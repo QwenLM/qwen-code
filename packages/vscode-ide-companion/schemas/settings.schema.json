@@ -8,6 +8,11 @@
       "type": "object",
       "additionalProperties": true
     },
+    "channels": {
+      "description": "Configuration for messaging channels.",
+      "type": "object",
+      "additionalProperties": true
+    },
     "modelProviders": {
       "description": "Model providers configuration grouped by authType. Each authType contains an array of model configurations.",
       "type": "object",
@@ -640,23 +645,10 @@
         }
       }
     },
-    "hooksConfig": {
-      "description": "Hook configurations for intercepting and customizing agent behavior.",
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "description": "Canonical toggle for the hooks system. When disabled, no hooks will be executed.",
-          "type": "boolean",
-          "default": true
-        },
-        "disabled": {
-          "description": "List of hook names (commands) that should be disabled. Hooks in this list will not execute even if configured.",
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        }
-      }
+    "disableAllHooks": {
+      "description": "Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).",
+      "type": "boolean",
+      "default": false
     },
     "hooks": {
       "description": "Hook event configurations for extending CLI behavior at various lifecycle points.",
@@ -1445,9 +1437,15 @@
       }
     },
     "experimental": {
-      "description": "Setting to enable experimental features",
+      "description": "Settings to enable experimental features.",
       "type": "object",
-      "properties": {}
+      "properties": {
+        "cron": {
+          "description": "Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.",
+          "type": "boolean",
+          "default": false
+        }
+      }
     },
     "$version": {
       "type": "number",

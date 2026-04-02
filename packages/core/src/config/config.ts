@@ -41,6 +41,7 @@ import {
   type FileEncodingType,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
+import { CronScheduler } from '../services/cronScheduler.js';
 
 // Tools
 import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
@@ -63,6 +64,9 @@ import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { LspTool } from '../tools/lsp.js';
+import { CronCreateTool } from '../tools/cron-create.js';
+import { CronListTool } from '../tools/cron-list.js';
+import { CronDeleteTool } from '../tools/cron-delete.js';
 import type { LspClient } from '../lsp/types.js';
 
 // Other modules
@@ -87,7 +91,7 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
-import { HookSystem } from '../hooks/index.js';
+import { HookSystem, createHookOutput } from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
@@ -108,6 +112,7 @@ import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -227,9 +232,10 @@ export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release';
+  type: 'git' | 'local' | 'link' | 'github-release' | 'npm';
   originSource?: ExtensionOriginSource;
-  releaseTag?: string; // Only present for github-release installs.
+  releaseTag?: string; // Only present for github-release and npm installs.
+  registryUrl?: string; // Only present for npm installs.
   ref?: string;
   autoUpdate?: boolean;
   allowPreRelease?: boolean;
@@ -366,6 +372,7 @@ export interface ConfigParameters {
   maxSessionTurns?: number;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  cronEnabled?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
@@ -418,12 +425,15 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
-  /** Enable hook system for lifecycle events */
-  enableHooks?: boolean;
+  /**
+   * Disable all hooks (default: false, hooks enabled).
+   * Migration note: This replaces the deprecated hooksConfig.enabled setting.
+   * Users with old settings.json containing hooksConfig.enabled should migrate
+   * to use disableAllHooks instead (note: inverted logic - enabled:true → disableAllHooks:false).
+   */
+  disableAllHooks?: boolean;
   /** Hooks configuration from settings */
   hooks?: Record<string, unknown>;
-  /** Hooks config settings (enabled, disabled list) */
-  hooksConfig?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
   /**
@@ -525,6 +535,7 @@ export class Config {
   private readonly usageStatisticsEnabled: boolean;
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
+  private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
     respectQwenIgnore: boolean;
@@ -552,6 +563,7 @@ export class Config {
 
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly cronEnabled: boolean = false;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
@@ -593,9 +605,8 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
-  private readonly enableHooks: boolean;
+  private readonly disableAllHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
-  private readonly hooksConfig?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
 
@@ -675,6 +686,7 @@ export class Config {
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.cronEnabled = params.cronEnabled ?? false;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
@@ -747,8 +759,9 @@ export class Config {
       initializeTelemetry(this);
     }
 
-    if (this.getProxy()) {
-      setGlobalDispatcher(new ProxyAgent(this.getProxy() as string));
+    const proxyUrl = this.getProxy();
+    if (proxyUrl) {
+      setGlobalDispatcher(new ProxyAgent(proxyUrl));
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -759,9 +772,8 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
-    this.enableHooks = params.enableHooks ?? false;
+    this.disableAllHooks = params.disableAllHooks ?? false;
     this.hooks = params.hooks;
-    this.hooksConfig = params.hooksConfig;
   }
 
   /**
@@ -786,7 +798,7 @@ export class Config {
     this.debugLogger.debug('Extension manager initialized');
 
     // Initialize hook system if enabled
-    if (this.enableHooks) {
+    if (!this.disableAllHooks) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
@@ -823,6 +835,7 @@ export class Config {
 
             // Execute the appropriate hook based on eventName
             let result;
+            let stopHookCount: number | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -832,13 +845,18 @@ export class Config {
                   signal,
                 );
                 break;
-              case 'Stop':
-                result = await hookSystem.fireStopEvent(
+              case 'Stop': {
+                const stopResult = await hookSystem.fireStopEvent(
                   (input['stop_hook_active'] as boolean) || false,
                   (input['last_assistant_message'] as string) || '',
                   signal,
                 );
+                result = stopResult.finalOutput
+                  ? createHookOutput('Stop', stopResult.finalOutput)
+                  : undefined;
+                stopHookCount = stopResult.allOutputs.length;
                 break;
+              }
               case 'PreToolUse': {
                 result = await hookSystem.firePreToolUseEvent(
                   (input['tool_name'] as string) || '',
@@ -926,6 +944,8 @@ export class Config {
               correlationId: request.correlationId,
               success: true,
               output: result,
+              // Include stop hook count for Stop events
+              stopHookCount,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
@@ -1072,7 +1092,7 @@ export class Config {
 
     // Fire auth_success notification hook (supports both interactive & non-interactive)
     const messageBus = this.getMessageBus();
-    const hooksEnabled = this.getEnableHooks();
+    const hooksEnabled = !this.getDisableAllHooks();
     if (hooksEnabled && messageBus) {
       fireNotificationHook(
         messageBus,
@@ -1675,6 +1695,19 @@ export class Config {
     return this.geminiClient;
   }
 
+  getCronScheduler(): CronScheduler {
+    if (!this.cronScheduler) {
+      this.cronScheduler = new CronScheduler();
+    }
+    return this.cronScheduler;
+  }
+
+  isCronEnabled(): boolean {
+    // Cron is experimental and opt-in: enabled via settings or env var
+    if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
+    return this.cronEnabled;
+  }
+
   getEnableRecursiveFileSearch(): boolean {
     return this.fileFiltering.enableRecursiveFileSearch;
   }
@@ -1717,7 +1750,7 @@ export class Config {
   }
 
   getProxy(): string | undefined {
-    return this.proxy;
+    return normalizeProxyUrl(this.proxy);
   }
 
   getWorkingDir(): string {
@@ -1779,10 +1812,10 @@ export class Config {
   }
 
   /**
-   * Check if hooks are enabled.
+   * Check if all hooks are disabled.
    */
-  getEnableHooks(): boolean {
-    return this.enableHooks;
+  getDisableAllHooks(): boolean {
+    return this.disableAllHooks;
   }
 
   /**
@@ -1799,17 +1832,6 @@ export class Config {
    */
   setMessageBus(messageBus: MessageBus): void {
     this.messageBus = messageBus;
-  }
-
-  /**
-   * Get the list of disabled hook names.
-   * This is used by the HookRegistry to filter out disabled hooks.
-   */
-  getDisabledHooks(): string[] {
-    const hooksConfig = this.hooksConfig;
-    if (!hooksConfig) return [];
-    const disabled = hooksConfig['disabled'];
-    return Array.isArray(disabled) ? (disabled as string[]) : [];
   }
 
   /**
@@ -2201,6 +2223,13 @@ export class Config {
     if (this.isLspEnabled() && this.getLspClient()) {
       // Register the unified LSP tool
       await registerCoreTool(LspTool, this);
+    }
+
+    // Register cron tools unless disabled
+    if (this.isCronEnabled()) {
+      await registerCoreTool(CronCreateTool, this);
+      await registerCoreTool(CronListTool, this);
+      await registerCoreTool(CronDeleteTool, this);
     }
 
     if (!options?.skipDiscovery) {
