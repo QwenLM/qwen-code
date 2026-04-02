@@ -35,7 +35,6 @@ import {
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -659,15 +658,11 @@ export class GeminiChat {
         // Some providers omit total_tokens or return 0 in streaming usage chunks.
         const lastPromptTokenCount =
           usageMetadata.totalTokenCount || usageMetadata.promptTokenCount;
-        if (lastPromptTokenCount) {
-          (this.telemetryService ?? uiTelemetryService).setLastPromptTokenCount(
-            lastPromptTokenCount,
-          );
+        if (lastPromptTokenCount && this.telemetryService) {
+          this.telemetryService.setLastPromptTokenCount(lastPromptTokenCount);
         }
-        if (usageMetadata.cachedContentTokenCount) {
-          (
-            this.telemetryService ?? uiTelemetryService
-          ).setLastCachedContentTokenCount(
+        if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
+          this.telemetryService.setLastCachedContentTokenCount(
             usageMetadata.cachedContentTokenCount,
           );
         }
