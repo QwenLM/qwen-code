@@ -105,7 +105,6 @@ export async function generatePromptSuggestion(
           abortSignal,
           modelOverride,
         );
-
     const suggestion = typeof raw === 'string' ? raw.trim() : null;
 
     if (!suggestion) {
@@ -207,6 +206,7 @@ async function generateViaBaseLlm(
   }
 
   const text = response.candidates?.[0]?.content?.parts
+    ?.filter((p) => !('thought' in p && p.thought))
     ?.map((p) => p.text ?? '')
     .join('')
     .trim();
