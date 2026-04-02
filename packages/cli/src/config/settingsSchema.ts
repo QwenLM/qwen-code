@@ -528,7 +528,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Cache Sharing for Suggestions',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
           'Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).',
         showInDialog: false,
