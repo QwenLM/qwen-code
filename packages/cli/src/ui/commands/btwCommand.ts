@@ -27,18 +27,17 @@ function formatBtwError(error: unknown): string {
   });
 }
 
-// Keep only the most recent history turns to limit token usage for side
-// questions. Each "turn" is a user+model pair, so MAX_BTW_HISTORY_TURNS of 10
-// means up to 20 Content entries (enough context without sending the full chat).
-const MAX_BTW_HISTORY_TURNS = 10;
+// Keep only the most recent history messages to limit token usage for side
+// questions. MAX_BTW_HISTORY_MESSAGES caps the number of Content entries sent.
+const MAX_BTW_HISTORY_MESSAGES = 20;
 
 function trimHistory(history: Content[]): Content[] {
-  if (history.length <= MAX_BTW_HISTORY_TURNS * 2) {
+  if (history.length <= MAX_BTW_HISTORY_MESSAGES) {
     return history;
   }
   // Slice from the end, ensuring we start on a 'user' message so the
   // alternating user/model pattern is preserved.
-  const sliced = history.slice(-(MAX_BTW_HISTORY_TURNS * 2));
+  const sliced = history.slice(-MAX_BTW_HISTORY_MESSAGES);
   if (sliced[0]?.role === 'model' && sliced.length > 1) {
     return sliced.slice(1);
   }
@@ -56,7 +55,7 @@ async function askBtw(
   abortSignal: AbortSignal,
   promptId: string,
 ): Promise<string> {
-  const history = trimHistory(geminiClient.getHistory());
+  const history = trimHistory(geminiClient.getHistory(true));
 
   // Enhanced system prompt inspired by Claude Code's side question design:
   // - Emphasizes direct answering without tools

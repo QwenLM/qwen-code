@@ -81,7 +81,7 @@ The `/btw` command allows you to ask quick side questions without interrupting o
 
 **How It Works:**
 
-- The side question is sent as a separate API call with recent conversation context (last 10 turns)
+- The side question is sent as a separate API call with recent conversation context (up to the last 20 messages)
 - The response is displayed above the Composer — you can continue typing while waiting
 - The main conversation is **not blocked** — it continues independently
 - The side question response does **not** become part of the main conversation history

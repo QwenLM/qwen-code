@@ -186,8 +186,8 @@ describe('btwCommand', () => {
       );
     });
 
-    it('should trim history to last 10 turns for long conversations', async () => {
-      // Build a history with 12 turns (24 entries) — exceeds the 10-turn limit
+    it('should trim history to last 20 messages for long conversations', async () => {
+      // Build 24 history entries — exceeds the 20-message limit
       const longHistory = Array.from({ length: 12 }, (_, i) => [
         { role: 'user', parts: [{ text: `Q${i}` }] },
         { role: 'model', parts: [{ text: `A${i}` }] },
@@ -201,9 +201,9 @@ describe('btwCommand', () => {
       await flushPromises();
 
       const calledContents = mockGenerateContent.mock.calls[0][0];
-      // 20 history entries (last 10 turns) + 1 btw question = 21
+      // 20 history entries + 1 btw question = 21
       expect(calledContents).toHaveLength(21);
-      // First entry should be user (starts at turn 2 = Q2)
+      // First entry should be user (Q2, since slice(-20) on 24 starts at index 4)
       expect(calledContents[0].role).toBe('user');
       expect(calledContents[0].parts[0].text).toBe('Q2');
     });
