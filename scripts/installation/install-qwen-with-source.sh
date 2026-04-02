@@ -165,15 +165,24 @@ ensure_download_tool() {
 clean_npmrc_conflict() {
     local npmrc="${HOME}/.npmrc"
     if [[ -f "${npmrc}" ]]; then
-        # Only clean if conflicting entries actually exist
-        if grep -Eq '^(prefix|globalconfig) *= *' "${npmrc}" 2>/dev/null; then
-            log_info "Cleaning npmrc conflicts..."
+        # Check if a user-configured prefix already exists
+        local existing_prefix
+        existing_prefix=$(grep -E '^prefix *= *' "${npmrc}" 2>/dev/null | head -1 | sed 's/^prefix *= *//' | sed 's/[[:space:]]*$//')
+        if [[ -n "${existing_prefix}" ]]; then
+            # User has already configured a prefix — respect it, don't overwrite
+            log_info "User-configured npm prefix found in .npmrc: ${existing_prefix}, skipping cleanup"
+            return 0
+        fi
+
+        # Only clean globalconfig conflicts when prefix is not set
+        if grep -Eq '^globalconfig *= *' "${npmrc}" 2>/dev/null; then
+            log_info "Cleaning npmrc globalconfig conflicts..."
             # Backup original npmrc before modifying
             cp -f "${npmrc}" "${npmrc}.bak"
             log_info "Backed up original .npmrc to ${npmrc}.bak"
-            grep -Ev '^(prefix|globalconfig) *= *' "${npmrc}.bak" > "${npmrc}.tmp" || true
+            grep -Ev '^globalconfig *= *' "${npmrc}.bak" > "${npmrc}.tmp" || true
             mv -f "${npmrc}.tmp" "${npmrc}" || true
-            log_success "Removed conflicting prefix/globalconfig entries from .npmrc"
+            log_success "Removed conflicting globalconfig entries from .npmrc"
         fi
     fi
 }
@@ -393,6 +402,10 @@ fix_npm_permissions() {
                 log_warning "npm prefix is a system directory (${NPM_GLOBAL_DIR}), switching to user directory to avoid breaking system binaries."
                 use_user_dir=true
                 ;;
+            "${HOME}"/*)
+                # User has configured a prefix under HOME — respect it
+                log_info "User-configured npm prefix (${NPM_GLOBAL_DIR}) is under HOME, keeping it"
+                ;;
         esac
     fi
 
@@ -427,21 +440,50 @@ fix_npm_permissions() {
 }
 
 # ============================================
-# Install Qwen Code
+# Clean old qwen installations from known paths
 # ============================================
+clean_old_qwen_installations() {
+    local target_prefix
+    target_prefix=$(npm config get prefix 2>/dev/null)
+    local qwen_found=false
+
+    # Check all known npm global prefixes for old qwen installations
+    local known_prefixes=("${HOME}/.npm-global" "${HOME}/.nvm/versions" "/usr/local")
+    for prefix in "${known_prefixes[@]}"; do
+        # Skip the target prefix (that's where we're installing)
+        [[ "${prefix}" == "${target_prefix}" ]] && continue
+
+        local old_bin="${prefix}/bin/qwen"
+        # For nvm, the path includes the node version subdirectory
+        if [[ "${prefix}" == *".nvm/versions" ]]; then
+            for node_dir in "${prefix}"/v*/bin/qwen; do
+                if [[ -f "${node_dir}" ]]; then
+                    local node_prefix
+                    node_prefix=$(dirname "$(dirname "${node_dir}")")
+                    log_warning "Removing old qwen from nvm: ${node_dir}"
+                    npm uninstall -g @qwen-code/qwen-code --prefix "${node_prefix}" 2>/dev/null || true
+                    qwen_found=true
+                fi
+            done
+        elif [[ -f "${old_bin}" ]]; then
+            log_warning "Removing old qwen from ${old_bin}"
+            npm uninstall -g @qwen-code/qwen-code --prefix "${prefix}" 2>/dev/null || true
+            qwen_found=true
+        fi
+    done
+
+    if [[ "${qwen_found}" == true ]]; then
+        log_success "Old qwen installations cleaned"
+    fi
+}
+
 install_qwen_code() {
     # Ensure NVM node is in PATH
     export NVM_DIR="${HOME}/.nvm"
     # shellcheck source=/dev/null
     [[ -s "${NVM_DIR}/nvm.sh" ]] && \. "${NVM_DIR}/nvm.sh" 2>/dev/null || true
 
-    # Add npm global bin to PATH
-    local NPM_GLOBAL_BIN
-    NPM_GLOBAL_BIN=$(npm config get prefix 2>/dev/null)/bin
-    if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
-        export PATH="${NPM_GLOBAL_BIN}:${PATH}"
-    fi
-
+    # Check current installation status (before any prefix changes)
     if command_exists qwen; then
         local QWEN_VERSION
         QWEN_VERSION=$(qwen --version 2>/dev/null || echo "unknown")
@@ -452,19 +494,31 @@ install_qwen_code() {
     # Clean npmrc conflicts
     clean_npmrc_conflict
 
-    # Fix npm permissions if needed
+    # Fix npm permissions if needed (may change prefix to ~/.npm-global)
     fix_npm_permissions
+
+    # Clean old qwen installations from other npm prefixes
+    clean_old_qwen_installations
+
+    # Set PATH with the correct npm global bin AFTER fixing permissions
+    local NPM_GLOBAL_BIN
+    NPM_GLOBAL_BIN=$(npm config get prefix 2>/dev/null)/bin
+    if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
+        export PATH="${NPM_GLOBAL_BIN}:${PATH}"
+    fi
 
     # Install Qwen Code
     log_info "Installing Qwen Code..."
     if npm install -g @qwen-code/qwen-code@latest --registry https://registry.npmmirror.com; then
         log_success "Qwen Code installed successfully!"
 
-        # Verify installation
-        if command_exists qwen; then
+        # Verify installation using the correct PATH
+        local qwen_path
+        qwen_path=$(command -v qwen 2>/dev/null)
+        if [[ -n "${qwen_path}" ]]; then
             local qwen_version
-            qwen_version=$(qwen --version 2>/dev/null) || qwen_version="unknown"
-            log_info "Qwen Code version: ${qwen_version}"
+            qwen_version=$("${qwen_path}" --version 2>/dev/null) || qwen_version="unknown"
+            log_info "Qwen Code version: ${qwen_version} (${qwen_path})"
         fi
     else
         log_error "Failed to install Qwen Code!"
@@ -539,12 +593,21 @@ main() {
     echo "=========================================="
     echo ""
 
-    # Ensure NVM and npm global bin are in PATH
+    # Ensure NVM and npm global bin are in PATH (use current prefix)
     export NVM_DIR="${HOME}/.nvm"
     # shellcheck source=/dev/null
     [[ -s "${NVM_DIR}/nvm.sh" ]] && \. "${NVM_DIR}/nvm.sh" 2>/dev/null || true
     local NPM_GLOBAL_BIN
     NPM_GLOBAL_BIN=$(npm config get prefix 2>/dev/null)/bin
+    # Remove any stale nvm qwen paths from PATH before prepending the correct one
+    local clean_path=""
+    IFS=':' read -ra path_parts <<< "${PATH}"
+    for p in "${path_parts[@]}"; do
+        if [[ "${p}" != *".nvm/"*"/bin"* ]] || [[ ! -f "${p}/qwen" ]]; then
+            clean_path="${clean_path:+${clean_path}:}${p}"
+        fi
+    done
+    export PATH="${clean_path}"
     if [[ -n "${NPM_GLOBAL_BIN}" ]]; then
         export PATH="${NPM_GLOBAL_BIN}:${PATH}"
     fi
