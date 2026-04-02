@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// English translations for Qwen Code CLI
+// English translations for proto CLI
 // The key serves as both the translation key and the default English text
 
 export default {
@@ -82,16 +82,16 @@ export default {
   'For a full list of shortcuts, see {{docPath}}':
     'For a full list of shortcuts, see {{docPath}}',
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
-  'for help on Qwen Code': 'for help on Qwen Code',
+  'for help on proto': 'for help on proto',
   'show version info': 'show version info',
   'submit a bug report': 'submit a bug report',
-  'About Qwen Code': 'About Qwen Code',
+  'About proto': 'About proto',
   Status: 'Status',
 
   // ============================================================================
   // System Information Fields
   // ============================================================================
-  'Qwen Code': 'Qwen Code',
+  proto: 'proto',
   Runtime: 'Runtime',
   OS: 'OS',
   Auth: 'Auth',
@@ -116,10 +116,10 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'Analyzes the project and creates a tailored QWEN.md file.',
-  'List available Qwen Code tools. Usage: /tools [desc]':
-    'List available Qwen Code tools. Usage: /tools [desc]',
+  'List available proto tools. Usage: /tools [desc]':
+    'List available proto tools. Usage: /tools [desc]',
   'List available skills.': 'List available skills.',
-  'Available Qwen Code CLI tools:': 'Available Qwen Code CLI tools:',
+  'Available proto CLI tools:': 'Available proto CLI tools:',
   'No tools available': 'No tools available',
   'View or change the approval mode for tool usage':
     'View or change the approval mode for tool usage',
@@ -143,8 +143,8 @@ export default {
     'Clear conversation history and free up context',
   'Compresses the context by replacing it with a summary.':
     'Compresses the context by replacing it with a summary.',
-  'open full Qwen Code documentation in your browser':
-    'open full Qwen Code documentation in your browser',
+  'open full proto documentation in your browser':
+    'open full proto documentation in your browser',
   'Configuration not available.': 'Configuration not available.',
   'change the auth method': 'change the auth method',
   'Configure authentication information for login':
@@ -233,8 +233,7 @@ export default {
   'Step {{n}}: Choose Location': 'Step {{n}}: Choose Location',
   'Step {{n}}: Choose Generation Method':
     'Step {{n}}: Choose Generation Method',
-  'Generate with Qwen Code (Recommended)':
-    'Generate with Qwen Code (Recommended)',
+  'Generate with proto (Recommended)': 'Generate with proto (Recommended)',
   'Manual Creation': 'Manual Creation',
   'Describe what this subagent should do and when it should be used. (Be comprehensive for best results)':
     'Describe what this subagent should do and when it should be used. (Be comprehensive for best results)',
@@ -360,10 +359,10 @@ export default {
   // ============================================================================
   // Commands - General (continued)
   // ============================================================================
-  'View and edit Qwen Code settings': 'View and edit Qwen Code settings',
+  'View and edit proto settings': 'View and edit proto settings',
   Settings: 'Settings',
-  'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
-    'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
+  'To see changes, proto must be restarted. Press r to exit and apply changes now.':
+    'To see changes, proto must be restarted. Press r to exit and apply changes now.',
   'The command "/{{command}}" is not supported in non-interactive mode.':
     'The command "/{{command}}" is not supported in non-interactive mode.',
   // ============================================================================
@@ -518,8 +517,8 @@ export default {
     'This extension will install the following subagents:',
   'Installation cancelled for "{{name}}".':
     'Installation cancelled for "{{name}}".',
-  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
-    'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with proto.':
+    'You are installing an extension from {{originSource}}. Some features may not work perfectly with proto.',
   '--ref and --auto-update are not applicable for marketplace extensions.':
     '--ref and --auto-update are not applicable for marketplace extensions.',
   'Extension "{{name}}" installed successfully and enabled.':
@@ -629,8 +628,8 @@ export default {
     'install required IDE companion for {{ideName}}',
   'enable IDE integration': 'enable IDE integration',
   'disable IDE integration': 'disable IDE integration',
-  'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
-    'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.',
+  'IDE integration is not supported in your current environment. To use this feature, run proto in one of these supported IDEs: VS Code or VS Code forks.':
+    'IDE integration is not supported in your current environment. To use this feature, run proto in one of these supported IDEs: VS Code or VS Code forks.',
   'Set up GitHub Actions': 'Set up GitHub Actions',
   'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)':
     'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)',
@@ -664,7 +663,7 @@ export default {
   // ============================================================================
   // Commands - Hooks
   // ============================================================================
-  'Manage Qwen Code hooks': 'Manage Qwen Code hooks',
+  'Manage proto hooks': 'Manage proto hooks',
   'List all configured hooks': 'List all configured hooks',
   'Enable a disabled hook': 'Enable a disabled hook',
   'Disable an active hook': 'Disable an active hook',
@@ -678,8 +677,8 @@ export default {
   'No hook events found.': 'No hook events found.',
   '{{count}} hook configured': '{{count}} hook configured',
   '{{count}} hooks configured': '{{count}} hooks configured',
-  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
-    'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask proto.':
+    'This menu is read-only. To add or modify hooks, edit settings.json directly or ask proto.',
   'Enter to select · Esc to cancel': 'Enter to select · Esc to cancel',
   // Hooks - Detail Step
   'Exit codes:': 'Exit codes:',
@@ -715,8 +714,8 @@ export default {
   'When notifications are sent': 'When notifications are sent',
   'When the user submits a prompt': 'When the user submits a prompt',
   'When a new session is started': 'When a new session is started',
-  'Right before Qwen Code concludes its response':
-    'Right before Qwen Code concludes its response',
+  'Right before proto concludes its response':
+    'Right before proto concludes its response',
   'When a subagent (Agent tool call) is started':
     'When a subagent (Agent tool call) is started',
   'Right before a subagent concludes its response':
@@ -1386,12 +1385,12 @@ export default {
   Ask: 'Ask',
   Deny: 'Deny',
   Workspace: 'Workspace',
-  "Qwen Code won't ask before using allowed tools.":
-    "Qwen Code won't ask before using allowed tools.",
-  'Qwen Code will ask before using these tools.':
-    'Qwen Code will ask before using these tools.',
-  'Qwen Code is not allowed to use denied tools.':
-    'Qwen Code is not allowed to use denied tools.',
+  "proto won't ask before using allowed tools.":
+    "proto won't ask before using allowed tools.",
+  'proto will ask before using these tools.':
+    'proto will ask before using these tools.',
+  'proto is not allowed to use denied tools.':
+    'proto is not allowed to use denied tools.',
   'Manage trusted directories for this workspace.':
     'Manage trusted directories for this workspace.',
   'Any use of the {{tool}} tool': 'Any use of the {{tool}} tool',
@@ -1429,10 +1428,10 @@ export default {
   // Workspace directory management
   'Add directory…': 'Add directory…',
   'Add directory to workspace': 'Add directory to workspace',
-  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
-    'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.',
-  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
-    'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.',
+  'proto can read files in the workspace, and make edits when auto-accept edits is on.':
+    'proto can read files in the workspace, and make edits when auto-accept edits is on.',
+  'proto will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'proto will be able to read files in this directory and make edits when auto-accept edits is on.',
   'Enter the path to the directory:': 'Enter the path to the directory:',
   'Enter directory path…': 'Enter directory path…',
   'Tab to complete · Enter to add · Esc to cancel':
@@ -1521,8 +1520,8 @@ export default {
     'Use /bug to submit issues to the maintainers when something goes off.',
   'Switch auth type quickly with /auth.':
     'Switch auth type quickly with /auth.',
-  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
-    'You can run any shell commands from Qwen Code using ! (e.g. !ls).',
+  'You can run any shell commands from proto using ! (e.g. !ls).':
+    'You can run any shell commands from proto using ! (e.g. !ls).',
   'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
     'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.',
   'You can resume a previous conversation by running qwen --continue or qwen --resume.':

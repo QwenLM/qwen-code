@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Japanese translations for Qwen Code CLI
+// Japanese translations for proto CLI
 
 export default {
   // ============================================================================
@@ -55,10 +55,10 @@ export default {
   'For a full list of shortcuts, see {{docPath}}':
     'ショートカットの完全なリストは {{docPath}} を参照',
   'docs/keyboard-shortcuts.md': 'docs/keyboard-shortcuts.md',
-  'for help on Qwen Code': 'Qwen Code のヘルプ',
+  'for help on proto': 'proto のヘルプ',
   'show version info': 'バージョン情報を表示',
   'submit a bug report': 'バグレポートを送信',
-  'About Qwen Code': 'Qwen Code について',
+  'About proto': 'proto について',
 
   // ============================================================================
   // System Information Fields
@@ -83,10 +83,10 @@ export default {
   // ============================================================================
   'Analyzes the project and creates a tailored QWEN.md file.':
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
-  'List available Qwen Code tools. Usage: /tools [desc]':
-    '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
+  'List available proto tools. Usage: /tools [desc]':
+    '利用可能な proto ツールを一覧表示。使い方: /tools [desc]',
   'List available skills.': '利用可能なスキルを一覧表示する。',
-  'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
+  'Available proto CLI tools:': '利用可能な proto CLI ツール:',
   'No tools available': '利用可能なツールはありません',
   'View or change the approval mode for tool usage':
     'ツール使用の承認モードを表示または変更',
@@ -107,8 +107,8 @@ export default {
     '会話履歴をクリアしてコンテキストを解放',
   'Compresses the context by replacing it with a summary.':
     'コンテキストを要約に置き換えて圧縮',
-  'open full Qwen Code documentation in your browser':
-    'ブラウザで Qwen Code のドキュメントを開く',
+  'open full proto documentation in your browser':
+    'ブラウザで proto のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
   'change the auth method': '認証方式を変更',
   'Configure authentication information for login':
@@ -183,7 +183,7 @@ export default {
   'Warnings:': '警告:',
   'Step {{n}}: Choose Location': 'ステップ {{n}}: 場所を選択',
   'Step {{n}}: Choose Generation Method': 'ステップ {{n}}: 作成方法を選択',
-  'Generate with Qwen Code (Recommended)': 'Qwen Code で生成(推奨)',
+  'Generate with proto (Recommended)': 'proto で生成(推奨)',
   'Manual Creation': '手動作成',
   'Generating subagent configuration...': 'サブエージェント設定を生成中...',
   'Failed to generate subagent: {{error}}':
@@ -249,11 +249,11 @@ export default {
   // Commands - General (continued)
   '(Use Enter to select{{tabText}})': '(Enter で選択{{tabText}})',
   ', Tab to change focus': '、Tab でフォーカス変更',
-  'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
-    '変更を確認するには Qwen Code を再起動する必要があります。 r を押して終了し、変更を適用してください',
+  'To see changes, proto must be restarted. Press r to exit and apply changes now.':
+    '変更を確認するには proto を再起動する必要があります。 r を押して終了し、変更を適用してください',
   'The command "/{{command}}" is not supported in non-interactive mode.':
     'コマンド "/{{command}}" は非対話モードではサポートされていません',
-  'View and edit Qwen Code settings': 'Qwen Code の設定を表示・編集',
+  'View and edit proto settings': 'proto の設定を表示・編集',
   Settings: '設定',
   'Vim Mode': 'Vim モード',
   'Disable Auto Update': '自動更新を無効化',
@@ -333,16 +333,16 @@ export default {
   'List active extensions': '有効な拡張機能を一覧表示',
   'Update extensions. Usage: update <extension-names>|--all':
     '拡張機能を更新。使い方: update <拡張機能名>|--all',
-  'You are installing an extension from {{originSource}}. Some features may not work perfectly with Qwen Code.':
-    '{{originSource}} から拡張機能をインストールしています。一部の機能は Qwen Code で完全に動作しない可能性があります。',
+  'You are installing an extension from {{originSource}}. Some features may not work perfectly with proto.':
+    '{{originSource}} から拡張機能をインストールしています。一部の機能は proto で完全に動作しない可能性があります。',
   'manage IDE integration': 'IDE連携を管理',
   'check status of IDE integration': 'IDE連携の状態を確認',
   'install required IDE companion for {{ideName}}':
     '{{ideName}} 用の必要なIDEコンパニオンをインストール',
   'enable IDE integration': 'IDE連携を有効化',
   'disable IDE integration': 'IDE連携を無効化',
-  'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
-    '現在の環境ではIDE連携はサポートされていません。この機能を使用するには、VS Code または VS Code 派生エディタで Qwen Code を実行してください',
+  'IDE integration is not supported in your current environment. To use this feature, run proto in one of these supported IDEs: VS Code or VS Code forks.':
+    '現在の環境ではIDE連携はサポートされていません。この機能を使用するには、VS Code または VS Code 派生エディタで proto を実行してください',
   'Set up GitHub Actions': 'GitHub Actions を設定',
   'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)':
     '複数行入力用のターミナルキーバインドを設定(VS Code、Cursor、Windsurf、Trae)',
@@ -376,7 +376,7 @@ export default {
   // ============================================================================
   // Commands - Hooks
   // ============================================================================
-  'Manage Qwen Code hooks': 'Qwen Code のフックを管理する',
+  'Manage proto hooks': 'proto のフックを管理する',
   'List all configured hooks': '設定済みのフックをすべて表示する',
   'Enable a disabled hook': '無効なフックを有効にする',
   'Disable an active hook': '有効なフックを無効にする',
@@ -390,8 +390,8 @@ export default {
   'No hook events found.': 'フックイベントが見つかりません。',
   '{{count}} hook configured': '{{count}} 件のフックが設定されています',
   '{{count}} hooks configured': '{{count}} 件のフックが設定されています',
-  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
-    'このメニューは読み取り専用です。フックを追加または変更するには、settings.json を直接編集するか、Qwen Code に尋ねてください。',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask proto.':
+    'このメニューは読み取り専用です。フックを追加または変更するには、settings.json を直接編集するか、proto に尋ねてください。',
   'Enter to select · Esc to cancel': 'Enter で選択 · Esc でキャンセル',
   // Hooks - Detail Step
   'Exit codes:': '終了コード：',
@@ -428,8 +428,7 @@ export default {
   'When notifications are sent': '通知送信時',
   'When the user submits a prompt': 'ユーザーがプロンプトを送信した時',
   'When a new session is started': '新しいセッションが開始された時',
-  'Right before Qwen Code concludes its response':
-    'Qwen Code が応答を終了する直前',
+  'Right before proto concludes its response': 'proto が応答を終了する直前',
   'When a subagent (Agent tool call) is started':
     'サブエージェント（Agent ツール呼び出し）が開始された時',
   'Right before a subagent concludes its response':
@@ -1024,12 +1023,12 @@ export default {
   Ask: '確認',
   Deny: '拒否',
   Workspace: 'ワークスペース',
-  "Qwen Code won't ask before using allowed tools.":
-    'Qwen Code は許可されたツールを使用する前に確認しません。',
-  'Qwen Code will ask before using these tools.':
-    'Qwen Code はこれらのツールを使用する前に確認します。',
-  'Qwen Code is not allowed to use denied tools.':
-    'Qwen Code は拒否されたツールを使用できません。',
+  "proto won't ask before using allowed tools.":
+    'proto は許可されたツールを使用する前に確認しません。',
+  'proto will ask before using these tools.':
+    'proto はこれらのツールを使用する前に確認します。',
+  'proto is not allowed to use denied tools.':
+    'proto は拒否されたツールを使用できません。',
   'Manage trusted directories for this workspace.':
     'このワークスペースの信頼済みディレクトリを管理します。',
   'Any use of the {{tool}} tool': '{{tool}} ツールのすべての使用',
@@ -1067,10 +1066,10 @@ export default {
   // Workspace directory management
   'Add directory…': 'ディレクトリを追加…',
   'Add directory to workspace': 'ワークスペースにディレクトリを追加',
-  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
-    'Qwen Code はワークスペース内のファイルを読み取り、自動編集承認が有効な場合は編集を行えます。',
-  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
-    'Qwen Code はこのディレクトリ内のファイルを読み取り、自動編集承認が有効な場合は編集を行えます。',
+  'proto can read files in the workspace, and make edits when auto-accept edits is on.':
+    'proto はワークスペース内のファイルを読み取り、自動編集承認が有効な場合は編集を行えます。',
+  'proto will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'proto はこのディレクトリ内のファイルを読み取り、自動編集承認が有効な場合は編集を行えます。',
   'Enter the path to the directory:': 'ディレクトリのパスを入力してください:',
   'Enter directory path…': 'ディレクトリパスを入力…',
   'Tab to complete · Enter to add · Esc to cancel':
@@ -1141,8 +1140,8 @@ export default {
     '問題が発生したら /bug でメンテナーに報告できます。',
   'Switch auth type quickly with /auth.':
     '/auth で認証タイプをすばやく切り替えられます。',
-  'You can run any shell commands from Qwen Code using ! (e.g. !ls).':
-    'Qwen Code から ! を使って任意のシェルコマンドを実行できます（例: !ls）。',
+  'You can run any shell commands from proto using ! (e.g. !ls).':
+    'proto から ! を使って任意のシェルコマンドを実行できます（例: !ls）。',
   'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.':
     '/ を入力してコマンドポップアップを開きます。Tab でスラッシュコマンドと保存済みプロンプトを補完できます。',
   'You can resume a previous conversation by running qwen --continue or qwen --resume.':
@@ -1158,8 +1157,8 @@ export default {
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',
   '2. Be specific for the best results.':
     '2. 具体的に指示すると最良の結果が得られます',
-  'files to customize your interactions with Qwen Code.':
-    'Qwen Code との対話をカスタマイズするためのファイル',
+  'files to customize your interactions with proto.':
+    'proto との対話をカスタマイズするためのファイル',
   'for more information.': '詳細情報を確認できます',
   // Exit Screen / Stats
   'Agent powering down. Goodbye!': 'エージェントを終了します。さようなら!',

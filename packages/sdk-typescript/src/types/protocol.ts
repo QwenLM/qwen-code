@@ -133,6 +133,62 @@ export interface SDKSystemMessage {
   };
 }
 
+/**
+ * Task lifecycle event emitted as a system message.
+ * Fired when agents create, update, or complete tasks during execution.
+ */
+export interface SDKTaskEvent extends SDKSystemMessage {
+  subtype: 'task_event';
+  data: {
+    action: 'created' | 'updated' | 'completed' | 'claimed' | 'stopped';
+    task: {
+      id: string;
+      title: string;
+      status: string;
+      assignee?: string;
+      parentId?: string;
+    };
+  };
+}
+
+/**
+ * Memory lifecycle event emitted as a system message.
+ * Fired when agents save, update, or delete memories during execution.
+ */
+export interface SDKMemoryEvent extends SDKSystemMessage {
+  subtype: 'memory_event';
+  data: {
+    action: 'saved' | 'updated' | 'deleted';
+    memory: {
+      name: string;
+      type: string;
+      file: string;
+    };
+  };
+}
+
+/**
+ * LSP diagnostic event emitted as a system message.
+ * Fired after file edits when language servers report errors or warnings.
+ */
+export interface SDKLspDiagnosticEvent extends SDKSystemMessage {
+  subtype: 'lsp_diagnostic';
+  data: {
+    uri: string;
+    serverName?: string;
+    diagnostics: Array<{
+      severity: 'error' | 'warning' | 'info' | 'hint';
+      message: string;
+      range: {
+        start: { line: number; character: number };
+        end: { line: number; character: number };
+      };
+      source?: string;
+      code?: string | number;
+    }>;
+  };
+}
+
 export interface SDKResultMessageSuccess {
   type: 'result';
   subtype: 'success';
@@ -541,6 +597,18 @@ export function isToolUseBlock(block: any): block is ToolUseBlock {
 
 export function isToolResultBlock(block: any): block is ToolResultBlock {
   return block && typeof block === 'object' && block.type === 'tool_result';
+}
+
+export function isTaskEvent(msg: any): msg is SDKTaskEvent {
+  return isSDKSystemMessage(msg) && msg.subtype === 'task_event';
+}
+
+export function isMemoryEvent(msg: any): msg is SDKMemoryEvent {
+  return isSDKSystemMessage(msg) && msg.subtype === 'memory_event';
+}
+
+export function isLspDiagnosticEvent(msg: any): msg is SDKLspDiagnosticEvent {
+  return isSDKSystemMessage(msg) && msg.subtype === 'lsp_diagnostic';
 }
 
 export type SubagentLevel = 'session';

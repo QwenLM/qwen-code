@@ -278,6 +278,41 @@ export class ProcessTransport implements Transport {
       args.push('--session-id', this.options.sessionId);
     }
 
+    // Phase 1: CLI pass-through options
+    if (this.options.hooks) {
+      args.push('--experimental-hooks');
+    }
+
+    if (this.options.extensions && this.options.extensions.length > 0) {
+      args.push('--extensions', this.options.extensions.join(','));
+    }
+
+    if (this.options.includeDirs && this.options.includeDirs.length > 0) {
+      args.push('--include-directories', this.options.includeDirs.join(','));
+    }
+
+    if (this.options.sandbox) {
+      args.push('--sandbox');
+    }
+
+    if (this.options.chatRecording === false) {
+      args.push('--chat-recording', 'false');
+    }
+
+    if (this.options.lsp) {
+      args.push('--experimental-lsp');
+    }
+
+    if (this.options.webSearch) {
+      const ws = this.options.webSearch;
+      if (ws.tavilyApiKey) args.push('--tavily-api-key', ws.tavilyApiKey);
+      if (ws.googleApiKey) args.push('--google-api-key', ws.googleApiKey);
+      if (ws.googleSearchEngineId)
+        args.push('--google-search-engine-id', ws.googleSearchEngineId);
+      if (ws.defaultProvider)
+        args.push('--web-search-default', ws.defaultProvider);
+    }
+
     return args;
   }
 

@@ -4,10 +4,35 @@ import type {
   SubagentConfig,
   SDKMcpServerConfig,
   AuthType,
+  HookCallbackResult,
 } from './protocol.js';
 import type { SpawnInfo } from '../utils/cliPath.js';
 
 export type { PermissionMode, AuthType };
+
+/**
+ * Hook event names supported by the CLI.
+ * Each event corresponds to a lifecycle point in agent execution.
+ */
+export type HookEvent =
+  | 'PreToolUse'
+  | 'PostToolUse'
+  | 'Stop'
+  | 'Notification'
+  | 'SubagentStop';
+
+/**
+ * Callback function invoked when a hook event fires.
+ * Called by the SDK when the CLI sends a hook_callback control request.
+ *
+ * @param input - The hook event payload (tool name, tool input, etc.)
+ * @param toolUseId - The tool use ID, if the event relates to a tool invocation
+ * @returns A HookCallbackResult controlling skip/interrupt/message behavior
+ */
+export type HookCallback = (
+  input: unknown,
+  toolUseId: string | null,
+) => Promise<HookCallbackResult> | HookCallbackResult;
 
 export type TransportOptions = {
   pathToQwenExecutable?: string;
@@ -46,6 +71,62 @@ export type TransportOptions = {
    * When resume is provided, this should match the resume ID.
    */
   sessionId?: string;
+
+  /**
+   * Enable the hooks system for event-driven automation.
+   * Hook definitions are loaded from settings.json when settingSources is configured.
+   * @default false
+   */
+  hooks?: boolean;
+
+  /**
+   * Extensions to enable for the session.
+   * Pass extension names to selectively enable specific extensions.
+   * Extensions provide skills, agents, hooks, MCP servers, and commands.
+   * @example ['protolabs', 'code-review']
+   */
+  extensions?: string[];
+
+  /**
+   * Additional directories to include in the workspace.
+   * Useful for multi-root workspaces or monorepo setups.
+   * @example ['/path/to/shared-lib', '/path/to/config']
+   */
+  includeDirs?: string[];
+
+  /**
+   * Enable sandbox mode for isolated execution.
+   * When true, the agent runs in a sandboxed environment with restricted access.
+   * @default false
+   */
+  sandbox?: boolean;
+
+  /**
+   * Control chat recording (session persistence).
+   * Set to false to disable session recording.
+   * @default true
+   */
+  chatRecording?: boolean;
+
+  /**
+   * Web search API configuration.
+   * Provide API keys and settings for web search capabilities.
+   */
+  webSearch?: {
+    tavilyApiKey?: string;
+    googleApiKey?: string;
+    googleSearchEngineId?: string;
+    defaultProvider?: string;
+  };
+
+  /**
+   * Enable the Language Server Protocol integration.
+   * When true, the CLI starts configured language servers and enables
+   * the LSP tool (goToDefinition, findReferences, hover, diagnostics, etc.).
+   * Language servers must be installed on the system.
+   * @default false
+   */
+  lsp?: boolean;
 };
 
 export interface QuerySystemPromptPreset {
@@ -455,6 +536,99 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   sessionId?: string;
+
+  /**
+   * Enable the hooks system for event-driven automation.
+   * Hook definitions are loaded from settings.json when settingSources is configured.
+   * @default false
+   */
+  hooks?: boolean;
+
+  /**
+   * Extensions to enable for the session.
+   * Pass extension names to selectively enable specific extensions.
+   * @example ['protolabs', 'code-review']
+   */
+  extensions?: string[];
+
+  /**
+   * Additional directories to include in the workspace.
+   * @example ['/path/to/shared-lib']
+   */
+  includeDirs?: string[];
+
+  /**
+   * Enable sandbox mode for isolated execution.
+   * @default false
+   */
+  sandbox?: boolean;
+
+  /**
+   * Control chat recording. Set to false to disable.
+   * @default true
+   */
+  chatRecording?: boolean;
+
+  /**
+   * Web search API configuration.
+   */
+  webSearch?: {
+    tavilyApiKey?: string;
+    googleApiKey?: string;
+    googleSearchEngineId?: string;
+    defaultProvider?: string;
+  };
+
+  /**
+   * SDK-side hook callbacks for event-driven automation.
+   * When provided, the hook system is automatically enabled (no need to set `hooks: true`).
+   *
+   * Callbacks are registered with the CLI during initialization. When a hook event fires,
+   * the CLI sends a `hook_callback` control request and the SDK invokes the matching callback.
+   *
+   * @example Single callback per event
+   * ```typescript
+   * hookCallbacks: {
+   *   PreToolUse: async (input, toolUseId) => {
+   *     console.log(`Tool about to run:`, input);
+   *     return {}; // allow
+   *   },
+   *   Stop: async (input) => {
+   *     console.log('Agent stopping');
+   *     return {};
+   *   },
+   * }
+   * ```
+   *
+   * @example Multiple callbacks (executed in order, first deny wins)
+   * ```typescript
+   * hookCallbacks: {
+   *   PreToolUse: [auditLogger, securityGate],
+   * }
+   * ```
+   */
+  hookCallbacks?: Partial<Record<HookEvent, HookCallback | HookCallback[]>>;
+
+  /**
+   * Enable Language Server Protocol integration for code intelligence.
+   * When true, the CLI starts language servers configured in `.lsp.json`
+   * or via installed LSP plugins. Enables the LSP tool with operations:
+   * goToDefinition, findReferences, hover, diagnostics, documentSymbol,
+   * workspaceSymbol, goToImplementation, callHierarchy, codeActions.
+   *
+   * Requires language server binaries to be installed on the system
+   * (e.g., typescript-language-server, pyright, gopls, rust-analyzer).
+   *
+   * @default false
+   * @example
+   * ```typescript
+   * const conversation = query({
+   *   prompt: 'Fix all type errors in src/',
+   *   options: { lsp: true, permissionMode: 'auto-edit' },
+   * });
+   * ```
+   */
+  lsp?: boolean;
 
   /**
    * Timeout configuration for various SDK operations.

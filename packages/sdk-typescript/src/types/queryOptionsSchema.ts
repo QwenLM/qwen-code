@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import type { CanUseTool } from './types.js';
+import type { CanUseTool, HookCallback } from './types.js';
 import type { SubagentConfig } from './protocol.js';
 
 /**
@@ -185,6 +185,36 @@ export const QueryOptionsSchema = z
     includePartialMessages: z.boolean().optional(),
     resume: z.string().optional(),
     sessionId: z.string().optional(),
+    hooks: z.boolean().optional(),
+    extensions: z.array(z.string()).optional(),
+    includeDirs: z.array(z.string()).optional(),
+    sandbox: z.boolean().optional(),
+    chatRecording: z.boolean().optional(),
+    webSearch: z
+      .object({
+        tavilyApiKey: z.string().optional(),
+        googleApiKey: z.string().optional(),
+        googleSearchEngineId: z.string().optional(),
+        defaultProvider: z.string().optional(),
+      })
+      .strict()
+      .optional(),
+    lsp: z.boolean().optional(),
+    hookCallbacks: z
+      .record(
+        z.string(),
+        z.union([
+          z.custom<HookCallback>((val) => typeof val === 'function', {
+            message: 'Hook callback must be a function',
+          }),
+          z.array(
+            z.custom<HookCallback>((val) => typeof val === 'function', {
+              message: 'Hook callback must be a function',
+            }),
+          ),
+        ]),
+      )
+      .optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict();

@@ -69,7 +69,7 @@ describe('AskUserQuestionTool', () => {
         questions: [
           {
             question: 'Test question?',
-            header: 'ThisHeaderIsTooLong',
+            header: 'ThisHeaderIsWayTooLongForTheLimit',
             options: [
               { label: 'A', description: 'Option A' },
               { label: 'B', description: 'Option B' },
@@ -80,7 +80,7 @@ describe('AskUserQuestionTool', () => {
       };
 
       const result = tool.validateToolParams(params);
-      expect(result).toContain('12 characters or less');
+      expect(result).toContain('30 characters or less');
     });
 
     it('should reject question with too few options', () => {

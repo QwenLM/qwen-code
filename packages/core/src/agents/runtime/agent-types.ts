@@ -61,6 +61,13 @@ export interface RunConfig {
    * before the execution is terminated. Helps prevent infinite loops.
    */
   max_turns?: number;
+  /**
+   * Maximum context window tokens before the agent triggers compaction.
+   * When the prompt token count exceeds this threshold, the agent should
+   * compact its conversation history to stay within budget.
+   * If not set, the agent uses the model's full context window.
+   */
+  max_context_tokens?: number;
 }
 
 /**

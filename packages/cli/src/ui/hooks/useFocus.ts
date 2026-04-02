@@ -34,13 +34,13 @@ export const useFocus = () => {
       }
     };
 
-    // Enable focus reporting
-    stdout?.write(ENABLE_FOCUS_REPORTING);
+    // Enable focus reporting (sync-guard to prevent flicker during Ink's initial render)
+    stdout?.write(`\x1b[?2026h${ENABLE_FOCUS_REPORTING}\x1b[?2026l`);
     stdin?.on('data', handleData);
 
     return () => {
       // Disable focus reporting on cleanup
-      stdout?.write(DISABLE_FOCUS_REPORTING);
+      stdout?.write(`\x1b[?2026h${DISABLE_FOCUS_REPORTING}\x1b[?2026l`);
       stdin?.removeListener('data', handleData);
     };
   }, [stdin, stdout]);

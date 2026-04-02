@@ -81,7 +81,7 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
         }
 
         if (progressiveEnhancementReceived) {
-          // Enable the protocol
+          // Enable the protocol (no sync guard needed — single atomic write)
           process.stdout.write('\x1b[>1u');
           protocolSupported = true;
           protocolEnabled = true;
@@ -98,9 +98,13 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
 
     process.stdin.on('data', handleData);
 
-    // Send queries
+    // Send queries wrapped in synchronized update to prevent flicker.
+    // Begin Synchronized Update (DEC mode 2026) batches stdout writes
+    // so the terminal renders them in a single frame.
+    process.stdout.write('\x1b[?2026h'); // Begin synchronized update
     process.stdout.write('\x1b[?u'); // Query progressive enhancement
     process.stdout.write('\x1b[c'); // Query device attributes
+    process.stdout.write('\x1b[?2026l'); // End synchronized update
 
     // Timeout after 200ms
     // When a iterm2 terminal does not have focus this can take over 90s on a

@@ -130,6 +130,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       };
     }
 
+    // Track successful reads for read-before-edit enforcement
+    this.config.trackFileRead(this.params.file_path);
+
     let llmContent: PartUnion;
     if (result.isTruncated) {
       const [start, end] = result.linesShown!;

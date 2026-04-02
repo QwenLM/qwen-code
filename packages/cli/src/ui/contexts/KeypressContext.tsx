@@ -173,10 +173,36 @@ export function KeypressProvider({
     let isPaste = false;
     let pasteBuffer = Buffer.alloc(0);
     let kittySequenceBuffer = '';
+    let kittySequenceTimeout: NodeJS.Timeout | null = null;
+    const KITTY_SEQUENCE_TIMEOUT_MS = 200;
+    const kittySequenceBufferRef = { current: '' };
     let backslashTimeout: NodeJS.Timeout | null = null;
     let waitingForEnterAfterBackslash = false;
     let rawDataBuffer = Buffer.alloc(0);
     let rawFlushTimeout: NodeJS.Timeout | null = null;
+
+    const clearKittyTimeout = () => {
+      if (kittySequenceTimeout) {
+        clearTimeout(kittySequenceTimeout);
+        kittySequenceTimeout = null;
+      }
+    };
+
+    const startKittyTimeout = () => {
+      clearKittyTimeout();
+      kittySequenceTimeout = setTimeout(() => {
+        if (kittySequenceBufferRef.current) {
+          if (debugKeystrokeLogging) {
+            debugLogger.debug(
+              '[DEBUG] Kitty buffer timeout, clearing:',
+              kittySequenceBufferRef.current,
+            );
+          }
+          kittySequenceBufferRef.current = '';
+          kittySequenceBuffer = '';
+        }
+      }, KITTY_SEQUENCE_TIMEOUT_MS);
+    };
 
     const createPrintableKey = (char: string): Key => {
       const printableName =
@@ -694,6 +720,8 @@ export function KeypressProvider({
             !key.sequence.startsWith(FOCUS_OUT))
         ) {
           kittySequenceBuffer += key.sequence;
+          kittySequenceBufferRef.current = kittySequenceBuffer;
+          startKittyTimeout();
 
           if (debugKeystrokeLogging) {
             debugLogger.debug(
@@ -729,6 +757,10 @@ export function KeypressProvider({
               }
               // Consume the parsed prefix and broadcast it.
               kittySequenceBuffer = kittySequenceBuffer.slice(parsed.length);
+              kittySequenceBufferRef.current = kittySequenceBuffer;
+              if (!kittySequenceBuffer) {
+                clearKittyTimeout();
+              }
               broadcast(parsed.key);
               bufferedInputHandled = true;
               continue;
@@ -746,6 +778,10 @@ export function KeypressProvider({
               kittySequenceBuffer = kittySequenceBuffer.slice(
                 completeUnsupportedCsiLength,
               );
+              kittySequenceBufferRef.current = kittySequenceBuffer;
+              if (!kittySequenceBuffer) {
+                clearKittyTimeout();
+              }
               bufferedInputHandled = true;
               continue;
             }
@@ -761,6 +797,10 @@ export function KeypressProvider({
               kittySequenceBuffer = kittySequenceBuffer.slice(
                 plainTextPrefix.length,
               );
+              kittySequenceBufferRef.current = kittySequenceBuffer;
+              if (!kittySequenceBuffer) {
+                clearKittyTimeout();
+              }
               broadcast(plainTextPrefix.key);
               bufferedInputHandled = true;
               continue;
@@ -776,6 +816,10 @@ export function KeypressProvider({
                 );
               }
               kittySequenceBuffer = kittySequenceBuffer.slice(nextStart);
+              kittySequenceBufferRef.current = kittySequenceBuffer;
+              if (!kittySequenceBuffer) {
+                clearKittyTimeout();
+              }
               bufferedInputHandled = true;
               continue;
             }
@@ -805,6 +849,8 @@ export function KeypressProvider({
               logKittySequenceOverflow(config, event);
             }
             kittySequenceBuffer = '';
+            kittySequenceBufferRef.current = '';
+            clearKittyTimeout();
           } else {
             return;
           }
@@ -964,6 +1010,8 @@ export function KeypressProvider({
         clearTimeout(backslashTimeout);
         backslashTimeout = null;
       }
+
+      clearKittyTimeout();
 
       if (rawFlushTimeout) {
         clearTimeout(rawFlushTimeout);

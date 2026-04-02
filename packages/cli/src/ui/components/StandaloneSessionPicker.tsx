@@ -57,8 +57,10 @@ function StandalonePickerScreen({
  * Clears the terminal screen.
  */
 function clearScreen(): void {
-  // Move cursor to home position and clear screen
-  process.stdout.write('\x1b[2J\x1b[H');
+  // Wrap in synchronized update to prevent flicker during clear
+  process.stdout.write('\x1b[?2026h'); // Begin synchronized update
+  process.stdout.write('\x1b[2J\x1b[H'); // Clear screen + home cursor
+  process.stdout.write('\x1b[?2026l'); // End synchronized update
 }
 
 /**

@@ -21,7 +21,8 @@ export const useBracketedPaste = () => {
   };
 
   useEffect(() => {
-    process.stdout.write(ENABLE_BRACKETED_PASTE);
+    // Sync-guard to prevent flicker during Ink's initial render
+    process.stdout.write(`\x1b[?2026h${ENABLE_BRACKETED_PASTE}\x1b[?2026l`);
 
     process.on('exit', cleanup);
     process.on('SIGINT', cleanup);

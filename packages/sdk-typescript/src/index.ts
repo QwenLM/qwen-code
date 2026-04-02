@@ -38,6 +38,9 @@ export type {
   SubagentLevel,
   ModelConfig,
   RunConfig,
+  SDKTaskEvent,
+  SDKMemoryEvent,
+  SDKLspDiagnosticEvent,
 } from './types/protocol.js';
 
 export {
@@ -49,6 +52,9 @@ export {
   isControlRequest,
   isControlResponse,
   isControlCancel,
+  isTaskEvent,
+  isMemoryEvent,
+  isLspDiagnosticEvent,
 } from './types/protocol.js';
 
 export type {
@@ -61,6 +67,10 @@ export type {
   McpServerConfig,
   McpOAuthConfig,
   McpAuthProviderType,
+  HookCallback,
+  HookEvent,
 } from './types/types.js';
+
+export type { HookCallbackResult, HookRegistration } from './types/protocol.js';
 
 export { isSdkMcpServerConfig } from './types/types.js';

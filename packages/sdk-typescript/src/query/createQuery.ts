@@ -50,6 +50,11 @@ export function query({
   const sessionId = options.resume ?? options.sessionId ?? randomUUID();
   const resolvedSystemPrompt = resolveSystemPromptOption(options.systemPrompt);
 
+  // Auto-enable hook system when SDK-side callbacks are provided
+  const enableHooks =
+    options.hooks ||
+    (options.hookCallbacks && Object.keys(options.hookCallbacks).length > 0);
+
   const transport = new ProcessTransport({
     pathToQwenExecutable,
     spawnInfo,
@@ -70,6 +75,13 @@ export function query({
     includePartialMessages: options.includePartialMessages,
     resume: options.resume,
     sessionId,
+    hooks: enableHooks || undefined,
+    extensions: options.extensions,
+    includeDirs: options.includeDirs,
+    sandbox: options.sandbox,
+    chatRecording: options.chatRecording,
+    webSearch: options.webSearch,
+    lsp: options.lsp,
   });
 
   const queryOptions: QueryOptions = {

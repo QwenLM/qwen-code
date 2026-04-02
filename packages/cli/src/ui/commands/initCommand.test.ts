@@ -34,7 +34,7 @@ vi.mock('fs', async (importOriginal) => {
 describe('initCommand', () => {
   let mockContext: CommandContext;
   const targetDir = '/test/dir';
-  const DEFAULT_CONTEXT_FILENAME = 'QWEN.md';
+  const DEFAULT_CONTEXT_FILENAME = 'PROTO.md';
   const geminiMdPath = path.join(targetDir, DEFAULT_CONTEXT_FILENAME);
 
   beforeEach(() => {

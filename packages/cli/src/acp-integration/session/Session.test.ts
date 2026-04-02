@@ -347,6 +347,71 @@ describe('Session', () => {
       );
     });
 
+    it('allows info confirmation tools in plan mode', async () => {
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const invocation = {
+        params: {
+          url: 'https://example.com/docs',
+          prompt: 'Summarize the docs',
+        },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'info',
+          title: 'Confirm Web Fetch',
+          prompt: 'Allow fetching docs?',
+          urls: ['https://example.com/docs'],
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue('Fetch docs'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: 'web_fetch',
+        kind: core.Kind.Fetch,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+      mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-info-plan',
+                  name: 'web_fetch',
+                  args: {
+                    url: 'https://example.com/docs',
+                    prompt: 'Summarize the docs',
+                  },
+                },
+              ],
+            },
+          };
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'research the docs first' }],
+      });
+
+      expect(mockClient.requestPermission).toHaveBeenCalled();
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: undefined },
+      );
+      expect(executeSpy).toHaveBeenCalled();
+    });
+
     it('returns permission error for disabled tools (L1 isToolEnabled check)', async () => {
       const executeSpy = vi.fn();
       const invocation = {

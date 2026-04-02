@@ -415,3 +415,33 @@ Yes, but only one will be used for each operation. The first server that returns
 ### Q: Does LSP work in sandbox mode?
 
 LSP servers run outside the sandbox to access your code. They're subject to workspace trust controls.
+
+## SDK usage
+
+Enable LSP when using the [TypeScript SDK](../reference/sdk-api.md) by setting `lsp: true`:
+
+```typescript
+import { query, isLspDiagnosticEvent } from '@qwen-code/sdk';
+
+const conversation = query({
+  prompt: 'Fix all type errors in the auth module',
+  options: {
+    lsp: true,
+    permissionMode: 'auto-edit',
+  },
+});
+
+for await (const message of conversation) {
+  if (isLspDiagnosticEvent(message)) {
+    const { uri, diagnostics } = message.data;
+    console.log(`${diagnostics.length} diagnostics in ${uri}`);
+    for (const d of diagnostics) {
+      console.log(
+        `  [${d.severity}] ${d.message} (line ${d.range.start.line})`,
+      );
+    }
+  }
+}
+```
+
+The SDK passes `--experimental-lsp` to the CLI process. Language servers are configured via `.lsp.json` or installed LSP plugins, the same as CLI usage. The `SDKLspDiagnosticEvent` surfaces diagnostics in the message stream so your application can react to type errors, missing imports, and other issues.

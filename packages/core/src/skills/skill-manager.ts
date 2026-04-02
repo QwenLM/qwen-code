@@ -396,10 +396,14 @@ export class SkillManager {
         }
       }
 
+      // Parse agentOnly flag (default: false)
+      const agentOnly = frontmatter['agentOnly'] === true;
+
       const config: SkillConfig = {
         name,
         description,
         allowedTools,
+        agentOnly,
         level,
         filePath,
         body: body.trim(),

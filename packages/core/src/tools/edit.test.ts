@@ -88,6 +88,8 @@ describe('EditTool', () => {
       setGeminiMdFileCount: vi.fn(),
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
       getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
+      hasFileBeenRead: vi.fn().mockReturnValue(true),
+      trackFileRead: vi.fn(),
     } as unknown as Config;
 
     // Reset mocks before each test

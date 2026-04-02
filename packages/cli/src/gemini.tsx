@@ -145,7 +145,6 @@ export async function startInteractiveUI(
   initializationResult: InitializationResult,
 ) {
   const version = await getCliVersion();
-  setWindowTitle(basename(workspaceRoot), settings);
 
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
@@ -189,9 +188,13 @@ export async function startInteractiveUI(
     ),
     {
       exitOnCtrlC: false,
+      patchConsole: false,
       isScreenReaderEnabled: config.getScreenReader(),
     },
   );
+
+  // Set window title AFTER Ink takes over stdout to avoid pre-render flicker
+  setWindowTitle(basename(workspaceRoot), settings);
 
   // Check for updates only if enableAutoUpdate is not explicitly disabled.
   // Using !== false ensures updates are enabled by default when undefined.
@@ -513,7 +516,8 @@ export async function main() {
 function setWindowTitle(title: string, settings: LoadedSettings) {
   if (!settings.merged.ui?.hideWindowTitle) {
     const windowTitle = computeWindowTitle(title);
-    process.stdout.write(`\x1b]2;${windowTitle}\x07`);
+    // Use synchronized update to prevent flicker from title escape sequence
+    process.stdout.write(`\x1b[?2026h\x1b]2;${windowTitle}\x07\x1b[?2026l`);
 
     process.on('exit', () => {
       process.stdout.write(`\x1b]2;\x07`);

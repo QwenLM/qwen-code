@@ -262,6 +262,27 @@ export interface ExtensionInstallMetadata {
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD = 25_000;
 export const DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES = 1000;
 
+/**
+ * Per-tool truncation overrides. Tools not listed here use the global defaults.
+ * Keys are tool names (e.g., 'shell', 'mcp_tool', 'grep_search').
+ */
+export interface ToolTruncationOverride {
+  threshold?: number;
+  lines?: number;
+}
+
+export const DEFAULT_TOOL_TRUNCATION_OVERRIDES: Record<
+  string,
+  ToolTruncationOverride
+> = {
+  // Shell output tends to be verbose (build logs, test output) — slightly higher char budget
+  shell: { threshold: 30_000, lines: 1000 },
+  // MCP tool responses should be tighter to preserve context for the agent's own work
+  mcp_tool: { threshold: 15_000, lines: 500 },
+  // Grep results are line-oriented — cap lines more aggressively
+  grep_search: { threshold: 25_000, lines: 500 },
+};
+
 export class MCPServerConfig {
   constructor(
     // For stdio transport
@@ -542,6 +563,7 @@ export class Config {
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
+  private readonly filesReadInSession: Set<string> = new Set();
   private geminiMdFileCount: number;
   private approvalMode: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
@@ -2079,6 +2101,22 @@ export class Config {
     this.fileSystemService = fileSystemService;
   }
 
+  /**
+   * Record that a file has been read in the current session.
+   * Used by read-before-edit enforcement.
+   */
+  trackFileRead(filePath: string): void {
+    this.filesReadInSession.add(filePath);
+  }
+
+  /**
+   * Check whether a file has been read in the current session.
+   * Used by Edit and WriteFile tools to enforce read-before-edit.
+   */
+  hasFileBeenRead(filePath: string): boolean {
+    return this.filesReadInSession.has(filePath);
+  }
+
   getChatCompression(): ChatCompressionSettings | undefined {
     return this.chatCompression;
   }
@@ -2143,6 +2181,20 @@ export class Config {
     }
 
     return this.truncateToolOutputLines;
+  }
+
+  /**
+   * Get per-tool truncation limits, falling back to global defaults.
+   */
+  getToolTruncationLimits(toolName: string): {
+    threshold: number;
+    lines: number;
+  } {
+    const override = DEFAULT_TOOL_TRUNCATION_OVERRIDES[toolName];
+    return {
+      threshold: override?.threshold ?? this.getTruncateToolOutputThreshold(),
+      lines: override?.lines ?? this.getTruncateToolOutputLines(),
+    };
   }
 
   getOutputFormat(): OutputFormat {

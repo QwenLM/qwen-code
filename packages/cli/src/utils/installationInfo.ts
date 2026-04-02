@@ -96,7 +96,7 @@ export function getInstallationInfo(
 
     // Check for pnpm
     if (realPath.includes('/.pnpm/global')) {
-      const updateCommand = 'pnpm add -g @qwen-code/qwen-code@latest';
+      const updateCommand = 'pnpm add -g @protolabs/proto@latest';
       return {
         packageManager: PackageManager.PNPM,
         isGlobal: true,
@@ -109,7 +109,7 @@ export function getInstallationInfo(
 
     // Check for yarn
     if (realPath.includes('/.yarn/global')) {
-      const updateCommand = 'yarn global add @qwen-code/qwen-code@latest';
+      const updateCommand = 'yarn global add @protolabs/proto@latest';
       return {
         packageManager: PackageManager.YARN,
         isGlobal: true,
@@ -129,7 +129,7 @@ export function getInstallationInfo(
       };
     }
     if (realPath.includes('/.bun/bin')) {
-      const updateCommand = 'bun add -g @qwen-code/qwen-code@latest';
+      const updateCommand = 'bun add -g @protolabs/proto@latest';
       return {
         packageManager: PackageManager.BUN,
         isGlobal: true,
@@ -162,7 +162,7 @@ export function getInstallationInfo(
     }
 
     // Assume global npm
-    const updateCommand = 'npm install -g @qwen-code/qwen-code@latest';
+    const updateCommand = 'npm install -g @protolabs/proto@latest';
     return {
       packageManager: PackageManager.NPM,
       isGlobal: true,
