@@ -317,16 +317,22 @@ class ProtoAgent(BaseInstalledAgent):
         model = self.model_name or os.environ.get("OPENAI_MODEL", "claude-sonnet-4-6")
         env["OPENAI_MODEL"] = model
 
-        # Detect auth mode: check both resolved env vars and os.environ for Anthropic key
+        # Detect auth mode. OpenAI-compat takes priority: if OPENAI_BASE_URL is explicitly
+        # provided (via --ae), use it and skip anthropic entirely — even if the host has
+        # ANTHROPIC_API_KEY in its environment (which would otherwise bleed through and cause
+        # Anthropic's API to 404 on gateway model names like "cli/claude-opus-4-6").
         auth_flag = ""
-        anthropic_key = env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
-        if anthropic_key:
-            auth_flag = "--auth-type anthropic"
-            env["ANTHROPIC_API_KEY"] = anthropic_key
-            if "ANTHROPIC_BASE_URL" not in env:
-                env["ANTHROPIC_BASE_URL"] = os.environ.get(
-                    "ANTHROPIC_BASE_URL", "https://api.anthropic.com"
-                )
+        openai_base = env.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL", "")
+        if not openai_base:
+            # No explicit gateway — fall back to direct Anthropic auth if key is available
+            anthropic_key = env.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_API_KEY", "")
+            if anthropic_key:
+                auth_flag = "--auth-type anthropic"
+                env["ANTHROPIC_API_KEY"] = anthropic_key
+                if "ANTHROPIC_BASE_URL" not in env:
+                    env["ANTHROPIC_BASE_URL"] = os.environ.get(
+                        "ANTHROPIC_BASE_URL", "https://api.anthropic.com"
+                    )
 
         # Build model flag — pass explicitly to avoid env var confusion between auth types
         model_flag = f"--model {model}" if model else ""

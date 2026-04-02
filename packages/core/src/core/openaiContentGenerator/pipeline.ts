@@ -426,6 +426,29 @@ export class ContentGenerationPipeline {
       baseRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
         request.config.tools,
       );
+    } else {
+      // If no tools are defined but the message history contains tool call or
+      // tool result messages (e.g. /btw using full conversation history),
+      // strip those messages. Anthropic (and LiteLLM routing to Anthropic)
+      // rejects requests that have tool-related messages without a tools param.
+      const hasToolMessages = baseRequest.messages.some(
+        (m) =>
+          m.role === 'tool' ||
+          (m.role === 'assistant' &&
+            Array.isArray((m as { tool_calls?: unknown }).tool_calls) &&
+            ((m as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0),
+      );
+      if (hasToolMessages) {
+        baseRequest.messages = baseRequest.messages.filter(
+          (m) =>
+            m.role !== 'tool' &&
+            !(
+              m.role === 'assistant' &&
+              Array.isArray((m as { tool_calls?: unknown }).tool_calls) &&
+              ((m as { tool_calls?: unknown[] }).tool_calls?.length ?? 0) > 0
+            ),
+        );
+      }
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)
