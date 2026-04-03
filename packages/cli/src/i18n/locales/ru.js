@@ -99,6 +99,7 @@ export default {
   'CLI Version': 'Версия CLI',
   'Git Commit': 'Git-коммит',
   Model: 'Модель',
+  'Fast Model': 'Быстрая модель',
   Sandbox: 'Песочница',
   'OS Platform': 'Платформа ОС',
   'OS Arch': 'Архитектура ОС',
@@ -993,6 +994,8 @@ export default {
   // Команды - Модель
   // ============================================================================
   'Switch the model for this session': 'Переключение модели для этой сессии',
+  'Set fast model for background tasks':
+    'Установить быструю модель для фоновых задач',
   'Content generator configuration not available.':
     'Конфигурация генератора содержимого недоступна.',
   'Authentication type not available.': 'Тип авторизации недоступен.',

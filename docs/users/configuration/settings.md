@@ -109,6 +109,9 @@ Settings are organized into categories. All settings should be placed within the
 | `ui.accessibility.enableLoadingPhrases` | boolean          | Enable loading phrases (disable for accessibility).                                                                                                                                                                                                                                                                                                                                                                 | `true`      |
 | `ui.accessibility.screenReader`         | boolean          | Enables screen reader mode, which adjusts the TUI for better compatibility with screen readers.                                                                                                                                                                                                                                                                                                                     | `false`     |
 | `ui.customWittyPhrases`                 | array of strings | A list of custom phrases to display during loading states. When provided, the CLI will cycle through these phrases instead of the default ones.                                                                                                                                                                                                                                                                     | `[]`        |
+| `ui.enableFollowupSuggestions`          | boolean          | Enable [followup suggestions](../features/followup-suggestions) that predict what you want to type next after the model responds. Suggestions appear as ghost text and can be accepted with Tab, Enter, or Right Arrow.                                                                                                                                                                                             | `true`      |
+| `ui.enableCacheSharing`                 | boolean          | Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).                                                                                                                                                                                                                                                                                     | `true`      |
+| `ui.enableSpeculation`                  | boolean          | Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).                                                                                                                                                                                                                                                                                              | `false`     |
 
 #### ide
 
@@ -184,6 +187,12 @@ The `extra_body` field allows you to add custom parameters to the request body s
 - `"~/qwen-logs"` - Logs to `~/qwen-logs` directory
 - `"./custom-logs"` - Logs to `./custom-logs` relative to current directory
 - `"/tmp/openai-logs"` - Logs to absolute path `/tmp/openai-logs`
+
+#### fastModel
+
+| Setting     | Type   | Description                                                                                                                                                                                                                                           | Default |
+| ----------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `fastModel` | string | Model for background tasks ([suggestion generation](../features/followup-suggestions), speculation). Leave empty to use the main model. A smaller/faster model (e.g., `qwen3.5-flash`) reduces latency and cost. Can also be set via `/model --fast`. | `""`    |
 
 #### context
 

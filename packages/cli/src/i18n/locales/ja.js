@@ -66,6 +66,7 @@ export default {
   'CLI Version': 'CLIバージョン',
   'Git Commit': 'Gitコミット',
   Model: 'モデル',
+  'Fast Model': '高速モデル',
   Sandbox: 'サンドボックス',
   'OS Platform': 'OSプラットフォーム',
   'OS Arch': 'OSアーキテクチャ',
@@ -739,6 +740,8 @@ export default {
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
   'Switch the model for this session': 'このセッションのモデルを切り替え',
+  'Set fast model for background tasks':
+    'バックグラウンドタスク用の高速モデルを設定',
   'Content generator configuration not available.':
     'コンテンツジェネレーター設定が利用できません',
   'Authentication type not available.': '認証タイプが利用できません',

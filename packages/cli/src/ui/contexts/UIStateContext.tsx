@@ -54,6 +54,7 @@ export interface UIState {
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
   isModelDialogOpen: boolean;
+  isFastModelMode: boolean;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
@@ -142,10 +143,17 @@ export interface UIState {
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+<<<<<<< HEAD
   // Voice input state
   voiceEnabled: boolean;
   voiceBackendAvailable: boolean;
   voiceState: 'idle' | 'recording' | 'transcribing' | 'error';
+=======
+  // Prompt suggestion
+  promptSuggestion: string | null;
+  /** Dismiss prompt suggestion (clears state, aborts speculation) */
+  dismissPromptSuggestion: () => void;
+>>>>>>> 3bce84d5d (feat(cli, webui): add follow-up suggestions feature (#2525))
 }
 
 export const UIStateContext = createContext<UIState | null>(null);
