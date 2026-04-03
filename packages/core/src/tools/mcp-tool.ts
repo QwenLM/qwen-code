@@ -20,7 +20,6 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { CallableTool, FunctionCall, Part } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
-import { truncateToolOutput } from '../utils/truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MCP_TOOL');
@@ -111,9 +110,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ToolParams,
   ToolResult
 > {
-  private static readonly allowlist: Set<string> = new Set();
   private static readonly MAX_RECONNECT_RETRIES = 3;
-
 
   constructor(
     private readonly mcpTool: CallableTool,
@@ -342,7 +339,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: transformedParts,
-        returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
+        returnDisplay: getDisplayFromParts(transformedParts),
       };
     } catch (error) {
       return this.handleReconnectOnError(error, signal, updateOutput);
@@ -416,36 +413,11 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: transformedParts,
-        returnDisplay: getStringifiedResultForDisplay(rawResponseParts),
+        returnDisplay: getDisplayFromParts(transformedParts),
       };
     } catch (error) {
       return this.handleReconnectOnError(error, signal);
     }
-  }
-
-  /**
-   * Truncates text parts in the transformed result if they exceed the
-   * configured threshold. Non-text parts (images, audio, etc.) are preserved.
-   */
-  private async truncateTextParts(parts: Part[]): Promise<Part[]> {
-    if (!this.cliConfig) {
-      return parts;
-    }
-
-    const result: Part[] = [];
-    for (const part of parts) {
-      if (part.text && !part.inlineData) {
-        const truncated = await truncateToolOutput(
-          this.cliConfig,
-          `mcp__${this.serverName}__${this.serverToolName}`,
-          part.text,
-        );
-        result.push({ text: truncated.content });
-      } else {
-        result.push(part);
-      }
-    }
-    return result;
   }
 
   getDescription(): string {

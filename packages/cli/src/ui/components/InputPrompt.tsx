@@ -96,15 +96,12 @@ export interface InputPromptProps {
   onSuggestionsVisibilityChange?: (visible: boolean) => void;
   vimHandleInput?: (key: Key) => boolean;
   isEmbeddedShellFocused?: boolean;
-<<<<<<< HEAD
   messageQueue?: readonly string[];
   dequeueAll?: () => string[];
-=======
   /** Prompt suggestion text to display after response completes */
   promptSuggestion?: string | null;
   /** Called when prompt suggestion is dismissed (user typed) */
   onPromptSuggestionDismiss?: () => void;
->>>>>>> 3bce84d5d (feat(cli, webui): add follow-up suggestions feature (#2525))
 }
 
 // Re-export from shared utils for backwards compatibility
@@ -134,13 +131,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   onSuggestionsVisibilityChange,
   vimHandleInput,
   isEmbeddedShellFocused,
-<<<<<<< HEAD
   messageQueue,
   dequeueAll,
-=======
   promptSuggestion,
   onPromptSuggestionDismiss,
->>>>>>> 3bce84d5d (feat(cli, webui): add follow-up suggestions feature (#2525))
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
@@ -1133,15 +1127,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       agentTabBarFocused,
       hasAgents,
       setAgentTabBarFocused,
-<<<<<<< HEAD
       voiceEnabled,
       voiceBackendAvailable,
       messageQueue,
       dequeueAll,
-=======
       followup,
       onPromptSuggestionDismiss,
->>>>>>> 3bce84d5d (feat(cli, webui): add follow-up suggestions feature (#2525))
     ],
   );
 

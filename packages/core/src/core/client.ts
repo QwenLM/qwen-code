@@ -989,9 +989,8 @@ export class GeminiClient {
       await arenaAgentClient.reportCancelled();
     }
 
-<<<<<<< HEAD
     if (ownsTurnSpan) endTurnSpan('ok');
-=======
+
     // Save cache-safe params on successful completion (non-abort) for forked queries
     if (!signal?.aborted && this.isInitialized()) {
       try {
@@ -1013,7 +1012,6 @@ export class GeminiClient {
       }
     }
 
->>>>>>> 3bce84d5d (feat(cli, webui): add follow-up suggestions feature (#2525))
     return turn;
   }
 

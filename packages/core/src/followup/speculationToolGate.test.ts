@@ -125,7 +125,7 @@ describe('speculationToolGate', () => {
     it.each([
       ToolNames.AGENT,
       ToolNames.SKILL,
-      ToolNames.TODO_WRITE,
+      ToolNames.TASK_LIST,
       ToolNames.MEMORY,
       ToolNames.ASK_USER_QUESTION,
       ToolNames.EXIT_PLAN_MODE,

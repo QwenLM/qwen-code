@@ -1908,16 +1908,13 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
-<<<<<<< HEAD
       // Voice input state
       voiceEnabled,
       voiceBackendAvailable: voice.backendAvailable,
       voiceState: voice.voiceState,
-=======
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
->>>>>>> 3bce84d5d (feat(cli, webui): add follow-up suggestions feature (#2525))
     }),
     [
       isThemeDialogOpen,
@@ -2022,16 +2019,13 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
-<<<<<<< HEAD
       // Voice input state
       voiceEnabled,
       voice.backendAvailable,
       voice.voiceState,
-=======
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
->>>>>>> 3bce84d5d (feat(cli, webui): add follow-up suggestions feature (#2525))
     ],
   );
 

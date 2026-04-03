@@ -43,7 +43,7 @@ const WRITE_TOOLS = new Set<string>([ToolNames.EDIT, ToolNames.WRITE_FILE]);
 const BOUNDARY_TOOLS = new Set<string>([
   ToolNames.AGENT,
   ToolNames.SKILL,
-  ToolNames.TODO_WRITE,
+  ToolNames.TASK_LIST,
   ToolNames.MEMORY,
   ToolNames.ASK_USER_QUESTION,
   ToolNames.EXIT_PLAN_MODE,
