@@ -46,7 +46,7 @@ export class ShellProcessRegistry {
     // Only register signal listeners once, and never in test environments
     if (
       !ShellProcessRegistry.signalListenersRegistered &&
-      process.env.NODE_ENV !== 'test'
+      process.env['NODE_ENV'] !== 'test'
     ) {
       ShellProcessRegistry.signalListenersRegistered = true;
       process.on('exit', () => {
@@ -68,7 +68,7 @@ export class ShellProcessRegistry {
    */
   static getInstance(): ShellProcessRegistry {
     // Auto-reset in test environments to prevent state leakage
-    if (process.env.NODE_ENV === 'test') {
+    if (process.env['NODE_ENV'] === 'test') {
       ShellProcessRegistry.instance = null;
     }
     if (!ShellProcessRegistry.instance) {

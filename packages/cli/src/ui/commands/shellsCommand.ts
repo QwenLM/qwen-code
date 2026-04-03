@@ -140,7 +140,6 @@ export const shellsCommand: SlashCommand = {
           return;
         }
 
-        const registry = ShellProcessRegistry.getInstance();
         const process = registry.getProcess(shellId);
 
         if (!process) {
