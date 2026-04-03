@@ -1378,7 +1378,6 @@ export class CoreToolScheduler {
     const executing = new Set<Promise<void>>();
 
     for (const call of calls) {
-      if (signal.aborted) break;
       const p = this.executeSingleToolCall(call, signal).finally(() => {
         executing.delete(p);
       });
