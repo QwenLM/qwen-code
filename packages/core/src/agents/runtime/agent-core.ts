@@ -499,7 +499,8 @@ export class AgentCore {
 
         // Mid-turn queue drain: inject queued user messages alongside tool
         // results so the model sees them in the next API call.
-        if (options?.midTurnDrain) {
+        // Skip if aborted — messages stay in queue for the next round.
+        if (options?.midTurnDrain && !abortController.signal.aborted) {
           const drained = options.midTurnDrain();
           if (drained.length > 0 && currentMessages[0]?.parts) {
             for (const msg of drained) {

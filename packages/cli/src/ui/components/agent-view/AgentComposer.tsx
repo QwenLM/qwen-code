@@ -194,12 +194,17 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     if (!emitter) return;
 
     const clearDisplay = () => setPendingMessages([]);
+    const clearOnIdle = (event: { newStatus?: AgentStatus }) => {
+      if (event.newStatus === AgentStatus.IDLE) {
+        setPendingMessages([]);
+      }
+    };
     emitter.on(AgentEventType.QUEUE_MESSAGES_CONSUMED, clearDisplay);
-    emitter.on(AgentEventType.STATUS_CHANGE, clearDisplay);
+    emitter.on(AgentEventType.STATUS_CHANGE, clearOnIdle);
 
     return () => {
       emitter.off(AgentEventType.QUEUE_MESSAGES_CONSUMED, clearDisplay);
-      emitter.off(AgentEventType.STATUS_CHANGE, clearDisplay);
+      emitter.off(AgentEventType.STATUS_CHANGE, clearOnIdle);
     };
   }, [interactiveAgent]);
 
