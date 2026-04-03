@@ -113,6 +113,7 @@ export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
 export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
+export * from './services/shellProcessRegistry.js';
 
 // ============================================================================
 // IDE Support

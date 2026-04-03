@@ -56,6 +56,8 @@ import { ReadFileTool } from '../tools/read-file.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { RipGrepTool } from '../tools/ripGrep.js';
 import { ShellTool } from '../tools/shell.js';
+import { ShellOutputTool } from '../tools/shellOutput.js';
+import { KillShellTool } from '../tools/killShell.js';
 import { SkillTool } from '../tools/skill.js';
 import { AgentTool } from '../tools/agent.js';
 import { TodoWriteTool } from '../tools/todoWrite.js';
@@ -2209,6 +2211,8 @@ export class Config {
     await registerCoreTool(EditTool, this);
     await registerCoreTool(WriteFileTool, this);
     await registerCoreTool(ShellTool, this);
+    await registerCoreTool(ShellOutputTool);
+    await registerCoreTool(KillShellTool);
     await registerCoreTool(MemoryTool);
     await registerCoreTool(TodoWriteTool, this);
     await registerCoreTool(AskUserQuestionTool, this);

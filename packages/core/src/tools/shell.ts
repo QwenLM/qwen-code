@@ -39,6 +39,7 @@ import {
   stripShellWrapper,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { ShellProcessRegistry } from '../services/shellProcessRegistry.js';
 import {
   isShellCommandReadOnlyAST,
   extractCommandRules,
@@ -323,12 +324,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // On Windows, background commands rely on early return since there's
       // no & backgrounding or pgrep. Awaiting would block until completion.
       if (shouldRunInBackground && isWindows) {
+        // Register in the shell process registry
+        const registry = ShellProcessRegistry.getInstance();
+        const shellProcess = registry.register({
+          id: '', // Will be auto-assigned
+          command: strippedCommand,
+          pid,
+          workingDirectory: cwd,
+        });
+
         const pidMsg = pid ? ` PID: ${pid}` : '';
-        const killHint = ' (Use taskkill /F /T /PID <pid> to stop)';
+        const killHint = ` (Shell ID: ${shellProcess.id}. Use /kill-shell ${shellProcess.id} to stop)`;
 
         return {
           llmContent: `Background command started.${pidMsg}${killHint}`,
-          returnDisplay: `Background command started.${pidMsg}${killHint}`,
+          returnDisplay: `Background command started. Shell ID: ${shellProcess.id}${pidMsg}`,
         };
       }
 
@@ -358,17 +368,26 @@ export class ShellToolInvocation extends BaseToolInvocation<
           }
         }
 
+        // Register in the shell process registry
+        const registry = ShellProcessRegistry.getInstance();
+        const shellProcess = registry.register({
+          id: '', // Will be auto-assigned
+          command: strippedCommand,
+          pid: backgroundPIDs.length > 0 ? backgroundPIDs[0] : pid,
+          workingDirectory: cwd,
+        });
+
         const bgPidMsg =
           backgroundPIDs.length > 0
             ? ` PIDs: ${backgroundPIDs.join(', ')}`
             : pid
               ? ` PID: ${pid}`
               : '';
-        const killHint = ' (Use kill <pid> to stop)';
+        const killHint = ` (Shell ID: ${shellProcess.id}. Use /kill-shell ${shellProcess.id} to stop)`;
 
         return {
           llmContent: `Background command started.${bgPidMsg}${killHint}`,
-          returnDisplay: `Background command started.${bgPidMsg}${killHint}`,
+          returnDisplay: `Background command started. Shell ID: ${shellProcess.id}${bgPidMsg}`,
         };
       }
 
