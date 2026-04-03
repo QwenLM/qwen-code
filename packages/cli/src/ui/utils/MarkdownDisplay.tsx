@@ -27,6 +27,16 @@ const CODE_BLOCK_PREFIX_PADDING = 1;
 const LIST_ITEM_PREFIX_PADDING = 1;
 const LIST_ITEM_TEXT_FLEX_GROW = 1;
 
+/**
+ * Splits a markdown table row on unescaped `|` delimiters,
+ * then un-escapes any `\|` sequences within each cell.
+ */
+function splitTableCells(row: string): string[] {
+  return row
+    .split(/(?<!\\)\|/)
+    .map((cell) => cell.replace(/\\\|/g, '|').trim());
+}
+
 const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   text,
   isPending,
@@ -111,7 +121,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         lines[index + 1].match(tableSeparatorRegex)
       ) {
         inTable = true;
-        tableHeaders = tableRowMatch[1].split('|').map((cell) => cell.trim());
+        tableHeaders = splitTableCells(tableRowMatch[1]);
         tableRows = [];
       } else {
         // Not a table, treat as regular text
@@ -127,7 +137,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       // Skip separator line - already handled
     } else if (inTable && tableRowMatch) {
       // Add table row
-      const cells = tableRowMatch[1].split('|').map((cell) => cell.trim());
+      const cells = splitTableCells(tableRowMatch[1]);
       // Ensure row has same column count as headers
       while (cells.length < tableHeaders.length) {
         cells.push('');
