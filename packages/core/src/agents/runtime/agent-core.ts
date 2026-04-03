@@ -17,6 +17,7 @@
  */
 
 import { reportError } from '../../utils/errorReporting.js';
+import { sessionFileTracker } from '../../services/fileTracker.js';
 import type { Config } from '../../config/config.js';
 import { type ToolCallRequestInfo } from '../../core/turn.js';
 import {
@@ -358,6 +359,15 @@ export class AgentCore {
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
 
+    // ── P0: Doom loop detection ───────────────────────────────
+    const DOOM_LOOP_THRESHOLD = 5;
+    const DOOM_LOOP_AB_WINDOW = 6; // for A→B→A→B pattern detection
+    const recentToolCalls: string[] = []; // circular buffer of "toolName:argsJSON"
+
+    // ── P1: Tool error reflection ─────────────────────────────
+    let consecutiveAllFailRounds = 0;
+    const MAX_FAIL_ROUNDS_BEFORE_REFLECT = 3;
+
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
       // calls after processFunctionCalls was unblocked by an abort signal.
@@ -376,6 +386,19 @@ export class AgentCore {
       if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
         terminateMode = AgentTerminateMode.TIMEOUT;
         break;
+      }
+
+      // ── P3: External file change detection ───────────────────
+      // Advance the turn counter for eviction, then check for files that have
+      // been modified externally (e.g., by a shell command) since last read.
+      sessionFileTracker.setTurn(turnCounter);
+      const changedPaths = sessionFileTracker.getChangedPaths();
+      if (changedPaths.length > 0) {
+        const notification = `<information>\n<critical>The following files have been modified externally since you last read them. Re-read them before making decisions that depend on their content.</critical>\n<files>${changedPaths.map((p) => `\n<file>${p}</file>`).join('')}\n</files>\n</information>`;
+        currentMessages = [
+          ...currentMessages,
+          { role: 'user', parts: [{ text: notification }] },
+        ];
       }
 
       // Create a new AbortController per round to avoid listener accumulation
@@ -496,6 +519,106 @@ export class AgentCore {
           toolsList,
           currentResponseId,
         );
+
+        // ── P0: Doom loop detection ───────────────────────────
+        for (const fc of functionCalls) {
+          const key = `${String(fc.name)}:${JSON.stringify(fc.args ?? {})}`;
+          recentToolCalls.push(key);
+          if (recentToolCalls.length > DOOM_LOOP_THRESHOLD * 2) {
+            recentToolCalls.shift();
+          }
+        }
+
+        // Check: last N calls are all identical (A→A→A→A→A pattern)
+        let loopWarningInjected = false;
+        if (recentToolCalls.length >= DOOM_LOOP_THRESHOLD) {
+          const last = recentToolCalls.slice(-DOOM_LOOP_THRESHOLD);
+          const isSimpleLoop = last.every((k) => k === last[0]);
+          if (isSimpleLoop) {
+            currentMessages = [
+              ...currentMessages,
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: 'You appear to be stuck in a repetitive loop. Stop retrying the same approach. Try a different tool, different arguments, or a fundamentally different strategy to accomplish the goal.',
+                  },
+                ],
+              },
+            ];
+            recentToolCalls.length = 0;
+            loopWarningInjected = true;
+          }
+        }
+
+        // Check: alternating A→B→A→B pattern (last 6 calls, strictly alternating between 2 keys)
+        if (
+          !loopWarningInjected &&
+          recentToolCalls.length >= DOOM_LOOP_AB_WINDOW
+        ) {
+          const lastAB = recentToolCalls.slice(-DOOM_LOOP_AB_WINDOW);
+          const uniqueKeys = new Set(lastAB);
+          if (uniqueKeys.size === 2) {
+            const keys = Array.from(uniqueKeys);
+            // Strictly alternating: each element at position i matches one of two parity patterns
+            const isAlternatingVariantA = lastAB.every(
+              (k, i) => k === keys[i % 2],
+            );
+            const isAlternatingVariantB = lastAB.every(
+              (k, i) => k === keys[(i + 1) % 2],
+            );
+            if (isAlternatingVariantA || isAlternatingVariantB) {
+              currentMessages = [
+                ...currentMessages,
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      text: 'You appear to be stuck in a repetitive loop. Stop retrying the same approach. Try a different tool, different arguments, or a fundamentally different strategy to accomplish the goal.',
+                    },
+                  ],
+                },
+              ];
+              recentToolCalls.length = 0;
+            }
+          }
+        }
+
+        // ── P1: Tool error reflection ─────────────────────────
+        // Inspect returned parts for errors: check functionResponse.response.error
+        const returnedParts = currentMessages[0]?.parts ?? [];
+        const hasAnySuccess = returnedParts.some((p) => {
+          const fr = (
+            p as { functionResponse?: { response?: { error?: unknown } } }
+          ).functionResponse;
+          return fr && !fr.response?.error;
+        });
+        const hasFunctionResponse = returnedParts.some(
+          (p) =>
+            (p as { functionResponse?: unknown }).functionResponse !==
+            undefined,
+        );
+
+        if (hasFunctionResponse && !hasAnySuccess) {
+          consecutiveAllFailRounds++;
+        } else {
+          consecutiveAllFailRounds = 0;
+        }
+
+        if (consecutiveAllFailRounds >= MAX_FAIL_ROUNDS_BEFORE_REFLECT) {
+          currentMessages = [
+            ...currentMessages,
+            {
+              role: 'user',
+              parts: [
+                {
+                  text: `Tool calls have failed ${consecutiveAllFailRounds} times consecutively. Before retrying: (1) identify exactly what went wrong with each failed call, (2) explain why it happened, (3) describe your corrected approach. Do not blindly retry the same calls.`,
+                },
+              ],
+            },
+          ];
+          consecutiveAllFailRounds = 0;
+        }
       } else {
         // No tool calls — treat this as the model's final answer.
         if (roundText && roundText.trim().length > 0) {

@@ -24,6 +24,7 @@ import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { isSubpaths, isSubpath } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
+import { sessionFileTracker } from '../services/fileTracker.js';
 
 /**
  * Parameters for the ReadFile tool
@@ -132,6 +133,13 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
     // Track successful reads for read-before-edit enforcement
     this.config.trackFileRead(this.params.file_path);
+
+    // Record file content for external change detection (P3 benchmark).
+    // Only track text content (strings); binary/image parts are skipped.
+    if (typeof result.llmContent === 'string' && result.llmContent) {
+      const absolutePath = path.resolve(this.params.file_path);
+      sessionFileTracker.record(absolutePath, result.llmContent);
+    }
 
     let llmContent: PartUnion;
     if (result.isTruncated) {
