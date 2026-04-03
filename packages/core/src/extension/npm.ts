@@ -371,7 +371,7 @@ export async function checkNpmUpdate(
       installMetadata.registryUrl || resolveNpmRegistry(scope, undefined);
     const authToken = getNpmAuthToken(registryUrl);
 
-    const encodedName = name.replace('/', '%2f');
+    const encodedName = name.replaceAll('/', '%2f');
     const metadataUrl = `${registryUrl}/${encodedName}`;
     const metadata = await fetchNpmJson<NpmPackageMetadata>(
       metadataUrl,

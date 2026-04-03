@@ -5,6 +5,7 @@
  */
 
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 import type {
   ToolCallConfirmationDetails,
   ToolInvocation,
@@ -225,6 +226,47 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     }
   }
 
+  /**
+   * Truncates text parts in the result if they exceed the configured threshold.
+   */
+  private async truncateParts(parts: Part[]): Promise<Part[]> {
+    if (
+      !this.cliConfig ||
+      typeof this.cliConfig.getToolTruncationLimits !== 'function'
+    )
+      return parts;
+    const textParts = parts.filter((p) => p.text != null);
+    if (textParts.length === 0) return parts;
+    const combinedText = textParts.map((p) => p.text!).join('');
+    const { content: truncated } = await truncateToolOutput(
+      this.cliConfig,
+      this.serverToolName,
+      combinedText,
+    );
+    if (truncated === combinedText) return parts;
+    // Replace text parts with a single truncated part; preserve non-text parts.
+    const nonTextParts = parts.filter((p) => p.text == null);
+    return [{ text: truncated }, ...nonTextParts];
+  }
+
+  private isConnectionError(error: unknown): boolean {
+    if (!(error instanceof Error)) return false;
+    const msg = error.message.toLowerCase();
+    return (
+      msg.includes('econnrefused') ||
+      msg.includes('econnreset') ||
+      msg.includes('enotfound') ||
+      msg.includes('etimedout') ||
+      msg.includes('socket hang up') ||
+      msg.includes('connection closed') ||
+      msg.includes('connection lost') ||
+      msg.includes('not connected') ||
+      msg.includes('disconnected') ||
+      msg.includes('transport closed') ||
+      /mcp error -\d+/.test(msg)
+    );
+  }
+
   private async handleReconnectOnError(
     error: unknown,
     signal: AbortSignal,
@@ -232,7 +274,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   ): Promise<ToolResult> {
     debugLogger.error(`MCP server error '${this.serverName}': ${error}`);
 
-    if (this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES) {
+    if (
+      this.isConnectionError(error) &&
+      this.retryCount < DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES
+    ) {
       debugLogger.info(
         `Reconnection attempt ${this.retryCount + 1}/${DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES} for MCP server '${this.serverName}'`,
       );
@@ -254,6 +299,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         return newInvocation.execute(signal, updateOutput);
       }
     } else if (
+      this.isConnectionError(error) &&
       this.retryCount >= DiscoveredMCPToolInvocation.MAX_RECONNECT_RETRIES
     ) {
       debugLogger.error(
@@ -335,7 +381,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         };
       }
 
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const transformedParts = await this.truncateParts(
+        transformMcpContentToParts(rawResponseParts),
+      );
 
       return {
         llmContent: transformedParts,
@@ -409,7 +457,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
         };
       }
 
-      const transformedParts = transformMcpContentToParts(rawResponseParts);
+      const transformedParts = await this.truncateParts(
+        transformMcpContentToParts(rawResponseParts),
+      );
 
       return {
         llmContent: transformedParts,
