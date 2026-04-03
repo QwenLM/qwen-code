@@ -72,7 +72,7 @@ import { useTextBuffer } from './components/shared/text-buffer.js';
 import { useLogger } from './hooks/useLogger.js';
 import { useGeminiStream } from './hooks/useGeminiStream.js';
 import { useVim } from './hooks/vim.js';
-import { isBtwCommand } from './utils/commandUtils.js';
+import { isBtwCommand, isSlashCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
@@ -758,6 +758,11 @@ export const AppContainer = (props: AppContainerProps) => {
       if (agentViewState.activeView !== 'main') {
         const agent = agentViewState.agents.get(agentViewState.activeView);
         if (agent) {
+          // Block slash commands from being sent to sub-agents.
+          // Slash commands must be handled by the main CLI, not processed as prompts.
+          if (isSlashCommand(submittedValue)) {
+            return;
+          }
           agent.interactiveAgent.enqueueMessage(submittedValue.trim());
           return;
         }
@@ -767,6 +772,14 @@ export const AppContainer = (props: AppContainerProps) => {
         isBtwCommand(submittedValue)
       ) {
         void submitQuery(submittedValue);
+        return;
+      }
+      // Ignore slash commands when streaming - they should not be queued or sent to the LLM.
+      // Slash commands must be handled immediately by the CLI, not processed as prompts.
+      if (
+        streamingState === StreamingState.Responding &&
+        isSlashCommand(submittedValue)
+      ) {
         return;
       }
       addMessage(submittedValue);
