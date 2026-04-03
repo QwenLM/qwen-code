@@ -257,6 +257,10 @@ function downloadNpmFile(
         const file = fs.createWriteStream(dest);
         res.pipe(file);
         file.on('finish', () => file.close(resolve as () => void));
+        file.on('error', (err) => {
+          file.destroy();
+          reject(err);
+        });
       })
       .on('error', reject);
   });
@@ -282,7 +286,7 @@ export async function downloadFromNpmRegistry(
   const authToken = getNpmAuthToken(registryUrl);
 
   // Fetch package metadata
-  const encodedName = name.replace('/', '%2f');
+  const encodedName = name.replaceAll('/', '%2f');
   const metadataUrl = `${registryUrl}/${encodedName}`;
   debugLogger.debug(`Fetching npm package metadata from ${metadataUrl}`);
 
