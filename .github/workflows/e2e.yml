@@ -34,12 +34,13 @@ jobs:
         run: |-
           npm config set fetch-retry-mintimeout 20000
           npm config set fetch-retry-maxtimeout 120000
-          npm config set fetch-retries 5
-          npm config set fetch-timeout 300000
+          npm config set fetch-retries 10
+          npm config set fetch-timeout 600000
 
       - name: 'Install dependencies'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          npm ci --prefer-offline --no-audit --progress=false || \
+          npm ci --no-audit --progress=false
 
       - name: 'Build project'
         run: |-
@@ -92,12 +93,13 @@ jobs:
         run: |-
           npm config set fetch-retry-mintimeout 20000
           npm config set fetch-retry-maxtimeout 120000
-          npm config set fetch-retries 5
-          npm config set fetch-timeout 300000
+          npm config set fetch-retries 10
+          npm config set fetch-timeout 600000
 
       - name: 'Install dependencies'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          npm ci --prefer-offline --no-audit --progress=false || \
+          npm ci --no-audit --progress=false
 
       - name: 'Build project'
         run: |-
