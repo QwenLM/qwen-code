@@ -37,7 +37,7 @@ By default, starting a new loop replaces any existing unnamed loop. To run multi
 /loop 10m --id deploy check deploy health
 ```
 
-Up to 50 loops can run concurrently (configurable via `loopMaxConcurrent` setting).
+Up to 50 loops can run concurrently (configurable via `model.loopMaxConcurrent` setting).
 
 ## Limit iterations
 
@@ -132,7 +132,7 @@ Settings live under the `model` section in `.qwen/settings.json`, or configure v
 The loop scheduler uses `setTimeout` with drift protection for accurate timing:
 
 - **Short intervals (<=60s)**: A single `setTimeout` fires the next iteration.
-- **Long intervals (>60s)**: Periodic checks with a dynamically shrinking interval ensure the timer fires within 1 second of the target time, even after system sleep.
+- **Long intervals (>60s)**: Periodic checks with a dynamically shrinking interval minimize drift. After system sleep, the next check detects the overdue target and fires immediately on wake.
 
 Loops fire **one at a time** through a serial prompt queue. If multiple loops are due simultaneously, they execute in sequence — each waits for the previous one's AI response to complete before firing.
 

@@ -195,7 +195,7 @@ export const loopCommand: SlashCommand = {
         {
           type: MessageType.ERROR,
           text: t(
-            'The /loop command is disabled. Enable it in settings (loopEnabled).',
+            'The /loop command is disabled. Enable it in settings (model.loopEnabled).',
           ),
         },
         Date.now(),
