@@ -237,6 +237,15 @@ describe('matchesCommandPattern', () => {
       ).toBe(true);
     });
 
+    it('matches commands containing embedded newlines (dotAll)', async () => {
+      expect(
+        matchesCommandPattern(
+          'python3 *',
+          'python3 -c "\nimport sys\nprint(sys.version)\n"',
+        ),
+      ).toBe(true);
+    });
+
     it('space-star requires word boundary (ls * does not match lsof)', async () => {
       expect(matchesCommandPattern('ls *', 'ls -la')).toBe(true);
       expect(matchesCommandPattern('ls *', 'lsof')).toBe(false);
@@ -414,6 +423,19 @@ describe('splitCompoundCommand', () => {
     expect(splitCompoundCommand('  git status  &&  rm -rf /  ')).toEqual([
       'git status',
       'rm -rf /',
+    ]);
+  });
+
+  it('splits on newline', async () => {
+    expect(splitCompoundCommand('export FOO=bar\npython3 script.py')).toEqual([
+      'export FOO=bar',
+      'python3 script.py',
+    ]);
+  });
+
+  it('does not split on newline inside quotes', async () => {
+    expect(splitCompoundCommand('echo "line1\nline2"')).toEqual([
+      'echo "line1\nline2"',
     ]);
   });
 });

@@ -453,6 +453,14 @@ describe('getCommandRoots', () => {
     const result = getCommandRoots('echo hello >| out.txt');
     expect(result).toEqual(['echo']);
   });
+
+  it('should skip leading env var assignments', async () => {
+    expect(
+      getCommandRoots(
+        'PYTHONPATH=/Users/jinjing/.qwen/skills/scripts python3 -c "print(1)"',
+      ),
+    ).toEqual(['python3']);
+  });
 });
 
 describe('stripShellWrapper', () => {

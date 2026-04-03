@@ -289,11 +289,8 @@ export function splitCommands(command: string): string[] {
 
 /**
  * Extracts the root command from a given shell command string.
- * This is used to identify the base command for permission checks.
- * @param command The shell command string to parse
- * @returns The root command name, or undefined if it cannot be determined
- * @example getCommandRoot("ls -la /tmp") returns "ls"
- * @example getCommandRoot("git status && npm test") returns "git"
+ * Skips leading env var assignments (VAR=value) so that
+ * `PYTHONPATH=/tmp python3 -c "..."` returns `python3`.
  */
 export function getCommandRoot(command: string): string | undefined {
   const trimmedCommand = command.trim();
@@ -301,22 +298,21 @@ export function getCommandRoot(command: string): string | undefined {
     return undefined;
   }
 
-  // This regex is designed to find the first "word" of a command,
-  // while respecting quotes. It looks for a sequence of non-whitespace
-  // characters that are not inside quotes.
-  const match = trimmedCommand.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
-  if (match) {
-    // The first element in the match array is the full match.
-    // The subsequent elements are the capture groups.
-    // We prefer a captured group because it will be unquoted.
-    const commandRoot = match[1] || match[2] || match[3];
-    if (commandRoot) {
-      // If the command is a path, return the last component.
-      return commandRoot.split(/[\\/]/).pop();
-    }
+  // Split on whitespace and skip leading VAR=value tokens.
+  const tokens = trimmedCommand.split(/\s+/);
+  let idx = 0;
+  while (idx < tokens.length && /^[A-Za-z_]\w*=/.test(tokens[idx]!)) {
+    idx++;
   }
 
-  return undefined;
+  const firstToken = tokens[idx];
+  if (!firstToken) {
+    return undefined;
+  }
+
+  // Strip quotes and extract last path component.
+  const unquoted = firstToken.replace(/^["']|["']$/g, '');
+  return unquoted ? unquoted.split(/[\\/]/).pop() : undefined;
 }
 
 export function getCommandRoots(command: string): string[] {
