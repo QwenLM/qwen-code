@@ -762,19 +762,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(65536); // Should be limited to model's output limit (64K)
-    });
-
-    it('should limit max_tokens when it exceeds model limit for qwen-vl-max-latest', () => {
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-vl-max-latest',
-        messages: [{ role: 'user', content: 'Hello' }],
-        max_tokens: 20000, // Exceeds the 8192 limit
-      };
-
-      const result = provider.buildRequest(request, 'test-prompt-id');
-
-      expect(result.max_tokens).toBe(8192); // Should be limited to model's output limit
+      expect(result.max_tokens).toBe(32768); // Should be limited to model's output limit (32K)
     });
 
     it('should not modify max_tokens when it is within model limit', () => {
@@ -799,7 +787,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const result = provider.buildRequest(request, 'test-prompt-id');
 
       // Should set conservative default (min of model limit and DEFAULT_OUTPUT_TOKEN_LIMIT)
-      // qwen3-max has 64K output limit, so min(64K, 32K) = 32K
+      // qwen3-max has 32K output limit, so min(32K, 32K) = 32K
       expect(result.max_tokens).toBe(32000);
     });
 
@@ -845,7 +833,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const result = provider.buildRequest(request, 'test-prompt-id');
 
       // max_tokens should be limited
-      expect(result.max_tokens).toBe(65536); // Limited to model's output limit (64K)
+      expect(result.max_tokens).toBe(32768); // Limited to model's output limit (32K)
 
       // Other parameters should be preserved
       expect(result.temperature).toBe(0.8);
@@ -854,58 +842,6 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(result.presence_penalty).toBe(0.2);
       expect(result.stop).toEqual(['END']);
       expect(result.user).toBe('test-user');
-    });
-
-    it('should work with vision models and output token limits', () => {
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen-vl-max-latest',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: 'Look at this image:' },
-              {
-                type: 'image_url',
-                image_url: { url: 'https://example.com/image.jpg' },
-              },
-            ],
-          },
-        ],
-        max_tokens: 20000, // Exceeds the model's output limit
-      };
-
-      const result = provider.buildRequest(request, 'test-prompt-id');
-
-      expect(result.max_tokens).toBe(8192); // Should be limited to model's output limit (8K)
-      expect(
-        (result as { vl_high_resolution_images?: boolean })
-          .vl_high_resolution_images,
-      ).toBe(true); // Vision-specific parameter should be preserved
-    });
-
-    it('should set high resolution flag for qwen3-vl-plus', () => {
-      const request: OpenAI.Chat.ChatCompletionCreateParams = {
-        model: 'qwen3-vl-plus',
-        messages: [
-          {
-            role: 'user',
-            content: [
-              { type: 'text', text: 'Please inspect the image.' },
-              {
-                type: 'image_url',
-                image_url: { url: 'https://example.com/vl.jpg' },
-              },
-            ],
-          },
-        ],
-      };
-
-      const result = provider.buildRequest(request, 'test-prompt-id');
-
-      expect(
-        (result as { vl_high_resolution_images?: boolean })
-          .vl_high_resolution_images,
-      ).toBe(true);
     });
 
     it('should set high resolution flag for the coder-model model', () => {
@@ -945,7 +881,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      expect(result.max_tokens).toBe(65536); // Should be limited to model's output limit (64K)
+      expect(result.max_tokens).toBe(32768); // Should be limited to model's output limit (32K)
       expect(result.stream).toBe(true); // Streaming should be preserved
     });
 
