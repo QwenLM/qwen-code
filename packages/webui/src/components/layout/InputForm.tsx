@@ -22,6 +22,18 @@ import { CompletionMenu } from './CompletionMenu.js';
 import { ContextIndicator } from './ContextIndicator.js';
 import type { CompletionItem } from '../../types/completion.js';
 import type { ContextUsage } from './ContextIndicator.js';
+/**
+ * Minimal follow-up state shape used by InputForm.
+ * Defined locally to avoid pulling @qwen-code/qwen-code-core into the
+ * root entry's type declarations. The full FollowupState lives in
+ * '@qwen-code/webui/followup'.
+ */
+interface InputFormFollowupState {
+  /** Current suggestion text */
+  suggestion: string | null;
+  /** Whether to show suggestion */
+  isVisible: boolean;
+}
 
 /**
  * Edit mode display information
@@ -91,8 +103,11 @@ export interface InputFormProps {
   onCompositionEnd: () => void;
   /** Key down callback */
   onKeyDown: (e: React.KeyboardEvent) => void;
-  /** Submit callback */
-  onSubmit: (e: React.FormEvent) => void;
+  /** Submit callback. When explicitText is provided, submit that value instead of reading from input state. */
+  onSubmit(
+    e: React.FormEvent | React.KeyboardEvent,
+    explicitText?: string,
+  ): void;
   /** Cancel callback */
   onCancel: () => void;
   /** Toggle edit mode callback */
@@ -125,6 +140,12 @@ export interface InputFormProps {
   placeholder?: string;
   /** Whether the current draft is eligible to submit */
   canSubmit?: boolean;
+  /** Prompt suggestion state */
+  followupState?: InputFormFollowupState;
+  /** Callback to accept prompt suggestion */
+  onAcceptFollowup?: (method?: 'tab' | 'enter' | 'right') => void;
+  /** Callback to dismiss prompt suggestion */
+  onDismissFollowup?: () => void;
 }
 
 /**
@@ -184,6 +205,9 @@ export const InputForm: FC<InputFormProps> = ({
   extraContent,
   placeholder = 'Ask Qwen Code …',
   canSubmit,
+  followupState,
+  onAcceptFollowup,
+  onDismissFollowup,
 }) => {
   const composerDisabled = isStreaming || isWaitingForResponse;
   const hasDraftContent =
@@ -194,6 +218,17 @@ export const InputForm: FC<InputFormProps> = ({
     completionItemsResolved.length > 0 &&
     !!onCompletionSelect &&
     !!onCompletionClose;
+
+  // Prompt suggestion handling
+  const followupSuggestion =
+    followupState?.isVisible && followupState.suggestion
+      ? followupState.suggestion
+      : null;
+  const hasFollowup = !!followupSuggestion;
+
+  // Compute actual placeholder
+  const actualPlaceholder =
+    hasFollowup && !inputText ? followupSuggestion! : placeholder;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // Let the completion menu handle Escape when it's active.
@@ -209,10 +244,44 @@ export const InputForm: FC<InputFormProps> = ({
       onCancel();
       return;
     }
+    // Tab to accept prompt suggestion (only when callback is wired)
+    if (
+      e.key === 'Tab' &&
+      hasFollowup &&
+      onAcceptFollowup &&
+      !inputText &&
+      !completionActive
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      onAcceptFollowup('tab');
+      return;
+    }
+    // Right arrow to accept prompt suggestion (only when callback is wired)
+    if (
+      e.key === 'ArrowRight' &&
+      hasFollowup &&
+      onAcceptFollowup &&
+      !inputText &&
+      !completionActive
+    ) {
+      e.preventDefault();
+      onAcceptFollowup?.('right');
+      return;
+    }
     // If composing (Chinese IME input), don't process Enter key
     if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
       // If CompletionMenu is open, let it handle Enter key
       if (completionActive) {
+        return;
+      }
+      // Accept and submit prompt suggestion on Enter when input is empty
+      if (hasFollowup && !inputText && followupSuggestion) {
+        e.preventDefault();
+        onAcceptFollowup?.('enter');
+        // Pass suggestion text explicitly — onInputChange is async (React setState)
+        // so onSubmit cannot rely on reading inputText from the closure.
+        onSubmit(e, followupSuggestion);
         return;
       }
       e.preventDefault();
@@ -269,7 +338,9 @@ export const InputForm: FC<InputFormProps> = ({
               role="textbox"
               aria-label="Message input"
               aria-multiline="true"
-              data-placeholder={placeholder}
+              data-placeholder={actualPlaceholder}
+              // Indicate when a prompt suggestion is active
+              data-has-suggestion={hasFollowup ? 'true' : 'false'}
               // Use a data flag so CSS can show placeholder even if the browser
               // inserts an invisible <br> into contentEditable (so :empty no longer matches)
               data-empty={
@@ -282,6 +353,10 @@ export const InputForm: FC<InputFormProps> = ({
                 // Filter out zero-width space that we use to maintain height
                 const text = target.textContent?.replace(/\u200B/g, '') || '';
                 onInputChange(text);
+                // Dismiss follow-up suggestion when user starts typing
+                if (hasFollowup && !inputText && text) {
+                  onDismissFollowup?.();
+                }
               }}
               onCompositionStart={onCompositionStart}
               onCompositionEnd={onCompositionEnd}

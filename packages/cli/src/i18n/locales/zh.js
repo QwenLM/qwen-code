@@ -96,6 +96,7 @@ export default {
   'CLI Version': 'CLI 版本',
   'Git Commit': 'Git 提交',
   Model: '模型',
+  'Fast Model': '快速模型',
   Sandbox: '沙箱',
   'OS Platform': '操作系统平台',
   'OS Arch': '操作系统架构',
@@ -1092,6 +1093,7 @@ export default {
   // Commands - Model
   // ============================================================================
   'Switch the model for this session': '切换此会话的模型',
+  'Set fast model for background tasks': '设置后台任务的快速模型',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':

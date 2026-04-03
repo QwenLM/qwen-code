@@ -513,6 +513,36 @@ const SETTINGS_SCHEMA = {
           'Show optional feedback dialog after conversations to help improve Qwen performance.',
         showInDialog: true,
       },
+      enableFollowupSuggestions: {
+        type: 'boolean',
+        label: 'Enable Follow-up Suggestions',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
+        showInDialog: true,
+      },
+      enableCacheSharing: {
+        type: 'boolean',
+        label: 'Enable Cache Sharing for Suggestions',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).',
+        showInDialog: false,
+      },
+      enableSpeculation: {
+        type: 'boolean',
+        label: 'Enable Speculative Execution',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).',
+        showInDialog: false,
+      },
       accessibility: {
         type: 'object',
         label: 'Accessibility',
@@ -614,6 +644,17 @@ const SETTINGS_SCHEMA = {
     default: undefined as TelemetrySettings | undefined,
     description: 'Telemetry configuration.',
     showInDialog: false,
+  },
+
+  fastModel: {
+    type: 'string',
+    label: 'Fast Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model for background tasks (suggestion generation, speculation). Leave empty to use the main model. A smaller/faster model (e.g., qwen3.5-flash) reduces latency and cost.',
+    showInDialog: true,
   },
 
   model: {

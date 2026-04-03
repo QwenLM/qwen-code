@@ -98,6 +98,7 @@ export default {
   'CLI Version': 'CLI Version',
   'Git Commit': 'Git Commit',
   Model: 'Model',
+  'Fast Model': 'Fast Model',
   Sandbox: 'Sandbox',
   'OS Platform': 'OS Platform',
   'OS Arch': 'OS Arch',
@@ -1151,6 +1152,7 @@ export default {
   // Commands - Model
   // ============================================================================
   'Switch the model for this session': 'Switch the model for this session',
+  'Set fast model for background tasks': 'Set fast model for background tasks',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',
