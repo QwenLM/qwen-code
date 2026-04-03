@@ -1,0 +1,39 @@
+#!/usr/bin/env sh
+
+CHANGED=$(git diff --name-only origin/main...HEAD 2>/dev/null || true)
+
+# ── 1. Stale settings schema ─────────────────────────────────────────────────
+if echo "$CHANGED" | grep -qE 'packages/(cli|core)/src/config/settingsSchema\.ts'; then
+  echo ''
+  echo '===================================================='
+  echo 'settingsSchema.ts changed — regenerating JSON schema'
+  echo '===================================================='
+  npm run generate:settings-schema --silent
+  if ! git diff --quiet packages/vscode-ide-companion/schemas/settings.schema.json; then
+    echo ''
+    echo '===================================================='
+    echo 'ERROR: settings.schema.json is out of date.'
+    echo ''
+    echo 'The schema was regenerated and differs from what is'
+    echo 'committed. Please stage and commit the updated file:'
+    echo ''
+    echo '  git add packages/vscode-ide-companion/schemas/settings.schema.json'
+    echo '  git commit -m "chore: regenerate settings schema"'
+    echo '===================================================='
+    exit 1
+  fi
+  echo 'settings.schema.json is up to date.'
+fi
+
+# ── 2. Stale vitest snapshots (warning only) ─────────────────────────────────
+if echo "$CHANGED" | grep -q 'packages/core/src/core/prompts\.ts'; then
+  echo ''
+  echo '===================================================='
+  echo 'WARNING: packages/core/src/core/prompts.ts changed.'
+  echo 'Vitest snapshots may be stale. If CI fails, run:'
+  echo ''
+  echo '  cd packages/core && npx vitest run src/core/prompts.test.ts --update'
+  echo ''
+  echo 'then commit the updated snapshots.'
+  echo '===================================================='
+fi
