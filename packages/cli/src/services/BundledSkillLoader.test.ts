@@ -33,6 +33,7 @@ describe('BundledSkillLoader', () => {
     };
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
+      isCronEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
   });
 
@@ -124,5 +125,26 @@ describe('BundledSkillLoader', () => {
 
     expect(commands).toHaveLength(2);
     expect(commands.map((c) => c.name)).toEqual(['review', 'deploy']);
+  });
+
+  it('should hide skills with cron allowedTools when cron is disabled', async () => {
+    const skills = [
+      makeSkill({ name: 'review', description: 'Review code' }),
+      makeSkill({
+        name: 'loop',
+        description: 'Loop command',
+        allowedTools: ['cron_create', 'cron_list', 'cron_delete'],
+      }),
+    ];
+    mockSkillManager.listSkills.mockResolvedValue(skills);
+    (mockConfig.isCronEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
+      false,
+    );
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].name).toBe('review');
   });
 });

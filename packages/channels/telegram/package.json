@@ -1,0 +1,28 @@
+{
+  "name": "@qwen-code/channel-telegram",
+  "version": "0.14.1",
+  "description": "Telegram channel adapter for Qwen Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@qwen-code/channel-base": "file:../base",
+    "grammy": "^1.41.1",
+    "telegram-markdown-formatter": "^0.1.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

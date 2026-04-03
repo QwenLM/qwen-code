@@ -51,6 +51,7 @@ import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
+import { channelCommand } from '../commands/channel.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -128,7 +129,6 @@ export interface CliArgs {
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalLsp: boolean | undefined;
-  experimentalHooks: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -350,12 +350,6 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean',
           description:
             'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
-          default: false,
-        })
-        .option('experimental-hooks', {
-          type: 'boolean',
-          description:
-            'Enable experimental hooks feature for lifecycle event customization',
           default: false,
         })
         .option('channel', {
@@ -590,7 +584,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Auth subcommands
     .command(authCommand)
     // Register Hooks subcommands
-    .command(hooksCommand);
+    .command(hooksCommand)
+    // Register Channel subcommands
+    .command(channelCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -611,7 +607,8 @@ export async function parseArguments(): Promise<CliArgs> {
     result._.length > 0 &&
     (result._[0] === 'mcp' ||
       result._[0] === 'extensions' ||
-      result._[0] === 'hooks')
+      result._[0] === 'hooks' ||
+      result._[0] === 'channel')
   ) {
     // MCP/Extensions/Hooks commands handle their own execution and process exit
     process.exit(0);
@@ -1089,6 +1086,7 @@ export async function loadCliConfig(
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    cronEnabled: settings.experimental?.cron ?? false,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
@@ -1121,9 +1119,7 @@ export async function loadCliConfig(
       format: outputSettingsFormat,
     },
     hooks: settings.hooks,
-    hooksConfig: settings.hooksConfig,
-    enableHooks:
-      argv.experimentalHooks === true || settings.hooksConfig?.enabled === true,
+    disableAllHooks: settings.disableAllHooks ?? false,
     channel: argv.channel,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will

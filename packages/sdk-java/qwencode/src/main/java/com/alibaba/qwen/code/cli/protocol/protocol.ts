@@ -534,12 +534,6 @@ export function isToolResultBlock(block: any): block is ToolResultBlock {
 
 export type SubagentLevel = 'session';
 
-export interface ModelConfig {
-  model?: string;
-  temp?: number;
-  top_p?: number;
-}
-
 export interface RunConfig {
   max_time_minutes?: number;
   max_turns?: number;
@@ -552,7 +546,7 @@ export interface SubagentConfig {
   systemPrompt: string;
   level: SubagentLevel;
   filePath?: string;
-  modelConfig?: Partial<ModelConfig>;
+  model?: string;
   runConfig?: Partial<RunConfig>;
   color?: string;
   readonly isBuiltin?: boolean;

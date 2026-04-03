@@ -62,6 +62,12 @@ esbuild
         __dirname,
         'packages/cli/src/patches/is-in-ci.ts',
       ),
+      '@qwen-code/web-templates': path.resolve(
+        __dirname,
+        'packages/web-templates/src/index.ts',
+      ),
+      // Resolve to userland punycode instead of deprecated node:punycode built-in
+      punycode: require.resolve('punycode/'),
     },
     define: {
       'process.env.CLI_VERSION': JSON.stringify(pkg.version),

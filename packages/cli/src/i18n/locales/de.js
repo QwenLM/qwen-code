@@ -599,6 +599,10 @@ export default {
   'Loading hooks...': 'Hooks werden geladen...',
   'Error loading hooks:': 'Fehler beim Laden der Hooks:',
   'Press Escape to close': 'Escape zum Schließen drücken',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Escape, Ctrl+C oder Ctrl+D zum Abbrechen',
+  'Press Space, Enter, or Escape to dismiss':
+    'Leertaste, Enter oder Escape zum Schließen',
   'No hook selected': 'Kein Hook ausgewählt',
   // Hooks - List Step
   'No hook events found.': 'Keine Hook-Ereignisse gefunden.',
@@ -623,6 +627,19 @@ export default {
   'No hook config selected': 'Keine Hook-Konfiguration ausgewählt',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'Um diesen Hook zu ändern oder zu entfernen, bearbeiten Sie settings.json direkt oder fragen Sie Qwen.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook-Konfiguration - Deaktiviert',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'Alle Hooks sind derzeit deaktiviert. Sie haben {{count}} die nicht ausgeführt werden.',
+  '{{count}} configured hook': '{{count}} konfigurierter Hook',
+  '{{count}} configured hooks': '{{count}} konfigurierte Hooks',
+  'When hooks are disabled:': 'Wenn Hooks deaktiviert sind:',
+  'No hook commands will execute': 'Keine Hook-Befehle werden ausgeführt',
+  'StatusLine will not be displayed': 'StatusLine wird nicht angezeigt',
+  'Tool operations will proceed without hook validation':
+    'Tool-Operationen werden ohne Hook-Validierung fortgesetzt',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'Um Hooks wieder zu aktivieren, entfernen Sie "disableAllHooks" aus settings.json oder fragen Sie Qwen Code.',
   // Hooks - Source
   Project: 'Projekt',
   User: 'Benutzer',
@@ -1323,8 +1340,8 @@ export default {
   unknown: 'unbekannt',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Modell konnte nicht auf '{{modelId}}' umgestellt werden.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — effizientes Hybridmodell mit führender Programmierleistung',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — effizientes Hybridmodell mit führender Programmierleistung',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Das neueste Qwen Vision Modell von Alibaba Cloud ModelStudio (Version: qwen3-vl-plus-2025-09-23)',
 

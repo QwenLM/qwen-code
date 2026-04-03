@@ -360,7 +360,7 @@ describe('Gemini Client (client.ts)', () => {
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
-      getEnableHooks: vi.fn().mockReturnValue(false),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -2415,11 +2415,11 @@ Other open files:
           request: vi.fn(),
           response: vi.fn(),
         };
-        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
-        vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
           mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
         );
-        vi.spyOn(client['config'], 'hasHooksForEvent').mockReturnValue(false);
+        vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
 
         const stream = client.sendMessageStream(
           [{ text: 'Hi' }],
@@ -2439,11 +2439,11 @@ Other open files:
           request: vi.fn(),
           response: vi.fn(),
         };
-        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
-        vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
           mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
         );
-        vi.spyOn(client['config'], 'hasHooksForEvent').mockReturnValue(false);
+        vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
 
         const stream = client.sendMessageStream(
           [{ text: 'Hi' }],
@@ -2463,11 +2463,11 @@ Other open files:
           request: vi.fn().mockResolvedValue({ modifiedPrompt: undefined }),
           response: vi.fn(),
         };
-        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
-        vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
           mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
         );
-        vi.spyOn(client['config'], 'hasHooksForEvent').mockImplementation(
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
           (event: string) => event === 'UserPromptSubmit',
         );
 

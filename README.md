@@ -18,18 +18,22 @@
 
 </div>
 
-> 🎉 **News (2026-02-16)**: Qwen3.5-Plus is now live! Sign in via Qwen OAuth to use it directly, or get an API key from [Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com?tab=doc#/doc/?type=model&url=2840914_2&modelId=group-qwen3.5-plus) to access it through the OpenAI-compatible API.
+## 🎉 News
 
-Qwen Code is an open-source AI agent for the terminal, optimized for [Qwen3-Coder](https://github.com/QwenLM/Qwen3-Coder). It helps you understand large codebases, automate tedious work, and ship faster.
+- **2026-04-02**: Qwen3.6-Plus is now live! Sign in via Qwen OAuth to use it directly, or get an API key from [Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3.6-plus) to access it through the OpenAI-compatible API.
 
-![](https://gw.alicdn.com/imgextra/i1/O1CN01D2DviS1wwtEtMwIzJ_!!6000000006373-2-tps-1600-900.png)
+- **2026-02-16**: Qwen3.5-Plus is now live!
 
 ## Why Qwen Code?
+
+Qwen Code is an open-source AI agent for the terminal, optimized for Qwen series models. It helps you understand large codebases, automate tedious work, and ship faster.
 
 - **Multi-protocol, OAuth free tier**: use OpenAI / Anthropic / Gemini-compatible APIs, or sign in with Qwen OAuth for 1,000 free requests/day.
 - **Open-source, co-evolving**: both the framework and the Qwen3-Coder model are open-source—and they ship and evolve together.
 - **Agentic workflow, feature-rich**: rich built-in tools (Skills, SubAgents) for a full agentic workflow and a Claude Code-like experience.
 - **Terminal-first, IDE-friendly**: built for developers who live in the command line, with optional integration for VS Code, Zed, and JetBrains IDEs.
+
+![](https://gw.alicdn.com/imgextra/i1/O1CN01D2DviS1wwtEtMwIzJ_!!6000000006373-2-tps-1600-900.png)
 
 ## Installation
 
@@ -148,8 +152,8 @@ Here is a complete example:
   "modelProviders": {
     "openai": [
       {
-        "id": "qwen3-coder-plus",
-        "name": "qwen3-coder-plus",
+        "id": "qwen3.6-plus",
+        "name": "qwen3.6-plus",
         "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "description": "Qwen3-Coder via Dashscope",
         "envKey": "DASHSCOPE_API_KEY"
@@ -165,7 +169,7 @@ Here is a complete example:
     }
   },
   "model": {
-    "name": "qwen3-coder-plus"
+    "name": "qwen3.6-plus"
   }
 }
 ```
@@ -175,7 +179,7 @@ Here is a complete example:
 | Field                        | What it does                                                                                                                          |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `modelProviders`             | Declares which models are available and how to connect to them. Keys like `openai`, `anthropic`, `gemini` represent the API protocol. |
-| `modelProviders[].id`        | The model ID sent to the API (e.g. `qwen3-coder-plus`, `gpt-4o`).                                                                     |
+| `modelProviders[].id`        | The model ID sent to the API (e.g. `qwen3.6-plus`, `gpt-4o`).                                                                         |
 | `modelProviders[].envKey`    | The name of the environment variable that holds your API key.                                                                         |
 | `modelProviders[].baseUrl`   | The API endpoint URL (required for non-default endpoints).                                                                            |
 | `env`                        | A fallback place to store API keys (lowest priority; prefer `.env` files or `export` for sensitive keys).                             |
@@ -200,29 +204,17 @@ Use the `/model` command at any time to switch between all configured models.
   "modelProviders": {
     "openai": [
       {
+        "id": "qwen3.6-plus",
+        "name": "qwen3.6-plus (Coding Plan)",
+        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
+        "description": "qwen3.6-plus from ModelStudio Coding Plan",
+        "envKey": "BAILIAN_CODING_PLAN_API_KEY"
+      },
+      {
         "id": "qwen3.5-plus",
         "name": "qwen3.5-plus (Coding Plan)",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
         "description": "qwen3.5-plus with thinking enabled from ModelStudio Coding Plan",
-        "envKey": "BAILIAN_CODING_PLAN_API_KEY",
-        "generationConfig": {
-          "extra_body": {
-            "enable_thinking": true
-          }
-        }
-      },
-      {
-        "id": "qwen3-coder-plus",
-        "name": "qwen3-coder-plus (Coding Plan)",
-        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "qwen3-coder-plus from ModelStudio Coding Plan",
-        "envKey": "BAILIAN_CODING_PLAN_API_KEY"
-      },
-      {
-        "id": "qwen3-coder-next",
-        "name": "qwen3-coder-next (Coding Plan)",
-        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "qwen3-coder-next with thinking enabled from ModelStudio Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY",
         "generationConfig": {
           "extra_body": {
@@ -265,7 +257,7 @@ Use the `/model` command at any time to switch between all configured models.
     }
   },
   "model": {
-    "name": "qwen3-coder-plus"
+    "name": "qwen3.6-plus"
   }
 }
 ```

@@ -385,6 +385,9 @@ export default {
   'Loading hooks...': 'フックを読み込んでいます...',
   'Error loading hooks:': 'フックの読み込みエラー：',
   'Press Escape to close': 'Escape キーで閉じる',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Escape、Ctrl+C、Ctrl+D でキャンセル',
+  'Press Space, Enter, or Escape to dismiss': 'Space、Enter、Escape で閉じる',
   'No hook selected': 'フックが選択されていません',
   // Hooks - List Step
   'No hook events found.': 'フックイベントが見つかりません。',
@@ -409,6 +412,19 @@ export default {
   'No hook config selected': 'フック設定が選択されていません',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'このフックを変更または削除するには、settings.json を直接編集するか、Qwen に尋ねてください。',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'フック設定 - 無効',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'すべてのフックは現在無効です。{{count}} が実行されていません。',
+  '{{count}} configured hook': '{{count}} 個の設定されたフック',
+  '{{count}} configured hooks': '{{count}} 個の設定されたフック',
+  'When hooks are disabled:': 'フックが無効な場合：',
+  'No hook commands will execute': 'フックコマンドは実行されません',
+  'StatusLine will not be displayed': 'StatusLine は表示されません',
+  'Tool operations will proceed without hook validation':
+    'ツール操作はフック検証なしで続行されます',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'フックを再有効化するには、settings.json から "disableAllHooks" を削除するか、Qwen Code に尋ねてください。',
   // Hooks - Source
   Project: 'プロジェクト',
   User: 'ユーザー',
@@ -1013,8 +1029,8 @@ export default {
   'not set': '未設定',
   none: 'なし',
   unknown: '不明',
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Alibaba Cloud ModelStudioの最新Qwen Visionモデル(バージョン: qwen3-vl-plus-2025-09-23)',
   // Dialogs - Permissions
