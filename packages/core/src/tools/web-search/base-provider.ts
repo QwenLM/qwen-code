@@ -30,6 +30,29 @@ export abstract class BaseWebSearchProvider implements WebSearchProvider {
   ): Promise<WebSearchResult>;
 
   /**
+   * Wraps a promise with a timeout. Rejects with a descriptive error if the
+   * timeout elapses first, making network-unavailability obvious to callers.
+   */
+  protected async withTimeout<T>(
+    promise: Promise<T>,
+    timeoutMs: number,
+    operationName: string,
+  ): Promise<T> {
+    const timeout = new Promise<never>((_, reject) =>
+      setTimeout(
+        () =>
+          reject(
+            new Error(
+              `${operationName} timed out after ${timeoutMs}ms — network may be unavailable`,
+            ),
+          ),
+        timeoutMs,
+      ),
+    );
+    return Promise.race([promise, timeout]);
+  }
+
+  /**
    * Execute a web search with error handling.
    * @param query The search query
    * @param signal Abort signal for cancellation

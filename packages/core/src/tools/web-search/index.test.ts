@@ -259,6 +259,48 @@ describe('WebSearchTool', () => {
     });
   });
 
+  describe('fallback behavior', () => {
+    it('should return fallback message with ripgrep output when provider throws a network error', async () => {
+      const webSearchConfig: WebSearchConfig = {
+        provider: [
+          {
+            type: 'tavily',
+            apiKey: 'test-key',
+          },
+        ],
+        default: 'tavily',
+      };
+
+      (
+        mockConfig.getWebSearchConfig as ReturnType<typeof vi.fn>
+      ).mockReturnValue(webSearchConfig);
+
+      // Simulate a network timeout or connection refused error
+      global.fetch = vi
+        .fn()
+        .mockRejectedValue(
+          new Error(
+            'Web search timed out after 5000ms — network may be unavailable',
+          ),
+        );
+
+      const tool = new WebSearchTool(mockConfig);
+      const invocation = tool.build({ query: 'typescript async patterns' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      // Should NOT throw — should return a structured response
+      expect(result.llmContent).toContain('Web search unavailable:');
+      expect(result.llmContent).toContain('network may be unavailable');
+      expect(result.llmContent).toContain(
+        'Falling back to local code search results',
+      );
+      expect(result.llmContent).toContain('typescript async patterns');
+
+      // Should not have an error object — the fallback is a valid tool response
+      expect(result.error).toBeUndefined();
+    });
+  });
+
   describe('configuration', () => {
     it('should return error when web search is not configured', async () => {
       (

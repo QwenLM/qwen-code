@@ -63,10 +63,14 @@ export class GoogleProvider extends BaseWebSearchProvider {
 
     const url = `https://www.googleapis.com/customsearch/v1?${params.toString()}`;
 
-    const response = await fetch(url, {
-      method: 'GET',
-      signal,
-    });
+    const response = await this.withTimeout(
+      fetch(url, {
+        method: 'GET',
+        signal,
+      }),
+      5000,
+      'Web search',
+    );
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');

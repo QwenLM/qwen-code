@@ -43,20 +43,24 @@ export class TavilyProvider extends BaseWebSearchProvider {
     query: string,
     signal: AbortSignal,
   ): Promise<WebSearchResult> {
-    const response = await fetch('https://api.tavily.com/search', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        api_key: this.config.apiKey,
-        query,
-        search_depth: this.config.searchDepth || 'advanced',
-        max_results: this.config.maxResults || 5,
-        include_answer: this.config.includeAnswer !== false,
+    const response = await this.withTimeout(
+      fetch('https://api.tavily.com/search', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          api_key: this.config.apiKey,
+          query,
+          search_depth: this.config.searchDepth || 'advanced',
+          max_results: this.config.maxResults || 5,
+          include_answer: this.config.includeAnswer !== false,
+        }),
+        signal,
       }),
-      signal,
-    });
+      5000,
+      'Web search',
+    );
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');

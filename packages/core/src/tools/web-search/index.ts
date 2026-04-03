@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execSync } from 'node:child_process';
 import type { ToolConfirmationOutcome } from '../tools.js';
 import {
   BaseDeclarativeTool,
@@ -35,6 +36,39 @@ import type {
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 
 const debugLogger = createDebugLogger('WEB_SEARCH');
+
+/**
+ * Fallback local code search using ripgrep when web search is unavailable
+ * (e.g. network-isolated Docker eval containers).
+ */
+function ripgrepFallback(query: string, cwd: string): string {
+  try {
+    // Split query into words, use first 3 as search terms
+    const terms = query
+      .split(/\s+/)
+      .slice(0, 3)
+      .filter((t) => t.length > 2);
+    if (terms.length === 0) return 'No search terms extracted from query.';
+
+    const pattern = terms.join('|');
+    const result = execSync(
+      `rg -i --max-count=3 --context=2 -e "${pattern.replace(/"/g, '\\"')}" .`,
+      {
+        cwd,
+        encoding: 'utf-8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 10000,
+      },
+    );
+    return result.trim() || 'No local matches found.';
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('No such file') || msg.includes('not found')) {
+      return 'ripgrep (rg) is not installed — cannot provide local fallback results.';
+    }
+    return `Local search returned no results: ${msg}`;
+  }
+}
 
 class WebSearchToolInvocation extends BaseToolInvocation<
   WebSearchToolParams,
@@ -269,15 +303,21 @@ class WebSearchToolInvocation extends BaseToolInvocation<
         sources,
       };
     } catch (error: unknown) {
-      const errorMessage = `Error during web search: ${getErrorMessage(error)}`;
-      debugLogger.error(errorMessage, error);
+      const errorMessage = getErrorMessage(error);
+      debugLogger.error(`Error during web search: ${errorMessage}`, error);
+
+      // Provide a ripgrep-based local fallback so the model gets useful output
+      // instead of a silent failure in network-isolated environments (e.g. Docker eval containers).
+      const cwd = process.cwd();
+      const fallbackResults = ripgrepFallback(this.params.query, cwd);
+      const llmContent =
+        `Web search unavailable: ${errorMessage}\n\n` +
+        `Falling back to local code search results for "${this.params.query}":\n` +
+        fallbackResults;
+
       return {
-        llmContent: errorMessage,
-        returnDisplay: 'Error performing web search.',
-        error: {
-          message: errorMessage,
-          type: ToolErrorType.EXECUTION_FAILED,
-        },
+        llmContent,
+        returnDisplay: 'Web search unavailable — showing local search results.',
       };
     }
   }

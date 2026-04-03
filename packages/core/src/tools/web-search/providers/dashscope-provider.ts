@@ -158,15 +158,19 @@ export class DashScopeProvider extends BaseWebSearchProvider {
       rows: this.config.maxResults || 10,
     };
 
-    const response = await fetch(apiEndpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${accessToken}`,
-      },
-      body: JSON.stringify(requestBody),
-      signal,
-    });
+    const response = await this.withTimeout(
+      fetch(apiEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify(requestBody),
+        signal,
+      }),
+      5000,
+      'Web search',
+    );
 
     if (!response.ok) {
       const text = await response.text().catch(() => '');
