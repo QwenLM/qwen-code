@@ -614,17 +614,19 @@ export class AgentCore {
         // ── P1: Tool error reflection ─────────────────────────
         // Inspect returned parts for errors: check functionResponse.response.error
         const returnedParts = currentMessages[0]?.parts ?? [];
-        const hasAnySuccess = returnedParts.some((p) => {
-          const fr = (
-            p as { functionResponse?: { response?: { error?: unknown } } }
-          ).functionResponse;
-          return fr && !fr.response?.error;
-        });
         const hasFunctionResponse = returnedParts.some(
           (p) =>
             (p as { functionResponse?: unknown }).functionResponse !==
             undefined,
         );
+        const hasAnySuccess = returnedParts.some((p) => {
+          const fr = (
+            p as {
+              functionResponse?: { response?: { error?: unknown } };
+            }
+          ).functionResponse;
+          return fr !== undefined && !fr.response?.error;
+        });
 
         if (hasFunctionResponse && !hasAnySuccess) {
           consecutiveAllFailRounds++;
