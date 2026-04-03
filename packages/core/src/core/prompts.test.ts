@@ -36,6 +36,9 @@ vi.mock('../tools/write-file', () => ({
 vi.mock('../utils/gitUtils', () => ({
   isGitRepository: vi.fn(),
 }));
+vi.mock('node:child_process', () => ({
+  execSync: vi.fn(() => 'src/foo.ts\nsrc/bar.ts\nREADME.md\n'),
+}));
 vi.mock('node:fs');
 
 describe('Core System Prompt (prompts.ts)', () => {
