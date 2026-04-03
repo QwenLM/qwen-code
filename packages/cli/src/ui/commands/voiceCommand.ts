@@ -13,7 +13,11 @@ import { CommandKind } from './types.js';
 import { SettingScope } from '../../config/settings.js';
 import { detectBackend } from '../../services/audioCapture.js';
 
-const DEFAULT_STT_ENDPOINT = 'http://localhost:8000/v1/audio/transcriptions';
+export const DEFAULT_STT_ENDPOINT =
+  'http://localhost:8000/v1/audio/transcriptions';
+
+export const HOSTED_STT_ENDPOINT =
+  'https://ai.proto-labs.ai/v1/audio/transcriptions';
 
 export const voiceCommand: SlashCommand = {
   name: 'voice',

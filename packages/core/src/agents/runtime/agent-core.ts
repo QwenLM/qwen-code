@@ -366,6 +366,17 @@ export class AgentCore {
     const DOOM_LOOP_AB_WINDOW = 6; // for A→B→A→B pattern detection
     const recentToolCalls: string[] = []; // circular buffer of "toolName:argsJSON"
 
+    // ── P0b: Analysis-only loop detection ────────────────────
+    // Tracks turns where the model makes tool calls but never writes/edits
+    // any files — i.e. pure read/analysis loops with no code output.
+    const CODE_WRITING_TOOLS = new Set<string>([
+      ToolNames.WRITE_FILE,
+      ToolNames.EDIT,
+      ToolNames.SHELL, // shell can write files (make, gcc, etc.)
+    ]);
+    const ANALYSIS_LOOP_THRESHOLD = 8; // turns without any file-write tool
+    let turnsWithoutCodeWrite = 0;
+
     // ── P1: Tool error reflection ─────────────────────────────
     let consecutiveAllFailRounds = 0;
     const MAX_FAIL_ROUNDS_BEFORE_REFLECT = 3;
@@ -611,6 +622,30 @@ export class AgentCore {
           }
         }
 
+        // ── P0b: Analysis-only loop check ────────────────────
+        const roundHasCodeWrite = functionCalls.some((fc) =>
+          CODE_WRITING_TOOLS.has(String(fc.name)),
+        );
+        if (roundHasCodeWrite) {
+          turnsWithoutCodeWrite = 0;
+        } else {
+          turnsWithoutCodeWrite++;
+          if (turnsWithoutCodeWrite >= ANALYSIS_LOOP_THRESHOLD) {
+            currentMessages = [
+              ...currentMessages,
+              {
+                role: 'user',
+                parts: [
+                  {
+                    text: `You have been reading and analyzing for ${turnsWithoutCodeWrite} turns without writing or modifying any files. Stop analyzing — write actual code now. Create or edit files to make concrete progress toward the goal.`,
+                  },
+                ],
+              },
+            ];
+            turnsWithoutCodeWrite = 0;
+          }
+        }
+
         // ── P1: Tool error reflection ─────────────────────────
         // Inspect returned parts for errors: check functionResponse.response.error
         const returnedParts = currentMessages[0]?.parts ?? [];
@@ -649,7 +684,9 @@ export class AgentCore {
           consecutiveAllFailRounds = 0;
         }
       } else {
-        // No tool calls — treat this as the model's final answer.
+        // No tool calls — reset analysis loop counter (model is finalizing).
+        turnsWithoutCodeWrite = 0;
+        // Treat this as the model's final answer.
         if (roundText && roundText.trim().length > 0) {
           finalText = roundText.trim();
           // Emit ROUND_END for the final round so all consumers see it.

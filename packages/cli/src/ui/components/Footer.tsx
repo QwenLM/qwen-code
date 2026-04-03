@@ -18,6 +18,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+import { VoiceMicButton } from './VoiceMicButton.js';
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
@@ -49,24 +50,35 @@ export const Footer: React.FC = () => {
     config.getContentGeneratorConfig()?.contextWindowSize;
 
   // Left section should show exactly ONE thing at any time, in priority order.
-  const leftContent = uiState.ctrlCPressedOnce ? (
-    <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
-  ) : uiState.ctrlDPressedOnce ? (
-    <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
-  ) : uiState.showEscapePrompt ? (
-    <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
-  ) : vimEnabled && vimMode === 'INSERT' ? (
-    <Text color={theme.text.secondary}>-- INSERT --</Text>
-  ) : uiState.shellModeActive ? (
-    <ShellModeIndicator />
-  ) : showAutoAcceptIndicator !== undefined &&
-    showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
-    <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-  ) : (
-    <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
-  );
+  const leftContent =
+    uiState.voiceState === 'recording' ? (
+      <Text color={theme.status.error}>● Recording… (ctrl+space to stop)</Text>
+    ) : uiState.voiceState === 'transcribing' ? (
+      <Text dimColor>◌ Transcribing…</Text>
+    ) : uiState.ctrlCPressedOnce ? (
+      <Text color={theme.status.warning}>
+        {t('Press Ctrl+C again to exit.')}
+      </Text>
+    ) : uiState.ctrlDPressedOnce ? (
+      <Text color={theme.status.warning}>
+        {t('Press Ctrl+D again to exit.')}
+      </Text>
+    ) : uiState.showEscapePrompt ? (
+      <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
+    ) : vimEnabled && vimMode === 'INSERT' ? (
+      <Text color={theme.text.secondary}>-- INSERT --</Text>
+    ) : uiState.shellModeActive ? (
+      <ShellModeIndicator />
+    ) : showAutoAcceptIndicator !== undefined &&
+      showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
+      <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+    ) : (
+      <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
+    );
 
-  const rightItems: Array<{ key: string; node: React.ReactNode }> = [];
+  const rightItems: Array<{ key: string; node: React.ReactNode }> = [
+    { key: 'voice', node: <VoiceMicButton /> },
+  ];
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',

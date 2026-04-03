@@ -118,6 +118,8 @@ import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+import { useVoice } from './hooks/useVoice.js';
+import { DEFAULT_STT_ENDPOINT } from './commands/voiceCommand.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -730,6 +732,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Queue declared before useGeminiStream so drain() can be passed directly.
   const { messageQueue, addMessage, popLast, drain } = useMessageQueue();
+
+  // Voice input — lifted here so Footer and InputPrompt share the same state
+  const voiceEnabled = settings.merged.voice?.enabled ?? false;
+  const sttEndpoint =
+    settings.merged.voice?.sttEndpoint ?? DEFAULT_STT_ENDPOINT;
+  const voice = useVoice(sttEndpoint);
 
   const {
     streamingState,
@@ -1617,6 +1625,10 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Voice input state
+      voiceEnabled,
+      voiceBackendAvailable: voice.backendAvailable,
+      voiceState: voice.voiceState,
     }),
     [
       isThemeDialogOpen,
@@ -1720,6 +1732,10 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Voice input state
+      voiceEnabled,
+      voice.backendAvailable,
+      voice.voiceState,
     ],
   );
 
@@ -1759,6 +1775,14 @@ export const AppContainer = (props: AppContainerProps) => {
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
       dequeueAll: drain,
+      onVoiceToggle: () => {
+        if (voice.voiceState === 'idle') void voice.start();
+        else if (voice.voiceState === 'recording')
+          void voice.stop().then((transcript) => {
+            if (transcript) buffer.insert(transcript, { paste: false });
+          });
+        else if (voice.voiceState === 'error') voice.reset();
+      },
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
@@ -1817,6 +1841,8 @@ export const AppContainer = (props: AppContainerProps) => {
       retryLastPrompt,
       handleClearScreen,
       drain,
+      voice,
+      buffer,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       // Subagent dialogs

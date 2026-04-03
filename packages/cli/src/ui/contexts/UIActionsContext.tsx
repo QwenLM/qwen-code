@@ -80,6 +80,7 @@ export interface UIActions {
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
   dequeueAll: () => string[];
+  onVoiceToggle: () => void;
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;

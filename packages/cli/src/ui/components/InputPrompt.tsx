@@ -49,8 +49,6 @@ import {
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
-import { useSettings } from '../contexts/SettingsContext.js';
-import { useVoice } from '../hooks/useVoice.js';
 
 const IMAGE_PATH_REGEX = /\.(png|jpe?g|gif|webp|bmp)$/i;
 
@@ -135,12 +133,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const uiState = useUIState();
   const uiActions = useUIActions();
   const { pasteWorkaround } = useKeypressContext();
-  const settings = useSettings();
-  const voiceEnabled = settings.merged.voice?.enabled ?? false;
-  const sttEndpoint =
-    settings.merged.voice?.sttEndpoint ??
-    'http://localhost:8000/v1/audio/transcriptions';
-  const voice = useVoice(sttEndpoint);
+  // Voice state is lifted to AppContainer so Footer can share it
+  const voiceEnabled = uiState.voiceEnabled;
+  const voiceBackendAvailable = uiState.voiceBackendAvailable;
+  const voiceState = uiState.voiceState;
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
   const hasAgents = agents.size > 0;
@@ -432,7 +428,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         const imagePath = rawPath
           .replace(/\\(.)/g, '$1')
           .replace(/^['"]|['"]$/g, '');
-        const { existsSync } = await import('node:fs');
+        const { existsSync, copyFileSync, mkdirSync } = await import('node:fs');
 
         if (!existsSync(imagePath)) {
           // Check if we're in an SSH session — likely cause of missing file
@@ -455,10 +451,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           // Either way, don't attach — file isn't readable
           return;
         }
+
+        // Copy to a stable temp dir immediately — macOS temp screenshots
+        // (e.g. /var/folders/.../TemporaryItems/NSIRD_screencaptureui_*/) are
+        // deleted within seconds of capture. Reading at submit time is too late.
+        const stableDir = Storage.getGlobalTempDir();
+        mkdirSync(stableDir, { recursive: true });
+        const ext = path.extname(imagePath);
+        const stablePath = path.join(stableDir, `dropped-${Date.now()}${ext}`);
+        copyFileSync(imagePath, stablePath);
+
         const filename = path.basename(imagePath);
         const newAttachment: Attachment = {
           id: String(Date.now()),
-          path: imagePath,
+          path: stablePath,
           filename,
         };
         setAttachments((prev) => [...prev, newAttachment]);
@@ -993,18 +999,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
       // ctrl+space — push-to-talk voice input
       if (voiceEnabled && key.ctrl && key.name === 'space') {
-        if (voice.backendAvailable) {
-          if (voice.voiceState === 'idle') {
-            void voice.start();
-          } else if (voice.voiceState === 'recording') {
-            void voice.stop().then((transcript) => {
-              if (transcript) {
-                buffer.insert(transcript, { paste: false });
-              }
-            });
-          } else if (voice.voiceState === 'error') {
-            voice.reset();
-          }
+        if (voiceBackendAvailable) {
+          uiActions.onVoiceToggle();
         }
         return true;
       }
@@ -1053,7 +1049,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       hasAgents,
       setAgentTabBarFocused,
       voiceEnabled,
-      voice,
+      voiceBackendAvailable,
       messageQueue,
       dequeueAll,
     ],
@@ -1218,22 +1214,22 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           ))}
         </Box>
       )}
-      {voiceEnabled && voice.voiceState !== 'idle' && (
+      {voiceEnabled && voiceState !== 'idle' && (
         <Box marginLeft={2} marginBottom={0}>
           <Text
             color={
-              voice.voiceState === 'recording'
+              voiceState === 'recording'
                 ? theme.status.error
-                : voice.voiceState === 'error'
+                : voiceState === 'error'
                   ? theme.status.errorDim
                   : theme.text.secondary
             }
           >
-            {voice.voiceState === 'recording'
+            {voiceState === 'recording'
               ? '[● REC]'
-              : voice.voiceState === 'transcribing'
+              : voiceState === 'transcribing'
                 ? '[◌ STT...]'
-                : `[Voice error: ${voice.error ?? 'unknown'}]`}
+                : `[Voice error: ${'unknown'}]`}
           </Text>
         </Box>
       )}

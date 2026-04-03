@@ -142,6 +142,10 @@ export interface UIState {
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+  // Voice input state
+  voiceEnabled: boolean;
+  voiceBackendAvailable: boolean;
+  voiceState: 'idle' | 'recording' | 'transcribing' | 'error';
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

@@ -38,6 +38,38 @@ import {
 } from './utils/errors.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
+
+/**
+ * Pre-flight auth check for OpenAI-compatible providers.
+ * Makes a cheap GET /models request to detect 401/403 before any session work.
+ * Returns null on success or non-auth errors (network, unsupported endpoint).
+ * Returns an error message string on auth failure.
+ */
+async function checkAuthPreflight(config: Config): Promise<string | null> {
+  const cgConfig = config.getContentGeneratorConfig();
+  const baseUrl = cgConfig?.baseUrl;
+  const apiKey = cgConfig?.apiKey;
+
+  // Only check OpenAI-compatible providers that have a baseUrl + apiKey
+  if (!baseUrl || !apiKey) return null;
+
+  const modelsUrl = baseUrl.replace(/\/$/, '') + '/models';
+  try {
+    const res = await fetch(modelsUrl, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (res.status === 401 || res.status === 403) {
+      return `Auth failed (HTTP ${res.status}) at ${modelsUrl}. Check your API key.`;
+    }
+  } catch (err) {
+    // Network error or timeout — skip preflight, let the session surface the real error
+    debugLogger.debug('preflight network error', err);
+  }
+  return null;
+}
+
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -147,6 +179,32 @@ export async function runNonInteractive(
 
     const geminiClient = config.getGeminiClient();
     const abortController = options.abortController ?? new AbortController();
+
+    // Auth pre-flight: fail fast before any session work
+    const authError = await checkAuthPreflight(config);
+    if (authError) {
+      if (
+        outputFormat === OutputFormat.JSON ||
+        outputFormat === OutputFormat.STREAM_JSON
+      ) {
+        const systemMessage = await buildSystemMessage(
+          config,
+          sessionId,
+          permissionMode,
+        );
+        adapter.emitMessage(systemMessage);
+        adapter.emitResult({
+          isError: true,
+          durationMs: 0,
+          apiDurationMs: 0,
+          numTurns: 0,
+          errorMessage: authError,
+        });
+      } else {
+        process.stderr.write(`proto: ${authError}\n`);
+      }
+      process.exit(1);
+    }
 
     // Setup signal handlers for graceful shutdown
     const shutdownHandler = () => {
