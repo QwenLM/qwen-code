@@ -2991,7 +2991,7 @@ describe('Fire hook functions integration', () => {
     });
   });
 
-  describe('Concurrent agent tool execution', () => {
+  describe('Concurrent tool execution', () => {
     // Ensure tests are deterministic regardless of environment.
     const origEnv = process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
     beforeEach(() => {
@@ -3345,6 +3345,84 @@ describe('Fire hook functions integration', () => {
       const editEnd = executionLog.indexOf('edit:end:E');
       const read3Start = executionLog.indexOf('read:start:3');
       expect(read3Start).toBeGreaterThan(editEnd);
+    });
+
+    it('should run read-only shell commands concurrently and non-read-only sequentially', async () => {
+      const executionLog: string[] = [];
+
+      const shellTool = new MockTool({
+        name: 'run_shell_command',
+        kind: Kind.Execute,
+        execute: async (params) => {
+          const cmd = (params as { command: string }).command;
+          executionLog.push(`shell:start:${cmd}`);
+          await new Promise((r) => setTimeout(r, 50));
+          executionLog.push(`shell:end:${cmd}`);
+          return {
+            llmContent: `Shell ${cmd} done`,
+            returnDisplay: `Shell ${cmd} done`,
+          };
+        },
+      });
+
+      const tools = new Map<string, MockTool>([
+        ['run_shell_command', shellTool],
+      ]);
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+      const scheduler = createScheduler(
+        tools,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+      );
+
+      // "git log" and "ls" are read-only → concurrent
+      // "npm install" is not read-only → sequential, breaks the batch
+      const requests = [
+        {
+          callId: '1',
+          name: 'run_shell_command',
+          args: { command: 'git log' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '2',
+          name: 'run_shell_command',
+          args: { command: 'ls' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '3',
+          name: 'run_shell_command',
+          args: { command: 'npm install' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ];
+
+      await scheduler.schedule(requests, new AbortController().signal);
+
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+
+      // "git log" and "ls" should start concurrently (both before either ends)
+      const gitStart = executionLog.indexOf('shell:start:git log');
+      const lsStart = executionLog.indexOf('shell:start:ls');
+      const firstReadOnlyEnd = Math.min(
+        executionLog.indexOf('shell:end:git log'),
+        executionLog.indexOf('shell:end:ls'),
+      );
+      expect(gitStart).toBeLessThan(firstReadOnlyEnd);
+      expect(lsStart).toBeLessThan(firstReadOnlyEnd);
+
+      // "npm install" should start after both read-only commands complete
+      const lastReadOnlyEnd = Math.max(
+        executionLog.indexOf('shell:end:git log'),
+        executionLog.indexOf('shell:end:ls'),
+      );
+      const npmStart = executionLog.indexOf('shell:start:npm install');
+      expect(npmStart).toBeGreaterThan(lastReadOnlyEnd);
     });
   });
 });

@@ -1345,10 +1345,9 @@ export class CoreToolScheduler {
       );
 
       // Partition tool calls into consecutive batches by concurrency safety.
-      // Consecutive safe tools (Read, Search, Fetch, Agent) are grouped
-      // into parallel batches; unsafe tools (Edit, Execute, etc.) each form
-      // their own sequential batch. This preserves ordering semantics while
-      // allowing read-only tools to execute in parallel.
+      // Consecutive safe tools are grouped into parallel batches; unsafe
+      // tools each form their own sequential batch. Execute (shell) is safe
+      // only when isShellCommandReadOnly() returns true; otherwise sequential.
       const batches = partitionToolCalls(callsToExecute);
 
       for (const batch of batches) {
