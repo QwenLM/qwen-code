@@ -177,7 +177,7 @@ describe('hooks constants', () => {
     });
 
     it('should have 12 events', () => {
-      expect(DISPLAY_HOOK_EVENTS).toHaveLength(12);
+      expect(DISPLAY_HOOK_EVENTS).toHaveLength(15);
     });
   });
 

@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { MockInstance } from 'vitest';
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { ideCommand } from './ideCommand.js';
 import { type CommandContext } from './types.js';
@@ -25,7 +24,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 describe('ideCommand', () => {
   let mockContext: CommandContext;
   let mockIdeClient: core.IdeClient;
-  let platformSpy: MockInstance;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -59,8 +57,6 @@ describe('ideCommand', () => {
         },
       },
     } as unknown as CommandContext;
-
-    platformSpy = vi.spyOn(process, 'platform', 'get');
   });
 
   afterEach(() => {
@@ -77,10 +73,9 @@ describe('ideCommand', () => {
     const command = await ideCommand();
     expect(command).not.toBeNull();
     expect(command.name).toBe('ide');
-    expect(command.subCommands).toHaveLength(3);
+    expect(command.subCommands).toHaveLength(2);
     expect(command.subCommands?.[0].name).toBe('enable');
     expect(command.subCommands?.[1].name).toBe('status');
-    expect(command.subCommands?.[2].name).toBe('install');
   });
 
   it('should show disable command when connected', async () => {
@@ -167,98 +162,6 @@ describe('ideCommand', () => {
         messageType: 'error',
         content: `🔴 Disconnected: ${details}`,
       });
-    });
-  });
-
-  describe('install subcommand', () => {
-    const mockInstall = vi.fn();
-    beforeEach(() => {
-      vi.mocked(mockIdeClient.getCurrentIde).mockReturnValue(
-        IDE_DEFINITIONS.vscode,
-      );
-      vi.mocked(mockIdeClient.getConnectionStatus).mockReturnValue({
-        status: core.IDEConnectionStatus.Disconnected,
-      });
-      vi.mocked(core.getIdeInstaller).mockReturnValue({
-        install: mockInstall,
-      });
-      platformSpy.mockReturnValue('linux');
-    });
-
-    it('should install the extension', async () => {
-      vi.useFakeTimers();
-      mockInstall.mockResolvedValue({
-        success: true,
-        message: 'Successfully installed.',
-      });
-
-      const command = await ideCommand();
-
-      // For the polling loop inside the action.
-      vi.mocked(mockIdeClient.getConnectionStatus).mockReturnValue({
-        status: core.IDEConnectionStatus.Connected,
-      });
-
-      const actionPromise = command!.subCommands!.find(
-        (c) => c.name === 'install',
-      )!.action!(mockContext, '');
-      await vi.runAllTimersAsync();
-      await actionPromise;
-
-      expect(core.getIdeInstaller).toHaveBeenCalledWith(IDE_DEFINITIONS.vscode);
-      expect(mockInstall).toHaveBeenCalled();
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'info',
-          text: `Installing IDE companion...`,
-        }),
-        expect.any(Number),
-      );
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'info',
-          text: 'Successfully installed.',
-        }),
-        expect.any(Number),
-      );
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'info',
-          text: '🟢 Connected to VS Code',
-        }),
-        expect.any(Number),
-      );
-      vi.useRealTimers();
-    }, 10000);
-
-    it('should show an error if installation fails', async () => {
-      mockInstall.mockResolvedValue({
-        success: false,
-        message: 'Installation failed.',
-      });
-
-      const command = await ideCommand();
-      await command!.subCommands!.find((c) => c.name === 'install')!.action!(
-        mockContext,
-        '',
-      );
-
-      expect(core.getIdeInstaller).toHaveBeenCalledWith(IDE_DEFINITIONS.vscode);
-      expect(mockInstall).toHaveBeenCalled();
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'info',
-          text: `Installing IDE companion...`,
-        }),
-        expect.any(Number),
-      );
-      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: 'error',
-          text: 'Installation failed.',
-        }),
-        expect.any(Number),
-      );
     });
   });
 });

@@ -14,6 +14,7 @@ import { VimModeProvider } from '../contexts/VimModeContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../hooks/useTerminalSize.js');
+vi.mock('./VoiceMicButton.js', () => ({ VoiceMicButton: () => null }));
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
 const defaultProps = {
@@ -38,6 +39,9 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     contextFileNames: [],
     showToolDescriptions: false,
     ideContextState: undefined,
+    voiceEnabled: false,
+    voiceBackendAvailable: false,
+    voiceState: 'idle' as const,
     ...overrides,
   }) as UIState;
 
