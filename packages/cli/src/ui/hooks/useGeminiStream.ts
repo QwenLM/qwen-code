@@ -1570,6 +1570,8 @@ export const useGeminiStream = (
           responsesToSend.push({
             text: `\n[User message received during tool execution]: ${msg}`,
           });
+          // Record in UI history so the transcript stays complete.
+          addItem({ type: MessageType.USER, text: msg }, Date.now());
         }
       }
 
@@ -1584,6 +1586,7 @@ export const useGeminiStream = (
       modelSwitchedFromQuotaError,
       config,
       midTurnDrainRef,
+      addItem,
     ],
   );
 
