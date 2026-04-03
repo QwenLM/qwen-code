@@ -164,8 +164,8 @@ export class GeminiClient {
     return this.chat !== undefined;
   }
 
-  getHistory(): Content[] {
-    return this.getChat().getHistory();
+  getHistory(curated: boolean = false): Content[] {
+    return this.getChat().getHistory(curated);
   }
 
   stripThoughtsFromHistory() {

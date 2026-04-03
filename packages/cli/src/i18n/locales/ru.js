@@ -610,6 +610,10 @@ export default {
   'Loading hooks...': 'Загрузка хуков...',
   'Error loading hooks:': 'Ошибка загрузки хуков:',
   'Press Escape to close': 'Нажмите Escape для закрытия',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Нажмите Escape, Ctrl+C или Ctrl+D для отмены',
+  'Press Space, Enter, or Escape to dismiss':
+    'Нажмите Пробел, Enter или Escape для закрытия',
   'No hook selected': 'Хук не выбран',
   // Hooks - List Step
   'No hook events found.': 'События хуков не найдены.',

@@ -235,7 +235,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <InsightProgressMessage progress={itemForDisplay.progress} />
       )}
       {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
-        <BtwMessage btw={itemForDisplay.btw} />
+        <BtwMessage btw={itemForDisplay.btw} containerWidth={contentWidth} />
       )}
       {itemForDisplay.type === 'user_prompt_submit_blocked' && (
         <Box flexDirection="column">
