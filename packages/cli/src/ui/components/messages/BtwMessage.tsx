@@ -22,6 +22,15 @@ export interface BtwDisplayProps {
 // border(1)*2 + paddingX(1)*2 = 4
 const BTW_SELF_CHROME = 4;
 
+/**
+ * Ensure code fences (``` or ~~~) start on their own line so that
+ * MarkdownDisplay's line-based parser can detect them.  Models sometimes
+ * emit the opening fence right after prose text without a preceding newline.
+ */
+function normalizeCodeFences(text: string): string {
+  return text.replace(/([^\n])(```|~~~)/g, '$1\n$2');
+}
+
 const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
   btw,
   containerWidth,
@@ -61,7 +70,7 @@ const BtwMessageInternal: React.FC<BtwDisplayProps> = ({
       ) : (
         <Box flexDirection="column" marginTop={1}>
           <MarkdownDisplay
-            text={btw.answer}
+            text={normalizeCodeFences(btw.answer)}
             isPending={false}
             contentWidth={contentWidth}
           />
