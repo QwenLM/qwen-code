@@ -1,0 +1,125 @@
+# Copyright 2025 Qwen Team
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: 'Post-Release PR'
+description: 'Create a release branch, bump version, and open an auto-merge PR.'
+
+inputs:
+  release-version:
+    description: 'The release version to set in package.json'
+    required: true
+  release-tag:
+    description: 'The release tag (used for branch name and commit message)'
+    required: true
+  workspace-package:
+    description: 'npm workspace package name (e.g., @qwen-code/sdk)'
+    required: true
+  branch-prefix:
+    description: 'Prefix for the release branch name'
+    required: false
+    default: 'release/sdk-typescript'
+  base-branch:
+    description: 'The base branch to merge into'
+    required: false
+    default: 'main'
+  github-token:
+    description: 'PAT with permissions to create branches, PRs, and enable auto-merge'
+    required: true
+
+outputs:
+  pr-url:
+    description: 'URL of the created pull request'
+    value: '${{ steps.create_pr.outputs.PR_URL }}'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: 'Configure Git User'
+      shell: 'bash'
+      run: |
+        set -euo pipefail
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+
+    - name: 'Set package version'
+      shell: 'bash'
+      env:
+        RELEASE_VERSION: '${{ inputs.release-version }}'
+        WORKSPACE_PACKAGE: '${{ inputs.workspace-package }}'
+      run: |
+        set -euo pipefail
+        npm version -w "${WORKSPACE_PACKAGE}" "${RELEASE_VERSION}" --no-git-tag-version --allow-same-version
+
+    - name: 'Create and switch to release branch'
+      shell: 'bash'
+      env:
+        BRANCH_PREFIX: '${{ inputs.branch-prefix }}'
+        RELEASE_TAG: '${{ inputs.release-tag }}'
+      run: |
+        set -euo pipefail
+        BRANCH_NAME="${BRANCH_PREFIX}/${RELEASE_TAG}"
+        if git ls-remote --exit-code --heads origin "${BRANCH_NAME}" >/dev/null 2>&1; then
+          echo "::warning::Branch ${BRANCH_NAME} already exists on remote, force-recreating."
+          git switch -C "${BRANCH_NAME}"
+        else
+          git switch -c "${BRANCH_NAME}"
+        fi
+        echo "BRANCH_NAME=${BRANCH_NAME}" >> "${GITHUB_ENV}"
+
+    - name: 'Commit and push package version'
+      shell: 'bash'
+      env:
+        RELEASE_TAG: '${{ inputs.release-tag }}'
+        WORKSPACE_PACKAGE: '${{ inputs.workspace-package }}'
+      run: |
+        set -euo pipefail
+        git add -u
+        if git diff --staged --quiet; then
+          echo "No version changes to commit"
+        else
+          git commit -m "chore(release): ${WORKSPACE_PACKAGE} ${RELEASE_TAG}"
+        fi
+        git push --set-upstream origin "${BRANCH_NAME}" --force --follow-tags
+
+    - name: 'Create PR to merge release branch'
+      id: 'create_pr'
+      shell: 'bash'
+      env:
+        GITHUB_TOKEN: '${{ inputs.github-token }}'
+        RELEASE_BRANCH: '${{ env.BRANCH_NAME }}'
+        RELEASE_TAG: '${{ inputs.release-tag }}'
+        BASE_BRANCH: '${{ inputs.base-branch }}'
+        WORKSPACE_PACKAGE: '${{ inputs.workspace-package }}'
+      run: |
+        set -euo pipefail
+
+        pr_url="$(gh pr list --head "${RELEASE_BRANCH}" --base "${BASE_BRANCH}" --json url --jq '.[0].url')"
+        if [[ -z "${pr_url}" ]]; then
+          pr_url="$(gh pr create \
+            --base "${BASE_BRANCH}" \
+            --head "${RELEASE_BRANCH}" \
+            --title "chore(release): ${WORKSPACE_PACKAGE} ${RELEASE_TAG}" \
+            --body "Automated release PR for ${WORKSPACE_PACKAGE} ${RELEASE_TAG}.")"
+        fi
+
+        echo "PR_URL=${pr_url}" >> "${GITHUB_OUTPUT}"
+
+    - name: 'Enable auto-merge for release PR'
+      shell: 'bash'
+      env:
+        GITHUB_TOKEN: '${{ inputs.github-token }}'
+        PR_URL: '${{ steps.create_pr.outputs.PR_URL }}'
+      run: |
+        set -euo pipefail
+        gh pr merge "${PR_URL}" --merge --auto --delete-branch
