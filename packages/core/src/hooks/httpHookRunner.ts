@@ -7,6 +7,9 @@
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { interpolateHeaders, interpolateUrl } from './envInterpolator.js';
 import { UrlValidator } from './urlValidator.js';
+import { createCombinedAbortSignal } from './combinedAbortSignal.js';
+import { isBlockedAddress } from './ssrfGuard.js';
+import { lookup as dnsLookup } from 'dns';
 import type {
   HttpHookConfig,
   HookInput,
@@ -18,12 +21,12 @@ import type {
 const debugLogger = createDebugLogger('HTTP_HOOK_RUNNER');
 
 /**
- * Default timeout for HTTP hook execution (30 seconds)
+ * Default timeout for HTTP hook execution
  */
-const DEFAULT_HTTP_TIMEOUT = 30000;
+const DEFAULT_HTTP_TIMEOUT = 10 * 60 * 1000;
 
 /**
- * Maximum output length (10,000 characters as per Claude Code spec)
+ * Maximum output length (10,000 characters as per Qwen Code spec)
  */
 const MAX_OUTPUT_LENGTH = 10000;
 
@@ -31,6 +34,50 @@ const MAX_OUTPUT_LENGTH = 10000;
  * Callback for displaying status messages during hook execution
  */
 export type StatusMessageCallback = (message: string) => void;
+
+/**
+ * Resolve a hostname and validate that all resolved IPs are not in blocked
+ * ranges. This is the core of DNS-level SSRF protection, aligned with
+ *
+ * NOTE: Node.js native `fetch` does not support a custom `lookup` option
+ * (unlike axios). We validate resolved IPs immediately before the fetch
+ * call to minimize the rebinding window.
+ */
+async function validateResolvedHost(
+  hostname: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    // If hostname is already an IP literal, validate directly.
+    if (isBlockedAddress(hostname)) {
+      resolve({
+        ok: false,
+        error: `HTTP hook blocked: ${hostname} is in a private/link-local range`,
+      });
+      return;
+    }
+
+    // For hostnames, resolve DNS and validate all returned IPs.
+    dnsLookup(hostname, { all: true }, (err, addresses) => {
+      if (err) {
+        // DNS resolution failure — let the fetch call handle it.
+        resolve({ ok: true });
+        return;
+      }
+
+      for (const addr of addresses) {
+        if (isBlockedAddress(addr.address)) {
+          resolve({
+            ok: false,
+            error: `HTTP hook blocked: ${hostname} resolves to ${addr.address} (private/link-local). Loopback (127.0.0.1, ::1) is allowed.`,
+          });
+          return;
+        }
+      }
+
+      resolve({ ok: true });
+    });
+  });
+}
 
 /**
  * HTTP Hook Runner - executes HTTP hooks by sending POST requests
@@ -108,14 +155,28 @@ export class HttpHookRunner {
         hookConfig.allowedEnvVars || [],
       );
 
-      // Validate URL with DNS rebinding protection
-      const validation = await this.urlValidator.validateWithDnsCheck(url);
+      // Validate URL format and whitelist (URL-level check)
+      const validation = this.urlValidator.validate(url);
       if (!validation.allowed) {
         return {
           hookConfig,
           eventName,
           success: false,
           error: new Error(`URL validation failed: ${validation.reason}`),
+          duration: Date.now() - startTime,
+        };
+      }
+
+      // DNS-level SSRF protection: validate resolved IPs
+      // It checks that the hostname resolves to non-private IPs.
+      const parsed = new URL(url);
+      const hostValidation = await validateResolvedHost(parsed.hostname);
+      if (!hostValidation.ok) {
+        return {
+          hookConfig,
+          eventName,
+          success: false,
+          error: new Error(hostValidation.error),
           duration: Date.now() - startTime,
         };
       }
@@ -134,15 +195,14 @@ export class HttpHookRunner {
         hook_event_name: eventName,
       });
 
-      // Set up timeout
-      const timeout = hookConfig.timeout ?? DEFAULT_HTTP_TIMEOUT;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-      // Combine with external signal
-      if (signal) {
-        signal.addEventListener('abort', () => controller.abort());
-      }
+      // Set up combined abort signal (external signal + timeout)
+      const timeout = hookConfig.timeout
+        ? hookConfig.timeout * 1000
+        : DEFAULT_HTTP_TIMEOUT;
+      const { signal: combinedSignal, cleanup } = createCombinedAbortSignal(
+        signal,
+        { timeoutMs: timeout },
+      );
 
       try {
         debugLogger.debug(`Executing HTTP hook: ${hookId} -> ${url}`);
@@ -154,14 +214,14 @@ export class HttpHookRunner {
             ...headers,
           },
           body,
-          signal: controller.signal,
+          signal: combinedSignal,
         });
 
-        clearTimeout(timeoutId);
+        cleanup();
 
         const duration = Date.now() - startTime;
 
-        // Per Claude Code spec: Non-2xx status is a non-blocking error
+        // Per Qwen Code spec: Non-2xx status is a non-blocking error
         // Execution continues, but we log a warning
         if (!response.ok) {
           debugLogger.warn(
@@ -192,14 +252,17 @@ export class HttpHookRunner {
           duration,
         };
       } catch (fetchError) {
-        clearTimeout(timeoutId);
+        cleanup();
 
         const duration = Date.now() - startTime;
 
-        if (fetchError instanceof Error && fetchError.name === 'AbortError') {
-          // Timeout is a non-blocking error per Claude Code spec
+        if (
+          fetchError instanceof Error &&
+          (fetchError.name === 'AbortError' || combinedSignal.aborted)
+        ) {
+          // Timeout or abort is a non-blocking error per Qwen Code spec
           debugLogger.warn(
-            `HTTP hook ${hookId} timed out after ${timeout}ms (non-blocking)`,
+            `HTTP hook ${hookId} timed out or was aborted after ${timeout}ms (non-blocking)`,
           );
           return {
             hookConfig,
@@ -210,7 +273,7 @@ export class HttpHookRunner {
           };
         }
 
-        // Connection failure is a non-blocking error per Claude Code spec
+        // Connection failure is a non-blocking error per Qwen Code spec
         debugLogger.warn(
           `HTTP hook ${hookId} connection failed (non-blocking): ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`,
         );
@@ -274,7 +337,7 @@ export class HttpHookRunner {
 
   /**
    * Truncate output to MAX_OUTPUT_LENGTH characters
-   * Per Claude Code spec: output is capped at 10,000 characters
+   * Per Qwen Code spec: output is capped at 10,000 characters
    */
   private truncateOutput(output: string): string {
     if (output.length <= MAX_OUTPUT_LENGTH) {
@@ -310,7 +373,7 @@ export class HttpHookRunner {
       output.suppressOutput = json['suppressOutput'];
     }
     if ('systemMessage' in json && typeof json['systemMessage'] === 'string') {
-      // Apply output length limit per Claude Code spec
+      // Apply output length limit per Qwen Code spec
       output.systemMessage = this.truncateOutput(json['systemMessage']);
     }
     if ('decision' in json && typeof json['decision'] === 'string') {

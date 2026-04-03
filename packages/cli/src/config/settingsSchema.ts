@@ -131,18 +131,31 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
       items: {
         type: 'object',
         description:
-          'A hook configuration entry that defines a command to execute.',
+          'A hook configuration entry that defines a hook to execute.',
         properties: {
           type: {
             type: 'string',
-            description: 'The type of hook.',
-            enum: ['command'],
+            description: 'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
+            enum: ['command', 'http'],
             required: true,
           },
           command: {
             type: 'string',
-            description: 'The command to execute when the hook is triggered.',
-            required: true,
+            description: 'The command to execute when the hook is triggered. Required for "command" type.',
+          },
+          url: {
+            type: 'string',
+            description: 'The URL to send the POST request to. Required for "http" type.',
+          },
+          headers: {
+            type: 'object',
+            description: 'HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).',
+            additionalProperties: { type: 'string' },
+          },
+          allowedEnvVars: {
+            type: 'array',
+            description: 'List of environment variables allowed for interpolation in headers and URL.',
+            items: { type: 'string' },
           },
           name: {
             type: 'string',
@@ -154,13 +167,30 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
           },
           timeout: {
             type: 'number',
-            description: 'Timeout in milliseconds for the hook execution.',
+            description: 'Timeout in seconds for the hook execution.',
           },
           env: {
             type: 'object',
             description:
               'Environment variables to set when executing the hook command.',
             additionalProperties: { type: 'string' },
+          },
+          async: {
+            type: 'boolean',
+            description: 'Whether to execute the hook asynchronously (non-blocking, for "command" type only).',
+          },
+          once: {
+            type: 'boolean',
+            description: 'Whether to execute the hook only once per session (for "http" type).',
+          },
+          statusMessage: {
+            type: 'string',
+            description: 'A message to display while the hook is executing.',
+          },
+          shell: {
+            type: 'string',
+            description: 'The shell to use for command execution.',
+            enum: ['bash', 'powershell'],
           },
         },
       },

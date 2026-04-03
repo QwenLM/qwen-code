@@ -9,14 +9,14 @@ import { UrlValidator, createUrlValidator } from './urlValidator.js';
 
 describe('UrlValidator', () => {
   describe('isBlocked', () => {
-    it('should ALLOW 127.0.0.1 for local dev hooks (matches Claude Code behavior)', () => {
+    it('should ALLOW 127.0.0.1 for local dev hooks', () => {
       const validator = new UrlValidator([]);
       expect(validator.isBlocked('http://127.0.0.1:8080/api')).toBe(false);
       expect(validator.isBlocked('http://127.0.0.1/api')).toBe(false);
       expect(validator.isBlocked('http://127.0.0.1:9876/hook')).toBe(false);
     });
 
-    it('should ALLOW localhost for local dev hooks (matches Claude Code behavior)', () => {
+    it('should ALLOW localhost for local dev hooks', () => {
       const validator = new UrlValidator([]);
       expect(validator.isBlocked('http://localhost:8080/api')).toBe(false);
       expect(validator.isBlocked('http://localhost:9876/hook')).toBe(false);

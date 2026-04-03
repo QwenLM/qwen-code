@@ -10,6 +10,19 @@
  */
 
 /**
+ * Strip CR, LF, and NUL bytes from a header value to prevent HTTP header
+ * injection (CRLF injection) via env var values or hook-configured header
+ * templates. A malicious env var like "token\r\nX-Evil: 1" would otherwise
+ * inject a second header into the request.
+ *
+ * Aligned with Claude Code's sanitizeHeaderValue behavior.
+ */
+export function sanitizeHeaderValue(value: string): string {
+  // eslint-disable-next-line no-control-regex
+  return value.replace(/[\r\n\x00]/g, '');
+}
+
+/**
  * Interpolate environment variables in a string value.
  * Only variables in the allowedVars list will be replaced.
  * Variables not in the whitelist will be replaced with empty string.
@@ -18,7 +31,7 @@
  *
  * @param value - The string containing environment variable references
  * @param allowedVars - List of allowed environment variable names
- * @returns The interpolated string
+ * @returns The interpolated string (sanitized to prevent header injection)
  */
 /**
  * Dangerous variable names that could be used for prototype pollution attacks
@@ -45,7 +58,7 @@ export function interpolateEnvVars(
   allowedVars: string[],
 ): string {
   // Match $VAR_NAME or ${VAR_NAME}
-  return value.replace(
+  const interpolated = value.replace(
     /\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g,
     (match, varName: string) => {
       // Block dangerous variable names to prevent prototype pollution
@@ -59,6 +72,8 @@ export function interpolateEnvVars(
       return '';
     },
   );
+  // Sanitize to prevent CRLF/NUL header injection
+  return sanitizeHeaderValue(interpolated);
 }
 
 /**

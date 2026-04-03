@@ -11,6 +11,7 @@ import {
   interpolateUrl,
   hasEnvVarReferences,
   extractEnvVarNames,
+  sanitizeHeaderValue,
 } from './envInterpolator.js';
 
 describe('envInterpolator', () => {
@@ -69,6 +70,30 @@ describe('envInterpolator', () => {
     it('should not replace text without $ prefix', () => {
       const result = interpolateEnvVars('MY_TOKEN', ['MY_TOKEN']);
       expect(result).toBe('MY_TOKEN');
+    });
+
+    it('should sanitize CR characters to prevent header injection', () => {
+      process.env['EVIL_TOKEN'] = 'good\r\nX-Evil: injected';
+      const result = interpolateEnvVars('$EVIL_TOKEN', ['EVIL_TOKEN']);
+      expect(result).toBe('goodX-Evil: injected');
+    });
+
+    it('should sanitize LF characters to prevent header injection', () => {
+      process.env['EVIL_TOKEN'] = 'good\nX-Evil: injected';
+      const result = interpolateEnvVars('$EVIL_TOKEN', ['EVIL_TOKEN']);
+      expect(result).toBe('goodX-Evil: injected');
+    });
+
+    it('should sanitize NUL characters', () => {
+      process.env['EVIL_TOKEN'] = 'good\x00bad';
+      const result = interpolateEnvVars('$EVIL_TOKEN', ['EVIL_TOKEN']);
+      expect(result).toBe('goodbad');
+    });
+
+    it('should sanitize CRLF and NUL combined', () => {
+      process.env['EVIL_TOKEN'] = 'token\r\nX-Injected: 1\x00more';
+      const result = interpolateEnvVars('Bearer $EVIL_TOKEN', ['EVIL_TOKEN']);
+      expect(result).toBe('Bearer tokenX-Injected: 1more');
     });
   });
 
@@ -141,6 +166,32 @@ describe('envInterpolator', () => {
 
     it('should return empty array for no variables', () => {
       expect(extractEnvVarNames('plain text')).toEqual([]);
+    });
+  });
+
+  describe('sanitizeHeaderValue', () => {
+    it('should strip CR characters', () => {
+      expect(sanitizeHeaderValue('token\r\nX-Evil: 1')).toBe('tokenX-Evil: 1');
+    });
+
+    it('should strip LF characters', () => {
+      expect(sanitizeHeaderValue('token\nX-Evil: 1')).toBe('tokenX-Evil: 1');
+    });
+
+    it('should strip NUL characters', () => {
+      expect(sanitizeHeaderValue('good\x00bad')).toBe('goodbad');
+    });
+
+    it('should strip all three dangerous characters', () => {
+      expect(sanitizeHeaderValue('a\r\nb\x00c')).toBe('abc');
+    });
+
+    it('should not affect safe values', () => {
+      expect(sanitizeHeaderValue('Bearer abc123')).toBe('Bearer abc123');
+    });
+
+    it('should handle empty string', () => {
+      expect(sanitizeHeaderValue('')).toBe('');
     });
   });
 });

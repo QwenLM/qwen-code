@@ -101,7 +101,31 @@ describe('HttpHookRunner', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
-    it('should fail for blocked URL (SSRF)', async () => {
+    it('should fail for blocked URL (SSRF - link-local metadata)', async () => {
+      const runner = new HttpHookRunner([]); // Allow all patterns
+      const config = createMockConfig({
+        url: 'http://169.254.169.254/latest/meta-data',
+      });
+      const input = createMockInput();
+
+      const result = await runner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toContain('blocked');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should ALLOW localhost for local dev hooks', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        headers: new Headers({ 'content-type': 'application/json' }),
+        json: async () => ({ continue: true }),
+      });
+
       const runner = new HttpHookRunner([]); // Allow all patterns
       const config = createMockConfig({
         url: 'http://localhost:8080/hook',
@@ -114,9 +138,8 @@ describe('HttpHookRunner', () => {
         input,
       );
 
-      expect(result.success).toBe(false);
-      expect(result.error?.message).toContain('SSRF');
-      expect(mockFetch).not.toHaveBeenCalled();
+      expect(result.success).toBe(true);
+      expect(mockFetch).toHaveBeenCalled();
     });
 
     it('should interpolate environment variables in headers', async () => {
