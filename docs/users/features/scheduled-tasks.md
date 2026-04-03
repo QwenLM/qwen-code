@@ -118,14 +118,14 @@ To avoid multiple loops firing at the exact same moment, each loop gets a small 
 
 ## Settings
 
-| Setting             | Type    | Default | Description                                            |
-| :------------------ | :------ | :------ | :----------------------------------------------------- |
-| `loopEnabled`       | boolean | `true`  | Enable or disable the `/loop` command entirely         |
-| `loopMaxConcurrent` | number  | `50`    | Maximum number of concurrent loops                     |
-| `loopExpiryDays`    | number  | `7`     | Days before recurring loops auto-expire (0 to disable) |
-| `loopJitterEnabled` | boolean | `true`  | Add deterministic jitter to loop intervals             |
+| Setting                   | Type    | Default | Description                                            |
+| :------------------------ | :------ | :------ | :----------------------------------------------------- |
+| `model.loopEnabled`       | boolean | `true`  | Enable or disable the `/loop` command entirely         |
+| `model.loopMaxConcurrent` | number  | `50`    | Maximum number of concurrent loops                     |
+| `model.loopExpiryDays`    | number  | `7`     | Days before recurring loops auto-expire (0 to disable) |
+| `model.loopJitterEnabled` | boolean | `true`  | Add deterministic jitter to loop intervals             |
 
-Settings can be configured in `.qwen/settings.json` or via `/settings`.
+Settings live under the `model` section in `.qwen/settings.json`, or configure via `/settings`.
 
 ## How loops run
 

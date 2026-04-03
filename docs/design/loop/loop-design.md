@@ -226,18 +226,20 @@ When a loop fires a prompt that doesn't trigger AI streaming (e.g., `/help`, `/c
 
 ## Feature Gate
 
-Controlled via settings (`.qwen/settings.json`):
+Controlled via the `model` section of `.qwen/settings.json`:
 
 ```json
 {
-  "loopEnabled": true,
-  "loopMaxConcurrent": 50,
-  "loopExpiryDays": 7,
-  "loopJitterEnabled": true
+  "model": {
+    "loopEnabled": true,
+    "loopMaxConcurrent": 50,
+    "loopExpiryDays": 7,
+    "loopJitterEnabled": true
+  }
 }
 ```
 
-The gate is checked at the top of the command handler. When `loopEnabled: false`, all `/loop` subcommands return an error message. Settings changes take effect immediately (no restart required).
+The gate is checked at the top of the command handler via `merged.model.loopEnabled`. When `false`, all `/loop` subcommands return an error message. Settings changes take effect immediately (no restart required).
 
 ## Test Coverage
 

@@ -387,6 +387,7 @@ export const loopCommand: SlashCommand = {
     if (parsed.subcommand === 'pause') {
       if (parsed.targetAll) {
         manager.pause();
+        void persistLoopStates(manager.toPersistedStates(), getQwenDir());
         ui.addItem(
           { type: MessageType.INFO, text: t('All loops paused.') },
           Date.now(),
@@ -403,6 +404,7 @@ export const loopCommand: SlashCommand = {
         return;
       }
       manager.pause(state.id);
+      void persistLoopStates(manager.toPersistedStates(), getQwenDir());
       ui.addItem(
         {
           type: MessageType.INFO,
@@ -421,6 +423,7 @@ export const loopCommand: SlashCommand = {
     if (parsed.subcommand === 'resume') {
       if (parsed.targetAll) {
         manager.resume();
+        void persistLoopStates(manager.toPersistedStates(), getQwenDir());
         ui.addItem(
           { type: MessageType.INFO, text: t('All paused loops resumed.') },
           Date.now(),
@@ -437,6 +440,7 @@ export const loopCommand: SlashCommand = {
         return;
       }
       manager.resume(state.id);
+      void persistLoopStates(manager.toPersistedStates(), getQwenDir());
       ui.addItem(
         {
           type: MessageType.INFO,
