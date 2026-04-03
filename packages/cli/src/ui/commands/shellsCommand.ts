@@ -24,7 +24,20 @@ export const shellsCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   action: (context: CommandContext) => {
-    const registry = ShellProcessRegistry.getInstance();
+    let registry: ShellProcessRegistry;
+    try {
+      registry = ShellProcessRegistry.getInstance();
+    } catch {
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Background shell management is not currently available.'),
+        },
+        Date.now(),
+      );
+      return;
+    }
+
     const processes = registry.listProcesses();
 
     if (processes.length === 0) {
@@ -96,6 +109,20 @@ export const shellsCommand: SlashCommand = {
       },
       kind: CommandKind.BUILT_IN,
       action: (context: CommandContext, args?: string) => {
+        let registry: ShellProcessRegistry;
+        try {
+          registry = ShellProcessRegistry.getInstance();
+        } catch {
+          context.ui.addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Background shell management is not available.'),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
         const parts = args?.trim().split(/\s+/) || [];
         const shellId = parts[0];
         const lines = parseInt(parts[1] || '50', 10);
@@ -165,7 +192,20 @@ export const shellsCommand: SlashCommand = {
           return;
         }
 
-        const registry = ShellProcessRegistry.getInstance();
+        let registry: ShellProcessRegistry;
+        try {
+          registry = ShellProcessRegistry.getInstance();
+        } catch {
+          context.ui.addItem(
+            {
+              type: MessageType.ERROR,
+              text: t('Background shell management is not available.'),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
         const process = registry.getProcess(shellId);
 
         if (!process) {
@@ -225,7 +265,20 @@ export const shellsCommand: SlashCommand = {
       },
       kind: CommandKind.BUILT_IN,
       action: (context: CommandContext) => {
-        const registry = ShellProcessRegistry.getInstance();
+        let registry: ShellProcessRegistry;
+        try {
+          registry = ShellProcessRegistry.getInstance();
+        } catch {
+          context.ui.addItem(
+            {
+              type: MessageType.INFO,
+              text: t('Background shell management is not available.'),
+            },
+            Date.now(),
+          );
+          return;
+        }
+
         const stats = registry.getStats();
 
         context.ui.addItem(

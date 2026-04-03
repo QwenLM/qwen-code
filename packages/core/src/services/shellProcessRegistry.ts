@@ -36,30 +36,41 @@ export interface ShellProcessRegistration {
  */
 export class ShellProcessRegistry {
   private static instance: ShellProcessRegistry | null = null;
+  private static signalListenersRegistered = false;
   private processes: Map<string, ShellProcess> = new Map();
   private counter: number = 0;
   private readonly MAX_OUTPUT_SIZE = 1_000_000; // 1MB limit per process
   private readonly AUTO_CLEANUP_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
   private constructor() {
-    // Register cleanup on process exit
-    process.on('exit', () => {
-      this.cleanup();
-    });
+    // Only register signal listeners once, and never in test environments
+    if (
+      !ShellProcessRegistry.signalListenersRegistered &&
+      process.env.NODE_ENV !== 'test'
+    ) {
+      ShellProcessRegistry.signalListenersRegistered = true;
+      process.on('exit', () => {
+        this.cleanup();
+      });
 
-    process.on('SIGTERM', () => {
-      this.cleanup();
-    });
+      process.on('SIGTERM', () => {
+        this.cleanup();
+      });
 
-    process.on('SIGINT', () => {
-      this.cleanup();
-    });
+      process.on('SIGINT', () => {
+        this.cleanup();
+      });
+    }
   }
 
   /**
    * Get singleton instance
    */
   static getInstance(): ShellProcessRegistry {
+    // Auto-reset in test environments to prevent state leakage
+    if (process.env.NODE_ENV === 'test') {
+      ShellProcessRegistry.instance = null;
+    }
     if (!ShellProcessRegistry.instance) {
       ShellProcessRegistry.instance = new ShellProcessRegistry();
     }
