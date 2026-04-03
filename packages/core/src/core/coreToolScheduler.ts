@@ -1345,7 +1345,7 @@ export class CoreToolScheduler {
       );
 
       // Partition tool calls into consecutive batches by concurrency safety.
-      // Consecutive safe tools (Read, Search, Fetch, Think, Agent) are grouped
+      // Consecutive safe tools (Read, Search, Fetch, Agent) are grouped
       // into parallel batches; unsafe tools (Edit, Execute, etc.) each form
       // their own sequential batch. This preserves ordering semantics while
       // allowing read-only tools to execute in parallel.
