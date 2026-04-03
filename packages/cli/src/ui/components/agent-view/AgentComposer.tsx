@@ -21,9 +21,9 @@ import { Box, Text, useStdin } from 'ink';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AgentStatus,
+  isTerminalStatus,
   ApprovalMode,
   APPROVAL_MODES,
-  AgentEventType,
 } from '@qwen-code/qwen-code-core';
 import {
   useAgentViewState,
@@ -184,40 +184,32 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     [buffer, agentTabBarFocused, setAgentTabBarFocused],
   );
 
-  // ── Message queue (mid-turn drain: always enqueue, track display locally) ──
+  // ── Message queue (accumulate while streaming, flush as one prompt on idle) ──
 
-  const [pendingMessages, setPendingMessages] = useState<string[]>([]);
+  const [messageQueue, setMessageQueue] = useState<string[]>([]);
 
-  // Clear display when messages are consumed mid-turn or agent goes idle.
+  // When agent becomes idle (and not terminal), flush queued messages.
   useEffect(() => {
-    const emitter = interactiveAgent?.getEventEmitter();
-    if (!emitter) return;
-
-    const clearDisplay = () => setPendingMessages([]);
-    const clearOnIdle = (event: { newStatus?: AgentStatus }) => {
-      if (event.newStatus === AgentStatus.IDLE) {
-        setPendingMessages([]);
-      }
-    };
-    emitter.on(AgentEventType.QUEUE_MESSAGES_CONSUMED, clearDisplay);
-    emitter.on(AgentEventType.STATUS_CHANGE, clearOnIdle);
-
-    return () => {
-      emitter.off(AgentEventType.QUEUE_MESSAGES_CONSUMED, clearDisplay);
-      emitter.off(AgentEventType.STATUS_CHANGE, clearOnIdle);
-    };
-  }, [interactiveAgent]);
+    if (
+      streamingState === StreamingState.Idle &&
+      messageQueue.length > 0 &&
+      status !== undefined &&
+      !isTerminalStatus(status)
+    ) {
+      const combined = messageQueue.join('\n');
+      setMessageQueue([]);
+      interactiveAgent?.enqueueMessage(combined);
+    }
+  }, [streamingState, messageQueue, interactiveAgent, status]);
 
   const handleSubmit = useCallback(
     (text: string) => {
       const trimmed = text.trim();
       if (!trimmed || !interactiveAgent) return;
-      // Always enqueue directly — mid-turn drain picks up messages
-      // during tool execution rather than waiting for idle.
-      interactiveAgent.enqueueMessage(trimmed);
-      // Track for display when agent is busy
-      if (streamingState !== StreamingState.Idle) {
-        setPendingMessages((prev) => [...prev, trimmed]);
+      if (streamingState === StreamingState.Idle) {
+        interactiveAgent.enqueueMessage(trimmed);
+      } else {
+        setMessageQueue((prev) => [...prev, trimmed]);
       }
     },
     [interactiveAgent, streamingState],
@@ -287,7 +279,7 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
           </Box>
         )}
 
-        <QueuedMessageDisplay messageQueue={pendingMessages} />
+        <QueuedMessageDisplay messageQueue={messageQueue} />
 
         {/* Input prompt — always visible, like the main Composer */}
         <BaseTextInput
