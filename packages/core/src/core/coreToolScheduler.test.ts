@@ -3119,7 +3119,7 @@ describe('Fire hook functions integration', () => {
       expect(startIndices.every((i) => i < firstEnd)).toBe(true);
     });
 
-    it('should run agent tools concurrently while other tools run sequentially', async () => {
+    it('should run concurrency-safe tools in parallel and unsafe tools sequentially', async () => {
       const executionLog: string[] = [];
 
       const agentTool = new MockTool({
@@ -3138,10 +3138,11 @@ describe('Fire hook functions integration', () => {
 
       const readTool = new MockTool({
         name: 'read_file',
+        kind: Kind.Read,
         execute: async (params) => {
           const id = (params as { id: string }).id;
           executionLog.push(`read:start:${id}`);
-          await new Promise((r) => setTimeout(r, 20));
+          await new Promise((r) => setTimeout(r, 50));
           executionLog.push(`read:end:${id}`);
           return {
             llmContent: `Read ${id} done`,
@@ -3163,6 +3164,8 @@ describe('Fire hook functions integration', () => {
       );
 
       const abortController = new AbortController();
+      // All 4 calls are concurrency-safe (read_file=Kind.Read, agent=Agent name)
+      // so they form one parallel batch and all run concurrently.
       const requests = [
         {
           callId: '1',
@@ -3202,20 +3205,23 @@ describe('Fire hook functions integration', () => {
       expect(completedCalls).toHaveLength(4);
       expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
 
-      // Non-agent tools should execute sequentially: read:1 finishes before read:2 starts
-      const read1End = executionLog.indexOf('read:end:1');
-      const read2Start = executionLog.indexOf('read:start:2');
-      expect(read1End).toBeLessThan(read2Start);
-
-      // Agent tools should execute concurrently: both start before either ends
-      const agentAStart = executionLog.indexOf('agent:start:A');
-      const agentBStart = executionLog.indexOf('agent:start:B');
-      const firstAgentEnd = Math.min(
+      // All 4 tools are concurrency-safe → they should all start
+      // before any of them finishes (parallel execution).
+      const allStarts = [
+        executionLog.indexOf('read:start:1'),
+        executionLog.indexOf('agent:start:A'),
+        executionLog.indexOf('read:start:2'),
+        executionLog.indexOf('agent:start:B'),
+      ];
+      const firstEnd = Math.min(
+        executionLog.indexOf('read:end:1'),
         executionLog.indexOf('agent:end:A'),
+        executionLog.indexOf('read:end:2'),
         executionLog.indexOf('agent:end:B'),
       );
-      expect(agentAStart).toBeLessThan(firstAgentEnd);
-      expect(agentBStart).toBeLessThan(firstAgentEnd);
+      for (const start of allStarts) {
+        expect(start).toBeLessThan(firstEnd);
+      }
     });
   });
 });

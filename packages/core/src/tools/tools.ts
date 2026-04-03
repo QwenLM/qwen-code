@@ -736,6 +736,14 @@ export const MUTATOR_KINDS: Kind[] = [
   Kind.Execute,
 ] as const;
 
+/** Tool kinds that are safe to execute concurrently (no side effects). */
+export const CONCURRENCY_SAFE_KINDS: ReadonlySet<Kind> = new Set([
+  Kind.Read,
+  Kind.Search,
+  Kind.Fetch,
+  Kind.Think,
+]);
+
 export interface ToolLocation {
   // Absolute path to the file
   path: string;

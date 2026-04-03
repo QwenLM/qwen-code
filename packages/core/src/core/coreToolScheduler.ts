@@ -49,6 +49,7 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
+import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
 import {
   buildPermissionCheckContext,
   evaluatePermissionRules,
@@ -327,6 +328,44 @@ interface CoreToolSchedulerOptions {
    * Optional recording service. If provided, tool results will be recorded.
    */
   chatRecordingService?: ChatRecordingService;
+}
+
+// ─── Tool Concurrency Helpers ────────────────────────────────
+
+interface ToolBatch {
+  concurrent: boolean;
+  calls: ScheduledToolCall[];
+}
+
+/**
+ * Returns true if a scheduled tool call can safely execute concurrently
+ * with other safe tools (no side effects, no shared mutable state).
+ */
+function isConcurrencySafe(call: ScheduledToolCall): boolean {
+  // Agent tools spawn independent sub-agents with no shared state.
+  if (call.request.name === ToolNames.AGENT) return true;
+  return CONCURRENCY_SAFE_KINDS.has(call.tool.kind);
+}
+
+/**
+ * Partition tool calls into consecutive batches by concurrency safety.
+ *
+ * Consecutive safe tools are merged into a single parallel batch.
+ * Each unsafe tool forms its own sequential batch.
+ *
+ * Example: [Read, Read, Edit, Read] → [[Read,Read](parallel), [Edit](seq), [Read](seq)]
+ */
+function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
+  return calls.reduce<ToolBatch[]>((batches, call) => {
+    const safe = isConcurrencySafe(call);
+    const lastBatch = batches[batches.length - 1];
+    if (safe && lastBatch?.concurrent) {
+      lastBatch.calls.push(call);
+    } else {
+      batches.push({ concurrent: safe, calls: [call] });
+    }
+    return batches;
+  }, []);
 }
 
 export class CoreToolScheduler {
@@ -1286,32 +1325,50 @@ export class CoreToolScheduler {
 
     if (allCallsFinalOrScheduled) {
       const callsToExecute = this.toolCalls.filter(
-        (call) => call.status === 'scheduled',
+        (call): call is ScheduledToolCall => call.status === 'scheduled',
       );
 
-      // Task tools are safe to run concurrently — they spawn independent
-      // sub-agents with no shared mutable state.  All other tools run
-      // sequentially in their original order to preserve any implicit
-      // ordering the model may rely on.
-      const taskCalls = callsToExecute.filter(
-        (call) => call.request.name === ToolNames.AGENT,
-      );
-      const otherCalls = callsToExecute.filter(
-        (call) => call.request.name !== ToolNames.AGENT,
-      );
+      // Partition tool calls into consecutive batches by concurrency safety.
+      // Consecutive safe tools (Read, Search, Fetch, Think, Agent) are grouped
+      // into parallel batches; unsafe tools (Edit, Execute, etc.) each form
+      // their own sequential batch. This preserves ordering semantics while
+      // allowing read-only tools to execute in parallel.
+      const batches = partitionToolCalls(callsToExecute);
 
-      const taskPromise = Promise.all(
-        taskCalls.map((tc) => this.executeSingleToolCall(tc, signal)),
-      );
-
-      const othersPromise = (async () => {
-        for (const toolCall of otherCalls) {
-          await this.executeSingleToolCall(toolCall, signal);
+      for (const batch of batches) {
+        if (batch.concurrent && batch.calls.length > 1) {
+          await this.runConcurrently(batch.calls, signal);
+        } else {
+          for (const call of batch.calls) {
+            await this.executeSingleToolCall(call, signal);
+          }
         }
-      })();
-
-      await Promise.all([taskPromise, othersPromise]);
+      }
     }
+  }
+
+  /**
+   * Execute multiple tool calls concurrently with a concurrency cap.
+   */
+  private async runConcurrently(
+    calls: ScheduledToolCall[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    const maxConcurrency =
+      parseInt(process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '', 10) || 10;
+    const executing = new Set<Promise<void>>();
+
+    for (const call of calls) {
+      if (signal.aborted) break;
+      const p = this.executeSingleToolCall(call, signal).then(() => {
+        executing.delete(p);
+      });
+      executing.add(p);
+      if (executing.size >= maxConcurrency) {
+        await Promise.race(executing);
+      }
+    }
+    await Promise.all(executing);
   }
 
   private async executeSingleToolCall(
