@@ -13,8 +13,6 @@ import {
   IdeConnectionType,
 } from '@qwen-code/qwen-code-core';
 import {
-  QWEN_CODE_COMPANION_EXTENSION_NAME,
-  getIdeInstaller,
   IDEConnectionStatus,
   ideContextStore,
 } from '@qwen-code/qwen-code-core';
@@ -180,96 +178,6 @@ export const ideCommand = async (): Promise<SlashCommand> => {
     },
   };
 
-  const installCommand: SlashCommand = {
-    name: 'install',
-    get description() {
-      const ideName = ideClient.getDetectedIdeDisplayName() ?? 'IDE';
-      return t('install required IDE companion for {{ideName}}', {
-        ideName,
-      });
-    },
-    kind: CommandKind.BUILT_IN,
-    action: async (context) => {
-      const installer = getIdeInstaller(currentIDE);
-      const isSandBox = !!process.env['SANDBOX'];
-      if (isSandBox) {
-        context.ui.addItem(
-          {
-            type: 'info',
-            text: `IDE integration needs to be installed on the host. If you have already installed it, you can directly connect the ide`,
-          },
-          Date.now(),
-        );
-        return;
-      }
-      if (!installer) {
-        const ideName = ideClient.getDetectedIdeDisplayName();
-        context.ui.addItem(
-          {
-            type: 'error',
-            text: `Automatic installation is not supported for ${ideName}. Please install the '${QWEN_CODE_COMPANION_EXTENSION_NAME}' extension manually from the marketplace.`,
-          },
-          Date.now(),
-        );
-        return;
-      }
-
-      context.ui.addItem(
-        {
-          type: 'info',
-          text: `Installing IDE companion...`,
-        },
-        Date.now(),
-      );
-
-      const result = await installer.install();
-      context.ui.addItem(
-        {
-          type: result.success ? 'info' : 'error',
-          text: result.message,
-        },
-        Date.now(),
-      );
-      if (result.success) {
-        context.services.settings.setValue(
-          SettingScope.User,
-          'ide.enabled',
-          true,
-        );
-        // Poll for up to 5 seconds for the extension to activate.
-        for (let i = 0; i < 10; i++) {
-          await setIdeModeAndSyncConnection(context.services.config!, true);
-          if (
-            ideClient.getConnectionStatus().status ===
-            IDEConnectionStatus.Connected
-          ) {
-            break;
-          }
-          await new Promise((resolve) => setTimeout(resolve, 500));
-        }
-
-        const { messageType, content } = getIdeStatusMessage(ideClient);
-        if (messageType === 'error') {
-          context.ui.addItem(
-            {
-              type: messageType,
-              text: `Failed to automatically enable IDE integration. To fix this, run the CLI in a new terminal window.`,
-            },
-            Date.now(),
-          );
-        } else {
-          context.ui.addItem(
-            {
-              type: messageType,
-              text: content,
-            },
-            Date.now(),
-          );
-        }
-      }
-    },
-  };
-
   const enableCommand: SlashCommand = {
     name: 'enable',
     get description() {
@@ -324,11 +232,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
   if (isConnected) {
     ideSlashCommand.subCommands = [statusCommand, disableCommand];
   } else {
-    ideSlashCommand.subCommands = [
-      enableCommand,
-      statusCommand,
-      installCommand,
-    ];
+    ideSlashCommand.subCommands = [enableCommand, statusCommand];
   }
 
   return ideSlashCommand;

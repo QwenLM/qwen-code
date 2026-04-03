@@ -97,6 +97,8 @@ export interface InputPromptProps {
   onSuggestionsVisibilityChange?: (visible: boolean) => void;
   vimHandleInput?: (key: Key) => boolean;
   isEmbeddedShellFocused?: boolean;
+  messageQueue?: readonly string[];
+  dequeueAll?: () => string[];
 }
 
 // Re-export from shared utils for backwards compatibility
@@ -126,6 +128,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   onSuggestionsVisibilityChange,
   vimHandleInput,
   isEmbeddedShellFocused,
+  messageQueue,
+  dequeueAll,
 }) => {
   const isShellFocused = useShellFocusState();
   const uiState = useUIState();
@@ -867,6 +871,16 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
+          // If there are queued messages, pull them all back into the input buffer
+          // instead of navigating history. Mirrors cc-2.18's up-arrow dequeue UX.
+          if (messageQueue && messageQueue.length > 0 && dequeueAll) {
+            const queued = dequeueAll();
+            const combined = [...queued, buffer.text]
+              .filter(Boolean)
+              .join('\n\n');
+            buffer.setText(combined);
+            return true;
+          }
           inputHistory.navigateUp();
           return true;
         }
@@ -1040,6 +1054,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       setAgentTabBarFocused,
       voiceEnabled,
       voice,
+      messageQueue,
+      dequeueAll,
     ],
   );
 

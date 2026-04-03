@@ -1758,6 +1758,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
+      dequeueAll: drain,
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
@@ -1815,6 +1816,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       retryLastPrompt,
       handleClearScreen,
+      drain,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       // Subagent dialogs

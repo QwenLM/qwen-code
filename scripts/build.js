@@ -38,9 +38,8 @@ execSync('npm run generate', { stdio: 'inherit', cwd: root });
 // 2. core (foundation package)
 // 3. web-templates (embeddable web templates - used by cli)
 // 4. cli (depends on core, test-utils, web-templates)
-// 5. webui (shared UI components - used by vscode companion)
+// 5. webui (shared UI components)
 // 6. sdk (no internal dependencies)
-// 7. vscode-ide-companion (depends on webui)
 const buildOrder = [
   'packages/test-utils',
   'packages/core',
@@ -48,7 +47,6 @@ const buildOrder = [
   'packages/cli',
   'packages/webui',
   'packages/sdk-typescript',
-  'packages/vscode-ide-companion',
 ];
 
 for (const workspace of buildOrder) {
@@ -56,15 +54,6 @@ for (const workspace of buildOrder) {
     stdio: 'inherit',
     cwd: root,
   });
-
-  // After cli is built, generate the JSON Schema for settings
-  // so the vscode-ide-companion extension can provide IntelliSense
-  if (workspace === 'packages/cli') {
-    execSync('npx tsx scripts/generate-settings-schema.ts', {
-      stdio: 'inherit',
-      cwd: root,
-    });
-  }
 }
 
 // also build container image if sandboxing is enabled
