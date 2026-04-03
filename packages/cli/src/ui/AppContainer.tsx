@@ -746,20 +746,24 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const {
-    messageQueue,
-    addMessage,
-    clearQueue,
-    getQueuedMessagesText,
-    drainQueue,
-  } = useMessageQueue({
-    isConfigInitialized,
-    streamingState,
-    submitQuery,
-  });
+  const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
+    useMessageQueue({
+      isConfigInitialized,
+      streamingState,
+      submitQuery,
+    });
 
-  // Bridge message queue to mid-turn drain ref for useGeminiStream.
-  midTurnDrainRef.current = drainQueue;
+  // Bridge message queue to mid-turn drain via ref.
+  // Sync ref on every render so the drain callback always reads latest state.
+  const messageQueueRef = useRef(messageQueue);
+  messageQueueRef.current = messageQueue;
+  midTurnDrainRef.current = () => {
+    const queue = messageQueueRef.current;
+    if (queue.length === 0) return [];
+    messageQueueRef.current = [];
+    clearQueue();
+    return [...queue];
+  };
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(

@@ -1564,7 +1564,11 @@ export const useGeminiStream = (
 
       // Mid-turn queue drain: inject queued user messages alongside tool
       // results so the model sees them in the next API call.
-      const drained = midTurnDrainRef?.current?.() ?? [];
+      // Skip if the turn was cancelled — messages stay in queue for next turn.
+      const drained =
+        turnCancelledRef.current || abortControllerRef.current?.signal.aborted
+          ? []
+          : (midTurnDrainRef?.current?.() ?? []);
       if (drained.length > 0) {
         for (const msg of drained) {
           responsesToSend.push({
