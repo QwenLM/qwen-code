@@ -172,6 +172,7 @@ export const useGeminiStream = (
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
+  midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1561,6 +1562,17 @@ export const useGeminiStream = (
         return;
       }
 
+      // Mid-turn queue drain: inject queued user messages alongside tool
+      // results so the model sees them in the next API call.
+      const drained = midTurnDrainRef?.current?.() ?? [];
+      if (drained.length > 0) {
+        for (const msg of drained) {
+          responsesToSend.push({
+            text: `\n[User message received during tool execution]: ${msg}`,
+          });
+        }
+      }
+
       submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
     },
     [
@@ -1571,6 +1583,7 @@ export const useGeminiStream = (
       performMemoryRefresh,
       modelSwitchedFromQuotaError,
       config,
+      midTurnDrainRef,
     ],
   );
 
