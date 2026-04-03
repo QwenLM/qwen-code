@@ -54,6 +54,7 @@ export interface UIState {
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
   isModelDialogOpen: boolean;
+  isFastModelMode: boolean;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
@@ -146,6 +147,10 @@ export interface UIState {
   voiceEnabled: boolean;
   voiceBackendAvailable: boolean;
   voiceState: 'idle' | 'recording' | 'transcribing' | 'error';
+  // Prompt suggestion
+  promptSuggestion: string | null;
+  /** Dismiss prompt suggestion (clears state, aborts speculation) */
+  dismissPromptSuggestion: () => void;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

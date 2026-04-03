@@ -56,6 +56,12 @@ import {
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { startTurnSpan, endTurnSpan } from '../telemetry/turnSpanContext.js';
 
+// Forked query cache
+import {
+  saveCacheSafeParams,
+  clearCacheSafeParams,
+} from '../followup/forkedQuery.js';
+
 // Utilities
 import {
   getDirectoryContextString,
@@ -243,6 +249,8 @@ export class GeminiClient {
   async startChat(extraHistory?: Content[]): Promise<GeminiChat> {
     this.forceFullIdeContext = true;
     this.hasFailedCompressionAttempt = false;
+    // Clear stale cache params on session reset to prevent cross-session leakage
+    clearCacheSafeParams();
 
     const history = await getInitialChatHistory(this.config, extraHistory);
 
@@ -488,7 +496,7 @@ export class GeminiClient {
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
-    const hooksEnabled = this.config.getEnableHooks();
+    const hooksEnabled = !this.config.getDisableAllHooks();
     const messageBus = this.config.getMessageBus();
     if (
       messageType !== SendMessageType.Retry &&
@@ -982,6 +990,28 @@ export class GeminiClient {
     }
 
     if (ownsTurnSpan) endTurnSpan('ok');
+
+    // Save cache-safe params on successful completion (non-abort) for forked queries
+    if (!signal?.aborted && this.isInitialized()) {
+      try {
+        const chat = this.getChat();
+        // Clone history then truncate to last 40 entries to avoid full-session deep copy overhead
+        const fullHistory = chat.getHistory(true);
+        const maxHistoryForCache = 40;
+        const cachedHistory =
+          fullHistory.length > maxHistoryForCache
+            ? fullHistory.slice(-maxHistoryForCache)
+            : fullHistory;
+        saveCacheSafeParams(
+          chat.getGenerationConfig(),
+          cachedHistory,
+          this.config.getModel(),
+        );
+      } catch {
+        // Best-effort — don't block the main flow
+      }
+    }
+
     return turn;
   }
 

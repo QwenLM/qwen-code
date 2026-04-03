@@ -83,7 +83,6 @@ export async function handleQwenAuth(
       experimentalAcp: undefined,
       experimentalLsp: undefined,
       lsp: undefined,
-      experimentalHooks: undefined,
       extensions: [],
       listExtensions: undefined,
       openaiLogging: undefined,

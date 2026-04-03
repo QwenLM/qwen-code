@@ -250,9 +250,10 @@ export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release';
+  type: 'git' | 'local' | 'link' | 'github-release' | 'npm';
   originSource?: ExtensionOriginSource;
-  releaseTag?: string; // Only present for github-release installs.
+  releaseTag?: string; // Only present for github-release and npm installs.
+  registryUrl?: string; // Only present for npm installs.
   ref?: string;
   autoUpdate?: boolean;
   allowPreRelease?: boolean;
@@ -463,12 +464,10 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
-  /** Enable hook system for lifecycle events */
-  enableHooks?: boolean;
+  /** Disable all hooks (default: false, hooks enabled) */
+  disableAllHooks?: boolean;
   /** Hooks configuration from settings */
   hooks?: Record<string, unknown>;
-  /** Hooks config settings (enabled, disabled list) */
-  hooksConfig?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
   /**
@@ -646,9 +645,8 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
-  private readonly enableHooks: boolean;
+  private readonly disableAllHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
-  private readonly hooksConfig?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
 
@@ -814,9 +812,8 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
-    this.enableHooks = params.enableHooks ?? false;
+    this.disableAllHooks = params.disableAllHooks ?? false;
     this.hooks = params.hooks;
-    this.hooksConfig = params.hooksConfig;
   }
 
   /**
@@ -841,7 +838,7 @@ export class Config {
     this.debugLogger.debug('Extension manager initialized');
 
     // Initialize hook system if enabled
-    if (this.enableHooks) {
+    if (!this.disableAllHooks) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
@@ -1132,7 +1129,7 @@ export class Config {
 
     // Fire auth_success notification hook (supports both interactive & non-interactive)
     const messageBus = this.getMessageBus();
-    const hooksEnabled = this.getEnableHooks();
+    const hooksEnabled = !this.getDisableAllHooks();
     if (hooksEnabled && messageBus) {
       fireNotificationHook(
         messageBus,
@@ -1919,10 +1916,10 @@ export class Config {
   }
 
   /**
-   * Check if hooks are enabled.
+   * Check if all hooks are disabled.
    */
-  getEnableHooks(): boolean {
-    return this.enableHooks;
+  getDisableAllHooks(): boolean {
+    return this.disableAllHooks;
   }
 
   /**
@@ -1939,17 +1936,6 @@ export class Config {
    */
   setMessageBus(messageBus: MessageBus): void {
     this.messageBus = messageBus;
-  }
-
-  /**
-   * Get the list of disabled hook names.
-   * This is used by the HookRegistry to filter out disabled hooks.
-   */
-  getDisabledHooks(): string[] {
-    const hooksConfig = this.hooksConfig;
-    if (!hooksConfig) return [];
-    const disabled = hooksConfig['disabled'];
-    return Array.isArray(disabled) ? (disabled as string[]) : [];
   }
 
   /**

@@ -23,6 +23,7 @@
     "src/commands/mcp/add.test.ts",
     "src/commands/mcp/list.test.ts",
     "src/commands/mcp/remove.test.ts",
+    "src/commands/mcp/reconnect.test.ts",
     "src/config/config.integration.test.ts",
     "src/config/config.test.ts",
     "src/config/extension.test.ts",

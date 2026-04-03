@@ -12,11 +12,11 @@ We offer a suite of extension management tools using both `qwen extensions` CLI 
 
 You can manage extensions at runtime within the interactive CLI using `/extensions` slash commands. These commands support hot-reloading, meaning changes take effect immediately without restarting the application.
 
-| Command                               | Description                                                       |
-| ------------------------------------- | ----------------------------------------------------------------- |
-| `/extensions` or `/extensions manage` | Manage all installed extensions                                   |
-| `/extensions install <source>`        | Install an extension from a git URL, local path, or marketplace   |
-| `/extensions explore [source]`        | Open extensions source page(Gemini or ClaudeCode) in your browser |
+| Command                               | Description                                                                  |
+| ------------------------------------- | ---------------------------------------------------------------------------- |
+| `/extensions` or `/extensions manage` | Manage all installed extensions                                              |
+| `/extensions install <source>`        | Install an extension from a git URL, local path, npm package, or marketplace |
+| `/extensions explore [source]`        | Open extensions source page(Gemini or ClaudeCode) in your browser            |
 
 ### CLI Extension Management
 
@@ -89,6 +89,34 @@ Gemini extensions are automatically converted to Qwen Code format during install
 - TOML command files are automatically migrated to Markdown format
 - MCP servers, context files, and settings are preserved
 
+#### From npm Registry
+
+Qwen Code supports installing extensions from npm registries using scoped package names. This is ideal for teams with private registries that already have auth, versioning, and publishing infrastructure in place.
+
+```bash
+# Install the latest version
+qwen extensions install @scope/my-extension
+
+# Install a specific version
+qwen extensions install @scope/my-extension@1.2.0
+
+# Install from a custom registry
+qwen extensions install @scope/my-extension --registry https://your-registry.com
+```
+
+Only scoped packages (`@scope/package-name`) are supported to avoid ambiguity with the `owner/repo` GitHub shorthand format.
+
+**Registry resolution** follows this priority:
+
+1. `--registry` CLI flag (explicit override)
+2. Scoped registry from `.npmrc` (e.g. `@scope:registry=https://...`)
+3. Default registry from `.npmrc`
+4. Fallback: `https://registry.npmjs.org/`
+
+**Authentication** is handled automatically via the `NPM_TOKEN` environment variable or registry-specific `_authToken` entries in your `.npmrc` file.
+
+> **Note:** npm extensions must include a `qwen-extension.json` file at the package root, following the same format as any other Qwen Code extension. See [Extension Releasing](./extension-releasing.md#releasing-through-npm-registry) for packaging details.
+
 #### From Git Repository
 
 ```bash
@@ -127,7 +155,7 @@ This is useful if you have an extension disabled at the top-level and only enabl
 
 ### Updating an extension
 
-For extensions installed from a local path or a git repository, you can explicitly update to the latest version (as reflected in the `qwen-extension.json` `version` field) with `qwen extensions update extension-name`.
+For extensions installed from a local path, a git repository, or an npm registry, you can explicitly update to the latest version with `qwen extensions update extension-name`. For npm extensions installed without a version pin (e.g. `@scope/pkg`), updates check the `latest` dist-tag. For those installed with a specific dist-tag (e.g. `@scope/pkg@beta`), updates track that tag. Extensions pinned to an exact version (e.g. `@scope/pkg@1.2.0`) are always considered up-to-date.
 
 You can update all extensions with:
 

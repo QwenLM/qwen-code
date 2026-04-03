@@ -347,7 +347,7 @@ describe('Server Config (config.ts)', () => {
       const mockMessageBus = { request: vi.fn() };
       const config = new Config({
         ...baseParams,
-        enableHooks: true,
+        disableAllHooks: false,
       });
       // Set messageBus using the setter
       config.setMessageBus(mockMessageBus as unknown as MessageBus);
@@ -378,7 +378,7 @@ describe('Server Config (config.ts)', () => {
     it('should not fire notification hook when hooks are disabled', async () => {
       const config = new Config({
         ...baseParams,
-        enableHooks: false,
+        disableAllHooks: true,
       });
       const authType = AuthType.USE_GEMINI;
       const mockContentConfig = {

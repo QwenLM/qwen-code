@@ -112,6 +112,8 @@ export const Composer = () => {
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
               : '  ' + t('Type your message or @path/to/file')
           }
+          promptSuggestion={uiState.promptSuggestion}
+          onPromptSuggestionDismiss={uiState.dismissPromptSuggestion}
         />
       )}
 

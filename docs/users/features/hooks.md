@@ -4,6 +4,19 @@ Run custom scripts at key points in the proto lifecycle — before tool calls, a
 
 This page covers how to configure hooks, the available hook types and events, and the input/output contract for each event.
 
+Hooks are enabled by default. You can temporarily disable all hooks by setting `disableAllHooks` to `true` in your settings file (at the top level, alongside `hooks`):
+
+```json
+{
+  "disableAllHooks": true,
+  "hooks": {
+    "PreToolUse": [...]
+  }
+}
+```
+
+This disables all hooks without deleting their configurations.
+
 ## Configure a hook
 
 Hooks are defined in `.proto/settings.json` (project) or `~/.proto/settings.json` (global). Each hook attaches to an event name and optionally filters by a matcher pattern.

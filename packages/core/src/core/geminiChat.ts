@@ -594,6 +594,11 @@ export class GeminiChat {
     this.generationConfig.tools = tools;
   }
 
+  /** Returns a shallow copy of the current generation config (for cache param snapshots). */
+  getGenerationConfig(): GenerateContentConfig {
+    return { ...this.generationConfig };
+  }
+
   async maybeIncludeSchemaDepthContext(error: StructuredError): Promise<void> {
     // Check for potentially problematic cyclic tools with cyclic schemas
     // and include a recommendation to remove potentially problematic tools.

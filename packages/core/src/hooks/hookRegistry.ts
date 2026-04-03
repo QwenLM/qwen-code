@@ -32,7 +32,6 @@ export interface HookRegistryConfig {
   isTrustedFolder(): boolean;
   getHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
-  getDisabledHooks(): string[];
   getExtensions(): ExtensionWithHooks[];
 }
 
@@ -256,18 +255,13 @@ please review the project settings (.proto/settings.json) and remove them.`;
       return;
     }
 
-    // Get disabled hooks list from settings
-    const disabledHooks = this.config.getDisabledHooks();
-
     for (const hookConfig of definition.hooks) {
       if (
         hookConfig &&
         typeof hookConfig === 'object' &&
         this.validateHookConfig(hookConfig, eventName, source)
       ) {
-        // Check if this hook is in the disabled list
         const hookName = this.getHookName({ config: hookConfig });
-        const isDisabled = disabledHooks.includes(hookName);
 
         // Check for duplicate hooks (same name+command+source+eventName+matcher+sequential)
         const isDuplicate = this.entries.some(
@@ -294,7 +288,7 @@ please review the project settings (.proto/settings.json) and remove them.`;
           eventName,
           matcher: definition.matcher,
           sequential: definition.sequential,
-          enabled: !isDisabled,
+          enabled: true,
         });
       } else {
         // Invalid hooks are logged and discarded here, they won't reach HookRunner

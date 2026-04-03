@@ -371,6 +371,7 @@ describe('Gemini Client (client.ts)', () => {
       getEnableHooks: vi.fn().mockReturnValue(false),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi.fn().mockReturnValue({
@@ -2423,7 +2424,7 @@ Other open files:
           request: vi.fn(),
           response: vi.fn(),
         };
-        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
+        vi.spyOn(client['config'], 'getDisableAllHooks').mockReturnValue(false);
         vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
           mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
         );
@@ -2447,7 +2448,7 @@ Other open files:
           request: vi.fn(),
           response: vi.fn(),
         };
-        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
+        vi.spyOn(client['config'], 'getDisableAllHooks').mockReturnValue(false);
         vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
           mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
         );
@@ -2471,7 +2472,7 @@ Other open files:
           request: vi.fn().mockResolvedValue({ modifiedPrompt: undefined }),
           response: vi.fn(),
         };
-        vi.spyOn(client['config'], 'getEnableHooks').mockReturnValue(true);
+        vi.spyOn(client['config'], 'getDisableAllHooks').mockReturnValue(false);
         vi.spyOn(client['config'], 'getMessageBus').mockReturnValue(
           mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
         );
