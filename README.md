@@ -311,9 +311,55 @@ Use `/skills` to list available skills in a session.
 | `Ctrl+D`  | Exit (on empty line)     |
 | `Up/Down` | Navigate command history |
 
-## IDE Integration
+## Voice Integration
 
-proto works with VS Code, Zed, and JetBrains IDEs. See the upstream [Qwen Code docs](https://qwenlm.github.io/qwen-code-docs/en/users/overview) for setup instructions.
+proto supports push-to-talk voice input. Press the mic button in the footer or use `/voice` to toggle.
+
+### Requirements
+
+Voice capture requires a system audio backend:
+
+| OS    | Backend | Install                               |
+| ----- | ------- | ------------------------------------- |
+| macOS | sox     | `brew install sox`                    |
+| Linux | sox     | `apt install sox` / `dnf install sox` |
+| Linux | arecord | `apt install alsa-utils` (fallback)   |
+
+Verify detection: `/voice status`
+
+### STT backend
+
+Voice input transcribes audio via a Whisper-compatible `/v1/audio/transcriptions` endpoint.
+
+**Option A — protoLabs hosted** (no setup):
+
+```json
+// ~/.proto/settings.json
+{
+  "voice": {
+    "enabled": true,
+    "sttEndpoint": "https://ai.proto-labs.ai/v1/audio/transcriptions"
+  }
+}
+```
+
+**Option B — self-hosted** (e.g. [faster-whisper-server](https://github.com/fedirz/faster-whisper-server)):
+
+```bash
+docker run --gpus all -p 8000:8000 fedirz/faster-whisper-server:latest-cuda
+```
+
+```json
+// ~/.proto/settings.json
+{
+  "voice": {
+    "enabled": true,
+    "sttEndpoint": "http://localhost:8000/v1/audio/transcriptions"
+  }
+}
+```
+
+The default endpoint is `http://localhost:8000/v1/audio/transcriptions` if none is configured.
 
 ## Architecture
 
