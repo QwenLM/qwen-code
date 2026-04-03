@@ -37,6 +37,11 @@ export class AsyncMessageQueue<T> {
     return null;
   }
 
+  /** Remove and return all items currently in the queue. */
+  dequeueAll(): T[] {
+    return this.items.splice(0);
+  }
+
   /** Signal that no more items will be enqueued. */
   drain(): void {
     this.drained = true;

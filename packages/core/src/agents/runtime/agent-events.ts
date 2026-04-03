@@ -37,7 +37,8 @@ export type AgentEvent =
   | 'usage_metadata'
   | 'finish'
   | 'error'
-  | 'status_change';
+  | 'status_change'
+  | 'queue_messages_consumed';
 
 export enum AgentEventType {
   START = 'start',
@@ -54,6 +55,7 @@ export enum AgentEventType {
   FINISH = 'finish',
   ERROR = 'error',
   STATUS_CHANGE = 'status_change',
+  QUEUE_MESSAGES_CONSUMED = 'queue_messages_consumed',
 }
 
 // ─── Event Payloads ─────────────────────────────────────────
@@ -172,6 +174,15 @@ export interface AgentErrorEvent {
   timestamp: number;
 }
 
+export interface AgentQueueDrainEvent {
+  subagentId: string;
+  /** The messages that were consumed from the queue. */
+  messages: string[];
+  /** Number of messages consumed. */
+  count: number;
+  timestamp: number;
+}
+
 export interface AgentStatusChangeEvent {
   agentId: string;
   previousStatus: AgentStatus;
@@ -200,6 +211,7 @@ export interface AgentEventMap {
   [AgentEventType.FINISH]: AgentFinishEvent;
   [AgentEventType.ERROR]: AgentErrorEvent;
   [AgentEventType.STATUS_CHANGE]: AgentStatusChangeEvent;
+  [AgentEventType.QUEUE_MESSAGES_CONSUMED]: AgentQueueDrainEvent;
 }
 
 // ─── Event Emitter ──────────────────────────────────────────

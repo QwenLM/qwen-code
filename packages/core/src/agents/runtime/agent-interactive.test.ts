@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { AgentInteractive } from './agent-interactive.js';
-import type { AgentCore } from './agent-core.js';
+import type { AgentCore, ReasoningLoopOptions } from './agent-core.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { ContextState } from './agent-headless.js';
 import type { AgentInteractiveConfig } from './agent-types.js';
@@ -596,6 +596,175 @@ describe('AgentInteractive', () => {
       interactive: true,
       extraHistory: undefined,
     });
+
+    await agent.shutdown();
+  });
+
+  // ─── Mid-Turn Queue Drain ───────────────────────────────────
+
+  it('should pass midTurnDrain callback to runReasoningLoop', async () => {
+    const { core } = createMockCore();
+
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
+      async (
+        _chat: unknown,
+        _msgs: unknown,
+        _tools: unknown,
+        _abort: unknown,
+        options?: ReasoningLoopOptions,
+      ) => {
+        expect(options?.midTurnDrain).toBeTypeOf('function');
+        return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+      },
+    );
+
+    const config = createConfig({ initialTask: 'test' });
+    const agent = new AgentInteractive(config, core);
+    await agent.start(context);
+    await vi.waitFor(() => expect(agent.getStatus()).toBe('idle'));
+
+    const callArgs = (core.runReasoningLoop as ReturnType<typeof vi.fn>).mock
+      .calls[0];
+    expect(callArgs[4]).toHaveProperty('midTurnDrain');
+
+    await agent.shutdown();
+  });
+
+  it('should drain queued messages mid-turn and record them', async () => {
+    const { core } = createMockCore();
+
+    let drainCallback: (() => string[]) | undefined;
+    let resolveLoop: (() => void) | undefined;
+
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
+      async (
+        _chat: unknown,
+        _msgs: unknown,
+        _tools: unknown,
+        _abort: unknown,
+        options?: ReasoningLoopOptions,
+      ) => {
+        drainCallback = options?.midTurnDrain;
+        await new Promise<void>((r) => {
+          resolveLoop = r;
+        });
+        return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+      },
+    );
+
+    const config = createConfig();
+    const agent = new AgentInteractive(config, core);
+    await agent.start(context);
+
+    // Start a message processing
+    agent.enqueueMessage('primary task');
+    await vi.waitFor(() => expect(agent.getStatus()).toBe('running'));
+
+    // Enqueue another message while "running"
+    agent.enqueueMessage('extra context');
+    expect(agent.getQueueSize()).toBe(1);
+
+    // Mid-turn drain should pick it up
+    expect(drainCallback).toBeDefined();
+    const drained = drainCallback!();
+    expect(drained).toEqual(['extra context']);
+    expect(agent.getQueueSize()).toBe(0);
+
+    // Verify recorded as user message with metadata
+    const messages = agent.getMessages();
+    const midTurnMsg = messages.find(
+      (m) =>
+        m.role === 'user' &&
+        m.content === 'extra context' &&
+        m.metadata?.['midTurnInjected'] === true,
+    );
+    expect(midTurnMsg).toBeDefined();
+
+    resolveLoop!();
+    await vi.waitFor(() => expect(agent.getStatus()).toBe('idle'));
+    await agent.shutdown();
+  });
+
+  it('should emit QUEUE_MESSAGES_CONSUMED event on drain', async () => {
+    const { core, emitter } = createMockCore();
+
+    let drainCallback: (() => string[]) | undefined;
+    let resolveLoop: (() => void) | undefined;
+
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
+      async (
+        _chat: unknown,
+        _msgs: unknown,
+        _tools: unknown,
+        _abort: unknown,
+        options?: ReasoningLoopOptions,
+      ) => {
+        drainCallback = options?.midTurnDrain;
+        await new Promise<void>((r) => {
+          resolveLoop = r;
+        });
+        return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+      },
+    );
+
+    const config = createConfig();
+    const agent = new AgentInteractive(config, core);
+    await agent.start(context);
+
+    agent.enqueueMessage('task');
+    await vi.waitFor(() => expect(agent.getStatus()).toBe('running'));
+
+    agent.enqueueMessage('update');
+
+    const drainEvents: unknown[] = [];
+    emitter.on(AgentEventType.QUEUE_MESSAGES_CONSUMED, (e: unknown) =>
+      drainEvents.push(e),
+    );
+
+    drainCallback!();
+    expect(drainEvents).toHaveLength(1);
+    expect(drainEvents[0]).toMatchObject({
+      messages: ['update'],
+      count: 1,
+    });
+
+    resolveLoop!();
+    await vi.waitFor(() => expect(agent.getStatus()).toBe('idle'));
+    await agent.shutdown();
+  });
+
+  it('should not emit event when drain finds empty queue', async () => {
+    const { core, emitter } = createMockCore();
+
+    let drainCallback: (() => string[]) | undefined;
+
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
+      async (
+        _chat: unknown,
+        _msgs: unknown,
+        _tools: unknown,
+        _abort: unknown,
+        options?: ReasoningLoopOptions,
+      ) => {
+        drainCallback = options?.midTurnDrain;
+        return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+      },
+    );
+
+    const config = createConfig({ initialTask: 'test' });
+    const agent = new AgentInteractive(config, core);
+    await agent.start(context);
+    await vi.waitFor(() => expect(agent.getStatus()).toBe('idle'));
+
+    const drainEvents: unknown[] = [];
+    emitter.on(AgentEventType.QUEUE_MESSAGES_CONSUMED, (e: unknown) =>
+      drainEvents.push(e),
+    );
+
+    // Drain on empty queue
+    const drained = drainCallback!();
+    expect(drained).toEqual([]);
+    expect(drainEvents).toHaveLength(0);
 
     await agent.shutdown();
   });
