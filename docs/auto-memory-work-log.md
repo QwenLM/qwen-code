@@ -62,6 +62,55 @@ Completed
 
 ---
 
+## Part 20 - Memory module integration coverage
+
+### Start review
+
+- The managed memory feature set is now functionally complete for the current non-team/private parity scope.
+- Existing tests already cover most units and command behaviors, but the module still needed end-to-end lifecycle coverage proving that the pieces work together in a realistic flow.
+- Scope for this part: add deterministic integration tests spanning extraction, recall, dream, governance, forget, and CLI command surfaces without relying on flaky live-model behavior.
+
+### Goal
+
+- Add a core integration test that exercises the managed memory lifecycle across multiple subsystems
+- Add a CLI integration test that validates the user-facing command experience over real managed-memory state
+- Re-run focused regressions and typechecks to confirm the new integration layer is stable
+
+### Implemented
+
+- Added `packages/core/src/memory/memoryLifecycle.integration.test.ts`
+- Added `packages/cli/src/ui/commands/memoryLifecycle.integration.test.ts`
+
+### Functional verification
+
+- The core integration test verifies a Claude-style durable-memory lifecycle: background extraction with trailing semantics, relevant-memory recall, dream dedupe, governance review, and forget preview/apply mutation.
+- The CLI integration test verifies that `/memory extract-now`, `/memory status`, `/memory tasks`, `/memory inspect`, `/memory review`, `/memory forget`, and `/forget` all operate correctly over real managed-memory files.
+- The new tests are deterministic and exercise the real filesystem-backed managed-memory implementation rather than mocks of the underlying lifecycle.
+
+### Test verification
+
+- Passed targeted integration tests:
+  - `cd packages/core && npx vitest run src/memory/memoryLifecycle.integration.test.ts`
+  - `cd packages/cli && npx vitest run src/ui/commands/memoryLifecycle.integration.test.ts`
+- Passed focused regression tests:
+  - `cd packages/core && npx vitest run src/memory/memoryLifecycle.integration.test.ts src/memory/entries.test.ts src/memory/extractScheduler.test.ts src/memory/forget.test.ts src/memory/governance.test.ts`
+  - `cd packages/cli && npx vitest run src/ui/commands/memoryLifecycle.integration.test.ts src/ui/commands/memoryCommand.test.ts src/ui/commands/forgetCommand.test.ts`
+- Passed build / typecheck verification:
+  - `npm run build --workspace=packages/core`
+  - `npm run typecheck --workspace=packages/core`
+  - `npm run typecheck --workspace=packages/cli`
+
+### Notes
+
+- These tests intentionally avoid relying on live side-query/model responses; they validate the production fallback and lifecycle behavior that users depend on most.
+- The integration coverage is aimed at the managed-memory experience shape seen in Claude Code: extract → recall → consolidate → review → forget.
+
+### Status
+
+Completed
+
+---
+
 ## Part 18 - Extraction runtime lifecycle and task timelines
 
 ### Start review
