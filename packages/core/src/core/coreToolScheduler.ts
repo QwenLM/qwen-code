@@ -347,7 +347,10 @@ function isConcurrencySafe(call: ScheduledToolCall): boolean {
   // Agent tools spawn independent sub-agents with no shared state.
   if (call.request.name === ToolNames.AGENT) return true;
   // Shell commands: check if the command is read-only (e.g., git log, cat).
-  // Uses the synchronous regex+shell-quote checker (fail-closed).
+  // Uses the synchronous regex+shell-quote checker (not the async AST-based
+  // one) because partitioning runs synchronously. The sync checker covers
+  // the same command whitelist and is fail-closed — unknown commands remain
+  // sequential. The AST version is used separately for permission decisions.
   if (call.tool.kind === Kind.Execute) {
     const command = (call.request.args as { command?: string }).command;
     if (typeof command !== 'string') return false;
@@ -1367,13 +1370,16 @@ export class CoreToolScheduler {
     calls: ScheduledToolCall[],
     signal: AbortSignal,
   ): Promise<void> {
-    const maxConcurrency =
-      parseInt(process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '', 10) || 10;
+    const parsed = parseInt(
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+      10,
+    );
+    const maxConcurrency = Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
     const executing = new Set<Promise<void>>();
 
     for (const call of calls) {
       if (signal.aborted) break;
-      const p = this.executeSingleToolCall(call, signal).then(() => {
+      const p = this.executeSingleToolCall(call, signal).finally(() => {
         executing.delete(p);
       });
       executing.add(p);

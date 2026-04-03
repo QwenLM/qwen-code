@@ -3223,5 +3223,115 @@ describe('Fire hook functions integration', () => {
         expect(start).toBeLessThan(firstEnd);
       }
     });
+
+    it('should partition mixed safe/unsafe tools into correct batches', async () => {
+      const executionLog: string[] = [];
+
+      const readTool = new MockTool({
+        name: 'read_file',
+        kind: Kind.Read,
+        execute: async (params) => {
+          const id = (params as { id: string }).id;
+          executionLog.push(`read:start:${id}`);
+          await new Promise((r) => setTimeout(r, 50));
+          executionLog.push(`read:end:${id}`);
+          return {
+            llmContent: `Read ${id} done`,
+            returnDisplay: `Read ${id} done`,
+          };
+        },
+      });
+
+      const editTool = new MockTool({
+        name: 'edit',
+        kind: Kind.Edit,
+        execute: async (params) => {
+          const id = (params as { id: string }).id;
+          executionLog.push(`edit:start:${id}`);
+          await new Promise((r) => setTimeout(r, 20));
+          executionLog.push(`edit:end:${id}`);
+          return {
+            llmContent: `Edit ${id} done`,
+            returnDisplay: `Edit ${id} done`,
+          };
+        },
+      });
+
+      const tools = new Map<string, MockTool>([
+        ['read_file', readTool],
+        ['edit', editTool],
+      ]);
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+      const scheduler = createScheduler(
+        tools,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+      );
+
+      // [Read₁, Read₂, Edit, Read₃]
+      // Expected batches: [Read₁,Read₂](parallel) → [Edit](seq) → [Read₃](seq)
+      const requests = [
+        {
+          callId: '1',
+          name: 'read_file',
+          args: { id: '1' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '2',
+          name: 'read_file',
+          args: { id: '2' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '3',
+          name: 'edit',
+          args: { id: 'E' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '4',
+          name: 'read_file',
+          args: { id: '3' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ];
+
+      await scheduler.schedule(requests, new AbortController().signal);
+
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls).toHaveLength(4);
+      expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
+
+      // Batch 1: Read₁ and Read₂ run in parallel (both start before either ends)
+      const read1Start = executionLog.indexOf('read:start:1');
+      const read2Start = executionLog.indexOf('read:start:2');
+      const firstReadEnd = Math.min(
+        executionLog.indexOf('read:end:1'),
+        executionLog.indexOf('read:end:2'),
+      );
+      expect(read1Start).toBeLessThan(firstReadEnd);
+      expect(read2Start).toBeLessThan(firstReadEnd);
+
+      // Batch 2: Edit starts after both reads complete
+      const lastReadEnd = Math.max(
+        executionLog.indexOf('read:end:1'),
+        executionLog.indexOf('read:end:2'),
+      );
+      const editStart = executionLog.indexOf('edit:start:E');
+      expect(editStart).toBeGreaterThan(lastReadEnd);
+
+      // Batch 3: Read₃ starts after Edit completes
+      const editEnd = executionLog.indexOf('edit:end:E');
+      const read3Start = executionLog.indexOf('read:start:3');
+      expect(read3Start).toBeGreaterThan(editEnd);
+    });
   });
 });
