@@ -1101,6 +1101,11 @@ export const useGeminiStream = (
             break;
           case ServerGeminiEventType.HookSystemMessage:
             // Display system message from Stop hooks with "Stop says:" prefix
+            // First commit any pending AI response to ensure correct ordering
+            if (pendingHistoryItemRef.current) {
+              addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+              setPendingHistoryItem(null);
+            }
             addItem(
               {
                 type: 'stop_hook_system_message',
