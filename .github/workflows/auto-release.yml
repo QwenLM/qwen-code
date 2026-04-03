@@ -1,0 +1,103 @@
+name: 'Auto Release'
+
+# Triggers after CI passes on main. Reads conventional commits since the last
+# tag, determines the bump type (major/minor/patch), bumps all workspace
+# versions, commits, and pushes — which triggers release.yml to publish.
+#
+# Skips automatically if:
+#   - All commits since last tag are release commits ("chore: release v*")
+#   - No commits since last tag
+#   - The triggering commit is itself a release commit (prevents loops)
+
+on:
+  workflow_run:
+    workflows:
+      - 'CI'
+    types:
+      - completed
+    branches:
+      - main
+
+permissions: read-all
+
+jobs:
+  auto-release:
+    runs-on: ubuntu-latest
+    if: >-
+      github.repository == 'protoLabsAI/protoCLI' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main'
+    timeout-minutes: 10
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Determine bump type
+        id: bump
+        run: |
+          BUMP=$(node scripts/determine-bump.js)
+          echo "type=${BUMP}" >> "$GITHUB_OUTPUT"
+          echo "Bump type: ${BUMP}"
+
+      - name: Skip if nothing to release
+        if: steps.bump.outputs.type == 'skip'
+        run: |
+          echo "No publishable commits since last tag — skipping release."
+
+      - name: Skip if triggered by a release commit
+        if: steps.bump.outputs.type != 'skip'
+        id: guard
+        run: |
+          LAST_MSG=$(git log -1 --pretty=format:%s)
+          if echo "$LAST_MSG" | grep -qE '^chore: release v'; then
+            echo "Last commit is a release commit — skipping to avoid loop."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure git
+        if: >-
+          steps.bump.outputs.type != 'skip' &&
+          steps.guard.outputs.skip != 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        if: >-
+          steps.bump.outputs.type != 'skip' &&
+          steps.guard.outputs.skip != 'true'
+        run: node scripts/version.js ${{ steps.bump.outputs.type }}
+
+      - name: Get new version
+        if: >-
+          steps.bump.outputs.type != 'skip' &&
+          steps.guard.outputs.skip != 'true'
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push
+        if: >-
+          steps.bump.outputs.type != 'skip' &&
+          steps.guard.outputs.skip != 'true'
+        run: |
+          git add package.json package-lock.json packages/*/package.json
+          git commit -m "chore: release v${{ steps.version.outputs.version }}"
+          git push origin main
