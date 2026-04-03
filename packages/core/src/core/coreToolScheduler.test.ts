@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type {
   Config,
@@ -2992,6 +2992,19 @@ describe('Fire hook functions integration', () => {
   });
 
   describe('Concurrent agent tool execution', () => {
+    // Ensure tests are deterministic regardless of environment.
+    const origEnv = process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    beforeEach(() => {
+      delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    });
+    afterEach(() => {
+      if (origEnv !== undefined) {
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = origEnv;
+      } else {
+        delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      }
+    });
+
     function createScheduler(
       tools: Map<string, MockTool>,
       onAllToolCallsComplete: Mock,
