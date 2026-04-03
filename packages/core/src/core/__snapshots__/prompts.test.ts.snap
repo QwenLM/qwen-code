@@ -165,6 +165,8 @@ You are running outside of a sandbox container, directly on the user's system. F
 
 
 
+
+
 # Examples (Illustrating Tone and Workflow)
 <example>
 user: 1 + 2
@@ -430,6 +432,10 @@ You are running outside of a sandbox container, directly on the user's system. F
 - Never push changes to a remote repository without being asked explicitly by the user.
 
 
+
+Workspace: 510 .ts, 23 .md, 2 .json, 2 .snap, 2 .wasm, 1 .gitignore, 1 .js, 1 .exe files
+
+
 # Examples (Illustrating Tone and Workflow)
 <example>
 user: 1 + 2
@@ -671,6 +677,8 @@ When you encounter an obstacle, do not resort to destructive shortcuts. Investig
 
 # Outside of Sandbox
 You are running outside of a sandbox container, directly on the user's system. For critical commands that are particularly likely to modify the user's system outside of the project directory or system temp directory, as you explain the command to the user (per the Explain Critical Commands rule above), also remind the user to consider enabling sandboxing.
+
+
 
 
 
@@ -920,6 +928,8 @@ You are running in a sandbox container with limited access to files outside the 
 
 
 
+
+
 # Examples (Illustrating Tone and Workflow)
 <example>
 user: 1 + 2
@@ -1161,6 +1171,8 @@ When you encounter an obstacle, do not resort to destructive shortcuts. Investig
 
 # macOS Seatbelt
 You are running under macos seatbelt with limited access to files outside the project directory or system temp directory, and with limited access to host system resources such as ports. If you encounter failures that could be due to MacOS Seatbelt (e.g. if a command fails with 'Operation not permitted' or similar error), as you report the error to the user, also explain why you think it could be due to MacOS Seatbelt, and how the user may need to adjust their Seatbelt profile.
+
+
 
 
 
@@ -1410,6 +1422,8 @@ You are running outside of a sandbox container, directly on the user's system. F
 
 
 
+
+
 # Examples (Illustrating Tone and Workflow)
 <example>
 user: 1 + 2
@@ -1651,6 +1665,8 @@ When you encounter an obstacle, do not resort to destructive shortcuts. Investig
 
 # Outside of Sandbox
 You are running outside of a sandbox container, directly on the user's system. For critical commands that are particularly likely to modify the user's system outside of the project directory or system temp directory, as you explain the command to the user (per the Explain Critical Commands rule above), also remind the user to consider enabling sandboxing.
+
+
 
 
 
@@ -1900,6 +1916,8 @@ You are running outside of a sandbox container, directly on the user's system. F
 
 
 
+
+
 # Examples (Illustrating Tone and Workflow)
 <example>
 user: 1 + 2
@@ -2145,6 +2163,8 @@ You are running outside of a sandbox container, directly on the user's system. F
 
 
 
+
+
 # Examples (Illustrating Tone and Workflow)
 <example>
 user: 1 + 2
@@ -2386,6 +2406,8 @@ When you encounter an obstacle, do not resort to destructive shortcuts. Investig
 
 # Sandbox
 You are running in a sandbox container with limited access to files outside the project directory or system temp directory, and with limited access to host system resources such as ports. If you encounter failures that could be due to sandboxing (e.g. if a command fails with 'Operation not permitted' or similar error), when you report the error to the user, also explain why you think it could be due to sandboxing, and how the user may need to adjust their sandbox configuration.
+
+
 
 
 
@@ -2654,6 +2676,8 @@ When you encounter an obstacle, do not resort to destructive shortcuts. Investig
 
 # Outside of Sandbox
 You are running outside of a sandbox container, directly on the user's system. For critical commands that are particularly likely to modify the user's system outside of the project directory or system temp directory, as you explain the command to the user (per the Explain Critical Commands rule above), also remind the user to consider enabling sandboxing.
+
+
 
 
 
@@ -2989,6 +3013,8 @@ You are running outside of a sandbox container, directly on the user's system. F
 
 
 
+
+
 # Examples (Illustrating Tone and Workflow)
 <example>
 user: 1 + 2
@@ -3253,6 +3279,8 @@ When you encounter an obstacle, do not resort to destructive shortcuts. Investig
 
 # Outside of Sandbox
 You are running outside of a sandbox container, directly on the user's system. For critical commands that are particularly likely to modify the user's system outside of the project directory or system temp directory, as you explain the command to the user (per the Explain Critical Commands rule above), also remind the user to consider enabling sandboxing.
+
+
 
 
 
@@ -3584,6 +3612,8 @@ You are running outside of a sandbox container, directly on the user's system. F
 
 
 
+
+
 # Examples (Illustrating Tone and Workflow)
 <example>
 user: 1 + 2
@@ -3825,6 +3855,8 @@ When you encounter an obstacle, do not resort to destructive shortcuts. Investig
 
 # Outside of Sandbox
 You are running outside of a sandbox container, directly on the user's system. For critical commands that are particularly likely to modify the user's system outside of the project directory or system temp directory, as you explain the command to the user (per the Explain Critical Commands rule above), also remind the user to consider enabling sandboxing.
+
+
 
 
 
