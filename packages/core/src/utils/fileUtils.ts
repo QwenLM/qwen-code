@@ -716,7 +716,64 @@ export async function processSingleFileContent(
           linesShown: [startLine + 1, actualEndLine],
         };
       }
-      case 'image':
+      case 'image': {
+        const contentBuffer = await fs.promises.readFile(filePath);
+        let imageBuffer = contentBuffer;
+        let imageMimeType = mime.getType(filePath) || 'image/png';
+
+        // Resize large images before encoding — 4K screenshots can exceed API limits
+        try {
+          const sharp = (await import('sharp')).default;
+          const metadata = await sharp(imageBuffer).metadata();
+          const { width = 0, height = 0 } = metadata;
+          const MAX_DIM = 2048;
+
+          if (width > MAX_DIM || height > MAX_DIM) {
+            imageBuffer = await sharp(imageBuffer)
+              .resize(MAX_DIM, MAX_DIM, {
+                fit: 'inside',
+                withoutEnlargement: true,
+              })
+              .png({ compressionLevel: 8 })
+              .toBuffer();
+            imageMimeType = 'image/png';
+          }
+
+          // If still too large after first resize, compress more aggressively as JPEG
+          const base64Check = imageBuffer.toString('base64');
+          if (base64Check.length / (1024 * 1024) > 4) {
+            imageBuffer = await sharp(imageBuffer)
+              .resize(1600, 1600, { fit: 'inside', withoutEnlargement: true })
+              .jpeg({ quality: 75 })
+              .toBuffer();
+            imageMimeType = 'image/jpeg';
+          }
+        } catch {
+          // Sharp not available or failed — proceed with original buffer and mime type
+        }
+
+        const base64Data = imageBuffer.toString('base64');
+        const base64SizeInMB = base64Data.length / (1024 * 1024);
+        // Use 9.9MB instead of 10MB to leave margin for small overhead (#1880)
+        if (base64SizeInMB > 9.9) {
+          return {
+            llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
+            returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
+            error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+            errorType: ToolErrorType.FILE_TOO_LARGE,
+          };
+        }
+        return {
+          llmContent: {
+            inlineData: {
+              data: base64Data,
+              mimeType: imageMimeType,
+              displayName,
+            },
+          },
+          returnDisplay: `Read ${fileType} file: ${relativePathForDisplay}`,
+        };
+      }
       case 'audio':
       case 'video':
       case 'pdf': {

@@ -40,6 +40,8 @@ const external = [
   '@teddyzhu/clipboard-linux-arm64-gnu',
   '@teddyzhu/clipboard-win32-x64-msvc',
   '@teddyzhu/clipboard-win32-arm64-msvc',
+  // Sharp native bindings — dynamic import in fileUtils.ts; excluded from bundle
+  'sharp',
 ];
 
 esbuild

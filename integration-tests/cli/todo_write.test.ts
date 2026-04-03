@@ -18,14 +18,18 @@ describe('todo_write', () => {
 
     const prompt = `Please create a todo list with these three simple tasks:
 1. Buy milk
-2. Walk the dog  
+2. Walk the dog
 3. Read a book
 
-Use the todo_write tool to create this list.`;
+Use the task_create tool to create each task.`;
 
     const result = await rig.run(prompt);
 
-    const foundToolCall = await rig.waitForToolCall('todo_write');
+    // todo_write was replaced by task_create; wait for any of the task creation calls
+    const foundToolCall = await rig.waitForAnyToolCall([
+      'task_create',
+      'todo_write',
+    ]);
 
     // Add debugging information
     if (!foundToolCall) {
@@ -34,7 +38,7 @@ Use the todo_write tool to create this list.`;
 
     expect(
       foundToolCall,
-      'Expected to find a todo_write tool call',
+      'Expected to find a task_create tool call',
     ).toBeTruthy();
 
     // Validate model output - will throw if no output
@@ -42,32 +46,24 @@ Use the todo_write tool to create this list.`;
 
     // Check that the tool was called with the right parameters
     const toolLogs = rig.readToolLogs();
-    const todoWriteCalls = toolLogs.filter(
-      (t) => t.toolRequest.name === 'todo_write',
+    const taskCreateCalls = toolLogs.filter(
+      (t) =>
+        t.toolRequest.name === 'task_create' ||
+        t.toolRequest.name === 'todo_write',
     );
 
-    expect(todoWriteCalls.length).toBeGreaterThan(0);
+    expect(taskCreateCalls.length).toBeGreaterThan(0);
 
     // Parse the arguments to verify they contain our tasks
-    const todoArgs = JSON.parse(todoWriteCalls[0].toolRequest.args);
+    const taskArgs = JSON.parse(taskCreateCalls[0].toolRequest.args);
 
-    expect(todoArgs.todos).toBeDefined();
-    expect(Array.isArray(todoArgs.todos)).toBe(true);
-    expect(todoArgs.todos.length).toBeGreaterThanOrEqual(3);
-
-    // Check that all todos have the correct structure
-    for (const todo of todoArgs.todos) {
-      expect(todo.id).toBeDefined();
-      expect(todo.content).toBeDefined();
-      expect(['pending', 'in_progress', 'completed', 'cancelled']).toContain(
-        todo.status,
-      );
-    }
+    // task_create uses { title, description?, priority? }
+    expect(taskArgs.title).toBeDefined();
 
     // Log success info if verbose
     if (process.env['VERBOSE'] === 'true') {
       console.log('Todo list created successfully');
-      console.log(`Created ${todoArgs.todos.length} todos`);
+      console.log(`Created ${taskCreateCalls.length} task(s)`);
     }
   });
 });
