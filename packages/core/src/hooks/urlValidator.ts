@@ -11,21 +11,23 @@ const debugLogger = createDebugLogger('URL_VALIDATOR');
 
 /**
  * Private IP address ranges that should be blocked for SSRF protection
+ * - 127.0.0.0/8 (loopback) is intentionally ALLOWED for local dev hooks
+ * - 100.64.0.0/10 (CGNAT) blocked (some cloud metadata use this, e.g. Alibaba 100.100.100.200)
  */
 const PRIVATE_IP_RANGES = [
   { start: '10.0.0.0', end: '10.255.255.255' },
+  { start: '100.64.0.0', end: '100.127.255.255' }, // CGNAT (RFC 6598)
   { start: '172.16.0.0', end: '172.31.255.255' },
   { start: '192.168.0.0', end: '192.168.255.255' },
-  { start: '127.0.0.0', end: '127.255.255.255' },
   { start: '169.254.0.0', end: '169.254.255.255' },
   { start: '0.0.0.0', end: '0.255.255.255' },
 ];
 
 /**
  * Hostnames that should be blocked for SSRF protection
+ * Note: 'localhost' is intentionally ALLOWED for local dev hooks (matches Claude Code behavior)
  */
 const BLOCKED_HOSTS = [
-  'localhost',
   'localhost.localdomain',
   'ip6-localhost',
   'ip6-loopback',
@@ -104,18 +106,17 @@ export class UrlValidator {
         return true;
       }
 
+      // Allow IPv6 loopback (::1) for local dev (matches Claude Code behavior)
+      if (hostname === '::1' || hostname === '[::1]') {
+        return false;
+      }
+
       // Check if hostname is an IP address
       if (this.isIpAddress(hostname)) {
         if (this.isPrivateIp(hostname)) {
           debugLogger.debug(`URL blocked: IP ${hostname} is in private range`);
           return true;
         }
-      }
-
-      // Check for IPv6 localhost
-      if (hostname === '::1' || hostname === '[::1]') {
-        debugLogger.debug(`URL blocked: IPv6 localhost`);
-        return true;
       }
 
       return false;

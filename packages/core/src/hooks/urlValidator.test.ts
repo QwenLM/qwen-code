@@ -9,16 +9,17 @@ import { UrlValidator, createUrlValidator } from './urlValidator.js';
 
 describe('UrlValidator', () => {
   describe('isBlocked', () => {
-    it('should block localhost', () => {
+    it('should ALLOW 127.0.0.1 for local dev hooks (matches Claude Code behavior)', () => {
       const validator = new UrlValidator([]);
-      expect(validator.isBlocked('http://localhost:8080/api')).toBe(true);
-      expect(validator.isBlocked('https://localhost/api')).toBe(true);
+      expect(validator.isBlocked('http://127.0.0.1:8080/api')).toBe(false);
+      expect(validator.isBlocked('http://127.0.0.1/api')).toBe(false);
+      expect(validator.isBlocked('http://127.0.0.1:9876/hook')).toBe(false);
     });
 
-    it('should block 127.0.0.1', () => {
+    it('should ALLOW localhost for local dev hooks (matches Claude Code behavior)', () => {
       const validator = new UrlValidator([]);
-      expect(validator.isBlocked('http://127.0.0.1:8080/api')).toBe(true);
-      expect(validator.isBlocked('http://127.0.0.1/api')).toBe(true);
+      expect(validator.isBlocked('http://localhost:8080/api')).toBe(false);
+      expect(validator.isBlocked('http://localhost:9876/hook')).toBe(false);
     });
 
     it('should block private IP 192.168.x.x', () => {
@@ -105,11 +106,19 @@ describe('UrlValidator', () => {
       expect(result.reason).toBeUndefined();
     });
 
-    it('should return not allowed for blocked URL', () => {
+    it('should return not allowed for blocked URL (private IP)', () => {
       const validator = new UrlValidator(['*']);
-      const result = validator.validate('http://localhost:8080/api');
+      const result = validator.validate('http://192.168.1.1:8080/api');
       expect(result.allowed).toBe(false);
       expect(result.reason).toContain('SSRF');
+    });
+
+    it('should return allowed for localhost/loopback URLs', () => {
+      const validator = new UrlValidator(['*']);
+      const result1 = validator.validate('http://localhost:8080/api');
+      expect(result1.allowed).toBe(true);
+      const result2 = validator.validate('http://127.0.0.1:9876/hook');
+      expect(result2.allowed).toBe(true);
     });
 
     it('should return not allowed for URL not matching whitelist', () => {
