@@ -84,12 +84,6 @@ export interface ReasoningLoopOptions {
   maxTimeMinutes?: number;
   /** Start time in ms (for timeout calculation). Defaults to Date.now(). */
   startTimeMs?: number;
-  /**
-   * Optional callback invoked after tool execution completes, before the
-   * next API call. Returns queued user messages to inject into the current
-   * turn so the model sees them immediately (mid-turn queue drain).
-   */
-  midTurnDrain?: () => string[];
 }
 
 /**
@@ -496,20 +490,6 @@ export class AgentCore {
           toolsList,
           currentResponseId,
         );
-
-        // Mid-turn queue drain: inject queued user messages alongside tool
-        // results so the model sees them in the next API call.
-        // Skip if aborted — messages stay in queue for the next round.
-        if (options?.midTurnDrain && !abortController.signal.aborted) {
-          const drained = options.midTurnDrain();
-          if (drained.length > 0 && currentMessages[0]?.parts) {
-            for (const msg of drained) {
-              currentMessages[0].parts.push({
-                text: `\n[User message received during tool execution]: ${msg}`,
-              });
-            }
-          }
-        }
       } else {
         // No tool calls — treat this as the model's final answer.
         if (roundText && roundText.trim().length > 0) {

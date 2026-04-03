@@ -186,7 +186,6 @@ export class AgentInteractive {
         {
           maxTurns: this.config.maxTurnsPerMessage,
           maxTimeMinutes: this.config.maxTimeMinutesPerMessage,
-          midTurnDrain: () => this.drainQueuedMessages(),
         },
       );
 
@@ -271,11 +270,6 @@ export class AgentInteractive {
     }
   }
 
-  /** Number of messages currently waiting in the queue. */
-  getQueueSize(): number {
-    return this.queue.size;
-  }
-
   // ─── State Accessors ───────────────────────────────────────
 
   getMessages(): readonly AgentMessage[] {
@@ -346,30 +340,6 @@ export class AgentInteractive {
     if (this.executionPromise) {
       await this.executionPromise;
     }
-  }
-
-  // ─── Mid-Turn Queue Drain ───────────────────────────────────
-
-  /**
-   * Drain all pending messages from the queue for mid-turn injection.
-   * Called by the midTurnDrain callback during the reasoning loop.
-   */
-  private drainQueuedMessages(): string[] {
-    const messages = this.queue.dequeueAll();
-    if (messages.length > 0) {
-      for (const msg of messages) {
-        this.addMessage('user', msg, {
-          metadata: { midTurnInjected: true },
-        });
-      }
-      this.core.eventEmitter?.emit(AgentEventType.QUEUE_MESSAGES_CONSUMED, {
-        subagentId: this.core.subagentId,
-        messages,
-        count: messages.length,
-        timestamp: Date.now(),
-      });
-    }
-    return messages;
   }
 
   // ─── Private Helpers ───────────────────────────────────────
