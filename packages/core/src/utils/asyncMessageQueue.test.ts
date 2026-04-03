@@ -72,4 +72,32 @@ describe('AsyncMessageQueue', () => {
       expect(queue.dequeue()).toBe(i);
     }
   });
+
+  // ── dequeueAll ──
+
+  it('should dequeueAll items and leave the queue empty', () => {
+    const queue = new AsyncMessageQueue<string>();
+    queue.enqueue('a');
+    queue.enqueue('b');
+    queue.enqueue('c');
+
+    const all = queue.dequeueAll();
+    expect(all).toEqual(['a', 'b', 'c']);
+    expect(queue.size).toBe(0);
+    expect(queue.dequeue()).toBeNull();
+  });
+
+  it('should return empty array when dequeueAll on empty queue', () => {
+    const queue = new AsyncMessageQueue<string>();
+    expect(queue.dequeueAll()).toEqual([]);
+  });
+
+  it('should not affect drained state when dequeueAll', () => {
+    const queue = new AsyncMessageQueue<string>();
+    queue.enqueue('x');
+    queue.drain();
+    const all = queue.dequeueAll();
+    expect(all).toEqual(['x']);
+    expect(queue.isDrained).toBe(true);
+  });
 });
