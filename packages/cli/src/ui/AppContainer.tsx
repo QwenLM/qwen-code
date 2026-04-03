@@ -759,6 +759,9 @@ export const AppContainer = (props: AppContainerProps) => {
   midTurnDrainRef.current = () => {
     const queue = messageQueueRef.current;
     if (queue.length === 0) return [];
+    // Synchronously clear the ref to prevent duplicate drains if called
+    // again before React re-renders.
+    messageQueueRef.current = [];
     clearQueue();
     return [...queue];
   };
