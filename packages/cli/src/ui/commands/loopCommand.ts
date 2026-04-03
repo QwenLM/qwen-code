@@ -26,7 +26,6 @@ import {
   DEFAULT_INTERVAL_MS,
   DEFAULT_MAX_LOOPS,
   persistLoopStates,
-  clearPersistedLoopState,
   loadPersistedLoopStates,
   acquireLock,
   releaseLock,
@@ -314,7 +313,7 @@ export const loopCommand: SlashCommand = {
       if (parsed.targetAll) {
         const count = manager.getActiveCount();
         manager.stop();
-        void clearPersistedLoopState(qwenDir);
+        void persistLoopStates([], qwenDir);
         ui.addItem(
           {
             type: MessageType.INFO,
@@ -361,7 +360,7 @@ export const loopCommand: SlashCommand = {
         if (manager.getActiveCount() > 0) {
           void persistLoopStates(manager.toPersistedStates(), qwenDir);
         } else {
-          void clearPersistedLoopState(qwenDir);
+          void persistLoopStates([], qwenDir);
         }
         ui.addItem(
           {
@@ -374,7 +373,7 @@ export const loopCommand: SlashCommand = {
       }
 
       // No active loops — clear persisted state (dismiss notification)
-      void clearPersistedLoopState(qwenDir);
+      void persistLoopStates([], qwenDir);
       ui.addItem(
         { type: MessageType.INFO, text: t('No active loops to stop.') },
         Date.now(),

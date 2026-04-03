@@ -45,7 +45,6 @@ import {
   formatInterval,
   loadPersistedLoopStates,
   persistLoopStates,
-  clearPersistedLoopState,
   releaseLock,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
@@ -1011,7 +1010,7 @@ export const AppContainer = (props: AppContainerProps) => {
       if (lm.isActive()) {
         void persistLoopStates(lm.toPersistedStates(), qwenDir);
       } else {
-        void clearPersistedLoopState(qwenDir);
+        void persistLoopStates([], qwenDir);
       }
       // Release lock on unmount so other sessions can take over
       void releaseLock(qwenDir, `session-${process.pid}`);
