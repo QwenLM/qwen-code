@@ -50,6 +50,8 @@ import type {
 } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
+import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
+import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
   buildPermissionCheckContext,
   evaluatePermissionRules,
@@ -344,6 +346,17 @@ interface ToolBatch {
 function isConcurrencySafe(call: ScheduledToolCall): boolean {
   // Agent tools spawn independent sub-agents with no shared state.
   if (call.request.name === ToolNames.AGENT) return true;
+  // Shell commands: check if the command is read-only (e.g., git log, cat).
+  // Uses the synchronous regex+shell-quote checker (fail-closed).
+  if (call.tool.kind === Kind.Execute) {
+    const command = (call.request.args as { command?: string }).command;
+    if (typeof command !== 'string') return false;
+    try {
+      return isShellCommandReadOnly(stripShellWrapper(command));
+    } catch {
+      return false; // fail-closed
+    }
+  }
   return CONCURRENCY_SAFE_KINDS.has(call.tool.kind);
 }
 
