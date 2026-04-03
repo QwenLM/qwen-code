@@ -8,6 +8,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { execSync } from 'node:child_process';
 import { ToolNames } from '../tools/tool-names.js';
 import process from 'node:process';
 import { isGitRepository } from '../utils/gitUtils.js';
@@ -377,6 +378,32 @@ ${(function () {
   return '';
 })()}
 
+${(function () {
+  if (!isGitRepository(process.cwd())) return '';
+  try {
+    const output = execSync('git ls-files', {
+      cwd: process.cwd(),
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    });
+    const extCounts: Record<string, number> = {};
+    for (const file of output.split('\n')) {
+      const dotIndex = file.lastIndexOf('.');
+      if (dotIndex === -1 || dotIndex === file.length - 1) continue;
+      const ext = '.' + file.slice(dotIndex + 1);
+      extCounts[ext] = (extCounts[ext] ?? 0) + 1;
+    }
+    const top = Object.entries(extCounts)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
+    if (top.length === 0) return '';
+    const parts = top.map(([ext, count]) => `${count} ${ext}`).join(', ');
+    return `\nWorkspace: ${parts} files\n`;
+  } catch {
+    return '';
+  }
+})()}
+
 ${getToolCallExamples(model || '')}
 
 ${(function () {
@@ -469,7 +496,7 @@ Be extremely concise. Every token counts. Omit pleasantries, explanations of you
 /**
  * Provides the system prompt for the history compression process.
  *
- * Produces a structured 9-section summary that preserves user intent,
+ * Produces a structured 10-section summary that preserves user intent,
  * debugging history, reasoning chains, and precise work state. This is
  * the agent's ONLY memory after compaction — density is critical.
  *
@@ -498,13 +525,13 @@ Before writing the summary, wrap your reasoning inside <analysis> tags:
 
 ## Summary Sections
 
-The <summary> block must contain exactly these nine sections:
+The <summary> block must contain exactly these ten sections:
 
 1. **Primary Request and Intent** — What the user originally wanted and the deeper goal behind it.
 
 2. **Key Technical Concepts** — Frameworks, patterns, algorithms, architectures, or domain knowledge involved. Include build commands, test commands, and environment details.
 
-3. **Files and Code Sections** — Enumerate every relevant file by absolute path. Include complete code snippets for anything non-trivial. Note status: CREATED, MODIFIED, READ, DELETED. Explain why each matters.
+3. **Files and Code Sections** — Enumerate every relevant file by absolute path. Include complete code snippets for anything non-trivial. Note status: CREATED, MODIFIED, READ, DELETED. Explain why each matters. For files that were read multiple times, keep only the most recent read — deduplicate by path.
 
 4. **Errors and Fixes** — Every error that surfaced, the exact error message, how it was resolved, and any user reactions or corrections. This section prevents the agent from retrying failed approaches.
 
@@ -512,11 +539,13 @@ The <summary> block must contain exactly these nine sections:
 
 6. **All User Messages** — List ALL non-tool-result messages from the user, preserving their substance verbatim. Do not paraphrase — the user's exact words carry intent that summaries lose.
 
-7. **Pending Tasks** — Work that remains unfinished or was explicitly deferred. Include any promises made to the user.
+7. **Current Todo List** — List EVERY todo item with its exact current status: added | in_progress | completed | cancelled. Do not omit any item. This is critical for resuming work without re-planning completed tasks.
 
-8. **Current Work** — Precise description of what was actively being worked on at conversation end, with file names, line numbers, and code fragments. This is the most critical section for seamless resumption.
+8. **Pending Tasks** — Work that remains unfinished or was explicitly deferred. Include any promises made to the user.
 
-9. **Optional Next Step** — MUST align directly with the user's most recent explicit requests. Include direct quotes showing which task was underway. Do not invent next steps the user did not ask for.
+9. **Current Work** — Precise description of what was actively being worked on at conversation end, with file names, line numbers, and code fragments. This is the most critical section for seamless resumption.
+
+10. **Optional Next Step** — MUST align directly with the user's most recent explicit requests. Include direct quotes showing which task was underway. Do not invent next steps the user did not ask for.
 
 ## Continuation Behavior
 
