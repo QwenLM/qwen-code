@@ -177,11 +177,20 @@ export const loopCommand: SlashCommand = {
     const manager = getLoopManager();
     const parsed = parseLoopArgs(args);
 
-    // Feature gate — read from merged settings using bracket notation
-    const settings = (
-      context.services.settings as unknown as Record<string, unknown>
-    )?.['merged'] as Record<string, unknown> | undefined;
-    if (settings?.['loopEnabled'] === false) {
+    // Feature gate — loop settings are under the 'model' section
+    const mergedSettings = context.services.settings?.merged as
+      | Record<string, Record<string, unknown> | undefined>
+      | undefined;
+    const modelSettings = mergedSettings?.['model'];
+
+    const readMaxLoops = (): number => {
+      const v = modelSettings?.['loopMaxConcurrent'];
+      return typeof v === 'number' && Number.isFinite(v) && v >= 1
+        ? Math.min(Math.floor(v), DEFAULT_MAX_LOOPS)
+        : DEFAULT_MAX_LOOPS;
+    };
+
+    if (modelSettings?.['loopEnabled'] === false) {
       ui.addItem(
         {
           type: MessageType.ERROR,
@@ -482,8 +491,7 @@ export const loopCommand: SlashCommand = {
         return;
       }
 
-      const maxLoops =
-        (settings?.['loopMaxConcurrent'] as number) ?? DEFAULT_MAX_LOOPS;
+      const maxLoops = readMaxLoops();
       let restored = 0;
       let firstPrompt: string | null = null;
       let firstRestoredId: string | null = null;
@@ -573,8 +581,7 @@ export const loopCommand: SlashCommand = {
       return;
     }
 
-    const maxLoops =
-      (settings?.['loopMaxConcurrent'] as number) ?? DEFAULT_MAX_LOOPS;
+    const maxLoops = readMaxLoops();
     // Allow if this replaces an existing loop (same named ID); block otherwise
     const replacing = parsed.loopId && manager.isActive(parsed.loopId);
     if (manager.getActiveCount() >= maxLoops && !replacing) {
@@ -608,8 +615,14 @@ export const loopCommand: SlashCommand = {
     }
 
     // Wire up settings for expiry and jitter
-    const expiryDays = (settings?.['loopExpiryDays'] as number) ?? 7;
-    const jitterEnabled = settings?.['loopJitterEnabled'] !== false;
+    const rawExpiry = modelSettings?.['loopExpiryDays'];
+    const expiryDays =
+      typeof rawExpiry === 'number' &&
+      Number.isFinite(rawExpiry) &&
+      rawExpiry >= 0
+        ? rawExpiry
+        : 7;
+    const jitterEnabled = modelSettings?.['loopJitterEnabled'] !== false;
 
     const config = {
       prompt: parsed.prompt,

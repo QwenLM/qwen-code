@@ -29,7 +29,9 @@ function isValidTask(t: unknown): t is PersistedLoopState {
   if (typeof p['id'] !== 'string') return false;
   if (
     typeof p['iteration'] !== 'number' ||
-    !Number.isFinite(p['iteration'] as number)
+    !Number.isFinite(p['iteration'] as number) ||
+    !Number.isInteger(p['iteration'] as number) ||
+    (p['iteration'] as number) < 0
   )
     return false;
   if (

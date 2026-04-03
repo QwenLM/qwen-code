@@ -142,4 +142,4 @@ If a loop prompt is a UI-only command (like `/help`) that doesn't trigger AI str
 
 - Loops fire only while Qwen Code is running and idle. If Qwen Code is busy with a long response, the loop waits.
 - With multiple loops, prompts are serialized — they don't run in parallel.
-- Persisted state is per-project (`.qwen/loop-state.json`). If two sessions write their own loops, the later write overwrites the earlier one. Use the file lock to coordinate.
+- Persisted state is per-project (`.qwen/loop-state.json`). If two sessions write their own loops, the later write overwrites the earlier one. The file lock only coordinates `/loop restore`, not active loop persistence.

@@ -278,7 +278,7 @@ export class LoopManager {
       // Another loop already owns the streaming slot. Don't mark this one as
       // waiting — just schedule its first timer so it starts independently.
       state.waitingForResponse = false;
-      state.iteration = 0;
+      state.iteration = config.resumeIteration ?? 0;
       this.scheduleNext(id);
     }
 
