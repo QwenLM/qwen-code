@@ -320,6 +320,86 @@ describe('HookRegistry', () => {
       expect(registry.getAllHooks()).toHaveLength(0);
     });
 
+    it('should discard HTTP hooks without url field', async () => {
+      const hooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [{ type: HookType.Http } as HookConfig],
+          },
+        ],
+      };
+      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      expect(registry.getAllHooks()).toHaveLength(0);
+    });
+
+    it('should discard function hooks without callback field', async () => {
+      const hooksConfig = {
+        [HookEventName.SessionStart]: [
+          {
+            hooks: [{ type: HookType.Function } as HookConfig],
+          },
+        ],
+      };
+      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      expect(registry.getAllHooks()).toHaveLength(0);
+    });
+
+    it('should accept valid HTTP hooks with url', async () => {
+      const hooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Http,
+                url: 'http://localhost:8080/hook',
+                name: 'http-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      expect(registry.getAllHooks()).toHaveLength(1);
+      expect(registry.getAllHooks()[0].config.type).toBe(HookType.Http);
+    });
+
+    it('should accept valid function hooks with callback', async () => {
+      const callback = vi.fn();
+      const hooksConfig = {
+        [HookEventName.SessionStart]: [
+          {
+            hooks: [
+              {
+                type: HookType.Function,
+                callback,
+                name: 'function-hook',
+                errorMessage: 'Error occurred',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      expect(registry.getAllHooks()).toHaveLength(1);
+      expect(registry.getAllHooks()[0].config.type).toBe(HookType.Function);
+    });
+
     it('should skip invalid event names', async () => {
       const hooksConfig = {
         InvalidEventName: [

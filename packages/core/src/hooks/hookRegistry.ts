@@ -312,7 +312,10 @@ please review the project settings (.qwen/settings.json) and remove them.`;
     eventName: HookEventName,
     source: HooksConfigSource,
   ): boolean {
-    if (!config.type || !['command', 'plugin'].includes(config.type)) {
+    if (
+      !config.type ||
+      !['command', 'http', 'function'].includes(config.type)
+    ) {
       debugLogger.warn(
         `Invalid hook ${eventName} from ${source} type: ${config.type}`,
       );
@@ -322,6 +325,20 @@ please review the project settings (.qwen/settings.json) and remove them.`;
     if (config.type === 'command' && !config.command) {
       debugLogger.warn(
         `Command hook ${eventName} from ${source} missing command field`,
+      );
+      return false;
+    }
+
+    if (config.type === 'http' && !config.url) {
+      debugLogger.warn(
+        `HTTP hook ${eventName} from ${source} missing url field`,
+      );
+      return false;
+    }
+
+    if (config.type === 'function' && typeof config.callback !== 'function') {
+      debugLogger.warn(
+        `Function hook ${eventName} from ${source} missing or invalid callback`,
       );
       return false;
     }
