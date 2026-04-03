@@ -1,0 +1,31 @@
+diff --git a/node_modules/normalize-package-data/lib/fixer.js b/node_modules/normalize-package-data/lib/fixer.js
+index 1c30cad..a2d6c05 100644
+--- a/node_modules/normalize-package-data/lib/fixer.js
++++ b/node_modules/normalize-package-data/lib/fixer.js
+@@ -270,7 +270,7 @@ module.exports = {
+         if (isEmail(data.bugs)) {
+           data.bugs = { email: data.bugs }
+         /* eslint-disable-next-line node/no-deprecated-api */
+-        } else if (url.parse(data.bugs).protocol) {
++        } else if ((function(){ try { return new URL(data.bugs).protocol } catch(e) { return null } }())) {
+           data.bugs = { url: data.bugs }
+         } else {
+           this.warn('nonEmailUrlBugsString')
+@@ -281,7 +281,7 @@ module.exports = {
+         data.bugs = {}
+         if (oldBugs.url) {
+           /* eslint-disable-next-line node/no-deprecated-api */
+-          if (typeof (oldBugs.url) === 'string' && url.parse(oldBugs.url).protocol) {
++          if (typeof (oldBugs.url) === 'string' && (function(){ try { return new URL(oldBugs.url).protocol } catch(e) { return null } }())) {
+             data.bugs.url = oldBugs.url
+           } else {
+             this.warn('nonUrlBugsUrlField')
+@@ -318,7 +318,7 @@ module.exports = {
+       return delete data.homepage
+     }
+     /* eslint-disable-next-line node/no-deprecated-api */
+-    if (!url.parse(data.homepage).protocol) {
++    if (!(function(){ try { return new URL(data.homepage).protocol } catch(e) { return null } }())) {
+       data.homepage = 'http://' + data.homepage
+     }
+   },
