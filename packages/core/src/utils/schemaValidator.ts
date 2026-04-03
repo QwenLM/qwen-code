@@ -102,6 +102,11 @@ export class SchemaValidator {
     if (!valid && validate.errors) {
       // Coerce string boolean values ("true"/"false") to actual booleans
       fixBooleanValues(data as Record<string, unknown>);
+      // Coerce non-string values to strings where the schema expects strings
+      fixStringValues(
+        data as Record<string, unknown>,
+        anySchema as Record<string, unknown>,
+      );
 
       valid = validate(data);
       if (!valid && validate.errors) {
@@ -135,6 +140,38 @@ function fixBooleanValues(data: Record<string, unknown>) {
       } else if (lower === 'false') {
         data[key] = false;
       }
+    }
+  }
+}
+
+/**
+ * Coerces non-string values to strings where the schema expects a string type.
+ * This handles cases where LLMs return numbers or booleans instead of string values
+ * for tool parameters like `old_string`, `content`, etc.
+ * Common with self-hosted LLMs (e.g., via LMStudio, sglang, vllm).
+ */
+function fixStringValues(
+  data: Record<string, unknown>,
+  schema: Record<string, unknown>,
+) {
+  const properties = schema?.properties as
+    | Record<string, Record<string, unknown>>
+    | undefined;
+  if (!properties) return;
+
+  for (const key of Object.keys(data)) {
+    if (!(key in data)) continue;
+    const value = data[key];
+    const propSchema = properties[key];
+    if (!propSchema) continue;
+
+    if (
+      propSchema.type === 'string' &&
+      typeof value !== 'string' &&
+      value !== null &&
+      value !== undefined
+    ) {
+      data[key] = String(value);
     }
   }
 }
