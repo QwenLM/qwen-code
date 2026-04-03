@@ -329,21 +329,7 @@ Verify detection: `/voice status`
 
 ### STT backend
 
-Voice input transcribes audio via a Whisper-compatible `/v1/audio/transcriptions` endpoint.
-
-**Option A — protoLabs hosted** (no setup):
-
-```json
-// ~/.proto/settings.json
-{
-  "voice": {
-    "enabled": true,
-    "sttEndpoint": "https://ai.proto-labs.ai/v1/audio/transcriptions"
-  }
-}
-```
-
-**Option B — self-hosted** (e.g. [faster-whisper-server](https://github.com/fedirz/faster-whisper-server)):
+Voice input transcribes audio via a Whisper-compatible `/v1/audio/transcriptions` endpoint. Self-host one (e.g. [faster-whisper-server](https://github.com/fedirz/faster-whisper-server)):
 
 ```bash
 docker run --gpus all -p 8000:8000 fedirz/faster-whisper-server:latest-cuda
