@@ -129,83 +129,92 @@ async function getGeminiMdFilePathsInternalForEachDir(
     'CLAUDE.md': CLAUDE_DIR,
   };
 
+  const resolvedHome = path.resolve(userHomePath);
+
+  // --- Global file: cascade through filenames, stop at first found.
+  // This means ~/.proto/PROTO.md wins over ~/.claude/CLAUDE.md — no flooding
+  // the context with every compat alias that happens to exist globally.
   for (const geminiMdFilename of geminiMdFilenames) {
-    const resolvedHome = path.resolve(userHomePath);
     const globalDir = GLOBAL_DIR_FOR_FILENAME[geminiMdFilename] ?? QWEN_DIR;
     const globalMemoryPath = path.join(
       resolvedHome,
       globalDir,
       geminiMdFilename,
     );
-
-    // This part that finds the global file always runs.
     try {
       await fs.access(globalMemoryPath, fsSync.constants.R_OK);
       allPaths.add(globalMemoryPath);
       logger.debug(
         `Found readable global ${geminiMdFilename}: ${globalMemoryPath}`,
       );
+      break; // cascade: first found wins, skip remaining filenames
     } catch {
-      // It's okay if it's not found.
+      // Not found, try next filename in priority order
     }
+  }
 
-    // Handle the case where we're in the home directory (dir is empty string or home path)
-    const resolvedDir = dir ? path.resolve(dir) : resolvedHome;
-    const isHomeDirectory = resolvedDir === resolvedHome;
+  const resolvedDir = dir ? path.resolve(dir) : resolvedHome;
+  const isHomeDirectory = resolvedDir === resolvedHome;
 
-    if (isHomeDirectory) {
-      // For home directory, only check for QWEN.md directly in the home directory
+  if (isHomeDirectory) {
+    // For home directory, cascade through filenames — stop at first found.
+    for (const geminiMdFilename of geminiMdFilenames) {
       const homeContextPath = path.join(resolvedHome, geminiMdFilename);
       try {
         await fs.access(homeContextPath, fsSync.constants.R_OK);
-        if (homeContextPath !== globalMemoryPath) {
-          allPaths.add(homeContextPath);
-          logger.debug(
-            `Found readable home ${geminiMdFilename}: ${homeContextPath}`,
-          );
-        }
+        allPaths.add(homeContextPath); // Set deduplicates if same as global
+        logger.debug(
+          `Found readable home ${geminiMdFilename}: ${homeContextPath}`,
+        );
+        break; // cascade: first found wins
       } catch {
-        // Not found, which is okay
+        // Not found
       }
-    } else if (dir && folderTrust) {
-      // FIX: Only perform the workspace search (upward scan from CWD to project root)
-      // if a valid currentWorkingDirectory is provided and it's not the home directory.
-      const resolvedCwd = path.resolve(dir);
-      logger.debug(
-        `Searching for ${geminiMdFilename} starting from CWD: ${resolvedCwd}`,
-      );
+    }
+  } else if (dir && folderTrust) {
+    // Walk upward from CWD to project root. For each directory, cascade through
+    // filenames and stop at first found — only one context file per directory.
+    const resolvedCwd = path.resolve(dir);
+    logger.debug(
+      `Searching for context files starting from CWD: ${resolvedCwd}`,
+    );
 
-      const projectRoot = await findProjectRoot(resolvedCwd);
-      logger.debug(`Determined project root: ${projectRoot ?? 'None'}`);
+    const projectRoot = await findProjectRoot(resolvedCwd);
+    logger.debug(`Determined project root: ${projectRoot ?? 'None'}`);
 
-      const upwardPaths: string[] = [];
-      let currentDir = resolvedCwd;
-      const ultimateStopDir = projectRoot
-        ? path.dirname(projectRoot)
-        : path.dirname(resolvedHome);
+    // Collect the walk directories (project root → CWD order so CWD is highest priority)
+    const walkDirs: string[] = [];
+    let currentDir = resolvedCwd;
+    const ultimateStopDir = projectRoot
+      ? path.dirname(projectRoot)
+      : path.dirname(resolvedHome);
 
-      while (currentDir && currentDir !== path.dirname(currentDir)) {
-        if (currentDir === path.join(resolvedHome, QWEN_DIR)) {
-          break;
-        }
+    while (currentDir && currentDir !== path.dirname(currentDir)) {
+      if (currentDir === path.join(resolvedHome, QWEN_DIR)) {
+        break;
+      }
+      walkDirs.unshift(currentDir); // prepend so outer dirs come first
+      if (currentDir === ultimateStopDir) {
+        break;
+      }
+      currentDir = path.dirname(currentDir);
+    }
 
-        const potentialPath = path.join(currentDir, geminiMdFilename);
+    // For each directory, cascade through filenames — stop at first found per dir.
+    for (const walkDir of walkDirs) {
+      for (const geminiMdFilename of geminiMdFilenames) {
+        const potentialPath = path.join(walkDir, geminiMdFilename);
         try {
           await fs.access(potentialPath, fsSync.constants.R_OK);
-          if (potentialPath !== globalMemoryPath) {
-            upwardPaths.unshift(potentialPath);
-          }
+          allPaths.add(potentialPath); // Set deduplicates if same as global
+          logger.debug(
+            `Found ${geminiMdFilename} in ${walkDir}: ${potentialPath}`,
+          );
+          break; // cascade: first found wins for this directory
         } catch {
-          // Not found, continue.
+          // Not found, try next filename
         }
-
-        if (currentDir === ultimateStopDir) {
-          break;
-        }
-
-        currentDir = path.dirname(currentDir);
       }
-      upwardPaths.forEach((p) => allPaths.add(p));
     }
   }
 
@@ -217,9 +226,7 @@ async function getGeminiMdFilePathsInternalForEachDir(
   const finalPaths = Array.from(allPaths);
 
   logger.debug(
-    `Final ordered ${getAllGeminiMdFilenames()} paths to read: ${JSON.stringify(
-      finalPaths,
-    )}`,
+    `Final ordered context file paths to read: ${JSON.stringify(finalPaths)}`,
   );
   return finalPaths;
 }

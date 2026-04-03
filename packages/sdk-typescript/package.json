@@ -33,14 +33,14 @@
     "prepack": "npm run build && npm run bundle:cli"
   },
   "keywords": [
-    "qwen",
-    "qwen-code",
+    "proto",
+    "protolabs",
     "ai",
     "code-assistant",
     "sdk",
     "typescript"
   ],
-  "author": "Qwen Team",
+  "author": "protoLabs",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=18.0.0"
@@ -65,11 +65,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/QwenLM/qwen-code.git",
+    "url": "git+https://github.com/protoLabsAI/protoCLI.git",
     "directory": "packages/sdk-typescript"
   },
   "bugs": {
-    "url": "https://github.com/QwenLM/qwen-code/issues"
+    "url": "https://github.com/protoLabsAI/protoCLI/issues"
   },
-  "homepage": "https://qwenlm.github.io/qwen-code-docs/"
+  "homepage": "https://protolabs.sh"
 }

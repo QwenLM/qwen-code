@@ -4,7 +4,11 @@
   "description": "proto",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/QwenLM/qwen-code.git"
+    "url": "git+https://github.com/protoLabsAI/protoCLI.git"
+  },
+  "homepage": "https://protolabs.sh",
+  "bugs": {
+    "url": "https://github.com/protoLabsAI/protoCLI/issues"
   },
   "type": "module",
   "main": "dist/index.js",
