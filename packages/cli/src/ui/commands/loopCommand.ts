@@ -66,7 +66,8 @@ const SUBCOMMANDS: Subcommand[] = [
   'list',
 ];
 
-function parseLoopArgs(args: string): ParsedArgs {
+/** @internal Exported for testing */
+export function parseLoopArgs(args: string): ParsedArgs {
   const tokens = args.trim().split(/\s+/);
 
   if (tokens.length === 0 || (tokens.length === 1 && tokens[0] === '')) {
