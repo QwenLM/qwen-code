@@ -1,6 +1,6 @@
 {
   "name": "@protolabsai/proto",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "publishConfig": {
     "access": "public"
   },
@@ -16,7 +16,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.13.2"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.15.0"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
