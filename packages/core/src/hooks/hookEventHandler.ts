@@ -31,6 +31,8 @@ import type {
   PermissionSuggestion,
   SubagentStartInput,
   SubagentStopInput,
+  MessagesProvider,
+  FunctionHookContext,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -47,17 +49,35 @@ export class HookEventHandler {
   private readonly hookPlanner: HookPlanner;
   private readonly hookRunner: HookRunner;
   private readonly hookAggregator: HookAggregator;
+  /** Optional provider for conversation history */
+  private messagesProvider?: MessagesProvider;
 
   constructor(
     config: Config,
     hookPlanner: HookPlanner,
     hookRunner: HookRunner,
     hookAggregator: HookAggregator,
+    messagesProvider?: MessagesProvider,
   ) {
     this.config = config;
     this.hookPlanner = hookPlanner;
     this.hookRunner = hookRunner;
     this.hookAggregator = hookAggregator;
+    this.messagesProvider = messagesProvider;
+  }
+
+  /**
+   * Set the messages provider for automatic conversation history passing
+   */
+  setMessagesProvider(provider: MessagesProvider): void {
+    this.messagesProvider = provider;
+  }
+
+  /**
+   * Get the current messages provider
+   */
+  getMessagesProvider(): MessagesProvider | undefined {
+    return this.messagesProvider;
   }
 
   /**
@@ -417,6 +437,15 @@ export class HookEventHandler {
         };
       }
 
+      // Build function hook context with messages from provider
+      const messages = this.messagesProvider?.();
+      const functionContext: FunctionHookContext = {
+        messages,
+        toolUseID:
+          'tool_use_id' in input ? (input.tool_use_id as string) : undefined,
+        signal,
+      };
+
       const onHookStart = (config: HookConfig, index: number) => {
         const hookName = this.getHookName(config);
         debugLogger.debug(
@@ -440,6 +469,7 @@ export class HookEventHandler {
             onHookStart,
             onHookEnd,
             signal,
+            functionContext,
           )
         : await this.hookRunner.executeHooksParallel(
             plan.hookConfigs,
@@ -448,6 +478,7 @@ export class HookEventHandler {
             onHookStart,
             onHookEnd,
             signal,
+            functionContext,
           );
 
       // Aggregate results

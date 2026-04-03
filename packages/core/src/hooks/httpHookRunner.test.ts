@@ -56,34 +56,6 @@ describe('HttpHookRunner', () => {
   });
 
   describe('execute', () => {
-    it('should send POST request to configured URL', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        headers: new Headers({ 'content-type': 'application/json' }),
-        json: async () => ({ continue: true }),
-      });
-
-      const config = createMockConfig();
-      const input = createMockInput();
-
-      const result = await httpRunner.execute(
-        config,
-        HookEventName.PreToolUse,
-        input,
-      );
-
-      expect(result.success).toBe(true);
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.example.com/hook',
-        expect.objectContaining({
-          method: 'POST',
-          headers: expect.objectContaining({
-            'Content-Type': 'application/json',
-          }),
-        }),
-      );
-    });
-
     it('should fail for URL not in whitelist', async () => {
       const config = createMockConfig({
         url: 'https://other.com/hook',

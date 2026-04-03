@@ -720,6 +720,10 @@ describe('HookEventHandler', () => {
         expect.any(Function), // onHookStart callback
         expect.any(Function), // onHookEnd callback
         undefined, // signal
+        expect.objectContaining({
+          messages: undefined,
+          toolUseID: 'toolu_test111',
+        }), // functionContext
       );
     });
 
@@ -2606,6 +2610,135 @@ describe('HookEventHandler', () => {
         mockConfig,
         expect.objectContaining({
           hook_event_name: HookEventName.Stop,
+        }),
+      );
+    });
+  });
+
+  describe('MessagesProvider integration', () => {
+    it('should accept messagesProvider in constructor', () => {
+      const messagesProvider = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', content: 'Hello' }]);
+
+      const handler = new HookEventHandler(
+        mockConfig,
+        mockHookPlanner,
+        mockHookRunner,
+        mockHookAggregator,
+        messagesProvider,
+      );
+
+      expect(handler.getMessagesProvider()).toBe(messagesProvider);
+    });
+
+    it('should set messagesProvider via setMessagesProvider', () => {
+      hookEventHandler.setMessagesProvider(vi.fn().mockReturnValue([]));
+      expect(hookEventHandler.getMessagesProvider()).toBeDefined();
+    });
+
+    it('should pass messages to function hooks via context', async () => {
+      const messages = [{ role: 'user', content: 'Test message' }];
+      const messagesProvider = vi.fn().mockReturnValue(messages);
+
+      hookEventHandler.setMessagesProvider(messagesProvider);
+
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+
+      await hookEventHandler.firePreToolUseEvent(
+        'Bash',
+        { command: 'ls' },
+        'toolu_test',
+        PermissionMode.Default,
+      );
+
+      // Verify context was passed with messages
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        expect.any(Array),
+        HookEventName.PreToolUse,
+        expect.any(Object),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.objectContaining({
+          messages,
+          toolUseID: 'toolu_test',
+        }),
+      );
+    });
+
+    it('should pass toolUseID from input to context', async () => {
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+
+      await hookEventHandler.firePostToolUseEvent(
+        'Write',
+        { file_path: '/test.txt' },
+        { content: 'test' },
+        'toolu_12345',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        expect.any(Array),
+        HookEventName.PostToolUse,
+        expect.any(Object),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.objectContaining({
+          toolUseID: 'toolu_12345',
+        }),
+      );
+    });
+
+    it('should handle undefined messagesProvider', async () => {
+      // No messagesProvider set
+      const mockPlan = createMockExecutionPlan([
+        {
+          type: HookType.Command,
+          command: 'echo test',
+          source: HooksConfigSource.Project,
+        },
+      ]);
+
+      vi.mocked(mockHookPlanner.createExecutionPlan).mockReturnValue(mockPlan);
+      vi.mocked(mockHookRunner.executeHooksParallel).mockResolvedValue([]);
+
+      await hookEventHandler.firePreToolUseEvent(
+        'Bash',
+        { command: 'ls' },
+        'toolu_test',
+        PermissionMode.Default,
+      );
+
+      expect(mockHookRunner.executeHooksParallel).toHaveBeenCalledWith(
+        expect.any(Array),
+        HookEventName.PreToolUse,
+        expect.any(Object),
+        expect.any(Function),
+        expect.any(Function),
+        undefined,
+        expect.objectContaining({
+          messages: undefined,
+          toolUseID: 'toolu_test',
         }),
       );
     });

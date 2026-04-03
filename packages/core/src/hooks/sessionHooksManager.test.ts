@@ -448,4 +448,167 @@ describe('SessionHooksManager', () => {
       expect(manager.getHookCount('non-existent')).toBe(0);
     });
   });
+
+  describe('regex matcher support', () => {
+    it('should match using regex pattern', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        '^Bash.*',
+        callback,
+        'Test error',
+      );
+
+      expect(
+        manager.getMatchingHooks('session-1', HookEventName.PreToolUse, 'Bash')
+          .length,
+      ).toBe(1);
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          'BashAction',
+        ).length,
+      ).toBe(1);
+      expect(
+        manager.getMatchingHooks('session-1', HookEventName.PreToolUse, 'Write')
+          .length,
+      ).toBe(0);
+    });
+
+    it('should match using regex with anchors', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        '^(Write|Edit)$',
+        callback,
+        'Test error',
+      );
+
+      expect(
+        manager.getMatchingHooks('session-1', HookEventName.PreToolUse, 'Write')
+          .length,
+      ).toBe(1);
+      expect(
+        manager.getMatchingHooks('session-1', HookEventName.PreToolUse, 'Edit')
+          .length,
+      ).toBe(1);
+      // Should not match WriteOrEdit because of anchors
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          'WriteOrEdit',
+        ).length,
+      ).toBe(0);
+    });
+
+    it('should fallback to exact match for invalid regex', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      // Invalid regex pattern - unclosed bracket
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        '[invalid',
+        callback,
+        'Test error',
+      );
+
+      // Should fallback to exact match
+      expect(
+        manager.getMatchingHooks(
+          'session-1',
+          HookEventName.PreToolUse,
+          '[invalid',
+        ).length,
+      ).toBe(1);
+      expect(
+        manager.getMatchingHooks('session-1', HookEventName.PreToolUse, 'Bash')
+          .length,
+      ).toBe(0);
+    });
+  });
+
+  describe('skillRoot support', () => {
+    it('should store skillRoot in hook entry', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash',
+        callback,
+        'Test error',
+        { skillRoot: '/path/to/skill' },
+      );
+
+      const hooks = manager.getMatchingHooks(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash',
+      );
+
+      expect(hooks.length).toBe(1);
+      expect(hooks[0].skillRoot).toBe('/path/to/skill');
+    });
+
+    it('should work without skillRoot', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash',
+        callback,
+        'Test error',
+      );
+
+      const hooks = manager.getMatchingHooks(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash',
+      );
+
+      expect(hooks.length).toBe(1);
+      expect(hooks[0].skillRoot).toBeUndefined();
+    });
+
+    it('should filter hooks by skillRoot', () => {
+      const callback1 = vi.fn().mockResolvedValue({ continue: true });
+      const callback2 = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash',
+        callback1,
+        'Error 1',
+        { skillRoot: '/skill-a' },
+      );
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash',
+        callback2,
+        'Error 2',
+        { skillRoot: '/skill-b' },
+      );
+
+      const hooks = manager.getMatchingHooks(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash',
+      );
+
+      expect(hooks.length).toBe(2);
+      expect(hooks[0].skillRoot).toBe('/skill-a');
+      expect(hooks[1].skillRoot).toBe('/skill-b');
+    });
+  });
 });

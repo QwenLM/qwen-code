@@ -11,14 +11,17 @@ import type {
   HookOutput,
   HookExecutionResult,
   HookEventName,
+  FunctionHookContext,
+  HookExecutionOutcome,
 } from './types.js';
 
 const debugLogger = createDebugLogger('FUNCTION_HOOK_RUNNER');
 
 /**
- * Default timeout for function hook execution (60 seconds)
+ * Default timeout for function hook execution (5 seconds)
+ * Function hooks are intended for quick validation checks
  */
-const DEFAULT_FUNCTION_TIMEOUT = 60000;
+const DEFAULT_FUNCTION_TIMEOUT = 5000;
 
 /**
  * Function Hook Runner - executes function hooks (callbacks)
@@ -30,16 +33,17 @@ export class FunctionHookRunner {
    * @param hookConfig Function hook configuration
    * @param eventName Event name
    * @param input Hook input
-   * @param signal Optional AbortSignal to cancel hook execution
+   * @param context Optional context (messages, toolUseID, signal)
    */
   async execute(
     hookConfig: FunctionHookConfig,
     eventName: HookEventName,
     input: HookInput,
-    signal?: AbortSignal,
+    context?: FunctionHookContext,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
     const hookId = hookConfig.id || hookConfig.name || 'anonymous-function';
+    const signal = context?.signal;
 
     // Check if already aborted
     if (signal?.aborted) {
@@ -47,6 +51,7 @@ export class FunctionHookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'cancelled',
         error: new Error(
           `Function hook execution cancelled (aborted): ${hookId}`,
         ),
@@ -57,10 +62,11 @@ export class FunctionHookRunner {
     try {
       const timeout = hookConfig.timeout ?? DEFAULT_FUNCTION_TIMEOUT;
 
-      // Execute callback with timeout
-      const output = await this.executeWithTimeout(
+      // Execute callback with timeout and context
+      const result = await this.executeWithTimeout(
         hookConfig.callback,
         input,
+        context,
         timeout,
         signal,
       );
@@ -71,13 +77,26 @@ export class FunctionHookRunner {
         `Function hook ${hookId} completed successfully in ${duration}ms`,
       );
 
-      return {
+      // Process the callback result
+      const executionResult = this.processHookResult(
         hookConfig,
         eventName,
-        success: true,
-        output: output || { continue: true },
+        result,
         duration,
-      };
+      );
+
+      // Invoke success callback if provided
+      if (executionResult.success && hookConfig.onHookSuccess) {
+        try {
+          hookConfig.onHookSuccess(executionResult);
+        } catch (error) {
+          debugLogger.warn(
+            `onHookSuccess callback failed for ${hookId}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+
+      return executionResult;
     } catch (error) {
       const duration = Date.now() - startTime;
       const errorMessage =
@@ -96,10 +115,75 @@ export class FunctionHookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'non_blocking_error',
         error: displayError,
         duration,
       };
     }
+  }
+
+  /**
+   * Process hook result and convert to execution result
+   */
+  private processHookResult(
+    hookConfig: FunctionHookConfig,
+    eventName: HookEventName,
+    result: HookOutput | boolean | undefined,
+    duration: number,
+  ): HookExecutionResult {
+    // Boolean semantics: true=success, false=blocking
+    if (typeof result === 'boolean') {
+      if (result) {
+        return {
+          hookConfig,
+          eventName,
+          success: true,
+          outcome: 'success',
+          output: { continue: true },
+          duration,
+        };
+      } else {
+        return {
+          hookConfig,
+          eventName,
+          success: false,
+          outcome: 'blocking',
+          output: {
+            continue: false,
+            stopReason: hookConfig.errorMessage || 'Blocked by function hook',
+            decision: 'block',
+            reason: hookConfig.errorMessage || 'Blocked by function hook',
+          },
+          duration,
+        };
+      }
+    }
+
+    // HookOutput semantics (advanced)
+    const output = result || { continue: true };
+    const outcome: HookExecutionOutcome = this.determineOutcome(output);
+
+    return {
+      hookConfig,
+      eventName,
+      success: outcome === 'success',
+      outcome,
+      output,
+      duration,
+    };
+  }
+
+  /**
+   * Determine outcome from HookOutput
+   */
+  private determineOutcome(output: HookOutput): HookExecutionOutcome {
+    if (output.decision === 'block' || output.decision === 'deny') {
+      return 'blocking';
+    }
+    if (output.continue === false) {
+      return 'blocking';
+    }
+    return 'success';
   }
 
   /**
@@ -108,9 +192,10 @@ export class FunctionHookRunner {
   private async executeWithTimeout(
     callback: FunctionHookConfig['callback'],
     input: HookInput,
+    context: FunctionHookContext | undefined,
     timeout: number,
     signal?: AbortSignal,
-  ): Promise<HookOutput | undefined> {
+  ): Promise<HookOutput | boolean | undefined> {
     // Validate callback
     if (typeof callback !== 'function') {
       throw new Error('Invalid callback: expected a function');
@@ -154,10 +239,8 @@ export class FunctionHookRunner {
       });
 
       // Race between callback execution, timeout, and abort
-      const promises: Array<Promise<HookOutput | undefined | never>> = [
-        callback(input),
-        timeoutPromise,
-      ];
+      const promises: Array<Promise<HookOutput | boolean | undefined | never>> =
+        [callback(input, context), timeoutPromise];
 
       if (signal) {
         promises.push(abortPromise);

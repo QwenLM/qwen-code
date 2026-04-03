@@ -53,8 +53,9 @@ describe('FunctionHookRunner', () => {
       );
 
       expect(result.success).toBe(true);
+      expect(result.outcome).toBe('success');
       expect(result.output?.decision).toBe('allow');
-      expect(mockCallback).toHaveBeenCalledWith(input);
+      expect(mockCallback).toHaveBeenCalledWith(input, undefined);
     });
 
     it('should handle callback returning undefined', async () => {
@@ -127,7 +128,7 @@ describe('FunctionHookRunner', () => {
         config,
         HookEventName.PreToolUse,
         input,
-        controller.signal,
+        { signal: controller.signal },
       );
 
       expect(result.success).toBe(false);
@@ -151,6 +152,7 @@ describe('FunctionHookRunner', () => {
           session_id: 'custom-session',
           cwd: '/custom/path',
         }),
+        undefined,
       );
     });
 
@@ -210,7 +212,7 @@ describe('FunctionHookRunner', () => {
         config,
         HookEventName.PreToolUse,
         input,
-        controller.signal,
+        { signal: controller.signal },
       );
 
       expect(result.success).toBe(false);
@@ -233,6 +235,198 @@ describe('FunctionHookRunner', () => {
       // No timeout should fire after success
       await new Promise((resolve) => setTimeout(resolve, 50));
       expect(result.success).toBe(true);
+    });
+
+    it('should support boolean semantics (true=success)', async () => {
+      const mockCallback = vi.fn().mockResolvedValue(true);
+      const config = createMockConfig(mockCallback);
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('success');
+      expect(result.output).toEqual({ continue: true });
+    });
+
+    it('should support boolean semantics (false=blocking)', async () => {
+      const mockCallback = vi.fn().mockResolvedValue(false);
+      const config = createMockConfig(mockCallback, {
+        errorMessage: 'Validation failed',
+      });
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('blocking');
+      expect(result.output?.continue).toBe(false);
+      expect(result.output?.decision).toBe('block');
+      expect(result.output?.reason).toBe('Validation failed');
+    });
+
+    it('should pass context to callback', async () => {
+      const mockCallback = vi.fn().mockResolvedValue(true);
+      const config = createMockConfig(mockCallback);
+      const input = createMockInput();
+      const messages = [
+        { role: 'user', content: 'Hello' },
+        { role: 'assistant', content: 'Hi there' },
+      ];
+
+      await functionRunner.execute(config, HookEventName.PreToolUse, input, {
+        messages,
+        toolUseID: 'tool-123',
+      });
+
+      expect(mockCallback).toHaveBeenCalledWith(
+        expect.objectContaining({
+          session_id: 'test-session',
+          cwd: '/test',
+        }),
+        {
+          messages,
+          toolUseID: 'tool-123',
+          signal: undefined,
+        },
+      );
+    });
+
+    it('should call onHookSuccess callback on success', async () => {
+      const mockCallback = vi.fn().mockResolvedValue(true);
+      const onSuccess = vi.fn();
+      const config = createMockConfig(mockCallback, {
+        onHookSuccess: onSuccess,
+      });
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(true);
+      expect(onSuccess).toHaveBeenCalledWith(result);
+    });
+
+    it('should not call onHookSuccess on failure', async () => {
+      const mockCallback = vi.fn().mockRejectedValue(new Error('Test error'));
+      const onSuccess = vi.fn();
+      const config = createMockConfig(mockCallback, {
+        errorMessage: 'Hook failed',
+        onHookSuccess: onSuccess,
+      });
+      const input = createMockInput();
+
+      await functionRunner.execute(config, HookEventName.PreToolUse, input);
+
+      expect(onSuccess).not.toHaveBeenCalled();
+    });
+
+    it('should handle onHookSuccess error gracefully', async () => {
+      const mockCallback = vi.fn().mockResolvedValue(true);
+      const onSuccess = vi.fn().mockImplementation(() => {
+        throw new Error('Success callback error');
+      });
+      const config = createMockConfig(mockCallback, {
+        onHookSuccess: onSuccess,
+      });
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(true);
+      expect(onSuccess).toHaveBeenCalled();
+    });
+
+    it('should determine outcome from HookOutput decision', async () => {
+      const mockCallback = vi.fn().mockResolvedValue({
+        decision: 'block',
+        reason: 'Security violation',
+      });
+      const config = createMockConfig(mockCallback);
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('blocking');
+      expect(result.output?.decision).toBe('block');
+    });
+
+    it('should determine outcome from HookOutput continue=false', async () => {
+      const mockCallback = vi.fn().mockResolvedValue({
+        continue: false,
+        stopReason: 'Please stop',
+      });
+      const config = createMockConfig(mockCallback);
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.outcome).toBe('blocking');
+      expect(result.output?.continue).toBe(false);
+    });
+
+    it('should treat undefined return as success', async () => {
+      const mockCallback = vi.fn().mockResolvedValue(undefined);
+      const config = createMockConfig(mockCallback);
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.outcome).toBe('success');
+      expect(result.output).toEqual({ continue: true });
+    });
+
+    it('should handle async callback with context', async () => {
+      const mockCallback = vi
+        .fn()
+        .mockImplementation(async (_input, context) => {
+          expect(context).toBeDefined();
+          expect(context?.messages).toEqual([{ role: 'user' }]);
+          return true;
+        });
+
+      const config = createMockConfig(mockCallback);
+      const input = createMockInput();
+
+      const result = await functionRunner.execute(
+        config,
+        HookEventName.PreToolUse,
+        input,
+        { messages: [{ role: 'user' }] },
+      );
+
+      expect(result.success).toBe(true);
+      expect(mockCallback).toHaveBeenCalledTimes(1);
     });
   });
 });

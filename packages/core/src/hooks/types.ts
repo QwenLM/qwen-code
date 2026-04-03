@@ -61,8 +61,10 @@ export interface CommandHookConfig {
   timeout?: number;
   source?: HooksConfigSource;
   env?: Record<string, string>;
-  async?: boolean; // New: async execution support
+  async?: boolean;
   shell?: 'bash' | 'powershell';
+  /** Custom status message to display while hook is executing */
+  statusMessage?: string;
 }
 
 /**
@@ -83,11 +85,37 @@ export interface HttpHookConfig {
 }
 
 /**
+ * Hook execution outcome - describes the result of hook execution
+ */
+export type HookExecutionOutcome =
+  | 'success' // Hook executed successfully
+  | 'blocking' // Hook blocked the operation
+  | 'non_blocking_error' // Hook failed but doesn't block
+  | 'cancelled'; // Hook was cancelled/aborted
+
+/**
+ * Context provided to function hooks for state access
+ */
+export interface FunctionHookContext {
+  /** Optional messages for conversation context */
+  messages?: Array<Record<string, unknown>>;
+  /** Optional tool use ID for关联 to specific tool call */
+  toolUseID?: string;
+  /** Optional abort signal for cancellation */
+  signal?: AbortSignal;
+}
+
+/**
  * Function hook callback type
+ * Supports both simple boolean semantics and complex HookOutput semantics
+ * - Return boolean: true=success, false=blocking error
+ * - Return HookOutput: for advanced control over hook behavior
+ * - Return undefined: treated as {continue: true} (success)
  */
 export type FunctionHookCallback = (
   input: HookInput,
-) => Promise<HookOutput | undefined>;
+  context?: FunctionHookContext,
+) => Promise<HookOutput | boolean | undefined>;
 
 /**
  * Hook configuration entry for function hooks (Session Hook specific)
@@ -101,7 +129,15 @@ export interface FunctionHookConfig {
   callback: FunctionHookCallback;
   errorMessage: string;
   statusMessage?: string;
+  /** Optional callback invoked on successful hook execution */
+  onHookSuccess?: (result: HookExecutionResult) => void;
 }
+
+/**
+ * Messages provider callback type for automatically passing conversation history
+ * to function hooks during execution
+ */
+export type MessagesProvider = () => Array<Record<string, unknown>> | undefined;
 
 export type HookConfig =
   | CommandHookConfig
@@ -788,6 +824,8 @@ export interface HookExecutionResult {
   hookConfig: HookConfig;
   eventName: HookEventName;
   success: boolean;
+  /** Execution outcome for finer-grained result handling */
+  outcome?: HookExecutionOutcome;
   output?: HookOutput;
   stdout?: string;
   stderr?: string;

@@ -28,9 +28,13 @@ import type {
   HttpHookConfig,
   PendingAsyncHook,
   PendingAsyncOutput,
+  MessagesProvider,
 } from './types.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
+
+// Re-export MessagesProvider for external use
+export type { MessagesProvider } from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -45,6 +49,8 @@ export class HookSystem {
   private readonly hookPlanner: HookPlanner;
   private readonly hookEventHandler: HookEventHandler;
   private readonly sessionHooksManager: SessionHooksManager;
+  /** Optional provider for automatically fetching conversation history */
+  private messagesProvider?: MessagesProvider;
 
   constructor(config: Config) {
     // Get allowed HTTP URLs from config if available
@@ -83,6 +89,22 @@ export class HookSystem {
   async initialize(): Promise<void> {
     await this.hookRegistry.initialize();
     debugLogger.debug('Hook system initialized successfully');
+  }
+
+  /**
+   * Set the messages provider for automatic conversation history passing
+   * to function hooks during execution
+   */
+  setMessagesProvider(provider: MessagesProvider): void {
+    this.messagesProvider = provider;
+    this.hookEventHandler.setMessagesProvider(provider);
+  }
+
+  /**
+   * Get the current messages provider
+   */
+  getMessagesProvider(): MessagesProvider | undefined {
+    return this.messagesProvider;
   }
 
   /**
@@ -365,7 +387,7 @@ export class HookSystem {
    * Add a function hook for a session
    * @param sessionId Session ID
    * @param event Hook event name
-   * @param matcher Matcher pattern (e.g., 'Bash', '*', 'Write|Edit')
+   * @param matcher Matcher pattern (e.g., 'Bash', '*', 'Write|Edit', or regex)
    * @param callback Function callback to execute
    * @param errorMessage Error message to display on failure
    * @param options Additional options
@@ -383,6 +405,7 @@ export class HookSystem {
       name?: string;
       description?: string;
       statusMessage?: string;
+      skillRoot?: string;
     },
   ): string {
     return this.sessionHooksManager.addFunctionHook(

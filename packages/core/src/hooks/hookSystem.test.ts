@@ -94,6 +94,7 @@ describe('HookSystem', () => {
       firePermissionRequestEvent: vi.fn(),
       fireSubagentStartEvent: vi.fn(),
       fireSubagentStopEvent: vi.fn(),
+      setMessagesProvider: vi.fn(),
     } as unknown as HookEventHandler;
 
     vi.mocked(HookRegistry).mockImplementation(() => mockHookRegistry);
@@ -1660,6 +1661,25 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.isBlockingDecision()).toBe(false);
+    });
+  });
+
+  describe('MessagesProvider', () => {
+    it('should set messagesProvider and forward to eventHandler', () => {
+      const provider = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', content: 'test' }]);
+
+      hookSystem.setMessagesProvider(provider);
+
+      expect(mockHookEventHandler.setMessagesProvider).toHaveBeenCalledWith(
+        provider,
+      );
+      expect(hookSystem.getMessagesProvider()).toBe(provider);
+    });
+
+    it('should return undefined when no provider is set', () => {
+      expect(hookSystem.getMessagesProvider()).toBeUndefined();
     });
   });
 });

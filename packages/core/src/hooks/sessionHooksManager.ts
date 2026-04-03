@@ -33,6 +33,8 @@ export interface SessionHookEntry {
   matcher: string;
   config: HookConfig;
   sequential?: boolean;
+  /** Optional skill root path for skill-scoped hooks */
+  skillRoot?: string;
 }
 
 /**
@@ -65,7 +67,7 @@ export class SessionHooksManager {
    * Add a function hook for a session
    * @param sessionId Session ID
    * @param event Hook event name
-   * @param matcher Matcher pattern (e.g., 'Bash', '*', 'Write|Edit')
+   * @param matcher Matcher pattern (e.g., 'Bash', '*', 'Write|Edit', or regex)
    * @param callback Function callback to execute
    * @param errorMessage Error message to display on failure
    * @param options Additional options
@@ -83,6 +85,10 @@ export class SessionHooksManager {
       name?: string;
       description?: string;
       statusMessage?: string;
+      onHookSuccess?: (
+        result: import('./types.js').HookExecutionResult,
+      ) => void;
+      skillRoot?: string;
     },
   ): string {
     const hookId = options?.id || generateHookId();
@@ -96,6 +102,7 @@ export class SessionHooksManager {
       callback,
       errorMessage,
       statusMessage: options?.statusMessage,
+      onHookSuccess: options?.onHookSuccess,
     };
 
     const entry: SessionHookEntry = {
@@ -103,6 +110,7 @@ export class SessionHooksManager {
       eventName: event,
       matcher,
       config,
+      skillRoot: options?.skillRoot,
     };
 
     const storage = this.getSessionStorage(sessionId);
@@ -251,7 +259,13 @@ export class SessionHooksManager {
 
   /**
    * Check if a target matches a pattern
-   * Supports: exact match, '*' wildcard, '|' for alternatives
+   * Supports: exact match, '*' wildcard, '|' for alternatives, regex syntax
+   *
+   * Matching priority:
+   * 1. '*' - matches everything
+   * 2. Pipe-separated alternatives (e.g., 'Write|Edit|Read')
+   * 3. Regex syntax (e.g., '^Bash.*', 'Write|Edit')
+   * 4. Exact match (fallback)
    */
   private matchesPattern(pattern: string, target: string): boolean {
     if (pattern === '*') {
@@ -259,12 +273,27 @@ export class SessionHooksManager {
     }
 
     // Handle pipe-separated alternatives
-    if (pattern.includes('|')) {
+    if (
+      pattern.includes('|') &&
+      !pattern.startsWith('^') &&
+      !pattern.startsWith('(')
+    ) {
       const alternatives = pattern.split('|').map((s) => s.trim());
       return alternatives.some((alt) => this.matchesPattern(alt, target));
     }
 
-    // Exact match
+    // Try regex match
+    try {
+      const regex = new RegExp(`^${pattern}$`);
+      return regex.test(target);
+    } catch {
+      // Invalid regex, fall back to exact match
+      debugLogger.debug(
+        `Invalid regex pattern "${pattern}", falling back to exact match`,
+      );
+    }
+
+    // Exact match (fallback)
     return pattern === target;
   }
 

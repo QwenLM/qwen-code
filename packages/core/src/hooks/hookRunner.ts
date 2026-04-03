@@ -14,12 +14,14 @@ import type {
   PreToolUseInput,
   UserPromptSubmitInput,
   CommandHookConfig,
+  FunctionHookContext,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   escapeShellArg,
   getShellConfiguration,
   type ShellType,
+  type ShellConfiguration,
 } from '../utils/shell-utils.js';
 import { HttpHookRunner } from './httpHookRunner.js';
 import { FunctionHookRunner } from './functionHookRunner.js';
@@ -77,15 +79,21 @@ export class HookRunner {
    * @param hookConfig Hook configuration
    * @param eventName Event name
    * @param input Hook input
-   * @param signal Optional AbortSignal to cancel hook execution
+   * @param contextOrSignal Optional context (for function hooks) or AbortSignal
    */
   async executeHook(
     hookConfig: HookConfig,
     eventName: HookEventName,
     input: HookInput,
-    signal?: AbortSignal,
+    contextOrSignal?: FunctionHookContext | AbortSignal,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
+
+    // Extract signal from context or use directly
+    const signal =
+      contextOrSignal && 'aborted' in contextOrSignal
+        ? contextOrSignal
+        : contextOrSignal?.signal;
 
     // Check if already aborted before starting
     if (signal?.aborted) {
@@ -94,6 +102,7 @@ export class HookRunner {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'cancelled',
         error: new Error(`Hook execution cancelled (aborted): ${hookId}`),
         duration: 0,
       };
@@ -127,13 +136,19 @@ export class HookRunner {
             input,
             signal,
           );
-        case HookType.Function:
+        case HookType.Function: {
+          // Function hooks accept context, not just signal
+          const functionContext =
+            contextOrSignal && !('aborted' in contextOrSignal)
+              ? contextOrSignal
+              : { signal };
           return await this.functionRunner.execute(
             hookConfig,
             eventName,
             input,
-            signal,
+            functionContext,
           );
+        }
         default:
           throw new Error(
             `Unknown hook type: ${(hookConfig as HookConfig).type}`,
@@ -179,6 +194,41 @@ export class HookRunner {
       default:
         return 'unknown';
     }
+  }
+
+  /**
+   * Get shell configuration for a hook, respecting hookConfig.shell override
+   */
+  private getShellConfigForHook(
+    hookConfig: CommandHookConfig,
+  ): ShellConfiguration {
+    const globalConfig = getShellConfiguration();
+
+    // If hook specifies a shell, use it
+    if (hookConfig.shell) {
+      const shellType: ShellType =
+        hookConfig.shell === 'powershell' ? 'powershell' : 'bash';
+
+      // Return configuration for the specified shell type
+      if (shellType === 'powershell') {
+        return {
+          shell: 'powershell',
+          executable: 'powershell',
+          argsPrefix: ['-Command'],
+        };
+      }
+
+      // For bash, use global config's executable path or fallback
+      return {
+        shell: 'bash',
+        executable:
+          globalConfig.shell === 'bash' ? globalConfig.executable : 'bash',
+        argsPrefix: ['-c'],
+      };
+    }
+
+    // Use global configuration
+    return globalConfig;
   }
 
   /**
@@ -332,7 +382,7 @@ export class HookRunner {
 
   /**
    * Execute multiple hooks in parallel
-   * @param signal Optional AbortSignal to cancel hook execution
+   * @param context Optional function hook context (messages, toolUseID)
    */
   async executeHooksParallel(
     hookConfigs: HookConfig[],
@@ -341,10 +391,14 @@ export class HookRunner {
     onHookStart?: (config: HookConfig, index: number) => void,
     onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
     signal?: AbortSignal,
+    context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
     const promises = hookConfigs.map(async (config, index) => {
       onHookStart?.(config, index);
-      const result = await this.executeHook(config, eventName, input, signal);
+      const result = await this.executeHook(config, eventName, input, {
+        ...context,
+        signal,
+      });
       onHookEnd?.(config, result);
       return result;
     });
@@ -354,7 +408,7 @@ export class HookRunner {
 
   /**
    * Execute multiple hooks sequentially
-   * @param signal Optional AbortSignal to cancel hook execution
+   * @param context Optional function hook context (messages, toolUseID)
    */
   async executeHooksSequential(
     hookConfigs: HookConfig[],
@@ -363,6 +417,7 @@ export class HookRunner {
     onHookStart?: (config: HookConfig, index: number) => void,
     onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
     signal?: AbortSignal,
+    context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
     const results: HookExecutionResult[] = [];
     let currentInput = input;
@@ -374,12 +429,10 @@ export class HookRunner {
       }
       const config = hookConfigs[i];
       onHookStart?.(config, i);
-      const result = await this.executeHook(
-        config,
-        eventName,
-        currentInput,
+      const result = await this.executeHook(config, eventName, currentInput, {
+        ...context,
         signal,
-      );
+      });
       onHookEnd?.(config, result);
       results.push(result);
 
@@ -486,7 +539,8 @@ export class HookRunner {
       let timedOut = false;
       let aborted = false;
 
-      const shellConfig = getShellConfiguration();
+      // Use hook-specific shell configuration if specified
+      const shellConfig = this.getShellConfigForHook(hookConfig);
       const command = this.expandCommand(
         hookConfig.command,
         input,
