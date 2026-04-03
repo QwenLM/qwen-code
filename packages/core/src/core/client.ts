@@ -647,15 +647,14 @@ export class GeminiClient {
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
     if (messageType === SendMessageType.UserQuery) {
       const systemReminders = [];
-      const relevantAutoMemory =
-        await resolveRelevantAutoMemoryPromptForQuery(
-          this.config.getProjectRoot(),
-          partToString(request),
-          {
-            config: this.config,
-            excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-          },
-        );
+      const relevantAutoMemory = await resolveRelevantAutoMemoryPromptForQuery(
+        this.config.getProjectRoot(),
+        partToString(request),
+        {
+          config: this.config,
+          excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+        },
+      );
       const relevantAutoMemoryPrompt = relevantAutoMemory.prompt;
 
       if (relevantAutoMemoryPrompt) {

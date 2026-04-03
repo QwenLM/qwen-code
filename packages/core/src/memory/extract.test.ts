@@ -15,10 +15,9 @@ import {
   extractMemoryPatchesFromTranscript,
   loadUnprocessedTranscriptSlice,
   runAutoMemoryExtract,
-  scheduleAutoMemoryExtract,
 } from './extract.js';
 import { ensureAutoMemoryScaffold } from './store.js';
-import { markExtractRunning, resetAutoMemoryStateForTests } from './state.js';
+import { resetAutoMemoryStateForTests } from './state.js';
 
 describe('auto-memory extraction', () => {
   let tempDir: string;
@@ -88,6 +87,29 @@ describe('auto-memory extraction', () => {
     expect(index).toContain('grafana.internal/d/api-latency');
   });
 
+  it('writes richer schema fields when extraction patches include them', async () => {
+    const touched = await applyExtractedMemoryPatches(projectRoot, [
+      {
+        topic: 'user',
+        summary: 'User prefers terse responses.',
+        why: 'They explicitly asked for concise replies.',
+        howToApply: 'Lead with a short answer before details.',
+        stability: 'stable',
+        sourceOffset: 0,
+      },
+    ]);
+
+    const userTopic = await fs.readFile(
+      getAutoMemoryTopicPath(projectRoot, 'user'),
+      'utf-8',
+    );
+
+    expect(touched).toEqual(['user']);
+    expect(userTopic).toContain('  - Why: They explicitly asked for concise replies.');
+    expect(userTopic).toContain('  - How to apply: Lead with a short answer before details.');
+    expect(userTopic).toContain('  - Stability: stable');
+  });
+
   it('updates cursor and avoids duplicate writes for repeated extraction', async () => {
     const history = [
       { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
@@ -114,18 +136,5 @@ describe('auto-memory extraction', () => {
 
     expect(cursor.sessionId).toBe('session-1');
     expect(cursor.processedOffset).toBe(2);
-  });
-
-  it('skips scheduled extraction while the project is already running', async () => {
-    markExtractRunning(projectRoot);
-
-    const result = await scheduleAutoMemoryExtract({
-      projectRoot,
-      sessionId: 'session-1',
-      history: [{ role: 'user', parts: [{ text: 'I prefer terse responses.' }] }],
-    });
-
-    expect(result.skippedReason).toBe('already_running');
-    expect(result.touchedTopics).toEqual([]);
   });
 });

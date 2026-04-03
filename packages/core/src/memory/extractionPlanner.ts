@@ -50,6 +50,16 @@ const RESPONSE_SCHEMA: Record<string, unknown> = {
           summary: {
             type: 'string',
           },
+          why: {
+            type: 'string',
+          },
+          howToApply: {
+            type: 'string',
+          },
+          stability: {
+            type: 'string',
+            enum: ['stable', 'working'],
+          },
           sourceOffset: {
             type: 'integer',
           },
@@ -160,6 +170,9 @@ export async function planAutoMemoryExtractionPatchesByModel(
   return response.patches.map((patch) => ({
     topic: patch.topic as AutoMemoryType,
     summary: patch.summary,
+    why: patch.why,
+    howToApply: patch.howToApply,
+    stability: patch.stability,
     sourceOffset: patch.sourceOffset,
   }));
 }

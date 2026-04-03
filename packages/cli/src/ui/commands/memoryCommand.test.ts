@@ -18,10 +18,12 @@ import {
   AUTO_MEMORY_TYPES,
   getErrorMessage,
   getManagedAutoMemoryStatus,
-  forgetManagedAutoMemoryEntries,
+  forgetManagedAutoMemoryMatches,
   loadServerHierarchicalMemory,
   QWEN_DIR,
+  reviewManagedAutoMemoryGovernance,
   scheduleAutoMemoryExtract,
+  selectManagedAutoMemoryForgetCandidates,
   setGeminiMdFilename,
   type FileDiscoveryService,
   type LoadServerHierarchicalMemoryResponse,
@@ -37,9 +39,11 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
       return String(error);
     }),
     getManagedAutoMemoryStatus: vi.fn(),
-    forgetManagedAutoMemoryEntries: vi.fn(),
+    forgetManagedAutoMemoryMatches: vi.fn(),
     loadServerHierarchicalMemory: vi.fn(),
+    reviewManagedAutoMemoryGovernance: vi.fn(),
     scheduleAutoMemoryExtract: vi.fn(),
+    selectManagedAutoMemoryForgetCandidates: vi.fn(),
   };
 });
 
@@ -56,13 +60,15 @@ vi.mock('node:fs/promises', () => {
 const mockLoadServerHierarchicalMemory = loadServerHierarchicalMemory as Mock;
 const mockScheduleAutoMemoryExtract = scheduleAutoMemoryExtract as Mock;
 const mockGetManagedAutoMemoryStatus = getManagedAutoMemoryStatus as Mock;
-const mockForgetManagedAutoMemoryEntries = forgetManagedAutoMemoryEntries as Mock;
+const mockForgetManagedAutoMemoryMatches = forgetManagedAutoMemoryMatches as Mock;
+const mockReviewManagedAutoMemoryGovernance = reviewManagedAutoMemoryGovernance as Mock;
+const mockSelectManagedAutoMemoryForgetCandidates = selectManagedAutoMemoryForgetCandidates as Mock;
 const mockReadFile = readFile as unknown as Mock;
 
 describe('memoryCommand', () => {
   let mockContext: CommandContext;
 
-  const getSubCommand = (name: 'show' | 'add' | 'refresh' | 'status' | 'tasks' | 'inspect' | 'forget'): SlashCommand => {
+  const getSubCommand = (name: 'show' | 'add' | 'refresh' | 'status' | 'tasks' | 'inspect' | 'review' | 'forget'): SlashCommand => {
     const subCommand = memoryCommand.subCommands?.find(
       (cmd) => cmd.name === name,
     );
@@ -329,6 +335,7 @@ describe('memoryCommand', () => {
           lastDreamTouchedTopics: [],
         },
         extractionRunning: false,
+        extractionTasks: [],
         dreamTasks: [],
         topics: AUTO_MEMORY_TYPES.map((topic) => ({
           topic,
@@ -352,6 +359,7 @@ describe('memoryCommand', () => {
       expect(text).toContain('Cursor: session=session-1, offset=3');
       expect(text).toContain('- user.md: 2 entries');
       expect(text).toContain('Extraction: running=no');
+      expect(text).toContain('Extraction tasks: active=0, tracked=0');
       expect(text).toContain('Dream: last=2026-04-01T01:00:00.000Z');
     });
   });
@@ -377,6 +385,23 @@ describe('memoryCommand', () => {
         indexPath: '/test/project/.qwen/memory/MEMORY.md',
         indexContent: '',
         extractionRunning: true,
+        extractionTasks: [
+          {
+            id: 'extract-1',
+            taskType: 'managed-auto-memory-extraction',
+            title: 'Managed auto-memory extraction',
+            projectRoot: '/test/project',
+            status: 'pending',
+            createdAt: '2026-04-01T00:00:00.000Z',
+            updatedAt: '2026-04-01T00:00:10.000Z',
+            progressText: 'Queued trailing extraction',
+            metadata: {
+              trailing: true,
+              queuedBehindTaskId: 'extract-0',
+              historyLength: 6,
+            },
+          },
+        ],
         topics: [],
         dreamTasks: [
           {
@@ -395,8 +420,12 @@ describe('memoryCommand', () => {
       await tasksCommand.action?.(mockContext, '');
 
       const text = (mockContext.ui.addItem as Mock).mock.calls[0][0].text;
-      expect(text).toContain('extraction: running');
-      expect(text).toContain('dream dream-1: running');
+      expect(text).toContain('extraction lane: running | active=1 | tracked=1');
+      expect(text).toContain('Extraction timeline:');
+      expect(text).toContain('extract-1: pending');
+      expect(text).toContain('trailing=yes');
+      expect(text).toContain('Dream timeline:');
+      expect(text).toContain('dream-1: running');
     });
   });
 
@@ -422,6 +451,7 @@ describe('memoryCommand', () => {
         indexPath: '/test/project/.qwen/memory/MEMORY.md',
         indexContent: '# Managed Auto-Memory Index\n\n- hook',
         extractionRunning: false,
+        extractionTasks: [],
         topics: [],
         dreamTasks: [],
       });
@@ -442,6 +472,7 @@ describe('memoryCommand', () => {
         indexPath: '/test/project/.qwen/memory/MEMORY.md',
         indexContent: '# Managed Auto-Memory Index',
         extractionRunning: false,
+        extractionTasks: [],
         topics: [],
         dreamTasks: [],
       });
@@ -455,6 +486,42 @@ describe('memoryCommand', () => {
       );
       const text = (mockContext.ui.addItem as Mock).mock.calls[0][0].text;
       expect(text).toContain('User prefers terse responses.');
+    });
+  });
+
+  describe('/memory review', () => {
+    let reviewCommand: SlashCommand;
+
+    beforeEach(() => {
+      reviewCommand = getSubCommand('review');
+      mockReviewManagedAutoMemoryGovernance.mockReset();
+      mockContext = createMockCommandContext({
+        services: {
+          config: {
+            getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+          },
+        },
+      });
+    });
+
+    it('shows governance review suggestions', async () => {
+      mockReviewManagedAutoMemoryGovernance.mockResolvedValue({
+        strategy: 'heuristic',
+        suggestions: [
+          {
+            type: 'promote',
+            topic: 'user',
+            summary: 'User prefers terse responses.',
+            rationale: 'Needs richer metadata.',
+          },
+        ],
+      });
+
+      await reviewCommand.action?.(mockContext, '');
+
+      const text = (mockContext.ui.addItem as Mock).mock.calls[0][0].text;
+      expect(text).toContain('governance review');
+      expect(text).toContain('[promote] user: User prefers terse responses.');
     });
   });
 
@@ -509,7 +576,8 @@ describe('memoryCommand', () => {
 
     beforeEach(() => {
       forgetCommand = getSubCommand('forget');
-      mockForgetManagedAutoMemoryEntries.mockReset();
+      mockForgetManagedAutoMemoryMatches.mockReset();
+      mockSelectManagedAutoMemoryForgetCandidates.mockReset();
       mockContext = createMockCommandContext({
         services: {
           config: {
@@ -524,23 +592,42 @@ describe('memoryCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Usage: /memory forget <memory text to remove>',
+        content: 'Usage: /memory forget [--apply] <memory text to remove>',
       });
     });
 
-    it('forgets matching managed memory entries', async () => {
-      mockForgetManagedAutoMemoryEntries.mockResolvedValue({
-        query: 'terse',
+    it('previews matching managed memory entries by default', async () => {
+      mockSelectManagedAutoMemoryForgetCandidates.mockResolvedValue({
+        strategy: 'model',
+        reasoning: 'Best semantic match.',
+        matches: [{ topic: 'user', summary: 'User prefers terse responses.' }],
+      });
+
+      await forgetCommand.action?.(mockContext, 'terse');
+
+      const text = (mockContext.ui.addItem as Mock).mock.calls[0][0].text;
+      expect(text).toContain('Forget preview (strategy=model):');
+      expect(text).toContain('1. user: User prefers terse responses.');
+      expect(text).toContain('/memory forget --apply terse');
+    });
+
+    it('forgets matching managed memory entries after --apply confirmation', async () => {
+      mockSelectManagedAutoMemoryForgetCandidates.mockResolvedValue({
+        strategy: 'heuristic',
+        matches: [{ topic: 'user', summary: 'User prefers terse responses.' }],
+      });
+      mockForgetManagedAutoMemoryMatches.mockResolvedValue({
+        query: '',
         removedEntries: [{ topic: 'user', summary: 'User prefers terse responses.' }],
         touchedTopics: ['user'],
         systemMessage: 'Managed auto-memory forgot 1 entry from user.md',
       });
 
-      await forgetCommand.action?.(mockContext, 'terse');
+      await forgetCommand.action?.(mockContext, '--apply terse');
 
-      expect(mockForgetManagedAutoMemoryEntries).toHaveBeenCalledWith(
+      expect(mockForgetManagedAutoMemoryMatches).toHaveBeenCalledWith(
         '/test/project',
-        'terse',
+        [{ topic: 'user', summary: 'User prefers terse responses.' }],
       );
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {

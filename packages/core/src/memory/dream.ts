@@ -6,6 +6,12 @@
 
 import * as fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
+import {
+  getAutoMemoryBodyHeading,
+  mergeAutoMemoryEntry,
+  parseAutoMemoryEntries,
+  renderAutoMemoryBody,
+} from './entries.js';
 import { getAutoMemoryMetadataPath, getAutoMemoryTopicPath } from './paths.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
@@ -23,15 +29,9 @@ export interface AutoMemoryDreamResult {
   systemMessage?: string;
 }
 
-function normalizeBullet(line: string): string {
-  return line.replace(/^[-*]\s+/, '').replace(/\s+/g, ' ').trim();
-}
-
 function countDuplicateBullets(body: string): number {
-  const bullets = body
-    .split('\n')
-    .filter((line) => /^[-*]\s+/.test(line.trim()))
-    .map(normalizeBullet)
+  const bullets = parseAutoMemoryEntries(body)
+    .map((entry) => entry.summary)
     .filter((line) => line.length > 0);
 
   return Math.max(
@@ -41,27 +41,22 @@ function countDuplicateBullets(body: string): number {
 }
 
 function buildDreamedBody(body: string): { body: string; dedupedEntries: number } {
-  const lines = body
-    .split('\n')
-    .map((line) => line.trimEnd())
-    .filter((line) => line.length > 0);
-
-  const heading = lines.find((line) => line.startsWith('# ')) ?? '# Memory';
-  const bullets = lines
-    .filter((line) => /^[-*]\s+/.test(line))
-    .map(normalizeBullet)
-    .filter((line) => line.length > 0);
-
-  const uniqueBullets = Array.from(
-    new Map(bullets.map((line) => [line.toLowerCase(), line])).values(),
-  ).sort((a, b) => a.localeCompare(b));
+  const heading = getAutoMemoryBodyHeading(body);
+  const entries = parseAutoMemoryEntries(body);
+  const mergedEntries = Array.from(
+    entries.reduce((map, entry) => {
+      const key = entry.summary.toLowerCase();
+      const current = map.get(key);
+      map.set(key, current ? mergeAutoMemoryEntry(current, entry) : entry);
+      return map;
+    }, new Map<string, ReturnType<typeof parseAutoMemoryEntries>[number]>()),
+  )
+    .map(([, entry]) => entry)
+    .sort((a, b) => a.summary.localeCompare(b.summary));
 
   return {
-    body:
-      uniqueBullets.length > 0
-        ? [heading, '', ...uniqueBullets.map((line) => `- ${line}`)].join('\n')
-        : [heading, '', '_No entries yet._'].join('\n'),
-    dedupedEntries: Math.max(0, bullets.length - uniqueBullets.length),
+    body: renderAutoMemoryBody(heading, mergedEntries),
+    dedupedEntries: Math.max(0, entries.length - mergedEntries.length),
   };
 }
 

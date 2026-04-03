@@ -49,6 +49,16 @@ const EXTRACTION_AGENT_RESPONSE_SCHEMA: Record<string, unknown> = {
           summary: {
             type: 'string',
           },
+          why: {
+            type: 'string',
+          },
+          howToApply: {
+            type: 'string',
+          },
+          stability: {
+            type: 'string',
+            enum: ['stable', 'working'],
+          },
           sourceOffset: {
             type: 'integer',
           },
@@ -146,6 +156,9 @@ function validateExtractionAgentResponse(
   return parsed.patches.map((patch) => ({
     topic: patch.topic as AutoMemoryType,
     summary: patch.summary.trim(),
+    why: patch.why?.trim(),
+    howToApply: patch.howToApply?.trim(),
+    stability: patch.stability,
     sourceOffset: patch.sourceOffset,
   }));
 }

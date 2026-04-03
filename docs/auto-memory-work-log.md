@@ -62,6 +62,107 @@ Completed
 
 ---
 
+## Part 18 - Extraction runtime lifecycle and task timelines
+
+### Start review
+
+- Overall parity work now focuses on the remaining Claude-aligned execution details rather than the basic memory backbone.
+- Previous parts already delivered model-driven recall/extract/dream and governance entrypoints, but extraction still lacked a fuller background lifecycle and the CLI only exposed limited task visibility.
+- Scope for this part: move extraction onto a tracked runtime with trailing semantics and surface richer extraction/dream task state through `/memory status` and `/memory tasks`.
+
+### Goal
+
+- Add a managed extraction runtime with queued trailing execution and drain support
+- Skip extraction when the same turn already used `save_memory`
+- Track extraction tasks alongside dream tasks in managed-memory status
+- Expand CLI task views with extraction/dream timelines and metadata summaries
+
+### Implemented
+
+- Added `packages/core/src/memory/extractScheduler.ts`
+- Added `packages/core/src/memory/extractScheduler.test.ts`
+- Updated `packages/core/src/memory/extract.ts` to delegate scheduling to the extraction runtime
+- Updated `packages/core/src/memory/status.ts` to expose `extractionTasks`
+- Updated `packages/cli/src/ui/commands/memoryCommand.ts` with dual-lane task summaries and timelines
+- Updated `packages/cli/src/ui/commands/memoryCommand.test.ts` with extraction timeline coverage
+
+### Functional verification
+
+- Managed extraction now supports trailing queued execution instead of only returning a coarse already-running skip.
+- The runtime detects `save_memory` activity in the same slice and skips redundant extraction safely.
+- `/memory status` and `/memory tasks` now show extraction and dream task counts, timelines, progress text, and key metadata such as trailing state and touched topics.
+
+### Test verification
+
+- Passed targeted tests:
+  - `cd packages/core && npx vitest run src/memory/extractScheduler.test.ts src/memory/extract.test.ts src/memory/status.test.ts src/core/client.test.ts`
+  - `cd packages/cli && npx vitest run src/ui/commands/memoryCommand.test.ts`
+
+### Notes
+
+- This part keeps extraction writes host-side; the new runtime improves lifecycle semantics and observability without changing the underlying patch-application ownership.
+
+### Status
+
+Completed
+
+---
+
+## Part 19 - Governance review, preview-first forget, and richer schema
+
+### Start review
+
+- After closing extraction lifecycle and task visibility, the remaining non-team/private parity work concentrated on governance maturity.
+- The system still needed structured durable entries, deeper governance suggestions, and a safer preview-first forget workflow.
+- Scope for this part: add richer durable-entry schema, model-assisted forget candidate selection, and governance review suggestions end to end.
+
+### Goal
+
+- Add a structured durable-entry representation with `why`, `howToApply`, and `stability`
+- Preserve that schema across extraction, dream, indexing, and forget flows
+- Add governance review suggestions with heuristic/model paths
+- Upgrade `/forget` and `/memory forget` to preview-first candidate selection with `--apply`
+
+### Implemented
+
+- Added `packages/core/src/memory/entries.ts`
+- Added `packages/core/src/memory/entries.test.ts`
+- Added `packages/core/src/memory/governance.ts`
+- Added `packages/core/src/memory/governance.test.ts`
+- Updated `packages/core/src/memory/extract.ts`, `dream.ts`, `indexer.ts`, `forget.ts`, `extractionPlanner.ts`, and `extractionAgentPlanner.ts` to use structured durable entries
+- Updated `packages/cli/src/ui/commands/memoryCommand.ts` with `/memory review` and preview-first `/memory forget`
+- Updated `packages/cli/src/ui/commands/forgetCommand.ts` with preview-first `/forget`
+- Updated CLI/core tests for richer schema, governance review, and preview/apply forget flows
+- Removed the previously started auto-memory feature-flag wiring after confirming that feature flags are not part of Qwen Code's target scope
+
+### Functional verification
+
+- Durable managed-memory entries can now carry `why`, `howToApply`, and `stability`, and those fields survive extraction, dedupe, indexing, inspection, and deletion.
+- Governance review can now surface duplicate, conflict, outdated, promote, migrate, and forget suggestions for manual inspection.
+- `/forget` and `/memory forget` now preview selected removal candidates first, then require `--apply` for the actual mutation path.
+
+### Test verification
+
+- Passed targeted tests:
+  - `cd packages/core && npx vitest run src/memory/entries.test.ts src/memory/extractScheduler.test.ts src/memory/extract.test.ts src/memory/dream.test.ts src/memory/forget.test.ts src/memory/governance.test.ts src/memory/status.test.ts src/core/client.test.ts`
+  - `cd packages/core && npx vitest run src/memory/extractionPlanner.test.ts src/memory/extractionAgentPlanner.test.ts src/memory/extractAgent.test.ts src/memory/extractModel.test.ts src/memory/indexer.test.ts src/memory/dreamScheduler.test.ts`
+  - `cd packages/cli && npx vitest run src/ui/commands/forgetCommand.test.ts src/ui/commands/memoryCommand.test.ts src/services/BuiltinCommandLoader.test.ts`
+- Passed build / typecheck verification:
+  - `npm run typecheck --workspace=packages/core`
+  - `npm run build --workspace=packages/core`
+  - `npm run typecheck --workspace=packages/cli`
+
+### Notes
+
+- Feature flags were explicitly removed from scope during this stage and are therefore not part of the delivered parity set.
+- The only major Claude-side item still intentionally out of scope is team/private multi-scope memory.
+
+### Status
+
+Completed
+
+---
+
 ## Part 13 - Dream agent consumer stage A
 
 ### Start review

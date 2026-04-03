@@ -72,6 +72,44 @@ describe('managed auto-memory dream', () => {
     expect(index.match(/User prefers terse responses\./g)).toHaveLength(1);
   });
 
+  it('preserves richer schema metadata when deduplicating entries', async () => {
+    await fs.writeFile(
+      getAutoMemoryTopicPath(projectRoot, 'user'),
+      [
+        '---',
+        'type: user',
+        'title: User Memory',
+        'description: User profile',
+        '---',
+        '',
+        '# User Memory',
+        '',
+        '- User prefers terse responses.',
+        '  - Why: They repeatedly ask for concise replies.',
+        '- User prefers terse responses.',
+        '  - Stability: stable',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const contentBefore = await fs.readFile(
+      getAutoMemoryTopicPath(projectRoot, 'user'),
+      'utf-8',
+    );
+    expect(contentBefore).toContain('Stability: stable');
+
+    await runManagedAutoMemoryDream(projectRoot);
+
+    const content = await fs.readFile(
+      getAutoMemoryTopicPath(projectRoot, 'user'),
+      'utf-8',
+    );
+
+    expect(content.match(/User prefers terse responses\./g)).toHaveLength(1);
+    expect(content).toContain('  - Why: They repeatedly ask for concise replies.');
+    expect(content).toContain('  - Stability: stable');
+  });
+
   it('restores the empty placeholder when no bullet entries remain', async () => {
     await fs.writeFile(
       getAutoMemoryTopicPath(projectRoot, 'project'),

@@ -8,12 +8,14 @@ import {
   AUTO_MEMORY_TYPES,
   getErrorMessage,
   getManagedAutoMemoryStatus,
-  forgetManagedAutoMemoryEntries,
+  forgetManagedAutoMemoryMatches,
   getAutoMemoryTopicPath,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
   QWEN_DIR,
+  reviewManagedAutoMemoryGovernance,
   scheduleAutoMemoryExtract,
+  selectManagedAutoMemoryForgetCandidates,
 } from '@qwen-code/qwen-code-core';
 import path from 'node:path';
 import os from 'node:os';
@@ -22,6 +24,128 @@ import { MessageType } from '../types.js';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+
+interface TaskLike {
+  id: string;
+  status: string;
+  updatedAt: string;
+  progressText?: string;
+  metadata?: Record<string, unknown>;
+}
+
+function summarizeTaskMetadata(task: TaskLike): string {
+  const metadata = task.metadata ?? {};
+  const parts: string[] = [];
+
+  if (Array.isArray(metadata['touchedTopics']) && metadata['touchedTopics'].length > 0) {
+    parts.push(`topics=${(metadata['touchedTopics'] as string[]).join(',')}`);
+  }
+  if (typeof metadata['patchCount'] === 'number') {
+    parts.push(`patches=${String(metadata['patchCount'])}`);
+  }
+  if (typeof metadata['dedupedEntries'] === 'number') {
+    parts.push(`deduped=${String(metadata['dedupedEntries'])}`);
+  }
+  if (typeof metadata['queuedBehindTaskId'] === 'string') {
+    parts.push(`behind=${metadata['queuedBehindTaskId']}`);
+  }
+  if (typeof metadata['skippedReason'] === 'string') {
+    parts.push(`skip=${metadata['skippedReason']}`);
+  }
+  if (metadata['trailing'] === true) {
+    parts.push('trailing=yes');
+  }
+  if (typeof metadata['historyLength'] === 'number') {
+    parts.push(`history=${String(metadata['historyLength'])}`);
+  }
+  if (typeof metadata['roundCount'] === 'number') {
+    parts.push(`rounds=${String(metadata['roundCount'])}`);
+  }
+  if (typeof metadata['filesTouched'] === 'number') {
+    parts.push(`files=${String(metadata['filesTouched'])}`);
+  }
+
+  return parts.join(' | ');
+}
+
+function countActiveTasks(tasks: TaskLike[]): number {
+  return tasks.filter(
+    (task) => task.status === 'pending' || task.status === 'running',
+  ).length;
+}
+
+function buildTaskTimeline(label: string, tasks: TaskLike[]): string[] {
+  if (tasks.length === 0) {
+    return [`${label}: none`];
+  }
+
+  return [
+    `${label}:`,
+    ...tasks.map((task) => {
+      const metadataSummary = summarizeTaskMetadata(task);
+      return `- ${task.id}: ${task.status} | updated=${task.updatedAt}${task.progressText ? ` | ${task.progressText}` : ''}${metadataSummary ? ` | ${metadataSummary}` : ''}`;
+    }),
+  ];
+}
+
+async function buildManagedMemoryReview(
+  projectRoot: string,
+  config?: {
+    getBaseLlmClient?: () => unknown;
+  },
+): Promise<string> {
+  const review = await reviewManagedAutoMemoryGovernance(projectRoot, {
+    config: config as never,
+  });
+
+  if (review.suggestions.length === 0) {
+    return t('Managed auto-memory governance review found no strong suggestions.');
+  }
+
+  return [
+    t('Managed auto-memory governance review (strategy={{strategy}}):', {
+      strategy: review.strategy,
+    }),
+    ...review.suggestions.map((suggestion, index) => {
+      const related = suggestion.relatedSummary
+        ? ` | related=${suggestion.relatedTopic}:${suggestion.relatedSummary}`
+        : '';
+      const target = suggestion.suggestedTargetTopic
+        ? ` | target=${suggestion.suggestedTargetTopic}`
+        : '';
+      return `${index + 1}. [${suggestion.type}] ${suggestion.topic}: ${suggestion.summary}${related}${target} | ${suggestion.rationale}`;
+    }),
+  ].join('\n');
+}
+
+async function buildForgetPreview(
+  projectRoot: string,
+  query: string,
+  applyCommand: string,
+  config?: {
+    getBaseLlmClient?: () => unknown;
+  },
+): Promise<string> {
+  const selection = await selectManagedAutoMemoryForgetCandidates(
+    projectRoot,
+    query,
+    { config: config as never },
+  );
+
+  if (selection.matches.length === 0) {
+    return t('No managed auto-memory entries matched: {{query}}', { query });
+  }
+
+  return [
+    t('Forget preview (strategy={{strategy}}):', { strategy: selection.strategy }),
+    ...(selection.reasoning ? [selection.reasoning] : []),
+    ...selection.matches.map(
+      (match, index) => `${index + 1}. ${match.topic}: ${match.summary}`,
+    ),
+    '',
+    t('Run {{command}} to apply these removals.', { command: applyCommand }),
+  ].join('\n');
+}
 
 async function buildManagedMemoryStatus(projectRoot: string): Promise<string> {
   const status = await getManagedAutoMemoryStatus(projectRoot);
@@ -54,14 +178,22 @@ async function buildManagedMemoryStatus(projectRoot: string): Promise<string> {
       last: status.metadata?.lastDreamAt || 'n/a',
       status: status.metadata?.lastDreamStatus || 'n/a',
       touched: status.metadata?.lastDreamTouchedTopics?.join(', ') || 'none',
-      activeTasks: String(
-        status.dreamTasks.filter(
-          (task: { status: string }) =>
-            task.status === 'pending' || task.status === 'running',
-        ).length,
-      ),
+      activeTasks: String(countActiveTasks(status.dreamTasks)),
     },
   );
+
+  const extractionTaskSummary = t(
+    'Extraction tasks: active={{active}}, tracked={{tracked}}',
+    {
+      active: String(countActiveTasks(status.extractionTasks)),
+      tracked: String(status.extractionTasks.length),
+    },
+  );
+
+  const dreamTaskSummary = t('Dream tasks: active={{active}}, tracked={{tracked}}', {
+    active: String(countActiveTasks(status.dreamTasks)),
+    tracked: String(status.dreamTasks.length),
+  });
 
   const topicSummaries = status.topics.map(
     (topic: { topic: string; entryCount: number; hooks: string[] }) =>
@@ -72,7 +204,9 @@ async function buildManagedMemoryStatus(projectRoot: string): Promise<string> {
     t('Managed auto-memory root: {{root}}', { root: status.root }),
     cursorSummary,
     extractionSummary,
+    extractionTaskSummary,
     dreamSummary,
+    dreamTaskSummary,
     t('Managed auto-memory topics:'),
     ...topicSummaries,
   ].join('\n');
@@ -82,19 +216,14 @@ async function buildManagedMemoryTasks(projectRoot: string): Promise<string> {
   const status = await getManagedAutoMemoryStatus(projectRoot);
   const lines = [
     t('Managed auto-memory background tasks:'),
-    `- extraction: ${status.extractionRunning ? 'running' : 'idle'}`,
+    `- extraction lane: ${status.extractionRunning ? 'running' : 'idle'} | active=${countActiveTasks(status.extractionTasks)} | tracked=${status.extractionTasks.length}`,
+    `- dream lane: active=${countActiveTasks(status.dreamTasks)} | tracked=${status.dreamTasks.length}`,
+    '',
   ];
 
-  if (status.dreamTasks.length === 0) {
-    lines.push('- dream: no tracked tasks');
-    return lines.join('\n');
-  }
-
-  for (const task of status.dreamTasks) {
-    lines.push(
-      `- dream ${task.id}: ${task.status} | updated=${task.updatedAt}${task.progressText ? ` | ${task.progressText}` : ''}`,
-    );
-  }
+  lines.push(...buildTaskTimeline('Extraction timeline', status.extractionTasks));
+  lines.push('');
+  lines.push(...buildTaskTimeline('Dream timeline', status.dreamTasks));
   return lines.join('\n');
 }
 
@@ -336,6 +465,33 @@ export const memoryCommand: SlashCommand = {
       },
     },
     {
+      name: 'review',
+      get description() {
+        return t('Review managed auto-memory governance suggestions.');
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (context) => {
+        const config = context.services.config;
+        if (!config) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Config not loaded.'),
+          };
+        }
+
+        context.ui.addItem(
+          {
+            type: MessageType.INFO,
+            text: await buildManagedMemoryReview(config.getProjectRoot(), config),
+          },
+          Date.now(),
+        );
+
+        return;
+      },
+    },
+    {
       name: 'extract-now',
       get description() {
         return t('Run managed auto-memory extraction for the current session.');
@@ -397,18 +553,44 @@ export const memoryCommand: SlashCommand = {
           };
         }
 
-        const query = args.trim();
+        const trimmedArgs = args.trim();
+        const apply = trimmedArgs.startsWith('--apply ');
+        const query = apply
+          ? trimmedArgs.slice('--apply '.length).trim()
+          : trimmedArgs;
         if (!query) {
           return {
             type: 'message',
             messageType: 'error',
-            content: t('Usage: /memory forget <memory text to remove>'),
+            content: t('Usage: /memory forget [--apply] <memory text to remove>'),
           };
         }
 
-        const result = await forgetManagedAutoMemoryEntries(
+        if (!apply) {
+          context.ui.addItem(
+            {
+              type: MessageType.INFO,
+              text: await buildForgetPreview(
+                config.getProjectRoot(),
+                query,
+                `/memory forget --apply ${query}`,
+                config,
+              ),
+            },
+            Date.now(),
+          );
+
+          return;
+        }
+
+        const selection = await selectManagedAutoMemoryForgetCandidates(
           config.getProjectRoot(),
           query,
+          { config },
+        );
+        const result = await forgetManagedAutoMemoryMatches(
+          config.getProjectRoot(),
+          selection.matches,
         );
 
         context.ui.addItem(

@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { parseAutoMemoryEntries } from './entries.js';
 import { getAutoMemoryIndexPath, getAutoMemoryMetadataPath } from './paths.js';
 import { scanAutoMemoryTopicDocuments, type ScannedAutoMemoryDocument } from './scan.js';
 import type { AutoMemoryMetadata } from './types.js';
@@ -12,12 +13,9 @@ import type { AutoMemoryMetadata } from './types.js';
 const MAX_TOPIC_HOOKS = 3;
 
 function getBodyBulletLines(body: string): string[] {
-  return body
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => /^[-*]\s+/.test(line))
-    .map((line) => line.replace(/^[-*]\s+/, '').trim())
-    .filter((line) => line.length > 0);
+  return parseAutoMemoryEntries(body)
+    .map((entry) => entry.summary)
+    .filter((summary) => summary.length > 0);
 }
 
 export function countAutoMemoryTopicEntries(body: string): number {

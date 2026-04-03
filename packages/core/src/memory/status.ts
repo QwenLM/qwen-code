@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { getManagedAutoMemoryExtractTaskRegistry } from './extractScheduler.js';
 import { getManagedAutoMemoryDreamTaskRegistry } from './dreamScheduler.js';
 import { buildAutoMemoryTopicHooks, countAutoMemoryTopicEntries } from './indexer.js';
 import {
@@ -40,6 +41,7 @@ export interface ManagedAutoMemoryStatus {
   metadata?: AutoMemoryMetadata;
   extractionRunning: boolean;
   topics: ManagedAutoMemoryTopicStatus[];
+  extractionTasks: BackgroundTaskState[];
   dreamTasks: BackgroundTaskState[];
 }
 
@@ -105,6 +107,9 @@ export async function getManagedAutoMemoryStatus(
     metadata,
     extractionRunning: isExtractRunning(projectRoot),
     topics,
+    extractionTasks: getManagedAutoMemoryExtractTaskRegistry()
+      .list(projectRoot)
+      .slice(0, 8),
     dreamTasks: getManagedAutoMemoryDreamTaskRegistry().list(projectRoot).slice(0, 5),
   };
 }

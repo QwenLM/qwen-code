@@ -11,20 +11,23 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { partToString } from '../utils/partUtils.js';
 import { getAutoMemoryExtractCursorPath, getAutoMemoryMetadataPath, getAutoMemoryTopicPath } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
+import {
+  getAutoMemoryBodyHeading,
+  mergeAutoMemoryEntry,
+  parseAutoMemoryEntries,
+  renderAutoMemoryBody,
+  type ManagedAutoMemoryEntryStability,
+} from './entries.js';
 import { parseAutoMemoryTopicDocument } from './scan.js';
 import { planAutoMemoryExtractionPatchesByAgent } from './extractionAgentPlanner.js';
 import { planAutoMemoryExtractionPatchesByModel } from './extractionPlanner.js';
+import { scheduleManagedAutoMemoryExtract } from './extractScheduler.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
 import {
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
   type AutoMemoryType,
 } from './types.js';
-import {
-  clearExtractRunning,
-  isExtractRunning,
-  markExtractRunning,
-} from './state.js';
 
 const MIN_CANDIDATE_LENGTH = 12;
 const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACT');
@@ -38,13 +41,16 @@ export interface AutoMemoryTranscriptMessage {
 export interface AutoMemoryExtractPatch {
   topic: AutoMemoryType;
   summary: string;
+  why?: string;
+  howToApply?: string;
+  stability?: ManagedAutoMemoryEntryStability;
   sourceOffset: number;
 }
 
 export interface AutoMemoryExtractResult {
   patches: AutoMemoryExtractPatch[];
   touchedTopics: AutoMemoryType[];
-  skippedReason?: 'already_running';
+  skippedReason?: 'already_running' | 'queued' | 'memory_tool';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
 }
@@ -198,6 +204,14 @@ function normalizeExtractPatch(
   return {
     topic: patch.topic,
     summary,
+    why: patch.why ? normalizeSummary(patch.why) : undefined,
+    howToApply: patch.howToApply
+      ? normalizeSummary(patch.howToApply)
+      : undefined,
+    stability:
+      patch.stability === 'stable' || patch.stability === 'working'
+        ? patch.stability
+        : undefined,
     sourceOffset: patch.sourceOffset,
   };
 }
@@ -320,27 +334,51 @@ async function bumpMetadata(
   }
 }
 
-function appendSummaryToTopicContent(content: string, summary: string): string | null {
+function appendPatchToTopicContent(
+  content: string,
+  patch: AutoMemoryExtractPatch,
+): string | null {
   const parsed = parseAutoMemoryTopicDocument('/virtual/topic.md', content);
   if (!parsed) {
     return null;
   }
 
-  const normalizedSummary = summary.toLowerCase();
-  const hasDuplicate = parsed.body
-    .split('\n')
-    .map((line) => line.replace(/^[-*]\s+/, '').trim().toLowerCase())
-    .some((line) => line === normalizedSummary);
+  const heading = getAutoMemoryBodyHeading(parsed.body);
+  const entries = parseAutoMemoryEntries(parsed.body);
+  const normalizedSummary = patch.summary.toLowerCase();
+  const existingIndex = entries.findIndex(
+    (entry) => entry.summary.toLowerCase() === normalizedSummary,
+  );
 
-  if (hasDuplicate) {
-    return null;
+  if (existingIndex >= 0) {
+    const merged = mergeAutoMemoryEntry(entries[existingIndex], {
+      summary: patch.summary,
+      why: patch.why,
+      howToApply: patch.howToApply,
+      stability: patch.stability,
+    });
+    const current = entries[existingIndex];
+    if (
+      current.summary === merged.summary &&
+      current.why === merged.why &&
+      current.howToApply === merged.howToApply &&
+      current.stability === merged.stability
+    ) {
+      return null;
+    }
+
+    entries[existingIndex] = merged;
+    return content.replace(parsed.body, renderAutoMemoryBody(heading, entries));
   }
 
-  const replacement = parsed.body.includes('_No entries yet._')
-    ? `- ${summary}`
-    : `${parsed.body.trimEnd()}\n- ${summary}`;
+  entries.push({
+    summary: patch.summary,
+    why: patch.why,
+    howToApply: patch.howToApply,
+    stability: patch.stability,
+  });
 
-  return content.replace(parsed.body, replacement);
+  return content.replace(parsed.body, renderAutoMemoryBody(heading, entries));
 }
 
 export async function applyExtractedMemoryPatches(
@@ -354,7 +392,7 @@ export async function applyExtractedMemoryPatches(
   for (const patch of patches) {
     const topicPath = getAutoMemoryTopicPath(projectRoot, patch.topic);
     const current = await fs.readFile(topicPath, 'utf-8');
-    const next = appendSummaryToTopicContent(current, patch.summary);
+    const next = appendPatchToTopicContent(current, patch);
     if (!next) {
       continue;
     }
@@ -430,22 +468,5 @@ export async function scheduleAutoMemoryExtract(params: {
   now?: Date;
   config?: Config;
 }): Promise<AutoMemoryExtractResult> {
-  if (isExtractRunning(params.projectRoot)) {
-    return {
-      patches: [],
-      touchedTopics: [],
-      skippedReason: 'already_running',
-      cursor: {
-        sessionId: params.sessionId,
-        updatedAt: (params.now ?? new Date()).toISOString(),
-      },
-    };
-  }
-
-  markExtractRunning(params.projectRoot);
-  try {
-    return await runAutoMemoryExtract(params);
-  } finally {
-    clearExtractRunning(params.projectRoot);
-  }
+  return scheduleManagedAutoMemoryExtract(params);
 }
