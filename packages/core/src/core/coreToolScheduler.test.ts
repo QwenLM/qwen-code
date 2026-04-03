@@ -3232,6 +3232,11 @@ describe('Fire hook functions integration', () => {
         executionLog.indexOf('read:end:2'),
         executionLog.indexOf('agent:end:B'),
       );
+      // Ensure all entries exist before comparing ordering
+      for (const start of allStarts) {
+        expect(start).not.toBe(-1);
+      }
+      expect(firstEnd).not.toBe(-1);
       for (const start of allStarts) {
         expect(start).toBeLessThan(firstEnd);
       }
@@ -3330,6 +3335,9 @@ describe('Fire hook functions integration', () => {
         executionLog.indexOf('read:end:1'),
         executionLog.indexOf('read:end:2'),
       );
+      expect(read1Start).not.toBe(-1);
+      expect(read2Start).not.toBe(-1);
+      expect(firstReadEnd).not.toBe(-1);
       expect(read1Start).toBeLessThan(firstReadEnd);
       expect(read2Start).toBeLessThan(firstReadEnd);
 
@@ -3339,11 +3347,14 @@ describe('Fire hook functions integration', () => {
         executionLog.indexOf('read:end:2'),
       );
       const editStart = executionLog.indexOf('edit:start:E');
+      expect(editStart).not.toBe(-1);
       expect(editStart).toBeGreaterThan(lastReadEnd);
 
       // Batch 3: Read₃ starts after Edit completes
       const editEnd = executionLog.indexOf('edit:end:E');
       const read3Start = executionLog.indexOf('read:start:3');
+      expect(editEnd).not.toBe(-1);
+      expect(read3Start).not.toBe(-1);
       expect(read3Start).toBeGreaterThan(editEnd);
     });
 
@@ -3413,6 +3424,9 @@ describe('Fire hook functions integration', () => {
         executionLog.indexOf('shell:end:git log'),
         executionLog.indexOf('shell:end:ls'),
       );
+      expect(gitStart).not.toBe(-1);
+      expect(lsStart).not.toBe(-1);
+      expect(firstReadOnlyEnd).not.toBe(-1);
       expect(gitStart).toBeLessThan(firstReadOnlyEnd);
       expect(lsStart).toBeLessThan(firstReadOnlyEnd);
 
@@ -3422,6 +3436,7 @@ describe('Fire hook functions integration', () => {
         executionLog.indexOf('shell:end:ls'),
       );
       const npmStart = executionLog.indexOf('shell:start:npm install');
+      expect(npmStart).not.toBe(-1);
       expect(npmStart).toBeGreaterThan(lastReadOnlyEnd);
     });
   });
