@@ -176,8 +176,10 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PermissionRequest);
     });
 
-    it('should have 12 events', () => {
-      expect(DISPLAY_HOOK_EVENTS).toHaveLength(15);
+    it('should match HookEventName count', () => {
+      expect(DISPLAY_HOOK_EVENTS).toHaveLength(
+        Object.values(HookEventName).length,
+      );
     });
   });
 

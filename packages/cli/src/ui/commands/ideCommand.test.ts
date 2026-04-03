@@ -14,7 +14,6 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original = await importOriginal<typeof core>();
   return {
     ...original,
-    getIdeInstaller: vi.fn(original.getIdeInstaller),
     IdeClient: {
       getInstance: vi.fn(),
     },
