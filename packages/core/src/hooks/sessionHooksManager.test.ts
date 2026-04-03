@@ -611,4 +611,84 @@ describe('SessionHooksManager', () => {
       expect(hooks[1].skillRoot).toBe('/skill-b');
     });
   });
+
+  describe('getAllSessionHooks', () => {
+    it('should return empty array for non-existent session', () => {
+      const hooks = manager.getAllSessionHooks('non-existent-session');
+      expect(hooks).toEqual([]);
+    });
+
+    it('should return all hooks across all events', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash',
+        callback,
+        'Error',
+      );
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PostToolUse,
+        'Write',
+        callback,
+        'Error',
+      );
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.Stop,
+        '',
+        callback,
+        'Error',
+      );
+
+      const hooks = manager.getAllSessionHooks('session-1');
+
+      expect(hooks).toHaveLength(3);
+      expect(hooks.map((h) => h.eventName).sort()).toEqual([
+        HookEventName.PostToolUse,
+        HookEventName.PreToolUse,
+        HookEventName.Stop,
+      ]);
+    });
+
+    it('should include session hooks with skillRoot', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash',
+        callback,
+        'Error',
+        { skillRoot: '/my-skill' },
+      );
+
+      const hooks = manager.getAllSessionHooks('session-1');
+
+      expect(hooks).toHaveLength(1);
+      expect(hooks[0].skillRoot).toBe('/my-skill');
+    });
+
+    it('should return copy of hooks array', () => {
+      const callback = vi.fn().mockResolvedValue({ continue: true });
+
+      manager.addFunctionHook(
+        'session-1',
+        HookEventName.PreToolUse,
+        'Bash',
+        callback,
+        'Error',
+      );
+
+      const hooks1 = manager.getAllSessionHooks('session-1');
+      const hooks2 = manager.getAllSessionHooks('session-1');
+
+      expect(hooks1).not.toBe(hooks2); // Different array references
+      expect(hooks1).toEqual(hooks2); // Same content
+    });
+  });
 });

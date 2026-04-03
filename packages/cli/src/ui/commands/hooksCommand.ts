@@ -12,7 +12,10 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import type { HookRegistryEntry } from '@qwen-code/qwen-code-core';
+import type {
+  HookRegistryEntry,
+  SessionHookEntry,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Format hook source for display
@@ -27,16 +30,11 @@ function formatHookSource(source: string): string {
       return t('System');
     case 'extensions':
       return t('Extension');
+    case 'session':
+      return t('Session (temporary)');
     default:
       return source;
   }
-}
-
-/**
- * Format hook status for display
- */
-function formatHookStatus(enabled: boolean): string {
-  return enabled ? t('✓ Enabled') : t('✗ Disabled');
 }
 
 const listCommand: SlashCommand = {
@@ -70,46 +68,105 @@ const listCommand: SlashCommand = {
     }
 
     const registry = hookSystem.getRegistry();
-    const allHooks = registry.getAllHooks();
+    const configHooks = registry.getAllHooks();
 
-    if (allHooks.length === 0) {
+    // Get session hooks
+    const sessionId = config.getSessionId();
+    const sessionHooksManager = hookSystem.getSessionHooksManager();
+    const sessionHooks = sessionId
+      ? sessionHooksManager.getAllSessionHooks(sessionId)
+      : [];
+
+    const totalHooks = configHooks.length + sessionHooks.length;
+
+    if (totalHooks === 0) {
       return {
         type: 'message',
         messageType: 'info',
         content: t(
-          'No hooks configured. Add hooks in your settings.json file.',
+          'No hooks configured. Add hooks in your settings.json file or invoke a skill with hooks.',
         ),
       };
     }
 
     // Group hooks by event
-    const hooksByEvent = new Map<string, HookRegistryEntry[]>();
-    for (const hook of allHooks) {
+    const hooksByEvent = new Map<
+      string,
+      Array<{ hook: HookRegistryEntry | SessionHookEntry; isSession: boolean }>
+    >();
+
+    // Add config hooks
+    for (const hook of configHooks) {
       const eventName = hook.eventName;
       if (!hooksByEvent.has(eventName)) {
         hooksByEvent.set(eventName, []);
       }
-      hooksByEvent.get(eventName)!.push(hook);
+      hooksByEvent.get(eventName)!.push({ hook, isSession: false });
     }
 
-    let output = `**Configured Hooks (${allHooks.length} total)**\n\n`;
+    // Add session hooks
+    for (const hook of sessionHooks) {
+      const eventName = hook.eventName;
+      if (!hooksByEvent.has(eventName)) {
+        hooksByEvent.set(eventName, []);
+      }
+      hooksByEvent.get(eventName)!.push({ hook, isSession: true });
+    }
+
+    let output = `**Configured Hooks (${totalHooks} total)**\n\n`;
 
     for (const [eventName, hooks] of hooksByEvent) {
       output += `### ${eventName}\n`;
-      for (const hook of hooks) {
-        const name =
-          hook.config.name ||
-          (hook.config.type === 'command'
-            ? (hook.config as { command?: string }).command
-            : undefined) ||
-          (hook.config.type === 'http'
-            ? (hook.config as { url?: string }).url
-            : undefined) ||
-          'unnamed';
-        const source = formatHookSource(hook.source);
-        const status = formatHookStatus(hook.enabled);
-        const matcher = hook.matcher ? ` (matcher: ${hook.matcher})` : '';
-        output += `- **${name}** [${source}] ${status}${matcher}\n`;
+      for (const { hook, isSession } of hooks) {
+        let name: string;
+        let source: string;
+        let matcher: string;
+        let config: {
+          type: string;
+          command?: string;
+          url?: string;
+          name?: string;
+        };
+
+        if (isSession) {
+          // Session hook
+          const sessionHook = hook as SessionHookEntry;
+          config = sessionHook.config as {
+            type: string;
+            command?: string;
+            url?: string;
+            name?: string;
+          };
+          name =
+            config.name ||
+            (config.type === 'command' ? config.command : undefined) ||
+            (config.type === 'http' ? config.url : undefined) ||
+            'unnamed';
+          source = formatHookSource('session');
+          matcher = sessionHook.matcher
+            ? ` (matcher: ${sessionHook.matcher})`
+            : '';
+        } else {
+          // Config hook
+          const configHook = hook as HookRegistryEntry;
+          config = configHook.config as {
+            type: string;
+            command?: string;
+            url?: string;
+            name?: string;
+          };
+          name =
+            config.name ||
+            (config.type === 'command' ? config.command : undefined) ||
+            (config.type === 'http' ? config.url : undefined) ||
+            'unnamed';
+          source = formatHookSource(configHook.source);
+          matcher = configHook.matcher
+            ? ` (matcher: ${configHook.matcher})`
+            : '';
+        }
+
+        output += `- **${name}** [${source}]${matcher}\n`;
       }
       output += '\n';
     }

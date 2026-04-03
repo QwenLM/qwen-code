@@ -5,6 +5,7 @@
  */
 
 import { isIP } from 'net';
+import * as dns from 'dns';
 
 /**
  * SSRF guard for HTTP hooks.
@@ -233,46 +234,40 @@ export function ssrfGuardedLookup(
   }
 
   // Resolve DNS and validate all returned IPs.
-  import('dns')
-    .then(({ promises: dnsPromises }) => {
-      dnsPromises
-        .lookup(hostname, { all: true })
-        .then((addresses) => {
-          for (const { address } of addresses) {
-            if (isBlockedAddress(address)) {
-              callback(ssrfError(hostname, address), '');
-              return;
-            }
-          }
+  dns.promises
+    .lookup(hostname, { all: true })
+    .then((addresses) => {
+      for (const { address } of addresses) {
+        if (isBlockedAddress(address)) {
+          callback(ssrfError(hostname, address), '');
+          return;
+        }
+      }
 
-          const first = addresses[0];
-          if (!first) {
-            callback(
-              Object.assign(new Error(`ENOTFOUND ${hostname}`), {
-                code: 'ENOTFOUND',
-                hostname,
-              }),
-              '',
-            );
-            return;
-          }
+      const first = addresses[0];
+      if (!first) {
+        callback(
+          Object.assign(new Error(`ENOTFOUND ${hostname}`), {
+            code: 'ENOTFOUND',
+            hostname,
+          }),
+          '',
+        );
+        return;
+      }
 
-          const family = first.family === 6 ? 6 : 4;
-          if (wantsAll) {
-            callback(
-              null,
-              addresses.map((a) => ({
-                address: a.address,
-                family: a.family === 6 ? 6 : 4,
-              })),
-            );
-          } else {
-            callback(null, first.address, family);
-          }
-        })
-        .catch((err) => {
-          callback(err, '');
-        });
+      const family = first.family === 6 ? 6 : 4;
+      if (wantsAll) {
+        callback(
+          null,
+          addresses.map((a) => ({
+            address: a.address,
+            family: a.family === 6 ? 6 : 4,
+          })),
+        );
+      } else {
+        callback(null, first.address, family);
+      }
     })
     .catch((err) => {
       callback(err, '');

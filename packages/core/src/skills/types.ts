@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { HookDefinition, HookEventName } from '../hooks/types.js';
+
 /**
  * Represents the storage level for a skill configuration.
  * - 'project': Stored in `.qwen/skills/` within the project directory
@@ -12,6 +14,14 @@
  * - 'bundled': Built-in skills shipped with qwen-code
  */
 export type SkillLevel = 'project' | 'user' | 'extension' | 'bundled';
+
+/**
+ * Hooks configuration for a skill.
+ * Maps hook event names to hook definitions.
+ */
+export type SkillHooksSettings = Partial<
+  Record<HookEventName, HookDefinition[]>
+>;
 
 /**
  * Core configuration for a skill as stored in SKILL.md files.
@@ -32,6 +42,13 @@ export interface SkillConfig {
   allowedTools?: string[];
 
   /**
+   * Hooks to register when this skill is invoked.
+   * Hooks are registered as session-scoped hooks that persist
+   * for the duration of the session.
+   */
+  hooks?: SkillHooksSettings;
+
+  /**
    * Storage level - determines where the configuration file is stored
    */
   level: SkillLevel;
@@ -40,6 +57,12 @@ export interface SkillConfig {
    * Absolute path to the skill directory containing SKILL.md
    */
   filePath: string;
+
+  /**
+   * Absolute path to the skill root directory (directory containing SKILL.md).
+   * Used to set QWEN_SKILL_ROOT environment variable for skill hooks.
+   */
+  skillRoot?: string;
 
   /**
    * The markdown body content from SKILL.md (after the frontmatter)

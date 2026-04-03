@@ -5,6 +5,7 @@
  */
 
 import { isIPv4, isIPv6 } from 'net';
+import * as dns from 'dns';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('URL_VALIDATOR');
@@ -221,11 +222,8 @@ export class UrlValidator {
     }
 
     try {
-      const dns = await import('dns');
-      const dnsPromises = dns.promises;
-
       // Check IPv4 addresses
-      const ipv4Addresses = await dnsPromises
+      const ipv4Addresses = await dns.promises
         .resolve4(hostname)
         .catch(() => []);
       for (const ip of ipv4Addresses) {
@@ -238,7 +236,7 @@ export class UrlValidator {
       }
 
       // Check IPv6 addresses
-      const ipv6Addresses = await dnsPromises
+      const ipv6Addresses = await dns.promises
         .resolve6(hostname)
         .catch(() => []);
       for (const ip of ipv6Addresses) {

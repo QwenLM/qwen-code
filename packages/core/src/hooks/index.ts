@@ -23,6 +23,10 @@ export { FunctionHookRunner } from './functionHookRunner.js';
 export { SessionHooksManager } from './sessionHooksManager.js';
 export type { SessionHookEntry } from './sessionHooksManager.js';
 export { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
+export {
+  registerSkillHooks,
+  unregisterSkillHooks,
+} from './registerSkillHooks.js';
 
 // Export utilities
 export {

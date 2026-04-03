@@ -12,6 +12,7 @@ import type {
   FunctionHookConfig,
   FunctionHookCallback,
   HookConfig,
+  HookExecutionResult,
 } from './types.js';
 import { HookType } from './types.js';
 
@@ -85,9 +86,7 @@ export class SessionHooksManager {
       name?: string;
       description?: string;
       statusMessage?: string;
-      onHookSuccess?: (
-        result: import('./types.js').HookExecutionResult,
-      ) => void;
+      onHookSuccess?: (result: HookExecutionResult) => void;
       skillRoot?: string;
     },
   ): string {
@@ -138,7 +137,7 @@ export class SessionHooksManager {
     event: HookEventName,
     matcher: string,
     hook: CommandHookConfig | HttpHookConfig,
-    options?: { sequential?: boolean },
+    options?: { sequential?: boolean; skillRoot?: string },
   ): string {
     const hookId = generateHookId();
 
@@ -148,6 +147,7 @@ export class SessionHooksManager {
       matcher,
       config: hook,
       sequential: options?.sequential,
+      skillRoot: options?.skillRoot,
     };
 
     const storage = this.getSessionStorage(sessionId);
@@ -347,5 +347,23 @@ export class SessionHooksManager {
       count += eventHooks.length;
     }
     return count;
+  }
+
+  /**
+   * Get all hooks for a session across all events
+   * @param sessionId Session ID
+   * @returns Array of all session hook entries
+   */
+  getAllSessionHooks(sessionId: string): SessionHookEntry[] {
+    const storage = this.sessions.get(sessionId);
+    if (!storage) {
+      return [];
+    }
+
+    const allHooks: SessionHookEntry[] = [];
+    for (const eventHooks of storage.hooks.values()) {
+      allHooks.push(...eventHooks);
+    }
+    return allHooks;
   }
 }

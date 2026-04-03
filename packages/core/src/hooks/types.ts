@@ -13,6 +13,7 @@ export enum HooksConfigSource {
   User = 'user',
   System = 'system',
   Extensions = 'extensions',
+  Session = 'session',
 }
 
 /**

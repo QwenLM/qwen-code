@@ -59,6 +59,12 @@ vi.mock('../../contexts/ConfigContext.js', async (importOriginal) => {
     useConfig: vi.fn(() => ({
       getExtensions: vi.fn(() => []),
       getDisableAllHooks: vi.fn(() => false),
+      getHookSystem: vi.fn(() => ({
+        getSessionHooksManager: vi.fn(() => ({
+          getAllSessionHooks: vi.fn(() => []),
+        })),
+      })),
+      getSessionId: vi.fn(() => 'test-session-id'),
     })),
   };
 });
