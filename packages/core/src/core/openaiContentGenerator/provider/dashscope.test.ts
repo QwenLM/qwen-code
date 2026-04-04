@@ -786,9 +786,9 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      // Should set conservative default (min of model limit and DEFAULT_OUTPUT_TOKEN_LIMIT)
-      // qwen3-max has 32K output limit, so min(32K, 32K) = 32K
-      expect(result.max_tokens).toBe(32000);
+      // Should set capped default (min of model limit and CAPPED_DEFAULT_MAX_TOKENS)
+      // qwen3-max has 32K output limit, so min(32K, 8K) = 8K
+      expect(result.max_tokens).toBe(8000);
     });
 
     it('should set conservative max_tokens when null is provided', () => {
@@ -800,8 +800,8 @@ describe('DashScopeOpenAICompatibleProvider', () => {
 
       const result = provider.buildRequest(request, 'test-prompt-id');
 
-      // null is treated as not configured, so set conservative default
-      expect(result.max_tokens).toBe(32000);
+      // null is treated as not configured, so set capped default: min(32K, 8K) = 8K
+      expect(result.max_tokens).toBe(8000);
     });
 
     it('should respect user max_tokens for unknown models', () => {
