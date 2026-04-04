@@ -21,6 +21,9 @@ import type {
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 
+/** Per-request config that strips tools so the model never produces function calls. */
+const NO_TOOLS: GenerateContentConfig = Object.freeze({ tools: [] });
+
 /**
  * Snapshot of the main conversation's cache-critical parameters.
  * Captured after each successful main turn so forked queries share the same prefix.
@@ -191,10 +194,10 @@ export async function runForkedQuery(
   const model = options?.model ?? params.model;
   const chat = createForkedChat(config, params);
 
-  // Build per-request config overrides for JSON schema if needed.
-  // Strip tools — forked queries are pure text completion and must never
-  // produce function calls or appear inside tool-call UI elements.
-  const requestConfig: GenerateContentConfig = { tools: [] };
+  // Build per-request config overrides.
+  // NO_TOOLS prevents the model from producing function calls — forked
+  // queries are pure text completion and must not appear in tool-call UI.
+  const requestConfig: GenerateContentConfig = { ...NO_TOOLS };
   if (options?.abortSignal) {
     requestConfig.abortSignal = options.abortSignal;
   }

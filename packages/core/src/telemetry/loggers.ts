@@ -8,6 +8,7 @@ import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
+import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
   EVENT_API_ERROR,
@@ -121,16 +122,8 @@ function getCommonAttributes(config: Config): LogAttributes {
 
 export { getCommonAttributes };
 
-/**
- * Returns true if the prompt_id belongs to an internal background operation
- * (suggestion generation, forked queries) whose events should not be
- * recorded to the chatRecordingService or OpenAI logs.
- *
- * Known internal IDs: `'prompt_suggestion'`, `'forked_query'`.
- */
-export function isInternalPromptId(promptId: string): boolean {
-  return promptId === 'prompt_suggestion' || promptId === 'forked_query';
-}
+// Re-export for consumers that import from this module.
+export { isInternalPromptId } from '../utils/internalPromptIds.js';
 
 export function logStartSession(
   config: Config,

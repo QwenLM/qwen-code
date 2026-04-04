@@ -30,8 +30,8 @@ import {
   logApiError,
   logApiRequest,
   logApiResponse,
-  isInternalPromptId,
 } from '../../telemetry/loggers.js';
+import { isInternalPromptId } from '../../utils/internalPromptIds.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
