@@ -520,4 +520,50 @@ describe('LoggingContentGenerator', () => {
       expect(loggerInstance.logInteraction).not.toHaveBeenCalled();
     },
   );
+
+  it.each(['prompt_suggestion', 'forked_query'])(
+    'skips logApiRequest and OpenAI logging for internal promptId %s (generateContentStream)',
+    async (promptId) => {
+      const mockChunk = {
+        responseId: 'stream-resp',
+        modelVersion: 'test-model',
+        candidates: [{ content: { parts: [{ text: 'suggestion' }] } }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+      } as unknown as GenerateContentResponse;
+
+      async function* fakeStream() {
+        yield mockChunk;
+      }
+
+      const mockWrapped = {
+        generateContent: vi.fn(),
+        generateContentStream: vi.fn().mockResolvedValue(fakeStream()),
+      } as unknown as ContentGenerator;
+
+      const gen = new LoggingContentGenerator(mockWrapped, createConfig(), {
+        model: 'test-model',
+        enableOpenAILogging: true,
+        openAILoggingDir: '/tmp/test-logs',
+      });
+
+      const request = {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+      } as unknown as GenerateContentParameters;
+
+      const stream = await gen.generateContentStream(request, promptId);
+      // Consume the stream
+      for await (const _chunk of stream) {
+        // drain
+      }
+
+      expect(logApiRequest).not.toHaveBeenCalled();
+      expect(logApiResponse).toHaveBeenCalled();
+      expect(OpenAILogger).toHaveBeenCalled();
+      const loggerInstance = (
+        OpenAILogger as unknown as ReturnType<typeof vi.fn>
+      ).mock.results[0]?.value;
+      expect(loggerInstance.logInteraction).not.toHaveBeenCalled();
+    },
+  );
 });

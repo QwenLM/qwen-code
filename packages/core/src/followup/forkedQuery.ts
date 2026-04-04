@@ -218,7 +218,7 @@ export async function runForkedQuery(
     model,
     {
       message: [{ text: userMessage }],
-      config: Object.keys(requestConfig).length > 0 ? requestConfig : undefined,
+      config: requestConfig,
     },
     'forked_query',
   );
