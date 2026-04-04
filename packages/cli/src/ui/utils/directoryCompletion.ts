@@ -177,7 +177,7 @@ export function isPathLikeToken(token: string): boolean {
       (token.startsWith('~\\') ||
         token.startsWith('.\\') ||
         token.startsWith('..\\') ||
-        /^[a-zA-Z]:\\/.test(token)))
+        /^[a-zA-Z]:[/\\]/.test(token)))
   );
 }
 

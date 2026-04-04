@@ -26,6 +26,7 @@ export enum CompletionMode {
 }
 
 export interface UseCommandCompletionReturn {
+  completionMode: CompletionMode;
   suggestions: Suggestion[];
   activeSuggestionIndex: number;
   visibleStartIndex: number;
@@ -279,6 +280,7 @@ export function useCommandCompletion(
   );
 
   return {
+    completionMode,
     suggestions,
     activeSuggestionIndex,
     visibleStartIndex,
