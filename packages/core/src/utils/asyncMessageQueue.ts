@@ -16,7 +16,9 @@
  * A generic non-blocking message queue.
  *
  * - `enqueue(item)` adds an item. Silently dropped after `drain()`.
- * - `dequeue()` returns the next item, or `null` if empty.
+ * - `dequeue()` returns the next item (FIFO), or `null` if empty.
+ * - `popLast()` returns the last item (LIFO), or `null` if empty.
+ *   Useful for retrieving the most recently queued item for editing.
  * - `drain()` signals that no more items will be enqueued.
  */
 export class AsyncMessageQueue<T> {
