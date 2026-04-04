@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { StreamingState } from '../types.js';
 
 export interface UseMessageQueueOptions {
@@ -32,6 +32,9 @@ export function useMessageQueue({
   submitQuery,
 }: UseMessageQueueOptions): UseMessageQueueReturn {
   const [messageQueue, setMessageQueue] = useState<string[]>([]);
+  // Ref keeps queue in sync for atomic popAllMessages (avoids stale closure reads)
+  const queueRef = useRef<string[]>(messageQueue);
+  queueRef.current = messageQueue;
 
   // Add a message to the queue
   const addMessage = useCallback((message: string) => {
@@ -52,13 +55,16 @@ export function useMessageQueue({
     return messageQueue.join('\n\n');
   }, [messageQueue]);
 
-  // Pop all messages from the queue for editing
+  // Pop all messages from the queue for editing (atomic via ref to prevent
+  // duplicate pops from key auto-repeat before React re-renders)
   const popAllMessages = useCallback((): string | null => {
-    if (messageQueue.length === 0) return null;
-    const allText = messageQueue.join('\n');
+    const current = queueRef.current;
+    if (current.length === 0) return null;
+    const allText = current.join('\n');
+    queueRef.current = [];
     setMessageQueue([]);
     return allText;
-  }, [messageQueue]);
+  }, []);
 
   // Process queued messages when streaming becomes idle
   useEffect(() => {
