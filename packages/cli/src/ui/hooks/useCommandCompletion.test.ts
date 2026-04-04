@@ -610,6 +610,59 @@ describe('useCommandCompletion', () => {
   });
 
   describe('PATH mode completion', () => {
+    it('completes a path without trailing space', async () => {
+      // Mock usePathCompletion to actually provide suggestions
+      vi.mocked(usePathCompletion).mockImplementation(
+        ({
+          enabled,
+          setSuggestions,
+          setIsLoadingSuggestions,
+        }: {
+          enabled: boolean;
+          setSuggestions: (s: Suggestion[]) => void;
+          setIsLoadingSuggestions: (l: boolean) => void;
+        }) => {
+          useEffect(() => {
+            if (enabled) {
+              setSuggestions([
+                {
+                  label: './src/',
+                  value: './src/',
+                  description: 'directory',
+                },
+              ]);
+              setIsLoadingSuggestions(false);
+            }
+          }, [enabled, setSuggestions, setIsLoadingSuggestions]);
+        },
+      );
+
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest('./sr');
+        const completion = useCommandCompletion(
+          textBuffer,
+          testDirs,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions).toHaveLength(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      // PATH mode should NOT add a trailing space (unlike AT/SLASH mode)
+      expect(result.current.textBuffer.text).toBe('./src/');
+    });
+
     it('enters PATH mode when typing a path-like token', () => {
       const { result } = renderHook(() =>
         useCommandCompletion(
