@@ -29,6 +29,12 @@ export const ToolNames = {
   CRON_CREATE: 'cron_create',
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
+  TEAM_CREATE: 'team_create',
+  TEAM_DELETE: 'team_delete',
+  SEND_MESSAGE: 'send_message',
+  TASK_CREATE: 'task_create',
+  TASK_UPDATE: 'task_update',
+  TASK_LIST: 'task_list',
 } as const;
 
 /**
@@ -56,6 +62,12 @@ export const ToolDisplayNames = {
   CRON_CREATE: 'CronCreate',
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
+  TEAM_CREATE: 'TeamCreate',
+  TEAM_DELETE: 'TeamDelete',
+  SEND_MESSAGE: 'SendMessage',
+  TASK_CREATE: 'TaskCreate',
+  TASK_UPDATE: 'TaskUpdate',
+  TASK_LIST: 'TaskList',
 } as const;
 
 // Migration from old tool names to new tool names

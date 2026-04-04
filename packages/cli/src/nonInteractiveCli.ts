@@ -20,6 +20,7 @@ import {
   parseAndFormatApiError,
   createDebugLogger,
   SendMessageType,
+  TeamEventType,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -154,11 +155,61 @@ export async function runNonInteractive(
       abortController.abort();
     };
 
+    // ─── Teammate message queue ─────────────────────────
+    // When teammates send messages to the leader, they
+    // accumulate here and are drained into the LLM
+    // conversation between turns.
+    const pendingTeammateMessages: string[] = [];
+    // Track the approval listener so we can remove it in
+    // finally — prevents duplicate handlers across turns in
+    // multi-turn stream-json sessions.
+    let approvalListener:
+      | ((
+          event: import('@qwen-code/qwen-code-core').TeammateApprovalRequestEvent,
+        ) => void)
+      | null = null;
+    let approvalListenerManager:
+      | import('@qwen-code/qwen-code-core').TeamManager
+      | null = null;
+    const onTeamManagerChangeHandler = (
+      manager: import('@qwen-code/qwen-code-core').TeamManager | null,
+    ) => {
+      if (manager) {
+        manager.setLeaderMessageCallback((formatted) => {
+          pendingTeammateMessages.push(formatted);
+        });
+
+        // Route teammate tool approvals through the session's
+        // permission channel (stream-json SDK or local mode).
+        if (options.controlService) {
+          approvalListener = (event) => {
+            void options.controlService!.permission.handleTeammateApproval(
+              event,
+            );
+          };
+          approvalListenerManager = manager;
+          manager
+            .getEventEmitter()
+            .on(TeamEventType.TEAMMATE_APPROVAL_REQUEST, approvalListener);
+        }
+      }
+    };
+
     try {
       process.stdout.on('error', stdoutErrorHandler);
 
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
+
+      config.onTeamManagerChange(onTeamManagerChangeHandler);
+
+      // Handle the case where a manager already exists (e.g.,
+      // a follow-up turn in a stream-json session that created
+      // a team on a previous turn).
+      const existingManager = config.getTeamManager();
+      if (existingManager) {
+        onTeamManagerChangeHandler(existingManager);
+      }
 
       // Emit systemMessage first (always the first message in JSON mode)
       const systemMessage = await buildSystemMessage(
@@ -251,7 +302,31 @@ export async function runNonInteractive(
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
       let isFirstTurn = true;
+      let hasUnsentToolResponse = false;
       while (true) {
+        // Drain pending teammate messages into the conversation.
+        // sendMessageStream only reads currentMessages[0].parts,
+        // so teammate text must be merged into that same parts
+        // array to avoid being silently dropped.
+        // Skip on the first turn to avoid replacing the user's
+        // initial query — early teammate messages will be picked
+        // up on the next iteration.
+        let isTeammateTurn = false;
+        if (!isFirstTurn && pendingTeammateMessages.length > 0) {
+          const batch = pendingTeammateMessages.splice(0);
+          const teammatePart = { text: batch.join('\n\n') };
+          if (hasUnsentToolResponse && currentMessages[0]) {
+            currentMessages[0].parts = [
+              ...(currentMessages[0].parts || []),
+              teammatePart,
+            ];
+          } else {
+            currentMessages = [{ role: 'user', parts: [teammatePart] }];
+            isTeammateTurn = true;
+          }
+        }
+        hasUnsentToolResponse = false;
+
         turnCount++;
         if (
           config.getMaxSessionTurns() >= 0 &&
@@ -260,17 +335,22 @@ export async function runNonInteractive(
           handleMaxTurnsExceededError(config);
         }
 
+        let sendType: SendMessageType;
+        if (isFirstTurn) {
+          sendType = SendMessageType.UserQuery;
+        } else if (isTeammateTurn) {
+          sendType = SendMessageType.Teammate;
+        } else {
+          sendType = SendMessageType.ToolResult;
+        }
+
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
         const responseStream = geminiClient.sendMessageStream(
           currentMessages[0]?.parts || [],
           abortController.signal,
           prompt_id,
-          {
-            type: isFirstTurn
-              ? SendMessageType.UserQuery
-              : SendMessageType.ToolResult,
-          },
+          { type: sendType },
         );
         isFirstTurn = false;
 
@@ -370,8 +450,64 @@ export async function runNonInteractive(
             }
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
+          hasUnsentToolResponse = true;
         } else {
-          // No more tool calls — check if cron jobs are keeping us alive
+          // No more tool calls — check if teammates are active.
+          const teamManager = config.getTeamManager();
+          if (teamManager?.hasActiveTeammates()) {
+            // If all remaining teammates are stalled, abort them,
+            // inject a final status, and let the leader wrap up.
+            if (teamManager.allRemainingStalled()) {
+              teamManager.abortStalledTeammates();
+              const status = teamManager.buildTeamStatusSummary();
+              pendingTeammateMessages.push(status);
+              continue;
+            }
+
+            // Wait for messages or termination. On timeout,
+            // wait again — don't inject status summaries that
+            // cause the leader to poll task_list in a loop.
+            // Only break out when a real message arrives or
+            // all teammates finish.
+            while (
+              teamManager.hasActiveTeammates() &&
+              !abortController.signal.aborted
+            ) {
+              if (pendingTeammateMessages.length > 0) {
+                break;
+              }
+              if (teamManager.allRemainingStalled()) {
+                teamManager.abortStalledTeammates();
+                const status = teamManager.buildTeamStatusSummary();
+                pendingTeammateMessages.push(status);
+                break;
+              }
+              await teamManager.waitForTeammateActivity(
+                undefined,
+                abortController.signal,
+              );
+            }
+
+            // Drain messages and loop back.
+            if (pendingTeammateMessages.length > 0) {
+              continue;
+            }
+            // All terminated with no messages — fall through.
+          }
+
+          // If the session was aborted (e.g. Ctrl+C), stop
+          // immediately instead of falling through to the
+          // success path.
+          if (abortController.signal.aborted) {
+            handleCancellationError(config);
+          }
+
+          // Also drain any final teammate messages.
+          if (pendingTeammateMessages.length > 0) {
+            continue;
+          }
+
+          // Check if cron jobs are keeping us alive
           const scheduler = !config.isCronEnabled()
             ? null
             : config.getCronScheduler();
@@ -552,6 +688,23 @@ export async function runNonInteractive(
       });
       handleError(error, config);
     } finally {
+      // Unsubscribe the leader message callback, but do NOT tear
+      // down the team itself — in stream-json sessions the same
+      // Config is reused across turns, so the team must survive.
+      // Full team cleanup happens via Config.shutdown() /
+      // cleanupTeamRuntime() when the session ends.
+      config.onTeamManagerChange(null, onTeamManagerChangeHandler);
+
+      // Remove the per-turn approval listener from the
+      // persistent TeamManager to avoid duplicates.
+      if (approvalListener && approvalListenerManager) {
+        approvalListenerManager
+          .getEventEmitter()
+          .off(TeamEventType.TEAMMATE_APPROVAL_REQUEST, approvalListener);
+        approvalListener = null;
+        approvalListenerManager = null;
+      }
+
       process.stdout.removeListener('error', stdoutErrorHandler);
       // Cleanup signal handlers
       process.removeListener('SIGINT', shutdownHandler);

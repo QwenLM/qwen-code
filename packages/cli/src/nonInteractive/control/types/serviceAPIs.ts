@@ -13,7 +13,10 @@
  */
 
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import type {
+  MCPServerConfig,
+  TeammateApprovalRequestEvent,
+} from '@qwen-code/qwen-code-core';
 import type { PermissionSuggestion } from '../../types.js';
 
 /**
@@ -46,6 +49,14 @@ export interface PermissionServiceAPI {
    * @returns Callback function that processes tool call updates
    */
   getToolCallUpdateCallback(): (toolCalls: unknown[]) => void;
+
+  /**
+   * Handle a teammate tool approval request.
+   *
+   * Routes the approval through the session's permission channel
+   * (stream-json control request or local approval mode check).
+   */
+  handleTeammateApproval(event: TeammateApprovalRequestEvent): Promise<void>;
 }
 
 /**

@@ -28,6 +28,7 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import { useArenaInProcess } from '../hooks/useArenaInProcess.js';
+import { useTeamInProcess } from '../hooks/useTeamInProcess.js';
 
 // ─── Types ──────────────────────────────────────────────────
 
@@ -297,6 +298,10 @@ export function AgentViewProvider({
   // in its own file for separation of concerns; it's called here so the
   // provider is the single owner of agent tab lifecycle.
   useArenaInProcess(config ?? null, actions);
+
+  // ── Team in-process bridge ──
+  // Same pattern for team mode — teammates appear as agent tabs.
+  useTeamInProcess(config ?? null, actions);
 
   return (
     <AgentViewStateContext.Provider value={state}>

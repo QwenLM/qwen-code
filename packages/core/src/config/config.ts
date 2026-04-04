@@ -23,6 +23,8 @@ import type { ShellExecutionConfig } from '../services/shellExecutionService.js'
 import type { AnyToolInvocation } from '../tools/tools.js';
 import type { ArenaManager } from '../agents/arena/ArenaManager.js';
 import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
+import type { TeamManager } from '../agents/team/TeamManager.js';
+import type { TeamContext } from '../agents/team/types.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -67,6 +69,12 @@ import { LspTool } from '../tools/lsp.js';
 import { CronCreateTool } from '../tools/cron-create.js';
 import { CronListTool } from '../tools/cron-list.js';
 import { CronDeleteTool } from '../tools/cron-delete.js';
+import { TeamCreateTool } from '../tools/team-create.js';
+import { TeamDeleteTool } from '../tools/team-delete.js';
+import { SendMessageTool } from '../tools/send-message.js';
+import { TaskCreateTool } from '../tools/task-create.js';
+import { TaskUpdateTool } from '../tools/task-update.js';
+import { TaskListTool } from '../tools/task-list.js';
 import type { LspClient } from '../lsp/types.js';
 
 // Other modules
@@ -317,6 +325,11 @@ export interface AgentsCollabSettings {
     /** Total timeout in seconds for the Arena session. No limit if unset. */
     timeoutSeconds?: number;
   };
+  /** Team-specific settings */
+  team?: {
+    /** Maximum number of teammates (default: 10). */
+    maxTeammates?: number;
+  };
 }
 
 export interface ConfigParameters {
@@ -373,6 +386,7 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  agentTeamEnabled?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
@@ -564,6 +578,7 @@ export class Config {
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = false;
+  private readonly agentTeamEnabled: boolean = false;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
@@ -588,6 +603,11 @@ export class Config {
     | ((manager: ArenaManager | null) => void)
     | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
+  private teamManager: TeamManager | null = null;
+  private teamManagerChangeCallbacks = new Set<
+    (manager: TeamManager | null) => void
+  >();
+  private teamContext: TeamContext | null = null;
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
@@ -687,6 +707,7 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? false;
+    this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
@@ -1390,6 +1411,7 @@ export class Config {
       }
 
       await this.cleanupArenaRuntime();
+      await this.cleanupTeamRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
@@ -1613,6 +1635,57 @@ export class Config {
     return this.agentsSettings;
   }
 
+  // ─── Team Manager ──────────────────────────────────────────
+
+  getTeamManager(): TeamManager | null {
+    return this.teamManager;
+  }
+
+  setTeamManager(manager: TeamManager | null): void {
+    this.teamManager = manager;
+    for (const cb of this.teamManagerChangeCallbacks) {
+      cb(manager);
+    }
+  }
+
+  /**
+   * Register a callback invoked whenever the team manager changes.
+   * Pass `null` to unsubscribe a previously registered callback.
+   * Multiple subscribers are supported.
+   */
+  onTeamManagerChange(
+    cb: ((manager: TeamManager | null) => void) | null,
+    previous?: (manager: TeamManager | null) => void,
+  ): void {
+    if (previous) {
+      this.teamManagerChangeCallbacks.delete(previous);
+    }
+    if (cb) {
+      this.teamManagerChangeCallbacks.add(cb);
+    }
+  }
+
+  getTeamContext(): TeamContext | null {
+    return this.teamContext;
+  }
+
+  setTeamContext(ctx: TeamContext | null): void {
+    this.teamContext = ctx;
+  }
+
+  /**
+   * Clean up Team runtime — stops all teammates and clears state.
+   */
+  async cleanupTeamRuntime(): Promise<void> {
+    const manager = this.teamManager;
+    if (!manager) {
+      return;
+    }
+    await manager.cleanup();
+    this.setTeamManager(null);
+    this.setTeamContext(null);
+  }
+
   /**
    * Clean up Arena runtime. When `force` is true (e.g., /arena select --discard),
    * always removes worktrees regardless of preserveArtifacts.
@@ -1706,6 +1779,12 @@ export class Config {
     // Cron is experimental and opt-in: enabled via settings or env var
     if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
     return this.cronEnabled;
+  }
+
+  isAgentTeamEnabled(): boolean {
+    // Agent team is experimental and opt-in: enabled via settings or env var
+    if (process.env['QWEN_CODE_ENABLE_AGENT_TEAM'] === '1') return true;
+    return this.agentTeamEnabled;
   }
 
   getEnableRecursiveFileSearch(): boolean {
@@ -2230,6 +2309,16 @@ export class Config {
       await registerCoreTool(CronCreateTool, this);
       await registerCoreTool(CronListTool, this);
       await registerCoreTool(CronDeleteTool, this);
+    }
+
+    // Register team collaboration tools (experimental)
+    if (this.isAgentTeamEnabled()) {
+      await registerCoreTool(TeamCreateTool, this);
+      await registerCoreTool(TeamDeleteTool, this);
+      await registerCoreTool(SendMessageTool, this);
+      await registerCoreTool(TaskCreateTool, this);
+      await registerCoreTool(TaskUpdateTool, this);
+      await registerCoreTool(TaskListTool, this);
     }
 
     if (!options?.skipDiscovery) {

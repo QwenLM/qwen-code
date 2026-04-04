@@ -617,4 +617,53 @@ describe('AgentInteractive', () => {
 
     expect(statuses).toContain(AgentStatus.COMPLETED);
   });
+
+  // ─── completeOnIdle ──────────────────────────────────────────
+
+  it('should transition to COMPLETED instead of IDLE when completeOnIdle is set', async () => {
+    const { core } = createMockCore();
+    const config = createConfig({
+      initialTask: 'do the task',
+      completeOnIdle: true,
+    });
+    const agent = new AgentInteractive(config, core);
+
+    await agent.start(context);
+    await vi.waitFor(() => {
+      expect(agent.getStatus()).toBe('completed');
+    });
+
+    expect(core.runReasoningLoop).toHaveBeenCalledOnce();
+  });
+
+  it('should transition to IDLE without completeOnIdle (default)', async () => {
+    const { core } = createMockCore();
+    const config = createConfig({ initialTask: 'do the task' });
+    const agent = new AgentInteractive(config, core);
+
+    await agent.start(context);
+    await vi.waitFor(() => {
+      expect(agent.getStatus()).toBe('idle');
+    });
+
+    expect(core.runReasoningLoop).toHaveBeenCalledOnce();
+  });
+
+  it('should still set FAILED on error even with completeOnIdle', async () => {
+    const { core } = createMockCore();
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      new Error('API failure'),
+    );
+
+    const config = createConfig({
+      initialTask: 'fail task',
+      completeOnIdle: true,
+    });
+    const agent = new AgentInteractive(config, core);
+
+    await agent.start(context);
+    await vi.waitFor(() => {
+      expect(agent.getStatus()).toBe('failed');
+    });
+  });
 });

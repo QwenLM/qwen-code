@@ -76,6 +76,11 @@ export interface InProcessSpawnConfig {
   agentName: string;
   /** Optional initial task to start working on immediately. */
   initialTask?: string;
+  /**
+   * When true, the agent transitions to COMPLETED instead of IDLE when
+   * its message queue empties. Used for team teammates.
+   */
+  completeOnIdle?: boolean;
   /** Runtime configuration for the AgentCore. */
   runtimeConfig: {
     promptConfig: PromptConfig;
@@ -166,6 +171,13 @@ export interface Backend {
    * @returns true if all agents exited, false if timeout was reached.
    */
   waitForAll(timeoutMs?: number): Promise<boolean>;
+
+  /**
+   * Wait for a specific agent to complete its current run loop.
+   *
+   * @returns true if the agent completed, false if not found or timeout.
+   */
+  waitForAgent(agentId: string, timeoutMs?: number): Promise<boolean>;
 
   // ─── Active Agent & Navigation ──────────────────────────────
 

@@ -390,13 +390,13 @@ describe('InProcessBackend', () => {
     const exitCallback = vi.fn();
     backend.setOnAgentExit(exitCallback);
 
-    // spawnAgent should NOT throw — it catches the error internally
+    // spawnAgent should reject so callers can roll back state.
     await expect(
       backend.spawnAgent(createSpawnConfig('agent-fail')),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow('Auth failed');
 
-    // Exit callback should have been fired with exit code 1
-    expect(exitCallback).toHaveBeenCalledWith('agent-fail', 1, null);
+    // Agent should not remain registered after a failed start.
+    expect(backend.getAgent('agent-fail')).toBeUndefined();
   });
 
   it('should return true immediately from waitForAll after cleanup', async () => {
