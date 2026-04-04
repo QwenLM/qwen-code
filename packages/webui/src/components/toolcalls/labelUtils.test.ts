@@ -71,5 +71,6 @@ describe('getToolDisplayLabel', () => {
     expect(getToolDisplayLabel({ kind: 'exit_plan_mode' })).toBe(
       'ExitPlanMode',
     );
+    expect(getToolDisplayLabel({ kind: 'switch_mode' })).toBe('ExitPlanMode');
   });
 });

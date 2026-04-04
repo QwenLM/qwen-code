@@ -94,6 +94,7 @@ export const getToolDisplayLabel = ({
     case 'memory':
       return 'SaveMemory';
     case 'exit_plan_mode':
+    case 'switch_mode':
       return 'ExitPlanMode';
     case 'task':
       return 'Task';
