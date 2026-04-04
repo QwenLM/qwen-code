@@ -970,7 +970,7 @@ export const AppContainer = (props: AppContainerProps) => {
     useState<boolean>(false);
 
   const [verboseMode, setVerboseMode] = useState<boolean>(
-    settings.merged.ui?.verboseMode ?? false,
+    settings.merged.ui?.verboseMode ?? true,
   );
   const [frozenSnapshot, setFrozenSnapshot] = useState<
     HistoryItemWithoutId[] | null
@@ -1371,7 +1371,9 @@ export const AppContainer = (props: AppContainerProps) => {
         setVerboseMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
         refreshStatic();
-        if (newValue && streamingState !== StreamingState.Idle) {
+        // Symmetric freeze: capture snapshot on ANY toggle during streaming
+        // (not just to verbose) to prevent abrupt content changes.
+        if (streamingState !== StreamingState.Idle) {
           setFrozenSnapshot([...pendingHistoryItems]);
         } else {
           setFrozenSnapshot(null);
@@ -1404,6 +1406,9 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
+      // `settings` is a stable LoadedSettings instance (not recreated on render).
+      // ESLint requires it here because the callback calls settings.setValue().
+      // debugKeystrokeLogging is read at call time, so no stale closure risk.
       settings,
       isAuthenticating,
       verboseMode,

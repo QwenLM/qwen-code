@@ -249,6 +249,7 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   config?: Config;
+  forceShowResult?: boolean;
 }
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
@@ -264,6 +265,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   embeddedShellFocused,
   ptyId,
   config,
+  forceShowResult,
 }) => {
   const settings = useSettings();
   const isThisShellFocused =
@@ -326,9 +328,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
   const { verboseMode } = useVerboseMode();
-  const effectiveDisplayRenderer = verboseMode
-    ? displayRenderer
-    : { type: 'none' as const };
+  const effectiveDisplayRenderer =
+    verboseMode || forceShowResult
+      ? displayRenderer
+      : { type: 'none' as const };
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">

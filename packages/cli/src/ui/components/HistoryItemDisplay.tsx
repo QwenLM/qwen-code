@@ -180,6 +180,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isFocused={isFocused}
           activeShellPtyId={activeShellPtyId}
           embeddedShellFocused={embeddedShellFocused}
+          isUserInitiated={itemForDisplay.isUserInitiated}
         />
       )}
       {itemForDisplay.type === 'compression' && (

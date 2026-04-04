@@ -1990,4 +1990,12 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
   verbose: 'verbose',
+  'Verbose mode on — showing full tool output and thinking':
+    'Verbose mode on — showing full tool output and thinking',
+  'Compact mode on — showing tool names and final responses only':
+    'Compact mode on — showing tool names and final responses only',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
+  'Press Ctrl+O to show full tool output':
+    'Press Ctrl+O to show full tool output',
 };

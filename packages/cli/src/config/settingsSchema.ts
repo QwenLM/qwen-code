@@ -545,9 +545,9 @@ const SETTINGS_SCHEMA = {
         label: 'Verbose Mode',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description:
-          'Show full tool output and thinking in verbose mode (toggle with ctrl+o).',
+          'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
         showInDialog: false,
       },
     },

@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,7 +13,7 @@ interface VerboseModeContextType {
 }
 
 const VerboseModeContext = createContext<VerboseModeContextType>({
-  verboseMode: false,
+  verboseMode: true,
   frozenSnapshot: null,
 });
 

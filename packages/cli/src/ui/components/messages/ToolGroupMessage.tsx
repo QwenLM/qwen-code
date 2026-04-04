@@ -11,9 +11,11 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
+import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
 import { theme } from '../../semantic-colors.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { useVerboseMode } from '../../contexts/VerboseModeContext.js';
 
 interface ToolGroupMessageProps {
   groupId: number;
@@ -24,6 +26,7 @@ interface ToolGroupMessageProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   onShellInputSubmit?: (input: string) => void;
+  isUserInitiated?: boolean;
 }
 
 // Main component renders the border and maps the tools using ToolMessage
@@ -34,7 +37,14 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   isFocused = true,
   activeShellPtyId,
   embeddedShellFocused,
+  isUserInitiated,
 }) => {
+  const config = useConfig();
+  const { verboseMode } = useVerboseMode();
+
+  const hasConfirmingTool = toolCalls.some(
+    (t) => t.status === ToolCallStatus.Confirming,
+  );
   const isEmbeddedShellFocused =
     embeddedShellFocused &&
     toolCalls.some(
@@ -42,11 +52,34 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         t.ptyId === activeShellPtyId && t.status === ToolCallStatus.Executing,
     );
 
+  // useMemo must be called unconditionally (Rules of Hooks) — before any early return
+  // only prompt for tool approval on the first 'confirming' tool in the list
+  const toolAwaitingApproval = useMemo(
+    () => toolCalls.find((tc) => tc.status === ToolCallStatus.Confirming),
+    [toolCalls],
+  );
+
+  // Compact mode: entire group → single line summary
+  // Force-expand when: user must interact (Confirming), shell is focused, or user-initiated
+  const showCompact =
+    !verboseMode &&
+    !hasConfirmingTool &&
+    !isEmbeddedShellFocused &&
+    !isUserInitiated;
+
+  if (showCompact) {
+    return (
+      <CompactToolGroupDisplay
+        toolCalls={toolCalls}
+        contentWidth={contentWidth}
+      />
+    );
+  }
+
+  // Full expanded view
   const hasPending = !toolCalls.every(
     (t) => t.status === ToolCallStatus.Success,
   );
-
-  const config = useConfig();
   const isShellCommand = toolCalls.some(
     (t) => t.name === SHELL_COMMAND_NAME || t.name === SHELL_NAME,
   );
@@ -60,13 +93,6 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const staticHeight = /* border */ 2 + /* marginBottom */ 1;
   // account for border (2 chars) and padding (2 chars)
   const innerWidth = contentWidth - 4;
-
-  // only prompt for tool approval on the first 'confirming' tool in the list
-  // note, after the CTA, this automatically moves over to the next 'confirming' tool
-  const toolAwaitingApproval = useMemo(
-    () => toolCalls.find((tc) => tc.status === ToolCallStatus.Confirming),
-    [toolCalls],
-  );
 
   let countToolCallsWithResults = 0;
   for (const tool of toolCalls) {
@@ -121,6 +147,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 activeShellPtyId={activeShellPtyId}
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
+                forceShowResult={isUserInitiated}
               />
             </Box>
             {tool.status === ToolCallStatus.Confirming &&

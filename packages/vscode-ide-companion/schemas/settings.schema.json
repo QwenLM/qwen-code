@@ -196,9 +196,9 @@
           "default": 0
         },
         "verboseMode": {
-          "description": "Show full tool output and thinking in verbose mode (toggle with ctrl+o).",
+          "description": "Show full tool output and thinking in verbose mode (toggle with Ctrl+O).",
           "type": "boolean",
-          "default": false
+          "default": true
         }
       }
     },
