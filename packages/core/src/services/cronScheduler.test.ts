@@ -103,9 +103,10 @@ describe('CronScheduler', () => {
       const fired: CronJob[] = [];
       scheduler.start((job) => fired.push(job));
 
-      scheduler.create('30 10 * * *', 'no match', true);
+      const job = scheduler.create('30 10 * * *', 'no match', true);
+      job.jitterMs = 0; // pin jitter so tick at 10:31 is deterministically out of range
 
-      // Tick at 10:31 — should not fire
+      // Tick at 10:31 — should not fire (cron only matches 10:30)
       scheduler.tick(new Date(2025, 0, 15, 10, 31, 0));
       expect(fired).toHaveLength(0);
     });
