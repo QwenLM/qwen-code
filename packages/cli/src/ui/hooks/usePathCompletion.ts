@@ -42,6 +42,20 @@ export function usePathCompletion(props: UsePathCompletionProps): void {
   const abortRef = useRef<AbortController | null>(null);
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Clear suggestions when disabled to avoid stale state
+  const wasEnabledRef = useRef(false);
+  useEffect(() => {
+    if (!enabled) {
+      if (wasEnabledRef.current) {
+        setSuggestions([]);
+        setIsLoadingSuggestions(false);
+        wasEnabledRef.current = false;
+      }
+    } else {
+      wasEnabledRef.current = true;
+    }
+  }, [enabled, setSuggestions, setIsLoadingSuggestions]);
+
   // Perform path completion search
   useEffect(() => {
     if (!enabled || query === null || query === '' || !isPathLikeToken(query)) {

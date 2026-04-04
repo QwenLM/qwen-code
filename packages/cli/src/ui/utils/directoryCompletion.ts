@@ -169,8 +169,12 @@ export function isPathLikeToken(token: string): boolean {
     token.startsWith('/') ||
     token.startsWith('./') ||
     token.startsWith('../') ||
-    // Also handle Windows paths
-    (sep === '\\' && /^[a-zA-Z]:\\/.test(token))
+    // Also handle Windows paths (drive letters and backslash separators)
+    (sep === '\\' &&
+      (token.startsWith('~\\') ||
+        token.startsWith('.\\') ||
+        token.startsWith('..\\') ||
+        /^[a-zA-Z]:\\/.test(token)))
   );
 }
 
