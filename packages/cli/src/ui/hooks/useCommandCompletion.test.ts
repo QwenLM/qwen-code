@@ -18,6 +18,7 @@ import type { UseAtCompletionProps } from './useAtCompletion.js';
 import { useAtCompletion } from './useAtCompletion.js';
 import type { UseSlashCompletionProps } from './useSlashCompletion.js';
 import { useSlashCompletion } from './useSlashCompletion.js';
+import { usePathCompletion } from './usePathCompletion.js';
 
 vi.mock('./useAtCompletion', () => ({
   useAtCompletion: vi.fn(),
@@ -31,7 +32,7 @@ vi.mock('./useSlashCompletion', () => ({
 }));
 
 vi.mock('./usePathCompletion', () => ({
-  usePathCompletion: vi.fn(),
+  usePathCompletion: vi.fn(() => undefined),
 }));
 
 // Helper to set up mocks in a consistent way for both child hooks
@@ -630,7 +631,9 @@ describe('useCommandCompletion', () => {
         { name: 'help', description: 'Show help', action: async () => {} },
       ];
 
-      const { result } = renderHook(() =>
+      vi.mocked(usePathCompletion).mockClear();
+
+      renderHook(() =>
         useCommandCompletion(
           useTextBufferForTest('/home'),
           testDirs,
@@ -643,7 +646,9 @@ describe('useCommandCompletion', () => {
       );
 
       // /home doesn't match any slash command, falls through to PATH mode
-      expect(result.current.showSuggestions).toBe(false);
+      expect(vi.mocked(usePathCompletion)).toHaveBeenCalledWith(
+        expect.objectContaining({ enabled: true, query: '/home' }),
+      );
     });
 
     it('enters PATH mode for ~/ paths', () => {
@@ -676,6 +681,31 @@ describe('useCommandCompletion', () => {
       );
 
       expect(result.current.showSuggestions).toBe(false);
+    });
+
+    it('bare / stays in SLASH mode when commands are registered', () => {
+      const mockSlashCommands = [
+        { name: 'help', description: 'Show help', action: async () => {} },
+      ];
+
+      vi.mocked(usePathCompletion).mockClear();
+
+      renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest('/'),
+          testDirs,
+          testRootDir,
+          mockSlashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      // / alone should enter SLASH mode, so PATH completion must be disabled
+      expect(vi.mocked(usePathCompletion)).toHaveBeenCalledWith(
+        expect.objectContaining({ enabled: false }),
+      );
     });
 
     it('SLASH mode takes precedence over PATH for matching commands', () => {

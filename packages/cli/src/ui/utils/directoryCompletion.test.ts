@@ -22,14 +22,14 @@ vi.mock('node:fs/promises');
 const mockReaddir = vi.mocked(fs.readdir);
 
 // Helper to create a mock Dirent
-function mockDirent(name: string, isDir: boolean): unknown {
+function mockDirent(name: string, isDir: boolean, isSymlink = false): unknown {
   return {
     name,
-    isDirectory: () => isDir,
-    isFile: () => !isDir,
+    isDirectory: () => isDir && !isSymlink,
+    isFile: () => !isDir && !isSymlink,
     isBlockDevice: () => false,
     isCharacterDevice: () => false,
-    isSymbolicLink: () => false,
+    isSymbolicLink: () => isSymlink,
     isFIFO: () => false,
     isSocket: () => false,
   };
@@ -104,7 +104,13 @@ describe('directoryCompletion', () => {
 
     it('recognizes home paths', () => {
       expect(isPathLikeToken('~/.config')).toBe(true);
-      expect(isPathLikeToken('~')).toBe(true);
+      expect(isPathLikeToken('~/')).toBe(true);
+    });
+
+    it('rejects bare tilde and dots without separator', () => {
+      expect(isPathLikeToken('~')).toBe(false);
+      expect(isPathLikeToken('.')).toBe(false);
+      expect(isPathLikeToken('..')).toBe(false);
     });
 
     it('rejects non-path tokens', () => {
@@ -170,6 +176,19 @@ describe('directoryCompletion', () => {
 
       expect(result).toHaveLength(2);
     });
+
+    it('includes symlinks as files', async () => {
+      mockReaddirAny.mockResolvedValue([
+        mockDirent('src', true),
+        mockDirent('link-to-dir', false, true),
+        mockDirent('readme.md', false),
+      ]);
+
+      const result = await scanDirectoryForPaths('/mock');
+
+      expect(result).toHaveLength(3);
+      expect(result.find((e) => e.name === 'link-to-dir')?.type).toBe('file');
+    });
   });
 
   describe('getDirectoryCompletions', () => {
@@ -226,12 +245,12 @@ describe('directoryCompletion', () => {
       expect(result[1].value).toBe('src/util.ts');
     });
 
-    it('strips leading ./ from directory portion', async () => {
+    it('preserves ./ prefix in results', async () => {
       mockReaddirAny.mockResolvedValue([mockDirent('file.ts', false)]);
 
       const result = await getPathCompletions('./f');
 
-      expect(result[0].value).toBe('file.ts');
+      expect(result[0].value).toBe('./file.ts');
     });
 
     it('handles Unicode filename prefixes', async () => {
@@ -243,7 +262,7 @@ describe('directoryCompletion', () => {
       const result = await getPathCompletions('./日');
 
       expect(result).toHaveLength(2);
-      expect(result[0].value).toBe('日本語.txt');
+      expect(result[0].value).toBe('./日本語.txt');
     });
 
     it('handles filenames with spaces', async () => {
@@ -268,6 +287,30 @@ describe('directoryCompletion', () => {
       // Only 'deep' matches prefix 'd'; dirPortion strips the 'd' prefix
       expect(result).toHaveLength(1);
       expect(result[0].value).toBe('a/b/c/deep/');
+    });
+
+    it('preserves ../ prefix in results', async () => {
+      mockReaddirAny.mockResolvedValue([
+        mockDirent('lib', true),
+        mockDirent('src', true),
+      ]);
+
+      const result = await getPathCompletions('../l');
+
+      expect(result).toHaveLength(1);
+      expect(result[0].value).toBe('../lib/');
+    });
+
+    it('preserves ~/ prefix in results', async () => {
+      mockReaddirAny.mockResolvedValue([
+        mockDirent('Documents', true),
+        mockDirent('Desktop', true),
+      ]);
+
+      const result = await getPathCompletions('~/Do');
+
+      expect(result).toHaveLength(1);
+      expect(result[0].value).toBe('~/Documents/');
     });
   });
 });

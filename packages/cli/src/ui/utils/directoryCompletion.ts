@@ -169,9 +169,6 @@ export function isPathLikeToken(token: string): boolean {
     token.startsWith('/') ||
     token.startsWith('./') ||
     token.startsWith('../') ||
-    token === '~' ||
-    token === '.' ||
-    token === '..' ||
     // Also handle Windows paths
     (sep === '\\' && /^[a-zA-Z]:\\/.test(token))
   );
@@ -238,10 +235,10 @@ export async function scanDirectoryForPaths(
       let entryType: 'directory' | 'file';
       if (entry.isDirectory()) {
         entryType = 'directory';
-      } else if (entry.isFile()) {
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
         entryType = 'file';
       } else {
-        continue; // Skip symlinks, etc.
+        continue;
       }
 
       paths.push({
@@ -318,7 +315,6 @@ export async function getPathCompletions(
 
   // Construct relative path based on original partialPath
   // e.g., if partialPath is "src/c", directory portion is "src/"
-  // Strip leading "./" since it's just used for cwd search
   const hasSeparator = partialPath.includes('/') || partialPath.includes(sep);
   let dirPortion = '';
   if (hasSeparator) {
@@ -326,9 +322,6 @@ export async function getPathCompletions(
     const lastSep = partialPath.lastIndexOf(sep);
     const lastSeparatorPos = Math.max(lastSlash, lastSep);
     dirPortion = partialPath.substring(0, lastSeparatorPos + 1);
-  }
-  if (dirPortion.startsWith('./') || dirPortion.startsWith('.' + sep)) {
-    dirPortion = dirPortion.slice(2);
   }
 
   return matches.map((entry) => {

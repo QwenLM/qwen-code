@@ -127,14 +127,14 @@ export function useCommandCompletion(
         const afterSlash = firstToken.substring(1);
         const isSlashMode =
           slashCommands.length === 0 ||
-          (afterSlash !== '' &&
-            slashCommands.some(
-              (cmd) =>
-                cmd.name.toLowerCase().startsWith(afterSlash.toLowerCase()) ||
-                cmd.altNames?.some((alt) =>
-                  alt.toLowerCase().startsWith(afterSlash.toLowerCase()),
-                ),
-            ));
+          afterSlash === '' ||
+          slashCommands.some(
+            (cmd) =>
+              cmd.name.toLowerCase().startsWith(afterSlash.toLowerCase()) ||
+              cmd.altNames?.some((alt) =>
+                alt.toLowerCase().startsWith(afterSlash.toLowerCase()),
+              ),
+          );
         if (isSlashMode) {
           return {
             completionMode: CompletionMode.SLASH,
@@ -181,7 +181,7 @@ export function useCommandCompletion(
 
   usePathCompletion({
     enabled: completionMode === CompletionMode.PATH,
-    query: completionMode === CompletionMode.PATH ? query : null,
+    query,
     basePath: cwd,
     setSuggestions,
     setIsLoadingSuggestions,

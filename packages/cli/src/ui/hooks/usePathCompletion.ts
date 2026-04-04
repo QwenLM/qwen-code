@@ -4,20 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import {
   getPathCompletions,
   isPathLikeToken,
   clearPathCache,
 } from '../utils/directoryCompletion.js';
-
-export interface UsePathCompletionReturn {
-  suggestions: Suggestion[];
-  isLoading: boolean;
-  setSuggestions: (suggestions: Suggestion[]) => void;
-  resetCompletionState: () => void;
-}
 
 export interface UsePathCompletionProps {
   enabled: boolean;
@@ -29,13 +22,13 @@ export interface UsePathCompletionProps {
   setIsLoadingSuggestions: (isLoading: boolean) => void;
 }
 
+const DEBOUNCE_MS = 100;
+
 /**
  * Hook for path completion (file/directory paths).
  * Triggers when the query looks like a path (starts with /, ./, ../, ~/).
  */
-export function usePathCompletion(
-  props: UsePathCompletionProps,
-): UsePathCompletionReturn {
+export function usePathCompletion(props: UsePathCompletionProps): void {
   const {
     enabled,
     query,
@@ -46,93 +39,53 @@ export function usePathCompletion(
     setIsLoadingSuggestions,
   } = props;
 
-  const [internalSuggestions, setInternalSuggestions] = useState<Suggestion[]>(
-    [],
-  );
-  const [isLoading, setIsLoading] = useState(false);
-  const searchAbortController = useRef<AbortController | null>(null);
-  const debounceTimer = useRef<NodeJS.Timeout | null>(null);
-  // Track whether we are the active completion source
-  const isActiveRef = useRef(false);
-
-  const resetCompletionState = useCallback(() => {
-    setInternalSuggestions([]);
-    setIsLoading(false);
-    // Only clear global suggestions if we are the active source
-    if (isActiveRef.current) {
-      setSuggestions([]);
-      isActiveRef.current = false;
-    }
-    setIsLoadingSuggestions(false);
-    if (searchAbortController.current) {
-      searchAbortController.current.abort();
-      searchAbortController.current = null;
-    }
-    if (debounceTimer.current) {
-      clearTimeout(debounceTimer.current);
-      debounceTimer.current = null;
-    }
-  }, [setSuggestions, setIsLoadingSuggestions]);
+  const abortRef = useRef<AbortController | null>(null);
+  const timerRef = useRef<NodeJS.Timeout | null>(null);
 
   // Perform path completion search
   useEffect(() => {
-    if (!enabled || query === null || query === '') {
-      resetCompletionState();
+    if (!enabled || query === null || query === '' || !isPathLikeToken(query)) {
       return;
     }
 
-    // Only trigger for path-like tokens
-    if (!isPathLikeToken(query)) {
-      resetCompletionState();
-      return;
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
     }
 
-    // Debounce to avoid excessive I/O
-    if (debounceTimer.current) {
-      clearTimeout(debounceTimer.current);
-    }
-
-    setIsLoading(true);
     setIsLoadingSuggestions(true);
 
-    debounceTimer.current = setTimeout(async () => {
+    timerRef.current = setTimeout(async () => {
       const controller = new AbortController();
-      searchAbortController.current = controller;
+      abortRef.current = controller;
 
       try {
         const results = await getPathCompletions(query, {
           basePath,
-          maxResults: 24, // MAX_SUGGESTIONS_TO_SHOW * 3
+          maxResults: 24,
           includeFiles,
           includeHidden,
         });
 
         if (!controller.signal.aborted) {
-          isActiveRef.current = true;
-          setInternalSuggestions(results);
           setSuggestions(results);
-          setIsLoading(false);
           setIsLoadingSuggestions(false);
         }
       } catch {
         if (!controller.signal.aborted) {
-          isActiveRef.current = false;
-          setInternalSuggestions([]);
           setSuggestions([]);
-          setIsLoading(false);
           setIsLoadingSuggestions(false);
         }
       }
-    }, 100); // 100ms debounce
+    }, DEBOUNCE_MS);
 
     return () => {
-      if (debounceTimer.current) {
-        clearTimeout(debounceTimer.current);
-        debounceTimer.current = null;
+      if (timerRef.current) {
+        clearTimeout(timerRef.current);
+        timerRef.current = null;
       }
-      if (searchAbortController.current) {
-        searchAbortController.current.abort();
-        searchAbortController.current = null;
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
       }
     };
   }, [
@@ -143,10 +96,9 @@ export function usePathCompletion(
     includeHidden,
     setSuggestions,
     setIsLoadingSuggestions,
-    resetCompletionState,
   ]);
 
-  // Clear cache when basePath changes (skip initial mount since caches are already empty)
+  // Clear cache when basePath changes (skip initial mount)
   const isFirstMount = useRef(true);
   useEffect(() => {
     if (isFirstMount.current) {
@@ -155,11 +107,4 @@ export function usePathCompletion(
     }
     clearPathCache();
   }, [basePath]);
-
-  return {
-    suggestions: internalSuggestions,
-    isLoading,
-    setSuggestions: setInternalSuggestions,
-    resetCompletionState,
-  };
 }
