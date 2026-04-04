@@ -11,6 +11,10 @@ import {
   type Frame,
 } from '@playwright/test';
 import { downloadAndUnzipVSCode } from '@vscode/test-electron';
+import {
+  buildIntegrationRunnerEnv,
+  hasIntegrationAuthEnv,
+} from '../../test/integrationAuthEnv.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const extensionPath = path.resolve(__dirname, '../..');
@@ -49,15 +53,9 @@ const ensureBundledCli = () => {
 };
 
 const ensureAuthEnv = () => {
-  const hasQwenOauth = !!process.env.QWEN_OAUTH;
-  const hasOpenAiEnv =
-    !!process.env.OPENAI_API_KEY &&
-    !!process.env.OPENAI_BASE_URL &&
-    !!process.env.OPENAI_MODEL;
-
-  if (!hasQwenOauth && !hasOpenAiEnv) {
+  if (!hasIntegrationAuthEnv(process.env)) {
     throw new Error(
-      'Missing auth env for VSCode E2E tests. Set QWEN_OAUTH or OPENAI_API_KEY, OPENAI_BASE_URL, and OPENAI_MODEL.',
+      'Missing auth env for VSCode E2E tests. Set QWEN_OAUTH or OPENAI_API_KEY, OPENAI_BASE_URL, and OPENAI_MODEL. QWEN_TEST_API_KEY, QWEN_TEST_BASE_URL, and QWEN_TEST_MODEL are also supported.',
     );
   }
 };
@@ -86,7 +84,7 @@ export const test = base.extend<{
   page: Page;
 }>({
   electronApp: async (
-    _args,
+    _fixtureOptions,
     runFixture: (r: ElectronApplication) => Promise<void>,
   ) => {
     const executablePath = await resolveVSCodeExecutablePath();
@@ -94,7 +92,10 @@ export const test = base.extend<{
     ensureAuthEnv();
     const userDataDir = createTempDir('user-data');
     const extensionsDir = createTempDir('extensions');
-    const launchEnv = { ...process.env };
+    const launchEnv = {
+      ...process.env,
+      ...buildIntegrationRunnerEnv(process.env),
+    };
     const electronApp = await _electron.launch({
       executablePath,
       env: launchEnv,

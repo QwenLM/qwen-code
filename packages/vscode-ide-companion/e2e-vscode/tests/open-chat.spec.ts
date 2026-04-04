@@ -85,4 +85,40 @@ test('opens Qwen Code webview via command palette', async ({
     },
     { timeout: 60_000 },
   );
+
+  await webview.waitForFunction(
+    () => {
+      const received = (window as typeof window & {
+        __qwenReceivedMessages?: unknown[];
+      }).__qwenReceivedMessages;
+      return (
+        Array.isArray(received) &&
+        received.some((message) => {
+          if (!message || typeof message !== 'object') {
+            return false;
+          }
+          const payload = message as {
+            type?: string;
+            data?: {
+              role?: string;
+              content?: string;
+              chunk?: string;
+            };
+          };
+          return (
+            (payload.type === 'message' &&
+              (payload.data?.role === 'assistant' ||
+                payload.data?.role === 'thinking') &&
+              typeof payload.data?.content === 'string' &&
+              payload.data.content.length > 0) ||
+            ((payload.type === 'streamChunk' ||
+              payload.type === 'thoughtChunk') &&
+              typeof payload.data?.chunk === 'string' &&
+              payload.data.chunk.length > 0)
+          );
+        })
+      );
+    },
+    { timeout: 60_000 },
+  );
 });

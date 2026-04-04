@@ -9,12 +9,14 @@
 import type React from 'react';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createRoot } from 'react-dom/client';
-import { act } from 'react-dom/test-utils';
+import { act } from 'react';
 import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import type { ToolCallUpdate } from '../../types/chatTypes.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../../types/chatTypes.js';
-import type { ModelInfo } from '../../types/acpTypes.js';
+import type { ModelInfo } from '@agentclientprotocol/sdk';
+import type { Question } from '../../types/acpTypes.js';
+import type { WebViewMessage } from './useImage.js';
 
 declare global {
   var acquireVsCodeApi:
@@ -42,10 +44,6 @@ interface WebViewMessageProps {
     setNextCursor: (cursor: number | undefined) => void;
     setHasMore: (hasMore: boolean) => void;
     setIsLoading: (loading: boolean) => void;
-    handleSaveSessionResponse: (response: {
-      success: boolean;
-      message?: string;
-    }) => void;
   };
   fileContext: {
     setActiveFileName: (name: string | null) => void;
@@ -66,28 +64,17 @@ interface WebViewMessageProps {
   };
   messageHandling: {
     setMessages: (
-      messages: Array<{
-        role: 'user' | 'assistant' | 'thinking';
-        content: string;
-        timestamp: number;
-        fileContext?: {
-          fileName: string;
-          filePath: string;
-          startLine?: number;
-          endLine?: number;
-        };
-      }>,
+      messages:
+        | WebViewMessage[]
+        | ((prev: WebViewMessage[]) => WebViewMessage[]),
     ) => void;
-    addMessage: (message: {
-      role: 'user' | 'assistant' | 'thinking';
-      content: string;
-      timestamp: number;
-    }) => void;
+    addMessage: (message: WebViewMessage) => void;
     clearMessages: () => void;
     startStreaming: (timestamp?: number) => void;
     appendStreamChunk: (chunk: string) => void;
     endStreaming: () => void;
     breakAssistantSegment: () => void;
+    breakThinkingSegment: () => void;
     appendThinkingChunk: (chunk: string) => void;
     clearThinking: () => void;
     setWaitingForResponse: (message: string) => void;
@@ -100,6 +87,15 @@ interface WebViewMessageProps {
     request: {
       options: PermissionOption[];
       toolCall: PermissionToolCall;
+    } | null,
+  ) => void;
+  handleAskUserQuestion: (
+    request: {
+      questions: Question[];
+      sessionId: string;
+      metadata?: {
+        source?: string;
+      };
     } | null,
   ) => void;
   inputFieldRef: React.RefObject<HTMLDivElement>;
@@ -121,7 +117,6 @@ const createProps = (overrides: Partial<WebViewMessageProps> = {}) => {
       setNextCursor: vi.fn(),
       setHasMore: vi.fn(),
       setIsLoading: vi.fn(),
-      handleSaveSessionResponse: vi.fn(),
     },
     fileContext: {
       setActiveFileName: vi.fn(),
@@ -138,6 +133,7 @@ const createProps = (overrides: Partial<WebViewMessageProps> = {}) => {
       appendStreamChunk: vi.fn(),
       endStreaming: vi.fn(),
       breakAssistantSegment: vi.fn(),
+      breakThinkingSegment: vi.fn(),
       appendThinkingChunk: vi.fn(),
       clearThinking: vi.fn(),
       setWaitingForResponse: vi.fn(),
@@ -147,6 +143,7 @@ const createProps = (overrides: Partial<WebViewMessageProps> = {}) => {
     clearToolCalls: vi.fn(),
     setPlanEntries: vi.fn(),
     handlePermissionRequest: vi.fn(),
+    handleAskUserQuestion: vi.fn(),
     inputFieldRef: {
       current: document.createElement('div'),
     } as React.RefObject<HTMLDivElement>,
@@ -177,6 +174,9 @@ const createProps = (overrides: Partial<WebViewMessageProps> = {}) => {
 
 const renderHook = async (props: WebViewMessageProps) => {
   const { useWebViewMessages } = await import('./useWebViewMessages.js');
+  (
+    globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
+  ).IS_REACT_ACT_ENVIRONMENT = true;
 
   const container = document.createElement('div');
   document.body.appendChild(container);

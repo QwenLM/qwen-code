@@ -16,7 +16,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type * as vscode from 'vscode';
-import { WebViewContent } from './WebViewContent.js';
+import { WebViewContent } from './providers/WebViewContent.js';
 
 describe('WebViewContent', () => {
   let mockPanel: vscode.WebviewPanel;

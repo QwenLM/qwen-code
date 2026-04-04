@@ -14,6 +14,7 @@ vi.mock('vscode', () => ({
 
 import { QwenConnectionHandler } from './qwenConnectionHandler.js';
 import type { AcpConnection } from './acpConnection.js';
+import { authMethod } from '../types/acpTypes.js';
 
 describe('QwenConnectionHandler', () => {
   let handler: QwenConnectionHandler;
@@ -36,6 +37,7 @@ describe('QwenConnectionHandler', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.clearAllMocks();
   });
 
@@ -131,6 +133,59 @@ describe('QwenConnectionHandler', () => {
       const connectArgs = (mockConnection.connect as ReturnType<typeof vi.fn>)
         .mock.calls[0];
       expect(connectArgs[2]).not.toContain('--proxy');
+    });
+  });
+
+  describe('authentication flow', () => {
+    const authRequiredError = Object.assign(
+      new Error('Authentication required (code: -32000)'),
+      { code: -32000 },
+    );
+
+    it('returns requiresAuth without auto-authenticating when autoAuthenticate is false', async () => {
+      mockGetConfiguration.mockReturnValue({ get: () => undefined });
+      (
+        mockConnection.newSession as unknown as ReturnType<typeof vi.fn>
+      ).mockRejectedValueOnce(authRequiredError);
+
+      const result = await handler.connect(
+        mockConnection,
+        '/workspace',
+        '/path/to/cli.js',
+        {
+          autoAuthenticate: false,
+        },
+      );
+
+      expect(result.sessionCreated).toBe(false);
+      expect(result.requiresAuth).toBe(true);
+      expect(mockConnection.authenticate).not.toHaveBeenCalled();
+      expect(mockConnection.newSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('authenticates and retries session creation when autoAuthenticate is true', async () => {
+      vi.useFakeTimers();
+      mockGetConfiguration.mockReturnValue({ get: () => undefined });
+      (mockConnection.newSession as unknown as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(authRequiredError)
+        .mockResolvedValueOnce({ sessionId: 'after-auth-session' });
+
+      const connectPromise = handler.connect(
+        mockConnection,
+        '/workspace',
+        '/path/to/cli.js',
+        {
+          autoAuthenticate: true,
+        },
+      );
+
+      await vi.runAllTimersAsync();
+      const result = await connectPromise;
+
+      expect(mockConnection.authenticate).toHaveBeenCalledWith(authMethod);
+      expect(mockConnection.newSession).toHaveBeenCalledTimes(2);
+      expect(result.sessionCreated).toBe(true);
+      expect(result.requiresAuth).toBe(false);
     });
   });
 });

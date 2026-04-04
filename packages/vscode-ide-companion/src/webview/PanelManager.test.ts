@@ -17,7 +17,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as vscode from 'vscode';
-import { PanelManager } from './PanelManager.js';
+import { PanelManager } from './providers/PanelManager.js';
 
 describe('PanelManager', () => {
   let panelManager: PanelManager;

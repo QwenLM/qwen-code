@@ -54,6 +54,9 @@ describe('useSessionManagement', () => {
   let api: VSCodeAPI;
 
   beforeEach(() => {
+    (
+      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT?: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
     api = {
       postMessage: vi.fn(),
       getState: vi.fn(() => ({})),
@@ -138,17 +141,19 @@ describe('useSessionManagement', () => {
     unmount();
   });
 
-  it('stores saved session tags from response', () => {
+  it('opens a new chat tab and closes the selector', () => {
     const { resultRef, unmount } = renderHook(api);
 
     act(() => {
-      resultRef.current.handleSaveSessionResponse({
-        success: true,
-        message: 'saved with tag: foo',
-      });
+      resultRef.current.setShowSessionSelector(true);
+      resultRef.current.handleNewQwenSession();
     });
 
-    expect(resultRef.current.savedSessionTags).toEqual(['foo']);
+    expect(api.postMessage).toHaveBeenCalledWith({
+      type: 'openNewChatTab',
+      data: {},
+    });
+    expect(resultRef.current.showSessionSelector).toBe(false);
 
     unmount();
   });

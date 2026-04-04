@@ -16,7 +16,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import * as vscode from 'vscode';
-import { MessageHandler } from './MessageHandler.js';
+import { MessageHandler } from './providers/MessageHandler.js';
 import type { QwenAgentManager } from '../services/qwenAgentManager.js';
 import type { ConversationStore } from '../services/conversationStore.js';
 
@@ -29,18 +29,26 @@ describe('MessageHandler', () => {
   beforeEach(() => {
     // Mock QwenAgentManager - AI agent manager
     mockAgentManager = {
+      isConnected: true,
       sendMessage: vi.fn().mockResolvedValue(undefined),
       createNewSession: vi.fn().mockResolvedValue({ id: 'new-session' }),
-      loadSession: vi.fn().mockResolvedValue([]),
-      switchToSession: vi.fn().mockResolvedValue(undefined),
+      getSessionListPaged: vi.fn().mockResolvedValue({
+        sessions: [],
+        nextCursor: undefined,
+        hasMore: false,
+      }),
+      getSessionList: vi.fn().mockResolvedValue([]),
+      getSessionMessages: vi.fn().mockResolvedValue([]),
+      loadSessionViaAcp: vi.fn().mockResolvedValue(null),
       cancelCurrentPrompt: vi.fn().mockResolvedValue(undefined),
       connect: vi.fn().mockResolvedValue({ requiresAuth: false }),
       disconnect: vi.fn(),
+      setApprovalModeFromUi: vi.fn().mockResolvedValue(undefined),
       setModelFromUi: vi.fn().mockResolvedValue({
         modelId: 'coder-model',
         name: 'coder-model',
       }),
-      currentSessionId: null,
+      currentSessionId: 'existing-session',
     } as unknown as QwenAgentManager;
 
     // Mock ConversationStore - local session storage
@@ -82,7 +90,7 @@ describe('MessageHandler', () => {
       await expect(
         messageHandler.route({
           type: 'sendMessage',
-          data: { content: 'Hello, AI!' },
+          data: { text: 'Hello, AI!' },
         }),
       ).resolves.not.toThrow();
     });
@@ -329,24 +337,24 @@ describe('MessageHandler', () => {
       await expect(
         messageHandler.route({
           type: 'sendMessage',
-          data: { content: 'test' },
+          data: { text: 'test' },
         }),
       ).resolves.not.toThrow();
     });
 
     /**
-     * Test: Handle loadSessions errors
+     * Test: Handle getQwenSessions errors
      *
      * Verifies load sessions failures don't cause crashes.
      */
-    it('should handle loadSessions errors gracefully', async () => {
-      vi.mocked(mockAgentManager.loadSession).mockRejectedValue(
+    it('should handle getQwenSessions errors gracefully', async () => {
+      vi.mocked(mockAgentManager.getSessionListPaged).mockRejectedValue(
         new Error('Load failed'),
       );
 
       await expect(
         messageHandler.route({
-          type: 'loadSessions',
+          type: 'getQwenSessions',
           data: {},
         }),
       ).resolves.not.toThrow();
@@ -362,14 +370,13 @@ describe('MessageHandler', () => {
     const messageTypes = [
       'sendMessage',
       'cancelStreaming',
-      'newSession',
-      'loadSessions',
-      'switchSession',
+      'newQwenSession',
+      'getQwenSessions',
+      'switchQwenSession',
       'permissionResponse',
       'login',
-      'attachFile',
-      'openFile',
       'setApprovalMode',
+      'setModel',
     ];
 
     messageTypes.forEach((type) => {

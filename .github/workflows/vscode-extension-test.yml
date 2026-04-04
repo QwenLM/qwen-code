@@ -111,15 +111,15 @@ jobs:
         if: steps.auth.outputs.ready == 'true'
         run: 'xvfb-run -a npm run test:integration'
         working-directory: 'packages/vscode-ide-companion'
-
-      - name: 'Skip integration tests (missing auth)'
-        if: steps.auth.outputs.ready != 'true'
-        run: 'echo "Skipping integration tests because auth env is missing."'
         env:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
           QWEN_OAUTH: '${{ secrets.QWEN_OAUTH }}'
+
+      - name: 'Skip integration tests (missing auth)'
+        if: steps.auth.outputs.ready != 'true'
+        run: 'echo "Skipping integration tests because auth env is missing."'
 
   e2e-test:
     name: 'E2E Tests'
