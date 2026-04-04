@@ -72,4 +72,21 @@ describe('AsyncMessageQueue', () => {
       expect(queue.dequeue()).toBe(i);
     }
   });
+
+  it('should pop the last item with popLast()', () => {
+    const queue = new AsyncMessageQueue<string>();
+    queue.enqueue('a');
+    queue.enqueue('b');
+    queue.enqueue('c');
+
+    expect(queue.popLast()).toBe('c');
+    expect(queue.size).toBe(2);
+    expect(queue.dequeue()).toBe('a');
+    expect(queue.dequeue()).toBe('b');
+  });
+
+  it('should return null from popLast() when empty', () => {
+    const queue = new AsyncMessageQueue<string>();
+    expect(queue.popLast()).toBeNull();
+  });
 });

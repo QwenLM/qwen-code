@@ -18,6 +18,7 @@ export interface UseMessageQueueReturn {
   addMessage: (message: string) => void;
   clearQueue: () => void;
   getQueuedMessagesText: () => string;
+  popAllMessages: () => string | null;
 }
 
 /**
@@ -51,6 +52,14 @@ export function useMessageQueue({
     return messageQueue.join('\n\n');
   }, [messageQueue]);
 
+  // Pop all messages from the queue for editing
+  const popAllMessages = useCallback((): string | null => {
+    if (messageQueue.length === 0) return null;
+    const allText = messageQueue.join('\n');
+    setMessageQueue([]);
+    return allText;
+  }, [messageQueue]);
+
   // Process queued messages when streaming becomes idle
   useEffect(() => {
     if (
@@ -71,5 +80,6 @@ export function useMessageQueue({
     addMessage,
     clearQueue,
     getQueuedMessagesText,
+    popAllMessages,
   };
 }

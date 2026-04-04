@@ -47,6 +47,14 @@ export class AsyncMessageQueue<T> {
     return this.items.length;
   }
 
+  /** Remove and return the last item, or null if empty. */
+  popLast(): T | null {
+    if (this.items.length > 0) {
+      return this.items.pop()!;
+    }
+    return null;
+  }
+
   /** Whether `drain()` has been called. */
   get isDrained(): boolean {
     return this.drained;

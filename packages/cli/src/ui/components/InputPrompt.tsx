@@ -839,6 +839,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
+        // Pop all queued messages into input when pressing Up with cursor at top
+        if (
+          uiState.messageQueue.length > 0 &&
+          (keyMatchers[Command.HISTORY_UP](key) ||
+            (keyMatchers[Command.NAVIGATION_UP](key) &&
+              (buffer.allVisualLines.length === 1 ||
+                (buffer.visualCursor[0] === 0 &&
+                  buffer.visualScrollRow === 0))))
+        ) {
+          const popped = uiActions.popAllQueuedMessages();
+          if (popped) {
+            const currentText = buffer.text;
+            const newText = currentText ? `${popped}\n${currentText}` : popped;
+            buffer.setText(newText);
+          }
+          return true;
+        }
+
         if (keyMatchers[Command.HISTORY_UP](key)) {
           inputHistory.navigateUp();
           return true;

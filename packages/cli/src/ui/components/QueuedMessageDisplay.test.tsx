@@ -73,4 +73,13 @@ describe('QueuedMessageDisplay', () => {
     const output = lastFrame();
     expect(output).toContain('Message with multiple whitespace');
   });
+
+  it('shows edit hint when queue has messages', () => {
+    const { lastFrame } = render(
+      <QueuedMessageDisplay messageQueue={['Some message']} />,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('to edit queued messages');
+  });
 });
