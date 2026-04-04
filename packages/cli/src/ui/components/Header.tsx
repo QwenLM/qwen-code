@@ -10,7 +10,7 @@ import Gradient from 'ink-gradient';
 import { shortenPath, tildeifyPath } from '@qwen-code/qwen-code-core';
 import { theme } from '../semantic-colors.js';
 import { shortAsciiLogo } from './AsciiArt.js';
-import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
+import { getAsciiArtWidth } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
 /**
@@ -35,15 +35,15 @@ interface HeaderProps {
 export const Header: React.FC<HeaderProps> = ({
   customAsciiArt,
   version,
-  authDisplayType,
-  model,
+  // authDisplayType,
+  // model,
   workingDirectory,
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
 
   const displayLogo = customAsciiArt ?? shortAsciiLogo;
   const logoWidth = getAsciiArtWidth(displayLogo);
-  const formattedAuthType = authDisplayType ?? AuthDisplayType.UNKNOWN;
+  // const formattedAuthType = authDisplayType ?? AuthDisplayType.UNKNOWN;
 
   // Calculate available space properly:
   // First determine if logo can be shown, then use remaining space for path
@@ -77,16 +77,16 @@ export const Header: React.FC<HeaderProps> = ({
     availableInfoPanelWidth - infoPanelChromeWidth,
   );
 
-  const infoPanelContentWidth = Math.max(
-    0,
-    availableInfoPanelWidth - infoPanelChromeWidth,
-  );
-  const authModelText = `${formattedAuthType} | ${model}`;
-  const modelHintText = ' (/model to change)';
-  const showModelHint =
-    infoPanelContentWidth > 0 &&
-    getCachedStringWidth(authModelText + modelHintText) <=
-      infoPanelContentWidth;
+  // const infoPanelContentWidth = Math.max(
+  //   0,
+  //   availableInfoPanelWidth - infoPanelChromeWidth,
+  // );
+  // const authModelText = `${formattedAuthType} | ${model}`;
+  // const modelHintText = ' (/model to change)';
+  // const showModelHint =
+  //   infoPanelContentWidth > 0 &&
+  //   getCachedStringWidth(authModelText + modelHintText) <=
+  //     infoPanelContentWidth;
 
   // Now shorten the path to fit the available space
   const tildeifiedPath = tildeifyPath(workingDirectory);
