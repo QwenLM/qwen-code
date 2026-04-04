@@ -171,12 +171,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const [dirs, setDirs] = useState<readonly string[]>(
     config.getWorkspaceContext().getDirectories(),
   );
-  const dirsChanged = config.getWorkspaceContext().getDirectories();
   useEffect(() => {
-    if (dirs.length !== dirsChanged.length) {
-      setDirs(dirsChanged);
+    const current = config.getWorkspaceContext().getDirectories();
+    if (
+      dirs.length !== current.length ||
+      !dirs.every((d, i) => d === current[i])
+    ) {
+      setDirs(current);
     }
-  }, [dirs.length, dirsChanged]);
+  }, [config, dirs]);
   const [reverseSearchActive, setReverseSearchActive] = useState(false);
   const [commandSearchActive, setCommandSearchActive] = useState(false);
   const [textBeforeReverseSearch, setTextBeforeReverseSearch] = useState('');
