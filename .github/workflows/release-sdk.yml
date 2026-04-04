@@ -348,15 +348,32 @@ jobs:
             CLI_SOURCE_DESC="CLI built from source (same branch/ref as SDK)"
           fi
 
-          # Create release notes with CLI version info
-          NOTES="## Bundled CLI Version\n\nThis SDK release bundles CLI version: \`${CLI_VERSION}\`\n\nSource: ${CLI_SOURCE_DESC}\n\n---\n\n"
+          # Create release notes file
+          NOTES_FILE=$(mktemp)
+          {
+            echo "## Bundled CLI Version"
+            echo ""
+            echo "This SDK release bundles CLI version: ${CLI_VERSION}"
+            echo ""
+            echo "Source: ${CLI_SOURCE_DESC}"
+            echo ""
+            echo "---"
+            echo ""
+          } > "${NOTES_FILE}"
 
+          # Get previous release notes if available
+          PREVIOUS_NOTES=$(gh release view "sdk-typescript-${PREVIOUS_RELEASE_TAG}" --json body -q '.body' 2>/dev/null || echo 'See commit history for changes.')
+          printf '%s\n' "${PREVIOUS_NOTES}" >> "${NOTES_FILE}"
+
+          # Create GitHub release
           gh release create "sdk-typescript-${RELEASE_TAG}" \
             --target "${TARGET}" \
             --title "SDK TypeScript Release ${RELEASE_TAG}" \
-            --notes-start-tag "sdk-typescript-${PREVIOUS_RELEASE_TAG}" \
-            --notes "${NOTES}$(gh release view "sdk-typescript-${PREVIOUS_RELEASE_TAG}" --json body -q '.body' 2>/dev/null || echo 'See commit history for changes.')" \
-            "${PRERELEASE_FLAG}"
+            --notes-file "${NOTES_FILE}" \
+            ${PRERELEASE_FLAG}
+
+          # Cleanup
+          rm -f "${NOTES_FILE}"
 
       - name: 'Create PR to merge release branch into main'
         if: |-

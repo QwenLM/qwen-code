@@ -230,20 +230,18 @@ describe('EditTool', () => {
       );
     });
 
-    it('should return error for path outside root', () => {
+    it('should allow path outside root (external path support)', () => {
       const params: EditToolParams = {
         file_path: path.join(tempDir, 'outside-root.txt'),
         old_string: 'old',
         new_string: 'new',
       };
       const error = tool.validateToolParams(params);
-      expect(error).toContain(
-        'File path must be within one of the workspace directories',
-      );
+      expect(error).toBeNull();
     });
   });
 
-  describe('shouldConfirmExecute', () => {
+  describe('getConfirmationDetails', () => {
     const testFile = 'edit_me.txt';
     let filePath: string;
 
@@ -268,7 +266,7 @@ describe('EditTool', () => {
         new_string: 'new',
       };
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
       expect(confirmation).toEqual(
@@ -280,7 +278,7 @@ describe('EditTool', () => {
       );
     });
 
-    it('should return false if old_string is not found', async () => {
+    it('should throw if old_string is not found', async () => {
       fs.writeFileSync(filePath, 'some content here');
       const params: EditToolParams = {
         file_path: filePath,
@@ -288,13 +286,12 @@ describe('EditTool', () => {
         new_string: 'new',
       };
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(confirmation).toBe(false);
+      await expect(
+        invocation.getConfirmationDetails(new AbortController().signal),
+      ).rejects.toThrow();
     });
 
-    it('should return false if multiple occurrences of old_string are found', async () => {
+    it('should throw if multiple occurrences of old_string are found', async () => {
       fs.writeFileSync(filePath, 'old old content here');
       const params: EditToolParams = {
         file_path: filePath,
@@ -302,10 +299,9 @@ describe('EditTool', () => {
         new_string: 'new',
       };
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(confirmation).toBe(false);
+      await expect(
+        invocation.getConfirmationDetails(new AbortController().signal),
+      ).rejects.toThrow();
     });
 
     it('should request confirmation for creating a new file (empty old_string)', async () => {
@@ -317,7 +313,7 @@ describe('EditTool', () => {
         new_string: 'new file content',
       };
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
       expect(confirmation).toEqual(
@@ -351,7 +347,7 @@ describe('EditTool', () => {
         });
 
       await expect(
-        invocation.shouldConfirmExecute(abortController.signal),
+        invocation.getConfirmationDetails(abortController.signal),
       ).rejects.toBe(abortError);
 
       calculateSpy.mockRestore();
@@ -871,17 +867,14 @@ describe('EditTool', () => {
       expect(tool.validateToolParams(validPath)).toBeNull();
     });
 
-    it('should reject paths outside workspace root', () => {
-      const invalidPath = {
+    it('should allow paths outside workspace root (external path support)', () => {
+      const externalPath = {
         file_path: '/etc/passwd',
         old_string: 'root',
         new_string: 'hacked',
       };
-      const error = tool.validateToolParams(invalidPath);
-      expect(error).toContain(
-        'File path must be within one of the workspace directories',
-      );
-      expect(error).toContain(rootDir);
+      const error = tool.validateToolParams(externalPath);
+      expect(error).toBeNull();
     });
   });
 
@@ -916,7 +909,7 @@ describe('EditTool', () => {
       });
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
 
@@ -928,6 +921,49 @@ describe('EditTool', () => {
 
       expect(params.old_string).toBe(initialContent);
       expect(params.new_string).toBe(modifiedContent);
+    });
+
+    it('should not call ideClient.openDiff in AUTO_EDIT mode', async () => {
+      const initialContent = 'some old content here';
+      fs.writeFileSync(filePath, initialContent);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      expect(ideClient.openDiff).not.toHaveBeenCalled();
+      expect(confirmation).toBeDefined();
+      expect((confirmation as any).ideConfirmation).toBeUndefined();
+    });
+
+    it('should not call ideClient.openDiff in YOLO mode', async () => {
+      const initialContent = 'some old content here';
+      fs.writeFileSync(filePath, initialContent);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      };
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.YOLO,
+      );
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      expect(ideClient.openDiff).not.toHaveBeenCalled();
+      expect((confirmation as any).ideConfirmation).toBeUndefined();
     });
   });
 });

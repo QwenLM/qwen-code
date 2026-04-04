@@ -1,6 +1,8 @@
 export default {
   commands: 'Commands',
+  'followup-suggestions': 'Followup Suggestions',
   'sub-agents': 'SubAgents',
+  arena: 'Agent Arena',
   skills: 'Skills',
   headless: 'Headless Mode',
   checkpointing: {
@@ -12,4 +14,7 @@ export default {
   'token-caching': 'Token Caching',
   sandbox: 'Sandboxing',
   language: 'i18n',
+  channels: 'Channels',
+  hooks: 'Hooks',
+  'scheduled-tasks': 'Scheduled Tasks',
 };

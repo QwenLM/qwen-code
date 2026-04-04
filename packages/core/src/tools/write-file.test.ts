@@ -14,7 +14,7 @@ import {
   type Mocked,
 } from 'vitest';
 import type { WriteFileToolParams } from './write-file.js';
-import { getCorrectedFileContent, WriteFileTool } from './write-file.js';
+import { WriteFileTool } from './write-file.js';
 import { ToolErrorType } from './tool-error.js';
 import type { FileDiff, ToolEditConfirmationDetails } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
@@ -151,15 +151,14 @@ describe('WriteFileTool', () => {
       expect(() => tool.build(params)).toThrow(/File path must be absolute/);
     });
 
-    it('should throw an error for a path outside root', () => {
+    it('should allow a path outside root (external path support)', () => {
       const outsidePath = path.resolve(tempDir, 'outside-root.txt');
       const params = {
         file_path: outsidePath,
         content: 'hello',
       };
-      expect(() => tool.build(params)).toThrow(
-        /File path must be within one of the workspace directories/,
-      );
+      const invocation = tool.build(params);
+      expect(invocation).toBeDefined();
     });
 
     it('should throw an error if path is a directory', () => {
@@ -193,74 +192,18 @@ describe('WriteFileTool', () => {
     });
   });
 
-  describe('getCorrectedFileContent', () => {
-    it('should return proposed content unchanged for a new file', async () => {
-      const filePath = path.join(rootDir, 'new_corrected_file.txt');
-      const proposedContent = 'Proposed new content.';
-
-      const result = await getCorrectedFileContent(
-        mockConfig,
-        filePath,
-        proposedContent,
-      );
-
-      expect(result.correctedContent).toBe(proposedContent);
-      expect(result.originalContent).toBe('');
-      expect(result.fileExists).toBe(false);
-      expect(result.error).toBeUndefined();
-    });
-
-    it('should return proposed content unchanged for an existing file', async () => {
-      const filePath = path.join(rootDir, 'existing_corrected_file.txt');
-      const originalContent = 'Original existing content.';
-      const proposedContent = 'Proposed replacement content.';
-      fs.writeFileSync(filePath, originalContent, 'utf8');
-
-      const result = await getCorrectedFileContent(
-        mockConfig,
-        filePath,
-        proposedContent,
-      );
-
-      expect(result.correctedContent).toBe(proposedContent);
-      expect(result.originalContent).toBe(originalContent);
-      expect(result.fileExists).toBe(true);
-      expect(result.error).toBeUndefined();
-    });
-
-    it('should return error if reading an existing file fails (e.g. permissions)', async () => {
-      const filePath = path.join(rootDir, 'unreadable_file.txt');
-      const proposedContent = 'some content';
-      fs.writeFileSync(filePath, 'content', { mode: 0o000 });
-
-      const readError = new Error('Permission denied');
-      vi.spyOn(fsService, 'readTextFile').mockImplementationOnce(() =>
-        Promise.reject(readError),
-      );
-
-      const result = await getCorrectedFileContent(
-        mockConfig,
-        filePath,
-        proposedContent,
-      );
-
-      expect(fsService.readTextFile).toHaveBeenCalledWith(filePath);
-      expect(result.correctedContent).toBe(proposedContent);
-      expect(result.originalContent).toBe('');
-      expect(result.fileExists).toBe(true);
-      expect(result.error).toEqual({
-        message: 'Permission denied',
-        code: undefined,
-      });
-
-      fs.chmodSync(filePath, 0o600);
-    });
-  });
-
   describe('shouldConfirmExecute', () => {
     const abortSignal = new AbortController().signal;
 
-    it('should return false if _getCorrectedFileContent returns an error', async () => {
+    it('should always return ask from getDefaultPermission', async () => {
+      const filePath = path.join(rootDir, 'confirm_permission_file.txt');
+      const params = { file_path: filePath, content: 'test content' };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+    });
+
+    it('should throw if _getCorrectedFileContent returns an error', async () => {
       const filePath = path.join(rootDir, 'confirm_error_file.txt');
       const params = { file_path: filePath, content: 'test content' };
       fs.writeFileSync(filePath, 'original', { mode: 0o000 });
@@ -271,8 +214,9 @@ describe('WriteFileTool', () => {
       );
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(abortSignal);
-      expect(confirmation).toBe(false);
+      await expect(
+        invocation.getConfirmationDetails(abortSignal),
+      ).rejects.toThrow('Error reading existing file for confirmation');
 
       fs.chmodSync(filePath, 0o600);
     });
@@ -283,7 +227,7 @@ describe('WriteFileTool', () => {
 
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
-      const confirmation = (await invocation.shouldConfirmExecute(
+      const confirmation = (await invocation.getConfirmationDetails(
         abortSignal,
       )) as ToolEditConfirmationDetails;
 
@@ -310,7 +254,7 @@ describe('WriteFileTool', () => {
 
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
-      const confirmation = (await invocation.shouldConfirmExecute(
+      const confirmation = (await invocation.getConfirmationDetails(
         abortSignal,
       )) as ToolEditConfirmationDetails;
 
@@ -342,7 +286,7 @@ describe('WriteFileTool', () => {
         const params = { file_path: filePath, content: 'test' };
         const invocation = tool.build(params);
 
-        const confirmation = (await invocation.shouldConfirmExecute(
+        const confirmation = (await invocation.getConfirmationDetails(
           abortSignal,
         )) as ToolEditConfirmationDetails;
 
@@ -361,7 +305,7 @@ describe('WriteFileTool', () => {
         const params = { file_path: filePath, content: 'test' };
         const invocation = tool.build(params);
 
-        await invocation.shouldConfirmExecute(abortSignal);
+        await invocation.getConfirmationDetails(abortSignal);
 
         expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
       });
@@ -372,9 +316,39 @@ describe('WriteFileTool', () => {
         const params = { file_path: filePath, content: 'test' };
         const invocation = tool.build(params);
 
-        await invocation.shouldConfirmExecute(abortSignal);
+        await invocation.getConfirmationDetails(abortSignal);
 
         expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
+      });
+
+      it('should not call openDiff in AUTO_EDIT mode', async () => {
+        mockConfigInternal.getApprovalMode.mockReturnValue(
+          ApprovalMode.AUTO_EDIT,
+        );
+        const filePath = path.join(rootDir, 'ide_auto_edit_file.txt');
+        const params = { file_path: filePath, content: 'test' };
+        const invocation = tool.build(params);
+
+        const confirmation = (await invocation.getConfirmationDetails(
+          abortSignal,
+        )) as ToolEditConfirmationDetails;
+
+        expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
+        expect(confirmation.ideConfirmation).toBeUndefined();
+      });
+
+      it('should not call openDiff in YOLO mode', async () => {
+        mockConfigInternal.getApprovalMode.mockReturnValue(ApprovalMode.YOLO);
+        const filePath = path.join(rootDir, 'ide_yolo_file.txt');
+        const params = { file_path: filePath, content: 'test' };
+        const invocation = tool.build(params);
+
+        const confirmation = (await invocation.getConfirmationDetails(
+          abortSignal,
+        )) as ToolEditConfirmationDetails;
+
+        expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
+        expect(confirmation.ideConfirmation).toBeUndefined();
       });
 
       it('should update params.content with IDE content when onConfirm is called', async () => {
@@ -383,7 +357,7 @@ describe('WriteFileTool', () => {
         const invocation = tool.build(params);
 
         // This is the key part: get the confirmation details
-        const confirmation = (await invocation.shouldConfirmExecute(
+        const confirmation = (await invocation.getConfirmationDetails(
           abortSignal,
         )) as ToolEditConfirmationDetails;
 
@@ -411,7 +385,7 @@ describe('WriteFileTool', () => {
         });
         mockIdeClient.openDiff.mockReturnValue(diffPromise);
 
-        const confirmation = (await invocation.shouldConfirmExecute(
+        const confirmation = (await invocation.getConfirmationDetails(
           abortSignal,
         )) as ToolEditConfirmationDetails;
 
@@ -469,7 +443,8 @@ describe('WriteFileTool', () => {
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
 
-      const confirmDetails = await invocation.shouldConfirmExecute(abortSignal);
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
       if (
         typeof confirmDetails === 'object' &&
         'onConfirm' in confirmDetails &&
@@ -484,7 +459,9 @@ describe('WriteFileTool', () => {
         /Successfully created and wrote to new file/,
       );
       expect(fs.existsSync(filePath)).toBe(true);
-      const writtenContent = await fsService.readTextFile(filePath);
+      const { content: writtenContent } = await fsService.readTextFile({
+        path: filePath,
+      });
       expect(writtenContent).toBe(proposedContent);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileName).toBe('execute_new_file.txt');
@@ -504,7 +481,8 @@ describe('WriteFileTool', () => {
       const params = { file_path: filePath, content: proposedContent };
       const invocation = tool.build(params);
 
-      const confirmDetails = await invocation.shouldConfirmExecute(abortSignal);
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
       if (
         typeof confirmDetails === 'object' &&
         'onConfirm' in confirmDetails &&
@@ -516,7 +494,9 @@ describe('WriteFileTool', () => {
       const result = await invocation.execute(abortSignal);
 
       expect(result.llmContent).toMatch(/Successfully overwrote file/);
-      const writtenContent = await fsService.readTextFile(filePath);
+      const { content: writtenContent } = await fsService.readTextFile({
+        path: filePath,
+      });
       expect(writtenContent).toBe(proposedContent);
       const display = result.returnDisplay as FileDiff;
       expect(display.fileName).toBe('execute_existing_file.txt');
@@ -528,6 +508,36 @@ describe('WriteFileTool', () => {
       );
     });
 
+    it('should treat metadata ENOENT as new file when readTextFile returned empty content', async () => {
+      const filePath = path.join(rootDir, 'execute_acp_like_missing_file.txt');
+      const proposedContent = 'content from acp-like flow';
+      const writeSpy = vi.spyOn(fsService, 'writeTextFile');
+
+      // Simulate ENOENT: file does not exist, readTextFile throws ENOENT.
+      const enoentError = new Error('File not found') as NodeJS.ErrnoException;
+      enoentError.code = 'ENOENT';
+      vi.spyOn(fsService, 'readTextFile').mockRejectedValueOnce(enoentError);
+
+      const params = { file_path: filePath, content: proposedContent };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toMatch(
+        /Successfully created and wrote to new file/,
+      );
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: proposedContent,
+        _meta: {
+          bom: false,
+          encoding: undefined,
+        },
+      });
+      expect(fs.existsSync(filePath)).toBe(true);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(proposedContent);
+    });
+
     it('should create directory if it does not exist', async () => {
       const dirPath = path.join(rootDir, 'new_dir_for_write');
       const filePath = path.join(dirPath, 'file_in_new_dir.txt');
@@ -536,7 +546,8 @@ describe('WriteFileTool', () => {
       const params = { file_path: filePath, content };
       const invocation = tool.build(params);
       // Simulate confirmation if your logic requires it before execute, or remove if not needed for this path
-      const confirmDetails = await invocation.shouldConfirmExecute(abortSignal);
+      const confirmDetails =
+        await invocation.getConfirmationDetails(abortSignal);
       if (
         typeof confirmDetails === 'object' &&
         'onConfirm' in confirmDetails &&
@@ -607,14 +618,13 @@ describe('WriteFileTool', () => {
       expect(() => tool.build(params)).not.toThrow();
     });
 
-    it('should reject paths outside workspace root', () => {
+    it('should allow paths outside workspace root (external path support)', () => {
       const params = {
         file_path: '/etc/passwd',
-        content: 'malicious',
+        content: 'test',
       };
-      expect(() => tool.build(params)).toThrow(
-        /File path must be within one of the workspace directories/,
-      );
+      const invocation = tool.build(params);
+      expect(invocation).toBeDefined();
     });
   });
 
@@ -757,8 +767,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: true
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: true,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: true, encoding: 'utf-8', lineEnding: 'lf' },
       });
 
       // Cleanup
@@ -783,8 +795,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: false
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: false,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: false, encoding: 'utf-8', lineEnding: 'lf' },
       });
 
       // Cleanup
@@ -810,8 +824,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: false (default is utf-8)
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: false,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: false, encoding: undefined },
       });
 
       // Cleanup
@@ -842,8 +858,10 @@ describe('WriteFileTool', () => {
       await invocation.execute(abortSignal);
 
       // Verify writeTextFile was called with bom: true
-      expect(writeSpy).toHaveBeenCalledWith(filePath, newContent, {
-        bom: true,
+      expect(writeSpy).toHaveBeenCalledWith({
+        path: filePath,
+        content: newContent,
+        _meta: { bom: true, encoding: undefined },
       });
 
       // Restore mock

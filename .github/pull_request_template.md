@@ -2,6 +2,19 @@
 
 <!-- Add a brief description of what this pull request changes and why and any important things for reviewers to look at -->
 
+## Screenshots / Video Demo
+
+<!--
+Please attach a screenshot or short video showing your change in action.
+This helps reviewers understand the change quickly and prioritize reviews.
+
+- For bug fixes: show the before/after behavior.
+- For features: show the new functionality in use.
+- For refactors or internal changes with no visible effect: write "N/A — no user-facing change" and briefly explain why.
+
+PRs with visual demos typically get reviewed much faster!
+-->
+
 ## Dive Deeper
 
 <!-- more thoughts and in-depth discussion here -->

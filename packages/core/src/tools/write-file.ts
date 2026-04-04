@@ -17,6 +17,7 @@ import type {
   ToolLocation,
   ToolResult,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -24,7 +25,12 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { FileEncoding } from '../services/fileSystemService.js';
+import {
+  FileEncoding,
+  needsUtf8Bom,
+  detectLineEnding,
+} from '../services/fileSystemService.js';
+import type { LineEnding } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
@@ -37,7 +43,10 @@ import { IdeClient } from '../ide/ide-client.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { FileOperation } from '../telemetry/metrics.js';
-import { getSpecificMimeType } from '../utils/fileUtils.js';
+import {
+  getSpecificMimeType,
+  fileExists as isFilefileExists,
+} from '../utils/fileUtils.js';
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -68,47 +77,6 @@ export interface WriteFileToolParams {
   ai_proposed_content?: string;
 }
 
-interface GetCorrectedFileContentResult {
-  originalContent: string;
-  correctedContent: string;
-  fileExists: boolean;
-  error?: { message: string; code?: string };
-}
-
-export async function getCorrectedFileContent(
-  config: Config,
-  filePath: string,
-  proposedContent: string,
-): Promise<GetCorrectedFileContentResult> {
-  let originalContent = '';
-  let fileExists = false;
-  const correctedContent = proposedContent;
-
-  try {
-    originalContent = await config
-      .getFileSystemService()
-      .readTextFile(filePath);
-    fileExists = true; // File exists and was read
-  } catch (err) {
-    if (isNodeError(err) && err.code === 'ENOENT') {
-      fileExists = false;
-      originalContent = '';
-    } else {
-      // File exists but could not be read (permissions, etc.)
-      fileExists = true; // Mark as existing but problematic
-      originalContent = ''; // Can't use its content
-      const error = {
-        message: getErrorMessage(err),
-        code: isNodeError(err) ? err.code : undefined,
-      };
-      // Return early as we can't proceed with content correction meaningfully
-      return { originalContent, correctedContent, fileExists, error };
-    }
-  }
-
-  return { originalContent, correctedContent, fileExists };
-}
-
 class WriteFileToolInvocation extends BaseToolInvocation<
   WriteFileToolParams,
   ToolResult
@@ -132,25 +100,34 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     return `Writing to ${shortenPath(relativePath)}`;
   }
 
-  override async shouldConfirmExecute(
+  /**
+   * Write operations always need user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
+
+  /**
+   * Constructs the write-file diff confirmation details.
+   */
+  override async getConfirmationDetails(
     _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
-      return false;
+  ): Promise<ToolCallConfirmationDetails> {
+    let originalContent = '';
+    const fileExists = await isFilefileExists(this.params.file_path);
+    if (fileExists) {
+      try {
+        const { content } = await this.config
+          .getFileSystemService()
+          .readTextFile({ path: this.params.file_path });
+        originalContent = content;
+      } catch (err) {
+        throw new Error(
+          `Error reading existing file for confirmation: ${getErrorMessage(err)}`,
+        );
+      }
     }
 
-    const correctedContentResult = await getCorrectedFileContent(
-      this.config,
-      this.params.file_path,
-      this.params.content,
-    );
-
-    if (correctedContentResult.error) {
-      // If file exists but couldn't be read, we can't show a diff for confirmation.
-      return false;
-    }
-
-    const { originalContent, correctedContent } = correctedContentResult;
     const relativePath = makeRelative(
       this.params.file_path,
       this.config.getTargetDir(),
@@ -160,16 +137,20 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     const fileDiff = Diff.createPatch(
       fileName,
       originalContent, // Original content (empty if new file or unreadable)
-      correctedContent, // Content after potential correction
+      this.params.content, // Content after potential correction
       'Current',
       'Proposed',
       DEFAULT_DIFF_OPTIONS,
     );
 
+    const approvalMode = this.config.getApprovalMode();
     const ideClient = await IdeClient.getInstance();
     const ideConfirmation =
-      this.config.getIdeMode() && ideClient.isDiffingEnabled()
-        ? ideClient.openDiff(this.params.file_path, correctedContent)
+      this.config.getIdeMode() &&
+      ideClient.isDiffingEnabled() &&
+      approvalMode !== ApprovalMode.AUTO_EDIT &&
+      approvalMode !== ApprovalMode.YOLO
+        ? ideClient.openDiff(this.params.file_path, this.params.content)
         : undefined;
 
     const confirmationDetails: ToolEditConfirmationDetails = {
@@ -179,7 +160,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       filePath: this.params.file_path,
       fileDiff,
       originalContent,
-      newContent: correctedContent,
+      newContent: this.params.content,
       onConfirm: async (outcome: ToolConfirmationOutcome) => {
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
@@ -201,73 +182,89 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     const { file_path, content, ai_proposed_content, modified_by_user } =
       this.params;
 
-    const correctedContentResult = await getCorrectedFileContent(
-      this.config,
-      file_path,
-      content,
-    );
-
-    if (correctedContentResult.error) {
-      const errDetails = correctedContentResult.error;
-      const errorMsg = errDetails.code
-        ? `Error checking existing file '${file_path}': ${errDetails.message} (${errDetails.code})`
-        : `Error checking existing file: ${errDetails.message}`;
-      return {
-        llmContent: errorMsg,
-        returnDisplay: errorMsg,
-        error: {
-          message: errorMsg,
-          type: ToolErrorType.FILE_WRITE_FAILURE,
-        },
-      };
+    let fileExists = await isFilefileExists(file_path);
+    let originalContent = '';
+    let useBOM = false;
+    let detectedEncoding: string | undefined;
+    let detectedLineEnding: LineEnding | undefined;
+    const dirName = path.dirname(file_path);
+    if (fileExists) {
+      try {
+        const fileInfo = await this.config
+          .getFileSystemService()
+          .readTextFile({ path: file_path });
+        if (fileInfo._meta?.bom !== undefined) {
+          useBOM = fileInfo._meta.bom;
+        } else {
+          useBOM =
+            fileInfo.content.length > 0 &&
+            fileInfo.content.codePointAt(0) === 0xfeff;
+        }
+        detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
+        detectedLineEnding = detectLineEnding(fileInfo.content);
+        originalContent = fileInfo.content;
+        fileExists = true; // File exists and was read
+      } catch (err) {
+        if (isNodeError(err) && err.code === 'ENOENT') {
+          fileExists = false;
+        } else {
+          const error = {
+            message: getErrorMessage(err),
+            code: isNodeError(err) ? err.code : undefined,
+          };
+          const errorMsg = error.code
+            ? `Error checking existing file '${file_path}': ${error.message} (${error.code})`
+            : `Error checking existing file: ${error.message}`;
+          return {
+            llmContent: errorMsg,
+            returnDisplay: errorMsg,
+            error: {
+              message: errorMsg,
+              type: ToolErrorType.FILE_WRITE_FAILURE,
+            },
+          };
+        }
+      }
     }
 
-    const {
-      originalContent,
-      correctedContent: fileContent,
-      fileExists,
-    } = correctedContentResult;
-    // fileExists is true if the file existed (and was readable or unreadable but caught by readError).
-    // fileExists is false if the file did not exist (ENOENT).
-    const isNewFile =
-      !fileExists ||
-      (correctedContentResult.error !== undefined &&
-        !correctedContentResult.fileExists);
+    if (!fileExists) {
+      fs.mkdirSync(dirName, { recursive: true });
+      const userEncoding = this.config.getDefaultFileEncoding();
+      if (userEncoding === FileEncoding.UTF8_BOM) {
+        // User explicitly configured UTF-8 BOM for all new files
+        useBOM = true;
+      } else if (userEncoding === undefined) {
+        // No explicit setting: auto-detect based on platform/extension.
+        // e.g. .ps1 on Windows with a non-UTF-8 code page needs BOM so
+        // PowerShell 5.1 reads the file as UTF-8 instead of the system ANSI page
+        useBOM = needsUtf8Bom(file_path);
+      }
+      // else: user explicitly set 'utf-8' (no BOM) — respect it
+      detectedEncoding = undefined;
+    }
 
     try {
-      const dirName = path.dirname(file_path);
-      if (!fs.existsSync(dirName)) {
-        fs.mkdirSync(dirName, { recursive: true });
-      }
-
-      // Check if file exists and has BOM to preserve encoding
-      // For new files, use the configured default encoding
-      let useBOM = false;
-      if (!isNewFile) {
-        useBOM = await this.config
-          .getFileSystemService()
-          .detectFileBOM(file_path);
-      } else {
-        useBOM = this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
-      }
-
-      await this.config
-        .getFileSystemService()
-        .writeTextFile(file_path, fileContent, { bom: useBOM });
+      await this.config.getFileSystemService().writeTextFile({
+        path: file_path,
+        content,
+        _meta: {
+          bom: useBOM,
+          encoding: detectedEncoding,
+          lineEnding: detectedLineEnding,
+        },
+      });
 
       // Generate diff for display result
       const fileName = path.basename(file_path);
       // If there was a readError, originalContent in correctedContentResult is '',
       // but for the diff, we want to show the original content as it was before the write if possible.
       // However, if it was unreadable, currentContentForDiff will be empty.
-      const currentContentForDiff = correctedContentResult.error
-        ? '' // Or some indicator of unreadable content
-        : originalContent;
+      const currentContentForDiff = originalContent;
 
       const fileDiff = Diff.createPatch(
         fileName,
         currentContentForDiff,
-        fileContent,
+        content,
         'Original',
         'Written',
         DEFAULT_DIFF_OPTIONS,
@@ -282,7 +279,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       );
 
       const llmSuccessMessageParts = [
-        isNewFile
+        !fileExists
           ? `Successfully created and wrote to new file: ${file_path}.`
           : `Successfully overwrote file: ${file_path}.`,
       ];
@@ -296,9 +293,11 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       const mimetype = getSpecificMimeType(file_path);
       const programmingLanguage = getLanguageFromFilePath(file_path);
       const extension = path.extname(file_path);
-      const operation = isNewFile ? FileOperation.CREATE : FileOperation.UPDATE;
+      const operation = !fileExists
+        ? FileOperation.CREATE
+        : FileOperation.UPDATE;
 
-      const lineCount = fileContent.split('\n').length;
+      const lineCount = content.split('\n').length;
       logFileOperation(
         this.config,
         new FileOperationEvent(
@@ -314,8 +313,8 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       const displayResult: FileDiff = {
         fileDiff,
         fileName,
-        originalContent: correctedContentResult.originalContent,
-        newContent: correctedContentResult.correctedContent,
+        originalContent,
+        newContent: content,
         diffStat,
       };
 
@@ -414,14 +413,6 @@ export class WriteFileTool
       return `File path must be absolute: ${filePath}`;
     }
 
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(filePath)) {
-      const directories = workspaceContext.getDirectories();
-      return `File path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )}`;
-    }
-
     try {
       if (fs.existsSync(filePath)) {
         const stats = fs.lstatSync(filePath);
@@ -450,21 +441,22 @@ export class WriteFileTool
     return {
       getFilePath: (params: WriteFileToolParams) => params.file_path,
       getCurrentContent: async (params: WriteFileToolParams) => {
-        const correctedContentResult = await getCorrectedFileContent(
-          this.config,
-          params.file_path,
-          params.content,
-        );
-        return correctedContentResult.originalContent;
+        const fileExists = await isFilefileExists(params.file_path);
+        if (fileExists) {
+          try {
+            const { content } = await this.config
+              .getFileSystemService()
+              .readTextFile({ path: params.file_path });
+            return content;
+          } catch (err) {
+            if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+            return '';
+          }
+        } else {
+          return '';
+        }
       },
-      getProposedContent: async (params: WriteFileToolParams) => {
-        const correctedContentResult = await getCorrectedFileContent(
-          this.config,
-          params.file_path,
-          params.content,
-        );
-        return correctedContentResult.correctedContent;
-      },
+      getProposedContent: async (params: WriteFileToolParams) => params.content,
       createUpdatedParams: (
         _oldContent: string,
         modifiedProposedContent: string,

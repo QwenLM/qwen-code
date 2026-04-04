@@ -15,9 +15,16 @@ import {
   type ApprovalMode,
 } from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
+import { type CodingPlanRegion } from '../../constants/codingPlan.js';
+import { type AlibabaStandardRegion } from '../../constants/alibabaStandardApiKey.js';
 import type { AuthState } from '../types.js';
-import { type VisionSwitchOutcome } from '../components/ModelSwitchDialog.js';
-import { type OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
+import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+// OpenAICredentials type (previously imported from OpenAIKeyPrompt)
+export interface OpenAICredentials {
+  apiKey: string;
+  baseUrl?: string;
+  model?: string;
+}
 
 export interface UIActions {
   openThemeDialog: () => void;
@@ -35,8 +42,17 @@ export interface UIActions {
     authType: AuthType | undefined,
     credentials?: OpenAICredentials,
   ) => Promise<void>;
+  handleCodingPlanSubmit: (
+    apiKey: string,
+    region?: CodingPlanRegion,
+  ) => Promise<void>;
+  handleAlibabaStandardSubmit: (
+    apiKey: string,
+    region: AlibabaStandardRegion,
+    modelIdsInput: string,
+  ) => Promise<void>;
   setAuthState: (state: AuthState) => void;
-  onAuthError: (error: string) => void;
+  onAuthError: (error: string | null) => void;
   cancelAuthentication: () => void;
   handleEditorSelect: (
     editorType: EditorType | undefined,
@@ -45,6 +61,11 @@ export interface UIActions {
   exitEditorDialog: () => void;
   closeSettingsDialog: () => void;
   closeModelDialog: () => void;
+  openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
+  closeArenaDialog: () => void;
+  handleArenaModelsSelected?: (models: string[]) => void;
+  dismissCodingPlanUpdate: () => void;
+  closeTrustDialog: () => void;
   closePermissionsDialog: () => void;
   setShellModeActive: (value: boolean) => void;
   vimHandleInput: (key: Key) => boolean;
@@ -56,15 +77,22 @@ export interface UIActions {
   onSuggestionsVisibilityChange: (visible: boolean) => void;
   refreshStatic: () => void;
   handleFinalSubmit: (value: string) => void;
+  handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
-  // Vision switch dialog
-  handleVisionSwitchSelect: (outcome: VisionSwitchOutcome) => void;
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;
   // Subagent dialogs
   closeSubagentCreateDialog: () => void;
   closeAgentsManagerDialog: () => void;
+  // Extensions manager dialog
+  closeExtensionsManagerDialog: () => void;
+  // MCP dialog
+  closeMcpDialog: () => void;
+  // Hooks dialog
+  openHooksDialog: () => void;
+  // Hooks dialog
+  closeHooksDialog: () => void;
   // Resume session dialog
   openResumeDialog: () => void;
   closeResumeDialog: () => void;

@@ -22,8 +22,12 @@ export class OpenAILogger {
   /**
    * Creates a new OpenAI logger
    * @param customLogDir Optional custom log directory path (supports relative paths, absolute paths, and ~ expansion)
+   * @param cwd Optional working directory for resolving relative paths. Defaults to process.cwd().
+   *            In ACP mode, process.cwd() may be '/' (filesystem root), so callers should
+   *            pass the project working directory from Config.getWorkingDir().
    */
-  constructor(customLogDir?: string) {
+  constructor(customLogDir?: string, cwd?: string) {
+    const baseCwd = cwd || process.cwd();
     if (customLogDir) {
       // Resolve relative paths to absolute paths
       // Handle ~ expansion
@@ -31,12 +35,12 @@ export class OpenAILogger {
       if (customLogDir === '~' || customLogDir.startsWith('~/')) {
         resolvedPath = path.join(os.homedir(), customLogDir.slice(1));
       } else if (!path.isAbsolute(customLogDir)) {
-        // If it's a relative path, resolve it relative to current working directory
-        resolvedPath = path.resolve(process.cwd(), customLogDir);
+        // If it's a relative path, resolve it relative to provided working directory
+        resolvedPath = path.resolve(baseCwd, customLogDir);
       }
       this.logDir = path.normalize(resolvedPath);
     } else {
-      this.logDir = path.join(process.cwd(), 'logs', 'openai');
+      this.logDir = path.join(baseCwd, 'logs', 'openai');
     }
   }
 

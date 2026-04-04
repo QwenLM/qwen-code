@@ -59,11 +59,12 @@ export default tseslint.config(
       ...importPlugin.configs.typescript.rules,
       'import/no-default-export': 'warn',
       'import/no-unresolved': 'off', // Disable for now, can be noisy with monorepos/paths
+      'import/namespace': 'off', // Disabled due to https://github.com/import-js/eslint-plugin-import/issues/2866
     },
   },
   {
     // General overrides and rules for the project (TS/TSX files)
-    files: ['packages/*/src/**/*.{ts,tsx}'], // Target only TS/TSX in the cli package
+    files: ['packages/**/src/**/*.{ts,tsx}'], // Target TS/TSX in all packages (including nested)
     plugins: {
       import: importPlugin,
     },
@@ -254,9 +255,12 @@ export default tseslint.config(
       'no-console': 'off',
     },
   },
-  // Settings for export-html assets
+  // Settings for web-templates assets
   {
-    files: ['packages/cli/assets/export-html/**/*.{js,jsx,ts,tsx}'],
+    files: [
+      'packages/web-templates/src/**/*.{js,jsx,ts,tsx}',
+      'packages/web-templates/*.mjs',
+    ],
     languageOptions: {
       globals: {
         ...globals.browser,
@@ -271,6 +275,8 @@ export default tseslint.config(
     rules: {
       'react/react-in-jsx-scope': 'off',
       'react/prop-types': 'off',
+      'no-console': 'off',
+      'no-undef': 'off',
     },
   },
   // Prettier config must be last

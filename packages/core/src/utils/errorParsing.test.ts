@@ -60,6 +60,14 @@ describe('parseAndFormatApiError', () => {
     );
   });
 
+  it('should omit status when the API error has no status field', () => {
+    const errorMessage =
+      '{"error":{"code":1302,"message":"您的账户已达到速率限制，请您控制请求频率"}}';
+    expect(parseAndFormatApiError(errorMessage)).toBe(
+      '[API Error: 您的账户已达到速率限制，请您控制请求频率]',
+    );
+  });
+
   it('should format a nested API error', () => {
     const nestedErrorMessage = JSON.stringify({
       error: {

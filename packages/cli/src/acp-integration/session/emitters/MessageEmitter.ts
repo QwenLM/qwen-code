@@ -5,7 +5,8 @@
  */
 
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
-import type { Usage } from '../../schema.js';
+import type { SubagentMeta } from '../types.js';
+import type { Usage } from '@agentclientprotocol/sdk';
 import { BaseEmitter } from './BaseEmitter.js';
 
 /**
@@ -77,14 +78,14 @@ export class MessageEmitter extends BaseEmitter {
     usageMetadata: GenerateContentResponseUsageMetadata,
     text: string = '',
     durationMs?: number,
-    subagentMeta?: import('../types.js').SubagentMeta,
+    subagentMeta?: SubagentMeta,
   ): Promise<void> {
     const usage: Usage = {
-      promptTokens: usageMetadata.promptTokenCount,
-      completionTokens: usageMetadata.candidatesTokenCount,
-      thoughtsTokens: usageMetadata.thoughtsTokenCount,
-      totalTokens: usageMetadata.totalTokenCount,
-      cachedTokens: usageMetadata.cachedContentTokenCount,
+      inputTokens: usageMetadata.promptTokenCount ?? 0,
+      outputTokens: usageMetadata.candidatesTokenCount ?? 0,
+      totalTokens: usageMetadata.totalTokenCount ?? 0,
+      thoughtTokens: usageMetadata.thoughtsTokenCount,
+      cachedReadTokens: usageMetadata.cachedContentTokenCount,
     };
 
     const meta =

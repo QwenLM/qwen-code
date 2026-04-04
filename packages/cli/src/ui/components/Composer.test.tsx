@@ -111,12 +111,14 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
     debugMessage: '',
     nightly: false,
     isTrustedFolder: true,
+    taskStartTokens: 0,
     ...overrides,
   }) as UIState;
 
 const createMockUIActions = (): UIActions =>
   ({
     handleFinalSubmit: vi.fn(),
+    handleRetryLastPrompt: vi.fn(),
     handleClearScreen: vi.fn(),
     setShellModeActive: vi.fn(),
     onEscapePromptChange: vi.fn(),

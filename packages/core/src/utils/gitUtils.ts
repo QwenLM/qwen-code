@@ -88,3 +88,61 @@ export const getGitBranch = (cwd: string): string | undefined => {
     return undefined;
   }
 };
+
+/**
+ * Gets the git repository full name (owner/repo), if in a git repository.
+ * Tries to get the name from the remote URL first, then falls back to the directory name.
+ */
+export const getGitRepoName = (cwd: string): string | undefined => {
+  try {
+    // Try to get the repository name from the remote URL
+    const remoteUrl = execSync('git remote get-url origin', {
+      cwd,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    if (remoteUrl) {
+      // Extract owner/repo from various URL formats:
+      // - https://github.com/owner/repo.git -> owner/repo
+      // - git@github.com:owner/repo.git -> owner/repo
+      // - https://gitlab.com/owner/repo -> owner/repo
+      // - https://github.com/owner/repo/extra -> owner/repo (ignore extra path)
+
+      // Handle SSH format: git@host.com:owner/repo.git
+      let normalizedUrl = remoteUrl;
+      if (remoteUrl.startsWith('git@')) {
+        normalizedUrl = remoteUrl.replace(/^git@[^:]+:/, 'https://host.com/');
+      }
+
+      try {
+        const url = new URL(normalizedUrl);
+        // Remove .git suffix and split path
+        const pathParts = url.pathname
+          .replace(/\.git$/, '')
+          .split('/')
+          .filter(Boolean);
+        if (pathParts.length >= 2) {
+          // Return owner/repo format
+          return `${pathParts[0]}/${pathParts[1]}`;
+        }
+      } catch {
+        // URL parsing failed, try regex fallback
+        const match = remoteUrl.match(/[:/]([^/]+)\/([^/]+?)(?:\.git)?$/);
+        if (match && match[1] && match[2]) {
+          return `${match[1]}/${match[2]}`;
+        }
+      }
+    }
+  } catch {
+    // Fall back to directory name if remote URL is not available
+  }
+
+  // Fallback: use the directory name of the git root
+  const gitRoot = findGitRoot(cwd);
+  if (gitRoot) {
+    return path.basename(gitRoot);
+  }
+
+  return undefined;
+};

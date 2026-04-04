@@ -3,6 +3,7 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizeContent } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('SKILL_LOAD');
 
@@ -56,21 +57,6 @@ export async function loadSkillsFromDir(
   }
 }
 
-/**
- * Normalizes skill file content for consistent parsing across platforms.
- * - Strips UTF-8 BOM to ensure frontmatter starts at the first character.
- * - Normalizes line endings so skills authored on Windows (CRLF) parse correctly.
- */
-function normalizeSkillFileContent(content: string): string {
-  // Strip UTF-8 BOM to ensure frontmatter starts at the first character.
-  let normalized = content.replace(/^\uFEFF/, '');
-
-  // Normalize line endings so skills authored on Windows (CRLF) parse correctly.
-  normalized = normalized.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-
-  return normalized;
-}
-
 export function parseSkillContent(
   content: string,
   filePath: string,
@@ -78,7 +64,7 @@ export function parseSkillContent(
   debugLogger.debug(`Parsing skill content from: ${filePath}`);
 
   // Normalize content to handle BOM and CRLF line endings
-  const normalizedContent = normalizeSkillFileContent(content);
+  const normalizedContent = normalizeContent(content);
 
   // Split frontmatter and content
   // Use (?:\n|$) to allow frontmatter ending with or without trailing newline

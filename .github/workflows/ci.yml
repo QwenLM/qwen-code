@@ -83,6 +83,23 @@ jobs:
       - name: 'Run sensitive keyword linter'
         run: 'node scripts/lint.js --sensitive-keywords'
 
+      - name: 'Build CLI package'
+        run: 'npm run build --workspace=packages/cli'
+
+      - name: 'Generate settings schema'
+        run: 'npm run generate:settings-schema'
+
+      - name: 'Check settings schema is up-to-date'
+        run: |
+          if [[ -n $(git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json) ]]; then
+            echo "❌ Error: settings.schema.json is out of date!"
+            echo "   Please run: npm run generate:settings-schema"
+            echo "   Then commit the updated schema file."
+            git diff packages/vscode-ide-companion/schemas/settings.schema.json
+            exit 1
+          fi
+          echo "✅ Settings schema is up-to-date"
+
   #
   # Test: Node
   #

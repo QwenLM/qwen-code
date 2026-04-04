@@ -83,6 +83,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   private firstResultReceivedResolve?: () => void;
 
   private readonly isSingleTurn: boolean;
+  private abortHandler: (() => void) | null = null;
 
   constructor(
     transport: Transport,
@@ -91,7 +92,8 @@ export class Query implements AsyncIterable<SDKMessage> {
   ) {
     this.transport = transport;
     this.options = options;
-    this.sessionId = options.resume ?? randomUUID();
+    // Use sessionId from options if provided (for SDK-CLI alignment), otherwise generate one
+    this.sessionId = options.resume ?? options.sessionId ?? randomUUID();
     this.inputStream = new Stream<SDKMessage>();
     this.abortController = options.abortController ?? new AbortController();
     this.isSingleTurn = singleTurn;
@@ -125,16 +127,32 @@ export class Query implements AsyncIterable<SDKMessage> {
         logger.error('Error during abort cleanup:', err);
       });
     } else {
-      this.abortController.signal.addEventListener('abort', () => {
+      this.abortHandler = () => {
         this.inputStream.error(new AbortError('Query aborted by user'));
         this.close().catch((err) => {
           logger.error('Error during abort cleanup:', err);
         });
-      });
+      };
+      this.abortController.signal.addEventListener('abort', this.abortHandler);
     }
 
     this.initialized = this.initialize();
-    this.initialized.catch(() => {});
+    this.initialized.catch((error) => {
+      // Propagate initialization errors to inputStream so users can catch them
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      if (
+        errorMessage.includes('Query is closed') &&
+        this.transport.exitError
+      ) {
+        // If query was closed due to transport error, propagate the transport error
+        this.inputStream.error(this.transport.exitError);
+      } else {
+        this.inputStream.error(
+          error instanceof Error ? error : new Error(errorMessage),
+        );
+      }
+    });
 
     this.startMessageRouter();
   }
@@ -627,6 +645,11 @@ export class Query implements AsyncIterable<SDKMessage> {
       return Promise.reject(new Error('Query is closed'));
     }
 
+    // Check if transport has already exited with an error
+    if (this.transport.exitError) {
+      return Promise.reject(this.transport.exitError);
+    }
+
     if (subtype !== ControlRequestType.INITIALIZE) {
       // Ensure all other control requests get processed after initialization
       await this.initialized;
@@ -719,16 +742,29 @@ export class Query implements AsyncIterable<SDKMessage> {
 
     this.closed = true;
 
+    // Remove abort listener to prevent memory leak
+    if (this.abortHandler) {
+      this.abortController.signal.removeEventListener(
+        'abort',
+        this.abortHandler,
+      );
+      this.abortHandler = null;
+    }
+
+    // Use transport's exit error if available, otherwise use generic error
+    const transportError = this.transport.exitError;
+    const rejectionError = transportError ?? new Error('Query is closed');
+
     for (const pending of this.pendingControlRequests.values()) {
       pending.abortController.abort();
       clearTimeout(pending.timeout);
-      pending.reject(new Error('Query is closed'));
+      pending.reject(rejectionError);
     }
     this.pendingControlRequests.clear();
 
     // Clean up pending MCP responses
     for (const pending of this.pendingMcpResponses.values()) {
-      pending.reject(new Error('Query is closed'));
+      pending.reject(rejectionError);
     }
     this.pendingMcpResponses.clear();
 

@@ -654,6 +654,24 @@ describe('StreamJsonOutputAdapter', () => {
         'Message not started',
       );
     });
+
+    it('should not emit empty assistant message when started but no content processed', () => {
+      stdoutWriteSpy.mockClear();
+      adapter.finalizeAssistantMessage();
+
+      const assistantCalls = stdoutWriteSpy.mock.calls.filter(
+        (call: unknown[]) => {
+          try {
+            const parsed = JSON.parse(call[0] as string);
+            return parsed.type === 'assistant';
+          } catch {
+            return false;
+          }
+        },
+      );
+
+      expect(assistantCalls).toHaveLength(0);
+    });
   });
 
   describe('emitResult', () => {
@@ -882,6 +900,115 @@ describe('StreamJsonOutputAdapter', () => {
     });
   });
 
+  describe('emitToolProgress', () => {
+    const mockRequest = {
+      callId: 'tool-call-1',
+      name: 'mcp__echo-test__echo',
+      args: {},
+      isClientInitiated: false,
+      prompt_id: '',
+    };
+
+    it('should emit tool_progress stream event when includePartialMessages is true', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, true);
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitToolProgress(mockRequest, {
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: 10,
+        message: 'Echo: 1',
+      });
+
+      expect(stdoutWriteSpy).toHaveBeenCalledTimes(1);
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.type).toBe('stream_event');
+      expect(parsed.parent_tool_use_id).toBeNull();
+      expect(parsed.session_id).toBe('test-session-id');
+      expect(parsed.uuid).toBeDefined();
+      expect(parsed.event).toEqual({
+        type: 'tool_progress',
+        tool_use_id: 'tool-call-1',
+        content: {
+          type: 'mcp_tool_progress',
+          progress: 1,
+          total: 10,
+          message: 'Echo: 1',
+        },
+      });
+    });
+
+    it('should not emit tool_progress when includePartialMessages is false', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitToolProgress(mockRequest, {
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: 10,
+        message: 'Echo: 1',
+      });
+
+      expect(stdoutWriteSpy).not.toHaveBeenCalled();
+    });
+
+    it('should emit multiple tool_progress events for sequential progress updates', () => {
+      adapter = new StreamJsonOutputAdapter(mockConfig, true);
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitToolProgress(mockRequest, {
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: 3,
+        message: 'Echo: 1',
+      });
+      adapter.emitToolProgress(mockRequest, {
+        type: 'mcp_tool_progress',
+        progress: 2,
+        total: 3,
+        message: 'Echo: 1, 2',
+      });
+      adapter.emitToolProgress(mockRequest, {
+        type: 'mcp_tool_progress',
+        progress: 3,
+        total: 3,
+        message: 'Echo: 1, 2, 3',
+      });
+
+      expect(stdoutWriteSpy).toHaveBeenCalledTimes(3);
+
+      const events = stdoutWriteSpy.mock.calls.map(
+        (call: unknown[]) => JSON.parse(call[0] as string).event,
+      );
+      expect(events[0].content).toEqual({
+        type: 'mcp_tool_progress',
+        progress: 1,
+        total: 3,
+        message: 'Echo: 1',
+      });
+      expect(events[1].content).toEqual({
+        type: 'mcp_tool_progress',
+        progress: 2,
+        total: 3,
+        message: 'Echo: 1, 2',
+      });
+      expect(events[2].content).toEqual({
+        type: 'mcp_tool_progress',
+        progress: 3,
+        total: 3,
+        message: 'Echo: 1, 2, 3',
+      });
+
+      // All events should share the same tool_use_id
+      for (const event of events) {
+        expect(event.type).toBe('tool_progress');
+        expect(event.tool_use_id).toBe('tool-call-1');
+      }
+    });
+  });
+
   describe('getSessionId and getModel', () => {
     beforeEach(() => {
       adapter = new StreamJsonOutputAdapter(mockConfig, false);
@@ -898,55 +1025,67 @@ describe('StreamJsonOutputAdapter', () => {
     });
   });
 
-  describe('message_id in stream events', () => {
+  describe('content_block event identification', () => {
     beforeEach(() => {
       adapter = new StreamJsonOutputAdapter(mockConfig, true);
       adapter.startAssistantMessage();
     });
 
-    it('should include message_id in stream events after message starts', () => {
+    it('should not include message_id in content_block events', () => {
       adapter.processEvent({
         type: GeminiEventType.Content,
         value: 'Text',
       });
-      // Process another event to ensure messageStarted is true
       adapter.processEvent({
         type: GeminiEventType.Content,
         value: 'More',
       });
 
       const calls = stdoutWriteSpy.mock.calls;
-      // Find all delta events
-      const deltaCalls = calls.filter((call: unknown[]) => {
+      const contentBlockCalls = calls.filter((call: unknown[]) => {
         try {
           const parsed = JSON.parse(call[0] as string);
           return (
             parsed.type === 'stream_event' &&
-            parsed.event.type === 'content_block_delta'
+            (parsed.event.type === 'content_block_start' ||
+              parsed.event.type === 'content_block_delta' ||
+              parsed.event.type === 'content_block_stop')
           );
         } catch {
           return false;
         }
       });
 
-      expect(deltaCalls.length).toBeGreaterThan(0);
-      // The second delta event should have message_id (after messageStarted becomes true)
-      // message_id is added to the event object, so check parsed.event.message_id
-      if (deltaCalls.length > 1) {
-        const secondDelta = JSON.parse(
-          (deltaCalls[1] as unknown[])[0] as string,
-        );
-        // message_id is on the enriched event object
-        expect(
-          secondDelta.event.message_id || secondDelta.message_id,
-        ).toBeTruthy();
-      } else {
-        // If only one delta, check if message_id exists
-        const delta = JSON.parse((deltaCalls[0] as unknown[])[0] as string);
-        // message_id is added when messageStarted is true
-        // First event may or may not have it, but subsequent ones should
-        expect(delta.event.message_id || delta.message_id).toBeTruthy();
+      expect(contentBlockCalls.length).toBeGreaterThan(0);
+      for (const call of contentBlockCalls) {
+        const parsed = JSON.parse((call as unknown[])[0] as string);
+        expect(parsed.event.message_id).toBeUndefined();
       }
+    });
+
+    it('should identify content_block events by session_id and index', () => {
+      adapter.processEvent({
+        type: GeminiEventType.Content,
+        value: 'Text',
+      });
+
+      const calls = stdoutWriteSpy.mock.calls;
+      const blockStartCall = calls.find((call: unknown[]) => {
+        try {
+          const parsed = JSON.parse(call[0] as string);
+          return (
+            parsed.type === 'stream_event' &&
+            parsed.event.type === 'content_block_start'
+          );
+        } catch {
+          return false;
+        }
+      });
+
+      expect(blockStartCall).toBeDefined();
+      const parsed = JSON.parse((blockStartCall as unknown[])[0] as string);
+      expect(parsed.session_id).toBe('test-session-id');
+      expect(typeof parsed.event.index).toBe('number');
     });
   });
 

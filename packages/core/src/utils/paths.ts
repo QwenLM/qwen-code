@@ -190,11 +190,35 @@ export function unescapePath(filePath: string): string {
 
 /**
  * Generates a unique hash for a project based on its root path.
+ * On Windows, paths are case-insensitive, so we normalize to lowercase
+ * to ensure the same physical path always produces the same hash.
  * @param projectRoot The absolute path to the project's root directory.
  * @returns A SHA256 hash of the project root path.
  */
 export function getProjectHash(projectRoot: string): string {
-  return crypto.createHash('sha256').update(projectRoot).digest('hex');
+  // On Windows, normalize path to lowercase for case-insensitive matching
+  const normalizedPath =
+    os.platform() === 'win32' ? projectRoot.toLowerCase() : projectRoot;
+  return crypto.createHash('sha256').update(normalizedPath).digest('hex');
+}
+
+/**
+ * Sanitizes a directory path to create a safe project ID.
+ *
+ * - On Windows: normalizes to lowercase for case-insensitive matching
+ * - Replaces all non-alphanumeric characters with hyphens
+ *
+ * This is used for:
+ * - Creating project-specific directories
+ * - Generating session IDs for debug logging during startup
+ *
+ * @param cwd - The directory path to sanitize
+ * @returns A sanitized string safe for use as a project identifier
+ */
+export function sanitizeCwd(cwd: string): string {
+  // On Windows, normalize to lowercase for case-insensitive matching
+  const normalizedCwd = os.platform() === 'win32' ? cwd.toLowerCase() : cwd;
+  return normalizedCwd.replace(/[^a-zA-Z0-9]/g, '-');
 }
 
 /**
@@ -215,6 +239,10 @@ export function isSubpath(parentPath: string, childPath: string): boolean {
     relative !== '..' &&
     !pathModule.isAbsolute(relative)
   );
+}
+
+export function isSubpaths(parentPath: string[], childPath: string): boolean {
+  return parentPath.some((p) => isSubpath(p, childPath));
 }
 
 /**
@@ -248,6 +276,13 @@ export interface PathValidationOptions {
    * If true, allows both files and directories. If false (default), only allows directories.
    */
   allowFiles?: boolean;
+
+  /**
+   * If true, allows paths outside the workspace boundaries.
+   * The caller is responsible for adjusting permissions (e.g. 'ask') for
+   * external paths.
+   */
+  allowExternalPaths?: boolean;
 }
 
 /**
@@ -263,11 +298,20 @@ export function validatePath(
   resolvedPath: string,
   options: PathValidationOptions = {},
 ): void {
-  const { allowFiles = false } = options;
+  const { allowFiles = false, allowExternalPaths = false } = options;
   const workspaceContext = config.getWorkspaceContext();
+  const isWithinWorkspace =
+    workspaceContext.isPathWithinWorkspace(resolvedPath);
 
-  if (!workspaceContext.isPathWithinWorkspace(resolvedPath)) {
+  if (!allowExternalPaths && !isWithinWorkspace) {
     throw new Error('Path is not within workspace');
+  }
+
+  // For external paths where allowExternalPaths is true, skip filesystem checks.
+  // The path may not exist locally on the current machine, and permissions for
+  // external paths are handled at runtime rather than at validation time.
+  if (allowExternalPaths && !isWithinWorkspace) {
+    return;
   }
 
   try {

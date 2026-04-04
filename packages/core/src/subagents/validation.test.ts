@@ -164,21 +164,12 @@ describe('SubagentValidator', () => {
       );
     });
 
-    it('should reject prompts that are too long', () => {
-      const longPrompt = 'a'.repeat(10001);
-      const result = validator.validateSystemPrompt(longPrompt);
-      expect(result.isValid).toBe(false);
-      expect(result.errors).toContain(
-        'System prompt is too long (>10,000 characters)',
-      );
-    });
-
     it('should warn about long prompts', () => {
-      const longPrompt = 'a'.repeat(5001);
+      const longPrompt = 'a'.repeat(10001);
       const result = validator.validateSystemPrompt(longPrompt);
       expect(result.isValid).toBe(true);
       expect(result.warnings).toContain(
-        'System prompt is quite long (>5,000 characters), consider shortening',
+        'System prompt is quite long (>10,000 characters), consider shortening',
       );
     });
   });
@@ -233,54 +224,53 @@ describe('SubagentValidator', () => {
     });
   });
 
-  describe('validateModelConfig', () => {
-    it('should accept valid model configurations', () => {
-      const validConfigs = [
-        { model: 'gemini-1.5-pro', temp: 0.7, top_p: 0.9 },
-        { temp: 0.5 },
-        { top_p: 1.0 },
-        {},
+  describe('validateModel', () => {
+    it('should accept valid model selectors', () => {
+      const validModels = [
+        'inherit',
+        'glm-5',
+        'claude-sonnet-4-6',
+        'openai:glm-5',
+        'anthropic:sonnet',
       ];
 
-      for (const config of validConfigs) {
-        const result = validator.validateModelConfig(config);
+      for (const model of validModels) {
+        const result = validator.validateModel(model);
         expect(result.isValid).toBe(true);
         expect(result.errors).toHaveLength(0);
       }
     });
 
-    it('should reject invalid model names', () => {
-      const result = validator.validateModelConfig({ model: '' });
+    it('should reject empty model selectors', () => {
+      const result = validator.validateModel('');
       expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('Model name must be a non-empty string');
+      expect(result.errors).toContain('Model must be a non-empty string');
     });
 
-    it('should reject invalid temperature values', () => {
-      const invalidTemps = [-0.1, 2.1, 'not-a-number'];
-
-      for (const temp of invalidTemps) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const result = validator.validateModelConfig({ temp: temp as any });
-        expect(result.isValid).toBe(false);
-      }
-    });
-
-    it('should warn about high temperature', () => {
-      const result = validator.validateModelConfig({ temp: 1.5 });
+    it('should accept model IDs containing colons with unknown prefix', () => {
+      const result = validator.validateModel('invalid:glm-5');
       expect(result.isValid).toBe(true);
-      expect(result.warnings).toContain(
-        'High temperature (>1) may produce very creative but unpredictable results',
+    });
+
+    it('should accept model IDs with colons (e.g. gpt-4o:online)', () => {
+      const result = validator.validateModel('gpt-4o:online');
+      expect(result.isValid).toBe(true);
+    });
+
+    it('should reject missing model IDs after valid authType prefixes', () => {
+      const result = validator.validateModel('openai:');
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain(
+        'Model selector must include a model ID after the authType',
       );
     });
 
-    it('should reject invalid top_p values', () => {
-      const invalidTopP = [-0.1, 1.1, 'not-a-number'];
-
-      for (const top_p of invalidTopP) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const result = validator.validateModelConfig({ top_p: top_p as any });
-        expect(result.isValid).toBe(false);
-      }
+    it('should warn when inherit is explicit', () => {
+      const result = validator.validateModel('inherit');
+      expect(result.isValid).toBe(true);
+      expect(result.warnings).toContain(
+        'Explicit "inherit" is optional because omitting the model uses the main conversation model',
+      );
     });
   });
 
@@ -372,7 +362,7 @@ describe('SubagentValidator', () => {
       const configWithWarnings: SubagentConfig = {
         ...validConfig,
         name: 'TestAgent', // Will generate warning about case
-        description: 'A'.repeat(501), // Will generate warning about long description
+        description: 'A'.repeat(1001), // Will generate warning about long description
       };
 
       const result = validator.validateConfig(configWithWarnings);

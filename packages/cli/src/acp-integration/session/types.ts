@@ -6,14 +6,20 @@
 
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
-import type * as acp from '../acp.js';
+import type {
+  SessionUpdate,
+  ToolCallLocation,
+  ToolKind,
+} from '@agentclientprotocol/sdk';
+
+export type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'yolo';
 
 /**
  * Interface for sending session updates to the ACP client.
  * Implemented by Session class and used by all emitters.
  */
 export interface SessionUpdateSender {
-  sendUpdate(update: acp.SessionUpdate): Promise<void>;
+  sendUpdate(update: SessionUpdate): Promise<void>;
 }
 
 /**
@@ -29,9 +35,9 @@ export interface SessionContext extends SessionUpdateSender {
  * Subagent metadata for tracking parent tool call context.
  */
 export interface SubagentMeta {
-  /** ID of the parent TaskTool call that created this subagent */
+  /** ID of the parent AgentTool call that created this subagent */
   parentToolCallId?: string;
-  /** Type of subagent (from TaskParams.subagent_type) */
+  /** Type of subagent (from AgentParams.subagent_type) */
   subagentType?: string;
 }
 
@@ -91,6 +97,6 @@ export interface TodoItem {
  */
 export interface ResolvedToolMetadata {
   title: string;
-  locations: acp.ToolCallLocation[];
-  kind: acp.ToolKind;
+  locations: ToolCallLocation[];
+  kind: ToolKind;
 }

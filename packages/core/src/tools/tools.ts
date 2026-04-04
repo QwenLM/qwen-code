@@ -9,8 +9,9 @@ import { ToolErrorType } from './tool-error.js';
 import type { DiffUpdateResult } from '../ide/ide-client.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
-import { type SubagentStatsSummary } from '../subagents/subagent-statistics.js';
+import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
+import type { PermissionDecision } from '../permissions/types.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -39,12 +40,29 @@ export interface ToolInvocation<
   toolLocations(): ToolLocation[];
 
   /**
-   * Determines if the tool should prompt for confirmation before execution.
-   * @returns Confirmation details or false if no confirmation is needed.
+   * Returns the tool's intrinsic permission for this invocation, based solely
+   * on its own parameters (without consulting PermissionManager).
+   *
+   * - `'allow'` — inherently safe (e.g., read-only commands, `cat`, `ls`).
+   * - `'ask'`   — may have side effects, needs user or PM confirmation.
+   * - `'deny'`  — security violation (e.g., command substitution in shell).
+   *
+   * The coreToolScheduler uses this as the *default* permission which may be
+   * overridden by PermissionManager rules at L4.
    */
-  shouldConfirmExecute(
+  getDefaultPermission(): Promise<PermissionDecision>;
+
+  /**
+   * Constructs the confirmation dialog details for this invocation.
+   * Only called when the final permission decision is `'ask'` and the user
+   * needs to be prompted interactively.
+   *
+   * @param abortSignal Signal to cancel the operation.
+   * @returns The confirmation details for the UI to display.
+   */
+  getConfirmationDetails(
     abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false>;
+  ): Promise<ToolCallConfirmationDetails>;
 
   /**
    * Executes the tool with the validated parameters.
@@ -75,10 +93,37 @@ export abstract class BaseToolInvocation<
     return [];
   }
 
-  shouldConfirmExecute(
+  /**
+   * Default: read-only tools return 'allow'. Override in subclasses for
+   * tools with side effects.
+   */
+  getDefaultPermission(): Promise<PermissionDecision> {
+    return Promise.resolve('allow');
+  }
+
+  /**
+   * Default fallback: returns a generic 'info' confirmation dialog using the
+   * tool's getDescription(). This ensures that even tools whose
+   * getDefaultPermission() returns 'allow' can still be prompted when PM
+   * rules override the decision to 'ask' at L4.
+   *
+   * Tools with richer confirmation UIs (Shell, Edit, MCP, etc.) override this.
+   */
+  getConfirmationDetails(
     _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    return Promise.resolve(false);
+  ): Promise<ToolCallConfirmationDetails> {
+    const details: ToolInfoConfirmationDetails = {
+      type: 'info',
+      title: `Confirm ${this.constructor.name.replace(/Invocation$/, '')}`,
+      prompt: this.getDescription(),
+      onConfirm: async (
+        _outcome: ToolConfirmationOutcome,
+        _payload?: ToolConfirmationPayload,
+      ) => {
+        // No-op: persistence is handled by coreToolScheduler via PM rules
+      },
+    };
+    return Promise.resolve(details);
   }
 
   abstract execute(
@@ -438,7 +483,7 @@ export function hasCycleInSchema(schema: object): boolean {
   return traverse(schema, new Set<string>(), new Set<string>());
 }
 
-export interface TaskResultDisplay {
+export interface AgentResultDisplay {
   type: 'task_execution';
   subagentName: string;
   subagentColor?: string;
@@ -447,7 +492,7 @@ export interface TaskResultDisplay {
   status: 'running' | 'completed' | 'failed' | 'cancelled';
   terminateReason?: string;
   result?: string;
-  executionSummary?: SubagentStatsSummary;
+  executionSummary?: AgentStatsSummary;
 
   // If the subagent is awaiting approval for a tool call,
   // this contains the confirmation details for inline UI rendering.
@@ -470,13 +515,28 @@ export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
 }
 
+/**
+ * Structured progress data following the MCP notifications/progress spec.
+ * @see https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/progress
+ */
+export interface McpToolProgressData {
+  type: 'mcp_tool_progress';
+  /** Current progress value (must increase with each notification) */
+  progress: number;
+  /** Optional total value indicating the operation's target */
+  total?: number;
+  /** Optional human-readable progress message */
+  message?: string;
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
-  | TaskResultDisplay
-  | AnsiOutputDisplay;
+  | AgentResultDisplay
+  | AnsiOutputDisplay
+  | McpToolProgressData;
 
 export interface FileDiff {
   fileDiff: string;
@@ -510,6 +570,7 @@ export interface PlanResultDisplay {
   type: 'plan_summary';
   message: string;
   plan: string;
+  rejected?: boolean;
 }
 
 export interface ToolEditConfirmationDetails {
@@ -519,6 +580,12 @@ export interface ToolEditConfirmationDetails {
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,
   ) => Promise<void>;
+  /**
+   * When true, the UI should not show "Always allow" options (ProceedAlwaysProject/User).
+   * Set by coreToolScheduler when PM has an explicit 'ask' rule that would override
+   * any 'allow' rule the user might add.
+   */
+  hideAlwaysAllow?: boolean;
   fileName: string;
   filePath: string;
   fileDiff: string;
@@ -534,6 +601,12 @@ export interface ToolConfirmationPayload {
   newContent?: string;
   // used to provide custom cancellation message when outcome is Cancel
   cancelMessage?: string;
+  // Permission rules to persist when user selects ProceedAlwaysProject/User.
+  // Populated by the tool's getConfirmationDetails() and read by
+  // coreToolScheduler.handleConfirmationResponse() for persistence.
+  permissionRules?: string[];
+  // used to pass user answers from ask_user_question tool
+  answers?: Record<string, string>;
 }
 
 export interface ToolExecuteConfirmationDetails {
@@ -543,13 +616,19 @@ export interface ToolExecuteConfirmationDetails {
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,
   ) => Promise<void>;
+  /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
+  hideAlwaysAllow?: boolean;
   command: string;
   rootCommand: string;
+  /** Permission rules extracted by extractCommandRules(), used for display and persistence. */
+  permissionRules?: string[];
 }
 
 export interface ToolMcpConfirmationDetails {
   type: 'mcp';
   title: string;
+  /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
+  hideAlwaysAllow?: boolean;
   serverName: string;
   toolName: string;
   toolDisplayName: string;
@@ -557,14 +636,23 @@ export interface ToolMcpConfirmationDetails {
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,
   ) => Promise<void>;
+  /** Permission rule for this MCP tool, e.g. 'mcp__server__tool'. */
+  permissionRules?: string[];
 }
 
 export interface ToolInfoConfirmationDetails {
   type: 'info';
   title: string;
-  onConfirm: (outcome: ToolConfirmationOutcome) => Promise<void>;
+  onConfirm: (
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>;
+  /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
+  hideAlwaysAllow?: boolean;
   prompt: string;
   urls?: string[];
+  /** Permission rules for persistence, e.g. 'WebFetch(example.com)'. */
+  permissionRules?: string[];
 }
 
 export type ToolCallConfirmationDetails =
@@ -572,13 +660,40 @@ export type ToolCallConfirmationDetails =
   | ToolExecuteConfirmationDetails
   | ToolMcpConfirmationDetails
   | ToolInfoConfirmationDetails
-  | ToolPlanConfirmationDetails;
+  | ToolPlanConfirmationDetails
+  | ToolAskUserQuestionConfirmationDetails;
 
 export interface ToolPlanConfirmationDetails {
   type: 'plan';
   title: string;
+  /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
+  hideAlwaysAllow?: boolean;
   plan: string;
-  onConfirm: (outcome: ToolConfirmationOutcome) => Promise<void>;
+  onConfirm: (
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>;
+}
+
+export interface ToolAskUserQuestionConfirmationDetails {
+  type: 'ask_user_question';
+  title: string;
+  questions: Array<{
+    question: string;
+    header: string;
+    options: Array<{
+      label: string;
+      description: string;
+    }>;
+    multiSelect: boolean;
+  }>;
+  metadata?: {
+    source?: string;
+  };
+  onConfirm: (
+    outcome: ToolConfirmationOutcome,
+    payload?: ToolConfirmationPayload,
+  ) => Promise<void>;
 }
 
 /**
@@ -589,8 +704,14 @@ export interface ToolPlanConfirmationDetails {
 export enum ToolConfirmationOutcome {
   ProceedOnce = 'proceed_once',
   ProceedAlways = 'proceed_always',
+  /** @deprecated Use ProceedAlwaysProject or ProceedAlwaysUser instead. */
   ProceedAlwaysServer = 'proceed_always_server',
+  /** @deprecated Use ProceedAlwaysProject or ProceedAlwaysUser instead. */
   ProceedAlwaysTool = 'proceed_always_tool',
+  /** Persist the permission rule to the project settings (workspace scope). */
+  ProceedAlwaysProject = 'proceed_always_project',
+  /** Persist the permission rule to the user settings (user scope). */
+  ProceedAlwaysUser = 'proceed_always_user',
   ModifyWithEditor = 'modify_with_editor',
   Cancel = 'cancel',
 }

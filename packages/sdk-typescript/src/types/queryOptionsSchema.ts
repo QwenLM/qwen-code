@@ -94,12 +94,6 @@ export const McpServerConfigSchema = z.union([
   SdkMcpServerConfigSchema,
 ]);
 
-export const ModelConfigSchema = z.object({
-  model: z.string().optional(),
-  temp: z.number().optional(),
-  top_p: z.number().optional(),
-});
-
 export const RunConfigSchema = z.object({
   max_time_minutes: z.number().optional(),
   max_turns: z.number().optional(),
@@ -110,7 +104,7 @@ export const SubagentConfigSchema = z.object({
   description: z.string().min(1, 'Description must be a non-empty string'),
   tools: z.array(z.string()).optional(),
   systemPrompt: z.string().min(1, 'System prompt must be a non-empty string'),
-  modelConfig: ModelConfigSchema.partial().optional(),
+  model: z.string().optional(),
   runConfig: RunConfigSchema.partial().optional(),
   color: z.string().optional(),
   isBuiltin: z.boolean().optional(),
@@ -123,12 +117,29 @@ export const TimeoutConfigSchema = z.object({
   streamClose: z.number().positive().optional(),
 });
 
+const QuerySystemPromptPresetSchema = z
+  .object({
+    type: z.literal('preset'),
+    preset: z.literal('qwen_code'),
+    append: z
+      .string()
+      .min(1, 'systemPrompt.append must be a non-empty string')
+      .optional(),
+  })
+  .strict();
+
 export const QueryOptionsSchema = z
   .object({
     cwd: z.string().optional(),
     model: z.string().optional(),
     pathToQwenExecutable: z.string().optional(),
     env: z.record(z.string(), z.string()).optional(),
+    systemPrompt: z
+      .union([
+        z.string().min(1, 'systemPrompt must be a non-empty string'),
+        QuerySystemPromptPresetSchema,
+      ])
+      .optional(),
     permissionMode: z.enum(['default', 'plan', 'auto-edit', 'yolo']).optional(),
     canUseTool: z
       .custom<CanUseTool>((val) => typeof val === 'function', {
@@ -167,6 +178,7 @@ export const QueryOptionsSchema = z
       .optional(),
     includePartialMessages: z.boolean().optional(),
     resume: z.string().optional(),
+    sessionId: z.string().optional(),
     timeout: TimeoutConfigSchema.optional(),
   })
   .strict();

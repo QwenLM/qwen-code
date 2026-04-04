@@ -244,13 +244,14 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain('Found 2 file(s)');
     });
 
-    it('should return error if path is outside workspace', async () => {
-      // Bypassing validation to test execute method directly
-      vi.spyOn(globTool, 'validateToolParams').mockReturnValue(null);
-      const params: GlobToolParams = { pattern: '*.txt', path: '/etc' };
+    it('should allow path outside workspace (external path support)', async () => {
+      const params: GlobToolParams = { pattern: '*.txt', path: '/tmp' };
       const invocation = globTool.build(params);
+      // External path is now allowed - it should not return a workspace error
       const result = await invocation.execute(abortSignal);
-      expect(result.returnDisplay).toBe('Error: Path is not within workspace');
+      expect(result.returnDisplay).not.toContain(
+        'Path is not within workspace',
+      );
     });
 
     it('should return a GLOB_EXECUTION_ERROR on glob failure', async () => {
@@ -322,9 +323,8 @@ describe('GlobTool', () => {
         pattern: '*.txt',
         path: '../../../../../../../../../../tmp', // Definitely outside
       };
-      expect(specificGlobTool.validateToolParams(paramsOutside)).toContain(
-        'Path is not within workspace',
-      );
+      // External paths are now allowed (permission handled at runtime)
+      expect(specificGlobTool.validateToolParams(paramsOutside)).toBeNull();
     });
 
     it('should return error if specified search path does not exist', async () => {
@@ -351,9 +351,8 @@ describe('GlobTool', () => {
       const invalidPath = { pattern: '*.ts', path: '../..' };
 
       expect(globTool.validateToolParams(validPath)).toBeNull();
-      expect(globTool.validateToolParams(invalidPath)).toContain(
-        'Path is not within workspace',
-      );
+      // External paths are now allowed (permission handled at runtime)
+      expect(globTool.validateToolParams(invalidPath)).toBeNull();
     });
 
     it('should work with paths in workspace subdirectories', async () => {
@@ -364,6 +363,87 @@ describe('GlobTool', () => {
       expect(result.llmContent).toContain('Found 2 file(s)');
       expect(result.llmContent).toContain('fileC.md');
       expect(result.llmContent).toContain('FileD.MD');
+    });
+  });
+
+  describe('multi-directory workspace', () => {
+    it('should search across all workspace directories when no path is specified', async () => {
+      // Create a second workspace directory
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'glob-tool-second-'),
+      );
+      await fs.writeFile(path.join(secondDir, '.git'), ''); // Fake git repo
+      await fs.writeFile(path.join(secondDir, 'extra.txt'), 'extra content');
+      await fs.writeFile(path.join(secondDir, 'bonus.txt'), 'bonus content');
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      const multiDirGlobTool = new GlobTool(multiDirConfig);
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = multiDirGlobTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // Should find files from both directories
+      expect(result.llmContent).toContain(path.join(tempRootDir, 'fileA.txt'));
+      expect(result.llmContent).toContain(path.join(secondDir, 'extra.txt'));
+      expect(result.llmContent).toContain(path.join(secondDir, 'bonus.txt'));
+      expect(result.llmContent).toContain('across 2 workspace directories');
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+
+    it('should deduplicate entries across overlapping directories', async () => {
+      // Use the same directory twice to test deduplication
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [tempRootDir]),
+      } as unknown as Config;
+
+      const multiDirGlobTool = new GlobTool(multiDirConfig);
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = multiDirGlobTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // Should still only have 2 txt files (fileA.txt, FileB.TXT), not doubled
+      expect(result.llmContent).toContain('Found 2 file(s)');
+    });
+
+    it('should use single directory description when only one workspace dir', async () => {
+      const params: GlobToolParams = { pattern: '*.txt' };
+      const invocation = globTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('in the workspace directory');
+      expect(result.llmContent).not.toContain('across');
+    });
+
+    it('should search only the specified path when path is provided (ignoring multi-dir)', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'glob-tool-second-'),
+      );
+      await fs.writeFile(path.join(secondDir, '.git'), '');
+      await fs.writeFile(path.join(secondDir, 'other.txt'), 'other');
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      const multiDirGlobTool = new GlobTool(multiDirConfig);
+      const params: GlobToolParams = { pattern: '*.txt', path: 'sub' };
+      const invocation = multiDirGlobTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // Should NOT find files from secondDir
+      expect(result.llmContent).not.toContain('other.txt');
+
+      await fs.rm(secondDir, { recursive: true, force: true });
     });
   });
 
@@ -410,6 +490,44 @@ describe('GlobTool', () => {
 
       expect(result.llmContent).toContain('Found 3 file(s)'); // fileA.txt, FileB.TXT, b.notignored.txt
       expect(result.llmContent).not.toContain('a.qwenignored.txt');
+    });
+
+    it('should respect .gitignore when searching a subdirectory (path option)', async () => {
+      // This tests the regression fix: relativePaths must be computed relative
+      // to projectRoot, not to searchDir, so that gitignore rules rooted at
+      // projectRoot are evaluated against the correct paths.
+      await fs.writeFile(path.join(tempRootDir, '.gitignore'), '*.secret');
+      await fs.writeFile(path.join(tempRootDir, 'sub', 'visible.txt'), 'ok');
+      await fs.writeFile(
+        path.join(tempRootDir, 'sub', 'hidden.secret'),
+        'should be ignored',
+      );
+
+      const subDirTool = new GlobTool(mockConfig);
+      const params: GlobToolParams = { pattern: '*', path: 'sub' };
+      const invocation = subDirTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('visible.txt');
+      expect(result.llmContent).not.toContain('hidden.secret');
+    });
+
+    it('should respect .qwenignore when searching a subdirectory (path option)', async () => {
+      await fs.writeFile(path.join(tempRootDir, '.qwenignore'), '*.secret');
+      await fs.writeFile(path.join(tempRootDir, 'sub', 'visible.txt'), 'ok');
+      await fs.writeFile(
+        path.join(tempRootDir, 'sub', 'hidden.secret'),
+        'should be ignored',
+      );
+
+      // Recreate to pick up .qwenignore
+      const subDirTool = new GlobTool(mockConfig);
+      const params: GlobToolParams = { pattern: '*', path: 'sub' };
+      const invocation = subDirTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('visible.txt');
+      expect(result.llmContent).not.toContain('hidden.secret');
     });
   });
 

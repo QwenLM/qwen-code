@@ -134,7 +134,9 @@ jobs:
         run: |
           npm run preflight
           npm run test:integration:cli:sandbox:none
+          npm run test:integration:interactive:sandbox:none
           npm run test:integration:cli:sandbox:docker
+          npm run test:integration:interactive:sandbox:docker
         env:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
@@ -166,7 +168,7 @@ jobs:
           IS_DRY_RUN: '${{ steps.vars.outputs.is_dry_run }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
         run: |-
-          git add package.json package-lock.json packages/*/package.json
+          git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json
           if git diff --staged --quiet; then
             echo "No version changes to commit"
           else
@@ -198,6 +200,13 @@ jobs:
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
 
+      - name: 'Publish @qwen-code/channel-base'
+        working-directory: 'packages/channels/base'
+        run: |-
+          npm publish --access public --tag=${{ steps.version.outputs.NPM_TAG }} ${{ steps.vars.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
+
       - name: 'Create GitHub Release and Tag'
         if: |-
           ${{ steps.vars.outputs.is_dry_run == 'false' }}
@@ -206,13 +215,22 @@ jobs:
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
           RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
           PREVIOUS_RELEASE_TAG: '${{ steps.version.outputs.PREVIOUS_RELEASE_TAG }}'
+          IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
+          IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
         run: |-
+          # Set prerelease flag for nightly and preview releases
+          PRERELEASE_FLAG=""
+          if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
             --target "$RELEASE_BRANCH" \
             --title "Release ${RELEASE_TAG}" \
             --notes-start-tag "$PREVIOUS_RELEASE_TAG" \
-            --generate-notes
+            --generate-notes \
+            ${PRERELEASE_FLAG}
 
       - name: 'Create Issue on Failure'
         if: |-

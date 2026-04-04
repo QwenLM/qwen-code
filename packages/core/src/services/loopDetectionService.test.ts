@@ -4,10 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import type { GeminiClient } from '../core/client.js';
-import type { BaseLlmClient } from '../core/baseLlmClient.js';
 import type {
   ServerGeminiContentEvent,
   ServerGeminiStreamEvent,
@@ -15,7 +13,6 @@ import type {
 } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
-import { LoopType } from '../telemetry/types.js';
 import { LoopDetectionService } from './loopDetectionService.js';
 
 vi.mock('../telemetry/loggers.js', () => ({
@@ -621,144 +618,5 @@ describe('LoopDetectionService', () => {
       expect(service.addAndCheck(otherEvent)).toBe(false);
       expect(service.addAndCheck(otherEvent)).toBe(false);
     });
-  });
-});
-
-describe('LoopDetectionService LLM Checks', () => {
-  let service: LoopDetectionService;
-  let mockConfig: Config;
-  let mockGeminiClient: GeminiClient;
-  let mockBaseLlmClient: BaseLlmClient;
-  let abortController: AbortController;
-
-  beforeEach(() => {
-    mockGeminiClient = {
-      getHistory: vi.fn().mockReturnValue([]),
-    } as unknown as GeminiClient;
-
-    mockBaseLlmClient = {
-      generateJson: vi.fn(),
-    } as unknown as BaseLlmClient;
-
-    mockConfig = {
-      getGeminiClient: () => mockGeminiClient,
-      getBaseLlmClient: () => mockBaseLlmClient,
-      getDebugMode: () => false,
-      getDebugLogger: () => ({
-        debug: () => {},
-        info: () => {},
-        warn: () => {},
-        error: () => {},
-      }),
-      getTelemetryEnabled: () => true,
-      getModel: () => 'test-model',
-    } as unknown as Config;
-
-    service = new LoopDetectionService(mockConfig);
-    abortController = new AbortController();
-    vi.clearAllMocks();
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  const advanceTurns = async (count: number) => {
-    for (let i = 0; i < count; i++) {
-      await service.turnStarted(abortController.signal);
-    }
-  };
-
-  it('should not trigger LLM check before LLM_CHECK_AFTER_TURNS', async () => {
-    await advanceTurns(29);
-    expect(mockBaseLlmClient.generateJson).not.toHaveBeenCalled();
-  });
-
-  it('should trigger LLM check on the 30th turn', async () => {
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockResolvedValue({ confidence: 0.1 });
-    await advanceTurns(30);
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledTimes(1);
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledWith(
-      expect.objectContaining({
-        systemInstruction: expect.any(String),
-        contents: expect.any(Array),
-        model: expect.any(String),
-        schema: expect.any(Object),
-        promptId: expect.any(String),
-      }),
-    );
-  });
-
-  it('should detect a cognitive loop when confidence is high', async () => {
-    // First check at turn 30
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockResolvedValue({ confidence: 0.85, reasoning: 'Repetitive actions' });
-    await advanceTurns(30);
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledTimes(1);
-
-    // The confidence of 0.85 will result in a low interval.
-    // The interval will be: 5 + (15 - 5) * (1 - 0.85) = 5 + 10 * 0.15 = 6.5 -> rounded to 7
-    await advanceTurns(6); // advance to turn 36
-
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockResolvedValue({ confidence: 0.95, reasoning: 'Repetitive actions' });
-    const finalResult = await service.turnStarted(abortController.signal); // This is turn 37
-
-    expect(finalResult).toBe(true);
-    expect(loggers.logLoopDetected).toHaveBeenCalledWith(
-      mockConfig,
-      expect.objectContaining({
-        'event.name': 'loop_detected',
-        loop_type: LoopType.LLM_DETECTED_LOOP,
-      }),
-    );
-  });
-
-  it('should not detect a loop when confidence is low', async () => {
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockResolvedValue({ confidence: 0.5, reasoning: 'Looks okay' });
-    await advanceTurns(30);
-    const result = await service.turnStarted(abortController.signal);
-    expect(result).toBe(false);
-    expect(loggers.logLoopDetected).not.toHaveBeenCalled();
-  });
-
-  it('should adjust the check interval based on confidence', async () => {
-    // Confidence is 0.0, so interval should be MAX_LLM_CHECK_INTERVAL (15)
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockResolvedValue({ confidence: 0.0 });
-    await advanceTurns(30); // First check at turn 30
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledTimes(1);
-
-    await advanceTurns(14); // Advance to turn 44
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledTimes(1);
-
-    await service.turnStarted(abortController.signal); // Turn 45
-    expect(mockBaseLlmClient.generateJson).toHaveBeenCalledTimes(2);
-  });
-
-  it('should handle errors from generateJson gracefully', async () => {
-    mockBaseLlmClient.generateJson = vi
-      .fn()
-      .mockRejectedValue(new Error('API error'));
-    await advanceTurns(30);
-    const result = await service.turnStarted(abortController.signal);
-    expect(result).toBe(false);
-    expect(loggers.logLoopDetected).not.toHaveBeenCalled();
-  });
-
-  it('should not trigger LLM check when disabled for session', async () => {
-    service.disableForSession();
-    expect(loggers.logLoopDetectionDisabled).toHaveBeenCalledTimes(1);
-    await advanceTurns(30);
-    const result = await service.turnStarted(abortController.signal);
-    expect(result).toBe(false);
-    expect(mockBaseLlmClient.generateJson).not.toHaveBeenCalled();
   });
 });

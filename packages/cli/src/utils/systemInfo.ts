@@ -38,8 +38,10 @@ export interface SystemInfo {
 export interface ExtendedSystemInfo extends SystemInfo {
   memoryUsage: string;
   baseUrl?: string;
+  apiKeyEnvKey?: string;
   gitCommit?: string;
   proxy?: string;
+  fastModel?: string;
 }
 
 /**
@@ -154,12 +156,14 @@ export async function getExtendedSystemInfo(
   // For bug reports, use sandbox name without prefix
   const sandboxEnv = getSandboxEnv(true);
 
-  // Get base URL if using OpenAI auth
-  const baseUrl =
+  // Get base URL and apiKeyEnvKey if using OpenAI or Anthropic auth
+  const contentGeneratorConfig =
     baseInfo.selectedAuthType === AuthType.USE_OPENAI ||
     baseInfo.selectedAuthType === AuthType.USE_ANTHROPIC
-      ? context.services.config?.getContentGeneratorConfig()?.baseUrl
+      ? context.services.config?.getContentGeneratorConfig()
       : undefined;
+  const baseUrl = contentGeneratorConfig?.baseUrl;
+  const apiKeyEnvKey = contentGeneratorConfig?.apiKeyEnvKey;
 
   // Get git commit info
   const gitCommit =
@@ -167,11 +171,16 @@ export async function getExtendedSystemInfo(
       ? GIT_COMMIT_INFO
       : undefined;
 
+  // Get fast model from settings
+  const fastModel = context.services.settings?.merged?.fastModel || undefined;
+
   return {
     ...baseInfo,
     sandboxEnv,
     memoryUsage,
     baseUrl,
+    apiKeyEnvKey,
     gitCommit,
+    fastModel,
   };
 }

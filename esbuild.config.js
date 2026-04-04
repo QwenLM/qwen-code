@@ -33,6 +33,13 @@ const external = [
   '@lydell/node-pty-linux-x64',
   '@lydell/node-pty-win32-arm64',
   '@lydell/node-pty-win32-x64',
+  '@teddyzhu/clipboard',
+  '@teddyzhu/clipboard-darwin-arm64',
+  '@teddyzhu/clipboard-darwin-x64',
+  '@teddyzhu/clipboard-linux-x64-gnu',
+  '@teddyzhu/clipboard-linux-arm64-gnu',
+  '@teddyzhu/clipboard-win32-x64-msvc',
+  '@teddyzhu/clipboard-win32-arm64-msvc',
 ];
 
 esbuild
@@ -55,6 +62,12 @@ esbuild
         __dirname,
         'packages/cli/src/patches/is-in-ci.ts',
       ),
+      '@qwen-code/web-templates': path.resolve(
+        __dirname,
+        'packages/web-templates/src/index.ts',
+      ),
+      // Resolve to userland punycode instead of deprecated node:punycode built-in
+      punycode: require.resolve('punycode/'),
     },
     define: {
       'process.env.CLI_VERSION': JSON.stringify(pkg.version),

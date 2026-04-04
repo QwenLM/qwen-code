@@ -41,8 +41,9 @@ describe('LSTool', () => {
         respectGitIgnore: true,
         respectQwenIgnore: true,
       }),
+      getTruncateToolOutputLines: () => 1000,
       storage: {
-        getUserSkillsDir: () => userSkillsBase,
+        getUserSkillsDirs: () => [userSkillsBase],
       },
     } as unknown as Config;
 
@@ -70,10 +71,9 @@ describe('LSTool', () => {
       );
     });
 
-    it('should reject paths outside workspace with clear error message', () => {
-      expect(() => lsTool.build({ path: '/etc/passwd' })).toThrow(
-        `Path must be within one of the workspace directories: ${tempRootDir}, ${tempSecondaryDir}`,
-      );
+    it('should allow paths outside workspace (external path support)', () => {
+      const invocation = lsTool.build({ path: '/etc' });
+      expect(invocation).toBeDefined();
     });
 
     it('should accept paths in secondary workspace directory', async () => {
@@ -83,6 +83,20 @@ describe('LSTool', () => {
       const invocation = lsTool.build({ path: testPath });
 
       expect(invocation).toBeDefined();
+    });
+  });
+
+  describe('getDefaultPermission', () => {
+    it('should return allow for paths within workspace', async () => {
+      const invocation = lsTool.build({ path: tempRootDir });
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for paths outside workspace', async () => {
+      const invocation = lsTool.build({ path: '/tmp' });
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
   });
 
@@ -100,7 +114,7 @@ describe('LSTool', () => {
 
       expect(result.llmContent).toContain('[DIR] subdir');
       expect(result.llmContent).toContain('file1.txt');
-      expect(result.returnDisplay).toBe('Listed 2 item(s).');
+      expect(result.returnDisplay).toBe('Listed 2 item(s)');
     });
 
     it('should list files from secondary workspace directory', async () => {
@@ -115,7 +129,7 @@ describe('LSTool', () => {
       const result = await invocation.execute(abortSignal);
 
       expect(result.llmContent).toContain('secondary-file.txt');
-      expect(result.returnDisplay).toBe('Listed 1 item(s).');
+      expect(result.returnDisplay).toBe('Listed 1 item(s)');
     });
 
     it('should handle empty directories', async () => {
@@ -140,7 +154,7 @@ describe('LSTool', () => {
 
       expect(result.llmContent).toContain('file1.txt');
       expect(result.llmContent).not.toContain('file2.log');
-      expect(result.returnDisplay).toBe('Listed 1 item(s).');
+      expect(result.returnDisplay).toBe('Listed 1 item(s)');
     });
 
     it('should respect gitignore patterns', async () => {
@@ -154,7 +168,7 @@ describe('LSTool', () => {
       expect(result.llmContent).toContain('file1.txt');
       expect(result.llmContent).not.toContain('file2.log');
       // .git is always ignored by default.
-      expect(result.returnDisplay).toBe('Listed 2 item(s). (2 git-ignored)');
+      expect(result.returnDisplay).toBe('Listed 2 item(s) (2 git-ignored)');
     });
 
     it('should respect qwenignore patterns', async () => {
@@ -166,7 +180,7 @@ describe('LSTool', () => {
 
       expect(result.llmContent).toContain('file1.txt');
       expect(result.llmContent).not.toContain('file2.log');
-      expect(result.returnDisplay).toBe('Listed 2 item(s). (1 qwen-ignored)');
+      expect(result.returnDisplay).toBe('Listed 2 item(s) (1 qwen-ignored)');
     });
 
     it('should handle non-directory paths', async () => {
@@ -204,7 +218,7 @@ describe('LSTool', () => {
         typeof result.llmContent === 'string' ? result.llmContent : ''
       )
         .split('\n')
-        .filter(Boolean);
+        .filter((l) => l.trim() && l.trim() !== '---');
       const entries = lines.slice(1); // Skip header
 
       expect(entries[0]).toBe('[DIR] x-dir');
@@ -259,9 +273,67 @@ describe('LSTool', () => {
       // Should still list the other files
       expect(result.llmContent).toContain('file1.txt');
       expect(result.llmContent).not.toContain('problematic.txt');
-      expect(result.returnDisplay).toBe('Listed 1 item(s).');
+      expect(result.returnDisplay).toBe('Listed 1 item(s)');
 
       statSpy.mockRestore();
+    });
+  });
+
+  describe('truncation', () => {
+    it('should truncate when entries exceed config line limit', async () => {
+      const lowLimitConfig = {
+        ...mockConfig,
+        getTruncateToolOutputLines: () => 5,
+      } as unknown as Config;
+      const lowLimitTool = new LSTool(lowLimitConfig);
+
+      for (let i = 0; i < 10; i++) {
+        await fs.writeFile(
+          path.join(tempRootDir, `file${String(i).padStart(2, '0')}.txt`),
+          `content${i}`,
+        );
+      }
+
+      const invocation = lowLimitTool.build({ path: tempRootDir });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('[5 items truncated]');
+      expect(result.returnDisplay).toBe('Listed 10 item(s) (truncated)');
+    });
+
+    it('should not truncate when entries are within limit', async () => {
+      for (let i = 0; i < 3; i++) {
+        await fs.writeFile(
+          path.join(tempRootDir, `file${i}.txt`),
+          `content${i}`,
+        );
+      }
+
+      const invocation = lsTool.build({ path: tempRootDir });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).not.toContain('truncated');
+      expect(result.returnDisplay).toBe('Listed 3 item(s)');
+    });
+
+    it('should use singular "entry" when exactly one entry is truncated', async () => {
+      const lowLimitConfig = {
+        ...mockConfig,
+        getTruncateToolOutputLines: () => 2,
+      } as unknown as Config;
+      const lowLimitTool = new LSTool(lowLimitConfig);
+
+      for (let i = 0; i < 3; i++) {
+        await fs.writeFile(
+          path.join(tempRootDir, `file${i}.txt`),
+          `content${i}`,
+        );
+      }
+
+      const invocation = lowLimitTool.build({ path: tempRootDir });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('[1 item truncated]');
     });
   });
 
@@ -302,11 +374,10 @@ describe('LSTool', () => {
       expect(lsTool.build(params)).toBeDefined();
     });
 
-    it('should reject paths outside all workspace directories', () => {
-      const params = { path: '/etc/passwd' };
-      expect(() => lsTool.build(params)).toThrow(
-        'Path must be within one of the workspace directories',
-      );
+    it('should allow paths outside all workspace directories (external path support)', () => {
+      const params = { path: '/etc' };
+      const invocation = lsTool.build(params);
+      expect(invocation).toBeDefined();
     });
 
     it('should list files from secondary workspace directory', async () => {
@@ -319,7 +390,7 @@ describe('LSTool', () => {
       const result = await invocation.execute(abortSignal);
 
       expect(result.llmContent).toContain('secondary-file.txt');
-      expect(result.returnDisplay).toBe('Listed 1 item(s).');
+      expect(result.returnDisplay).toBe('Listed 1 item(s)');
     });
   });
 });

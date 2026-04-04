@@ -95,7 +95,10 @@
 
   /* Buttons - VSCode tokens */
   --app-ghost-button-hover-background: var(--vscode-toolbar-hoverBackground);
-  --app-button-foreground: var(--vscode-button-foreground, var(--app-qwen-ivory));
+  --app-button-foreground: var(
+    --vscode-button-foreground,
+    var(--app-qwen-ivory)
+  );
   --app-button-background: var(
     --vscode-button-background,
     var(--app-qwen-clay-button-orange)

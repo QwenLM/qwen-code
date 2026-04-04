@@ -5,12 +5,9 @@
  */
 
 import { SubagentError, SubagentErrorCode } from './types.js';
-import type {
-  ModelConfig,
-  RunConfig,
-  SubagentConfig,
-  ValidationResult,
-} from './types.js';
+import type { SubagentConfig, ValidationResult } from './types.js';
+import type { RunConfig } from '../agents/runtime/agent-types.js';
+import { parseSubagentModelSelection } from './model-selection.js';
 
 /**
  * Validates subagent configurations to ensure they are well-formed
@@ -36,9 +33,9 @@ export class SubagentValidator {
     // Validate description
     if (!config.description || config.description.trim().length === 0) {
       errors.push('Description is required and cannot be empty');
-    } else if (config.description.length > 500) {
+    } else if (config.description.length > 1000) {
       warnings.push(
-        'Description is quite long (>500 chars), consider shortening for better readability',
+        'Description is quite long (>1,000 chars), consider shortening for better readability',
       );
     }
 
@@ -58,9 +55,9 @@ export class SubagentValidator {
       warnings.push(...toolsValidation.warnings);
     }
 
-    // Validate model config if specified
-    if (config.modelConfig) {
-      const modelValidation = this.validateModelConfig(config.modelConfig);
+    // Validate model selector if specified
+    if (config.model) {
+      const modelValidation = this.validateModel(config.model);
       if (!modelValidation.isValid) {
         errors.push(...modelValidation.errors);
       }
@@ -181,12 +178,10 @@ export class SubagentValidator {
       errors.push('System prompt must be at least 10 characters long');
     }
 
-    // Check maximum length to prevent token issues
+    // Warn for very long prompts
     if (trimmedPrompt.length > 10000) {
-      errors.push('System prompt is too long (>10,000 characters)');
-    } else if (trimmedPrompt.length > 5000) {
       warnings.push(
-        'System prompt is quite long (>5,000 characters), consider shortening',
+        'System prompt is quite long (>10,000 characters), consider shortening',
       );
     }
 
@@ -246,42 +241,34 @@ export class SubagentValidator {
   }
 
   /**
-   * Validates model configuration.
+   * Validates a subagent model selector.
    *
-   * @param modelConfig - Partial model configuration to validate
+   * @param model - Model selector to validate
    * @returns ValidationResult
    */
-  validateModelConfig(modelConfig: ModelConfig): ValidationResult {
+  validateModel(model: string): ValidationResult {
     const errors: string[] = [];
     const warnings: string[] = [];
 
-    if (modelConfig.model !== undefined) {
-      if (
-        typeof modelConfig.model !== 'string' ||
-        modelConfig.model.trim().length === 0
-      ) {
-        errors.push('Model name must be a non-empty string');
-      }
+    if (typeof model !== 'string' || model.trim().length === 0) {
+      errors.push('Model must be a non-empty string');
+      return {
+        isValid: false,
+        errors,
+        warnings,
+      };
     }
 
-    if (modelConfig.temp !== undefined) {
-      if (typeof modelConfig.temp !== 'number') {
-        errors.push('Temperature must be a number');
-      } else if (modelConfig.temp < 0 || modelConfig.temp > 2) {
-        errors.push('Temperature must be between 0 and 2');
-      } else if (modelConfig.temp > 1) {
-        warnings.push(
-          'High temperature (>1) may produce very creative but unpredictable results',
-        );
-      }
+    try {
+      parseSubagentModelSelection(model);
+    } catch (error) {
+      errors.push(error instanceof Error ? error.message : 'Invalid model');
     }
 
-    if (modelConfig.top_p !== undefined) {
-      if (typeof modelConfig.top_p !== 'number') {
-        errors.push('top_p must be a number');
-      } else if (modelConfig.top_p < 0 || modelConfig.top_p > 1) {
-        errors.push('top_p must be between 0 and 1');
-      }
+    if (model.trim() === 'inherit') {
+      warnings.push(
+        'Explicit "inherit" is optional because omitting the model uses the main conversation model',
+      );
     }
 
     return {

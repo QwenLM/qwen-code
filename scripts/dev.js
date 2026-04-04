@@ -15,17 +15,45 @@
  */
 
 import { spawn } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { writeFileSync, mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import {
+  writeFileSync,
+  mkdtempSync,
+  rmSync,
+  existsSync,
+  symlinkSync,
+  mkdirSync,
+} from 'node:fs';
+import { tmpdir, platform } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const cliPackageDir = join(root, 'packages', 'cli');
 
-// Resolve tsx from node_modules
-const tsxPath = resolve(root, 'node_modules', '.bin', 'tsx');
+// Ensure qc-helper bundled skill can find user docs in dev mode.
+// In dev, import.meta.url resolves to the source tree, so the bundled skill
+// directory is packages/core/src/skills/bundled/qc-helper/. We create a
+// symlink from there to docs/users/ so the skill can read docs at runtime.
+const qcHelperDocsLink = join(
+  root,
+  'packages',
+  'core',
+  'src',
+  'skills',
+  'bundled',
+  'qc-helper',
+  'docs',
+);
+const userDocsTarget = join(root, 'docs', 'users');
+if (existsSync(userDocsTarget) && !existsSync(qcHelperDocsLink)) {
+  mkdirSync(dirname(qcHelperDocsLink), { recursive: true });
+  try {
+    symlinkSync(userDocsTarget, qcHelperDocsLink);
+  } catch {
+    // Symlink may fail on some systems; non-critical for dev
+  }
+}
 
 // Entry point for the CLI
 const cliEntry = join(cliPackageDir, 'index.ts');
@@ -67,21 +95,28 @@ register('${loaderUrl}', pathToFileURL('./'));
 `;
 writeFileSync(registerPath, registerCode);
 
+// Preserve existing NODE_OPTIONS (e.g. VS Code debugger injects --inspect flags via NODE_OPTIONS)
+const existingNodeOptions = process.env.NODE_OPTIONS || '';
+const importFlag = `--import ${pathToFileURL(registerPath).href}`;
+
 const env = {
   ...process.env,
   DEV: 'true',
   CLI_VERSION: 'dev',
   NODE_ENV: 'development',
-  // Use --import with register() instead of deprecated --loader
-  NODE_OPTIONS: `--import ${pathToFileURL(registerPath).href}`,
+  NODE_OPTIONS: `${existingNodeOptions} ${importFlag}`.trim(),
 };
 
-const nodeArgs = [tsxPath, cliEntry, ...process.argv.slice(2)];
+// On Windows, use tsx.cmd; on Unix, use tsx directly
+const isWin = platform() === 'win32';
+const tsxCmd = isWin ? 'tsx.cmd' : 'tsx';
+const tsxArgs = [cliEntry, ...process.argv.slice(2)];
 
-const child = spawn('node', nodeArgs, {
+const child = spawn(tsxCmd, tsxArgs, {
   stdio: 'inherit',
   env,
   cwd: process.cwd(),
+  shell: isWin, // Use shell on Windows to resolve .cmd files
 });
 
 child.on('error', (err) => {

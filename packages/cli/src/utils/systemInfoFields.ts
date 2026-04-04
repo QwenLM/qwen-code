@@ -6,6 +6,7 @@
 
 import type { ExtendedSystemInfo } from './systemInfo.js';
 import { t } from '../i18n/index.js';
+import { isCodingPlanConfig } from '../constants/codingPlan.js';
 
 /**
  * Field configuration for system information display
@@ -30,7 +31,9 @@ export function getSystemInfoFields(
   addField(fields, t('IDE Client'), info.ideClient);
   addField(fields, t('OS'), formatOs(info));
   addField(fields, t('Auth'), formatAuth(info));
+  addField(fields, t('Base URL'), formatBaseUrl(info));
   addField(fields, t('Model'), info.modelVersion);
+  addField(fields, t('Fast Model'), info.fastModel || info.modelVersion);
   addField(fields, t('Session ID'), info.sessionId);
   addField(fields, t('Sandbox'), info.sandboxEnv);
   addField(fields, t('Proxy'), formatProxy(info.proxy));
@@ -86,15 +89,34 @@ function formatAuth(info: ExtendedSystemInfo): string {
   if (!info.selectedAuthType) {
     return '';
   }
-  const authType = formatAuthType(info.selectedAuthType);
-  if (!info.baseUrl) {
-    return authType;
+
+  if (isCodingPlanConfig(info.baseUrl, info.apiKeyEnvKey)) {
+    return t('Alibaba Cloud Coding Plan');
   }
-  return `${authType} (${info.baseUrl})`;
+
+  if (
+    info.selectedAuthType.startsWith('oauth') ||
+    info.selectedAuthType === 'qwen-oauth'
+  ) {
+    return 'Qwen OAuth';
+  }
+
+  return `API Key - ${info.selectedAuthType}`;
 }
 
-function formatAuthType(authType: string): string {
-  return authType.startsWith('oauth') ? 'OAuth' : authType;
+function formatBaseUrl(info: ExtendedSystemInfo): string {
+  if (!info.selectedAuthType || !info.baseUrl) {
+    return '';
+  }
+
+  if (
+    info.selectedAuthType.startsWith('oauth') ||
+    info.selectedAuthType === 'qwen-oauth'
+  ) {
+    return '';
+  }
+
+  return info.baseUrl;
 }
 
 function formatProxy(proxy?: string): string {

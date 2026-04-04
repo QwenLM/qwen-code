@@ -1840,7 +1840,7 @@ export function useTextBuffer({
         process.env['VISUAL'] ??
         process.env['EDITOR'] ??
         (process.platform === 'win32' ? 'notepad' : 'vi');
-      const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'gemini-edit-'));
+      const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
       const filePath = pathMod.join(tmpDir, 'buffer.txt');
       fs.writeFileSync(filePath, text, 'utf8');
 
@@ -1907,8 +1907,8 @@ export function useTextBuffer({
       else if (key.ctrl && key.name === 'b') move('left');
       else if (key.name === 'right' && !key.meta && !key.ctrl) move('right');
       else if (key.ctrl && key.name === 'f') move('right');
-      else if (key.name === 'up') move('up');
-      else if (key.name === 'down') move('down');
+      else if (key.name === 'up' && !key.shift) move('up');
+      else if (key.name === 'down' && !key.shift) move('down');
       else if ((key.ctrl || key.meta) && key.name === 'left') move('wordLeft');
       else if (key.meta && key.name === 'b') move('wordLeft');
       else if ((key.ctrl || key.meta) && key.name === 'right')

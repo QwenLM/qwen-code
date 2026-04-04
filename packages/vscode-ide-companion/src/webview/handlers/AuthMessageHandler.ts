@@ -6,6 +6,7 @@
 
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
+import { getErrorMessage } from '../../utils/errorMessage.js';
 
 /**
  * Auth message handler
@@ -67,6 +68,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
         await vscode.commands.executeCommand('qwen-code.login');
       }
     } catch (error) {
+      const errorMsg = getErrorMessage(error);
       console.error('[AuthMessageHandler] Login failed:', error);
       console.error(
         '[AuthMessageHandler] Error stack:',
@@ -75,7 +77,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       this.sendToWebView({
         type: 'loginError',
         data: {
-          message: `Login failed: ${error instanceof Error ? error.message : String(error)}`,
+          message: `Login failed: ${errorMsg}`,
         },
       });
     }

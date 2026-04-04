@@ -192,17 +192,17 @@ export class DiffManager {
       return;
     }
     // Left side: old content using qwen-diff scheme
-    const leftDocUri = vscode.Uri.from({
+    // Use Uri.file() to properly handle Windows paths (e.g., C:\Users\...)
+    // then change the scheme to our custom diff scheme
+    const leftDocUri = vscode.Uri.file(normalizedPath).with({
       scheme: DIFF_SCHEME,
-      path: normalizedPath,
       query: `old&rand=${Math.random()}`,
     });
     this.diffContentProvider.setContent(leftDocUri, oldContent);
 
     // Right side: new content using qwen-diff scheme
-    const rightDocUri = vscode.Uri.from({
+    const rightDocUri = vscode.Uri.file(normalizedPath).with({
       scheme: DIFF_SCHEME,
-      path: normalizedPath,
       query: `new&rand=${Math.random()}`,
     });
     this.diffContentProvider.setContent(rightDocUri, newContent);

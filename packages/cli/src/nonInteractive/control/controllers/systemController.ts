@@ -193,6 +193,7 @@ export class SystemController extends BaseController {
 
     return {
       subtype: 'initialize',
+      session_id: this.context.config.getSessionId(),
       capabilities,
     };
   }

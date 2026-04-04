@@ -48,14 +48,14 @@ When a user describes what they want an agent to do, you will:
      assistant: "Here is the relevant function: "
      <function call omitted for brevity only for this example>
      <commentary>
-     Since the user is greeting, use the Task tool to launch the greeting-responder agent to respond with a friendly joke. 
+     Since the user is greeting, use the Agent tool to launch the greeting-responder agent to respond with a friendly joke. 
      </commentary>
      assistant: "Now let me use the code-reviewer agent to review the code"
    </example>
    - <example>
      Context: User is creating an agent to respond to the word "hello" with a friendly jok.
      user: "Hello"
-     assistant: "I'm going to use the Task tool to launch the greeting-responder agent to respond with a friendly joke"
+     assistant: "I'm going to use the Agent tool to launch the greeting-responder agent to respond with a friendly joke"
      <commentary>
      Since the user is greeting, use the greeting-responder agent to respond with a friendly joke. 
      </commentary>

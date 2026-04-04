@@ -7,7 +7,13 @@
 import { useCallback } from 'react';
 import { SettingScope } from '../../config/settings.js';
 import type { AuthType, ApprovalMode } from '@qwen-code/qwen-code-core';
-import type { OpenAICredentials } from '../components/OpenAIKeyPrompt.js';
+import type { ArenaDialogType } from './useArenaCommand.js';
+// OpenAICredentials type (previously imported from OpenAIKeyPrompt)
+interface OpenAICredentials {
+  apiKey: string;
+  baseUrl?: string;
+  model?: string;
+}
 
 export interface DialogCloseOptions {
   // Theme dialog
@@ -36,6 +42,10 @@ export interface DialogCloseOptions {
   // Settings dialog
   isSettingsDialogOpen: boolean;
   closeSettingsDialog: () => void;
+
+  // Arena dialogs
+  activeArenaDialog: ArenaDialogType;
+  closeArenaDialog: () => void;
 
   // Folder trust dialog
   isFolderTrustDialogOpen: boolean;
@@ -75,6 +85,11 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.isSettingsDialogOpen) {
       // Mimic ESC behavior: onSelect(undefined, selectedScope)
       options.closeSettingsDialog();
+      return true;
+    }
+
+    if (options.activeArenaDialog !== null) {
+      options.closeArenaDialog();
       return true;
     }
 

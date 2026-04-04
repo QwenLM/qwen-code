@@ -16,25 +16,45 @@ Make sure you have:
 
 To install Qwen Code, use one of the following methods:
 
-### NPM (recommended)
+### Quick Install (Recommended)
 
-Requires [Node.js 20+](https://nodejs.org/download), you can use `node -v` check the version. If it's not installed, use the following command to install it.
-
-If you have [Node.js or newer installed](https://nodejs.org/en/download/):
+**Linux / macOS**
 
 ```sh
+curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh | bash
+```
+
+**Windows (Run as Administrator CMD)**
+
+```sh
+curl -fsSL -o %TEMP%\install-qwen.bat https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat && %TEMP%\install-qwen.bat
+```
+
+> [!note]
+>
+> It's recommended to restart your terminal after installation to ensure environment variables take effect.
+
+### Manual Installation
+
+**Prerequisites**
+
+Make sure you have Node.js 20 or later installed. Download it from [nodejs.org](https://nodejs.org/en/download).
+
+**NPM**
+
+```bash
 npm install -g @qwen-code/qwen-code@latest
 ```
 
-### Homebrew (macOS, Linux)
+**Homebrew (macOS, Linux)**
 
-```sh
+```bash
 brew install qwen-code
 ```
 
 ## Step 2: Log in to your account
 
-Qwen Code requires an account to use. When you start an interactive session with the `qwen` command, you'll need to log in:
+Qwen Code requires an account to use. When you start an interactive session with the `qwen` command, you'll be prompted to log in:
 
 ```bash
 # You'll be prompted to log in on first use
@@ -54,7 +74,7 @@ Select `Qwen OAuth`, log in to your account and follow the prompts to confirm. O
 
 > [!tip]
 >
-> If you need to log in again or switch accounts, use the `/auth` command within Qwen Code.
+> You can also configure authentication directly from the terminal without starting a session by running `qwen auth`. Use `qwen auth status` to check your current configuration at any time. See the [Authentication](./configuration/auth) page for details.
 
 ## Step 3: Start your first session
 
@@ -196,7 +216,9 @@ Here are the most important commands for daily use:
 | Command               | What it does                                     | Example                       |
 | --------------------- | ------------------------------------------------ | ----------------------------- |
 | `qwen`                | start Qwen Code                                  | `qwen`                        |
-| `/auth`               | Change authentication method                     | `/auth`                       |
+| `/auth`               | Change authentication method (in session)        | `/auth`                       |
+| `qwen auth`           | Configure authentication from the terminal       | `qwen auth`                   |
+| `qwen auth status`    | Check current authentication status              | `qwen auth status`            |
 | `/help`               | Display help information for available commands  | `/help` or `/?`               |
 | `/compress`           | Replace chat history with summary to save Tokens | `/compress`                   |
 | `/clear`              | Clear terminal screen content                    | `/clear` (shortcut: `Ctrl+L`) |

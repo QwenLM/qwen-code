@@ -21,7 +21,6 @@ vi.mock('../services/shellExecutionService.js', () => ({
 vi.mock('fs');
 vi.mock('os');
 vi.mock('crypto');
-vi.mock('../utils/summarizer.js');
 
 import { isCommandAllowed } from '../utils/shell-utils.js';
 import { ShellTool } from './shell.js';
@@ -35,11 +34,10 @@ import * as os from 'node:os';
 import { EOL } from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
-import * as summarizer from '../utils/summarizer.js';
 import { ToolErrorType } from './tool-error.js';
-import { ToolConfirmationOutcome } from './tools.js';
 import { OUTPUT_UPDATE_INTERVAL_MS } from './shell.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 
 describe('ShellTool', () => {
   let shellTool: ShellTool;
@@ -52,16 +50,21 @@ describe('ShellTool', () => {
 
     mockConfig = {
       getCoreTools: vi.fn().mockReturnValue([]),
-      getExcludeTools: vi.fn().mockReturnValue([]),
+      getPermissionsAllow: vi.fn().mockReturnValue([]),
+      getPermissionsAsk: vi.fn().mockReturnValue([]),
+      getPermissionsDeny: vi.fn().mockReturnValue([]),
       getDebugMode: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/test/dir'),
-      getSummarizeToolOutputConfig: vi.fn().mockReturnValue(undefined),
       getWorkspaceContext: vi
         .fn()
         .mockReturnValue(createMockWorkspaceContext('/test/dir')),
       storage: {
-        getUserSkillsDir: vi.fn().mockReturnValue('/test/dir/.qwen/skills'),
+        getUserSkillsDirs: vi.fn().mockReturnValue(['/test/dir/.qwen/skills']),
+        getProjectTempDir: vi.fn().mockReturnValue('/tmp/qwen-temp'),
       },
+      getTruncateToolOutputThreshold: vi.fn().mockReturnValue(0),
+      getTruncateToolOutputLines: vi.fn().mockReturnValue(0),
+      getPermissionManager: vi.fn().mockReturnValue(undefined),
       getGeminiClient: vi.fn(),
       getGitCoAuthor: vi.fn().mockReturnValue({
         enabled: true,
@@ -92,21 +95,21 @@ describe('ShellTool', () => {
   });
 
   describe('isCommandAllowed', () => {
-    it('should allow a command if no restrictions are provided', () => {
+    it('should allow a command if no restrictions are provided', async () => {
       (mockConfig.getCoreTools as Mock).mockReturnValue(undefined);
-      (mockConfig.getExcludeTools as Mock).mockReturnValue(undefined);
-      expect(isCommandAllowed('ls -l', mockConfig).allowed).toBe(true);
+      (mockConfig.getPermissionsDeny as Mock).mockReturnValue(undefined);
+      expect((await isCommandAllowed('ls -l', mockConfig)).allowed).toBe(true);
     });
 
-    it('should block a command with command substitution using $()', () => {
-      expect(isCommandAllowed('echo $(rm -rf /)', mockConfig).allowed).toBe(
-        false,
-      );
+    it('should block a command with command substitution using $()', async () => {
+      expect(
+        (await isCommandAllowed('echo $(rm -rf /)', mockConfig)).allowed,
+      ).toBe(false);
     });
   });
 
   describe('build', () => {
-    it('should return an invocation for a valid command', () => {
+    it('should return an invocation for a valid command', async () => {
       const invocation = shellTool.build({
         command: 'ls -l',
         is_background: false,
@@ -114,13 +117,13 @@ describe('ShellTool', () => {
       expect(invocation).toBeDefined();
     });
 
-    it('should throw an error for an empty command', () => {
+    it('should throw an error for an empty command', async () => {
       expect(() =>
         shellTool.build({ command: ' ', is_background: false }),
       ).toThrow('Command cannot be empty.');
     });
 
-    it('should throw an error for a relative directory path', () => {
+    it('should throw an error for a relative directory path', async () => {
       expect(() =>
         shellTool.build({
           command: 'ls',
@@ -130,7 +133,7 @@ describe('ShellTool', () => {
       ).toThrow('Directory must be an absolute path.');
     });
 
-    it('should throw an error for a directory outside the workspace', () => {
+    it('should throw an error for a directory outside the workspace', async () => {
       (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
         createMockWorkspaceContext('/test/dir', ['/another/workspace']),
       );
@@ -145,7 +148,7 @@ describe('ShellTool', () => {
       );
     });
 
-    it('should throw an error for a directory within the user skills directory', () => {
+    it('should throw an error for a directory within the user skills directory', async () => {
       expect(() =>
         shellTool.build({
           command: 'ls',
@@ -157,7 +160,7 @@ describe('ShellTool', () => {
       );
     });
 
-    it('should throw an error for the user skills directory itself', () => {
+    it('should throw an error for the user skills directory itself', async () => {
       expect(() =>
         shellTool.build({
           command: 'ls',
@@ -169,7 +172,7 @@ describe('ShellTool', () => {
       );
     });
 
-    it('should resolve directory path before checking user skills directory', () => {
+    it('should resolve directory path before checking user skills directory', async () => {
       expect(() =>
         shellTool.build({
           command: 'ls',
@@ -181,7 +184,7 @@ describe('ShellTool', () => {
       );
     });
 
-    it('should return an invocation for a valid absolute directory path', () => {
+    it('should return an invocation for a valid absolute directory path', async () => {
       (mockConfig.getWorkspaceContext as Mock).mockReturnValue(
         createMockWorkspaceContext('/test/dir', ['/another/workspace']),
       );
@@ -193,7 +196,7 @@ describe('ShellTool', () => {
       expect(invocation).toBeDefined();
     });
 
-    it('should include background indicator in description when is_background is true', () => {
+    it('should include background indicator in description when is_background is true', async () => {
       const invocation = shellTool.build({
         command: 'npm start',
         is_background: true,
@@ -201,7 +204,7 @@ describe('ShellTool', () => {
       expect(invocation.getDescription()).toContain('[background]');
     });
 
-    it('should not include background indicator in description when is_background is false', () => {
+    it('should not include background indicator in description when is_background is false', async () => {
       const invocation = shellTool.build({
         command: 'npm test',
         is_background: false,
@@ -210,7 +213,7 @@ describe('ShellTool', () => {
     });
 
     describe('is_background parameter coercion', () => {
-      it('should accept string "true" as boolean true', () => {
+      it('should accept string "true" as boolean true', async () => {
         const invocation = shellTool.build({
           command: 'npm run dev',
           is_background: 'true' as unknown as boolean,
@@ -219,7 +222,7 @@ describe('ShellTool', () => {
         expect(invocation.getDescription()).toContain('[background]');
       });
 
-      it('should accept string "false" as boolean false', () => {
+      it('should accept string "false" as boolean false', async () => {
         const invocation = shellTool.build({
           command: 'npm run build',
           is_background: 'false' as unknown as boolean,
@@ -228,7 +231,7 @@ describe('ShellTool', () => {
         expect(invocation.getDescription()).not.toContain('[background]');
       });
 
-      it('should accept string "True" as boolean true', () => {
+      it('should accept string "True" as boolean true', async () => {
         const invocation = shellTool.build({
           command: 'npm run dev',
           is_background: 'True' as unknown as boolean,
@@ -237,7 +240,7 @@ describe('ShellTool', () => {
         expect(invocation.getDescription()).toContain('[background]');
       });
 
-      it('should accept string "False" as boolean false', () => {
+      it('should accept string "False" as boolean false', async () => {
         const invocation = shellTool.build({
           command: 'npm run build',
           is_background: 'False' as unknown as boolean,
@@ -268,10 +271,10 @@ describe('ShellTool', () => {
       resolveExecutionPromise(fullResult);
     };
 
-    it('should wrap command on linux and parse pgrep output', async () => {
+    it('should wrap background command on linux and parse pgrep output', async () => {
       const invocation = shellTool.build({
-        command: 'my-command &',
-        is_background: false,
+        command: 'my-command',
+        is_background: true,
       });
       const promise = invocation.execute(mockAbortSignal);
       resolveShellExecution({ pid: 54321 });
@@ -291,7 +294,7 @@ describe('ShellTool', () => {
         false,
         {},
       );
-      expect(result.llmContent).toContain('Background PIDs: 54322');
+      expect(result.llmContent).toContain('PIDs: 54322');
       expect(vi.mocked(fs.unlinkSync)).toHaveBeenCalledWith(tmpFile);
     });
 
@@ -353,15 +356,11 @@ describe('ShellTool', () => {
       const promise = invocation.execute(mockAbortSignal);
       resolveShellExecution({ pid: 54321 });
 
-      vi.mocked(fs.existsSync).mockReturnValue(true);
-      vi.mocked(fs.readFileSync).mockReturnValue('54321\n54322\n');
-
       await promise;
 
-      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
-      const wrappedCommand = `{ npm test; }; __code=$?; pgrep -g 0 >${tmpFile} 2>&1; exit $__code;`;
+      // Foreground commands should not be wrapped with pgrep
       expect(mockShellExecutionService).toHaveBeenCalledWith(
-        wrappedCommand,
+        'npm test',
         expect.any(String),
         expect.any(Function),
         expect.any(AbortSignal),
@@ -383,10 +382,9 @@ describe('ShellTool', () => {
       resolveShellExecution();
       await promise;
 
-      const tmpFile = path.join(os.tmpdir(), 'shell_pgrep_abcdef.tmp');
-      const wrappedCommand = `{ ls; }; __code=$?; pgrep -g 0 >${tmpFile} 2>&1; exit $__code;`;
+      // Foreground commands should not be wrapped with pgrep
       expect(mockShellExecutionService).toHaveBeenCalledWith(
-        wrappedCommand,
+        'ls',
         '/test/dir/subdir',
         expect.any(Function),
         expect.any(AbortSignal),
@@ -465,13 +463,13 @@ describe('ShellTool', () => {
       expect(result.error?.message).toBe('command failed');
     });
 
-    it('should throw an error for invalid parameters', () => {
+    it('should throw an error for invalid parameters', async () => {
       expect(() =>
         shellTool.build({ command: '', is_background: false }),
       ).toThrow('Command cannot be empty.');
     });
 
-    it('should throw an error for invalid directory', () => {
+    it('should throw an error for invalid directory', async () => {
       expect(() =>
         shellTool.build({
           command: 'ls',
@@ -479,42 +477,6 @@ describe('ShellTool', () => {
           is_background: false,
         }),
       ).toThrow('Directory must be an absolute path.');
-    });
-
-    it('should summarize output when configured', async () => {
-      (mockConfig.getSummarizeToolOutputConfig as Mock).mockReturnValue({
-        [shellTool.name]: { tokenBudget: 1000 },
-      });
-      vi.mocked(summarizer.summarizeToolOutput).mockResolvedValue(
-        'summarized output',
-      );
-
-      const invocation = shellTool.build({
-        command: 'ls',
-        is_background: false,
-      });
-      const promise = invocation.execute(mockAbortSignal);
-      resolveExecutionPromise({
-        output: 'long output',
-        rawOutput: Buffer.from('long output'),
-        exitCode: 0,
-        signal: null,
-        error: null,
-        aborted: false,
-        pid: 12345,
-        executionMethod: 'child_process',
-      });
-
-      const result = await promise;
-
-      expect(summarizer.summarizeToolOutput).toHaveBeenCalledWith(
-        expect.any(String),
-        mockConfig.getGeminiClient(),
-        expect.any(AbortSignal),
-        1000,
-      );
-      expect(result.llmContent).toBe('summarized output');
-      expect(result.returnDisplay).toBe('long output');
     });
 
     it('should clean up the temp file on synchronous execution error', async () => {
@@ -733,7 +695,6 @@ describe('ShellTool', () => {
 
         await promise;
 
-        // On Linux, commands are wrapped with pgrep functionality
         expect(mockShellExecutionService).toHaveBeenCalledWith(
           expect.stringContaining('npm install'),
           expect.any(String),
@@ -762,7 +723,6 @@ describe('ShellTool', () => {
 
         await promise;
 
-        // On Linux, commands are wrapped with pgrep functionality
         expect(mockShellExecutionService).toHaveBeenCalledWith(
           expect.stringContaining('git commit'),
           expect.any(String),
@@ -828,7 +788,6 @@ describe('ShellTool', () => {
 
         await promise;
 
-        // On Linux, commands are wrapped with pgrep functionality
         expect(mockShellExecutionService).toHaveBeenCalledWith(
           expect.stringContaining('git commit -m "Initial commit"'),
           expect.any(String),
@@ -941,47 +900,102 @@ describe('ShellTool', () => {
     });
   });
 
-  describe('shouldConfirmExecute', () => {
+  describe('getDefaultPermission and getConfirmationDetails', () => {
     it('should not request confirmation for read-only commands', async () => {
       const invocation = shellTool.build({
         command: 'ls -la',
         is_background: false,
       });
 
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
+      const permission = await invocation.getDefaultPermission();
 
-      expect(confirmation).toBe(false);
+      expect(permission).toBe('allow');
     });
 
-    it('should request confirmation for a new command and whitelist it on "Always"', async () => {
+    it('should request confirmation for a non-read-only command and return details', async () => {
       const params = { command: 'npm install', is_background: false };
       const invocation = shellTool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+
+      const details = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
-
-      expect(confirmation).not.toBe(false);
-      expect(confirmation && confirmation.type).toBe('exec');
-
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      await (confirmation as any).onConfirm(
-        ToolConfirmationOutcome.ProceedAlways,
-      );
-
-      // Should now be whitelisted
-      const secondInvocation = shellTool.build({
-        command: 'npm test',
-        is_background: false,
-      });
-      const secondConfirmation = await secondInvocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(secondConfirmation).toBe(false);
+      expect(details.type).toBe('exec');
     });
 
-    it('should throw an error if validation fails', () => {
+    it('should exclude read-only sub-commands from confirmation details in compound commands', async () => {
+      // "cd" is read-only, "npm run build" is not
+      const params = {
+        command: 'cd packages/core && npm run build',
+        is_background: false,
+      };
+      const invocation = shellTool.build(params);
+
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string; permissionRules: string[] };
+
+      // rootCommand should only include 'npm', not 'cd'
+      expect(details.rootCommand).not.toContain('cd');
+      expect(details.rootCommand).toContain('npm');
+
+      // permissionRules should not include Bash(cd *)
+      expect(details.permissionRules).not.toContainEqual(
+        expect.stringContaining('cd'),
+      );
+      expect(details.permissionRules).toContainEqual(
+        expect.stringContaining('npm'),
+      );
+    });
+
+    it('should not surface file descriptor redirects as standalone commands in confirmation details', async () => {
+      const params = {
+        command: 'npm run build 2>&1 | head -100',
+        is_background: false,
+      };
+      const invocation = shellTool.build(params);
+
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string; permissionRules: string[] };
+
+      expect(details.rootCommand).toBe('npm');
+      expect(details.permissionRules).toEqual(['Bash(npm run *)']);
+    });
+
+    it('should exclude already-allowed sub-commands from confirmation details in compound commands', async () => {
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => ['Bash(git add *)'],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getProjectRoot: () => '/test/dir',
+        getCwd: () => '/test/dir',
+      });
+      pm.initialize();
+      (mockConfig.getPermissionManager as Mock).mockReturnValue(pm);
+
+      const invocation = shellTool.build({
+        command: 'git add /tmp/file && git commit -m "msg"',
+        is_background: false,
+      });
+
+      const details = (await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      )) as { rootCommand: string; permissionRules: string[] };
+
+      expect(details.rootCommand).toBe('git');
+      expect(details.permissionRules).toEqual(['Bash(git commit *)']);
+    });
+
+    it('should throw an error if validation fails', async () => {
       expect(() =>
         shellTool.build({ command: '', is_background: false }),
       ).toThrow();
@@ -989,13 +1003,13 @@ describe('ShellTool', () => {
   });
 
   describe('getDescription', () => {
-    it('should return the windows description when on windows', () => {
+    it('should return the windows description when on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('win32');
       const shellTool = new ShellTool(mockConfig);
       expect(shellTool.description).toMatchSnapshot();
     });
 
-    it('should return the non-windows description when not on windows', () => {
+    it('should return the non-windows description when not on windows', async () => {
       vi.mocked(os.platform).mockReturnValue('linux');
       const shellTool = new ShellTool(mockConfig);
       expect(shellTool.description).toMatchSnapshot();
@@ -1040,7 +1054,7 @@ describe('ShellTool', () => {
   });
 
   describe('timeout parameter', () => {
-    it('should validate timeout parameter correctly', () => {
+    it('should validate timeout parameter correctly', async () => {
       // Valid timeout
       expect(() => {
         shellTool.build({
@@ -1105,7 +1119,7 @@ describe('ShellTool', () => {
       }).toThrow('params/timeout must be number');
     });
 
-    it('should include timeout in description for foreground commands', () => {
+    it('should include timeout in description for foreground commands', async () => {
       const invocation = shellTool.build({
         command: 'npm test',
         is_background: false,
@@ -1115,7 +1129,7 @@ describe('ShellTool', () => {
       expect(invocation.getDescription()).toBe('npm test [timeout: 30000ms]');
     });
 
-    it('should not include timeout in description for background commands', () => {
+    it('should not include timeout in description for background commands', async () => {
       const invocation = shellTool.build({
         command: 'npm start',
         is_background: true,

@@ -16,6 +16,8 @@ export type TransportOptions = {
   model?: string;
   permissionMode?: PermissionMode;
   env?: Record<string, string>;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
   abortController?: AbortController;
   debug?: boolean;
   stderr?: (message: string) => void;
@@ -38,7 +40,21 @@ export type TransportOptions = {
    * When provided, takes precedence over `continue`.
    */
   resume?: string;
+  /**
+   * Session ID to use for this session.
+   * Passed to CLI via --session-id to ensure consistent session ID.
+   * When resume is provided, this should match the resume ID.
+   */
+  sessionId?: string;
 };
+
+export interface QuerySystemPromptPreset {
+  type: 'preset';
+  preset: 'qwen_code';
+  append?: string;
+}
+
+export type QuerySystemPrompt = string | QuerySystemPromptPreset;
 
 type ToolInput = Record<string, unknown>;
 
@@ -219,6 +235,16 @@ export interface QueryOptions {
    * These variables will be merged with the current process environment.
    */
   env?: Record<string, string>;
+
+  /**
+   * System prompt configuration for the Qwen CLI session.
+   *
+   * - `string`: fully overrides the main session system prompt
+   * - `{ type: 'preset', preset: 'qwen_code', append?: string }`:
+   *   uses Qwen Code's built-in prompt as the base and optionally appends extra
+   *   instructions for the main session
+   */
+  systemPrompt?: QuerySystemPrompt;
 
   /**
    * Permission mode controlling how the SDK handles tool execution approval.
@@ -421,6 +447,14 @@ export interface QueryOptions {
    * @example '123e4567-e89b-12d3-a456-426614174000'
    */
   resume?: string;
+
+  /**
+   * Specify a session ID for the new session.
+   * This ensures the SDK and CLI use the same session ID without resuming a previous session.
+   * Equivalent to CLI's `--session-id` flag.
+   * @example '123e4567-e89b-12d3-a456-426614174000'
+   */
+  sessionId?: string;
 
   /**
    * Timeout configuration for various SDK operations.

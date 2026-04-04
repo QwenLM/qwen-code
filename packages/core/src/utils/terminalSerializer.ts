@@ -131,17 +131,26 @@ class Cell {
   }
 }
 
-export function serializeTerminalToObject(terminal: Terminal): AnsiOutput {
+export function serializeTerminalToObject(
+  terminal: Terminal,
+  scrollOffset: number = 0,
+): AnsiOutput {
   const buffer = terminal.buffer.active;
-  const cursorX = buffer.cursorX;
-  const cursorY = buffer.cursorY;
   const defaultFg = '';
   const defaultBg = '';
+
+  // Clamp scrollOffset to valid range [0, viewportY]
+  const clampedOffset = Math.max(0, Math.min(scrollOffset, buffer.viewportY));
+  const startRow = buffer.viewportY - clampedOffset;
+
+  // Only show cursor when viewing the live viewport (no scroll)
+  const cursorX = clampedOffset === 0 ? buffer.cursorX : -1;
+  const cursorY = clampedOffset === 0 ? buffer.cursorY : -1;
 
   const result: AnsiOutput = [];
 
   for (let y = 0; y < terminal.rows; y++) {
-    const line = buffer.getLine(buffer.viewportY + y);
+    const line = buffer.getLine(startRow + y);
     const currentLine: AnsiLine = [];
     if (!line) {
       result.push(currentLine);

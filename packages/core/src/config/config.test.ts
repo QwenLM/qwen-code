@@ -36,6 +36,8 @@ import { RipGrepTool } from '../tools/ripGrep.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
+import { fireNotificationHook } from '../core/toolHookTriggers.js';
+import type { MessageBus } from '../confirmation-bus/message-bus.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -118,6 +120,7 @@ vi.mock('../tools/memoryTool', () => ({
   MemoryTool: createToolMock('save_memory'),
   setGeminiMdFilename: vi.fn(),
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
+  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
   QWEN_CONFIG_DIR: '.qwen',
 }));
@@ -194,6 +197,10 @@ vi.mock('../ide/ide-client.js', () => ({
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 
 vi.mock('../core/baseLlmClient.js');
+// Mock fireNotificationHook from toolHookTriggers
+vi.mock('../core/toolHookTriggers.js', () => ({
+  fireNotificationHook: vi.fn().mockResolvedValue({}),
+}));
 
 describe('Server Config (config.ts)', () => {
   const MODEL = 'qwen3-coder-plus';
@@ -245,6 +252,26 @@ describe('Server Config (config.ts)', () => {
         sources: {},
       }),
     );
+  });
+
+  it('should store a system prompt override', () => {
+    const config = new Config({
+      ...baseParams,
+      systemPrompt: 'You are a custom system prompt.',
+    });
+
+    expect(config.getSystemPrompt()).toBe('You are a custom system prompt.');
+    expect(config.getAppendSystemPrompt()).toBeUndefined();
+  });
+
+  it('should store an appended system prompt', () => {
+    const config = new Config({
+      ...baseParams,
+      appendSystemPrompt: 'Be extra concise.',
+    });
+
+    expect(config.getAppendSystemPrompt()).toBe('Be extra concise.');
+    expect(config.getSystemPrompt()).toBeUndefined();
   });
 
   describe('initialize', () => {
@@ -316,6 +343,64 @@ describe('Server Config (config.ts)', () => {
       expect(GeminiClient).toHaveBeenCalledWith(config);
     });
 
+    it('should fire auth_success notification hook when hooks are enabled', async () => {
+      const mockMessageBus = { request: vi.fn() };
+      const config = new Config({
+        ...baseParams,
+        disableAllHooks: false,
+      });
+      // Set messageBus using the setter
+      config.setMessageBus(mockMessageBus as unknown as MessageBus);
+
+      const authType = AuthType.USE_GEMINI;
+      const mockContentConfig = {
+        apiKey: 'test-key',
+        model: 'qwen3-coder-plus',
+        authType,
+      };
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: mockContentConfig as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      // Verify that fireNotificationHook was called with correct parameters
+      expect(fireNotificationHook).toHaveBeenCalledWith(
+        mockMessageBus,
+        `Successfully authenticated with ${authType}`,
+        'auth_success',
+        'Authentication successful',
+      );
+    });
+
+    it('should not fire notification hook when hooks are disabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        disableAllHooks: true,
+      });
+      const authType = AuthType.USE_GEMINI;
+      const mockContentConfig = {
+        apiKey: 'test-key',
+        model: 'qwen3-coder-plus',
+        authType,
+      };
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: mockContentConfig as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      // Clear any previous calls
+      vi.mocked(fireNotificationHook).mockClear();
+
+      await config.refreshAuth(authType);
+
+      // Verify that fireNotificationHook was not called
+      expect(fireNotificationHook).not.toHaveBeenCalled();
+    });
+
     it('should not strip thoughts when switching from Vertex to GenAI', async () => {
       const config = new Config(baseParams);
 
@@ -370,9 +455,9 @@ describe('Server Config (config.ts)', () => {
       // Spy after initial refresh to ensure model switch does not re-trigger refreshAuth.
       const refreshSpy = vi.spyOn(config, 'refreshAuth');
 
-      await config.switchModel(AuthType.QWEN_OAUTH, 'vision-model');
+      await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
 
-      expect(config.getModel()).toBe('vision-model');
+      expect(config.getModel()).toBe('coder-model');
       expect(refreshSpy).not.toHaveBeenCalled();
       // Called once during initial refreshAuth + once during handleModelChange diffing.
       expect(
@@ -1046,10 +1131,10 @@ describe('Server Config (config.ts)', () => {
       expect(config.getTruncateToolOutputThreshold()).toBe(50000);
     });
 
-    it('should return infinity when truncation is disabled', () => {
+    it('should return infinity when threshold is zero or negative', () => {
       const customParams = {
         ...baseParams,
-        enableToolOutputTruncation: false,
+        truncateToolOutputThreshold: 0,
       };
       const config = new Config(customParams);
       expect(config.getTruncateToolOutputThreshold()).toBe(
@@ -1496,5 +1581,38 @@ describe('Model Switching and Config Updates', () => {
     // Verify limits are now defined
     const updatedConfig = config.getContentGeneratorConfig();
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
+  });
+
+  describe('hasHooksForEvent', () => {
+    it('should return false when hookSystem is not initialized', () => {
+      const config = new Config(baseParams);
+      expect(config.hasHooksForEvent('Stop')).toBe(false);
+    });
+
+    it('should delegate to hookSystem.hasHooksForEvent when hookSystem exists', () => {
+      const config = new Config(baseParams);
+      const mockHasHooksForEvent = vi.fn().mockReturnValue(true);
+      const mockHookSystem = {
+        hasHooksForEvent: mockHasHooksForEvent,
+      };
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = mockHookSystem;
+
+      expect(config.hasHooksForEvent('UserPromptSubmit')).toBe(true);
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith('UserPromptSubmit');
+    });
+
+    it('should return false when hookSystem has no hooks for the event', () => {
+      const config = new Config(baseParams);
+      const mockHasHooksForEvent = vi.fn().mockReturnValue(false);
+      const mockHookSystem = {
+        hasHooksForEvent: mockHasHooksForEvent,
+      };
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = mockHookSystem;
+
+      expect(config.hasHooksForEvent('Stop')).toBe(false);
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith('Stop');
+    });
   });
 });

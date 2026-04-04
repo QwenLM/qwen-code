@@ -35,6 +35,7 @@ import { KeypressProvider } from './ui/contexts/KeypressContext.js';
 import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
+import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import { themeManager } from './ui/themes/theme-manager.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
@@ -162,13 +163,15 @@ export async function startInteractiveUI(
         >
           <SessionStatsProvider sessionId={config.getSessionId()}>
             <VimModeProvider settings={settings}>
-              <AppContainer
-                config={config}
-                settings={settings}
-                startupWarnings={startupWarnings}
-                version={version}
-                initializationResult={initializationResult}
-              />
+              <AgentViewProvider config={config}>
+                <AppContainer
+                  config={config}
+                  settings={settings}
+                  startupWarnings={startupWarnings}
+                  version={version}
+                  initializationResult={initializationResult}
+                />
+              </AgentViewProvider>
             </VimModeProvider>
           </SessionStatsProvider>
         </KeypressProvider>
@@ -279,11 +282,13 @@ export async function main() {
           process.exit(1);
         }
       }
-      // For stream-json mode, don't read stdin here - it should be forwarded to the sandbox
-      // and consumed by StreamJsonInputReader inside the container
+      // For stream-json and ACP modes, don't read stdin here — stdin carries
+      // protocol data (not a user prompt) and should be forwarded to the sandbox
+      // intact via stdio: 'inherit'.
       const inputFormat = argv.inputFormat as string | undefined;
+      const isAcpMode = argv.acp || argv.experimentalAcp;
       let stdinData = '';
-      if (!process.stdin.isTTY && inputFormat !== 'stream-json') {
+      if (!process.stdin.isTTY && inputFormat !== 'stream-json' && !isAcpMode) {
         stdinData = await readStdin();
       }
 
@@ -323,8 +328,15 @@ export async function main() {
     }
   }
 
-  // Handle --resume without a session ID by showing the session picker
+  // Handle --resume without a session ID by showing the session picker.
+  // Set the runtime output dir early so the picker can find sessions stored
+  // under a custom runtimeOutputDir (setRuntimeBaseDir is idempotent and will
+  // be called again inside loadCliConfig).
   if (argv.resume === '') {
+    Storage.setRuntimeBaseDir(
+      settings.merged.advanced?.runtimeOutputDir,
+      process.cwd(),
+    );
     const selectedSessionId = await showResumeSessionPicker();
     if (!selectedSessionId) {
       // User cancelled or no sessions available
@@ -385,20 +397,22 @@ export async function main() {
     setMaxSizedBoxDebugging(isDebugMode);
 
     // Check input format early to determine initialization flow
-    const inputFormat =
-      typeof config.getInputFormat === 'function'
+    // In TTY mode, ignore stream-json input format to prevent process from hanging
+    const inputFormat = process.stdin.isTTY
+      ? InputFormat.TEXT
+      : typeof config.getInputFormat === 'function'
         ? config.getInputFormat()
         : InputFormat.TEXT;
 
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
-    let initializationResult: InitializationResult | undefined;
-    if (inputFormat !== InputFormat.STREAM_JSON) {
-      initializationResult = await initializeApp(config, settings);
-    }
+    const initializationResult = await initializeApp(config, settings);
 
     if (config.getExperimentalZedIntegration()) {
-      return runAcpAgent(config, settings, argv);
+      await runAcpAgent(config, settings, argv);
+      // Clean up child processes and force exit, matching other non-interactive modes
+      await runExitCleanup();
+      process.exit(0);
     }
 
     let input = config.getQuestion();
@@ -411,6 +425,7 @@ export async function main() {
           useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
         })),
         ...getSettingsWarnings(settings),
+        ...config.getWarnings(),
       ]),
     ];
 

@@ -13,6 +13,7 @@ import {
   type DebugLogSession,
 } from './debugLogger.js';
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { Storage } from '../config/storage.js';
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -23,6 +24,9 @@ vi.mock('node:fs', async (importOriginal) => {
       ...actual.promises,
       mkdir: vi.fn().mockResolvedValue(undefined),
       appendFile: vi.fn().mockResolvedValue(undefined),
+      unlink: vi.fn().mockResolvedValue(undefined),
+      symlink: vi.fn().mockResolvedValue(undefined),
+      copyFile: vi.fn().mockResolvedValue(undefined),
     },
   };
 });
@@ -36,6 +40,7 @@ describe('debugLogger', () => {
 
   beforeEach(() => {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+    Storage.setRuntimeBaseDir(null);
     vi.clearAllMocks();
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-24T10:30:00.000Z'));
@@ -46,6 +51,7 @@ describe('debugLogger', () => {
   afterEach(() => {
     vi.useRealTimers();
     setDebugLogSession(null);
+    Storage.setRuntimeBaseDir(null);
     if (previousDebugLogFileEnv === undefined) {
       delete process.env['QWEN_DEBUG_LOG_FILE'];
     } else {
@@ -111,6 +117,27 @@ describe('debugLogger', () => {
       expect(calls[3]?.[1]).toContain('[ERROR]');
     });
 
+    it('creates a new debug directory after the runtime base dir changes', async () => {
+      Storage.setRuntimeBaseDir(path.resolve('runtime-a'));
+      const logger = createDebugLogger();
+      logger.debug('first');
+      await vi.runAllTimersAsync();
+
+      Storage.setRuntimeBaseDir(path.resolve('runtime-b'));
+      logger.debug('second');
+      await vi.runAllTimersAsync();
+
+      const mkdirCalls = vi.mocked(fs.mkdir).mock.calls;
+      expect(mkdirCalls).toContainEqual([
+        path.join(path.resolve('runtime-a'), 'debug'),
+        { recursive: true },
+      ]);
+      expect(mkdirCalls).toContainEqual([
+        path.join(path.resolve('runtime-b'), 'debug'),
+        { recursive: true },
+      ]);
+    });
+
     it('formats multiple arguments', async () => {
       const logger = createDebugLogger();
       logger.debug('Count:', 42, 'items');
@@ -154,6 +181,7 @@ describe('debugLogger', () => {
     });
 
     it('returns true when mkdir fails', async () => {
+      resetDebugLoggingState();
       vi.mocked(fs.mkdir).mockRejectedValueOnce(new Error('Permission denied'));
 
       const logger = createDebugLogger();
@@ -193,6 +221,55 @@ describe('debugLogger', () => {
 
       // Should still be degraded
       expect(isDebugLoggingDegraded()).toBe(true);
+    });
+  });
+
+  describe('latest debug log symlink', () => {
+    const expectedLatestPath = path.join(Storage.getGlobalDebugDir(), 'latest');
+
+    it('creates a symlink to the current session log file', async () => {
+      resetDebugLoggingState();
+      setDebugLogSession(mockSession);
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.unlink).toHaveBeenCalledWith(expectedLatestPath);
+      expect(fs.symlink).toHaveBeenCalledWith(
+        'test-session-123.txt',
+        expectedLatestPath,
+      );
+    });
+
+    it('does not create symlink when session is cleared', async () => {
+      vi.clearAllMocks();
+      resetDebugLoggingState();
+      setDebugLogSession(null);
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).not.toHaveBeenCalled();
+    });
+
+    it('does not fall back to copy when symlink fails', async () => {
+      resetDebugLoggingState();
+      vi.mocked(fs.symlink).mockRejectedValueOnce(new Error('EPERM'));
+
+      setDebugLogSession(mockSession);
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.copyFile).not.toHaveBeenCalled();
+    });
+
+    it('does not create symlink when debug logging is disabled', async () => {
+      process.env['QWEN_DEBUG_LOG_FILE'] = '0';
+      vi.clearAllMocks();
+      resetDebugLoggingState();
+      setDebugLogSession(mockSession);
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).not.toHaveBeenCalled();
     });
   });
 

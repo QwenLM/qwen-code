@@ -5,9 +5,11 @@
  */
 
 import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import util from 'node:util';
 import { Storage } from '../config/storage.js';
+import { updateSymlink } from './symlink.js';
 
 type LogLevel = 'DEBUG' | 'INFO' | 'WARN' | 'ERROR';
 
@@ -23,6 +25,7 @@ export interface DebugLogger {
 }
 
 let ensureDebugDirPromise: Promise<void> | null = null;
+let ensuredDebugDirPath: string | null = null;
 let hasWriteFailure = false;
 let globalSession: DebugLogSession | null = null;
 const sessionContext = new AsyncLocalStorage<DebugLogSession>();
@@ -39,13 +42,16 @@ function getActiveSession(): DebugLogSession | null {
 }
 
 function ensureDebugDirExists(): Promise<void> {
-  if (!ensureDebugDirPromise) {
+  const debugDirPath = Storage.getGlobalDebugDir();
+  if (!ensureDebugDirPromise || ensuredDebugDirPath !== debugDirPath) {
+    ensuredDebugDirPath = debugDirPath;
     ensureDebugDirPromise = fs
-      .mkdir(Storage.getGlobalDebugDir(), { recursive: true })
+      .mkdir(debugDirPath, { recursive: true })
       .then(() => undefined)
       .catch(() => {
         hasWriteFailure = true;
         ensureDebugDirPromise = null;
+        ensuredDebugDirPath = null;
       });
   }
   return ensureDebugDirPromise ?? Promise.resolve();
@@ -113,6 +119,24 @@ export function isDebugLoggingDegraded(): boolean {
 export function resetDebugLoggingState(): void {
   hasWriteFailure = false;
   ensureDebugDirPromise = null;
+  ensuredDebugDirPath = null;
+}
+
+const DEBUG_LATEST_ALIAS = 'latest';
+
+function updateLatestDebugLogAlias(sessionId: string): void {
+  if (!isDebugLogFileEnabled()) {
+    return;
+  }
+
+  const aliasPath = path.join(Storage.getGlobalDebugDir(), DEBUG_LATEST_ALIAS);
+  const targetPath = Storage.getDebugLogPath(sessionId);
+
+  void ensureDebugDirExists()
+    .then(() => updateSymlink(aliasPath, targetPath, { fallbackCopy: false }))
+    .catch(() => {
+      // Best-effort; don't degrade overall logging
+    });
 }
 
 /**
@@ -125,6 +149,9 @@ export function setDebugLogSession(
   session: DebugLogSession | null | undefined,
 ) {
   globalSession = session ?? null;
+  if (session) {
+    updateLatestDebugLogAlias(session.getSessionId());
+  }
 }
 
 /**

@@ -7,6 +7,7 @@
 import type { SlashCommand, CommandContext } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadServerHierarchicalMemory } from '@qwen-code/qwen-code-core';
@@ -25,6 +26,44 @@ export function expandHomeDir(p: string): string {
   return path.normalize(expandedPath);
 }
 
+/**
+ * Returns directory path completions for the given partial argument.
+ * Supports comma-separated paths by completing only the last segment.
+ */
+export function getDirPathCompletions(partialArg: string): string[] {
+  const lastComma = partialArg.lastIndexOf(',');
+  const prefix = lastComma >= 0 ? partialArg.substring(0, lastComma + 1) : '';
+  const partial =
+    lastComma >= 0
+      ? partialArg.substring(lastComma + 1).trimStart()
+      : partialArg;
+
+  const trimmed = partial.trim();
+  if (!trimmed) return [];
+
+  const expanded = trimmed.startsWith('~')
+    ? trimmed.replace(/^~/, os.homedir())
+    : trimmed;
+  const endsWithSep = expanded.endsWith('/') || expanded.endsWith(path.sep);
+  const searchDir = endsWithSep ? expanded : path.dirname(expanded);
+  const namePrefix = endsWithSep ? '' : path.basename(expanded);
+
+  try {
+    return fs
+      .readdirSync(searchDir, { withFileTypes: true })
+      .filter(
+        (e) =>
+          e.isDirectory() &&
+          e.name.startsWith(namePrefix) &&
+          !e.name.startsWith('.'),
+      )
+      .map((e) => prefix + path.join(searchDir, e.name))
+      .slice(0, 8);
+  } catch {
+    return [];
+  }
+}
+
 export const directoryCommand: SlashCommand = {
   name: 'directory',
   altNames: ['dir'],
@@ -41,6 +80,8 @@ export const directoryCommand: SlashCommand = {
         );
       },
       kind: CommandKind.BUILT_IN,
+      completion: async (_context: CommandContext, partialArg: string) =>
+        getDirPathCompletions(partialArg),
       action: async (context: CommandContext, args: string) => {
         const {
           ui: { addItem },
