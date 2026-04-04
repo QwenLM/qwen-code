@@ -5,7 +5,7 @@
  */
 
 import { basename, dirname, join, sep } from 'node:path';
-import { readdir } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 
@@ -239,7 +239,16 @@ export async function scanDirectoryForPaths(
       let entryType: 'directory' | 'file';
       if (entry.isDirectory()) {
         entryType = 'directory';
-      } else if (entry.isFile() || entry.isSymbolicLink()) {
+      } else if (entry.isSymbolicLink()) {
+        // Resolve symlink target type — symlinks to directories should
+        // show as directories so users can continue navigating into them
+        try {
+          const targetStat = await stat(join(dirPath, entry.name));
+          entryType = targetStat.isDirectory() ? 'directory' : 'file';
+        } catch {
+          entryType = 'file'; // Broken symlink, treat as file
+        }
+      } else if (entry.isFile()) {
         entryType = 'file';
       } else {
         continue;

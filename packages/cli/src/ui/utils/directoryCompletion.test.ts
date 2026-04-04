@@ -20,6 +20,7 @@ import * as fs from 'node:fs/promises';
 vi.mock('node:fs/promises');
 
 const mockReaddir = vi.mocked(fs.readdir);
+const mockStat = vi.mocked(fs.stat);
 
 // Helper to create a mock Dirent
 function mockDirent(name: string, isDir: boolean, isSymlink = false): unknown {
@@ -57,11 +58,9 @@ describe('directoryCompletion', () => {
     });
 
     it('handles empty input with no basePath', () => {
-      const originalCwd = process.cwd;
-      process.cwd = () => '/mock/cwd';
+      vi.spyOn(process, 'cwd').mockReturnValue('/mock/cwd');
       const result = parsePartialPath('');
       expect(result).toEqual({ directory: '/mock/cwd', prefix: '' });
-      process.cwd = originalCwd;
     });
 
     it('parses path ending with separator', () => {
@@ -177,17 +176,42 @@ describe('directoryCompletion', () => {
       expect(result).toHaveLength(2);
     });
 
-    it('includes symlinks as files', async () => {
+    it('resolves symlinks to directories as directory type', async () => {
       mockReaddirAny.mockResolvedValue([
         mockDirent('src', true),
         mockDirent('link-to-dir', false, true),
+        mockDirent('link-to-file', false, true),
         mockDirent('readme.md', false),
       ]);
+      mockStat.mockImplementation(async (p) => {
+        const path = String(p);
+        return {
+          isDirectory: () => path.includes('link-to-dir'),
+          isFile: () => !path.includes('link-to-dir'),
+        } as unknown as Awaited<ReturnType<typeof fs.stat>>;
+      });
 
       const result = await scanDirectoryForPaths('/mock');
 
-      expect(result).toHaveLength(3);
-      expect(result.find((e) => e.name === 'link-to-dir')?.type).toBe('file');
+      expect(result).toHaveLength(4);
+      // Symlink to directory should be typed as 'directory'
+      expect(result.find((e) => e.name === 'link-to-dir')?.type).toBe(
+        'directory',
+      );
+      // Symlink to file should be typed as 'file'
+      expect(result.find((e) => e.name === 'link-to-file')?.type).toBe('file');
+    });
+
+    it('treats broken symlinks as files', async () => {
+      mockReaddirAny.mockResolvedValue([
+        mockDirent('broken-link', false, true),
+      ]);
+      mockStat.mockRejectedValue(new Error('ENOENT'));
+
+      const result = await scanDirectoryForPaths('/mock');
+
+      expect(result).toHaveLength(1);
+      expect(result[0].type).toBe('file');
     });
   });
 

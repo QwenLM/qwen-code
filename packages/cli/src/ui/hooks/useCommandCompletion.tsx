@@ -156,8 +156,7 @@ export function useCommandCompletion(
             completionMode: CompletionMode.PATH,
             query: firstToken,
             completionStart: 0,
-            // Use code point count, not UTF-16 length, for correct Unicode handling
-            completionEnd: [...firstToken].length,
+            completionEnd: toCodePoints(firstToken).length,
           };
         }
       }
