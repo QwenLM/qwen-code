@@ -111,6 +111,13 @@ export interface SendMessageOptions {
   };
 }
 
+/**
+ * Idle threshold for thinking block cleanup. After this period without any
+ * API call the old thinking blocks are unlikely to aid reasoning coherence
+ * and only waste context tokens.
+ */
+const THINKING_IDLE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
@@ -125,6 +132,25 @@ export class GeminiClient {
    * being forced and did it fail?
    */
   private hasFailedCompressionAttempt = false;
+
+  /**
+   * Timestamp (epoch ms) of the last completed API call.
+   * Used to detect idle periods for thinking block cleanup.
+   * Starts as null — on the first query there is no prior thinking to clean,
+   * so the idle check is skipped until the first API call completes.
+   */
+  private lastApiCompletionTimestamp: number | null = null;
+
+  /**
+   * Sticky-on latch for clearing thinking blocks from prior turns.
+   * Triggered when >1h since last API call — old thinking is no longer
+   * useful for reasoning coherence. Once latched, stays true to prevent
+   * oscillation: without it, thinking would accumulate → get stripped →
+   * accumulate again, causing the message prefix to change repeatedly
+   * (bad for any provider-side prompt caching and wastes context).
+   * Reset on /clear (resetChat).
+   */
+  private thinkingClearLatched = false;
 
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
@@ -199,6 +225,9 @@ export class GeminiClient {
   }
 
   async resetChat(): Promise<void> {
+    // Reset thinking clear latch — fresh chat, no prior thinking to clean up
+    this.thinkingClearLatched = false;
+    this.lastApiCompletionTimestamp = null;
     await this.startChat();
   }
 
@@ -537,8 +566,24 @@ export class GeminiClient {
       // record user message for session management
       this.config.getChatRecordingService()?.recordUserMessage(request);
 
-      // strip thoughts from history before sending the message
-      this.stripThoughtsFromHistory();
+      // Thinking block cross-turn retention with idle cleanup:
+      // - Active session (< 1h idle): keep thinking blocks for reasoning coherence
+      // - Idle > 1h: clear old thinking, keep only last 1 turn to free context
+      // - Latch: once triggered, never revert — prevents oscillation
+      if (
+        !this.thinkingClearLatched &&
+        this.lastApiCompletionTimestamp !== null
+      ) {
+        if (
+          Date.now() - this.lastApiCompletionTimestamp >
+          THINKING_IDLE_THRESHOLD_MS
+        ) {
+          this.thinkingClearLatched = true;
+        }
+      }
+      if (this.thinkingClearLatched) {
+        this.getChat().stripThoughtsFromHistoryKeepRecent(1);
+      }
     }
     if (messageType !== SendMessageType.Retry) {
       this.sessionTurnCount++;
@@ -680,6 +725,7 @@ export class GeminiClient {
           if (arenaAgentClient) {
             await arenaAgentClient.reportError('Loop detected');
           }
+          this.lastApiCompletionTimestamp = Date.now();
           return turn;
         }
       }
@@ -698,9 +744,14 @@ export class GeminiClient {
               : 'Unknown error';
           await arenaAgentClient.reportError(errorMsg);
         }
+        this.lastApiCompletionTimestamp = Date.now();
         return turn;
       }
     }
+
+    // Track API completion time for thinking block idle cleanup
+    this.lastApiCompletionTimestamp = Date.now();
+
     // Fire Stop hook through MessageBus (only if hooks are enabled and registered)
     // This must be done before any early returns to ensure hooks are always triggered
     if (

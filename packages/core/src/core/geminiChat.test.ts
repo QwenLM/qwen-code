@@ -1767,6 +1767,150 @@ describe('GeminiChat', async () => {
     });
   });
 
+  describe('stripThoughtsFromHistoryKeepRecent', () => {
+    it('should keep the most recent N model turns with thoughts', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'old thinking', thought: true },
+            { text: 'response1' },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'msg2' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'mid thinking', thought: true },
+            { text: 'response2' },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'recent thinking', thought: true },
+            { text: 'response3' },
+          ],
+        },
+      ]);
+
+      chat.stripThoughtsFromHistoryKeepRecent(1);
+
+      const history = chat.getHistory();
+      // First two model turns should have thoughts stripped
+      expect(history[1]!.parts).toEqual([{ text: 'response1' }]);
+      expect(history[3]!.parts).toEqual([{ text: 'response2' }]);
+      // Last model turn should keep thoughts
+      expect(history[5]!.parts).toEqual([
+        { text: 'recent thinking', thought: true },
+        { text: 'response3' },
+      ]);
+    });
+
+    it('should not strip anything when keepTurns >= model turns with thoughts', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'thinking', thought: true }, { text: 'response' }],
+        },
+      ]);
+
+      chat.stripThoughtsFromHistoryKeepRecent(1);
+
+      const history = chat.getHistory();
+      expect(history[1]!.parts).toEqual([
+        { text: 'thinking', thought: true },
+        { text: 'response' },
+      ]);
+    });
+
+    it('should remove model content objects that become empty after stripping', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'only thinking', thought: true }],
+        },
+        { role: 'user', parts: [{ text: 'msg2' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'recent thinking', thought: true },
+            { text: 'response' },
+          ],
+        },
+      ]);
+
+      chat.stripThoughtsFromHistoryKeepRecent(1);
+
+      const history = chat.getHistory();
+      // The first model turn (only thoughts) should be removed entirely
+      expect(history).toHaveLength(3);
+      expect(history[0]!.parts).toEqual([{ text: 'msg1' }]);
+      expect(history[1]!.parts).toEqual([{ text: 'msg2' }]);
+      expect(history[2]!.parts).toEqual([
+        { text: 'recent thinking', thought: true },
+        { text: 'response' },
+      ]);
+    });
+
+    it('should also strip thoughtSignature from stripped turns', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'old thinking', thought: true },
+            {
+              text: 'with sig',
+              thoughtSignature: 'sig1',
+            } as unknown as { text: string; thoughtSignature: string },
+            { text: 'response1' },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'msg2' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'recent thinking', thought: true },
+            { text: 'response2' },
+          ],
+        },
+      ]);
+
+      chat.stripThoughtsFromHistoryKeepRecent(1);
+
+      const history = chat.getHistory();
+      // First model turn: thought stripped, thoughtSignature stripped
+      expect(history[1]!.parts).toEqual([
+        { text: 'with sig' },
+        { text: 'response1' },
+      ]);
+      expect(
+        (history[1]!.parts![0] as { thoughtSignature?: string })
+          .thoughtSignature,
+      ).toBeUndefined();
+    });
+
+    it('should handle keepTurns=0 by stripping all thoughts', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'thinking', thought: true }, { text: 'response' }],
+        },
+      ]);
+
+      chat.stripThoughtsFromHistoryKeepRecent(0);
+
+      const history = chat.getHistory();
+      expect(history[1]!.parts).toEqual([{ text: 'response' }]);
+    });
+  });
+
   describe('stripOrphanedUserEntriesFromHistory', () => {
     it('should pop a single trailing user entry', () => {
       chat.setHistory([

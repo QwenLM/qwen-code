@@ -577,6 +577,83 @@ export class GeminiChat {
   }
 
   /**
+   * Strip thought parts from history, keeping the most recent `keepTurns`
+   * model turns' thinking blocks intact.
+   *
+   * Used for idle cleanup: after >1h idle the old thinking blocks are no
+   * longer useful for reasoning coherence but still consume context tokens.
+   * Keeping the most recent turn preserves the latest reasoning chain.
+   */
+  stripThoughtsFromHistoryKeepRecent(keepTurns: number): void {
+    keepTurns = Math.max(0, Math.floor(keepTurns));
+
+    // Find indices of model turns that contain thought parts
+    const modelTurnIndices: number[] = [];
+    for (let i = 0; i < this.history.length; i++) {
+      const content = this.history[i];
+      if (
+        content.role === 'model' &&
+        content.parts?.some(
+          (part) =>
+            part &&
+            typeof part === 'object' &&
+            'thought' in part &&
+            part.thought,
+        )
+      ) {
+        modelTurnIndices.push(i);
+      }
+    }
+
+    // Determine which model turns to keep (the most recent `keepTurns`)
+    const turnsToStrip = new Set(
+      modelTurnIndices.slice(
+        0,
+        Math.max(0, modelTurnIndices.length - keepTurns),
+      ),
+    );
+
+    if (turnsToStrip.size === 0) return;
+
+    this.history = this.history
+      .map((content, index) => {
+        if (!turnsToStrip.has(index) || !content.parts) return content;
+
+        // Strip thought parts from this turn
+        const filteredParts = content.parts
+          .filter(
+            (part) =>
+              !(
+                part &&
+                typeof part === 'object' &&
+                'thought' in part &&
+                part.thought
+              ),
+          )
+          .map((part) => {
+            if (
+              part &&
+              typeof part === 'object' &&
+              'thoughtSignature' in part
+            ) {
+              const newPart = { ...part };
+              delete (newPart as { thoughtSignature?: string })
+                .thoughtSignature;
+              return newPart;
+            }
+            return part;
+          });
+
+        return {
+          ...content,
+          parts: filteredParts,
+        };
+      })
+      // Remove Content objects that have no parts left after filtering
+      .filter((content) => content.parts && content.parts.length > 0);
+  }
+
+  /**
    * Pop all orphaned trailing user entries from chat history.
    * In a valid conversation the last entry is always a model response;
    * any trailing user entries are leftovers from a request that failed.
