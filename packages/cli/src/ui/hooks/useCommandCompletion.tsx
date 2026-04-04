@@ -146,8 +146,9 @@ export function useCommandCompletion(
         // Fall through to PATH mode for absolute paths like /, /home, /etc/nginx
       }
 
-      // Check for path-like input (/, ./, ../, ~/) when not a slash command
-      // Only trigger on first row and when the first token looks like a path
+      // Check for path-like input (/, ./, ../, ~/) when not a slash command.
+      // Restricted to cursorRow === 0 to match SLASH mode behavior: multi-line
+      // input is typically used for code snippets, not file system paths.
       if (cursorRow === 0) {
         const firstToken = currentLine.split(/\s+/)[0] || '';
         if (isPathLikeToken(firstToken)) {

@@ -6,6 +6,7 @@
 
 import { basename, dirname, join, sep } from 'node:path';
 import { readdir } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -90,6 +91,14 @@ class SimpleLRUCache<K, V> {
   }
 }
 
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+/**
+ * Maximum number of directory entries to return from a single scan.
+ * Keeps the suggestion UI responsive and avoids excessive memory usage.
+ */
+const MAX_SCAN_RESULTS = 100;
+
 // ─── Cache configuration ─────────────────────────────────────────────────────
 
 const CACHE_SIZE = 500;
@@ -117,7 +126,7 @@ function expandPath(partialPath: string): string {
       partialPath[1] === sep ||
       partialPath[1] === '/')
   ) {
-    const home = process.env['HOME'] ?? process.env['USERPROFILE'] ?? '';
+    const home = homedir();
     if (partialPath.length === 1) return home;
     return join(home, partialPath.slice(2));
   }
@@ -194,7 +203,7 @@ export async function scanDirectory(
         path: join(dirPath, entry.name),
         type: 'directory' as const,
       }))
-      .slice(0, 100); // Limit results to keep UI responsive
+      .slice(0, MAX_SCAN_RESULTS);
 
     // Cache the results
     directoryCache.set(dirPath, directories);
@@ -249,7 +258,7 @@ export async function scanDirectoryForPaths(
       return a.name.localeCompare(b.name);
     });
 
-    const limited = paths.slice(0, 100);
+    const limited = paths.slice(0, MAX_SCAN_RESULTS);
     pathCache.set(cacheKey, limited);
     return limited;
   } catch {

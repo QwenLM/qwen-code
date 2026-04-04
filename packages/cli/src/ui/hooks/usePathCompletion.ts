@@ -15,7 +15,6 @@ import {
 export interface UsePathCompletionReturn {
   suggestions: Suggestion[];
   isLoading: boolean;
-  enabled: boolean;
   setSuggestions: (suggestions: Suggestion[]) => void;
   resetCompletionState: () => void;
 }
@@ -160,7 +159,6 @@ export function usePathCompletion(
   return {
     suggestions: internalSuggestions,
     isLoading,
-    enabled,
     setSuggestions: setInternalSuggestions,
     resetCompletionState,
   };
