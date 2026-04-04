@@ -40,12 +40,17 @@ export function useMessageQueue({
   const addMessage = useCallback((message: string) => {
     const trimmedMessage = message.trim();
     if (trimmedMessage.length > 0) {
-      setMessageQueue((prev) => [...prev, trimmedMessage]);
+      setMessageQueue((prev) => {
+        const next = [...prev, trimmedMessage];
+        queueRef.current = next;
+        return next;
+      });
     }
   }, []);
 
   // Clear the entire queue
   const clearQueue = useCallback(() => {
+    queueRef.current = [];
     setMessageQueue([]);
   }, []);
 

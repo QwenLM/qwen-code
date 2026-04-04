@@ -852,8 +852,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             const currentText = buffer.text;
             const newText = currentText ? `${popped}\n${currentText}` : popped;
             buffer.setText(newText);
+            return true;
           }
-          return true;
+          // popped is null (queue already cleared) — fall through to history
         }
 
         if (keyMatchers[Command.HISTORY_UP](key)) {
