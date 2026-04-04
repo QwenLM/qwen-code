@@ -11,8 +11,10 @@ import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { logicalPosToOffset } from '../components/shared/text-buffer.js';
 import { isSlashCommand } from '../utils/commandUtils.js';
 import { toCodePoints } from '../utils/textUtils.js';
+import { isPathLikeToken } from '../utils/directoryCompletion.js';
 import { useAtCompletion } from './useAtCompletion.js';
 import { useSlashCompletion } from './useSlashCompletion.js';
+import { usePathCompletion } from './usePathCompletion.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { useCompletion } from './useCompletion.js';
 
@@ -20,6 +22,7 @@ export enum CompletionMode {
   IDLE = 'IDLE',
   AT = 'AT',
   SLASH = 'SLASH',
+  PATH = 'PATH',
 }
 
 export interface UseCommandCompletionReturn {
@@ -116,12 +119,46 @@ export function useCommandCompletion(
       }
 
       if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
-        return {
-          completionMode: CompletionMode.SLASH,
-          query: currentLine,
-          completionStart: 0,
-          completionEnd: currentLine.length,
-        };
+        // When slash commands are registered, distinguish between actual
+        // slash commands and absolute file paths. Only treat as SLASH mode
+        // if the first token matches a known command name (prefix match).
+        // When no commands are registered, fall back to treating all "/" as SLASH.
+        const firstToken = currentLine.trim().split(/\s+/)[0] || '';
+        const afterSlash = firstToken.substring(1);
+        const isSlashMode =
+          slashCommands.length === 0 ||
+          (afterSlash !== '' &&
+            slashCommands.some(
+              (cmd) =>
+                cmd.name.toLowerCase().startsWith(afterSlash.toLowerCase()) ||
+                cmd.altNames?.some((alt) =>
+                  alt.toLowerCase().startsWith(afterSlash.toLowerCase()),
+                ),
+            ));
+        if (isSlashMode) {
+          return {
+            completionMode: CompletionMode.SLASH,
+            query: currentLine,
+            completionStart: 0,
+            completionEnd: currentLine.length,
+          };
+        }
+        // Fall through to PATH mode for absolute paths like /, /home, /etc/nginx
+      }
+
+      // Check for path-like input (/, ./, ../, ~/) when not a slash command
+      // Only trigger on first row and when the first token looks like a path
+      if (cursorRow === 0) {
+        const firstToken = currentLine.split(/\s+/)[0] || '';
+        if (isPathLikeToken(firstToken)) {
+          return {
+            completionMode: CompletionMode.PATH,
+            query: firstToken,
+            completionStart: 0,
+            // Use code point count, not UTF-16 length, for correct Unicode handling
+            completionEnd: [...firstToken].length,
+          };
+        }
       }
 
       return {
@@ -130,13 +167,21 @@ export function useCommandCompletion(
         completionStart: -1,
         completionEnd: -1,
       };
-    }, [cursorRow, cursorCol, buffer.lines]);
+    }, [cursorRow, cursorCol, buffer.lines, slashCommands]);
 
   useAtCompletion({
     enabled: completionMode === CompletionMode.AT,
     pattern: query || '',
     config,
     cwd,
+    setSuggestions,
+    setIsLoadingSuggestions,
+  });
+
+  usePathCompletion({
+    enabled: completionMode === CompletionMode.PATH,
+    query: completionMode === CompletionMode.PATH ? query : null,
+    basePath: cwd,
     setSuggestions,
     setIsLoadingSuggestions,
   });
@@ -208,7 +253,11 @@ export function useCommandCompletion(
 
       const lineCodePoints = toCodePoints(buffer.lines[cursorRow] || '');
       const charAfterCompletion = lineCodePoints[end];
-      if (charAfterCompletion !== ' ') {
+      // Don't add trailing space for path completions (user may continue typing path)
+      if (
+        completionMode !== CompletionMode.PATH &&
+        charAfterCompletion !== ' '
+      ) {
         suggestionText += ' ';
       }
 

@@ -30,6 +30,10 @@ vi.mock('./useSlashCompletion', () => ({
   })),
 }));
 
+vi.mock('./usePathCompletion', () => ({
+  usePathCompletion: vi.fn(),
+}));
+
 // Helper to set up mocks in a consistent way for both child hooks
 const setupMocks = ({
   atSuggestions = [],
@@ -601,6 +605,98 @@ describe('useCommandCompletion', () => {
       expect(result.current.textBuffer.text).toBe(
         '@src/file1.txt is a good file',
       );
+    });
+  });
+
+  describe('PATH mode completion', () => {
+    it('enters PATH mode when typing a path-like token', () => {
+      const { result } = renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest('./src'),
+          testDirs,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      expect(result.current.showSuggestions).toBe(false);
+    });
+
+    it('enters PATH mode for absolute paths starting with /', () => {
+      const mockSlashCommands = [
+        { name: 'help', description: 'Show help', action: async () => {} },
+      ];
+
+      const { result } = renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest('/home'),
+          testDirs,
+          testRootDir,
+          mockSlashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      // /home doesn't match any slash command, falls through to PATH mode
+      expect(result.current.showSuggestions).toBe(false);
+    });
+
+    it('enters PATH mode for ~/ paths', () => {
+      const { result } = renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest('~/.config'),
+          testDirs,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      expect(result.current.showSuggestions).toBe(false);
+    });
+
+    it('enters PATH mode for ../ paths', () => {
+      const { result } = renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest('../lib'),
+          testDirs,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      expect(result.current.showSuggestions).toBe(false);
+    });
+
+    it('SLASH mode takes precedence over PATH for matching commands', () => {
+      const mockSlashCommands = [
+        { name: 'help', description: 'Show help', action: async () => {} },
+      ];
+
+      const { result } = renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest('/h'),
+          testDirs,
+          testRootDir,
+          mockSlashCommands,
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      // /h matches /help prefix, so SLASH mode (not PATH)
+      expect(result.current.showSuggestions).toBe(false);
     });
   });
 });
