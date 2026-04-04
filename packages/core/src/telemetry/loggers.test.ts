@@ -359,6 +359,54 @@ describe('loggers', () => {
     });
   });
 
+  describe('logApiResponse skips chatRecordingService for internal prompt IDs', () => {
+    it.each(['prompt_suggestion', 'forked_query'])(
+      'should not record to chatRecordingService when prompt_id is %s',
+      (promptId) => {
+        const mockRecordUiTelemetryEvent = vi.fn();
+        const configWithRecording = {
+          getSessionId: () => 'test-session-id',
+          getUsageStatisticsEnabled: () => false,
+          getChatRecordingService: () => ({
+            recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+          }),
+        } as unknown as Config;
+
+        const event = new ApiResponseEvent(
+          'resp-id',
+          'test-model',
+          50,
+          promptId,
+        );
+        logApiResponse(configWithRecording, event);
+
+        expect(mockRecordUiTelemetryEvent).not.toHaveBeenCalled();
+        expect(mockUiEvent.addEvent).toHaveBeenCalled();
+      },
+    );
+
+    it('should record to chatRecordingService for normal prompt IDs', () => {
+      const mockRecordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => false,
+        getChatRecordingService: () => ({
+          recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+        }),
+      } as unknown as Config;
+
+      const event = new ApiResponseEvent(
+        'resp-id',
+        'test-model',
+        50,
+        'user_query',
+      );
+      logApiResponse(configWithRecording, event);
+
+      expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+  });
+
   describe('logApiRequest', () => {
     const mockConfig = {
       getSessionId: () => 'test-session-id',

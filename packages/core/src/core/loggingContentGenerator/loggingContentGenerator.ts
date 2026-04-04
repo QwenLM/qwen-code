@@ -224,12 +224,17 @@ export class LoggingContentGenerator implements ContentGenerator {
     model: string,
     openaiRequest?: OpenAI.Chat.ChatCompletionCreateParams,
   ): AsyncGenerator<GenerateContentResponse> {
+    const isInternal = isInternalPromptId(userPromptId);
+    // For internal prompts we only need the last usage metadata (for /stats);
+    // skip collecting full responses to avoid unnecessary memory overhead.
     const responses: GenerateContentResponse[] = [];
 
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     try {
       for await (const response of stream) {
-        responses.push(response);
+        if (!isInternal) {
+          responses.push(response);
+        }
         if (response.usageMetadata) {
           lastUsageMetadata = response.usageMetadata;
         }
@@ -244,9 +249,11 @@ export class LoggingContentGenerator implements ContentGenerator {
         userPromptId,
         lastUsageMetadata,
       );
-      const consolidatedResponse =
-        this.consolidateGeminiResponsesForLogging(responses);
-      await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
+      if (!isInternal) {
+        const consolidatedResponse =
+          this.consolidateGeminiResponsesForLogging(responses);
+        await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
+      }
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError(
@@ -256,7 +263,9 @@ export class LoggingContentGenerator implements ContentGenerator {
         responses[0]?.modelVersion || model,
         userPromptId,
       );
-      await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      if (!isInternal) {
+        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      }
       throw error;
     }
   }

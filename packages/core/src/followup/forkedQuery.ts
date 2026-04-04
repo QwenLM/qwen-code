@@ -6,11 +6,15 @@
  * Forked Query Infrastructure
  *
  * Enables cache-aware secondary LLM calls that share the main conversation's
- * prompt prefix (systemInstruction + tools + history) for cache hits.
+ * prompt prefix (systemInstruction + history) for cache hits.
  *
  * DashScope already enables cache_control via X-DashScope-CacheControl header.
  * By constructing the forked GeminiChat with identical generationConfig and
  * history prefix, the fork automatically benefits from prefix caching.
+ *
+ * Note: `runForkedQuery` overrides `tools: []` at the per-request level so the
+ * model cannot produce function calls. `createForkedChat` retains the full
+ * generationConfig (including tools) for callers like speculation that need them.
  */
 
 import type {
@@ -168,7 +172,7 @@ function extractUsage(
 
 /**
  * Run a forked query using a GeminiChat that shares the main conversation's
- * cache prefix. This is a single-turn request (no tool execution loop).
+ * cache prefix. This is a single-turn, tool-free request (no function calls).
  *
  * @param config - App config
  * @param userMessage - The user message to send (e.g., SUGGESTION_PROMPT)
