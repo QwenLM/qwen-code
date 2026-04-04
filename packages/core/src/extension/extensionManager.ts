@@ -1232,9 +1232,9 @@ export class ExtensionManager {
       }
       callback(extension.name, ExtensionUpdateState.CHECKING_FOR_UPDATES);
       promises.push(
-        checkForExtensionUpdate(extension, this).then((state) =>
-          callback(extension.name, state),
-        ),
+        checkForExtensionUpdate(extension, this)
+          .then((state) => callback(extension.name, state))
+          .catch(() => callback(extension.name, ExtensionUpdateState.ERROR)),
       );
     }
     await Promise.all(promises);
