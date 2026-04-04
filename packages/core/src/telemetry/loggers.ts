@@ -121,6 +121,15 @@ function getCommonAttributes(config: Config): LogAttributes {
 
 export { getCommonAttributes };
 
+/**
+ * Returns true if the prompt_id belongs to an internal background operation
+ * (suggestion generation, forked queries) whose events should not be
+ * recorded to the chatRecordingService.
+ */
+function isInternalPromptId(promptId: string): boolean {
+  return promptId === 'prompt_suggestion' || promptId === 'forked_query';
+}
+
 export function logStartSession(
   config: Config,
   event: StartSessionEvent,
@@ -382,7 +391,9 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
-  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  if (!isInternalPromptId(event.prompt_id)) {
+    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  }
   QwenLogger.getInstance(config)?.logApiErrorEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -449,7 +460,9 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
-  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  if (!isInternalPromptId(event.prompt_id)) {
+    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
   if (!isTelemetrySdkInitialized()) return;
   const attributes: LogAttributes = {

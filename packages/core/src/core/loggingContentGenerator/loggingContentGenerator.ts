@@ -74,6 +74,15 @@ export class LoggingContentGenerator implements ContentGenerator {
     return this.wrapped;
   }
 
+  /**
+   * Returns true if the promptId belongs to an internal background operation
+   * (e.g., suggestion generation, forked queries) whose input/output should
+   * not be recorded to OpenAI logs or other persistent stores.
+   */
+  private isInternalPromptId(promptId: string): boolean {
+    return promptId === 'prompt_suggestion' || promptId === 'forked_query';
+  }
+
   private logApiRequest(
     contents: Content[],
     model: string,
@@ -143,8 +152,17 @@ export class LoggingContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     const startTime = Date.now();
-    this.logApiRequest(this.toContents(req.contents), req.model, userPromptId);
-    const openaiRequest = await this.buildOpenAIRequestForLogging(req);
+    const isInternal = this.isInternalPromptId(userPromptId);
+    if (!isInternal) {
+      this.logApiRequest(
+        this.toContents(req.contents),
+        req.model,
+        userPromptId,
+      );
+    }
+    const openaiRequest = isInternal
+      ? undefined
+      : await this.buildOpenAIRequestForLogging(req);
     try {
       const response = await this.wrapped.generateContent(req, userPromptId);
       const durationMs = Date.now() - startTime;
@@ -155,12 +173,16 @@ export class LoggingContentGenerator implements ContentGenerator {
         userPromptId,
         response.usageMetadata,
       );
-      await this.logOpenAIInteraction(openaiRequest, response);
+      if (!isInternal) {
+        await this.logOpenAIInteraction(openaiRequest, response);
+      }
       return response;
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
-      await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      if (!isInternal) {
+        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      }
       throw error;
     }
   }
@@ -170,8 +192,17 @@ export class LoggingContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const startTime = Date.now();
-    this.logApiRequest(this.toContents(req.contents), req.model, userPromptId);
-    const openaiRequest = await this.buildOpenAIRequestForLogging(req);
+    const isInternal = this.isInternalPromptId(userPromptId);
+    if (!isInternal) {
+      this.logApiRequest(
+        this.toContents(req.contents),
+        req.model,
+        userPromptId,
+      );
+    }
+    const openaiRequest = isInternal
+      ? undefined
+      : await this.buildOpenAIRequestForLogging(req);
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
@@ -179,7 +210,9 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError('', durationMs, error, req.model, userPromptId);
-      await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      if (!isInternal) {
+        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      }
       throw error;
     }
 

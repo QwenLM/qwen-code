@@ -191,8 +191,10 @@ export async function runForkedQuery(
   const model = options?.model ?? params.model;
   const chat = createForkedChat(config, params);
 
-  // Build per-request config overrides for JSON schema if needed
-  const requestConfig: GenerateContentConfig = {};
+  // Build per-request config overrides for JSON schema if needed.
+  // Strip tools — forked queries are pure text completion and must never
+  // produce function calls or appear inside tool-call UI elements.
+  const requestConfig: GenerateContentConfig = { tools: [] };
   if (options?.abortSignal) {
     requestConfig.abortSignal = options.abortSignal;
   }
