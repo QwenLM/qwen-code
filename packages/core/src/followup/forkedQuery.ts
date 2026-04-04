@@ -26,7 +26,9 @@ import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 
 /** Per-request config that strips tools so the model never produces function calls. */
-const NO_TOOLS: GenerateContentConfig = Object.freeze({ tools: [] });
+const NO_TOOLS: GenerateContentConfig = Object.freeze({
+  tools: Object.freeze([]),
+});
 
 /**
  * Snapshot of the main conversation's cache-critical parameters.

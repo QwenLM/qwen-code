@@ -479,4 +479,45 @@ describe('LoggingContentGenerator', () => {
       },
     ]);
   });
+
+  it.each(['prompt_suggestion', 'forked_query'])(
+    'skips logApiRequest and OpenAI logging for internal promptId %s (generateContent)',
+    async (promptId) => {
+      const mockResponse = {
+        responseId: 'internal-resp',
+        modelVersion: 'test-model',
+        candidates: [{ content: { parts: [{ text: 'suggestion' }] } }],
+        usageMetadata: { promptTokenCount: 10, candidatesTokenCount: 5 },
+      } as unknown as GenerateContentResponse;
+
+      const mockWrapped = {
+        generateContent: vi.fn().mockResolvedValue(mockResponse),
+        generateContentStream: vi.fn(),
+      } as unknown as ContentGenerator;
+
+      const gen = new LoggingContentGenerator(mockWrapped, createConfig(), {
+        enableOpenAILogging: true,
+        openAILoggingDir: '/tmp/test-logs',
+      });
+
+      const request = {
+        model: 'test-model',
+        contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+      } as unknown as GenerateContentParameters;
+
+      await gen.generateContent(request, promptId);
+
+      // logApiRequest should NOT be called for internal prompts
+      expect(logApiRequest).not.toHaveBeenCalled();
+      // logApiResponse SHOULD be called (for /stats token tracking)
+      expect(logApiResponse).toHaveBeenCalled();
+      // OpenAI logger should NOT be called
+      const loggerInstance = (
+        OpenAILogger as unknown as ReturnType<typeof vi.fn>
+      ).mock.results[0]?.value;
+      if (loggerInstance) {
+        expect(loggerInstance.logInteraction).not.toHaveBeenCalled();
+      }
+    },
+  );
 });
