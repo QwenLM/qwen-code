@@ -352,6 +352,12 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
   return `${basePrompt}${memorySuffix}${appendSuffix}`;
 }
 
+/**
+ * Returns the "Executing actions with care" system prompt section.
+ * Provides layered guidance for risky operations: general principle,
+ * 4 categories of dangerous operations, behavioral rules, and approval scoping.
+ * Placed between Sandbox and Git Repository sections in the prompt.
+ */
 function getActionsSection(): string {
   return `
 # Executing actions with care
