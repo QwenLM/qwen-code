@@ -120,9 +120,13 @@ export function clearCacheSafeParams(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Create an isolated GeminiChat that shares the same cache prefix as the main
- * conversation. The fork uses identical generationConfig (systemInstruction +
- * tools) and history, so DashScope's cache_control mechanism produces cache hits.
+ * Create an isolated GeminiChat that shares the main conversation's
+ * generationConfig (including systemInstruction, tools, and history).
+ *
+ * The full config is retained so that callers like `runSpeculativeLoop`
+ * can execute tool calls during speculation. For pure-text callers like
+ * `runForkedQuery`, tools are stripped at the per-request level via
+ * `NO_TOOLS` — see {@link runForkedQuery}.
  *
  * The fork does NOT have chatRecordingService or telemetryService to avoid
  * polluting the main session's recordings and token counts.
