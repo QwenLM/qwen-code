@@ -23,11 +23,16 @@ import {
 import { OpenAILogger } from '../../utils/openaiLogger.js';
 import type OpenAI from 'openai';
 
-vi.mock('../../telemetry/loggers.js', () => ({
-  logApiRequest: vi.fn(),
-  logApiResponse: vi.fn(),
-  logApiError: vi.fn(),
-}));
+vi.mock('../../telemetry/loggers.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../telemetry/loggers.js')>();
+  return {
+    ...actual,
+    logApiRequest: vi.fn(),
+    logApiResponse: vi.fn(),
+    logApiError: vi.fn(),
+  };
+});
 
 vi.mock('../../utils/openaiLogger.js', () => ({
   OpenAILogger: vi.fn().mockImplementation(() => ({

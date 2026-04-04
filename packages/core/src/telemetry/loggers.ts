@@ -124,9 +124,11 @@ export { getCommonAttributes };
 /**
  * Returns true if the prompt_id belongs to an internal background operation
  * (suggestion generation, forked queries) whose events should not be
- * recorded to the chatRecordingService.
+ * recorded to the chatRecordingService or OpenAI logs.
+ *
+ * Known internal IDs: `'prompt_suggestion'`, `'forked_query'`.
  */
-function isInternalPromptId(promptId: string): boolean {
+export function isInternalPromptId(promptId: string): boolean {
   return promptId === 'prompt_suggestion' || promptId === 'forked_query';
 }
 

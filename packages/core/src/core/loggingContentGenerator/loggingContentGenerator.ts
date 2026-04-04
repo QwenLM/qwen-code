@@ -30,6 +30,7 @@ import {
   logApiError,
   logApiRequest,
   logApiResponse,
+  isInternalPromptId,
 } from '../../telemetry/loggers.js';
 import type {
   ContentGenerator,
@@ -72,15 +73,6 @@ export class LoggingContentGenerator implements ContentGenerator {
 
   getWrapped(): ContentGenerator {
     return this.wrapped;
-  }
-
-  /**
-   * Returns true if the promptId belongs to an internal background operation
-   * (e.g., suggestion generation, forked queries) whose input/output should
-   * not be recorded to OpenAI logs or other persistent stores.
-   */
-  private isInternalPromptId(promptId: string): boolean {
-    return promptId === 'prompt_suggestion' || promptId === 'forked_query';
   }
 
   private logApiRequest(
@@ -152,7 +144,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     const startTime = Date.now();
-    const isInternal = this.isInternalPromptId(userPromptId);
+    const isInternal = isInternalPromptId(userPromptId);
     if (!isInternal) {
       this.logApiRequest(
         this.toContents(req.contents),
@@ -192,7 +184,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const startTime = Date.now();
-    const isInternal = this.isInternalPromptId(userPromptId);
+    const isInternal = isInternalPromptId(userPromptId);
     if (!isInternal) {
       this.logApiRequest(
         this.toContents(req.contents),
