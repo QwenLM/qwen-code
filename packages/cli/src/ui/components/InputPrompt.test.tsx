@@ -34,12 +34,13 @@ vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../utils/clipboardUtils.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
-  useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false })),
+  useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
 }));
 vi.mock('../contexts/UIActionsContext.js', () => ({
   useUIActions: vi.fn(() => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
+    popAllQueuedMessages: vi.fn(() => null),
   })),
 }));
 
@@ -2540,12 +2541,14 @@ describe('InputPrompt', () => {
     let mockUIActions: {
       handleRetryLastPrompt: ReturnType<typeof vi.fn>;
       temporaryCloseFeedbackDialog: ReturnType<typeof vi.fn>;
+      popAllQueuedMessages: ReturnType<typeof vi.fn>;
     };
 
     beforeEach(() => {
       mockUIActions = {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
       };
 
       // Override the mock for useUIActions

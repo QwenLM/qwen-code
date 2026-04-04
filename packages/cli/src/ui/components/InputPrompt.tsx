@@ -841,6 +841,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
         // Pop all queued messages into input when pressing Up with cursor at top
         if (
+          !isAttachmentMode &&
           uiState.messageQueue.length > 0 &&
           (keyMatchers[Command.HISTORY_UP](key) ||
             (keyMatchers[Command.NAVIGATION_UP](key) &&

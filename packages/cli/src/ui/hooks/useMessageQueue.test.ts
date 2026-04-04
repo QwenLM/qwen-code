@@ -257,6 +257,28 @@ describe('useMessageQueue', () => {
     expect(result.current.messageQueue).toEqual([]);
   });
 
+  it('should pop single message without separator', () => {
+    const { result } = renderHook(() =>
+      useMessageQueue({
+        isConfigInitialized: true,
+        streamingState: StreamingState.Responding,
+        submitQuery: mockSubmitQuery,
+      }),
+    );
+
+    act(() => {
+      result.current.addMessage('Only message');
+    });
+
+    let popped: string | null = null;
+    act(() => {
+      popped = result.current.popAllMessages();
+    });
+
+    expect(popped).toBe('Only message');
+    expect(result.current.messageQueue).toEqual([]);
+  });
+
   it('should return null when popping from empty queue', () => {
     const { result } = renderHook(() =>
       useMessageQueue({
