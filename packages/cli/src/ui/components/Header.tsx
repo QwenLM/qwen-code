@@ -146,12 +146,12 @@ export const Header: React.FC<HeaderProps> = ({
           Built-in DataWorks Official Skills
         </Text>
         {/* Auth and Model line */}
-        <Text>
+        {/* <Text>
           <Text color={theme.text.secondary}>{authModelText}</Text>
           {showModelHint && (
             <Text color={theme.text.secondary}>{modelHintText}</Text>
           )}
-        </Text>
+        </Text> */}
         {/* Directory line */}
         <Text color={theme.text.secondary}>{displayPath}</Text>
       </Box>
