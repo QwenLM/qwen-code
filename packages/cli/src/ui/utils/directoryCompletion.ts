@@ -73,8 +73,11 @@ class SimpleLRUCache<K, V> {
   }
 
   set(key: K, value: V): void {
-    // Evict oldest entry if at capacity
-    if (this.cache.size >= this.maxSize && !this.cache.has(key)) {
+    // Delete first to reset insertion order (Map preserves original
+    // position on overwrite, which would break LRU eviction)
+    if (this.cache.has(key)) {
+      this.cache.delete(key);
+    } else if (this.cache.size >= this.maxSize) {
       const oldestKey = this.cache.keys().next().value;
       if (oldestKey !== undefined) {
         this.cache.delete(oldestKey);
