@@ -161,4 +161,33 @@ describe('SessionMessageHandler', () => {
       },
     ]);
   });
+
+  it('forces a fresh ACP session when the webview requests a new session', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      createNewSession: vi.fn().mockResolvedValue('session-2'),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      null,
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'newQwenSession',
+    });
+
+    expect(agentManager.createNewSession).toHaveBeenCalledWith('/workspace', {
+      forceNew: true,
+    });
+  });
 });

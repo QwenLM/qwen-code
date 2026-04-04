@@ -1614,7 +1614,7 @@ export class WebViewProvider {
       const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
 
       // Create new Qwen session via agent manager
-      await this.agentManager.createNewSession(workingDir);
+      await this.agentManager.createNewSession(workingDir, { forceNew: true });
 
       // Clear current conversation UI
       this.sendMessageToWebView({

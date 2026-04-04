@@ -103,3 +103,30 @@ describe('QwenAgentManager.setModelFromUi', () => {
     expect(onModelChanged).toHaveBeenCalledWith(selectedModel);
   });
 });
+
+describe('QwenAgentManager.createNewSession', () => {
+  it('creates a fresh ACP session when explicitly requested even if one is already active', async () => {
+    const manager = new QwenAgentManager();
+    const connection = {
+      currentSessionId: 'session-1',
+      newSession: vi.fn().mockImplementation(async () => {
+        connection.currentSessionId = 'session-2';
+        return { sessionId: 'session-2' };
+      }),
+      authenticate: vi.fn(),
+    };
+
+    (
+      manager as unknown as {
+        connection: typeof connection;
+      }
+    ).connection = connection;
+
+    const newSessionId = await manager.createNewSession('/workspace', {
+      forceNew: true,
+    } as never);
+
+    expect(connection.newSession).toHaveBeenCalledWith('/workspace');
+    expect(newSessionId).toBe('session-2');
+  });
+});

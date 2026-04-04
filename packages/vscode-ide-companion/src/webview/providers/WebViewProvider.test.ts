@@ -68,6 +68,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onPermissionRequest = vi.fn();
     onAskUserQuestion = vi.fn();
     disconnect = vi.fn();
+    createNewSession = vi.fn();
   },
 }));
 
@@ -286,5 +287,28 @@ describe('WebViewProvider.attachToView', () => {
       },
     });
     expect(panelPostMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('WebViewProvider.createNewSession', () => {
+  it('forces a fresh ACP session for the sidebar new-session action', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          createNewSession: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+
+    await provider.createNewSession();
+
+    expect(agentManager.createNewSession).toHaveBeenCalledWith(
+      '/workspace-root',
+      { forceNew: true },
+    );
   });
 });
