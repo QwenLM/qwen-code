@@ -496,6 +496,7 @@ describe('LoggingContentGenerator', () => {
       } as unknown as ContentGenerator;
 
       const gen = new LoggingContentGenerator(mockWrapped, createConfig(), {
+        model: 'test-model',
         enableOpenAILogging: true,
         openAILoggingDir: '/tmp/test-logs',
       });
@@ -511,13 +512,12 @@ describe('LoggingContentGenerator', () => {
       expect(logApiRequest).not.toHaveBeenCalled();
       // logApiResponse SHOULD be called (for /stats token tracking)
       expect(logApiResponse).toHaveBeenCalled();
-      // OpenAI logger should NOT be called
+      // OpenAI logger should be constructed, but no interaction should be logged
+      expect(OpenAILogger).toHaveBeenCalled();
       const loggerInstance = (
         OpenAILogger as unknown as ReturnType<typeof vi.fn>
       ).mock.results[0]?.value;
-      if (loggerInstance) {
-        expect(loggerInstance.logInteraction).not.toHaveBeenCalled();
-      }
+      expect(loggerInstance.logInteraction).not.toHaveBeenCalled();
     },
   );
 });

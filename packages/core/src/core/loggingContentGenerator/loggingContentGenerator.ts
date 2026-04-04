@@ -229,9 +229,19 @@ export class LoggingContentGenerator implements ContentGenerator {
     // skip collecting full responses to avoid unnecessary memory overhead.
     const responses: GenerateContentResponse[] = [];
 
+    // Track first-seen IDs so _logApiResponse/_logApiError have accurate
+    // values even when we skip collecting full responses for internal prompts.
+    let firstResponseId = '';
+    let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     try {
       for await (const response of stream) {
+        if (!firstResponseId && response.responseId) {
+          firstResponseId = response.responseId;
+        }
+        if (!firstModelVersion && response.modelVersion) {
+          firstModelVersion = response.modelVersion;
+        }
         if (!isInternal) {
           responses.push(response);
         }
@@ -243,9 +253,9 @@ export class LoggingContentGenerator implements ContentGenerator {
       // Only log successful API response if no error occurred
       const durationMs = Date.now() - startTime;
       this._logApiResponse(
-        responses[0]?.responseId ?? '',
+        firstResponseId,
         durationMs,
-        responses[0]?.modelVersion || model,
+        firstModelVersion || model,
         userPromptId,
         lastUsageMetadata,
       );
@@ -257,10 +267,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError(
-        responses[0]?.responseId ?? '',
+        firstResponseId,
         durationMs,
         error,
-        responses[0]?.modelVersion || model,
+        firstModelVersion || model,
         userPromptId,
       );
       if (!isInternal) {
