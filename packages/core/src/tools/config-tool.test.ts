@@ -142,6 +142,8 @@ describe('ConfigTool', () => {
 
       expect(result.llmContent).toContain('Failed to set model');
       expect(result.llmContent).toContain('Invalid model ID');
+      expect(result.error).toBeDefined();
+      expect(result.error?.type).toBe('execution_failed');
     });
   });
 

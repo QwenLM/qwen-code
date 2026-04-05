@@ -13,6 +13,7 @@ import type {
 } from './tools.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
@@ -132,7 +133,11 @@ class ConfigToolInvocation extends BaseToolInvocation<
       const available = getAllKeys().join(', ');
       const msg = `Unknown setting: "${setting}". Available settings: ${available}`;
       debugLogger.debug(msg);
-      return { llmContent: msg, returnDisplay: msg };
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     if (action === 'get') {
@@ -161,7 +166,11 @@ class ConfigToolInvocation extends BaseToolInvocation<
     // SET
     if (value == null) {
       const msg = `Value is required for SET operation on "${setting}".`;
-      return { llmContent: msg, returnDisplay: msg };
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
     const previousValue = descriptor.read(this.config);
     const error = await descriptor.write(this.config, value);
@@ -169,7 +178,11 @@ class ConfigToolInvocation extends BaseToolInvocation<
     if (error) {
       const msg = `Failed to set ${setting}: ${error}`;
       debugLogger.debug(msg);
-      return { llmContent: msg, returnDisplay: msg };
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg, type: ToolErrorType.EXECUTION_FAILED },
+      };
     }
 
     const newValue = descriptor.read(this.config);

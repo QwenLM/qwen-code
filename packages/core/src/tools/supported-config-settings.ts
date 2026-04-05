@@ -13,8 +13,8 @@ import type { Config } from '../config/config.js';
 export interface ConfigSettingDescriptor {
   /** Human-readable description shown to the LLM. */
   description: string;
-  /** Value type for validation and coercion. */
-  type: 'string' | 'boolean';
+  /** Value type currently supported by the descriptor API. */
+  type: 'string';
   /** Whether the Agent may write this setting. */
   writable: boolean;
   /** Read the current value from Config. */
