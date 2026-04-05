@@ -17,11 +17,11 @@ import {
   type HistoryItemWithoutId,
 } from '../types.js';
 import { t } from '../../i18n/index.js';
-import type {
-  TipHistory,
+import {
   selectTip,
   tipRegistry,
   type TipContext,
+  type TipHistory,
 } from '../../services/tips/index.js';
 
 const DEFAULT_TOKEN_LIMIT = 1_048_576;
