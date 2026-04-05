@@ -21,7 +21,9 @@ export const clearCommand: SlashCommand = {
   name: 'clear',
   altNames: ['reset', 'new'],
   get description() {
-    return t('Clear conversation history and free up context');
+    return t(
+      'Clear screen, or use --history/--all to clear conversation and reset session',
+    );
   },
   kind: CommandKind.BUILT_IN,
   completion: async () => [
@@ -34,8 +36,10 @@ export const clearCommand: SlashCommand = {
     { value: '--all', description: t('Complete reset (like a new session)') },
   ],
   action: async (context, args): Promise<void | SlashCommandActionReturn> => {
-    const isHistory = args.includes('--history');
-    const isAll = args.includes('--all');
+    const hasAll = args.includes('--all');
+    // --all is a superset of --history; if both are provided, treat as --all
+    const isAll = hasAll;
+    const isHistory = !hasAll && args.includes('--history');
 
     if (!isHistory && !isAll) {
       // Clear UI only for immediate responsiveness
@@ -83,6 +87,8 @@ export const clearCommand: SlashCommand = {
       }
 
       if (isAll) {
+        // --history preserves IDE context (system prompt + memory + context);
+        // --all performs a full reset including IDE context store
         ideContextStore.clear();
       }
 

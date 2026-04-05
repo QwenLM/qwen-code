@@ -150,6 +150,21 @@ describe('clearCommand', () => {
     expect(ideContextStore.clear).toHaveBeenCalledTimes(1);
   });
 
+  it('should treat --all as superset when both --history and --all are provided', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    mockContext.overwriteConfirmed = true;
+    await clearCommand.action(mockContext, '--history --all');
+
+    expect(mockStartNewSession).toHaveBeenCalledTimes(1);
+    expect(mockResetChat).toHaveBeenCalledTimes(1);
+    expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
+    // --all should trigger ideContextStore.clear
+    expect(ideContextStore.clear).toHaveBeenCalledTimes(1);
+  });
+
   it('should fire SessionEnd event before clearing and SessionStart event after clearing when confirmed', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');

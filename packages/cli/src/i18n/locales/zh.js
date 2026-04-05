@@ -1820,4 +1820,6 @@ export default {
   'Clear dialogue history (keep system prompt + memory + context)':
     '清除对话历史（保留系统提示+记忆+上下文）',
   'Complete reset (like a new session)': '完全重置（如同新会话）',
+  'Clear screen, or use --history/--all to clear conversation and reset session':
+    '清屏，或使用 --history/--all 清除对话并重置会话',
 };

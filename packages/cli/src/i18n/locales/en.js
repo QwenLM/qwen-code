@@ -2015,4 +2015,6 @@ export default {
   'Clear dialogue history (keep system prompt + memory + context)':
     'Clear dialogue history (keep system prompt + memory + context)',
   'Complete reset (like a new session)': 'Complete reset (like a new session)',
+  'Clear screen, or use --history/--all to clear conversation and reset session':
+    'Clear screen, or use --history/--all to clear conversation and reset session',
 };
