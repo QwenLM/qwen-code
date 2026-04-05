@@ -416,6 +416,7 @@ export class PermissionManager {
     'cron_create',
     'cron_list',
     'cron_delete',
+    'config',
   ]);
 
   /**

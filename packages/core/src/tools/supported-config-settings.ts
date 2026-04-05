@@ -58,7 +58,9 @@ export function isSupported(key: string): boolean {
 export function getDescriptor(
   key: string,
 ): ConfigSettingDescriptor | undefined {
-  return SUPPORTED_CONFIG_SETTINGS[key];
+  return Object.hasOwn(SUPPORTED_CONFIG_SETTINGS, key)
+    ? SUPPORTED_CONFIG_SETTINGS[key]
+    : undefined;
 }
 
 export function getAllKeys(): string[] {
