@@ -2008,4 +2008,17 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
+
+  'Switch to plan mode or execute the current plan':
+    'Switch to plan mode or execute the current plan',
+  'Exited plan mode. The agent will now execute the plan.':
+    'Exited plan mode. The agent will now execute the plan.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan execute" to execute the plan.':
+    'Already in plan mode. Use "/plan execute" to execute the plan.',
+  'The name of the extension to update.':
+    'The name of the extension to update.',
+  'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
+    'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
 };

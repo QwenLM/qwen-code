@@ -1813,4 +1813,18 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
+
+  'Switch to plan mode or execute the current plan':
+    '切换到计划模式或执行当前计划',
+  'Exited plan mode. The agent will now execute the plan.':
+    '退出计划模式。智能体现在将执行计划。',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    '启用计划模式。智能体将只分析和规划，而不执行工具。',
+  'Already in plan mode. Use "/plan execute" to execute the plan.':
+    '已处于计划模式。使用 "/plan execute" 执行计划。',
+  'Value:': '值：',
+  'No server selected': '未选择服务器',
+  prompts: '提示词',
+  required: '必填',
+  Enum: '枚举',
 };
