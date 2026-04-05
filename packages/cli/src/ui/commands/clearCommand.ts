@@ -26,20 +26,27 @@ export const clearCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
-  completion: async () => [
-    {
-      value: '--history',
-      description: t(
-        'Clear dialogue history (keep system prompt + memory + context)',
-      ),
-    },
-    { value: '--all', description: t('Complete reset (like a new session)') },
-  ],
+  completion: async (_context, partialArg) => {
+    const suggestions = [
+      {
+        value: '--history',
+        description: t(
+          'Clear dialogue history (keep system prompt + memory + context)',
+        ),
+      },
+      {
+        value: '--all',
+        description: t('Complete reset (like a new session)'),
+      },
+    ];
+    const filtered = suggestions.filter((s) => s.value.startsWith(partialArg));
+    return filtered.length > 0 ? filtered : null;
+  },
   action: async (context, args): Promise<void | SlashCommandActionReturn> => {
-    const hasAll = args.includes('--all');
+    const tokens = args.trim().split(/\s+/).filter(Boolean);
     // --all is a superset of --history; if both are provided, treat as --all
-    const isAll = hasAll;
-    const isHistory = !hasAll && args.includes('--history');
+    const isAll = tokens.includes('--all');
+    const isHistory = !isAll && tokens.includes('--history');
 
     if (!isHistory && !isAll) {
       // Clear UI only for immediate responsiveness
@@ -87,8 +94,8 @@ export const clearCommand: SlashCommand = {
       }
 
       if (isAll) {
-        // --history preserves IDE context (system prompt + memory + context);
-        // --all performs a full reset including IDE context store
+        // --history preserves IDE/editor context.
+        // --all also clears the IDE context store.
         ideContextStore.clear();
       }
 
