@@ -29,11 +29,15 @@ vi.mock('os', () => ({
 }));
 
 const mockQuote = vi.hoisted(() => vi.fn());
-const mockParse = vi.hoisted(() => vi.fn());
-vi.mock('shell-quote', () => ({
-  quote: mockQuote,
-  parse: mockParse,
-}));
+vi.mock('shell-quote', async () => {
+  const actual =
+    await vi.importActual<typeof import('shell-quote')>('shell-quote');
+
+  return {
+    ...actual,
+    quote: mockQuote,
+  };
+});
 
 let config: Config;
 
@@ -42,7 +46,6 @@ beforeEach(() => {
   mockQuote.mockImplementation((args: string[]) =>
     args.map((arg) => `'${arg}'`).join(' '),
   );
-  mockParse.mockImplementation((cmd: string) => cmd.split(' '));
   config = {
     getCoreTools: () => [],
     getPermissionsDeny: () => [],
@@ -460,6 +463,12 @@ describe('getCommandRoots', () => {
         'PYTHONPATH=/Users/jinjing/.qwen/skills/scripts python3 -c "print(1)"',
       ),
     ).toEqual(['python3']);
+  });
+
+  it('should preserve quoted Windows paths with spaces', async () => {
+    expect(getCommandRoots('"C:\\Program Files\\foo\\bar.exe" arg1')).toEqual([
+      'bar.exe',
+    ]);
   });
 });
 

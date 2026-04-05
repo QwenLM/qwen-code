@@ -438,6 +438,46 @@ describe('splitCompoundCommand', () => {
       'echo "line1\nline2"',
     ]);
   });
+
+  it('does not split heredoc bodies on newlines', async () => {
+    const command = ["python - <<'PY'", 'print(1)', 'PY', 'echo done'].join(
+      '\n',
+    );
+
+    expect(splitCompoundCommand(command)).toEqual([
+      ["python - <<'PY'", 'print(1)', 'PY'].join('\n'),
+      'echo done',
+    ]);
+  });
+
+  it('keeps heredoc bodies attached to the command that declared them', async () => {
+    const command = ["cat <<'EOF' | grep foo", 'foo', 'EOF'].join('\n');
+
+    expect(splitCompoundCommand(command)).toEqual([
+      ["cat <<'EOF'", 'foo', 'EOF'].join('\n'),
+      'grep foo',
+    ]);
+  });
+
+  it('does not treat comment text containing << as a heredoc', async () => {
+    const command = ["# <<'EOF'", 'rm -rf /', 'EOF', 'echo done'].join('\n');
+
+    expect(splitCompoundCommand(command)).toEqual([
+      "# <<'EOF'",
+      'rm -rf /',
+      'EOF',
+      'echo done',
+    ]);
+  });
+
+  it('does not treat arithmetic shifts as heredoc operators', async () => {
+    const command = ['echo $((1 << 2))', 'echo done'].join('\n');
+
+    expect(splitCompoundCommand(command)).toEqual([
+      'echo $((1 << 2))',
+      'echo done',
+    ]);
+  });
 });
 
 // ─── resolvePathPattern ──────────────────────────────────────────────────────

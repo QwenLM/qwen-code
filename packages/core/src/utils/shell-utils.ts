@@ -8,7 +8,7 @@ import type { AnyToolInvocation } from '../index.js';
 import type { Config } from '../config/config.js';
 import os from 'node:os';
 import path from 'node:path';
-import { quote } from 'shell-quote';
+import { parse, quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
@@ -40,6 +40,7 @@ export interface ShellConfiguration {
 }
 
 let cachedBashPath: string | undefined;
+const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
 /**
  * Attempts to find the Git Bash executable path on Windows.
@@ -298,21 +299,29 @@ export function getCommandRoot(command: string): string | undefined {
     return undefined;
   }
 
-  // Split on whitespace and skip leading VAR=value tokens.
-  const tokens = trimmedCommand.split(/\s+/);
-  let idx = 0;
-  while (idx < tokens.length && /^[A-Za-z_]\w*=/.test(tokens[idx]!)) {
-    idx++;
-  }
+  try {
+    const tokens = parse(trimmedCommand).filter(
+      (token): token is string => typeof token === 'string',
+    );
 
-  const firstToken = tokens[idx];
-  if (!firstToken) {
+    let idx = 0;
+    while (idx < tokens.length && ENV_ASSIGNMENT_REGEX.test(tokens[idx]!)) {
+      idx++;
+    }
+
+    const firstToken = tokens[idx];
+    return firstToken ? firstToken.split(/[\\/]/).pop() : undefined;
+  } catch {
+    const match = trimmedCommand.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
+    if (match) {
+      const commandRoot = match[1] || match[2] || match[3];
+      if (commandRoot) {
+        return commandRoot.split(/[\\/]/).pop();
+      }
+    }
+
     return undefined;
   }
-
-  // Strip quotes and extract last path component.
-  const unquoted = firstToken.replace(/^["']|["']$/g, '');
-  return unquoted ? unquoted.split(/[\\/]/).pop() : undefined;
 }
 
 export function getCommandRoots(command: string): string[] {
