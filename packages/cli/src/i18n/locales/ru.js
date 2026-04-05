@@ -1974,6 +1974,6 @@ export default {
     'Enabled plan mode. The agent will analyze and plan without executing tools.',
   'Already in plan mode. Use "/plan execute" to execute the plan.':
     'Already in plan mode. Use "/plan execute" to execute the plan.',
-  'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
-    'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
 };

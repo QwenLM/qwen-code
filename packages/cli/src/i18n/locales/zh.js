@@ -1822,9 +1822,6 @@ export default {
     '启用计划模式。智能体将只分析和规划，而不执行工具。',
   'Already in plan mode. Use "/plan execute" to execute the plan.':
     '已处于计划模式。使用 "/plan execute" 执行计划。',
-  'Value:': '值：',
-  'No server selected': '未选择服务器',
-  prompts: '提示词',
-  required: '必填',
-  Enum: '枚举',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    '未处于计划模式。请先使用 "/plan" 进入计划模式。',
 };

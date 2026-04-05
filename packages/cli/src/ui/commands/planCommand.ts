@@ -34,8 +34,16 @@ export const planCommand: SlashCommand = {
     }
 
     const trimmedArgs = args.trim();
+    const currentMode = config.getApprovalMode();
 
     if (trimmedArgs === 'execute') {
+      if (currentMode !== ApprovalMode.PLAN) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Not in plan mode. Use "/plan" to enter plan mode first.'),
+        };
+      }
       try {
         config.setApprovalMode(ApprovalMode.DEFAULT);
       } catch (e) {
@@ -52,7 +60,6 @@ export const planCommand: SlashCommand = {
       };
     }
 
-    const currentMode = config.getApprovalMode();
     if (currentMode !== ApprovalMode.PLAN) {
       try {
         config.setApprovalMode(ApprovalMode.PLAN);

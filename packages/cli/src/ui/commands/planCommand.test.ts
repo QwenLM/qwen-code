@@ -115,4 +115,20 @@ describe('planCommand', () => {
       content: 'Exited plan mode. The agent will now execute the plan.',
     });
   });
+
+  it('should return error when execute is used but not in plan mode', async () => {
+    if (!planCommand.action) {
+      throw new Error('The plan command must have an action.');
+    }
+
+    // Default mock returns ApprovalMode.DEFAULT (not PLAN)
+    const result = await planCommand.action(mockContext, 'execute');
+
+    expect(mockContext.services.config?.setApprovalMode).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Not in plan mode. Use "/plan" to enter plan mode first.',
+    });
+  });
 });
