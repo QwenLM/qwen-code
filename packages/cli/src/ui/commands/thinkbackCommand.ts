@@ -61,23 +61,23 @@ export const thinkbackCommand: SlashCommand = {
       };
     }
 
-    let fromTopic = '';
-    let topicMatch = '';
+    let fromTimeRange = '';
+    let topicFilter = '';
     const fromMatch = args.match(/--from\s+((?:"[^"]+")|(?:'[^']+')|(?:\S+))/);
     const topicArgMatch = args.match(
       /--topic\s+((?:"[^"]+")|(?:'[^']+')|(?:\S+))/,
     );
 
     if (fromMatch) {
-      fromTopic = fromMatch[1].replace(/^["']|["']$/g, '');
+      fromTimeRange = fromMatch[1].replace(/^["']|["']$/g, '');
     }
     if (topicArgMatch) {
-      topicMatch = topicArgMatch[1].replace(/^["']|["']$/g, '');
+      topicFilter = topicArgMatch[1].replace(/^["']|["']$/g, '');
     }
 
     const getChatHistory = () => {
       const chat = geminiClient.getChat();
-      return chat.getHistory();
+      return chat.getHistory(true);
     };
 
     const history = getChatHistory();
@@ -95,11 +95,11 @@ export const thinkbackCommand: SlashCommand = {
       let prompt =
         "Please analyze the conversation history above and extract key events to create a timeline of this session.\nFocus on:\n1. File modifications (which files were changed and why)\n2. Bug fixes and error resolutions\n3. Architectural or key design decisions made\n\nFormat the output strictly as a timeline, for example:\n# Timeline Review\n- **Step 1** — [Decision/Fix/Change] description (files affected if any)\n- **Step 2** — [Decision/Fix/Change] description (files affected if any)\n\nIf you can't determine the exact time, use relative ordering or an approximation based on the flow.";
 
-      if (fromTopic) {
-        prompt += `\nOnly include events from the time period corresponding to: ${fromTopic}.`;
+      if (fromTimeRange) {
+        prompt += `\nOnly include events from the time period corresponding to: ${fromTimeRange}.`;
       }
-      if (topicMatch) {
-        prompt += `\nOnly focus on events related to the topic: ${topicMatch}.`;
+      if (topicFilter) {
+        prompt += `\nOnly focus on events related to the topic: ${topicFilter}.`;
       }
 
       prompt += '\nOutput directly without conversational filler.';
