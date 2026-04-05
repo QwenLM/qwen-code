@@ -61,7 +61,7 @@ Commands for managing AI tools and models.
 | `/mcp`           | List configured MCP servers and tools             | `/mcp`, `/mcp desc`                           |
 | `/tools`         | Display currently available tool list             | `/tools`, `/tools desc`                       |
 | `/skills`        | List and run available skills                     | `/skills`, `/skills <name>`                   |
-| `/plan`          | Switch to plan mode or execute the current plan   | `/plan`, `/plan execute`                      |
+| `/plan`          | Switch to plan mode or execute the current plan   | `/plan`, `/plan <task>`, `/plan execute`      |
 | `/approval-mode` | Change approval mode for tool usage               | `/approval-mode <mode (auto-edit)> --project` |
 | →`plan`          | Analysis only, no execution                       | Secure review                                 |
 | →`default`       | Require approval for edits                        | Daily use                                     |
