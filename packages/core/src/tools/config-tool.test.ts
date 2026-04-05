@@ -160,7 +160,7 @@ describe('ConfigTool', () => {
       if (details.type === 'info') {
         expect(details.prompt).toContain('qwen-coder-plus');
         expect(details.prompt).toContain('qwen3-coder');
-        expect(details.permissionRules).toEqual(['Config(set:model)']);
+        expect(details.hideAlwaysAllow).toBe(true);
       }
     });
 

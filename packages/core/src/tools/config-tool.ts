@@ -116,9 +116,9 @@ class ConfigToolInvocation extends BaseToolInvocation<
         this.params.action === 'set'
           ? `Change ${this.params.setting} from '${currentValue}' to '${this.params.value}'`
           : `Read ${this.params.setting}`,
-      permissionRules: [`Config(${this.params.action}:${this.params.setting})`],
+      hideAlwaysAllow: true,
       onConfirm: async (_outcome: ToolConfirmationOutcome) => {
-        // No-op: persistence handled by coreToolScheduler via PM rules
+        // No-op: config changes should be confirmed each time in Phase 1.
       },
     };
     return details;
