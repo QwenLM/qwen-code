@@ -26,13 +26,9 @@ Another paragraph.
 
 exports[`<MarkdownDisplay /> > with 'Unix' line endings > handles a table at the end of the input 1`] = `
 "Some text before.
-
-[38;2;108;112;134m┌─────┬─────┐[39m
-[38;2;108;112;134m│[39m [38;2;137;180;250m[1m A [22m[39m [38;2;108;112;134m│[39m [38;2;137;180;250m[1m B [22m[39m [38;2;108;112;134m│[39m
-[38;2;108;112;134m├─────┼─────┤[39m
-[38;2;108;112;134m│[39m 1   [38;2;108;112;134m│[39m 2   [38;2;108;112;134m│[39m
-[38;2;108;112;134m└─────┴─────┘[39m
-"
+| A | B |
+|---|
+| 1 | 2 |"
 `;
 
 exports[`<MarkdownDisplay /> > with 'Unix' line endings > handles unclosed (pending) code blocks 1`] = `" 1 let y = 2;"`;
@@ -141,13 +137,9 @@ Another paragraph.
 
 exports[`<MarkdownDisplay /> > with 'Windows' line endings > handles a table at the end of the input 1`] = `
 "Some text before.
-
-[38;2;108;112;134m┌─────┬─────┐[39m
-[38;2;108;112;134m│[39m [38;2;137;180;250m[1m A [22m[39m [38;2;108;112;134m│[39m [38;2;137;180;250m[1m B [22m[39m [38;2;108;112;134m│[39m
-[38;2;108;112;134m├─────┼─────┤[39m
-[38;2;108;112;134m│[39m 1   [38;2;108;112;134m│[39m 2   [38;2;108;112;134m│[39m
-[38;2;108;112;134m└─────┴─────┘[39m
-"
+| A | B |
+|---|
+| 1 | 2 |"
 `;
 
 exports[`<MarkdownDisplay /> > with 'Windows' line endings > handles unclosed (pending) code blocks 1`] = `" 1 let y = 2;"`;

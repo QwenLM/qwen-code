@@ -121,15 +121,22 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       codeBlockFence = codeFenceMatch[1];
       codeBlockLang = codeFenceMatch[2] || null;
     } else if (tableRowMatch && !inTable) {
-      // Potential table start - check if next line is separator
-      if (
-        index + 1 < lines.length &&
-        lines[index + 1].match(tableSeparatorRegex)
-      ) {
+      // Potential table start - check if next line is separator with matching column count
+      const potentialHeaders = tableRowMatch[1]
+        .split(/(?<!\\)\|/)
+        .map((cell) => cell.trim().replaceAll('\\|', '|'));
+      const nextLine = index + 1 < lines.length ? lines[index + 1]! : '';
+      const sepMatch = nextLine.match(tableSeparatorRegex);
+      const sepColCount = sepMatch
+        ? nextLine
+            .split(/(?<!\\)\|/)
+            .map((c) => c.trim())
+            .filter((c) => c.length > 0).length
+        : 0;
+
+      if (sepMatch && sepColCount === potentialHeaders.length) {
         inTable = true;
-        tableHeaders = tableRowMatch[1]
-          .split(/(?<!\\)\|/)
-          .map((cell) => cell.trim().replaceAll('\\|', '|'));
+        tableHeaders = potentialHeaders;
         tableRows = [];
       } else {
         // Not a table, treat as regular text

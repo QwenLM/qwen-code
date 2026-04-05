@@ -250,6 +250,11 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
 }) => {
   const colCount = headers.length;
 
+  // Empty table — nothing to render
+  if (colCount === 0) {
+    return <Box />;
+  }
+
   // ── Step 1: Calculate min (longest word) and ideal (full content) widths ──
   const minColumnWidths = headers.map((header, colIndex) => {
     let maxMin = getMinWordWidth(header);
@@ -399,11 +404,11 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
         const padded = padAligned(lineText, displayWidth, width, align);
 
         if (isHeader) {
-          // Apply bold + link color for headers, matching original theme
-          const hasAnsi = lineText.includes('\x1b[');
-          const styledPadded = hasAnsi
-            ? ansiFmt.bold(padded)
-            : applyColor(ansiFmt.bold(padded), theme.text.link);
+          // Always apply bold + link color for headers, matching original theme
+          const styledPadded = applyColor(
+            ansiFmt.bold(padded),
+            theme.text.link,
+          );
           line += ' ' + styledPadded + ' ' + borderPipe;
         } else {
           line += ' ' + padded + ' ' + borderPipe;

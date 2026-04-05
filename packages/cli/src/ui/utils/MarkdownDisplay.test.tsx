@@ -228,6 +228,20 @@ next line
       expect(output).not.toContain('┌');
     });
 
+    it('does not treat separator with mismatched column count as a table', () => {
+      const text = `
+| A | B |
+|---|
+| 1 | 2 |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('| A | B |');
+      expect(output).not.toContain('┌');
+    });
+
     it('does not treat a horizontal rule after a pipe line as a table separator', () => {
       const text = `
 | Header |
