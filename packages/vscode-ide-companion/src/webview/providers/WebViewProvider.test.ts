@@ -103,6 +103,8 @@ vi.mock('./MessageHandler.js', () => ({
     setLoginHandler = vi.fn();
     setPermissionHandler = vi.fn();
     setAskUserQuestionHandler = vi.fn();
+    setCurrentConversationId = vi.fn();
+    getCurrentConversationId = vi.fn(() => null);
     setupFileWatchers = vi.fn(() => ({ dispose: vi.fn() }));
     appendStreamContent = vi.fn();
     route = vi.fn();
@@ -303,6 +305,13 @@ describe('WebViewProvider.createNewSession', () => {
         };
       }
     ).agentManager;
+    const messageHandler = (
+      provider as unknown as {
+        messageHandler: {
+          setCurrentConversationId: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).messageHandler;
 
     await provider.createNewSession();
 
@@ -310,5 +319,6 @@ describe('WebViewProvider.createNewSession', () => {
       '/workspace-root',
       { forceNew: true },
     );
+    expect(messageHandler.setCurrentConversationId).toHaveBeenCalledWith(null);
   });
 });

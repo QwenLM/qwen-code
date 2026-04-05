@@ -21,7 +21,11 @@ export function computeContextUsage(
     typeof metaLimitRaw === 'number' || metaLimitRaw === null
       ? metaLimitRaw
       : undefined;
+  // Intentionally avoid DEFAULT_TOKEN_LIMIT here. The footer should disappear
+  // when neither ACP nor trusted model metadata provides a numeric limit.
   const limit = usageStats?.tokenLimit ?? metaLimit;
+  // Prefer the ACP SDK's canonical inputTokens field and only fall back to the
+  // legacy promptTokens name for older payloads.
   const used =
     usageStats?.usage?.inputTokens ?? usageStats?.usage?.promptTokens ?? 0;
 

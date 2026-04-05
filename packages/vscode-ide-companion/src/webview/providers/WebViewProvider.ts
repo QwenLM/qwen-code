@@ -1615,6 +1615,7 @@ export class WebViewProvider {
 
       // Create new Qwen session via agent manager
       await this.agentManager.createNewSession(workingDir, { forceNew: true });
+      this.messageHandler.setCurrentConversationId(null);
 
       // Clear current conversation UI
       this.sendMessageToWebView({

@@ -186,8 +186,13 @@ describe('SessionMessageHandler', () => {
       type: 'newQwenSession',
     });
 
+    expect(handler.getCurrentConversationId()).toBeNull();
     expect(agentManager.createNewSession).toHaveBeenCalledWith('/workspace', {
       forceNew: true,
+    });
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationCleared',
+      data: {},
     });
   });
 });
