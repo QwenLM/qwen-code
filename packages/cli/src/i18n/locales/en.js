@@ -2008,4 +2008,11 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
+  'Are you sure you want to completely reset the session?':
+    'Are you sure you want to completely reset the session?',
+  'Are you sure you want to clear the conversation history?':
+    'Are you sure you want to clear the conversation history?',
+  'Clear dialogue history (keep system prompt + memory + context)':
+    'Clear dialogue history (keep system prompt + memory + context)',
+  'Complete reset (like a new session)': 'Complete reset (like a new session)',
 };

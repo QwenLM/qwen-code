@@ -14,6 +14,7 @@ import {
   ToolNames,
   SkillTool,
   type PermissionMode,
+  ideContextStore,
 } from '@qwen-code/qwen-code-core';
 
 export const clearCommand: SlashCommand = {
@@ -23,7 +24,39 @@ export const clearCommand: SlashCommand = {
     return t('Clear conversation history and free up context');
   },
   kind: CommandKind.BUILT_IN,
-  action: async (context, _args) => {
+  completion: async () => [
+    {
+      value: '--history',
+      description: t(
+        'Clear dialogue history (keep system prompt + memory + context)',
+      ),
+    },
+    { value: '--all', description: t('Complete reset (like a new session)') },
+  ],
+  action: async (context, args) => {
+    const isHistory = args.includes('--history');
+    const isAll = args.includes('--all');
+
+    if (!isHistory && !isAll) {
+      // Clear UI only for immediate responsiveness
+      context.ui.clear();
+      return;
+    }
+
+    if (!context.overwriteConfirmed) {
+      return {
+        type: 'confirm_action',
+        prompt: isAll
+          ? t('Are you sure you want to completely reset the session?')
+          : t('Are you sure you want to clear the conversation history?'),
+        originalInvocation: {
+          raw:
+            context.invocation?.raw ||
+            `/clear ${isAll ? '--all' : '--history'}`,
+        },
+      };
+    }
+
     const { config } = context.services;
 
     if (config) {
@@ -47,6 +80,10 @@ export const clearCommand: SlashCommand = {
         .find((tool) => tool.name === ToolNames.SKILL);
       if (skillTool instanceof SkillTool) {
         skillTool.clearLoadedSkills();
+      }
+
+      if (isAll) {
+        ideContextStore.clear();
       }
 
       if (newSessionId && context.session.startNewSession) {
