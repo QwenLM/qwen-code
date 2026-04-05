@@ -123,6 +123,8 @@ import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.j
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { useContextualTips } from './hooks/useContextualTips.js';
+import { getTipHistory } from './components/Tips.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
@@ -744,6 +746,18 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalWidth,
     terminalHeight,
   );
+
+  // Contextual tips — show tips based on context usage after model responses
+  const tipHistory = useMemo(() => getTipHistory(), []);
+  useContextualTips({
+    streamingState,
+    lastPromptTokenCount: sessionStats.lastPromptTokenCount,
+    sessionPromptCount: sessionStats.promptCount,
+    config,
+    tipHistory,
+    addItem: historyManager.addItem,
+    hideTips: !!(settings.merged.ui?.hideTips || config.getScreenReader()),
+  });
 
   // Track whether suggestions are visible for Tab key handling
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);

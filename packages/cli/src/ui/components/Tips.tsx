@@ -8,48 +8,52 @@ import { useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
+import {
+  TipHistory,
+  selectTip,
+  tipRegistry,
+  type TipContext,
+} from '../../services/tips/index.js';
 
-type Tip = string | { text: string; weight: number };
-
-const startupTips: Tip[] = [
-  'Use /compress when the conversation gets long to summarize history and free up context.',
-  'Start a fresh idea with /clear or /new; the previous session stays available in history.',
-  'Use /bug to submit issues to the maintainers when something goes off.',
-  'Switch auth type quickly with /auth.',
-  'You can run any shell commands from Qwen Code using ! (e.g. !ls).',
-  'Type / to open the command popup; Tab autocompletes slash commands and saved prompts.',
-  'You can resume a previous conversation by running qwen --continue or qwen --resume.',
-  process.platform === 'win32'
-    ? 'You can switch permission mode quickly with Tab or /approval-mode.'
-    : 'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
-  {
-    text: 'Try /insight to generate personalized insights from your chat history.',
-    weight: 3,
-  },
-];
-
-function tipText(tip: Tip): string {
-  return typeof tip === 'string' ? tip : tip.text;
-}
-
-function tipWeight(tip: Tip): number {
-  return typeof tip === 'string' ? 1 : tip.weight;
-}
-
-export function selectWeightedTip(tips: Tip[]): string {
-  const totalWeight = tips.reduce((sum, tip) => sum + tipWeight(tip), 0);
-  let random = Math.random() * totalWeight;
-  for (const tip of tips) {
-    random -= tipWeight(tip);
-    if (random <= 0) {
-      return tipText(tip);
-    }
+/**
+ * Shared TipHistory instance for the session. Loaded once at import time
+ * so both startup tips and post-response tips use the same state.
+ */
+let _tipHistory: TipHistory | null = null;
+export function getTipHistory(): TipHistory {
+  if (!_tipHistory) {
+    _tipHistory = TipHistory.load();
   }
-  return tipText(tips[tips.length - 1]!);
+  return _tipHistory;
+}
+
+/**
+ * Select a startup tip. Extracted as a standalone function for clarity.
+ * Called once via useMemo([], ...) — recordShown writes to disk.
+ */
+function pickStartupTip(): string {
+  const history = getTipHistory();
+  const context: TipContext = {
+    lastPromptTokenCount: 0,
+    contextWindowSize: 0,
+    compressionThreshold: 0,
+    sessionPromptCount: 0,
+    sessionCount: history.sessionCount,
+    platform: process.platform,
+  };
+
+  const tip = selectTip('startup', context, tipRegistry, history);
+  if (tip) {
+    history.recordShown(tip.id, 0);
+    return tip.content;
+  }
+
+  // Fallback — should not happen with the current registry
+  return 'Type / to see all available commands.';
 }
 
 export const Tips: React.FC = () => {
-  const selectedTip = useMemo(() => selectWeightedTip(startupTips), []);
+  const selectedTip = useMemo(() => pickStartupTip(), []);
 
   return (
     <Box marginLeft={2} marginRight={2}>

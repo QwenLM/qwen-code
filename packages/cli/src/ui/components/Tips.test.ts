@@ -4,59 +4,141 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { selectWeightedTip } from './Tips.js';
+import { describe, it, expect } from 'vitest';
+import {
+  selectTip,
+  tipRegistry,
+  type TipContext,
+} from '../../services/tips/index.js';
+import { TipHistory } from '../../services/tips/tipHistory.js';
 
-describe('selectWeightedTip', () => {
-  const tips = [
-    { text: 'tip-a', weight: 1 },
-    { text: 'tip-b', weight: 3 },
-    { text: 'tip-c', weight: 1 },
-  ];
+function createContext(overrides: Partial<TipContext> = {}): TipContext {
+  return {
+    lastPromptTokenCount: 0,
+    contextWindowSize: 1_000_000,
+    compressionThreshold: 0.7,
+    sessionPromptCount: 0,
+    sessionCount: 1,
+    platform: 'linux',
+    ...overrides,
+  };
+}
 
-  it('returns a valid tip text', () => {
-    const result = selectWeightedTip(tips);
-    expect(['tip-a', 'tip-b', 'tip-c']).toContain(result);
+function createHistory(): TipHistory {
+  // Create a TipHistory with no persistence (in-memory only)
+  return new TipHistory(
+    { sessionCount: 1, tips: {} },
+    '/tmp/test-tip-history.json',
+  );
+}
+
+describe('selectTip', () => {
+  it('returns a startup tip for new user', () => {
+    const ctx = createContext({ sessionCount: 1 });
+    const history = createHistory();
+    const tip = selectTip('startup', ctx, tipRegistry, history);
+    expect(tip).not.toBeNull();
+    expect(tip!.trigger).toBe('startup');
   });
 
-  it('selects the first tip when random is near zero', () => {
-    vi.spyOn(Math, 'random').mockReturnValue(0);
-    expect(selectWeightedTip(tips)).toBe('tip-a');
-    vi.restoreAllMocks();
+  it('returns context-high tip when context usage is high', () => {
+    const ctx = createContext({
+      lastPromptTokenCount: 850_000,
+      contextWindowSize: 1_000_000,
+      sessionPromptCount: 10,
+    });
+    const history = createHistory();
+    const tip = selectTip('post-response', ctx, tipRegistry, history);
+    expect(tip).not.toBeNull();
+    expect(tip!.id).toBe('context-high');
   });
 
-  it('selects the weighted tip when random falls in its range', () => {
-    // Total weight = 5. tip-a covers [0,1), tip-b covers [1,4), tip-c covers [4,5)
-    // Math.random() * 5 = 2.0 falls in tip-b's range
-    vi.spyOn(Math, 'random').mockReturnValue(0.4); // 0.4 * 5 = 2.0
-    expect(selectWeightedTip(tips)).toBe('tip-b');
-    vi.restoreAllMocks();
+  it('returns context-critical tip when context usage is critical', () => {
+    const ctx = createContext({
+      lastPromptTokenCount: 960_000,
+      contextWindowSize: 1_000_000,
+      sessionPromptCount: 10,
+    });
+    const history = createHistory();
+    const tip = selectTip('post-response', ctx, tipRegistry, history);
+    expect(tip).not.toBeNull();
+    expect(tip!.id).toBe('context-critical');
   });
 
-  it('selects the last tip when random is near max', () => {
-    vi.spyOn(Math, 'random').mockReturnValue(0.99);
-    expect(selectWeightedTip(tips)).toBe('tip-c');
-    vi.restoreAllMocks();
+  it('returns compress-intro tip when context is moderate and session is long', () => {
+    const ctx = createContext({
+      lastPromptTokenCount: 550_000,
+      contextWindowSize: 1_000_000,
+      sessionPromptCount: 10,
+    });
+    const history = createHistory();
+    const tip = selectTip('post-response', ctx, tipRegistry, history);
+    expect(tip).not.toBeNull();
+    expect(tip!.id).toBe('compress-intro');
   });
 
-  it('respects weight distribution over many samples', () => {
-    const counts: Record<string, number> = {
-      'tip-a': 0,
-      'tip-b': 0,
-      'tip-c': 0,
-    };
-    const iterations = 10000;
-    for (let i = 0; i < iterations; i++) {
-      const result = selectWeightedTip(tips);
-      counts[result]!++;
-    }
-    // tip-b (weight 3) should appear roughly 3x as often as tip-a or tip-c (weight 1)
-    // With 10k iterations, we expect: tip-a ~2000, tip-b ~6000, tip-c ~2000
-    expect(counts['tip-b']!).toBeGreaterThan(counts['tip-a']! * 2);
-    expect(counts['tip-b']!).toBeGreaterThan(counts['tip-c']! * 2);
+  it('returns null for post-response when context usage is low', () => {
+    const ctx = createContext({
+      lastPromptTokenCount: 100_000,
+      contextWindowSize: 1_000_000,
+      sessionPromptCount: 2,
+    });
+    const history = createHistory();
+    const tip = selectTip('post-response', ctx, tipRegistry, history);
+    expect(tip).toBeNull();
   });
 
-  it('handles single tip', () => {
-    expect(selectWeightedTip([{ text: 'only', weight: 1 }])).toBe('only');
+  it('respects cooldown — does not re-show same tip within cooldown period', () => {
+    const ctx = createContext({
+      lastPromptTokenCount: 850_000,
+      contextWindowSize: 1_000_000,
+      sessionPromptCount: 10,
+    });
+    const history = createHistory();
+
+    // First selection should return context-high
+    const tip1 = selectTip('post-response', ctx, tipRegistry, history);
+    expect(tip1!.id).toBe('context-high');
+
+    // Record it as shown
+    history.recordShown(tip1!.id, 10);
+
+    // Same prompt count — should be cooled down, skip context-high
+    const tip2 = selectTip('post-response', ctx, tipRegistry, history);
+    // Should either be null or a different tip
+    expect(tip2?.id).not.toBe('context-high');
+  });
+
+  it('selects a new-user tip for brand new users', () => {
+    const ctx = createContext({ sessionCount: 1 });
+    const history = createHistory();
+    const tip = selectTip('startup', ctx, tipRegistry, history);
+    // New user tips have priority 70, so one of them should be selected
+    expect(tip).not.toBeNull();
+    expect(tip!.priority).toBe(70);
+  });
+
+  it('rotates startup tips across sessions via LRU', () => {
+    const ctx = createContext({ sessionCount: 1 });
+    const history = createHistory();
+
+    // Pick first tip
+    const tip1 = selectTip('startup', ctx, tipRegistry, history);
+    expect(tip1).not.toBeNull();
+    history.recordShown(tip1!.id, 0);
+
+    // Pick second tip — should be different due to LRU
+    const tip2 = selectTip('startup', ctx, tipRegistry, history);
+    expect(tip2).not.toBeNull();
+    expect(tip2!.id).not.toBe(tip1!.id);
+  });
+
+  it('returns a priority-70 tip for experienced users with insight available', () => {
+    const ctx = createContext({ sessionCount: 25 });
+    const history = createHistory();
+    const tip = selectTip('startup', ctx, tipRegistry, history);
+    // insight-command has priority 70, same as other new-user tips
+    expect(tip).not.toBeNull();
+    expect(tip!.priority).toBe(70);
   });
 });
