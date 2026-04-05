@@ -10,6 +10,7 @@ import wrapAnsi from 'wrap-ansi';
 import stripAnsi from 'strip-ansi';
 import { getPlainTextLength } from './InlineMarkdownRenderer.js';
 import { getCachedStringWidth } from './textUtils.js';
+import { theme } from '../semantic-colors.js';
 
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
@@ -20,10 +21,6 @@ const MAX_ROW_LINES = 4;
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
 
-/** ANSI escape codes for text formatting */
-const ANSI_BOLD_START = '\x1b[1m';
-const ANSI_BOLD_END = '\x1b[22m';
-
 export type ColumnAlign = 'left' | 'center' | 'right';
 
 interface TableRendererProps {
@@ -33,9 +30,6 @@ interface TableRendererProps {
   /** Per-column alignment parsed from markdown separator line */
   aligns?: ColumnAlign[];
 }
-
-const INLINE_MARKDOWN_REGEX =
-  /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>)/;
 
 /**
  * Strip inline markdown syntax from text to get plain content.
@@ -52,8 +46,131 @@ function stripInlineMarkdown(text: string): string {
     .replace(/\[(.*?)\]\(.*?\)/g, '$1');
 }
 
-function hasInlineMarkdown(text: string): boolean {
-  return INLINE_MARKDOWN_REGEX.test(text);
+/** Map Ink-compatible named colors to ANSI foreground codes */
+const INK_COLOR_TO_ANSI: Record<string, number> = {
+  black: 30,
+  red: 31,
+  green: 32,
+  yellow: 33,
+  blue: 34,
+  magenta: 35,
+  cyan: 36,
+  white: 37,
+  gray: 90,
+  grey: 90,
+  blackbright: 90,
+  redbright: 91,
+  greenbright: 92,
+  yellowbright: 93,
+  bluebright: 94,
+  magentabright: 95,
+  cyanbright: 96,
+  whitebright: 97,
+};
+
+/** Apply an Ink-compatible color (hex or named) to text via raw ANSI codes */
+function applyColor(text: string, color: string): string {
+  if (!color) return text;
+  if (color.startsWith('#')) {
+    const hex =
+      color.length === 4
+        ? color[1]! + color[1]! + color[2]! + color[2]! + color[3]! + color[3]!
+        : color.slice(1);
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
+  }
+  const code = INK_COLOR_TO_ANSI[color.toLowerCase()];
+  if (code !== undefined) return `\x1b[${code}m${text}\x1b[39m`;
+  return text;
+}
+
+/** ANSI text formatting helpers (always produce escape codes, unlike chalk) */
+const ansiFmt = {
+  bold: (t: string) => `\x1b[1m${t}\x1b[22m`,
+  italic: (t: string) => `\x1b[3m${t}\x1b[23m`,
+  underline: (t: string) => `\x1b[4m${t}\x1b[24m`,
+  strikethrough: (t: string) => `\x1b[9m${t}\x1b[29m`,
+};
+
+/**
+ * Convert inline markdown to ANSI-styled text.
+ * Mirrors RenderInline's behavior but outputs strings instead of React nodes.
+ */
+function renderMarkdownToAnsi(text: string): string {
+  const inlineRegex =
+    /(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|\[.*?\]\(.*?\)|`+.+?`+|<u>.*?<\/u>|https?:\/\/\S+)/g;
+
+  let result = '';
+  let lastIndex = 0;
+  let match;
+
+  while ((match = inlineRegex.exec(text)) !== null) {
+    result += text.slice(lastIndex, match.index);
+    const fullMatch = match[0]!;
+    let rendered: string | null = null;
+
+    if (
+      fullMatch.startsWith('**') &&
+      fullMatch.endsWith('**') &&
+      fullMatch.length > 4
+    ) {
+      rendered = ansiFmt.bold(fullMatch.slice(2, -2));
+    } else if (
+      fullMatch.length > 2 &&
+      ((fullMatch.startsWith('*') && fullMatch.endsWith('*')) ||
+        (fullMatch.startsWith('_') && fullMatch.endsWith('_'))) &&
+      !/\w/.test(text.substring(match.index - 1, match.index)) &&
+      !/\w/.test(
+        text.substring(inlineRegex.lastIndex, inlineRegex.lastIndex + 1),
+      ) &&
+      !/\S[./\\]/.test(text.substring(match.index - 2, match.index)) &&
+      !/[./\\]\S/.test(
+        text.substring(inlineRegex.lastIndex, inlineRegex.lastIndex + 2),
+      )
+    ) {
+      rendered = ansiFmt.italic(fullMatch.slice(1, -1));
+    } else if (
+      fullMatch.startsWith('~~') &&
+      fullMatch.endsWith('~~') &&
+      fullMatch.length > 4
+    ) {
+      rendered = ansiFmt.strikethrough(fullMatch.slice(2, -2));
+    } else if (
+      fullMatch.startsWith('`') &&
+      fullMatch.endsWith('`') &&
+      fullMatch.length > 1
+    ) {
+      const codeMatch = fullMatch.match(/^(`+)(.+?)\1$/s);
+      if (codeMatch?.[2]) {
+        rendered = applyColor(codeMatch[2], theme.text.code);
+      }
+    } else if (
+      fullMatch.startsWith('[') &&
+      fullMatch.includes('](') &&
+      fullMatch.endsWith(')')
+    ) {
+      const linkMatch = fullMatch.match(/\[(.*?)\]\((.*?)\)/);
+      if (linkMatch) {
+        rendered = `${linkMatch[1]} ${applyColor(`(${linkMatch[2]})`, theme.text.link)}`;
+      }
+    } else if (
+      fullMatch.startsWith('<u>') &&
+      fullMatch.endsWith('</u>') &&
+      fullMatch.length > 7
+    ) {
+      rendered = ansiFmt.underline(fullMatch.slice(3, -4));
+    } else if (/^https?:\/\//.test(fullMatch)) {
+      rendered = applyColor(fullMatch, theme.text.link);
+    }
+
+    result += rendered ?? fullMatch;
+    lastIndex = inlineRegex.lastIndex;
+  }
+
+  result += text.slice(lastIndex);
+  return result;
 }
 
 /**
@@ -192,9 +309,9 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   const getCellPlainText = (text: string): string =>
     stripAnsi(stripInlineMarkdown(text));
 
-  // Preserve ANSI when possible; markdown currently falls back to plain text.
+  // Render inline markdown to ANSI-styled text; preserve existing ANSI codes.
   const getFormattedCellText = (text: string): string =>
-    hasInlineMarkdown(text) ? stripInlineMarkdown(text) : text;
+    renderMarkdownToAnsi(text);
 
   // ── Step 4: Check max row lines to decide vertical fallback ──
   function calculateMaxRowLines(): number {
@@ -240,7 +357,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
       line += mid.repeat(width + 2);
       line += colIndex < columnWidths.length - 1 ? cross : right;
     });
-    return line;
+    return applyColor(line, theme.border.default);
   }
 
   // ── Build row lines as pure strings ──
@@ -256,9 +373,10 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     // Vertical centering offset per cell
     const offsets = cellLines.map((l) => Math.floor((maxLines - l.length) / 2));
 
+    const borderPipe = applyColor('│', theme.border.default);
     const result: string[] = [];
     for (let lineIdx = 0; lineIdx < maxLines; lineIdx++) {
-      let line = '│';
+      let line = borderPipe;
       for (let colIndex = 0; colIndex < colCount; colIndex++) {
         const lines = cellLines[colIndex]!;
         const offset = offsets[colIndex]!;
@@ -275,12 +393,14 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
         const padded = padAligned(lineText, displayWidth, width, align);
 
         if (isHeader) {
-          const headerText = lineText.includes('\x1b[')
-            ? padded
-            : `${ANSI_BOLD_START}${padded}${ANSI_BOLD_END}`;
-          line += ' ' + headerText + ' │';
+          // Apply bold + link color for headers, matching original theme
+          const hasAnsi = lineText.includes('\x1b[');
+          const styledPadded = hasAnsi
+            ? ansiFmt.bold(padded)
+            : applyColor(ansiFmt.bold(padded), theme.text.link);
+          line += ' ' + styledPadded + ' ' + borderPipe;
         } else {
-          line += ' ' + padded + ' │';
+          line += ' ' + padded + ' ' + borderPipe;
         }
       }
       result.push(line);
@@ -306,7 +426,9 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
           .replace(/\s+/g, ' ')
           .trim();
 
-        lines.push(`${ANSI_BOLD_START}${label}:${ANSI_BOLD_END} ${value}`);
+        lines.push(
+          `${applyColor(ansiFmt.bold(`${label}:`), theme.text.link)} ${value}`,
+        );
       });
     });
     return lines.join('\n');

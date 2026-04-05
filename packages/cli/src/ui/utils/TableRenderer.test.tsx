@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect } from 'vitest';
 import stripAnsi from 'strip-ansi';
 import stringWidth from 'string-width';
 import { renderWithProviders } from '../../test-utils/render.js';
@@ -40,10 +40,6 @@ describe('<TableRenderer />', () => {
     const widths = lines.map((line) => stringWidth(stripAnsi(line)));
     expect(new Set(widths).size).toBe(1);
   };
-
-  beforeEach(() => {
-    vi.clearAllMocks();
-  });
 
   it('renders a basic table with borders', () => {
     const output = renderTable(['Name', 'Value'], [['foo', 'bar']]);
