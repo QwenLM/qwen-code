@@ -374,6 +374,22 @@ describe('QwenSessionUpdateHandler', () => {
         'verification-pack',
       ]);
     });
+
+    it('clears available skills when metadata is absent', () => {
+      mockCallbacks.onAvailableSkills = vi.fn();
+
+      const commandsUpdate = {
+        sessionId: 'test-session',
+        update: {
+          sessionUpdate: 'available_commands_update',
+          availableCommands: [],
+        },
+      } as unknown as SessionNotification;
+
+      handler.handleSessionUpdate(commandsUpdate);
+
+      expect(mockCallbacks.onAvailableSkills).toHaveBeenCalledWith([]);
+    });
   });
 
   describe('updateCallbacks', () => {

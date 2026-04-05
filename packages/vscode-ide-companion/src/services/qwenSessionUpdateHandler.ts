@@ -203,9 +203,8 @@ export class QwenSessionUpdateHandler {
           }
 
           const meta = (update as { _meta?: SessionUpdateMeta | null })._meta;
-          const availableSkills = meta?.availableSkills;
-          if (availableSkills && this.callbacks.onAvailableSkills) {
-            this.callbacks.onAvailableSkills(availableSkills);
+          if (this.callbacks.onAvailableSkills) {
+            this.callbacks.onAvailableSkills(meta?.availableSkills ?? []);
           }
         } catch (err) {
           console.warn(
