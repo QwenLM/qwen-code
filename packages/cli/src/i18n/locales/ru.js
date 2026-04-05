@@ -995,15 +995,15 @@ export default {
     'Не удалось сгенерировать сводку - не получен текстовый контент из ответа LLM',
   // Thinkback
   'Review the key decisions, modifications, and bug fixes in the current session timeline.':
-    'Review the key decisions, modifications, and bug fixes in the current session timeline.',
+    'Просмотрите ключевые решения, изменения и исправления ошибок в хронологии текущей сессии.',
   'No chat client available to generate thinkback.':
-    'No chat client available to generate thinkback.',
+    'Нет доступного чат-клиента для генерации thinkback.',
   'Already generating thinkback, wait for previous request to complete':
-    'Already generating thinkback, wait for previous request to complete',
-  'No conversation found to review.': 'No conversation found to review.',
-  'Generating thinkback timeline...': 'Generating thinkback timeline...',
+    'Генерация thinkback уже выполняется, дождитесь завершения предыдущего запроса',
+  'No conversation found to review.': 'Не найдено диалогов для просмотра.',
+  'Generating thinkback timeline...': 'Генерация хронологии thinkback...',
   'Failed to generate thinkback - no text content received from LLM response':
-    'Failed to generate thinkback - no text content received from LLM response',
+    'Не удалось сгенерировать thinkback — не получен текстовый контент из ответа LLM',
 
   // ============================================================================
   // Команды - Модель

@@ -994,15 +994,16 @@ export default {
     'Falha ao gerar resumo - nenhum conteúdo de texto recebido da resposta do LLM',
   // Thinkback
   'Review the key decisions, modifications, and bug fixes in the current session timeline.':
-    'Review the key decisions, modifications, and bug fixes in the current session timeline.',
+    'Revise as principais decisões, modificações e correções de bugs na linha do tempo da sessão atual.',
   'No chat client available to generate thinkback.':
-    'No chat client available to generate thinkback.',
+    'Nenhum cliente de chat disponível para gerar o thinkback.',
   'Already generating thinkback, wait for previous request to complete':
-    'Already generating thinkback, wait for previous request to complete',
-  'No conversation found to review.': 'No conversation found to review.',
-  'Generating thinkback timeline...': 'Generating thinkback timeline...',
+    'Já gerando o thinkback, aguarde a conclusão da solicitação anterior',
+  'No conversation found to review.':
+    'Nenhuma conversa encontrada para revisar.',
+  'Generating thinkback timeline...': 'Gerando linha do tempo do thinkback...',
   'Failed to generate thinkback - no text content received from LLM response':
-    'Failed to generate thinkback - no text content received from LLM response',
+    'Falha ao gerar o thinkback - nenhum conteúdo de texto recebido da resposta do LLM',
 
   // ============================================================================
   // Commands - Model

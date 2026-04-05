@@ -23,6 +23,7 @@ describe('thinkbackCommand', () => {
   let mockContext: CommandContext;
 
   beforeEach(() => {
+    vi.clearAllMocks();
     mockContext = createMockCommandContext({
       executionMode: 'interactive',
       services: {
