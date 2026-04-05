@@ -192,7 +192,8 @@ ${textContent}
       this.params.prompt.length > 100
         ? this.params.prompt.substring(0, 97) + '...'
         : this.params.prompt;
-    return `Fetching content from ${this.params.url} and processing with prompt: "${displayPrompt}"`;
+    const format = this.params.format ?? 'auto';
+    return `Fetching content from ${this.params.url} (format: ${format}) and processing with prompt: "${displayPrompt}"`;
   }
 
   /**
