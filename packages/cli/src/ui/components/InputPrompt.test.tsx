@@ -1300,6 +1300,23 @@ describe('InputPrompt', () => {
       expect(mockBuffer.handleInput).toHaveBeenCalled();
       unmount();
     });
+
+    it('should toggle shortcuts when vim passes through ? on an empty prompt', async () => {
+      props.vimHandleInput = vi.fn().mockReturnValue(false);
+      props.onToggleShortcuts = vi.fn();
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('?');
+      await wait();
+
+      expect(props.vimHandleInput).toHaveBeenCalled();
+      expect(props.onToggleShortcuts).toHaveBeenCalled();
+      unmount();
+    });
   });
 
   describe('unfocused paste', () => {
