@@ -24,7 +24,6 @@ function pickStartupTip(): string {
   const context: TipContext = {
     lastPromptTokenCount: 0,
     contextWindowSize: 0,
-    compressionThreshold: 0,
     sessionPromptCount: 0,
     sessionCount: history.sessionCount,
     platform: process.platform,

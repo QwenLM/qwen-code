@@ -15,7 +15,6 @@ export type TipTrigger = 'startup' | 'post-response';
 export interface TipContext {
   lastPromptTokenCount: number;
   contextWindowSize: number;
-  compressionThreshold: number;
   sessionPromptCount: number;
   sessionCount: number;
   platform: string;

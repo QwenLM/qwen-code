@@ -24,8 +24,6 @@ import {
   type TipHistory,
 } from '../../services/tips/index.js';
 
-const COMPRESSION_TOKEN_THRESHOLD = 0.7;
-
 interface UseContextualTipsOptions {
   streamingState: StreamingState;
   lastPromptTokenCount: number;
@@ -76,14 +74,10 @@ export function useContextualTips({
     const contentGeneratorConfig = config.getContentGeneratorConfig();
     const contextWindowSize =
       contentGeneratorConfig?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
-    const compressionThreshold =
-      config.getChatCompression()?.contextPercentageThreshold ??
-      COMPRESSION_TOKEN_THRESHOLD;
 
     const tipContext: TipContext = {
       lastPromptTokenCount,
       contextWindowSize,
-      compressionThreshold,
       sessionPromptCount,
       sessionCount: tipHistory.sessionCount,
       platform: process.platform,

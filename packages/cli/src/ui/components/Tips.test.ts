@@ -37,7 +37,6 @@ function createContext(overrides: Partial<TipContext> = {}): TipContext {
   return {
     lastPromptTokenCount: 0,
     contextWindowSize: 1_000_000,
-    compressionThreshold: 0.7,
     sessionPromptCount: 0,
     sessionCount: 1,
     platform: 'linux',
