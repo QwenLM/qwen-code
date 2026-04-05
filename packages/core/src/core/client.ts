@@ -574,15 +574,17 @@ export class GeminiClient {
         !this.thinkingClearLatched &&
         this.lastApiCompletionTimestamp !== null
       ) {
-        if (
-          Date.now() - this.lastApiCompletionTimestamp >
-          THINKING_IDLE_THRESHOLD_MS
-        ) {
+        const idleMs = Date.now() - this.lastApiCompletionTimestamp;
+        if (idleMs > THINKING_IDLE_THRESHOLD_MS) {
           this.thinkingClearLatched = true;
+          debugLogger.debug(
+            `Thinking clear latched: idle ${Math.round(idleMs / 1000)}s > threshold ${THINKING_IDLE_THRESHOLD_MS / 1000}s`,
+          );
         }
       }
       if (this.thinkingClearLatched) {
         this.getChat().stripThoughtsFromHistoryKeepRecent(1);
+        debugLogger.debug('Stripped old thinking blocks (keeping last 1 turn)');
       }
     }
     if (messageType !== SendMessageType.Retry) {
