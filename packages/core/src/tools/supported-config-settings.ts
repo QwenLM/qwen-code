@@ -45,7 +45,7 @@ export const SUPPORTED_CONFIG_SETTINGS: Record<
         });
         return null;
       } catch (e) {
-        return e instanceof Error ? e.message : String(e);
+        return e instanceof Error ? e.message : 'Failed to set model';
       }
     },
   },

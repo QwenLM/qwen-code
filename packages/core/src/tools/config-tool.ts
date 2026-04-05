@@ -9,14 +9,10 @@ import type {
   ToolCallConfirmationDetails,
   ToolInvocation,
   ToolResult,
-
-  ToolConfirmationOutcome} from './tools.js';
-import type { PermissionDecision } from '../permissions/types.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
-  Kind
+  ToolConfirmationOutcome,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
@@ -104,9 +100,14 @@ class ConfigToolInvocation extends BaseToolInvocation<
     _abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
     const descriptor = getDescriptor(this.params.setting);
-    const currentValue = descriptor
-      ? descriptor.read(this.config)
-      : '<unknown>';
+    let currentValue = '<unknown>';
+    if (descriptor) {
+      try {
+        currentValue = descriptor.read(this.config);
+      } catch {
+        currentValue = '<error reading value>';
+      }
+    }
 
     const details: ToolInfoConfirmationDetails = {
       type: 'info',
@@ -148,8 +149,8 @@ class ConfigToolInvocation extends BaseToolInvocation<
               .join('\n');
             result += `\nAvailable models:\n${modelList}`;
           }
-        } catch {
-          // getAvailableModels may not be available in all contexts
+        } catch (err) {
+          debugLogger.debug('Failed to get available models:', err);
         }
       }
 
