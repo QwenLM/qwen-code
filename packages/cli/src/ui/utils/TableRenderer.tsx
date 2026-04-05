@@ -30,21 +30,6 @@ interface TableRendererProps {
   aligns?: ColumnAlign[];
 }
 
-/**
- * Strip inline markdown syntax from text to get plain content.
- * Used for column width calculation and text wrapping.
- */
-function stripInlineMarkdown(text: string): string {
-  return text
-    .replace(/\*\*(.*?)\*\*/g, '$1')
-    .replace(/\*(.*?)\*/g, '$1')
-    .replace(/_(.*?)_/g, '$1')
-    .replace(/~~(.*?)~~/g, '$1')
-    .replace(/`(.*?)`/g, '$1')
-    .replace(/<u>(.*?)<\/u>/g, '$1')
-    .replace(/\[(.*?)\]\(.*?\)/g, '$1');
-}
-
 /** Map Ink-compatible named colors to ANSI foreground codes */
 const INK_COLOR_TO_ANSI: Record<string, number> = {
   black: 30,
@@ -83,6 +68,24 @@ function applyColor(text: string, color: string): string {
   const code = INK_COLOR_TO_ANSI[color.toLowerCase()];
   if (code !== undefined) return `\x1b[${code}m${text}\x1b[39m`;
   return text;
+}
+
+/** Get raw ANSI foreground color escape (without reset) for re-application */
+function getColorCode(color: string): string {
+  if (!color) return '';
+  if (color.startsWith('#')) {
+    const hex =
+      color.length === 4
+        ? color[1]! + color[1]! + color[2]! + color[2]! + color[3]! + color[3]!
+        : color.slice(1);
+    const r = parseInt(hex.slice(0, 2), 16);
+    const g = parseInt(hex.slice(2, 4), 16);
+    const b = parseInt(hex.slice(4, 6), 16);
+    return `\x1b[38;2;${r};${g};${b}m`;
+  }
+  const code = INK_COLOR_TO_ANSI[color.toLowerCase()];
+  if (code !== undefined) return `\x1b[${code}m`;
+  return '';
 }
 
 /** ANSI text formatting helpers (always produce escape codes, unlike chalk) */
@@ -220,7 +223,8 @@ function wrapText(
  * This determines the minimum column width to avoid breaking words.
  */
 function getMinWordWidth(text: string): number {
-  const clean = stripAnsi(stripInlineMarkdown(text));
+  // Use rendered text so link URLs are included as unbreakable tokens
+  const clean = stripAnsi(renderMarkdownToAnsi(text));
   const words = clean.split(/\s+/).filter((w) => w.length > 0);
   if (words.length === 0) return MIN_COLUMN_WIDTH;
   return Math.max(
@@ -399,14 +403,26 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
 
         const width = columnWidths[colIndex]!;
         const displayWidth = getCachedStringWidth(stripAnsi(lineText));
-        // Header row always center-aligned; data uses column alignment
-        const align = isHeader ? 'center' : getAlign(colIndex);
+        // Respect explicit alignment; default headers to center when unspecified
+        const align =
+          aligns?.[colIndex] != null
+            ? getAlign(colIndex)
+            : isHeader
+              ? 'center'
+              : 'left';
         const padded = padAligned(lineText, displayWidth, width, align);
 
         if (isHeader) {
-          // Always apply bold + link color for headers, matching original theme
+          // Apply bold + link color; re-apply link color after inner \x1b[39m
+          // resets (e.g. from inline `code`) to match Ink's nested color behavior
+          const linkCode = getColorCode(theme.text.link);
+          // Re-apply link color after inner foreground resets (\x1b[39m)
+          const fgReset = '\x1b[39m';
+          const recolored = linkCode
+            ? padded.split(fgReset).join(fgReset + linkCode)
+            : padded;
           const styledPadded = applyColor(
-            ansiFmt.bold(padded),
+            ansiFmt.bold(recolored),
             theme.text.link,
           );
           line += ' ' + styledPadded + ' ' + borderPipe;
