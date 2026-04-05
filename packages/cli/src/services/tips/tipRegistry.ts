@@ -118,13 +118,20 @@ export const tipRegistry: ContextualTip[] = [
     priority: 50,
   },
   {
+    id: 'approval-mode-win32',
+    content:
+      'You can switch permission mode quickly with Tab or /approval-mode.',
+    trigger: 'startup',
+    isRelevant: (ctx) => ctx.platform === 'win32',
+    cooldownPrompts: 0,
+    priority: 50,
+  },
+  {
     id: 'approval-mode',
     content:
-      process.platform === 'win32'
-        ? 'You can switch permission mode quickly with Tab or /approval-mode.'
-        : 'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
+      'You can switch permission mode quickly with Shift+Tab or /approval-mode.',
     trigger: 'startup',
-    isRelevant: () => true,
+    isRelevant: (ctx) => ctx.platform !== 'win32',
     cooldownPrompts: 0,
     priority: 50,
   },

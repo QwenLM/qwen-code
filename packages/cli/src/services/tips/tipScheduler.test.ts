@@ -4,19 +4,31 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect } from 'vitest';
 import { selectTip } from './tipScheduler.js';
 import { TipHistory } from './tipHistory.js';
 import type { ContextualTip, TipContext } from './tipRegistry.js';
 
+const tempPaths: string[] = [];
+
 function tmpPath(): string {
-  return join(
+  const p = join(
     tmpdir(),
     `test-scheduler-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
   );
+  tempPaths.push(p);
+  return p;
 }
+
+afterEach(() => {
+  for (const p of tempPaths) {
+    rmSync(p, { force: true });
+  }
+  tempPaths.length = 0;
+});
 
 function createContext(overrides: Partial<TipContext> = {}): TipContext {
   return {

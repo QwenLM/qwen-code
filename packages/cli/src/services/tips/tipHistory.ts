@@ -128,7 +128,12 @@ export class TipHistory {
 
     // Increment session count for this startup
     data.sessionCount++;
-    data.tips = data.tips ?? {};
+    data.tips =
+      typeof data.tips === 'object' &&
+      data.tips !== null &&
+      !Array.isArray(data.tips)
+        ? data.tips
+        : {};
 
     const history = new TipHistory(data, filePath);
     history.persist();
