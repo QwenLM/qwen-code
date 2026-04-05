@@ -82,11 +82,12 @@ export class SystemController extends BaseController {
     }
 
     try {
-      const { collectContextData } = await import(
-        '../../../ui/commands/contextCommand.js'
-      );
+      const mod = await import('../../../ui/commands/contextCommand.js');
+      if (typeof mod.collectContextData !== 'function') {
+        throw new Error('collectContextData is not available');
+      }
       const showDetails = payload.show_details ?? false;
-      const contextUsageItem = await collectContextData(
+      const contextUsageItem = await mod.collectContextData(
         this.context.config,
         showDetails,
       );
@@ -96,11 +97,13 @@ export class SystemController extends BaseController {
         ...contextUsageItem,
       };
     } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to get context usage';
       debugLogger.error(
         '[SystemController] Failed to get context usage:',
         error,
       );
-      throw new Error('Failed to get context usage');
+      throw new Error(errorMessage);
     }
   }
 

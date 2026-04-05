@@ -37,6 +37,7 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
  * - init: Initialize project configuration
  * - summary: Generate session summary
  * - compress: Compress conversation history
+ * - context: Show context window usage (read-only diagnostic)
  */
 export const ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE = [
   'init',

@@ -319,9 +319,10 @@ export const contextCommand: SlashCommand = {
     const showDetails =
       args?.trim().toLowerCase() === 'detail' ||
       args?.trim().toLowerCase() === '-d';
+    const executionMode = context.executionMode ?? 'interactive';
     const { config } = context.services;
     if (!config) {
-      if (context.executionMode === 'interactive') {
+      if (executionMode === 'interactive') {
         context.ui.addItem(
           {
             type: MessageType.ERROR,
@@ -340,7 +341,7 @@ export const contextCommand: SlashCommand = {
 
     const contextUsageItem = await collectContextData(config, showDetails);
 
-    if (context.executionMode === 'interactive') {
+    if (executionMode === 'interactive') {
       context.ui.addItem(contextUsageItem, Date.now());
       return;
     } else {
