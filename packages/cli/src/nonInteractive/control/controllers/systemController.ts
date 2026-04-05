@@ -83,6 +83,9 @@ export class SystemController extends BaseController {
 
     try {
       const mod = await import('../../../ui/commands/contextCommand.js');
+      if (signal.aborted) {
+        throw new Error('Request aborted');
+      }
       if (typeof mod.collectContextData !== 'function') {
         throw new Error('collectContextData is not available');
       }
@@ -91,6 +94,9 @@ export class SystemController extends BaseController {
         this.context.config,
         showDetails,
       );
+      if (signal.aborted) {
+        throw new Error('Request aborted');
+      }
 
       return {
         subtype: 'get_context_usage',
