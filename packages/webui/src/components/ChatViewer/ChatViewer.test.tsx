@@ -7,11 +7,10 @@
 /** @vitest-environment jsdom */
 
 import type React from 'react';
-import { describe, it, expect, vi, afterEach } from 'vitest';
-import { createRoot } from 'react-dom/client';
 import { act } from 'react';
-import { ChatViewer } from './ChatViewer.js';
-import type { ChatMessageData } from './ChatViewer.js';
+import { createRoot } from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ChatViewer, type ChatMessageData } from './ChatViewer.js';
 
 vi.mock('../toolcalls/index.js', () => {
   const make = (id: string) => {
@@ -54,26 +53,54 @@ const render = (ui: React.ReactElement) => {
   };
 };
 
-const toolCallMessage: ChatMessageData = {
-  uuid: 'tool-1',
-  timestamp: new Date().toISOString(),
+const createToolCallMessage = (kind: string): ChatMessageData => ({
+  uuid: `${kind}-1`,
+  timestamp: '2026-03-22T16:48:35.000Z',
   type: 'tool_call',
   toolCall: {
-    toolCallId: '1',
-    kind: 'read',
-    title: 'Read file',
+    toolCallId: `${kind}-tool-call`,
+    kind,
+    title: kind,
     status: 'completed',
+    locations: [{ path: 'src/index.ts' }, { path: 'src/App.tsx' }],
   },
-};
+});
 
 describe('ChatViewer tool call routing', () => {
   afterEach(() => {
     document.body.innerHTML = '';
   });
 
-  it('renders the matching tool call component', () => {
+  it('renders the matching tool call component for read', () => {
     const { container, unmount } = render(
-      <ChatViewer messages={[toolCallMessage]} autoScroll={false} />,
+      <ChatViewer
+        messages={[createToolCallMessage('read')]}
+        autoScroll={false}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="read"]')).not.toBeNull();
+    unmount();
+  });
+
+  it('routes read_many_files to ReadToolCall', () => {
+    const { container, unmount } = render(
+      <ChatViewer
+        messages={[createToolCallMessage('read_many_files')]}
+        autoScroll={false}
+      />,
+    );
+
+    expect(container.querySelector('[data-testid="read"]')).not.toBeNull();
+    unmount();
+  });
+
+  it('routes list_directory to ReadToolCall', () => {
+    const { container, unmount } = render(
+      <ChatViewer
+        messages={[createToolCallMessage('list_directory')]}
+        autoScroll={false}
+      />,
     );
 
     expect(container.querySelector('[data-testid="read"]')).not.toBeNull();

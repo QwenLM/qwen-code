@@ -74,6 +74,7 @@ function createProvider() {
   return {
     createNewSession: vi.fn().mockResolvedValue(undefined),
     forceReLogin: vi.fn().mockResolvedValue(undefined),
+    setInitialModelId: vi.fn(),
     show: vi.fn().mockResolvedValue(undefined),
   } as unknown as WebViewProvider;
 }
@@ -211,10 +212,13 @@ describe('registerNewCommands', () => {
       () => provider,
     );
 
-    await getRegisteredHandler(openNewChatTabCommand)();
+    await getRegisteredHandler(openNewChatTabCommand)({
+      initialModelId: 'glm-5',
+    });
 
     expect(provider.show).toHaveBeenCalledTimes(1);
     expect(provider.createNewSession).not.toHaveBeenCalled();
+    expect(provider.setInitialModelId).toHaveBeenCalledWith('glm-5');
   });
 
   it('login uses the latest provider when one exists', async () => {

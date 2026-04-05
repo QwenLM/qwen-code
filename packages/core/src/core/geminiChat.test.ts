@@ -1146,6 +1146,162 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('should retry immediately when skipDelay is called during rate-limit wait', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const tpmError = new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        );
+        const successStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Success after skip' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw tpmError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(successStream);
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-skip-delay',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        // First event: RETRY with retryInfo containing skipDelay
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+        const skipDelay = first.value.retryInfo!.skipDelay!;
+
+        // Resume generator — it's now awaiting the 60s delay.
+        // Call skipDelay() to resolve it immediately instead of advancing timers.
+        const secondPromise = iterator.next();
+        skipDelay();
+        const second = await secondPromise;
+
+        // The generator should have continued to the next attempt immediately
+        expect(second.done).toBe(false);
+        expect(second.value.type).toBe(StreamEventType.RETRY); // retry-start marker
+
+        // Consume remaining events
+        const events: StreamEvent[] = [first.value, second.value];
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done) break;
+          events.push(next.value);
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Success after skip',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should exit retry loop when aborted during rate-limit delay', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const tpmError = new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        );
+        async function* failingStreamGenerator() {
+          throw tpmError;
+
+          yield {} as GenerateContentResponse;
+        }
+
+        const abortController = new AbortController();
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(failingStreamGenerator())
+          // Should never be called — abort should prevent the second attempt
+          .mockResolvedValueOnce(failingStreamGenerator());
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test', config: { abortSignal: abortController.signal } },
+          'prompt-id-abort-delay',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        // First event: RETRY with retryInfo
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+
+        // Abort while the generator is awaiting the 60s delay
+        const nextPromise = iterator.next();
+        abortController.abort();
+
+        // The generator should throw the abort error
+        await expect(nextPromise).rejects.toThrow();
+
+        // Only one API call should have been made (no retry after abort)
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+
+        // Verify the next sendMessageStream is not blocked by the old delay.
+        // If sendPromise were still pending, this would hang until the 60s
+        // timer fires — which never happens under fake timers, causing a timeout.
+        const nextStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Next request OK' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockReset()
+          .mockResolvedValueOnce(nextStream);
+
+        const stream2 = await chat.sendMessageStream(
+          'test-model',
+          { message: 'follow-up' },
+          'prompt-id-after-abort',
+        );
+        const events: StreamEvent[] = [];
+        for await (const e of stream2) {
+          events.push(e);
+        }
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Next request OK',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should retry on GLM rate limit StreamContentError with backoff delay', async () => {
       vi.useFakeTimers();
 
