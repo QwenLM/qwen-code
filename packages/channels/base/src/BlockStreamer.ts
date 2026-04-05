@@ -35,8 +35,8 @@ export class BlockStreamer {
   /** Number of blocks emitted so far. */
   blockCount = 0;
 
-  /** The most recent send error, or null if the last send succeeded. */
-  lastSendError: unknown = null;
+  /** Errors collected from failed sends during this stream. */
+  sendErrors: unknown[] = [];
 
   constructor(opts: BlockStreamerOptions) {
     this.opts = opts;
@@ -53,7 +53,10 @@ export class BlockStreamer {
     }
   }
 
-  /** Flush all remaining buffered text. Awaits all pending sends. */
+  /**
+   * Flush all remaining buffered text. Awaits all pending sends.
+   * Throws an AggregateError if any sends failed during this stream.
+   */
   async flush(): Promise<void> {
     this.clearIdleTimer();
     if (this.buffer.length > 0) {
@@ -61,6 +64,11 @@ export class BlockStreamer {
       this.buffer = '';
     }
     await this.sending;
+
+    if (this.sendErrors.length > 0) {
+      const errors = [...this.sendErrors];
+      throw new AggregateError(errors, `${errors.length} block send(s) failed`);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -99,11 +107,8 @@ export class BlockStreamer {
     this.blockCount++;
     this.sending = this.sending
       .then(() => this.opts.send(trimmed))
-      .then(() => {
-        this.lastSendError = null;
-      })
       .catch((err: unknown) => {
-        this.lastSendError = err;
+        this.sendErrors.push(err);
       });
   }
 

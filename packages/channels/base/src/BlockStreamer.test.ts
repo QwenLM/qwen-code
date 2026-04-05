@@ -22,13 +22,14 @@ describe('BlockStreamer', () => {
       minChars: number;
       maxChars: number;
       idleMs: number;
+      send: (text: string) => Promise<void>;
     }> = {},
   ) {
     return new BlockStreamer({
       minChars: overrides.minChars ?? 20,
       maxChars: overrides.maxChars ?? 60,
       idleMs: overrides.idleMs ?? 500,
-      send,
+      send: overrides.send ?? send,
     });
   }
 
@@ -195,5 +196,79 @@ describe('BlockStreamer', () => {
     expect(sent).toEqual([]);
     await s.flush();
     expect(sent).toEqual(['Hello world, no timer']);
+  });
+
+  describe('error handling', () => {
+    it('collects send errors and throws AggregateError on flush', async () => {
+      const error = new Error('send failed');
+      const s = createStreamer({
+        minChars: 5,
+        send: async () => {
+          throw error;
+        },
+      });
+
+      s.push('Hello world');
+      await expect(s.flush()).rejects.toThrow(AggregateError);
+      await expect(s.flush()).rejects.toThrow('1 block send(s) failed');
+      expect(s.sendErrors).toEqual([error]);
+    });
+
+    it('collects multiple errors across blocks', async () => {
+      let callCount = 0;
+      const s = createStreamer({
+        minChars: 5,
+        maxChars: 20,
+        send: async () => {
+          callCount++;
+          throw new Error(`fail ${callCount}`);
+        },
+      });
+
+      // Push enough to trigger multiple blocks via force-split
+      s.push('aaaa bbbb cccc dddd eeee ffff');
+
+      try {
+        await s.flush();
+      } catch (err) {
+        expect(err).toBeInstanceOf(AggregateError);
+        expect((err as AggregateError).errors.length).toBeGreaterThanOrEqual(2);
+      }
+      expect(s.sendErrors.length).toBeGreaterThanOrEqual(2);
+    });
+
+    it('tracks errors even when some sends succeed', async () => {
+      let callCount = 0;
+      const s = createStreamer({
+        minChars: 5,
+        maxChars: 20,
+        send: async (text: string) => {
+          callCount++;
+          if (callCount === 2) throw new Error('second failed');
+          sent.push(text);
+        },
+      });
+
+      s.push('aaaa bbbb cccc dddd eeee ffff gggg hhhh');
+
+      try {
+        await s.flush();
+      } catch (err) {
+        expect(err).toBeInstanceOf(AggregateError);
+        expect((err as AggregateError).errors).toHaveLength(1);
+      }
+      // Some blocks were sent successfully
+      expect(sent.length).toBeGreaterThanOrEqual(1);
+      // The error is tracked
+      expect(s.sendErrors).toHaveLength(1);
+      expect((s.sendErrors[0] as Error).message).toBe('second failed');
+    });
+
+    it('flush succeeds when all sends succeed', async () => {
+      const s = createStreamer({ minChars: 5 });
+      s.push('Hello world');
+      await s.flush(); // should not throw
+      expect(s.sendErrors).toEqual([]);
+    });
   });
 });
