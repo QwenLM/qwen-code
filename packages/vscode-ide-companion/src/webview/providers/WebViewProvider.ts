@@ -32,6 +32,8 @@ export class WebViewProvider {
   private conversationStore: ConversationStore;
   private disposables: vscode.Disposable[] = [];
   private agentInitialized = false; // Track if agent has been initialized
+  private lastMessageFromWebview: unknown | null = null;
+  private lastMessageToWebview: unknown | null = null;
   // Track a pending permission request and its resolver so extension commands
   // can "simulate" user choice from the command palette (e.g. after accepting
   // a diff, auto-allow read/execute, or auto-reject on cancel).
@@ -648,6 +650,7 @@ export class WebViewProvider {
     // Handle messages from WebView
     newPanel.webview.onDidReceiveMessage(
       async (message: { type: string; data?: unknown }) => {
+        this.lastMessageFromWebview = message;
         // Suppress UI-originated diff opens in auto/yolo mode
         if (message.type === 'openDiff' && this.isAutoMode()) {
           return;
@@ -1311,6 +1314,7 @@ export class WebViewProvider {
    * Send message to WebView
    */
   private sendMessageToWebView(message: unknown): void {
+    this.lastMessageToWebview = message;
     this.updateAuthStateFromMessage(message);
     this.getActiveWebview()?.postMessage(message);
   }
@@ -1348,6 +1352,32 @@ export class WebViewProvider {
 
   private getActiveWebview(): vscode.Webview | null {
     return this.panelManager.getPanel()?.webview ?? this.attachedWebview;
+  }
+
+  getLastWebviewMessageForTest(): unknown | null {
+    return this.lastMessageFromWebview;
+  }
+
+  getLastMessageToWebviewForTest(): unknown | null {
+    return this.lastMessageToWebview;
+  }
+
+  getAuthStateForTest(): boolean | null {
+    return this.authState;
+  }
+
+  getAgentConnectionStateForTest(): {
+    agentInitialized: boolean;
+    isConnected: boolean;
+    currentSessionId: string | null;
+    authState: boolean | null;
+  } {
+    return {
+      agentInitialized: this.agentInitialized,
+      isConnected: this.agentManager.isConnected,
+      currentSessionId: this.agentManager.currentSessionId,
+      authState: this.authState,
+    };
   }
 
   /**

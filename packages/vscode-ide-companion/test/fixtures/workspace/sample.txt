@@ -1,0 +1,1 @@
+Sample file for VS Code integration tests.

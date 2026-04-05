@@ -194,9 +194,12 @@
     "package": "vsce package --no-dependencies",
     "test": "vitest run",
     "test:ci": "vitest run --coverage",
+    "test:integration": "node ./test/runTest.cjs",
+    "test:e2e:vscode": "playwright test -c e2e-vscode/playwright.config.ts",
     "validate:notices": "node ./scripts/validate-notices.js"
   },
   "devDependencies": {
+    "@playwright/test": "^1.57.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "@types/markdown-it": "^14.1.2",
@@ -207,6 +210,7 @@
     "@types/vscode": "^1.85.0",
     "@typescript-eslint/eslint-plugin": "^8.31.1",
     "@typescript-eslint/parser": "^8.31.1",
+    "@vscode/test-electron": "^2.5.2",
     "@vscode/vsce": "^3.6.0",
     "autoprefixer": "^10.4.22",
     "esbuild": "^0.25.3",
@@ -220,8 +224,8 @@
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
-    "@qwen-code/webui": "*",
     "@modelcontextprotocol/sdk": "^1.25.1",
+    "@qwen-code/webui": "*",
     "cors": "^2.8.5",
     "express": "^5.1.0",
     "markdown-it": "^14.1.0",

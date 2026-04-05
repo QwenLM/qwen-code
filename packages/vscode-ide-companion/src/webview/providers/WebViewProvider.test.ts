@@ -29,6 +29,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 }));
 
 vi.mock('vscode', () => ({
+  ProgressLocation: {
+    Notification: 15,
+  },
   Uri: {
     joinPath: vi.fn((base: { fsPath?: string }, ...parts: string[]) => ({
       fsPath: `${base.fsPath ?? ''}/${parts.join('/')}`.replace(/\/+/g, '/'),
@@ -39,6 +42,12 @@ vi.mock('vscode', () => ({
     onDidChangeActiveTextEditor: mockOnDidChangeActiveTextEditor,
     onDidChangeTextEditorSelection: mockOnDidChangeTextEditorSelection,
     activeTextEditor: undefined,
+    withProgress: vi.fn(
+      (
+        _options: unknown,
+        callback: (progress: { report: (value: unknown) => void }) => unknown,
+      ) => callback({ report: vi.fn() }),
+    ),
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/workspace-root' } }],
@@ -52,8 +61,11 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
   QwenAgentManager: class {
     isConnected = false;
     currentSessionId = null;
-    connect = vi.fn();
-    createNewSession = vi.fn();
+    connect = vi.fn().mockResolvedValue({
+      requiresAuth: false,
+      sessionCreated: true,
+    });
+    createNewSession = vi.fn().mockResolvedValue('session-1');
     setModelFromUi = vi.fn();
     onMessage = vi.fn();
     onStreamChunk = vi.fn();
@@ -78,10 +90,9 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
 vi.mock('../../services/conversationStore.js', () => ({
   ConversationStore: class {
     constructor(_context: unknown) {}
-    createConversation = vi.fn().mockResolvedValue({
-      id: 'conversation-1',
-      messages: [],
-    });
+    createConversation = vi
+      .fn()
+      .mockResolvedValue({ id: 'conv-1', messages: [] });
   },
 }));
 
@@ -101,6 +112,7 @@ vi.mock('./PanelManager.js', async (importOriginal) => {
 
 vi.mock('./MessageHandler.js', () => ({
   MessageHandler: class {
+    currentConversationId: string | null = null;
     constructor(
       _agentManager: unknown,
       _conversationStore: unknown,
@@ -110,8 +122,10 @@ vi.mock('./MessageHandler.js', () => ({
     setLoginHandler = vi.fn();
     setPermissionHandler = vi.fn();
     setAskUserQuestionHandler = vi.fn();
-    setCurrentConversationId = vi.fn();
-    getCurrentConversationId = vi.fn(() => 'conversation-1');
+    setCurrentConversationId = vi.fn((id: string | null) => {
+      this.currentConversationId = id;
+    });
+    getCurrentConversationId = vi.fn(() => this.currentConversationId);
     setupFileWatchers = vi.fn(() => ({ dispose: vi.fn() }));
     appendStreamContent = vi.fn();
     route = vi.fn();
@@ -133,7 +147,9 @@ vi.mock('../../utils/authErrors.js', () => ({
 }));
 
 vi.mock('../../utils/errorMessage.js', () => ({
-  getErrorMessage: vi.fn((error: unknown) => String(error)),
+  getErrorMessage: vi.fn((error: unknown) =>
+    error instanceof Error ? error.message : String(error),
+  ),
 }));
 
 import { WebViewProvider } from './WebViewProvider.js';
@@ -296,6 +312,128 @@ describe('WebViewProvider.attachToView', () => {
       },
     });
     expect(panelPostMessage).not.toHaveBeenCalled();
+  });
+
+  it('sends authState=false and initializes an empty conversation when init requires login', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    const postMessage = vi.fn();
+
+    (
+      provider as unknown as {
+        attachedWebview: { postMessage: (message: unknown) => void };
+      }
+    ).attachedWebview = {
+      postMessage,
+    };
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          connect: ReturnType<typeof vi.fn>;
+          createNewSession: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    agentManager.connect.mockResolvedValueOnce({
+      requiresAuth: true,
+      sessionCreated: false,
+    });
+
+    await (
+      provider as unknown as {
+        doInitializeAgentConnection: (options?: unknown) => Promise<void>;
+      }
+    ).doInitializeAgentConnection({
+      autoAuthenticate: false,
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'authState',
+      data: { authenticated: false },
+    });
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'conversationLoaded',
+      data: { id: 'conv-1', messages: [] },
+    });
+    expect(agentManager.createNewSession).not.toHaveBeenCalled();
+    expect(provider.getAuthStateForTest()).toBe(false);
+  });
+
+  it('emits loginSuccess after forceReLogin reconnects successfully', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    const postMessage = vi.fn();
+
+    (
+      provider as unknown as {
+        attachedWebview: { postMessage: (message: unknown) => void };
+        agentInitialized: boolean;
+      }
+    ).attachedWebview = {
+      postMessage,
+    };
+    (
+      provider as unknown as {
+        attachedWebview: { postMessage: (message: unknown) => void };
+        agentInitialized: boolean;
+      }
+    ).agentInitialized = true;
+
+    const doInitializeAgentConnection = vi
+      .spyOn(
+        provider as unknown as {
+          doInitializeAgentConnection: (options?: unknown) => Promise<void>;
+        },
+        'doInitializeAgentConnection',
+      )
+      .mockResolvedValue(undefined);
+
+    await provider.forceReLogin();
+
+    expect(doInitializeAgentConnection).toHaveBeenCalledWith({
+      autoAuthenticate: true,
+    });
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'loginSuccess',
+      data: { message: 'Successfully logged in!' },
+    });
+    expect(provider.getAuthStateForTest()).toBe(true);
+  });
+
+  it('emits loginError after forceReLogin fails', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    const postMessage = vi.fn();
+
+    (
+      provider as unknown as {
+        attachedWebview: { postMessage: (message: unknown) => void };
+      }
+    ).attachedWebview = {
+      postMessage,
+    };
+
+    vi.spyOn(
+      provider as unknown as {
+        doInitializeAgentConnection: (options?: unknown) => Promise<void>;
+      },
+      'doInitializeAgentConnection',
+    ).mockRejectedValue(new Error('boom'));
+
+    await expect(provider.forceReLogin()).rejects.toThrow('boom');
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'loginError',
+      data: { message: 'Login failed: boom' },
+    });
+    expect(provider.getAuthStateForTest()).toBe(false);
   });
 });
 
