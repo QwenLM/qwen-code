@@ -1,0 +1,140 @@
+name: PR CI Status Monitor
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  checks: read
+  pull-requests: read
+
+jobs:
+  check-pr-ci-status:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Get PR CI Status
+        id: ci_status
+        run: |
+          PR_NUMBER=2910
+          REPO="QwenLM/qwen-code"
+
+          # Get PR details
+          PR_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}")
+
+          PR_HTTP_CODE=$(echo "$PR_RESPONSE" | tail -n1)
+          PR_BODY=$(echo "$PR_RESPONSE" | sed '$d')
+
+          if [ "$PR_HTTP_CODE" -ne 200 ]; then
+            echo "::error::Failed to fetch PR #${PR_NUMBER}. HTTP code: ${PR_HTTP_CODE}"
+            echo "$PR_BODY"
+            echo "pr_state=error" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          PR_STATE=$(echo "$PR_BODY" | jq -r '.state')
+          echo "PR state: ${PR_STATE}"
+
+          # Get combined status for the PR head SHA
+          PR_SHA=$(echo "$PR_BODY" | jq -r '.head.sha')
+          echo "PR SHA: ${PR_SHA}"
+
+          # Get check runs for this SHA
+          CHECKS_RESPONSE=$(curl -s -w "\n%{http_code}" \
+            -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${REPO}/commits/${PR_SHA}/check-runs")
+
+          CHECKS_HTTP_CODE=$(echo "$CHECKS_RESPONSE" | tail -n1)
+          CHECKS_BODY=$(echo "$CHECKS_RESPONSE" | sed '$d')
+
+          if [ "$CHECKS_HTTP_CODE" -ne 200 ]; then
+            echo "::error::Failed to fetch check runs. HTTP code: ${CHECKS_HTTP_CODE}"
+            echo "pr_state=error" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+
+          # Parse check results
+          TOTAL_CHECKS=$(echo "$CHECKS_BODY" | jq '.total_count')
+          FAILED_CHECKS=$(echo "$CHECKS_BODY" | jq '[.check_runs[] | select(.conclusion == "failure")] | length')
+          SUCCESS_CHECKS=$(echo "$CHECKS_BODY" | jq '[.check_runs[] | select(.conclusion == "success")] | length')
+          PENDING_CHECKS=$(echo "$CHECKS_BODY" | jq '[.check_runs[] | select(.conclusion == null or .conclusion == "pending" or .conclusion == "neutral" or .conclusion == "action_required" or .conclusion == "stale" or .conclusion == "timed_out" or .conclusion == "cancelled")] | length')
+
+          echo "Total checks: ${TOTAL_CHECKS}"
+          echo "Success: ${SUCCESS_CHECKS}"
+          echo "Failed: ${FAILED_CHECKS}"
+          echo "Pending: ${PENDING_CHECKS}"
+
+          # Determine overall state
+          if [ "$FAILED_CHECKS" -gt 0 ]; then
+            echo "pr_state=failed" >> $GITHUB_OUTPUT
+            echo "::error::CI checks FAILED. ${FAILED_CHECKS} of ${TOTAL_CHECKS} checks failed."
+
+            # Log failed check names
+            echo "$CHECKS_BODY" | jq -r '.check_runs[] | select(.conclusion == "failure") | "FAILED: \(.name) - \(.html_url)"'
+          elif [ "$PENDING_CHECKS" -gt 0 ]; then
+            echo "pr_state=pending" >> $GITHUB_OUTPUT
+            echo "::notice::CI checks still PENDING. ${PENDING_CHECKS} of ${TOTAL_CHECKS} checks pending."
+          elif [ "$SUCCESS_CHECKS" -eq "$TOTAL_CHECKS" ] && [ "$TOTAL_CHECKS" -gt 0 ]; then
+            echo "pr_state=success" >> $GITHUB_OUTPUT
+            echo "::notice::All CI checks PASSED. PR #${PR_NUMBER} is ready for merge!"
+          else
+            echo "pr_state=unknown" >> $GITHUB_OUTPUT
+            echo "::warning::Could not determine CI status. Total: ${TOTAL_CHECKS}, Success: ${SUCCESS_CHECKS}"
+          fi
+
+      - name: Handle Failed CI
+        if: steps.ci_status.outputs.pr_state == 'failed'
+        run: |
+          echo "::error::PR #2910 CI checks have FAILED."
+          echo "Waiting for next run to recheck..."
+          exit 0
+
+      - name: Handle Pending CI
+        if: steps.ci_status.outputs.pr_state == 'pending'
+        run: |
+          echo "::notice::PR #2910 CI checks are still running."
+          echo "Will recheck in 15 minutes..."
+          exit 0
+
+      - name: PR Ready to Merge
+        if: steps.ci_status.outputs.pr_state == 'success'
+        run: |
+          echo "✅ All CI checks passed for PR #2910!"
+          echo "PR is ready for merge."
+
+          # Write status to artifact
+          mkdir -p pr-status
+          cat > pr-status/pr-2910-status.json << 'EOF'
+          {
+            "pr_number": 2910,
+            "repository": "QwenLM/qwen-code",
+            "status": "ready_for_merge",
+            "all_checks_passed": true,
+            "checked_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          }
+          EOF
+
+          echo "Status written to pr-status/pr-2910-status.json"
+          cat pr-status/pr-2910-status.json
+
+      - name: Upload PR Status Artifact
+        if: steps.ci_status.outputs.pr_state == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: pr-2910-status
+          path: pr-status/pr-2910-status.json
+          retention-days: 7
+
+      - name: Handle Unknown State
+        if: steps.ci_status.outputs.pr_state == 'unknown'
+        run: |
+          echo "::warning::Could not determine CI status for PR #2910."
+          echo "This might mean no checks have run yet."
+          exit 0

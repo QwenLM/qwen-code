@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "github": {
+      "description": "GitHub API для работы с PR, issues, CI",
+      "tools": [
+        "create_pr",
+        "update_pr",
+        "get_pr_status",
+        "add_comment",
+        "get_diff"
+      ]
+    },
+    "code-sandbox": {
+      "description": "Безопасное выполнение кода с низким приоритетом",
+      "tools": ["run_tests", "run_lint", "run_build"]
+    }
+  }
+}

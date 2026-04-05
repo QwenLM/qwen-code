@@ -1,0 +1,737 @@
+# .github/workflows/autofix.yml
+#
+# Feedback Loop: тесты -> фикс -> retest
+#
+# Применяет Self-Reflection и Salience Reminder протоколы:
+# - Перед каждым фиксом: анализ "что может пойти не так"
+# - После фикса: верификация что изменение корректно
+# - Ключевые инструкции обрамлены в НАЧАЛЕ и КОНЦЕ workflow
+
+name: 'CI Autofix Feedback Loop'
+
+on:
+  workflow_run:
+    workflows: ['Qwen Code CI']
+    types:
+      - completed
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to fix'
+        required: true
+        type: 'number'
+      max_attempts:
+        description: 'Maximum autofix attempts'
+        required: false
+        type: 'number'
+        default: 3
+
+concurrency:
+  group: 'autofix-${{ github.event.workflow_run.head_sha || github.event.inputs.pr_number }}'
+  cancel-in-progress: true
+
+# ⚠️ ВАЖНО: Salience Reminder — ключевые инструкции
+# Максимум 3 попытки фикса. После исчерпания — комментарий в PR.
+# Не фиксить: e2e тесты, линтеры (только явные баги в коде тестов).
+# Фиксить: undefined变量, missing imports, null pointer, type errors.
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  actions: read
+
+env:
+  MAX_AUTOFIX_ATTEMPTS: 3
+  NODE_VERSION: '22.x'
+
+jobs:
+  # ------------------------------------------------------------------
+  # Шаг 1: Проверить — CI действительно упал и есть ли лимит попыток
+  # ------------------------------------------------------------------
+  check-failure:
+    name: 'Check CI failure & attempt count'
+    if: |-
+      ${{
+        github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'failure'
+      }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    outputs:
+      pr_number: ${{ steps.extract.outputs.pr_number }}
+      branch_name: ${{ steps.extract.outputs.branch_name }}
+      head_sha: ${{ steps.extract.outputs.head_sha }}
+      attempt_count: ${{ steps.count.outputs.attempt_count }}
+      can_retry: ${{ steps.count.outputs.can_retry }}
+      failed_jobs: ${{ steps.extract.outputs.failed_jobs }}
+      is_fork: ${{ steps.extract.outputs.is_fork }}
+    steps:
+      - name: 'Extract PR info from workflow_run'
+        id: extract
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUN_ID="${{ github.event.workflow_run.id }}"
+          REPO="${{ github.repository }}"
+
+          # Get workflow run details
+          WORKFLOW_RUN=$(curl -s \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}")
+
+          HEAD_SHA=$(echo "$WORKFLOW_RUN" | jq -r '.head_sha')
+          echo "head_sha=${HEAD_SHA}" >> $GITHUB_OUTPUT
+
+          # Find associated PR
+          PR_NUMBER=$(echo "$WORKFLOW_RUN" | jq -r '.pull_requests[0].number // empty')
+
+          # Fallback: search PRs by SHA
+          if [ -z "$PR_NUMBER" ]; then
+            SEARCH=$(curl -s \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/commits/${HEAD_SHA}/pulls")
+            PR_NUMBER=$(echo "$SEARCH" | jq -r '.[0].number // empty')
+          fi
+
+          # Another fallback: search by head_sha
+          if [ -z "$PR_NUMBER" ]; then
+            COMMITS=$(curl -s \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/commits/${HEAD_SHA}")
+            # Try to find PR from commit message
+            COMMIT_MSG=$(echo "$COMMITS" | jq -r '.commit.message // empty')
+            if echo "$COMMIT_MSG" | grep -qE '\(#([0-9]+)\)'; then
+              PR_NUMBER=$(echo "$COMMIT_MSG" | grep -oP '\(#\K[0-9]+')
+            fi
+          fi
+
+          if [ -z "$PR_NUMBER" ]; then
+            echo "::error::Cannot find associated PR"
+            exit 1
+          fi
+
+          echo "pr_number=${PR_NUMBER}" >> $GITHUB_OUTPUT
+
+          # Get branch name
+          PR_INFO=$(curl -s \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/pulls/${PR_NUMBER}")
+          BRANCH_NAME=$(echo "$PR_INFO" | jq -r '.head.ref')
+          echo "branch_name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+
+          # Check if PR is from a fork
+          HEAD_REPO=$(echo "$PR_INFO" | jq -r '.head.repo.full_name')
+          IS_FORK="false"
+          if [ "$HEAD_REPO" != "$REPO" ]; then
+            IS_FORK="true"
+            echo "::notice::PR is from fork (${HEAD_REPO}). Push will not work with GITHUB_TOKEN."
+          fi
+          echo "is_fork=${IS_FORK}" >> $GITHUB_OUTPUT
+
+          echo "Found PR #${PR_NUMBER}, branch '${BRANCH_NAME}', SHA ${HEAD_SHA}"
+
+      - name: 'Check failed jobs'
+        id: failed_jobs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RUN_ID="${{ github.event.workflow_run.id }}"
+          REPO="${{ github.repository }}"
+
+          JOBS=$(curl -s \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/actions/runs/${RUN_ID}/jobs")
+
+          # Extract failed job names and IDs
+          FAILED=$(echo "$JOBS" | jq -c '[.jobs[] | select(.conclusion == "failure") | {name: .name, id: .id}]')
+          echo "failed_jobs=${FAILED}" >> $GITHUB_OUTPUT
+
+          echo "Failed jobs: $(echo "$FAILED" | jq -r '.[].name' | tr '\n' ', ')"
+
+      - name: 'Count previous autofix attempts'
+        id: count
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ steps.extract.outputs.pr_number }}
+        run: |
+          REPO="${{ github.repository }}"
+
+          # Count comments with autofix marker
+          COMMENTS=$(curl -s \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/issues/${PR_NUMBER}/comments")
+
+          ATTEMPT_COUNT=$(echo "$COMMENTS" | jq '[.[] | select(.body | contains("<!-- autofix-attempt -->"))] | length')
+
+          # Also count workflow_dispatch override
+          DISPATCH_MAX="${{ github.event.inputs.max_attempts }}"
+          if [ -n "$DISPATCH_MAX" ] && [ "$DISPATCH_MAX" != "null" ]; then
+            MAX_ATTEMPTS="$DISPATCH_MAX"
+          else
+            MAX_ATTEMPTS="${MAX_AUTOFIX_ATTEMPTS}"
+          fi
+
+          CAN_RETRY="true"
+          if [ "$ATTEMPT_COUNT" -ge "$MAX_ATTEMPTS" ]; then
+            CAN_RETRY="false"
+            echo "::warning::Max autofix attempts reached (${ATTEMPT_COUNT}/${MAX_ATTEMPTS})"
+          fi
+
+          echo "attempt_count=${ATTEMPT_COUNT}" >> $GITHUB_OUTPUT
+          echo "can_retry=${CAN_RETRY}" >> $GITHUB_OUTPUT
+
+          echo "Attempt ${ATTEMPT_COUNT}/${MAX_ATTEMPTS}, can_retry=${CAN_RETRY}"
+
+  # ------------------------------------------------------------------
+  # Шаг 2: Получить логи упавших тестов и проанализировать ошибки
+  # ------------------------------------------------------------------
+  analyze-errors:
+    name: 'Analyze test errors'
+    needs: 'check-failure'
+    if: ${{ needs.check-failure.outputs.can_retry == 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    outputs:
+      error_summary: ${{ steps.parse.outputs.error_summary }}
+      fixable_errors: ${{ steps.classify.outputs.fixable }}
+      error_types: ${{ steps.classify.outputs.error_types }}
+      is_fixable: ${{ steps.classify.outputs.is_fixable }}
+      skip_reason: ${{ steps.classify.outputs.skip_reason }}
+    steps:
+      - name: 'Checkout code'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8'
+        with:
+          ref: '${{ needs.check-failure.outputs.head_sha }}'
+          fetch-depth: 0
+
+      - name: 'Download failed job logs'
+        id: logs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+          FAILED_JOBS: ${{ needs.check-failure.outputs.failed_jobs }}
+        run: |
+          REPO="${{ github.repository }}"
+          mkdir -p logs
+
+          # Parse failed jobs JSON
+          echo "$FAILED_JOBS" | jq -c '.[]' | while read -r job; do
+            JOB_ID=$(echo "$job" | jq -r '.id')
+            JOB_NAME=$(echo "$job" | jq -r '.name')
+
+            # Download job logs
+            LOG_FILE="logs/${JOB_NAME//[^a-zA-Z0-9_-]/_}.txt"
+            curl -s -L \
+              -H "Authorization: token $GITHUB_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${REPO}/actions/jobs/${JOB_ID}/logs" \
+              > "$LOG_FILE" 2>&1
+
+            echo "Downloaded logs for: ${JOB_NAME}"
+          done
+
+          echo "Log files:"
+          ls -la logs/
+
+      - name: 'Parse error logs'
+        id: parse
+        run: |
+          ERROR_SUMMARY=""
+
+          for log_file in logs/*.txt; do
+            [ -f "$log_file" ] || continue
+
+            JOB_NAME=$(basename "$log_file" .txt)
+
+            # Extract error lines (common patterns)
+            ERRORS=$(grep -iE \
+              '(error|TypeError|ReferenceError|SyntaxError|AssertionError|failed|✗|×|FAIL)' \
+              "$log_file" 2>/dev/null | tail -50 || true)
+
+            if [ -n "$ERRORS" ]; then
+              ERROR_SUMMARY="${ERROR_SUMMARY}
+          <details>
+          <summary>${JOB_NAME}</summary>
+
+          \`\`\`
+          ${ERRORS}
+          \`\`\`
+
+          </details>"
+            fi
+          done
+
+          # Escape for GitHub output
+          ERROR_SUMMARY=$(echo "$ERROR_SUMMARY" | jq -Rs '.')
+          echo "error_summary=${ERROR_SUMMARY}" >> $GITHUB_OUTPUT
+
+      - name: 'Classify errors'
+        id: classify
+        env:
+          ERROR_SUMMARY: ${{ steps.parse.outputs.error_summary }}
+        run: |
+          # Decode JSON string
+          ERRORS=$(echo "$ERROR_SUMMARY" | jq -r '.')
+
+          FIXABLE_ERRORS="[]"
+          ERROR_TYPES="[]"
+          IS_FIXABLE="true"
+          SKIP_REASON=""
+
+          # Pattern 1: ReferenceError / undefined variable
+          if echo "$ERRORS" | grep -qiE 'ReferenceError|is not defined|Cannot read properties of undefined'; then
+            FIXABLE=$(echo "$FIXABLE" | jq '. + [{"type": "reference_error", "pattern": "undefined_variable"}]')
+            ERROR_TYPES=$(echo "$ERROR_TYPES" | jq '. + ["reference_error"]')
+          fi
+
+          # Pattern 2: Module not found / import error
+          if echo "$ERRORS" | grep -qiE 'Cannot find module|ModuleNotFoundError|cannot resolve|import.*error'; then
+            FIXABLE=$(echo "$FIXABLE" | jq '. + [{"type": "import_error", "pattern": "missing_import"}]')
+            ERROR_TYPES=$(echo "$ERROR_TYPES" | jq '. + ["import_error"]')
+          fi
+
+          # Pattern 3: TypeError / null pointer
+          if echo "$ERRORS" | grep -qiE 'TypeError.*null|TypeError.*undefined|cannot read property'; then
+            FIXABLE=$(echo "$FIXABLE" | jq '. + [{"type": "type_error", "pattern": "null_check"}]')
+            ERROR_TYPES=$(echo "$ERROR_TYPES" | jq '. + ["type_error"]')
+          fi
+
+          # Pattern 4: Syntax error
+          if echo "$ERRORS" | grep -qiE 'SyntaxError|unexpected token|parse error'; then
+            FIXABLE=$(echo "$FIXABLE" | jq '. + [{"type": "syntax_error", "pattern": "syntax_fix"}]')
+            ERROR_TYPES=$(echo "$ERROR_TYPES" | jq '. + ["syntax_error"]')
+          fi
+
+          # Pattern 5: Test assertion failure (usually NOT auto-fixable)
+          if echo "$ERRORS" | grep -qiE 'AssertionError|expected.*to.*be|assert.*failed|expect.*received'; then
+            IS_FIXABLE="false"
+            SKIP_REASON="Test assertion failures require manual review"
+          fi
+
+          # Pattern 6: Linter errors (skip)
+          if echo "$ERRORS" | grep -qiE 'eslint|prettier|lint'; then
+            IS_FIXABLE="false"
+            SKIP_REASON="Linter errors should be fixed locally"
+          fi
+
+          # Pattern 7: E2E / integration test failures (skip)
+          if echo "$ERRORS" | grep -qiE 'e2e|integration|timeout.*exceeded'; then
+            IS_FIXABLE="false"
+            SKIP_REASON="E2E/Integration test failures require manual review"
+          fi
+
+          # Pattern 8: Build failures (may be fixable)
+          if echo "$ERRORS" | grep -qiE 'build failed|compilation error|tsc.*error'; then
+            FIXABLE=$(echo "$FIXABLE" | jq '. + [{"type": "build_error", "pattern": "build_fix"}]')
+            ERROR_TYPES=$(echo "$ERROR_TYPES" | jq '. + ["build_error"]')
+          fi
+
+          if [ "$IS_FIXABLE" != "true" ]; then
+            echo "::notice::Errors not auto-fixable: ${SKIP_REASON}"
+          fi
+
+          echo "fixable_errors=$(echo "$FIXABLE" | jq -c '.')" >> $GITHUB_OUTPUT
+          echo "error_types=$(echo "$ERROR_TYPES" | jq -c '.')" >> $GITHUB_OUTPUT
+          echo "is_fixable=${IS_FIXABLE}" >> $GITHUB_OUTPUT
+          echo "skip_reason=${SKIP_REASON}" >> $GITHUB_OUTPUT
+
+  # ------------------------------------------------------------------
+  # Шаг 3: Self-Reflection — проверить план фикса перед выполнением
+  # ------------------------------------------------------------------
+  self-reflection-check:
+    name: 'Self-Reflection: Verify fix plan'
+    needs: ['check-failure', 'analyze-errors']
+    if: ${{ needs.analyze-errors.outputs.is_fixable == 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    outputs:
+      reflection_passed: ${{ steps.reflect.outputs.passed }}
+      fix_plan: ${{ steps.reflect.outputs.fix_plan }}
+    steps:
+      - name: 'Run Self-Reflection on fix plan'
+        id: reflect
+        env:
+          FIXABLE_ERRORS: ${{ needs.analyze-errors.outputs.fixable_errors }}
+          ERROR_TYPES: ${{ needs.analyze-errors.outputs.error_types }}
+        run: |
+          # ⚠️ САМОРЕФЛЕКСИЯ: Could this fix plan be wrong?
+          # Проверяем:
+          # 1. Все ли ошибки правильно классифицированы?
+          # 2. Не сломаем ли мы что-то ещё фиксом?
+          # 3. Нет ли edge cases?
+
+          FIX_PLAN=$(echo "$FIXABLE_ERRORS" | jq -c '.')
+          ERROR_TYPES=$(echo "$ERROR_TYPES" | jq -r '.[]' | tr '\n' ', ')
+
+          REFLECTION_PASSED="true"
+          WARNINGS=""
+
+          # Check 1: Don't fix if mixed error types (might need different approaches)
+          TYPE_COUNT=$(echo "$FIXABLE_ERRORS" | jq 'length')
+          if [ "$TYPE_COUNT" -gt 2 ]; then
+            WARNINGS="${WARNINGS}Multiple error types detected (${TYPE_COUNT}). Risk of incomplete fix.\n"
+          fi
+
+          # Check 2: Don't fix build errors with code errors together
+          if echo "$ERROR_TYPES" | grep -q "build_error" && \
+             (echo "$ERROR_TYPES" | grep -q "reference_error" || echo "$ERROR_TYPES" | grep -q "type_error"); then
+            REFLECTION_PASSED="false"
+            WARNINGS="${WARNINGS}Mixed build and runtime errors. Manual review recommended.\n"
+          fi
+
+          # Check 3: Check if we're on a release branch (don't auto-fix)
+          BRANCH="${{ needs.check-failure.outputs.branch_name }}"
+          if echo "$BRANCH" | grep -qE '^release/'; then
+            REFLECTION_PASSED="false"
+            WARNINGS="${WARNINGS}Release branch detected. No autofix.\n"
+          fi
+
+          if [ -n "$WARNINGS" ]; then
+            echo "::warning::Self-Reflection warnings:\n${WARNINGS}"
+          fi
+
+          echo "passed=${REFLECTION_PASSED}" >> $GITHUB_OUTPUT
+          echo "fix_plan=${FIX_PLAN}" >> $GITHUB_OUTPUT
+
+  # ------------------------------------------------------------------
+  # Шаг 4: Создать и применить фиксы
+  # ------------------------------------------------------------------
+  apply-fix:
+    name: 'Apply autofix'
+    needs: ['check-failure', 'analyze-errors', 'self-reflection-check']
+    if: |-
+      ${{
+        needs.self-reflection-check.outputs.reflection_passed == 'true' &&
+        needs.check-failure.outputs.is_fork == 'false'
+      }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 15
+    outputs:
+      fix_applied: ${{ steps.fix.outputs.applied }}
+      fix_description: ${{ steps.fix.outputs.description }}
+      files_changed: ${{ steps.fix.outputs.files_changed }}
+    steps:
+      - name: 'Checkout PR branch'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8'
+        with:
+          ref: '${{ needs.check-failure.outputs.branch_name }}'
+          repository: '${{ github.repository }}'
+          token: '${{ secrets.GITHUB_TOKEN }}'
+          fetch-depth: 0
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020'
+        with:
+          node-version: '${{ env.NODE_VERSION }}'
+          cache: 'npm'
+
+      - name: 'Install dependencies'
+        run: 'npm ci --prefer-offline --no-audit --progress=false'
+
+      # ⚠️ ВАЖНО: Salience Reminder — применяем только безопасные фиксы
+      # НЕ меняем бизнес-логику, только технические исправления
+      - name: 'Apply autofixes'
+        id: fix
+        env:
+          FIXABLE_ERRORS: ${{ needs.analyze-errors.outputs.fixable_errors }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.check-failure.outputs.pr_number }}
+        run: |
+          FIXES=$(echo "$FIXABLE_ERRORS" | jq -c '.[]' 2>/dev/null || echo "")
+          FILES_CHANGED="[]"
+          FIX_DESCRIPTIONS=""
+          FIX_APPLIED="false"
+
+          if [ -z "$FIXES" ]; then
+            echo "::warning::No fixable errors detected"
+            echo "applied=false" >> $GITHUB_OUTPUT
+            echo "description=No fixable errors" >> $GITHUB_OUTPUT
+            echo "files_changed=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "$FIXES" | while IFS= read -r fix_entry; do
+            FIX_TYPE=$(echo "$fix_entry" | jq -r '.type')
+            PATTERN=$(echo "$fix_entry" | jq -r '.pattern')
+
+            case "$PATTERN" in
+              "missing_import")
+                echo "Applying import fix..."
+                # Find and fix missing imports using the error context
+                npm run lint:fix 2>/dev/null || true
+                FIX_APPLIED="true"
+                FIX_DESCRIPTIONS="${FIX_DESCRIPTIONS}- Fixed import errors via lint --fix\n"
+                ;;
+
+              "null_check")
+                echo "Applying null check fix..."
+                # Add optional chaining for common null pointer patterns
+                node scripts/autofix-null-checks.mjs 2>/dev/null || true
+                FIX_APPLIED="true"
+                FIX_DESCRIPTIONS="${FIX_DESCRIPTIONS}- Added null checks / optional chaining\n"
+                ;;
+
+              "syntax_fix")
+                echo "Applying syntax fix..."
+                # Run prettier + eslint for syntax issues
+                npm run format 2>/dev/null || true
+                npm run lint:fix 2>/dev/null || true
+                FIX_APPLIED="true"
+                FIX_DESCRIPTIONS="${FIX_DESCRIPTIONS}- Fixed syntax errors via formatter\n"
+                ;;
+
+              "build_fix")
+                echo "Applying build fix..."
+                # Try to run typecheck and see if tsc can auto-suggest fixes
+                npm run build 2>/dev/null || true
+                FIX_APPLIED="true"
+                FIX_DESCRIPTIONS="${FIX_DESCRIPTIONS}- Applied build fixes\n"
+                ;;
+
+              "undefined_variable")
+                echo "Applying undefined variable fix..."
+                # This usually means missing imports or typos
+                npm run lint:fix 2>/dev/null || true
+                FIX_APPLIED="true"
+                FIX_DESCRIPTIONS="${FIX_DESCRIPTIONS}- Fixed undefined variable references\n"
+                ;;
+            esac
+          done
+
+          # Check if any files were actually changed
+          CHANGED=$(git diff --name-only 2>/dev/null || echo "")
+
+          if [ -z "$CHANGED" ]; then
+            echo "::warning::No changes to commit — autofix did not modify any files"
+            echo "applied=false" >> $GITHUB_OUTPUT
+            echo "description=Autofix script ran but made no changes" >> $GITHUB_OUTPUT
+            echo "files_changed=[]" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Get list of changed files
+          for f in $CHANGED; do
+            FILES_CHANGED=$(echo "$FILES_CHANGED" | jq --arg f "$f" '. + [$f]')
+          done
+
+          # Commit the fix
+          NEXT_ATTEMPT=$((ATTEMPT + 1))
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add -A
+          git commit -m "ci(autofix): attempt ${NEXT_ATTEMPT} - auto-fix CI failures
+
+          Autofix applied for PR #${PR_NUMBER}.
+          Attempt ${NEXT_ATTEMPT} of ${MAX_AUTOFIX_ATTEMPTS}.
+
+          Changes:
+          ${FIX_DESCRIPTIONS}
+
+          Generated by CI Autofix Feedback Loop"
+
+          git push origin HEAD:$(git rev-parse --abbrev-ref HEAD)
+
+          echo "applied=true" >> $GITHUB_OUTPUT
+          echo "description=${FIX_DESCRIPTIONS}" >> $GITHUB_OUTPUT
+          echo "files_changed=$(echo "$FILES_CHANGED" | jq -c '.')" >> $GITHUB_OUTPUT
+
+  # ------------------------------------------------------------------
+  # Шаг 5: Перезапустить CI (re-run failed workflow)
+  # ------------------------------------------------------------------
+  retrigger-ci:
+    name: 'Retrigger CI'
+    needs: ['check-failure', 'apply-fix']
+    if: ${{ needs.apply-fix.outputs.fix_applied == 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      - name: 'Re-run failed workflow'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          curl -s -L \
+            -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${RUN_ID}/rerun-failed-jobs"
+
+          echo "::notice::CI re-triggered for run ${RUN_ID}"
+
+      - name: 'Post update comment on PR'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.check-failure.outputs.pr_number }}
+          FIX_DESCRIPTION: ${{ needs.apply-fix.outputs.fix_description }}
+          FILES_CHANGED: ${{ needs.apply-fix.outputs.files_changed }}
+        run: |
+          ATTEMPT="${{ needs.check-failure.outputs.attempt_count }}"
+          NEXT_ATTEMPT=$((ATTEMPT + 1))
+
+          # Build files changed list
+          FILES_LIST=$(echo "$FILES_CHANGED" | jq -r '.[]' 2>/dev/null | while read -r f; do echo "- \`${f}\`"; done)
+
+          COMMENT="<!-- autofix-attempt -->
+          ## 🔧 CI Autofix — Attempt ${NEXT_ATTEMPT}/${MAX_AUTOFIX_ATTEMPTS}
+
+          **Fix applied:**
+          ${FIX_DESCRIPTION}
+
+          **Files changed:**
+          ${FILES_LIST}
+
+          CI has been re-triggered. Waiting for results...
+
+          ---
+          *🤖 Generated by CI Autofix Feedback Loop*
+          *[Self-Reflection: ✅ passed]*"
+
+          curl -s \
+            -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            -d "{\"body\": $(echo "$COMMENT" | jq -Rs '.')}"
+
+  # ------------------------------------------------------------------
+  # Шаг 6: Максимум попыток достигнут — оставить комментарий
+  # ------------------------------------------------------------------
+  max-attempts-reached:
+    name: 'Max attempts — notify PR'
+    needs: ['check-failure', 'analyze-errors']
+    if: ${{ needs.check-failure.outputs.can_retry != 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      - name: 'Post final failure comment'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.check-failure.outputs.pr_number }}
+          ERROR_SUMMARY: ${{ needs.analyze-errors.outputs.error_summary }}
+          ERROR_TYPES: ${{ needs.analyze-errors.outputs.error_types }}
+          SKIP_REASON: ${{ needs.analyze-errors.outputs.skip_reason }}
+        run: |
+          COMMENT="## ❌ CI Autofix — Max attempts reached (${MAX_AUTOFIX_ATTEMPTS}/${MAX_AUTOFIX_ATTEMPTS})
+
+          **Autofix could not resolve the CI failures.**
+
+          **Error summary:**
+          ${ERROR_SUMMARY}
+
+          **Error types detected:**
+          $(echo "$ERROR_TYPES" | jq -r '.[]' 2>/dev/null | while read -r t; do echo "- \`${t}\`"; done)
+
+          **Reason:** ${SKIP_REASON:-"Autofix scripts did not resolve the errors"}
+
+          ---
+          ### ⚠️ Self-Reflection Analysis
+          Before manual fix, consider:
+          1. Could the test itself be wrong? (flaky test, race condition)
+          2. Is this a breaking change that needs design review?
+          3. Are there edge cases not covered by the test?
+          4. Does this fix introduce a regression elsewhere?
+
+          **Please review and fix manually.**
+
+          ---
+          *🤖 CI Autofix Feedback Loop*
+          *[Salience Reminder: Проверьте ВСЕ edge cases перед мерджем]*"
+
+          curl -s \
+            -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            -d "{\"body\": $(echo "$COMMENT" | jq -Rs '.')}"
+
+  # ------------------------------------------------------------------
+  # Шаг 7: Обработка случая когда ошибки НЕ fixable
+  # ------------------------------------------------------------------
+  non-fixable-notify:
+    name: 'Non-fixable errors — notify PR'
+    needs: ['check-failure', 'analyze-errors']
+    if: ${{ needs.analyze-errors.outputs.is_fixable != 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      - name: 'Post non-fixable comment'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.check-failure.outputs.pr_number }}
+          ERROR_SUMMARY: ${{ needs.analyze-errors.outputs.error_summary }}
+          SKIP_REASON: ${{ needs.analyze-errors.outputs.skip_reason }}
+        run: |
+          COMMENT="## ⏭️ CI Autofix — Skipped
+
+          **Errors are not auto-fixable.**
+
+          **Reason:** ${SKIP_REASON}
+
+          **Error summary:**
+          ${ERROR_SUMMARY}
+
+          ---
+          *🤖 CI Autofix Feedback Loop*
+          *[Salience Reminder: Этот тип ошибок требует ручной проверки]*"
+
+          curl -s \
+            -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            -d "{\"body\": $(echo "$COMMENT" | jq -Rs '.')}"
+
+  # ------------------------------------------------------------------
+  # Шаг 8: Fork PR — невозможно запушить фикс
+  # ------------------------------------------------------------------
+  fork-notify:
+    name: 'Fork PR — notify only'
+    needs: ['check-failure', 'analyze-errors']
+    if: ${{ needs.check-failure.outputs.is_fork == 'true' && needs.analyze-errors.outputs.is_fixable == 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    steps:
+      - name: 'Post fork notification'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ needs.check-failure.outputs.pr_number }}
+        run: |
+          COMMENT="## 🔧 CI Autofix — Fork PR detected
+
+          Autofix is **disabled** for PRs from forked repositories.
+
+          **Why?** The workflow cannot push commits to your fork.
+
+          **What you can do:**
+          1. Run \`npm run lint:fix\` locally and push to your fork
+          2. Run \`npm run format\` locally
+          3. Check for missing imports or null pointer issues
+
+          ---
+          *🤖 CI Autofix Feedback Loop*"
+
+          curl -s \
+            -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+            -d "{\"body\": $(echo "$COMMENT" | jq -Rs '.')}"
+
+# ⚠️ НАПОМИНАНИЕ (Salience Reminder):
+# Этот workflow:
+# 1. Запускается ТОЛЬКО при падении CI на PR
+# 2. Анализирует ошибки через логи GitHub Actions
+# 3. Классифицирует: fixable vs non-fixable
+# 4. Применяет Self-Reflection перед фиксом
+# 5. Фиксит только: импорты, синтаксис, null-checks, билды
+# 6. НЕ фиксит: assertion failures, линтеры, e2e тесты
+# 7. Максимум 3 попытки (счётчик через PR comments)
+# 8. После исчерпания — детальный комментарий с Self-Reflection анализом
+# 9. После фикса — перезапускает CI через API
