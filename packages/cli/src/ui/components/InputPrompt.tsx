@@ -892,7 +892,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           followup.state.suggestion
         ) {
           const text = followup.state.suggestion;
-          followup.accept('enter');
+          // Skip onAccept (buffer.insert) — we pass the text directly to
+          // handleSubmitAndClear which clears the buffer synchronously.
+          // Without skipOnAccept the microtask in accept() would re-insert
+          // the suggestion into the buffer after it was already cleared.
+          followup.accept('enter', { skipOnAccept: true });
           handleSubmitAndClear(text);
           return true;
         }
