@@ -52,7 +52,7 @@ export const SUPPORTED_CONFIG_SETTINGS: Record<
 };
 
 export function isSupported(key: string): boolean {
-  return key in SUPPORTED_CONFIG_SETTINGS;
+  return Object.hasOwn(SUPPORTED_CONFIG_SETTINGS, key);
 }
 
 export function getDescriptor(

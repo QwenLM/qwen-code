@@ -43,6 +43,30 @@ describe('ConfigTool', () => {
       );
     });
 
+    it('rejects SET with empty string value', () => {
+      expect(() =>
+        tool.build({ action: 'set', setting: 'model', value: '' }),
+      ).toThrow(/Value is required/);
+    });
+
+    it('rejects SET with whitespace-only value', () => {
+      expect(() =>
+        tool.build({ action: 'set', setting: 'model', value: '   ' }),
+      ).toThrow(/Value is required/);
+    });
+
+    it('rejects prototype chain keys like toString', () => {
+      expect(() => tool.build({ action: 'get', setting: 'toString' })).toThrow(
+        /Unknown setting.*toString/,
+      );
+    });
+
+    it('rejects __proto__ as setting name', () => {
+      expect(() => tool.build({ action: 'get', setting: '__proto__' })).toThrow(
+        /Unknown setting/,
+      );
+    });
+
     it('accepts valid GET params', () => {
       expect(() =>
         tool.build({ action: 'get', setting: 'model' }),

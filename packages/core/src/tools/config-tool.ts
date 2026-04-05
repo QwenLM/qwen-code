@@ -159,8 +159,12 @@ class ConfigToolInvocation extends BaseToolInvocation<
     }
 
     // SET
+    if (value == null) {
+      const msg = `Value is required for SET operation on "${setting}".`;
+      return { llmContent: msg, returnDisplay: msg };
+    }
     const previousValue = descriptor.read(this.config);
-    const error = await descriptor.write(this.config, value!);
+    const error = await descriptor.write(this.config, value);
 
     if (error) {
       const msg = `Failed to set ${setting}: ${error}`;
@@ -199,7 +203,7 @@ export class ConfigTool extends BaseDeclarativeTool<
     }
 
     if (params.action === 'set') {
-      if (!params.value && params.value !== '') {
+      if (params.value == null || params.value.trim() === '') {
         return `Value is required when action is 'set'.`;
       }
       const descriptor = getDescriptor(params.setting);
