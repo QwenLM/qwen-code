@@ -8,7 +8,6 @@ import type React from 'react';
 import { Text, Box } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 import stripAnsi from 'strip-ansi';
-import { getPlainTextLength } from './InlineMarkdownRenderer.js';
 import { getCachedStringWidth } from './textUtils.js';
 import { theme } from '../semantic-colors.js';
 
@@ -260,10 +259,14 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     return maxMin;
   });
 
+  // Use rendered width (after markdown→ANSI) so link URLs etc. are accounted for
+  const getRenderedWidth = (text: string): number =>
+    getCachedStringWidth(stripAnsi(renderMarkdownToAnsi(text)));
+
   const idealWidths = headers.map((header, colIndex) => {
-    let maxIdeal = Math.max(getPlainTextLength(header), MIN_COLUMN_WIDTH);
+    let maxIdeal = Math.max(getRenderedWidth(header), MIN_COLUMN_WIDTH);
     for (const row of rows) {
-      maxIdeal = Math.max(maxIdeal, getPlainTextLength(row[colIndex] || ''));
+      maxIdeal = Math.max(maxIdeal, getRenderedWidth(row[colIndex] || ''));
     }
     return maxIdeal;
   });
@@ -305,20 +308,17 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     );
   }
 
-  // ── Helper: Get plain text for a cell (strips markdown + ANSI) ──
-  const getCellPlainText = (text: string): string =>
-    stripAnsi(stripInlineMarkdown(text));
-
   // Render inline markdown to ANSI-styled text; preserve existing ANSI codes.
   const getFormattedCellText = (text: string): string =>
     renderMarkdownToAnsi(text);
 
   // ── Step 4: Check max row lines to decide vertical fallback ──
+  // Use formatted text (same as renderRowLines) so row height estimate is accurate
   function calculateMaxRowLines(): number {
     let maxLines = 1;
     for (let i = 0; i < headers.length; i++) {
       const wrapped = wrapText(
-        getCellPlainText(headers[i]!),
+        getFormattedCellText(headers[i]!),
         columnWidths[i]!,
         { hard: needsHardWrap },
       );
@@ -327,7 +327,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     for (const row of rows) {
       for (let i = 0; i < colCount; i++) {
         const wrapped = wrapText(
-          getCellPlainText(row[i] || ''),
+          getFormattedCellText(row[i] || ''),
           columnWidths[i]!,
           { hard: needsHardWrap },
         );
@@ -424,9 +424,11 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
       if (rowIndex > 0) {
         lines.push(separator);
       }
-      row.forEach((cell, colIndex) => {
-        const label = headers[colIndex] || `Column ${colIndex + 1}`;
-        const value = getFormattedCellText(cell || '')
+      // Normalize row to exactly colCount (consistent with horizontal format)
+      for (let colIndex = 0; colIndex < colCount; colIndex++) {
+        const rawLabel = headers[colIndex] || `Column ${colIndex + 1}`;
+        const label = renderMarkdownToAnsi(rawLabel);
+        const value = getFormattedCellText(row[colIndex] || '')
           .trim()
           .replace(/\n+/g, ' ')
           .replace(/\s+/g, ' ')
@@ -435,7 +437,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
         lines.push(
           `${applyColor(ansiFmt.bold(`${label}:`), theme.text.link)} ${value}`,
         );
-      });
+      }
     });
     return lines.join('\n');
   }
