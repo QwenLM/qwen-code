@@ -52,11 +52,10 @@ import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
 import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../types/acpTypes.js';
-import {
-  DEFAULT_TOKEN_LIMIT,
-  tokenLimit,
-} from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
 import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
+
+// Keep aligned with packages/core/src/core/tokenLimits.ts.
+const DEFAULT_CONTEXT_LIMIT = 131_072;
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -213,32 +212,16 @@ export const App: React.FC = () => {
       return null;
     }
 
-    const modelName =
-      modelInfo?.modelId && typeof modelInfo.modelId === 'string'
-        ? modelInfo.modelId
-        : modelInfo?.name && typeof modelInfo.name === 'string'
-          ? modelInfo.name
-          : undefined;
-
     // Note: In the webview context, the contextWindowSize is already reflected in
     // modelInfo._meta.contextLimit which is computed on the extension side with the proper config.
-    // We only use tokenLimit as a fallback if metaLimit is not available.
-    const derivedLimit =
-      modelName && modelName.length > 0
-        ? tokenLimit(modelName, 'input')
-        : undefined;
-
+    // Avoid importing qwen-code-core into the browser bundle; fall back to the default limit locally.
     const metaLimitRaw = modelInfo?._meta?.['contextLimit'];
     const metaLimit =
       typeof metaLimitRaw === 'number' || metaLimitRaw === null
         ? metaLimitRaw
         : undefined;
 
-    const limit =
-      usageStats?.tokenLimit ??
-      metaLimit ??
-      derivedLimit ??
-      DEFAULT_TOKEN_LIMIT;
+    const limit = usageStats?.tokenLimit ?? metaLimit ?? DEFAULT_CONTEXT_LIMIT;
 
     const used = usageStats?.usage?.promptTokens ?? 0;
     if (typeof limit !== 'number' || limit <= 0 || used < 0) {
