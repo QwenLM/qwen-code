@@ -19,6 +19,7 @@ import type {
   CLIControlInitializeRequest,
   CLIControlSetModelRequest,
   CLIMcpServerConfig,
+  CLIControlGetContextUsageRequest,
 } from '../../types.js';
 import { getAvailableCommands } from '../../../nonInteractiveCliCommands.js';
 import {
@@ -61,8 +62,45 @@ export class SystemController extends BaseController {
       case 'supported_commands':
         return this.handleSupportedCommands(signal);
 
+      case 'get_context_usage':
+        return this.handleGetContextUsage(
+          payload as CLIControlGetContextUsageRequest,
+          signal,
+        );
+
       default:
         throw new Error(`Unsupported request subtype in SystemController`);
+    }
+  }
+
+  private async handleGetContextUsage(
+    payload: CLIControlGetContextUsageRequest,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    try {
+      const { collectContextData } = await import(
+        '../../../ui/commands/contextCommand.js'
+      );
+      const showDetails = payload.show_details ?? false;
+      const contextUsageItem = await collectContextData(
+        this.context.config,
+        showDetails,
+      );
+
+      return {
+        subtype: 'get_context_usage',
+        ...contextUsageItem,
+      };
+    } catch (error) {
+      debugLogger.error(
+        '[SystemController] Failed to get context usage:',
+        error,
+      );
+      throw new Error('Failed to get context usage');
     }
   }
 
@@ -212,6 +250,7 @@ export class SystemController extends BaseController {
       can_set_permission_mode:
         typeof this.context.config.setApprovalMode === 'function',
       can_set_model: typeof this.context.config.setModel === 'function',
+      can_get_context_usage: true,
       // SDK MCP servers are supported - messages routed through control plane
       can_handle_mcp_message: true,
     };

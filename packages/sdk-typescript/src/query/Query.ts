@@ -908,6 +908,21 @@ export class Query implements AsyncIterable<SDKMessage> {
   }
 
   /**
+   * Get context usage breakdown from the CLI
+   *
+   * @param showDetails Whether to include per-item detailed breakdowns
+   * @returns Promise resolving to context usage data
+   * @throws Error if query is closed
+   */
+  async getContextUsage(
+    showDetails: boolean = false,
+  ): Promise<Record<string, unknown> | null> {
+    return this.sendControlRequest(ControlRequestType.GET_CONTEXT_USAGE, {
+      show_details: showDetails,
+    });
+  }
+
+  /**
    * Get list of control commands supported by the CLI
    *
    * @returns Promise resolving to list of supported command names
