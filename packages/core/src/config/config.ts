@@ -663,7 +663,7 @@ export class Config {
       useCollector: params.telemetry?.useCollector,
     };
     this.gitCoAuthor = {
-      enabled: params.gitCoAuthor ?? true,
+      enabled: params.gitCoAuthor ?? false,
       name: 'Qwen-Coder',
       email: 'qwen-coder@alibabacloud.com',
     };

@@ -55,6 +55,7 @@ import {
   injectPermissionRulesIfMissing,
   persistPermissionOutcome,
 } from './permission-helpers.js';
+import { SessionApprovalCache } from '../permissions/session-approval-cache.js';
 import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
@@ -341,6 +342,7 @@ export class CoreToolScheduler {
   private chatRecordingService?: ChatRecordingService;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
+  private sessionApprovalCache = new SessionApprovalCache();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
@@ -905,6 +907,18 @@ export class CoreToolScheduler {
             reqInfo.name === ToolNames.ASK_USER_QUESTION;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
+          // Session-level approval cache: if the user has already approved
+          // this exact tool+parameters combination in the current session,
+          // auto-approve to reduce excessive confirmation dialogs.
+          if (this.sessionApprovalCache.isApproved(pmCtx)) {
+            this.setToolCallOutcome(
+              reqInfo.callId,
+              ToolConfirmationOutcome.ProceedOnce,
+            );
+            this.setStatusInternal(reqInfo.callId, 'scheduled');
+            continue;
+          }
+
           if (approvalMode === ApprovalMode.YOLO && !isAskUserQuestionTool) {
             this.setToolCallOutcome(
               reqInfo.callId,
@@ -1163,19 +1177,41 @@ export class CoreToolScheduler {
     await originalOnConfirm(outcome, payload);
 
     if (
+      outcome === ToolConfirmationOutcome.ProceedOnce ||
       outcome === ToolConfirmationOutcome.ProceedAlways ||
       outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
       outcome === ToolConfirmationOutcome.ProceedAlwaysUser
     ) {
-      // Persist permission rules for Project/User scope outcomes
-      await persistPermissionOutcome(
-        outcome,
-        (toolCall as WaitingToolCall).confirmationDetails,
-        this.config.getOnPersistPermissionRule?.(),
-        this.config.getPermissionManager?.(),
-        payload,
+      // Record in session approval cache so subsequent identical
+      // tool+parameter combinations are auto-approved, reducing
+      // excessive confirmation dialogs (Bug #2906).
+      const waitingToolCall = toolCall as WaitingToolCall;
+      const toolParams = waitingToolCall.invocation.params as Record<
+        string,
+        unknown
+      >;
+      const pmCtx = buildPermissionCheckContext(
+        toolCall.request.name,
+        toolParams,
+        this.config.getTargetDir?.() ?? '',
       );
-      await this.autoApproveCompatiblePendingTools(signal, callId);
+      this.sessionApprovalCache.approve(pmCtx);
+
+      // Persist permission rules for Project/User scope outcomes
+      if (
+        outcome === ToolConfirmationOutcome.ProceedAlways ||
+        outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+        outcome === ToolConfirmationOutcome.ProceedAlwaysUser
+      ) {
+        await persistPermissionOutcome(
+          outcome,
+          (toolCall as WaitingToolCall).confirmationDetails,
+          this.config.getOnPersistPermissionRule?.(),
+          this.config.getPermissionManager?.(),
+          payload,
+        );
+        await this.autoApproveCompatiblePendingTools(signal, callId);
+      }
     }
 
     this.setToolCallOutcome(callId, outcome);

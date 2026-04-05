@@ -42,6 +42,7 @@ describe('WASM path resolution', () => {
       'tree-sitter.wasm',
       symlinkedCliPath,
       () => realCliPath,
+      null, // explicitly disable package root resolution
     );
 
     expect(result).toBe(
@@ -78,6 +79,7 @@ describe('WASM path resolution', () => {
       'tree-sitter.wasm',
       symlinkedCliPath,
       () => realCliPath,
+      null, // explicitly disable package root resolution
     );
 
     expect(result).toBe(
@@ -93,6 +95,41 @@ describe('WASM path resolution', () => {
       ),
     );
     // Must NOT use the symlink dir (/usr/bin/vendor/...)
+    expect(result).not.toContain(path.join('/usr', 'bin', 'vendor'));
+  });
+
+  it('resolveWasmPathForModule: resolves vendor from dist/vendor when symlink hides real path (system install)', () => {
+    // Simulate system install: /usr/bin/qwen → /usr/lib/node_modules/@qwen-code/qwen-code/dist/cli.js
+    // Vendor/ is inside dist/: /usr/lib/node_modules/@qwen-code/qwen-code/dist/vendor/tree-sitter/
+    const symlinkedCliPath = path.join('/usr', 'bin', 'qwen');
+    const realCliPath = path.join(
+      '/usr',
+      'lib',
+      'node_modules',
+      '@qwen-code',
+      'qwen-code',
+      'dist',
+      'cli.js',
+    );
+    const distDir = path.join(
+      '/usr',
+      'lib',
+      'node_modules',
+      '@qwen-code',
+      'qwen-code',
+      'dist',
+    );
+
+    const result = _resolveWasmPathForTesting(
+      'tree-sitter.wasm',
+      symlinkedCliPath,
+      () => realCliPath,
+      null, // rely on resolved path, not package root
+    );
+
+    expect(result).toBe(
+      path.join(distDir, 'vendor', 'tree-sitter', 'tree-sitter.wasm'),
+    );
     expect(result).not.toContain(path.join('/usr', 'bin', 'vendor'));
   });
 });

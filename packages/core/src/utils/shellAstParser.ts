@@ -18,6 +18,7 @@ import Parser from 'web-tree-sitter';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 
 // ---------------------------------------------------------------------------
@@ -625,6 +626,25 @@ function resolveWasmPath(filename: string): string {
 }
 
 /**
+ * Resolve the directory of the `@qwen-code/qwen-code-core` package using
+ * `require.resolve()`.  This works even when the module is loaded through
+ * symlinks because Node.js module resolution follows the actual package
+ * location rather than the symlink path.
+ *
+ * Returns `null` if resolution fails (e.g. direct file copy without npm).
+ */
+function resolveCorePackageDir(): string | null {
+  try {
+    const req = createRequire(import.meta.url);
+    // Resolve the package.json of this very package to find its root.
+    const pkgPath = req.resolve('@qwen-code/qwen-code-core/package.json');
+    return path.dirname(pkgPath);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Return an ordered, deduplicated list of directories where the bundled
  * vendor directory might live.  We try multiple sources because:
  *
@@ -634,6 +654,9 @@ function resolveWasmPath(filename: string): string {
  *     additionally try `fs.realpathSync` on the raw path.
  *  3. `process.argv[1]` is the path Node.js was actually invoked with and
  *     can differ from `import.meta.url` in certain execution environments.
+ *  4. `require.resolve('@qwen-code/qwen-code-core')` finds the real package
+ *     root even when loaded through symlinks — this fixes ENOENT on system
+ *     installations where the binary is symlinked (e.g. `/usr/bin/qwen`).
  */
 function getWasmCandidateDirs(rawModulePath: string): string[] {
   const unique = new Set<string>();
@@ -665,6 +688,13 @@ function getWasmCandidateDirs(rawModulePath: string): string[] {
     }
   }
 
+  // Candidate 5: package root via require.resolve (fixes #2901).
+  // The vendor/ directory lives at the package root level, so we add it
+  // directly as a candidate.  This handles system installations where all
+  // other candidates point to symlink directories.
+  const pkgDir = resolveCorePackageDir();
+  if (pkgDir) add(pkgDir);
+
   return [...unique];
 }
 
@@ -672,6 +702,7 @@ function resolveWasmPathForModule(
   filename: string,
   moduleFilePath: string,
   resolvePath: (moduleFilePath: string) => string = resolveModuleFilePath,
+  pkgDirOverride?: string | null,
 ): string {
   const resolvedModuleFilePath = resolvePath(moduleFilePath);
   const moduleDir = path.dirname(resolvedModuleFilePath);
@@ -681,13 +712,40 @@ function resolveWasmPathForModule(
     : resolvedModuleFilePath.endsWith('.ts')
       ? 2
       : 3;
-  return path.join(
+
+  // Primary: compute from resolved module path.
+  const primaryPath = path.join(
     moduleDir,
     ...Array<string>(levelsUp).fill('..'),
     'vendor',
     'tree-sitter',
     filename,
   );
+
+  // If we are in the bundle case (levelsUp === 0), also check the package
+  // root because vendor/ may live there rather than next to the bundle.
+  // Use the package-root path only when the primary path does not exist,
+  // so that bundled installs (dist/vendor/) take precedence over source
+  // trees (package-root/vendor/).
+  if (!inSrcUtils) {
+    try {
+      if (fs.existsSync(primaryPath)) return primaryPath;
+    } catch {
+      /* ignore */
+    }
+
+    // Use override if provided (for testing), otherwise resolve from runtime.
+    const pkgDir =
+      pkgDirOverride !== undefined ? pkgDirOverride : resolveCorePackageDir();
+    if (pkgDir) {
+      const pkgRootPath = path.join(pkgDir, 'vendor', 'tree-sitter', filename);
+      if (fs.existsSync(path.join(pkgDir, 'vendor', 'tree-sitter'))) {
+        return pkgRootPath;
+      }
+    }
+  }
+
+  return primaryPath;
 }
 
 /**
@@ -1243,6 +1301,12 @@ export function _resolveWasmPathForTesting(
   filename: string,
   moduleFilePath: string,
   resolvePath?: (moduleFilePath: string) => string,
+  pkgDirOverride?: string | null,
 ): string {
-  return resolveWasmPathForModule(filename, moduleFilePath, resolvePath);
+  return resolveWasmPathForModule(
+    filename,
+    moduleFilePath,
+    resolvePath,
+    pkgDirOverride,
+  );
 }

@@ -54,7 +54,7 @@
         "gitCoAuthor": {
           "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "checkpointing": {
           "description": "Session checkpointing settings.",

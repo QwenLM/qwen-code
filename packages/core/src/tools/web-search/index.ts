@@ -57,10 +57,12 @@ class WebSearchToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * WebSearch requires confirmation for external network requests.
+   * WebSearch is read-only — it fetches information without modifying
+   * files or executing commands. Auto-approve to reduce confirmation
+   * dialogs (Bug #2906).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    return 'ask';
+    return 'allow';
   }
 
   /**
