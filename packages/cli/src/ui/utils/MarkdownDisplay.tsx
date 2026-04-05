@@ -43,10 +43,12 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const olItemRegex = /^([ \t]*)(\d+)\. +(.*)/;
   const hrRegex = /^ *([-*_] *){3,} *$/;
   const tableRowRegex = /^\s*\|(.+)\|\s*$/;
-  const tableSeparatorRegex = /^\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
+  const tableSeparatorRegex =
+    /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
 
   /** Parse column alignments from a markdown table separator like `|:---|:---:|---:|` */
-  const parseTableAligns = (line: string): ColumnAlign[] => line
+  const parseTableAligns = (line: string): ColumnAlign[] =>
+    line
       .split(/(?<!\\)\|/)
       .map((cell) => cell.trim())
       .filter((cell) => cell.length > 0)

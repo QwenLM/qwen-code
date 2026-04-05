@@ -228,6 +228,21 @@ next line
       expect(output).not.toContain('┌');
     });
 
+    it('does not treat a horizontal rule after a pipe line as a table separator', () => {
+      const text = `
+| Header |
+---
+data
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      // `---` without any `|` is a horizontal rule, not a table separator
+      expect(output).toContain('| Header |');
+      expect(output).not.toContain('┌');
+    });
+
     it('ends a table when a blank line appears', () => {
       const text = `
 | A | B |

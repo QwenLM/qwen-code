@@ -325,7 +325,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
       maxLines = Math.max(maxLines, wrapped.length);
     }
     for (const row of rows) {
-      for (let i = 0; i < row.length; i++) {
+      for (let i = 0; i < colCount; i++) {
         const wrapped = wrapText(
           getCellPlainText(row[i] || ''),
           columnWidths[i]!,
@@ -362,9 +362,15 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
 
   // ── Build row lines as pure strings ──
   function renderRowLines(cells: string[], isHeader: boolean): string[] {
+    // Normalize cells to exactly colCount (pad missing, truncate extras)
+    const normalizedCells = Array.from(
+      { length: colCount },
+      (_, i) => cells[i] || '',
+    );
+
     // Wrap each cell's formatted content. Preserve ANSI when possible.
-    const cellLines = cells.map((cell, colIndex) =>
-      wrapText(getFormattedCellText(cell || ''), columnWidths[colIndex]!, {
+    const cellLines = normalizedCells.map((cell, colIndex) =>
+      wrapText(getFormattedCellText(cell), columnWidths[colIndex]!, {
         hard: needsHardWrap,
       }),
     );
