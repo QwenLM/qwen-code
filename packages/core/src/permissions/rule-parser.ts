@@ -510,214 +510,11 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
 // Shell command matching
 // ─────────────────────────────────────────────────────────────────────────────
 
-type PendingHeredoc = {
-  delimiter: string;
-  segmentIndex: number;
-  stripLeadingTabs: boolean;
-};
-
 /**
  * Shell operator tokens that act as command boundaries.
  * Ordered by length (longest first) for correct multi-char operator detection.
- *
- * Newlines are handled separately so heredoc bodies can consume their own
- * embedded line breaks without being split into standalone commands.
  */
 const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';'];
-
-function isShellWordBoundary(char: string): boolean {
-  if (char === ' ' || char === '\t' || char === '\n' || char === '\r') {
-    return true;
-  }
-
-  return [';', '&', '|', '<', '>', '(', ')'].includes(char);
-}
-
-function isCommentStart(command: string, index: number): boolean {
-  if (command[index] !== '#') {
-    return false;
-  }
-  if (index === 0) {
-    return true;
-  }
-
-  const prev = command[index - 1]!;
-  if (prev === ' ' || prev === '\t' || prev === '\n' || prev === '\r') {
-    return true;
-  }
-
-  return [';', '&', '|', '(', ')', '<', '>'].includes(prev);
-}
-
-function isArithmeticCommandStart(command: string, index: number): boolean {
-  if (command[index] !== '(' || command[index + 1] !== '(') {
-    return false;
-  }
-  if (index === 0) {
-    return true;
-  }
-
-  const prev = command[index - 1]!;
-  return isShellWordBoundary(prev);
-}
-
-function parseHeredocOperator(
-  command: string,
-  startIndex: number,
-  segmentIndex: number,
-): { nextIndex: number; heredoc: PendingHeredoc } | null {
-  if (command[startIndex] !== '<' || command[startIndex + 1] !== '<') {
-    return null;
-  }
-
-  let i = startIndex + 2;
-  const stripLeadingTabs = command[i] === '-';
-  if (stripLeadingTabs) {
-    i++;
-  }
-
-  while (i < command.length && (command[i] === ' ' || command[i] === '\t')) {
-    i++;
-  }
-
-  let delimiter = '';
-  let inSingleQuotes = false;
-  let inDoubleQuotes = false;
-
-  while (i < command.length) {
-    const char = command[i]!;
-
-    if (!inSingleQuotes && !inDoubleQuotes && isShellWordBoundary(char)) {
-      break;
-    }
-
-    if (!inSingleQuotes && !inDoubleQuotes) {
-      if (char === "'") {
-        inSingleQuotes = true;
-        i++;
-        continue;
-      }
-
-      if (char === '"') {
-        inDoubleQuotes = true;
-        i++;
-        continue;
-      }
-
-      if (char === '\\') {
-        i++;
-        if (i >= command.length) {
-          break;
-        }
-        delimiter += command[i]!;
-        i++;
-        continue;
-      }
-
-      delimiter += char;
-      i++;
-      continue;
-    }
-
-    if (inSingleQuotes) {
-      if (char === "'") {
-        inSingleQuotes = false;
-        i++;
-        continue;
-      }
-
-      delimiter += char;
-      i++;
-      continue;
-    }
-
-    if (char === '"') {
-      inDoubleQuotes = false;
-      i++;
-      continue;
-    }
-
-    if (char === '\\') {
-      i++;
-      if (i >= command.length) {
-        break;
-      }
-      delimiter += command[i]!;
-      i++;
-      continue;
-    }
-
-    delimiter += char;
-    i++;
-  }
-
-  if (delimiter.length === 0) {
-    return null;
-  }
-
-  return {
-    nextIndex: i,
-    heredoc: {
-      delimiter,
-      segmentIndex,
-      stripLeadingTabs,
-    },
-  };
-}
-
-function consumePendingHeredocs(
-  command: string,
-  startIndex: number,
-  pendingHeredocs: PendingHeredoc[],
-  commands: string[],
-): number {
-  let i = startIndex;
-
-  for (const heredoc of pendingHeredocs) {
-    let heredocText = '';
-
-    while (i <= command.length) {
-      const lineStart = i;
-      while (i < command.length && command[i] !== '\n' && command[i] !== '\r') {
-        i++;
-      }
-      const lineEnd = i;
-
-      const rawLine = command.slice(lineStart, lineEnd);
-      const effectiveLine = heredoc.stripLeadingTabs
-        ? rawLine.replace(/^\t+/, '')
-        : rawLine;
-      heredocText += `\n${rawLine}`;
-
-      let newlineLength = 0;
-      if (
-        i < command.length &&
-        command[i] === '\r' &&
-        command[i + 1] === '\n'
-      ) {
-        newlineLength = 2;
-      } else if (
-        i < command.length &&
-        (command[i] === '\n' || command[i] === '\r')
-      ) {
-        newlineLength = 1;
-      }
-
-      commands[heredoc.segmentIndex] =
-        (commands[heredoc.segmentIndex] ?? '') + heredocText;
-
-      if (effectiveLine === heredoc.delimiter || newlineLength === 0) {
-        i = lineEnd + newlineLength;
-        break;
-      }
-
-      heredocText = '';
-      i = lineEnd + newlineLength;
-    }
-  }
-
-  return i;
-}
 
 /**
  * Split a compound shell command into its individual simple commands
@@ -734,141 +531,53 @@ function consumePendingHeredocs(
  */
 export function splitCompoundCommand(command: string): string[] {
   const commands: string[] = [];
-  const pendingHeredocs: PendingHeredoc[] = [];
-  let currentCommand = '';
   let inSingle = false;
   let inDouble = false;
-  let inComment = false;
   let escaped = false;
-  let arithmeticParenDepth = 0;
-
-  const pushCurrentCommand = () => {
-    const segment = currentCommand.trim();
-    if (segment) {
-      commands.push(segment);
-    }
-    currentCommand = '';
-  };
+  let lastSplit = 0;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
 
-    if (inComment) {
-      if (ch === '\r' || ch === '\n') {
-        inComment = false;
-      } else {
-        currentCommand += ch;
-        continue;
-      }
-    }
-
     if (escaped) {
-      currentCommand += ch;
       escaped = false;
       continue;
     }
     if (ch === '\\') {
-      currentCommand += ch;
       escaped = true;
       continue;
     }
     if (ch === "'" && !inDouble) {
-      currentCommand += ch;
       inSingle = !inSingle;
       continue;
     }
     if (ch === '"' && !inSingle) {
-      currentCommand += ch;
       inDouble = !inDouble;
       continue;
     }
     if (inSingle || inDouble) {
-      currentCommand += ch;
       continue;
-    }
-
-    if (arithmeticParenDepth > 0) {
-      currentCommand += ch;
-      if (ch === '(') {
-        arithmeticParenDepth++;
-      } else if (ch === ')') {
-        arithmeticParenDepth--;
-      }
-      continue;
-    }
-
-    if (ch === '\r' || ch === '\n') {
-      const newlineLength = ch === '\r' && command[i + 1] === '\n' ? 2 : 1;
-
-      if (pendingHeredocs.length > 0) {
-        pushCurrentCommand();
-        const nextIndex = consumePendingHeredocs(
-          command,
-          i + newlineLength,
-          pendingHeredocs,
-          commands,
-        );
-        pendingHeredocs.length = 0;
-        i = nextIndex - 1;
-        continue;
-      }
-
-      pushCurrentCommand();
-      if (newlineLength === 2) {
-        i++;
-      }
-      continue;
-    }
-
-    if (ch === '#' && isCommentStart(command, i)) {
-      currentCommand += ch;
-      inComment = true;
-      continue;
-    }
-
-    if (ch === '$' && command[i + 1] === '(' && command[i + 2] === '(') {
-      currentCommand += '$((';
-      arithmeticParenDepth = 2;
-      i += 2;
-      continue;
-    }
-
-    if (ch === '(' && isArithmeticCommandStart(command, i)) {
-      currentCommand += '((';
-      arithmeticParenDepth = 2;
-      i += 1;
-      continue;
-    }
-
-    if (ch === '<' && command[i + 1] === '<') {
-      const parsed = parseHeredocOperator(command, i, commands.length);
-      if (parsed) {
-        currentCommand += command.slice(i, parsed.nextIndex);
-        pendingHeredocs.push(parsed.heredoc);
-        i = parsed.nextIndex - 1;
-        continue;
-      }
     }
 
     // Check for shell operators (longest match first)
-    let matchedOperator = false;
     for (const op of SHELL_OPERATORS) {
       if (command.substring(i, i + op.length) === op) {
-        pushCurrentCommand();
-        i += op.length - 1;
-        matchedOperator = true;
+        const segment = command.substring(lastSplit, i).trim();
+        if (segment) {
+          commands.push(segment);
+        }
+        lastSplit = i + op.length;
+        i = lastSplit - 1; // -1 because the loop will i++
         break;
       }
     }
-
-    if (matchedOperator) {
-      continue;
-    }
-
-    currentCommand += ch;
   }
 
-  pushCurrentCommand();
+  // Add the last segment
+  const lastSegment = command.substring(lastSplit).trim();
+  if (lastSegment) {
+    commands.push(lastSegment);
+  }
 
   return commands.length > 0 ? commands : [command];
 }
