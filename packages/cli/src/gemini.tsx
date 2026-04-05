@@ -143,6 +143,7 @@ export async function startInteractiveUI(
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
+  initialQuery?: string,
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
@@ -170,6 +171,7 @@ export async function startInteractiveUI(
                   startupWarnings={startupWarnings}
                   version={version}
                   initializationResult={initializationResult}
+                  initialQuery={initialQuery}
                 />
               </AgentViewProvider>
             </VimModeProvider>
@@ -429,7 +431,7 @@ export async function main() {
       ]),
     ];
 
-    // Render UI, passing necessary config values. Check that there is no command line question.
+    // Render UI, passing necessary config values and initial query.
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
@@ -439,6 +441,7 @@ export async function main() {
         startupWarnings,
         process.cwd(),
         initializationResult!,
+        input,
       );
       return;
     }
