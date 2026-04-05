@@ -16,6 +16,7 @@ import {
   groupContent,
 } from './shared/index.js';
 import type { BaseToolCallProps } from './shared/index.js';
+import { getToolDisplayLabel } from './labelUtils.js';
 
 /**
  * Generic tool call component that can display any tool call type
@@ -29,24 +30,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
 }) => {
   const { kind, title, content, locations, toolCallId } = toolCall;
   const operationText = safeTitle(title);
-
-  /**
-   * Map tool call kind to appropriate display name
-   */
-  const getDisplayLabel = (): string => {
-    const normalizedKind = kind.toLowerCase();
-    if (normalizedKind === 'task') {
-      return 'Task';
-    } else if (normalizedKind === 'web_fetch') {
-      return 'WebFetch';
-    } else if (normalizedKind === 'web_search') {
-      return 'WebSearch';
-    } else if (normalizedKind === 'exit_plan_mode') {
-      return 'ExitPlanMode';
-    } else {
-      return kind; // fallback to original kind if not mapped
-    }
-  };
+  const displayLabel = getToolDisplayLabel({ kind, title });
 
   // Group content by type
   const { textOutputs, errors } = groupContent(content);
@@ -55,7 +39,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
   if (errors.length > 0) {
     return (
       <ToolCallCard icon="🔧">
-        <ToolCallRow label={getDisplayLabel()}>
+        <ToolCallRow label={displayLabel}>
           <div>{operationText}</div>
         </ToolCallRow>
         <ToolCallRow label="Error">
@@ -76,7 +60,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
 
       return (
         <ToolCallCard icon="🔧">
-          <ToolCallRow label={getDisplayLabel()}>
+          <ToolCallRow label={displayLabel}>
             <div>{operationText}</div>
           </ToolCallRow>
           <ToolCallRow label="Output">
@@ -95,7 +79,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
         : 'success';
     return (
       <ToolCallContainer
-        label={getDisplayLabel()}
+        label={displayLabel}
         status={statusFlag}
         toolCallId={toolCallId}
         isFirst={isFirst}
@@ -114,7 +98,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
         : 'success';
     return (
       <ToolCallContainer
-        label={getDisplayLabel()}
+        label={displayLabel}
         status={statusFlag}
         toolCallId={toolCallId}
         isFirst={isFirst}
@@ -133,7 +117,7 @@ export const GenericToolCall: FC<BaseToolCallProps> = ({
         : 'success';
     return (
       <ToolCallContainer
-        label={getDisplayLabel()}
+        label={displayLabel}
         status={statusFlag}
         toolCallId={toolCallId}
         isFirst={isFirst}

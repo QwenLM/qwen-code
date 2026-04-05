@@ -100,7 +100,13 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // This does not alter the current conversation in this tab; the new tab
         // will initialize its own state and (optionally) create a new session.
         try {
-          await vscode.commands.executeCommand('qwenCode.openNewChatTab');
+          const modelId =
+            typeof data?.modelId === 'string' && data.modelId.trim().length > 0
+              ? data.modelId.trim()
+              : undefined;
+          await vscode.commands.executeCommand('qwenCode.openNewChatTab', {
+            initialModelId: modelId,
+          });
         } catch (error) {
           console.error(
             '[SessionMessageHandler] Failed to open new chat tab:',
