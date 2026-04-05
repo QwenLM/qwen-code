@@ -68,7 +68,7 @@ export class TipHistory {
       );
     }
     // Use the persisted last-shown timestamp for cross-session recency
-    return this.data.tips[tipId]?.lastSessionTimestamp ?? 0;
+    return this.normalizeEntry(this.data.tips[tipId]).lastSessionTimestamp;
   }
 
   /**
@@ -137,7 +137,13 @@ export class TipHistory {
           parsed !== null &&
           typeof parsed.sessionCount === 'number'
         ) {
-          data = parsed as TipHistoryData;
+          data = {
+            sessionCount:
+              Number.isFinite(parsed.sessionCount) && parsed.sessionCount >= 0
+                ? Math.floor(parsed.sessionCount)
+                : 0,
+            tips: parsed.tips ?? {},
+          };
         }
       }
     } catch {
