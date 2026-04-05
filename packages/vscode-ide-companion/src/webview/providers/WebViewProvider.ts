@@ -17,6 +17,7 @@ import type {
   PermissionResponseMessage,
   AskUserQuestionResponseMessage,
 } from '../../types/webviewMessageTypes.js';
+import type { AvailableCommand } from '../../types/chatTypes.js';
 import { PanelManager, getLocalResourceRoots } from './PanelManager.js';
 import { MessageHandler } from './MessageHandler.js';
 import { WebViewContent } from './WebViewContent.js';
@@ -1630,6 +1631,13 @@ export class WebViewProvider {
       this.sendMessageToWebView({
         type: 'availableSkills',
         data: { skills: this.cachedAvailableSkills },
+      });
+    }
+
+    if (this.cachedAvailableCommands !== null) {
+      this.sendMessageToWebView({
+        type: 'availableCommands',
+        data: { commands: this.cachedAvailableCommands },
       });
     }
 
