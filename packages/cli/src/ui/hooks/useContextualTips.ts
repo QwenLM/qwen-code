@@ -10,7 +10,7 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { type Config } from '@qwen-code/qwen-code-core';
+import { type Config, DEFAULT_TOKEN_LIMIT } from '@qwen-code/qwen-code-core';
 import {
   StreamingState,
   MessageType,
@@ -24,7 +24,6 @@ import {
   type TipHistory,
 } from '../../services/tips/index.js';
 
-const DEFAULT_TOKEN_LIMIT = 1_048_576;
 const COMPRESSION_TOKEN_THRESHOLD = 0.7;
 
 interface UseContextualTipsOptions {

@@ -72,20 +72,36 @@ export class TipHistory {
   }
 
   /**
+   * Normalize a persisted tip entry so corrupted values cannot crash mutations.
+   */
+  private normalizeEntry(raw: unknown): TipHistoryEntry {
+    if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+      return { totalShown: 0, lastSessionTimestamp: 0 };
+    }
+    const candidate = raw as Partial<TipHistoryEntry>;
+    return {
+      totalShown:
+        typeof candidate.totalShown === 'number' &&
+        Number.isFinite(candidate.totalShown)
+          ? candidate.totalShown
+          : 0,
+      lastSessionTimestamp:
+        typeof candidate.lastSessionTimestamp === 'number' &&
+        Number.isFinite(candidate.lastSessionTimestamp)
+          ? candidate.lastSessionTimestamp
+          : 0,
+    };
+  }
+
+  /**
    * Record that a tip was shown at the given prompt count.
    */
   recordShown(tipId: string, currentPromptCount: number): void {
     this.sessionShown.set(tipId, currentPromptCount);
-    const entry = this.data.tips[tipId];
-    if (entry) {
-      entry.totalShown++;
-      entry.lastSessionTimestamp = Date.now();
-    } else {
-      this.data.tips[tipId] = {
-        totalShown: 1,
-        lastSessionTimestamp: Date.now(),
-      };
-    }
+    const entry = this.normalizeEntry(this.data.tips[tipId]);
+    entry.totalShown++;
+    entry.lastSessionTimestamp = Date.now();
+    this.data.tips[tipId] = entry;
     this.persist();
   }
 
@@ -98,7 +114,9 @@ export class TipHistory {
       if (!fs.existsSync(dir)) {
         fs.mkdirSync(dir, { recursive: true });
       }
-      fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2));
+      fs.writeFileSync(this.filePath, JSON.stringify(this.data, null, 2), {
+        mode: 0o600,
+      });
     } catch {
       // Silently ignore write errors — tips are non-critical
     }

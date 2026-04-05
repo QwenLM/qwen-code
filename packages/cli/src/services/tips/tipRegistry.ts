@@ -8,6 +8,8 @@
  * Contextual tip registry — defines tips, their conditions, and display rules.
  */
 
+import { DEFAULT_TOKEN_LIMIT } from '@qwen-code/qwen-code-core';
+
 export type TipTrigger = 'startup' | 'post-response';
 
 export interface TipContext {
@@ -27,11 +29,6 @@ export interface ContextualTip {
   cooldownPrompts: number;
   priority: number;
 }
-
-/**
- * Default context window size fallback (matches chatCompressionService).
- */
-const DEFAULT_TOKEN_LIMIT = 1_048_576;
 
 export function getContextUsagePercent(ctx: TipContext): number {
   const windowSize = ctx.contextWindowSize || DEFAULT_TOKEN_LIMIT;
