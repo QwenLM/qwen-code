@@ -88,6 +88,20 @@ function getColorCode(color: string): string {
   return '';
 }
 
+/**
+ * Re-apply a color code after any SGR sequence that resets foreground:
+ * \x1b[39m (default foreground) and \x1b[0m (full reset).
+ */
+function recolorAfterResets(text: string, colorCode: string): string {
+  const fgReset = '\x1b[39m';
+  const fullReset = '\x1b[0m';
+  return text
+    .split(fgReset)
+    .join(fgReset + colorCode)
+    .split(fullReset)
+    .join(fullReset + colorCode);
+}
+
 /** ANSI text formatting helpers (always produce escape codes, unlike chalk) */
 const ansiFmt = {
   bold: (t: string) => `\x1b[1m${t}\x1b[22m`,
@@ -412,12 +426,11 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
               : 'left';
         const padded = padAligned(lineText, displayWidth, width, align);
 
-        // Re-apply base color after inner foreground resets (\x1b[39m)
-        const fgReset = '\x1b[39m';
+        // Re-apply base color after any SGR reset (\x1b[39m or \x1b[0m)
         if (isHeader) {
           const linkCode = getColorCode(theme.text.link);
           const recolored = linkCode
-            ? padded.split(fgReset).join(fgReset + linkCode)
+            ? recolorAfterResets(padded, linkCode)
             : padded;
           const styledPadded = applyColor(
             ansiFmt.bold(recolored),
@@ -427,7 +440,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
         } else {
           const primaryCode = getColorCode(theme.text.primary);
           const recolored = primaryCode
-            ? padded.split(fgReset).join(fgReset + primaryCode)
+            ? recolorAfterResets(padded, primaryCode)
             : padded;
           const styledCell = primaryCode
             ? applyColor(recolored, theme.text.primary)
