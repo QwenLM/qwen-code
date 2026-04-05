@@ -8,7 +8,7 @@ import React from 'react';
 import { Text, Box } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { colorizeCode } from './CodeColorizer.js';
-import { TableRenderer } from './TableRenderer.js';
+import { TableRenderer, type ColumnAlign } from './TableRenderer.js';
 import { RenderInline } from './InlineMarkdownRenderer.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 
@@ -43,7 +43,20 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const olItemRegex = /^([ \t]*)(\d+)\. +(.*)/;
   const hrRegex = /^ *([-*_] *){3,} *$/;
   const tableRowRegex = /^\s*\|(.+)\|\s*$/;
-  const tableSeparatorRegex = /^\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)+\|?\s*$/;
+  const tableSeparatorRegex = /^\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
+
+  /** Parse column alignments from a markdown table separator like `|:---|:---:|---:|` */
+  const parseTableAligns = (line: string): ColumnAlign[] => line
+      .split(/(?<!\\)\|/)
+      .map((cell) => cell.trim())
+      .filter((cell) => cell.length > 0)
+      .map((cell) => {
+        const startsWithColon = cell.startsWith(':');
+        const endsWithColon = cell.endsWith(':');
+        if (startsWithColon && endsWithColon) return 'center';
+        if (endsWithColon) return 'right';
+        return 'left';
+      });
 
   const contentBlocks: React.ReactNode[] = [];
   let inCodeBlock = false;
@@ -54,6 +67,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   let inTable = false;
   let tableRows: string[][] = [];
   let tableHeaders: string[] = [];
+  let tableAligns: ColumnAlign[] = [];
 
   function addContentBlock(block: React.ReactNode) {
     if (block) {
@@ -111,7 +125,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         lines[index + 1].match(tableSeparatorRegex)
       ) {
         inTable = true;
-        tableHeaders = tableRowMatch[1].split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll('\\|', '|'));
+        tableHeaders = tableRowMatch[1]
+          .split(/(?<!\\)\|/)
+          .map((cell) => cell.trim().replaceAll('\\|', '|'));
         tableRows = [];
       } else {
         // Not a table, treat as regular text
@@ -124,10 +140,13 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         );
       }
     } else if (inTable && tableSeparatorMatch) {
-      // Skip separator line - already handled
+      // Parse alignment from separator line
+      tableAligns = parseTableAligns(line);
     } else if (inTable && tableRowMatch) {
       // Add table row
-      const cells = tableRowMatch[1].split(/(?<!\\)\|/).map((cell) => cell.trim().replaceAll('\\|', '|'));
+      const cells = tableRowMatch[1]
+        .split(/(?<!\\)\|/)
+        .map((cell) => cell.trim().replaceAll('\\|', '|'));
       // Ensure row has same column count as headers
       while (cells.length < tableHeaders.length) {
         cells.push('');
@@ -145,12 +164,14 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             headers={tableHeaders}
             rows={tableRows}
             contentWidth={contentWidth}
+            aligns={tableAligns}
           />,
         );
       }
       inTable = false;
       tableRows = [];
       tableHeaders = [];
+      tableAligns = [];
 
       // Process current line as normal
       if (line.trim().length > 0) {
@@ -279,6 +300,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         headers={tableHeaders}
         rows={tableRows}
         contentWidth={contentWidth}
+        aligns={tableAligns}
       />,
     );
   }
@@ -408,14 +430,21 @@ interface RenderTableProps {
   headers: string[];
   rows: string[][];
   contentWidth: number;
+  aligns?: ColumnAlign[];
 }
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
   headers,
   rows,
   contentWidth,
+  aligns,
 }) => (
-  <TableRenderer headers={headers} rows={rows} contentWidth={contentWidth} />
+  <TableRenderer
+    headers={headers}
+    rows={rows}
+    contentWidth={contentWidth}
+    aligns={aligns}
+  />
 );
 
 const RenderTable = React.memo(RenderTableInternal);

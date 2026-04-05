@@ -26,9 +26,13 @@ Another paragraph.
 
 exports[`<MarkdownDisplay /> > with 'Unix' line endings > handles a table at the end of the input 1`] = `
 "Some text before.
-| A | B |
-|---|
-| 1 | 2 |"
+
+┌─────┬─────┐
+│ [1m A [22m │ [1m B [22m │
+├─────┼─────┤
+│ 1   │ 2   │
+└─────┴─────┘
+"
 `;
 
 exports[`<MarkdownDisplay /> > with 'Unix' line endings > handles unclosed (pending) code blocks 1`] = `" 1 let y = 2;"`;
@@ -47,6 +51,28 @@ exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders a fenced code 
 `;
 
 exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders a fenced code block without a language 1`] = `" 1 plain text"`;
+
+exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders a single-column table 1`] = `
+"
+┌───────┐
+│ [1mName [22m │
+├───────┤
+│ Alice │
+├───────┤
+│ Bob   │
+└───────┘
+"
+`;
+
+exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders a single-column table with center alignment 1`] = `
+"
+┌───────┐
+│ [1mName [22m │
+├───────┤
+│ Alice │
+└───────┘
+"
+`;
 
 exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders headers with correct levels 1`] = `
 "Header 1
@@ -81,10 +107,11 @@ exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders ordered lists 
 exports[`<MarkdownDisplay /> > with 'Unix' line endings > renders tables correctly 1`] = `
 "
 ┌──────────┬──────────┐
-│ Header 1 │ Header 2 │
+│ [1mHeader 1[22m │ [1mHeader 2[22m │
 ├──────────┼──────────┤
-│ Cell 1   │ Cell 2   │
-│ Cell 3   │ Cell 4   │
+│ Cell 1   │  Cell 2  │
+├──────────┼──────────┤
+│ Cell 3   │  Cell 4  │
 └──────────┴──────────┘
 "
 `;
@@ -114,9 +141,13 @@ Another paragraph.
 
 exports[`<MarkdownDisplay /> > with 'Windows' line endings > handles a table at the end of the input 1`] = `
 "Some text before.
-| A | B |
-|---|
-| 1 | 2 |"
+
+┌─────┬─────┐
+│ [1m A [22m │ [1m B [22m │
+├─────┼─────┤
+│ 1   │ 2   │
+└─────┴─────┘
+"
 `;
 
 exports[`<MarkdownDisplay /> > with 'Windows' line endings > handles unclosed (pending) code blocks 1`] = `" 1 let y = 2;"`;
@@ -135,6 +166,28 @@ exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders a fenced co
 `;
 
 exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders a fenced code block without a language 1`] = `" 1 plain text"`;
+
+exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders a single-column table 1`] = `
+"
+┌───────┐
+│ [1mName [22m │
+├───────┤
+│ Alice │
+├───────┤
+│ Bob   │
+└───────┘
+"
+`;
+
+exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders a single-column table with center alignment 1`] = `
+"
+┌───────┐
+│ [1mName [22m │
+├───────┤
+│ Alice │
+└───────┘
+"
+`;
 
 exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders headers with correct levels 1`] = `
 "Header 1
@@ -169,10 +222,11 @@ exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders ordered lis
 exports[`<MarkdownDisplay /> > with 'Windows' line endings > renders tables correctly 1`] = `
 "
 ┌──────────┬──────────┐
-│ Header 1 │ Header 2 │
+│ [1mHeader 1[22m │ [1mHeader 2[22m │
 ├──────────┼──────────┤
-│ Cell 1   │ Cell 2   │
-│ Cell 3   │ Cell 4   │
+│ Cell 1   │  Cell 2  │
+├──────────┼──────────┤
+│ Cell 3   │  Cell 4  │
 └──────────┴──────────┘
 "
 `;
