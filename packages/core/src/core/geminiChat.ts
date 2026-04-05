@@ -588,7 +588,9 @@ export class GeminiChat {
    * longer useful for reasoning coherence but still consume context tokens.
    */
   stripThoughtsFromHistoryKeepRecent(keepTurns: number): void {
-    keepTurns = Math.max(0, Math.floor(keepTurns));
+    keepTurns = Number.isFinite(keepTurns)
+      ? Math.max(0, Math.floor(keepTurns))
+      : 0;
 
     // Find indices of model turns that contain thought parts
     const modelTurnIndices: number[] = [];
