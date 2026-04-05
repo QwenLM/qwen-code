@@ -412,12 +412,10 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
               : 'left';
         const padded = padAligned(lineText, displayWidth, width, align);
 
+        // Re-apply base color after inner foreground resets (\x1b[39m)
+        const fgReset = '\x1b[39m';
         if (isHeader) {
-          // Apply bold + link color; re-apply link color after inner \x1b[39m
-          // resets (e.g. from inline `code`) to match Ink's nested color behavior
           const linkCode = getColorCode(theme.text.link);
-          // Re-apply link color after inner foreground resets (\x1b[39m)
-          const fgReset = '\x1b[39m';
           const recolored = linkCode
             ? padded.split(fgReset).join(fgReset + linkCode)
             : padded;
@@ -427,7 +425,14 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
           );
           line += ' ' + styledPadded + ' ' + borderPipe;
         } else {
-          line += ' ' + padded + ' ' + borderPipe;
+          const primaryCode = getColorCode(theme.text.primary);
+          const recolored = primaryCode
+            ? padded.split(fgReset).join(fgReset + primaryCode)
+            : padded;
+          const styledCell = primaryCode
+            ? applyColor(recolored, theme.text.primary)
+            : recolored;
+          line += ' ' + styledCell + ' ' + borderPipe;
         }
       }
       result.push(line);
@@ -447,7 +452,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
       }
       // Normalize row to exactly colCount (consistent with horizontal format)
       for (let colIndex = 0; colIndex < colCount; colIndex++) {
-        const rawLabel = headers[colIndex] || `Column ${colIndex + 1}`;
+        const rawLabel = headers[colIndex] ?? `Column ${colIndex + 1}`;
         const label = renderMarkdownToAnsi(rawLabel);
         const value = getFormattedCellText(row[colIndex] || '')
           .trim()
