@@ -1073,7 +1073,7 @@ export class ExtensionManager {
               'success',
             ),
           );
-          this.refreshTools();
+          await this.refreshTools();
         } else {
           logExtensionInstallEvent(
             telemetryConfig,
@@ -1186,7 +1186,7 @@ export class ExtensionManager {
     if (isUpdate) return;
 
     this.removeEnablementConfig(extension.name);
-    this.refreshTools();
+    await this.refreshTools();
 
     logExtensionUninstall(
       telemetryConfig,
@@ -1337,7 +1337,7 @@ export class ExtensionManager {
   async refreshMemory(): Promise<void> {
     if (!this.config) return;
     // refresh mcp servers
-    this.config.getToolRegistry().restartMcpServers();
+    await this.config.getToolRegistry().restartMcpServers();
     // refresh skills
     this.config.getSkillManager()?.refreshCache();
     // refresh subagents
@@ -1349,7 +1349,7 @@ export class ExtensionManager {
   async refreshTools(): Promise<void> {
     if (!this.config) return;
     // FIXME: restart all mcp servers now, this can be optimized by only restarting changed ones at here
-    this.refreshMemory();
+    await this.refreshMemory();
   }
 }
 
