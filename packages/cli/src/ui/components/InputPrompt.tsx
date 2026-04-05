@@ -168,18 +168,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     }
   }, []);
 
-  const [dirs, setDirs] = useState<readonly string[]>(
-    config.getWorkspaceContext().getDirectories(),
-  );
+  const currentDirs = config.getWorkspaceContext().getDirectories();
+  const dirKey = currentDirs.join('\0');
+  const [dirs, setDirs] = useState<readonly string[]>(currentDirs);
   useEffect(() => {
-    const current = config.getWorkspaceContext().getDirectories();
-    if (
-      dirs.length !== current.length ||
-      !dirs.every((d, i) => d === current[i])
-    ) {
-      setDirs(current);
-    }
-  }, [config, dirs]);
+    setDirs(currentDirs);
+  }, [dirKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const [reverseSearchActive, setReverseSearchActive] = useState(false);
   const [commandSearchActive, setCommandSearchActive] = useState(false);
   const [textBeforeReverseSearch, setTextBeforeReverseSearch] = useState('');
