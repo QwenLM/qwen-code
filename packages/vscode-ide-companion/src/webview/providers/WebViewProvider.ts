@@ -11,13 +11,13 @@ import type {
   RequestPermissionRequest,
   AvailableCommand,
   ModelInfo,
+  AvailableCommand,
 } from '@agentclientprotocol/sdk';
 import type { AskUserQuestionRequest } from '../../types/acpTypes.js';
 import type {
   PermissionResponseMessage,
   AskUserQuestionResponseMessage,
 } from '../../types/webviewMessageTypes.js';
-import type { AvailableCommand } from '../../types/chatTypes.js';
 import { PanelManager, getLocalResourceRoots } from './PanelManager.js';
 import { MessageHandler } from './MessageHandler.js';
 import { WebViewContent } from './WebViewContent.js';
