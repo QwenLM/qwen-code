@@ -133,6 +133,10 @@
           "type": "string",
           "default": "Qwen Dark"
         },
+        "statusLine": {
+          "description": "Shell command to execute periodically to display custom information in the status line (e.g., \"curl -s api/rate-limit | jq .remaining\").",
+          "type": "string"
+        },
         "customThemes": {
           "description": "Custom theme definitions.",
           "type": "object",

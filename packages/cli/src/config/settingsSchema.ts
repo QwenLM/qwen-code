@@ -429,6 +429,16 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      statusLine: {
+        type: 'string',
+        label: 'Status Line',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Shell command to execute periodically to display custom information in the status line (e.g., "curl -s api/rate-limit | jq .remaining").',
+        showInDialog: true,
+      },
       customThemes: {
         type: 'object',
         label: 'Custom Themes',

@@ -13,6 +13,7 @@ import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
 import { ShellModeIndicator } from './ShellModeIndicator.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
+import { useStatusLine } from '../hooks/useStatusLine.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
@@ -23,6 +24,7 @@ export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
+  const customStatusLine = useStatusLine();
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -67,6 +69,12 @@ export const Footer: React.FC = () => {
   );
 
   const rightItems: Array<{ key: string; node: React.ReactNode }> = [];
+  if (customStatusLine) {
+    rightItems.push({
+      key: 'customStatusLine',
+      node: <Text color={theme.text.secondary}>{customStatusLine}</Text>,
+    });
+  }
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',

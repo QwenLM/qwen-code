@@ -241,6 +241,7 @@ export * from './utils/retry.js';
 export * from './utils/ripgrepUtils.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/shell-utils.js';
+export * from './utils/shellAstParser.js';
 export * from './utils/subagentGenerator.js';
 export * from './utils/symlink.js';
 export * from './utils/systemEncoding.js';
