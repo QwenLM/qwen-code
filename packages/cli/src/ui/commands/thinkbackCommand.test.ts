@@ -158,7 +158,7 @@ describe('thinkbackCommand', () => {
   it('handles concurrent generation in interactive mode', async () => {
     mockContext.ui.pendingItem = {
       type: 'info',
-    } as unknown as import('./types.js').HistoryItemWithoutId;
+    } as unknown as import('../types.js').HistoryItemWithoutId;
 
     if (!thinkbackCommand.action) {
       throw new Error('thinkback command must have action');

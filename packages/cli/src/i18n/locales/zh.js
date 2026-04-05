@@ -1090,6 +1090,20 @@ export default {
     '生成摘要失败 - 未从 LLM 响应中接收到文本内容',
 
   // ============================================================================
+  // Commands - Thinkback
+  // ============================================================================
+  'Review the key decisions, modifications, and bug fixes in the current session timeline.':
+    '回顾当前会话时间线中的关键决策、修改和 Bug 修复。',
+  'No chat client available to generate thinkback.':
+    '没有可用的聊天客户端来生成回顾。',
+  'Already generating thinkback, wait for previous request to complete':
+    '正在生成回顾，请等待上一个请求完成',
+  'No conversation found to review.': '未找到可回顾的对话。',
+  'Generating thinkback timeline...': '正在生成回顾时间线...',
+  'Failed to generate thinkback - no text content received from LLM response':
+    '生成回顾失败 - 未从 LLM 响应中接收到文本内容',
+
+  // ============================================================================
   // Commands - Model
   // ============================================================================
   'Switch the model for this session': '切换此会话的模型',

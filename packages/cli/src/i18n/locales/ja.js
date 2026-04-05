@@ -742,6 +742,17 @@ export default {
   'Generating project summary...': 'プロジェクトサマリーを生成中...',
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
+  // Thinkback
+  'Review the key decisions, modifications, and bug fixes in the current session timeline.':
+    '現在のセッションタイムラインの主要な決定、変更、バグ修正を振り返ります。',
+  'No chat client available to generate thinkback.':
+    '振り返りを生成するためのチャットクライアントが利用できません。',
+  'Already generating thinkback, wait for previous request to complete':
+    '振り返り生成中です。前のリクエストの完了をお待ちください',
+  'No conversation found to review.': '振り返る会話が見つかりません。',
+  'Generating thinkback timeline...': '振り返りタイムラインを生成中...',
+  'Failed to generate thinkback - no text content received from LLM response':
+    '振り返りの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
   'Switch the model for this session': 'このセッションのモデルを切り替え',
   'Set fast model for background tasks':

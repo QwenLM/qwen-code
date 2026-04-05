@@ -90,21 +90,16 @@ export const thinkbackCommand: SlashCommand = {
     }
 
     const generateThinkbackMarkdown = async (): Promise<string> => {
-      let prompt = t(
-        "Please analyze the conversation history above and extract key events to create a timeline of this session.\nFocus on:\n1. File modifications (which files were changed and why)\n2. Bug fixes and error resolutions\n3. Architectural or key design decisions made\n\nFormat the output strictly as a timeline, for example:\n# Timeline Review\n- **Step 1** — [Decision/Fix/Change] description (files affected if any)\n- **Step 2** — [Decision/Fix/Change] description (files affected if any)\n\nIf you can't determine the exact time, use relative ordering or an approximation based on the flow.",
-      );
+      // NOTE: LLM prompts are intentionally NOT wrapped in t() — translating
+      // prompts degrades model output quality.
+      let prompt =
+        "Please analyze the conversation history above and extract key events to create a timeline of this session.\nFocus on:\n1. File modifications (which files were changed and why)\n2. Bug fixes and error resolutions\n3. Architectural or key design decisions made\n\nFormat the output strictly as a timeline, for example:\n# Timeline Review\n- **Step 1** — [Decision/Fix/Change] description (files affected if any)\n- **Step 2** — [Decision/Fix/Change] description (files affected if any)\n\nIf you can't determine the exact time, use relative ordering or an approximation based on the flow.";
 
       if (fromTopic) {
-        prompt += t(
-          '\nOnly include events from the time period corresponding to: {{fromTopic}}.',
-          { fromTopic },
-        );
+        prompt += `\nOnly include events from the time period corresponding to: ${fromTopic}.`;
       }
       if (topicMatch) {
-        prompt += t(
-          '\nOnly focus on events related to the topic: {{topicMatch}}.',
-          { topicMatch },
-        );
+        prompt += `\nOnly focus on events related to the topic: ${topicMatch}.`;
       }
 
       prompt += '\nOutput directly without conversational filler.';
