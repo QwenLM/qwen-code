@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import {
   selectTip,
@@ -11,6 +13,13 @@ import {
   type TipContext,
 } from '../../services/tips/index.js';
 import { TipHistory } from '../../services/tips/tipHistory.js';
+
+function tmpPath(): string {
+  return join(
+    tmpdir(),
+    `test-tips-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+  );
+}
 
 function createContext(overrides: Partial<TipContext> = {}): TipContext {
   return {
@@ -25,11 +34,7 @@ function createContext(overrides: Partial<TipContext> = {}): TipContext {
 }
 
 function createHistory(): TipHistory {
-  // Create a TipHistory with no persistence (in-memory only)
-  return new TipHistory(
-    { sessionCount: 1, tips: {} },
-    '/tmp/test-tip-history.json',
-  );
+  return new TipHistory({ sessionCount: 1, tips: {} }, tmpPath());
 }
 
 describe('selectTip', () => {

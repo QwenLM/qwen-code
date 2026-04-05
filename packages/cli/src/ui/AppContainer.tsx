@@ -124,7 +124,7 @@ import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
-import { getTipHistory } from './components/Tips.js';
+import { getTipHistory } from '../services/tips/index.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
@@ -748,7 +748,15 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   // Contextual tips — show tips based on context usage after model responses
-  const tipHistory = useMemo(() => getTipHistory(), []);
+  // Defer TipHistory loading when tips are disabled to avoid side effects
+  // (sessionCount increment + disk write) when the user has opted out.
+  const tipsDisabled = !!(
+    settings.merged.ui?.hideTips || config.getScreenReader()
+  );
+  const tipHistory = useMemo(
+    () => (tipsDisabled ? null : getTipHistory()),
+    [tipsDisabled],
+  );
   useContextualTips({
     streamingState,
     lastPromptTokenCount: sessionStats.lastPromptTokenCount,
@@ -756,7 +764,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     tipHistory,
     addItem: historyManager.addItem,
-    hideTips: !!(settings.merged.ui?.hideTips || config.getScreenReader()),
+    hideTips: tipsDisabled,
   });
 
   // Track whether suggestions are visible for Tab key handling

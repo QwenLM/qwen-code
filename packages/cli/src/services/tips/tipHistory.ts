@@ -53,16 +53,22 @@ export class TipHistory {
   /**
    * Get a recency score for LRU sorting. Lower = shown longer ago (or never).
    * Tips shown in this session get a high score (shown recently).
-   * Tips never shown in this session fall back to cross-session totalShown.
-   * This ensures that tips rotate both within and across sessions.
+   * Tips never shown in this session fall back to cross-session
+   * lastSessionTimestamp for true recency-based rotation.
    */
   getLastShown(tipId: string): number {
     if (this.sessionShown.has(tipId)) {
-      // Add a large offset so any session-shown tip sorts after cross-session-only tips
-      return 1_000_000 + (this.sessionShown.get(tipId) ?? 0);
+      // Use a base larger than persisted epoch-millisecond timestamps so any
+      // session-shown tip sorts after cross-session-only tips, while still
+      // preserving prompt-count ordering within the current session.
+      return (
+        Number.MAX_SAFE_INTEGER -
+        1_000_000 +
+        (this.sessionShown.get(tipId) ?? 0)
+      );
     }
-    // Use totalShown as a proxy for recency across sessions
-    return this.data.tips[tipId]?.totalShown ?? 0;
+    // Use the persisted last-shown timestamp for cross-session recency
+    return this.data.tips[tipId]?.lastSessionTimestamp ?? 0;
   }
 
   /**

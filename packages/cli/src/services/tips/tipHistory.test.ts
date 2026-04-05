@@ -4,14 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { TipHistory } from './tipHistory.js';
 
-function createHistory(sessionCount = 1): TipHistory {
-  return new TipHistory(
-    { sessionCount, tips: {} },
-    '/tmp/test-tip-history-unit.json',
+function tmpPath(): string {
+  return join(
+    tmpdir(),
+    `test-tip-history-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
   );
+}
+
+function createHistory(sessionCount = 1): TipHistory {
+  return new TipHistory({ sessionCount, tips: {} }, tmpPath());
 }
 
 describe('TipHistory', () => {
@@ -59,36 +65,42 @@ describe('TipHistory', () => {
     it('returns high score after recordShown (session-shown offset)', () => {
       const history = createHistory();
       history.recordShown('tip-a', 7);
-      // Session-shown tips get 1_000_000 + promptCount offset
-      expect(history.getLastShown('tip-a')).toBe(1_000_007);
+      // Session-shown tips get Number.MAX_SAFE_INTEGER - 1_000_000 + promptCount
+      expect(history.getLastShown('tip-a')).toBe(
+        Number.MAX_SAFE_INTEGER - 1_000_000 + 7,
+      );
     });
 
     it('updates on subsequent recordShown calls', () => {
       const history = createHistory();
       history.recordShown('tip-a', 3);
       history.recordShown('tip-a', 10);
-      expect(history.getLastShown('tip-a')).toBe(1_000_010);
+      expect(history.getLastShown('tip-a')).toBe(
+        Number.MAX_SAFE_INTEGER - 1_000_000 + 10,
+      );
     });
 
-    it('falls back to totalShown from cross-session data when session has no record', () => {
+    it('falls back to lastSessionTimestamp from cross-session data when session has no record', () => {
       const history = new TipHistory(
         {
           sessionCount: 5,
-          tips: { 'tip-x': { totalShown: 3, lastSessionTimestamp: 0 } },
+          tips: { 'tip-x': { totalShown: 3, lastSessionTimestamp: 1000 } },
         },
-        '/tmp/test-fallback.json',
+        tmpPath(),
       );
-      // No sessionShown record, so fallback to totalShown=3
-      expect(history.getLastShown('tip-x')).toBe(3);
+      // No sessionShown record, so fallback to lastSessionTimestamp=1000
+      expect(history.getLastShown('tip-x')).toBe(1000);
     });
 
     it('session-shown tips always sort after cross-session-only tips', () => {
       const history = new TipHistory(
         {
           sessionCount: 5,
-          tips: { 'tip-old': { totalShown: 999, lastSessionTimestamp: 0 } },
+          tips: {
+            'tip-old': { totalShown: 999, lastSessionTimestamp: Date.now() },
+          },
         },
-        '/tmp/test-sort.json',
+        tmpPath(),
       );
       history.recordShown('tip-new', 0);
       // tip-old: cross-session only → 999

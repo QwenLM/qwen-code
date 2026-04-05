@@ -1173,15 +1173,15 @@ export default {
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
-    'Add a QWEN.md file to give Qwen Code persistent project context.',
+    'QWEN.md ファイルを追加すると、Qwen Code に永続的なプロジェクトコンテキストを与えられます。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
-    'Use /btw to ask a quick side question without disrupting the conversation.',
+    '会話を中断せずに /btw でちょっとした横道の質問ができます。',
   'Context is almost full! Run /compress now or start /new to continue.':
-    'Context is almost full! Run /compress now or start /new to continue.',
+    'コンテキストがもうすぐいっぱいです！今すぐ /compress を実行するか、/new を開始して続けてください。',
   'Context is getting full. Use /compress to free up space.':
-    'Context is getting full. Use /compress to free up space.',
+    'コンテキストが埋まりつつあります。/compress を使って空きを増やしてください。',
   'Long conversation? /compress summarizes history to free context.':
-    'Long conversation? /compress summarizes history to free context.',
+    '会話が長くなりましたか？ /compress は履歴を要約してコンテキストを空けます。',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',

@@ -4,10 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, it, expect } from 'vitest';
 import { selectTip } from './tipScheduler.js';
 import { TipHistory } from './tipHistory.js';
 import type { ContextualTip, TipContext } from './tipRegistry.js';
+
+function tmpPath(): string {
+  return join(
+    tmpdir(),
+    `test-scheduler-${Date.now()}-${Math.random().toString(36).slice(2)}.json`,
+  );
+}
 
 function createContext(overrides: Partial<TipContext> = {}): TipContext {
   return {
@@ -22,10 +31,7 @@ function createContext(overrides: Partial<TipContext> = {}): TipContext {
 }
 
 function createHistory(): TipHistory {
-  return new TipHistory(
-    { sessionCount: 10, tips: {} },
-    '/tmp/test-scheduler.json',
-  );
+  return new TipHistory({ sessionCount: 10, tips: {} }, tmpPath());
 }
 
 const tipA: ContextualTip = {

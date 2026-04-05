@@ -32,7 +32,7 @@ interface UseContextualTipsOptions {
   lastPromptTokenCount: number;
   sessionPromptCount: number;
   config: Config;
-  tipHistory: TipHistory;
+  tipHistory: TipHistory | null;
   addItem: (item: HistoryItemWithoutId, timestamp: number) => void;
   hideTips: boolean;
 }
@@ -70,7 +70,7 @@ export function useContextualTips({
     // Reset regardless of hideTips to prevent stale state accumulation
     hadResponsePhase.current = false;
 
-    if (hideTips) {
+    if (hideTips || !tipHistory) {
       return;
     }
 

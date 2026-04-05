@@ -9,23 +9,11 @@ import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { t } from '../../i18n/index.js';
 import {
-  TipHistory,
+  getTipHistory,
   selectTip,
   tipRegistry,
   type TipContext,
 } from '../../services/tips/index.js';
-
-/**
- * Shared TipHistory instance for the session. Loaded once at import time
- * so both startup tips and post-response tips use the same state.
- */
-let _tipHistory: TipHistory | null = null;
-export function getTipHistory(): TipHistory {
-  if (!_tipHistory) {
-    _tipHistory = TipHistory.load();
-  }
-  return _tipHistory;
-}
 
 /**
  * Select a startup tip. Extracted as a standalone function for clarity.
