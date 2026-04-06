@@ -98,9 +98,11 @@ Found 3 issues with auto-fixable suggestions. Apply auto-fixes? (y/n)
 When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/review-pr-<number>`) instead of switching your current branch. This means:
 
 - Your working tree, staged changes, and current branch are **never touched**
+- Dependencies are installed in the worktree (`npm ci`, etc.) so linting and build/test work
 - Build and test commands run in isolation without polluting your local build cache
 - If anything goes wrong, your environment is unaffected — just delete the worktree
 - The worktree is automatically cleaned up after the review completes
+- Review reports and cache are saved to the main project directory (not the worktree)
 
 ## PR Inline Comments
 
