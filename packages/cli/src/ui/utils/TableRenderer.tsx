@@ -229,21 +229,6 @@ function wrapText(
 }
 
 /**
- * Get the visual width of the longest word in a cell text.
- * This determines the minimum column width to avoid breaking words.
- */
-function getMinWordWidth(text: string): number {
-  // Use rendered text so link URLs are included as unbreakable tokens
-  const clean = stripAnsi(renderMarkdownToAnsi(text));
-  const words = clean.split(/\s+/).filter((w) => w.length > 0);
-  if (words.length === 0) return MIN_COLUMN_WIDTH;
-  return Math.max(
-    ...words.map((w) => getCachedStringWidth(w)),
-    MIN_COLUMN_WIDTH,
-  );
-}
-
-/**
  * Custom table renderer for markdown tables.
  *
  * Builds the table as pure ANSI strings (like Claude Code does)
@@ -269,23 +254,45 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     return <Box />;
   }
 
+  // ── Precompute per-cell metrics to avoid repeated renderMarkdownToAnsi calls ──
+  const computeMetrics = (text: string) => {
+    const rendered = renderMarkdownToAnsi(text);
+    const visible = stripAnsi(rendered);
+    const words = visible.split(/\s+/).filter((w) => w.length > 0);
+    return {
+      rendered,
+      renderedWidth: getCachedStringWidth(visible),
+      minWordWidth:
+        words.length > 0
+          ? Math.max(
+              ...words.map((w) => getCachedStringWidth(w)),
+              MIN_COLUMN_WIDTH,
+            )
+          : MIN_COLUMN_WIDTH,
+    };
+  };
+
+  const headerMetrics = headers.map((h) => computeMetrics(h));
+  const rowMetrics = rows.map((row) =>
+    Array.from({ length: colCount }, (_, i) => computeMetrics(row[i] || '')),
+  );
+
   // ── Step 1: Calculate min (longest word) and ideal (full content) widths ──
-  const minColumnWidths = headers.map((header, colIndex) => {
-    let maxMin = getMinWordWidth(header);
-    for (const row of rows) {
-      maxMin = Math.max(maxMin, getMinWordWidth(row[colIndex] || ''));
+  const minColumnWidths = headers.map((_, colIndex) => {
+    let maxMin = headerMetrics[colIndex]!.minWordWidth;
+    for (const row of rowMetrics) {
+      maxMin = Math.max(maxMin, row[colIndex]!.minWordWidth);
     }
     return maxMin;
   });
 
-  // Use rendered width (after markdown→ANSI) so link URLs etc. are accounted for
-  const getRenderedWidth = (text: string): number =>
-    getCachedStringWidth(stripAnsi(renderMarkdownToAnsi(text)));
-
-  const idealWidths = headers.map((header, colIndex) => {
-    let maxIdeal = Math.max(getRenderedWidth(header), MIN_COLUMN_WIDTH);
-    for (const row of rows) {
-      maxIdeal = Math.max(maxIdeal, getRenderedWidth(row[colIndex] || ''));
+  const idealWidths = headers.map((_, colIndex) => {
+    let maxIdeal = Math.max(
+      headerMetrics[colIndex]!.renderedWidth,
+      MIN_COLUMN_WIDTH,
+    );
+    for (const row of rowMetrics) {
+      maxIdeal = Math.max(maxIdeal, row[colIndex]!.renderedWidth);
     }
     return maxIdeal;
   });
@@ -325,31 +332,33 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     columnWidths = minColumnWidths.map((w) =>
       Math.max(Math.floor(w * scaleFactor), MIN_COLUMN_WIDTH),
     );
+    // Post-pass: MIN_COLUMN_WIDTH floor can push sum over availableWidth.
+    // Shave wider columns until the total fits.
+    let excess = columnWidths.reduce((s, w) => s + w, 0) - availableWidth;
+    while (excess > 0) {
+      const maxW = Math.max(...columnWidths);
+      if (maxW <= MIN_COLUMN_WIDTH) break;
+      const idx = columnWidths.indexOf(maxW);
+      const reduction = Math.min(excess, maxW - MIN_COLUMN_WIDTH);
+      columnWidths[idx] = maxW - reduction;
+      excess -= reduction;
+    }
   }
 
-  // Render inline markdown to ANSI-styled text; preserve existing ANSI codes.
-  const getFormattedCellText = (text: string): string =>
-    renderMarkdownToAnsi(text);
-
   // ── Step 4: Check max row lines to decide vertical fallback ──
-  // Use formatted text (same as renderRowLines) so row height estimate is accurate
   function calculateMaxRowLines(): number {
     let maxLines = 1;
-    for (let i = 0; i < headers.length; i++) {
-      const wrapped = wrapText(
-        getFormattedCellText(headers[i]!),
-        columnWidths[i]!,
-        { hard: needsHardWrap },
-      );
+    for (let i = 0; i < colCount; i++) {
+      const wrapped = wrapText(headerMetrics[i]!.rendered, columnWidths[i]!, {
+        hard: needsHardWrap,
+      });
       maxLines = Math.max(maxLines, wrapped.length);
     }
-    for (const row of rows) {
+    for (const row of rowMetrics) {
       for (let i = 0; i < colCount; i++) {
-        const wrapped = wrapText(
-          getFormattedCellText(row[i] || ''),
-          columnWidths[i]!,
-          { hard: needsHardWrap },
-        );
+        const wrapped = wrapText(row[i]!.rendered, columnWidths[i]!, {
+          hard: needsHardWrap,
+        });
         maxLines = Math.max(maxLines, wrapped.length);
       }
     }
@@ -380,18 +389,13 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   // ── Build row lines as pure strings ──
-  function renderRowLines(cells: string[], isHeader: boolean): string[] {
-    // Normalize cells to exactly colCount (pad missing, truncate extras)
-    const normalizedCells = Array.from(
-      { length: colCount },
-      (_, i) => cells[i] || '',
-    );
-
-    // Wrap each cell's formatted content. Preserve ANSI when possible.
-    const cellLines = normalizedCells.map((cell, colIndex) =>
-      wrapText(getFormattedCellText(cell), columnWidths[colIndex]!, {
-        hard: needsHardWrap,
-      }),
+  // renderedCells: pre-rendered ANSI text for each column (already colCount-normalized)
+  function renderRowLines(
+    renderedCells: string[],
+    isHeader: boolean,
+  ): string[] {
+    const cellLines = renderedCells.map((cell, colIndex) =>
+      wrapText(cell, columnWidths[colIndex]!, { hard: needsHardWrap }),
     );
 
     const maxLines = Math.max(...cellLines.map((l) => l.length), 1);
@@ -455,16 +459,14 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     const separatorWidth = Math.max(Math.min(contentWidth - 1, 40), 0);
     const separator = separatorWidth > 0 ? '─'.repeat(separatorWidth) : '';
 
-    rows.forEach((row, rowIndex) => {
+    rowMetrics.forEach((row, rowIndex) => {
       if (rowIndex > 0) {
         lines.push(separator);
       }
-      // Normalize row to exactly colCount (consistent with horizontal format)
       for (let colIndex = 0; colIndex < colCount; colIndex++) {
         const rawLabel = headers[colIndex] ?? `Column ${colIndex + 1}`;
         const label = renderMarkdownToAnsi(rawLabel);
-        const value = getFormattedCellText(row[colIndex] || '')
-          .trim()
+        const value = row[colIndex]!.rendered.trim()
           .replace(/\n+/g, ' ')
           .replace(/\s+/g, ' ')
           .trim();
@@ -498,12 +500,18 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   // ── Build the complete horizontal table as strings ──
+  const headerRendered = headerMetrics.map((m) => m.rendered);
   const tableLines: string[] = [];
   tableLines.push(renderBorderLine('top'));
-  tableLines.push(...renderRowLines(headers, true));
+  tableLines.push(...renderRowLines(headerRendered, true));
   tableLines.push(renderBorderLine('middle'));
-  rows.forEach((row, rowIndex) => {
-    tableLines.push(...renderRowLines(row, false));
+  rowMetrics.forEach((row, rowIndex) => {
+    tableLines.push(
+      ...renderRowLines(
+        row.map((m) => m.rendered),
+        false,
+      ),
+    );
     if (rowIndex < rows.length - 1) {
       tableLines.push(renderBorderLine('middle'));
     }
