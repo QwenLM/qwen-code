@@ -104,9 +104,9 @@ Found 3 issues with auto-fixable suggestions. Apply auto-fixes? (y/n)
 
 - Fixes are applied using the `edit` tool (targeted replacements, not full-file rewrites)
 - Per-file linter checks run after fixes to verify they don't introduce new issues
-- For PR reviews, fixes are committed and pushed from the worktree automatically
+- For PR reviews, fixes are committed and pushed from the worktree automatically — your working tree stays clean
 - Nice to have and low-confidence findings are never auto-fixed
-- For PR reviews, autofix operates in an isolated worktree — your working tree stays clean. Fixes are committed and pushed directly from the worktree.
+- PR review submission always uses the **pre-fix verdict** (e.g., "Request changes") since the remote PR hasn't been updated until the autofix push completes
 
 ## Worktree Isolation
 
