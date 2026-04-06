@@ -71,7 +71,18 @@ Commands for managing AI tools and models.
 | `/extensions`    | List all active extensions in current session     | `/extensions`                                 |
 | `/memory`        | Manage AI's instruction context                   | `/memory add Important Info`                  |
 
-### 1.5 Side Question (`/btw`)
+### 1.5 Built-in Skills
+
+These commands invoke bundled skills that provide specialized workflows.
+
+| Command     | Description                                                         | Usage Examples                                    |
+| ----------- | ------------------------------------------------------------------- | ------------------------------------------------- |
+| `/review`   | Review code changes with 5 parallel agents + deterministic analysis | `/review`, `/review 123`, `/review 123 --comment` |
+| `/simplify` | Review changed code for reuse, quality, and efficiency              | `/simplify`                                       |
+
+See [Code Review](./code-review.md) for full `/review` documentation.
+
+### 1.6 Side Question (`/btw`)
 
 The `/btw` command allows you to ask quick side questions without interrupting or affecting the main conversation flow.
 
