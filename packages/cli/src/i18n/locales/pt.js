@@ -1002,8 +1002,8 @@ export default {
   'No conversation found to review.':
     'Nenhuma conversa encontrada para revisar.',
   'Generating thinkback timeline...': 'Gerando linha do tempo do thinkback...',
-  'Failed to generate thinkback - no text content received from LLM response':
-    'Falha ao gerar o thinkback - nenhum conteúdo de texto recebido da resposta do LLM',
+  'No text content received from LLM response':
+    'Nenhum conteúdo de texto recebido da resposta do LLM',
   'Failed to generate thinkback timeline: {{error}}':
     'Falha ao gerar linha do tempo do thinkback: {{error}}',
 

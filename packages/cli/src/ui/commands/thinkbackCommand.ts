@@ -134,11 +134,7 @@ export const thinkbackCommand: SlashCommand = {
           .join('') || '';
 
       if (!markdown) {
-        throw new Error(
-          t(
-            'Failed to generate thinkback - no text content received from LLM response',
-          ),
-        );
+        throw new Error(t('No text content received from LLM response'));
       }
 
       return markdown;

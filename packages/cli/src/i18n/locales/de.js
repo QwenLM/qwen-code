@@ -995,8 +995,8 @@ export default {
   'No conversation found to review.':
     'Keine Unterhaltung zum Überprüfen gefunden.',
   'Generating thinkback timeline...': 'Thinkback-Zeitleiste wird generiert...',
-  'Failed to generate thinkback - no text content received from LLM response':
-    'Fehler beim Generieren von Thinkback - kein Textinhalt von der LLM-Antwort erhalten',
+  'No text content received from LLM response':
+    'Kein Textinhalt von der LLM-Antwort erhalten',
   'Failed to generate thinkback timeline: {{error}}':
     'Fehler beim Generieren der Thinkback-Zeitleiste: {{error}}',
 

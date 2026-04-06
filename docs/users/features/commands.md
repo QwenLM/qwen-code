@@ -22,7 +22,7 @@ These commands help you save, restore, and summarize work progress.
 | ------------ | --------------------------------------------------------- | ------------------------------------ |
 | `/init`      | Analyze current directory and create initial context file | `/init`                              |
 | `/summary`   | Generate project summary based on conversation history    | `/summary`                           |
-| `/compress`  | Replace chat history with summary to save Tokens          | `/compress`                          |
+| `/compress`  | Replace chat history with summary to save tokens          | `/compress`                          |
 | `/resume`    | Resume a previous conversation session                    | `/resume`                            |
 | `/restore`   | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
 | `/thinkback` | Review session timeline of key decisions, changes & fixes | `/thinkback --topic "auth"`          |
