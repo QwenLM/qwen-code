@@ -19,11 +19,11 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 ## Step 1: Determine what to review
 
-Your goal here is to understand the scope of changes so you can dispatch agents effectively in Step 2.
+Your goal here is to understand the scope of changes so you can dispatch agents effectively in Step 4.
 
 First, parse the `--comment` flag: split the arguments by whitespace, and if any token is exactly `--comment` (not a substring match — ignore tokens like `--commentary`), set the comment flag and remove that token from the argument list. If `--comment` is set but the review target is not a PR, warn the user: "Warning: `--comment` flag is ignored because the review target is not a PR." and continue without it.
 
-To disambiguate the argument type: if the argument is a pure integer, treat it as a PR number. If it's a URL containing `/pull/`, extract the PR number and check if the URL's owner/repo matches the current repository (run `gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'`). If it matches, proceed with the normal worktree flow. If it's a **cross-repo URL**, use lightweight mode: extract owner/repo/number from the URL and run `gh pr diff <url>` to get the diff directly. Skip Steps 2 (no local rules), 3 (no local linter), 8 (no local files to fix), 10 (no local cache), 11 (no worktree to clean). In Step 9, use the extracted owner/repo from the URL (not `gh repo view` which returns the current repo). Inform the user: "Cross-repo review: running in lightweight mode (no build/test, no linter, no autofix)." Otherwise, treat the argument as a file path.
+To disambiguate the argument type: if the argument is a pure integer, treat it as a PR number. If it's a URL containing `/pull/`, extract the PR number and check if the URL's owner/repo matches the current repository (run `gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'`). If it matches, proceed with the normal worktree flow. If it's a **cross-repo URL**, use lightweight mode: extract owner/repo/number from the URL and run `gh pr diff <url>` to get the diff directly. Skip Steps 2 (no local rules), 3 (no local linter), 8 (no local files to fix), 10 (no local cache), 11 (no worktree to clean). Also fetch existing PR comments using the extracted owner/repo (`gh api repos/{owner}/{repo}/pulls/{number}/comments`) to avoid duplicating human feedback. In Step 9, use the extracted owner/repo from the URL (not `gh repo view` which returns the current repo). Inform the user: "Cross-repo review: running in lightweight mode (no build/test, no linter, no autofix)." Otherwise, treat the argument as a file path.
 
 Based on the remaining arguments:
 
@@ -31,7 +31,7 @@ Based on the remaining arguments:
   - Run `git diff` and `git diff --staged` to get all changes
   - If both diffs are empty, inform the user there are no changes to review and stop here — do not proceed to the review agents
 
-- **PR number or URL** (e.g., `123` or `https://github.com/.../pull/123`):
+- **PR number or same-repo URL** (e.g., `123` or a URL whose owner/repo matches the current repo — cross-repo URLs are handled by the lightweight mode above):
   - **Create an ephemeral worktree** to avoid modifying the user's working tree. This eliminates all stash/checkout/restore complexity:
     1. **Clean up stale worktree** from a previously interrupted review (if any): if `.qwen/tmp/review-pr-<number>` exists, remove it with `git worktree remove .qwen/tmp/review-pr-<number> --force` and delete the stale ref `git branch -D qwen-review/pr-<number>` if it exists. This ensures a fresh start.
     2. Fetch the PR branch into a unique local ref: `git fetch origin pull/<number>/head:qwen-review/pr-<number>` (do NOT use `gh pr checkout` — it modifies the current working tree). If fetch fails (auth, network, PR doesn't exist), inform the user and stop.
@@ -197,9 +197,9 @@ This agent runs deterministic build and test commands to verify the code compile
 
 **Note**: Build/test results are deterministic facts. Code-caused failures skip Step 5 verification — the `[build]`/`[test]` source tag is how they are recognized as pre-confirmed. Environment/setup failures are informational only and should not affect the verdict.
 
-### Cross-file impact analysis (applies to Agents 1-4)
+### Cross-file impact analysis (applies to Agents 1-4, same-repo reviews only)
 
-In addition to their primary focus, each review agent (1-4) MUST perform cross-file impact analysis for modified functions, classes, or interfaces. If the diff modifies more than 10 exported symbols, prioritize those with **signature changes** (parameter/return type modifications, renamed/removed members) and skip unchanged-signature modifications to avoid excessive search overhead.
+For same-repo reviews (where local files are available), each review agent (1-4) MUST perform cross-file impact analysis for modified functions, classes, or interfaces. Skip this for cross-repo lightweight mode (no local codebase to search). If the diff modifies more than 10 exported symbols, prioritize those with **signature changes** (parameter/return type modifications, renamed/removed members) and skip unchanged-signature modifications to avoid excessive search overhead.
 
 1. Use `grep_search` to find all callers/importers of each modified function/class/interface
 2. Check whether callers are compatible with the modified signature/behavior
