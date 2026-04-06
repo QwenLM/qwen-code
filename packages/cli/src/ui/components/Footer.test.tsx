@@ -11,6 +11,7 @@ import * as useTerminalSize from '../hooks/useTerminalSize.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { VimModeProvider } from '../contexts/VimModeContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../hooks/useTerminalSize.js');
@@ -52,14 +53,17 @@ const createMockSettings = (): LoadedSettings =>
 
 const renderWithWidth = (width: number, uiState: UIState) => {
   useTerminalSizeMock.mockReturnValue({ columns: width, rows: 24 });
+  const mockSettings = createMockSettings();
   return render(
-    <ConfigContext.Provider value={createMockConfig() as never}>
-      <VimModeProvider settings={createMockSettings()}>
-        <UIStateContext.Provider value={uiState}>
-          <Footer />
-        </UIStateContext.Provider>
-      </VimModeProvider>
-    </ConfigContext.Provider>,
+    <SettingsContext.Provider value={mockSettings}>
+      <ConfigContext.Provider value={createMockConfig() as never}>
+        <VimModeProvider settings={mockSettings}>
+          <UIStateContext.Provider value={uiState}>
+            <Footer />
+          </UIStateContext.Provider>
+        </VimModeProvider>
+      </ConfigContext.Provider>
+    </SettingsContext.Provider>,
   );
 };
 
