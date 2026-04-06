@@ -290,6 +290,9 @@ One of:
 - **Request changes** — Has critical issues that need fixing
 - **Comment** — Has suggestions but no blockers
 
+If the review target is a PR and there are confirmed findings, append a tip after the verdict:
+"Tip: run `/review <number> --comment` to post these findings as PR inline comments."
+
 ## Step 3.5: Autofix
 
 If there are **Critical** or **Suggestion** findings with clear, unambiguous fixes, offer to auto-apply them.
