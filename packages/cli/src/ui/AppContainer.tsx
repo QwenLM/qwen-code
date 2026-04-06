@@ -970,7 +970,7 @@ export const AppContainer = (props: AppContainerProps) => {
     useState<boolean>(false);
 
   const [verboseMode, setVerboseMode] = useState<boolean>(
-    settings.merged.ui?.verboseMode ?? false,
+    settings.merged.ui?.verboseMode ?? true,
   );
   const [frozenSnapshot, setFrozenSnapshot] = useState<
     HistoryItemWithoutId[] | null
