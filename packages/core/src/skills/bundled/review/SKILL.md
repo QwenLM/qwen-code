@@ -94,7 +94,7 @@ Extract the list of changed files from the diff output. For local uncommitted re
 
 **Important**: For whole-project tools (`tsc`, `npm run lint`, `cargo clippy`, `go vet`), capture the full output first, then filter to only errors/warnings in changed files, then truncate to the first 200 lines. Do NOT pipe to `head` before filtering — this can drop relevant errors for changed files that appear later in the output.
 
-**Timeout**: Set a 120-second timeout for type checkers (`tsc`, `mypy`) and 60-second timeout for linters. If a command times out or fails to run (tool not installed), skip it and record an informational note naming the skipped check and the reason (e.g., "tsc skipped: timeout after 120s" or "ruff skipped: tool not installed"). Include these notes in the Step 3 summary so the user knows which checks did not run.
+**Timeout**: Set a 120-second timeout (120000ms when using `run_shell_command`) for type checkers (`tsc`, `mypy`) and 60-second timeout (60000ms) for linters. If a command times out or fails to run (tool not installed), skip it and record an informational note naming the skipped check and the reason (e.g., "tsc skipped: timeout after 120s" or "ruff skipped: tool not installed"). Include these notes in the Step 3 summary so the user knows which checks did not run.
 
 **Output handling**: Parse file paths, line numbers, and error/warning messages from the output. Linter output typically follows formats like `file.ts:42:5: error ...` or `file.py:10: W123 ...`. Add them to the findings as **confirmed deterministic issues** with proper file:line references — these skip Step 2.5 verification entirely. Set `Source:` to `[linter]` or `[typecheck]` as appropriate, and keep `Issue:` as a plain description of the problem.
 
