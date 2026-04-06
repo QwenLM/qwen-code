@@ -150,12 +150,12 @@ describe('BundledSkillLoader', () => {
     });
   });
 
-  it('should use "unknown" when model is not available for {{model}}', async () => {
+  it('should use "unknown" for {{model}} when getModel returns undefined', async () => {
     const skill = makeSkill({
       body: 'Review by {{model}}',
     });
     mockSkillManager.listSkills.mockResolvedValue([skill]);
-    // No getModel on config
+    // getModel returns undefined (default mock behavior)
 
     const loader = new BundledSkillLoader(mockConfig);
     const commands = await loader.loadCommands(signal);
