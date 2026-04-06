@@ -50,7 +50,8 @@ export const Footer: React.FC = () => {
   const contextWindowSize =
     config.getContentGeneratorConfig()?.contextWindowSize;
 
-  // Left section should show exactly ONE thing at any time, in priority order.
+  // Left section shows one item in priority order, or nothing when a custom
+  // status line is active (status line occupies its own row below).
   const leftContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (

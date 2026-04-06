@@ -5,7 +5,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { exec } from 'child_process';
+import { exec, type ChildProcess } from 'child_process';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -49,7 +49,18 @@ function getStatusLineConfig(
     'command' in raw &&
     typeof raw.command === 'string'
   ) {
-    return raw as StatusLineConfig;
+    const config: StatusLineConfig = {
+      type: 'command',
+      command: raw.command,
+    };
+    if (
+      'padding' in raw &&
+      typeof raw.padding === 'number' &&
+      Number.isFinite(raw.padding)
+    ) {
+      config.padding = Math.max(0, raw.padding);
+    }
+    return config;
   }
   return undefined;
 }
@@ -94,22 +105,27 @@ export function useStatusLine(): {
     undefined,
   );
 
-  // Track previous trigger values to detect actual changes
+  // Track previous trigger values to detect actual changes.
+  // Initialized with current values so the state-change effect
+  // does not fire redundantly on mount.
+  const { lastPromptTokenCount } = uiState.sessionStats;
+  const { currentModel } = uiState;
   const prevStateRef = useRef<{
     promptTokenCount: number;
     currentModel: string;
     vimMode: string | undefined;
   }>({
-    promptTokenCount: 0,
-    currentModel: '',
-    vimMode: undefined,
+    promptTokenCount: lastPromptTokenCount,
+    currentModel,
+    vimMode,
   });
 
   // Guard: when true, the mount effect has already called doUpdate so the
   // command-change effect should skip its first run to avoid a double exec.
   const hasMountedRef = useRef(false);
 
-  // Track the active child process so we can ignore stale callbacks.
+  // Track the active child process so we can kill it on new updates / unmount.
+  const activeChildRef = useRef<ChildProcess | undefined>(undefined);
   const generationRef = useRef(0);
 
   const doUpdate = useCallback(() => {
@@ -138,6 +154,12 @@ export function useStatusLine(): {
       }),
     };
 
+    // Kill the previous child process if still running.
+    if (activeChildRef.current) {
+      activeChildRef.current.kill();
+      activeChildRef.current = undefined;
+    }
+
     // Bump generation so earlier in-flight callbacks are ignored.
     const gen = ++generationRef.current;
 
@@ -146,6 +168,7 @@ export function useStatusLine(): {
       { timeout: 5000, maxBuffer: 1024 * 10 },
       (error, stdout) => {
         if (gen !== generationRef.current) return; // stale
+        activeChildRef.current = undefined;
         if (!error && stdout) {
           setOutput(stdout.trim().split('\n')[0] || null);
         } else {
@@ -153,6 +176,8 @@ export function useStatusLine(): {
         }
       },
     );
+
+    activeChildRef.current = child;
 
     // Pass structured JSON context via stdin.
     // Guard against EPIPE if the child exits before we finish writing.
@@ -174,8 +199,6 @@ export function useStatusLine(): {
   }, [doUpdate]);
 
   // Trigger update when meaningful state changes
-  const { lastPromptTokenCount } = uiState.sessionStats;
-  const { currentModel } = uiState;
   useEffect(() => {
     if (!statusLineCommand) {
       setOutput(null);
@@ -218,9 +241,12 @@ export function useStatusLine(): {
     hasMountedRef.current = true;
     const genRef = generationRef;
     const debounceRef = debounceTimerRef;
+    const childRef = activeChildRef;
     doUpdate();
     return () => {
-      // Invalidate any in-flight exec callbacks
+      // Kill active child process and invalidate callbacks
+      childRef.current?.kill();
+      childRef.current = undefined;
       genRef.current++;
       if (debounceRef.current !== undefined) {
         clearTimeout(debounceRef.current);

@@ -154,11 +154,7 @@ How to use the statusLine command:
      }
    }
 
-   You can use this JSON data in your command like:
-   - $(cat | jq -r '.model.id')
-   - $(cat | jq -r '.cwd')
-
-   Or store it in a variable first:
+   IMPORTANT: stdin can only be consumed once. Always read it into a variable first:
    - input=$(cat); echo "$(echo "$input" | jq -r '.model.id') in $(echo "$input" | jq -r '.cwd')"
 
    To display context usage:
@@ -167,13 +163,16 @@ How to use the statusLine command:
 2. For longer commands, you can save a new file in the user's ~/.qwen directory, e.g.:
    - ~/.qwen/statusline-command.sh and reference that file in the settings.
 
-3. Update the user's ~/.qwen/settings.json with:
+3. Update the user's ~/.qwen/settings.json. The statusLine setting is nested under the "ui" key:
    {
-     "statusLine": {
-       "type": "command",
-       "command": "your_command_here"
+     "ui": {
+       "statusLine": {
+         "type": "command",
+         "command": "your_command_here"
+       }
      }
    }
+   Make sure to preserve any existing "ui" settings (theme, etc.) when updating.
 
 4. If ~/.qwen/settings.json is a symlink, update the target file instead.
 
