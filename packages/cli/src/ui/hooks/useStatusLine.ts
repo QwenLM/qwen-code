@@ -110,14 +110,15 @@ export function useStatusLine(): {
   // does not fire redundantly on mount.
   const { lastPromptTokenCount } = uiState.sessionStats;
   const { currentModel } = uiState;
+  const effectiveVim = vimEnabled ? vimMode : undefined;
   const prevStateRef = useRef<{
     promptTokenCount: number;
     currentModel: string;
-    vimMode: string | undefined;
+    effectiveVim: string | undefined;
   }>({
     promptTokenCount: lastPromptTokenCount,
     currentModel,
-    vimMode,
+    effectiveVim,
   });
 
   // Guard: when true, the mount effect has already called doUpdate so the
@@ -209,18 +210,18 @@ export function useStatusLine(): {
     if (
       lastPromptTokenCount !== prev.promptTokenCount ||
       currentModel !== prev.currentModel ||
-      vimMode !== prev.vimMode
+      effectiveVim !== prev.effectiveVim
     ) {
       prev.promptTokenCount = lastPromptTokenCount;
       prev.currentModel = currentModel;
-      prev.vimMode = vimMode;
+      prev.effectiveVim = effectiveVim;
       scheduleUpdate();
     }
   }, [
     statusLineCommand,
     lastPromptTokenCount,
     currentModel,
-    vimMode,
+    effectiveVim,
     scheduleUpdate,
   ]);
 
