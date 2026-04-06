@@ -21,7 +21,7 @@ export const statuslineCommand: SlashCommand = {
       type: 'submit_prompt',
       content: [
         {
-          text: `Create an Agent with subagent_type "statusline-setup" and the following prompt:\n\n${prompt}`,
+          text: `Use the Agent tool with subagent_type: "statusline-setup" and this prompt:\n\n${prompt}`,
         },
       ],
     };
