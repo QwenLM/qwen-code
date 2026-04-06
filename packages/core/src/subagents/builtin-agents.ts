@@ -124,7 +124,7 @@ When asked to convert the user's shell PS1 configuration, follow these steps:
    - \\w → $(pwd)
    - \\W → $(basename "$(pwd)")
    - \\$ → $
-   - \\n → \\n
+   - \\n → (remove or replace with a space — the status line only displays one line)
    - \\t → $(date +%H:%M:%S)
    - \\d → $(date "+%a %b %d")
    - \\@ → $(date +%I:%M%p)
@@ -177,6 +177,7 @@ How to use the statusLine command:
 4. If ~/.qwen/settings.json is a symlink, update the target file instead.
 
 Guidelines:
+- The status line only displays the first line of stdout — ensure commands produce exactly one line of output
 - Preserve existing settings when updating
 - Return a summary of what was configured, including the name of the script file if used
 - If the script includes git commands, they should skip optional locks
