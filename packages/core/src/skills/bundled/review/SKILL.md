@@ -216,17 +216,15 @@ In addition to their primary focus, each review agent (1-4) MUST perform cross-f
 
 Before verification, merge findings that refer to the same issue (same file, same line range, same root cause) even if reported by different agents. Keep the most detailed description and note which agents flagged it. When severities differ across merged items, use the **highest severity** — never let deduplication downgrade severity. **If a merged finding includes any deterministic source** (`[linter]`, `[typecheck]`, `[build]`, `[test]`), treat the entire merged finding as pre-confirmed — retain all source tags for reporting, preserve deterministic severity as authoritative, and skip verification.
 
-### Independent verification
+### Batch verification
 
-For each **unique** finding after deduplication that is **not** pre-confirmed, launch an **independent verification agent**. Run verification agents in parallel, but if there are more than 10 unique findings, batch them in groups of 10 to avoid resource exhaustion.
+Launch a **single verification agent** that receives **all** non-pre-confirmed findings at once (not one agent per finding — this keeps LLM calls fixed regardless of finding count). The verification agent receives:
 
-Each verification agent receives:
-
-- The finding description (what's wrong, file, line)
+- The complete list of findings to verify (with file, line, issue description for each)
 - The command to obtain the diff (as determined in Step 1)
 - Access to read files and search the codebase
 
-Each verification agent must **independently** (without seeing other agents' findings):
+The verification agent must, for each finding:
 
 1. Read the actual code at the referenced file and line
 2. Check surrounding context — callers, type definitions, tests, related modules
@@ -238,7 +236,7 @@ Each verification agent must **independently** (without seeing other agents' fin
 
 **When uncertain, lean toward rejecting.** The goal is high signal, low noise — it's better to miss a minor suggestion than to report a false positive. Reserve "confirmed (low confidence)" for issues that are **likely real but need human judgment to be certain** — not for vague suspicions (those should be rejected).
 
-**After all verification agents complete:** remove all rejected findings. Separate confirmed findings into two groups: high-confidence and low-confidence. Low-confidence findings appear **only in terminal output** (under "Needs Human Review") and are **never posted as PR inline comments** — this preserves the "Silence is better than noise" principle for PR interactions.
+**After verification:** remove all rejected findings. Separate confirmed findings into two groups: high-confidence and low-confidence. Low-confidence findings appear **only in terminal output** (under "Needs Human Review") and are **never posted as PR inline comments** — this preserves the "Silence is better than noise" principle for PR interactions.
 
 ### Pattern aggregation
 
