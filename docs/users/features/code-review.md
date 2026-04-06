@@ -25,33 +25,33 @@ If there are no uncommitted changes, `/review` will let you know and stop — no
 
 The `/review` command runs a multi-stage pipeline:
 
-```mermaid
-flowchart TD
-    A["🔍 Determine scope\n(local diff / PR worktree / file)"] --> B["📋 Load project review rules\n(.qwen/review-rules.md, copilot-instructions.md, etc.)"]
-    B --> C["🔧 Deterministic analysis\n(linter, typecheck — zero LLM cost)"]
-    C --> D["🤖 5 parallel review agents"]
-
-    subgraph agents [" "]
-        D1["Agent 1\nCorrectness\n& Security"]
-        D2["Agent 2\nCode\nQuality"]
-        D3["Agent 3\nPerformance\n& Efficiency"]
-        D4["Agent 4\nUndirected\nAudit"]
-        D5["Agent 5\nBuild & Test\n(shell, zero LLM)"]
-    end
-
-    D --> agents
-    agents --> E["🔀 Deduplicate → Batch verify → Aggregate\n(single verification agent for all findings)"]
-    E --> F["🔄 Reverse audit\n(find coverage gaps)"]
-    F --> G["📊 Present findings + verdict"]
-    G --> H{"Autofix?"}
-    H -- "User accepts" --> I["✏️ Apply fixes + verify"]
-    H -- "Declined / N/A" --> J["💬 Follow-up tips"]
-    I --> J
-    J --> K{"PR comments?"}
-    K -- "post comments" --> L["📝 Post inline comments\n(high-confidence Critical/Suggestion only)"]
-    K -- "No" --> M["💾 Save report + cache"]
-    L --> M
-    M --> N["🧹 Clean up\n(remove worktree + temp files)"]
+```
+Determine scope (local diff / PR worktree / file)
+        |
+Load project review rules
+        |
+Run deterministic analysis (linter, typecheck)         [zero LLM cost]
+        |
+5 parallel review agents                               [5 LLM calls]
+  |-- Agent 1: Correctness & Security
+  |-- Agent 2: Code Quality
+  |-- Agent 3: Performance & Efficiency
+  |-- Agent 4: Undirected Audit
+  '-- Agent 5: Build & Test                             [zero LLM cost]
+        |
+Deduplicate --> Batch verify --> Aggregate              [1 LLM call]
+        |
+Reverse audit (find coverage gaps)                      [1 LLM call]
+        |
+Present findings + verdict
+        |
+Autofix (user-confirmed, optional)
+        |
+Post PR inline comments (if requested)
+        |
+Save report + incremental cache
+        |
+Clean up (remove worktree + temp files)
 ```
 
 ### Review Agents
