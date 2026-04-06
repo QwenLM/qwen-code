@@ -75,10 +75,11 @@ Commands for managing AI tools and models.
 
 These commands invoke bundled skills that provide specialized workflows.
 
-| Command     | Description                                                         | Usage Examples                                    |
-| ----------- | ------------------------------------------------------------------- | ------------------------------------------------- |
-| `/review`   | Review code changes with 5 parallel agents + deterministic analysis | `/review`, `/review 123`, `/review 123 --comment` |
-| `/simplify` | Review changed code for reuse, quality, and efficiency              | `/simplify`                                       |
+| Command      | Description                                                         | Usage Examples                                    |
+| ------------ | ------------------------------------------------------------------- | ------------------------------------------------- |
+| `/review`    | Review code changes with 5 parallel agents + deterministic analysis | `/review`, `/review 123`, `/review 123 --comment` |
+| `/loop`      | Run a prompt on a recurring schedule                                | `/loop 5m check the build`                        |
+| `/qc-helper` | Answer questions about Qwen Code usage and configuration            | `/qc-helper how do I configure MCP?`              |
 
 See [Code Review](./code-review.md) for full `/review` documentation.
 

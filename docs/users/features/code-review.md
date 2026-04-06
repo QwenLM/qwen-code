@@ -8,8 +8,9 @@
 # Review local uncommitted changes
 /review
 
-# Review a pull request
+# Review a pull request (by number or URL)
 /review 123
+/review https://github.com/org/repo/pull/123
 
 # Review and post inline comments on the PR
 /review 123 --comment
@@ -17,6 +18,8 @@
 # Review a specific file
 /review src/utils/auth.ts
 ```
+
+If there are no uncommitted changes, `/review` will let you know and stop — no agents are launched.
 
 ## How It Works
 
@@ -124,7 +127,7 @@ After the review, context-aware tips appear as ghost text. Press Tab to accept:
 You can customize review criteria per project. `/review` reads rules from these files (in order):
 
 1. `.qwen/review-rules.md` (Qwen Code native)
-2. `.github/copilot-instructions.md` (or `copilot-instructions.md`)
+2. `.github/copilot-instructions.md` (preferred) or `copilot-instructions.md` (fallback — only one is loaded, not both)
 3. `AGENTS.md` — `## Code Review` section
 4. `QWEN.md` — `## Code Review` section
 
@@ -153,11 +156,11 @@ When reviewing a PR that was previously reviewed, `/review` only examines change
 /review 123
 ```
 
-Cache is stored in `.qwen/review-cache/` (automatically gitignored). If the cached commit was rebased away, it falls back to a full review.
+Cache is stored in `.qwen/review-cache/`. Make sure this directory is in your `.gitignore` (a broader rule like `.qwen/*` also works). If the cached commit was rebased away, it falls back to a full review.
 
 ## Review Reports
 
-Every review is saved as a Markdown file in `.qwen/reviews/`:
+Every review is saved as a Markdown file in your project's `.qwen/reviews/` directory:
 
 ```
 .qwen/reviews/2026-04-06-143022-pr-123.md
@@ -176,6 +179,17 @@ When code changes modify exported functions, classes, or interfaces, the review 
 - Breaking API changes
 
 For large diffs (>10 modified symbols), analysis prioritizes functions with signature changes.
+
+## What's NOT Flagged
+
+The review intentionally excludes:
+
+- Pre-existing issues in unchanged code (focus on the diff only)
+- Style/formatting/naming that matches your codebase conventions
+- Issues a linter or type checker would catch (handled by deterministic analysis)
+- Subjective "consider doing X" suggestions without a real problem
+- Minor refactoring that doesn't fix a bug or risk
+- Missing documentation unless the logic is genuinely confusing
 
 ## Design Philosophy
 
