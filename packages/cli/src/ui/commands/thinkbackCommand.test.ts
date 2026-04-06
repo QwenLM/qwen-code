@@ -91,6 +91,59 @@ describe('thinkbackCommand', () => {
     });
   });
 
+  it('generates thinkback timeline in ACP mode', async () => {
+    const acpContext = createMockCommandContext({
+      executionMode: 'acp',
+      services: {
+        config: {
+          getGeminiClient: vi.fn(() => mockGeminiClient),
+          getModel: vi.fn(() => 'test-model'),
+        } as unknown as CommandContext['services']['config'],
+      },
+    } as unknown as CommandContext);
+
+    mockGetHistory.mockReturnValue([
+      { role: 'user', parts: [{ text: 'query 1' }] },
+      { role: 'model', parts: [{ text: 'response 1' }] },
+      { role: 'user', parts: [{ text: 'query 2' }] },
+    ]);
+
+    mockGenerateContent.mockResolvedValue({
+      candidates: [
+        {
+          content: {
+            parts: [{ text: '# Timeline Review\n- **Step 1**' }],
+          },
+        },
+      ],
+    });
+
+    if (!thinkbackCommand.action) {
+      throw new Error('thinkback command must have action');
+    }
+
+    const result = await thinkbackCommand.action(acpContext, '');
+
+    expect(result).toBeDefined();
+    expect((result as { type: string }).type).toBe('stream_messages');
+
+    const messages = (result as { messages: AsyncGenerator }).messages;
+    const collected: Array<{ messageType: string; content: string }> = [];
+    for await (const msg of messages) {
+      collected.push(msg as { messageType: string; content: string });
+    }
+
+    expect(collected).toHaveLength(2);
+    expect(collected[0]).toEqual({
+      messageType: 'info',
+      content: 'Generating thinkback timeline...',
+    });
+    expect(collected[1]).toEqual({
+      messageType: 'info',
+      content: '# Timeline Review\n- **Step 1**',
+    });
+  });
+
   it('handles --from and --topic arguments', async () => {
     mockGetHistory.mockReturnValue([
       { role: 'user', parts: [{ text: 'query 1' }] },
