@@ -105,6 +105,16 @@ Extract the list of changed files from the diff output. For local uncommitted re
 4. **Go projects**:
    - If `go.mod` exists → `go vet ./... 2>&1` (vet includes compile checks, so Agent 5 can skip `go build` if vet ran successfully) and `golangci-lint run ./... 2>&1` (golangci-lint expects package patterns, not individual file paths; filter diagnostics to changed files after capture)
 
+5. **Java projects**:
+   - If `pom.xml` exists (Maven) → `mvn compile -q 2>&1` (compilation check; Agent 5 can skip build if this succeeds). If `checkstyle` plugin is configured → `mvn checkstyle:check -q 2>&1`
+   - Else if `build.gradle` or `build.gradle.kts` exists (Gradle) → `gradle compileJava -q 2>&1`. If `checkstyle` plugin is configured → `gradle checkstyleMain -q 2>&1`
+   - Else if `Makefile` exists (e.g., OpenJDK) → skip deterministic analysis for Java (build system is too project-specific; Agent 5 will handle build/test)
+   - If `spotbugs` or `pmd` is available → `mvn spotbugs:check -q 2>&1` or `mvn pmd:check -q 2>&1`
+
+6. **C/C++ projects**:
+   - If `CMakeLists.txt` or `Makefile` exists → skip per-file linting (C/C++ linters like clang-tidy require full build context). Agent 5 will handle build verification.
+   - If `compile_commands.json` exists and `clang-tidy` is available → `clang-tidy <changed-files> 2>&1`
+
 **Important**: For whole-project tools (`tsc`, `npm run lint`, `cargo clippy`, `go vet`), capture the full output first, then filter to only errors/warnings in changed files, then truncate to the first 200 lines. Do NOT pipe to `head` before filtering — this can drop relevant errors for changed files that appear later in the output.
 
 **Timeout**: Set a 120-second timeout (120000ms when using `run_shell_command`) for type checkers (`tsc`, `mypy`) and 60-second timeout (60000ms) for linters. If a command times out or fails to run (tool not installed), skip it and record an informational note naming the skipped check and the reason (e.g., "tsc skipped: timeout after 120s" or "ruff skipped: tool not installed"). Include these notes in the Step 7 summary so the user knows which checks did not run.
@@ -187,11 +197,15 @@ This agent runs deterministic build and test commands to verify the code compile
 
 1. Detect the build system and run **exactly one** build command (skip if Step 3 already verified compilation). Use this precedence order — choose the **first applicable** option only to avoid duplicate builds (e.g., a Makefile that wraps npm). Capture full output; if it exceeds 200 lines, keep the first 50 and last 100 lines:
    - If `package.json` exists with a `build` script → `npm run build 2>&1`
+   - Else if `pom.xml` exists → `mvn compile -q 2>&1`
+   - Else if `build.gradle` or `build.gradle.kts` exists → `gradle compileJava -q 2>&1`
    - Else if `Makefile` exists → `make build 2>&1`
    - Else if `Cargo.toml` exists → `cargo build 2>&1`
    - Else if `go.mod` exists → `go build ./... 2>&1`
 2. Run **exactly one** test command (same precedence and output handling):
    - If `package.json` exists with a `test` script → `npm test 2>&1`
+   - Else if `pom.xml` exists → `mvn test -q 2>&1`
+   - Else if `build.gradle` or `build.gradle.kts` exists → `gradle test -q 2>&1`
    - Else if `pytest.ini` or `pyproject.toml` with `[tool.pytest]` → `pytest 2>&1`
    - Else if `Cargo.toml` exists → `cargo test 2>&1`
    - Else if `go.mod` exists → `go test ./... 2>&1`
