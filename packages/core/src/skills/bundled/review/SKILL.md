@@ -290,8 +290,10 @@ One of:
 - **Request changes** — Has critical issues that need fixing
 - **Comment** — Has suggestions but no blockers
 
-If the review target is a PR and there are confirmed findings, append a tip after the verdict:
-"Tip: type `post comments` to publish these findings as PR inline comments."
+Append a follow-up tip after the verdict based on the review target:
+
+- **PR review with confirmed findings**: "Tip: type `post comments` to publish these findings as PR inline comments."
+- **Local review with Approve verdict**: "Tip: type `commit` to commit your changes."
 
 If the user responds with "post comments" (or similar intent like "yes post them", "publish comments"), proceed directly to Step 4 using the findings already collected — do NOT re-run Steps 1-3.5.
 
