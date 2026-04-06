@@ -129,11 +129,13 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 
 After the review, context-aware tips appear as ghost text. Press Tab to accept:
 
-| State after review      | Tip                | What happens                            |
-| ----------------------- | ------------------ | --------------------------------------- |
-| Unfixed findings remain | `fix these issues` | LLM interactively fixes each finding    |
-| PR review with findings | `post comments`    | Posts PR inline comments (no re-review) |
-| Local review, all clear | `commit`           | Commits your changes                    |
+| State after review                 | Tip                | What happens                            |
+| ---------------------------------- | ------------------ | --------------------------------------- |
+| Local review with unfixed findings | `fix these issues` | LLM interactively fixes each finding    |
+| PR review with findings            | `post comments`    | Posts PR inline comments (no re-review) |
+| Local review, all clear            | `commit`           | Commits your changes                    |
+
+Note: `fix these issues` is only available for local reviews. For PR reviews, use Autofix (Step 3.5) — the worktree is cleaned up after the review, so post-review interactive fixing is not possible.
 
 ## Project Review Rules
 
@@ -208,6 +210,19 @@ When code changes modify exported functions, classes, or interfaces, the review 
 - Breaking API changes
 
 For large diffs (>10 modified symbols), analysis prioritizes functions with signature changes.
+
+## Token Efficiency
+
+The review pipeline uses a fixed number of LLM calls regardless of how many findings are produced:
+
+| Stage                             | LLM calls | Notes                                      |
+| --------------------------------- | --------- | ------------------------------------------ |
+| Deterministic analysis (Step 1.5) | 0         | Shell commands only                        |
+| Build & test (Agent 5)            | 0         | Shell commands only                        |
+| 5 review agents (Step 2)          | 5         | Run in parallel                            |
+| Batch verification (Step 2.5)     | 1         | Single agent verifies all findings at once |
+| Reverse audit (Step 2.6)          | 1         | Finds coverage gaps                        |
+| **Total**                         | **7**     | Fixed, not proportional to finding count   |
 
 ## What's NOT Flagged
 
