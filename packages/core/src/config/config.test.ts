@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import { Config, ApprovalMode } from './config.js';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../tools/memoryTool.js';
 import {
@@ -57,6 +58,9 @@ vi.mock('node:fs', async (importOriginal) => {
       isDirectory: vi.fn().mockReturnValue(true),
     }),
     realpathSync: vi.fn((path) => path),
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    readFileSync: vi.fn(),
   };
   return {
     ...mocked,
@@ -1237,6 +1241,53 @@ describe('setApprovalMode with folder trust', () => {
       // Setting PLAN again should not overwrite prePlanMode
       config.setApprovalMode(ApprovalMode.PLAN);
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    });
+  });
+
+  describe('plan file persistence', () => {
+    it('should save plan to disk', () => {
+      const config = new Config(baseParams);
+
+      config.savePlan('# My Plan\n1. Step one\n2. Step two');
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith(
+        expect.stringContaining('plans'),
+        { recursive: true },
+      );
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('.md'),
+        '# My Plan\n1. Step one\n2. Step two',
+        'utf-8',
+      );
+    });
+
+    it('should load plan from disk', () => {
+      const config = new Config(baseParams);
+      (fs.readFileSync as Mock).mockReturnValue('# Saved Plan');
+
+      const plan = config.loadPlan();
+      expect(plan).toBe('# Saved Plan');
+    });
+
+    it('should return undefined when no plan file exists', () => {
+      const config = new Config(baseParams);
+      (fs.readFileSync as Mock).mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
+
+      const plan = config.loadPlan();
+      expect(plan).toBeUndefined();
+    });
+
+    it('should use session ID in plan file path', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+      });
+
+      const filePath = config.getPlanFilePath();
+      expect(filePath).toContain('test-session-123');
+      expect(filePath).toMatch(/\.md$/);
     });
   });
 

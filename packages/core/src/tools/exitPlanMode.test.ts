@@ -22,6 +22,7 @@ describe('ExitPlanModeTool', () => {
       setApprovalMode: vi.fn((mode: ApprovalMode) => {
         approvalMode = mode;
       }),
+      savePlan: vi.fn(),
     } as unknown as Config;
 
     tool = new ExitPlanModeTool(mockConfig);
@@ -148,6 +149,9 @@ describe('ExitPlanModeTool', () => {
         ApprovalMode.DEFAULT,
       );
       expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+
+      // Plan should be saved to disk
+      expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
     });
 
     it('should request confirmation with plan details', async () => {
@@ -222,6 +226,9 @@ describe('ExitPlanModeTool', () => {
         ApprovalMode.PLAN,
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
+
+      // Plan should NOT be saved when rejected
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
     });
 
     it('should have correct description', () => {

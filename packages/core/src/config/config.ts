@@ -6,6 +6,7 @@
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
 
@@ -1663,6 +1664,35 @@ export class Config {
       this.prePlanMode = undefined;
     }
     this.approvalMode = mode;
+  }
+
+  /**
+   * Returns the file path for this session's plan file.
+   */
+  getPlanFilePath(): string {
+    return Storage.getPlanFilePath(this.sessionId);
+  }
+
+  /**
+   * Saves a plan to disk for the current session.
+   */
+  savePlan(plan: string): void {
+    const filePath = this.getPlanFilePath();
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, plan, 'utf-8');
+  }
+
+  /**
+   * Loads the plan for the current session, or returns undefined if none exists.
+   */
+  loadPlan(): string | undefined {
+    const filePath = this.getPlanFilePath();
+    try {
+      return fs.readFileSync(filePath, 'utf-8');
+    } catch {
+      return undefined;
+    }
   }
 
   getInputFormat(): 'text' | 'stream-json' {
