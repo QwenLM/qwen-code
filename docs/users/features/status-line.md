@@ -166,9 +166,9 @@ Then reference it in settings:
 
 ## Troubleshooting
 
-| Problem                 | Cause                  | Fix                                                                                                                                                 |
-| ----------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Status line not showing | Config at wrong path   | Must be under `ui.statusLine`, not root-level `statusLine`                                                                                          |
-| Empty output            | Command fails silently | Test manually: `echo '{"model":{"id":"test"},"cwd":"/tmp","context_window":{"context_window_size":1,"last_prompt_token_count":0}}' \| your_command` |
-| Stale data              | No trigger fired       | Send a message or switch models to trigger an update                                                                                                |
-| Command too slow        | Complex script         | Optimize the script or move heavy work to a background cache                                                                                        |
+| Problem                 | Cause                  | Fix                                                                                                                                                         |
+| ----------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status line not showing | Config at wrong path   | Must be under `ui.statusLine`, not root-level `statusLine`                                                                                                  |
+| Empty output            | Command fails silently | Test manually: `echo '{"model":{"id":"test"},"cwd":"/tmp","context_window":{"context_window_size":1,"last_prompt_token_count":0}}' \| sh -c 'your_command'` |
+| Stale data              | No trigger fired       | Send a message or switch models to trigger an update                                                                                                        |
+| Command too slow        | Complex script         | Optimize the script or move heavy work to a background cache                                                                                                |
