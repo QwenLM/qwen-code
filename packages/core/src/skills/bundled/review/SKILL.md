@@ -249,7 +249,7 @@ After verification, identify **confirmed** findings that describe the **same typ
 
 All confirmed findings (aggregated or standalone) proceed to Step 2.6.
 
-### Reverse audit
+## Step 2.6: Reverse audit
 
 After aggregation, launch a **single reverse audit agent** to find issues that all previous agents missed. This agent receives:
 
