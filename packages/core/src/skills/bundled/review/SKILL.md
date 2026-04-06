@@ -70,7 +70,7 @@ If none of these files exist, skip this step silently.
 
 Before launching LLM review agents, run the project's existing linter and type checker. When a tool supports file arguments, run it on changed files only. When a tool is whole-project by nature (e.g., `tsc`, `cargo clippy`, `go vet`), run it on the whole project but **filter reported diagnostics to changed files**. These tools provide ground-truth results that LLMs cannot match in accuracy.
 
-Extract the list of changed files from the diff output. For local uncommitted reviews, take the union of files from both `git diff` and `git diff --staged` so staged-only and unstaged-only changes are both included. For file path reviews with no diff (reviewing a file's current state), use the specified file as the target. Then run the applicable checks:
+Extract the list of changed files from the diff output. For local uncommitted reviews, take the union of files from both `git diff` and `git diff --staged` so staged-only and unstaged-only changes are both included. **Exclude deleted files** — use `git diff --diff-filter=d --name-only` (or filter out deletions from `git diff --name-status`) since running linters on non-existent paths would produce false failures. For file path reviews with no diff (reviewing a file's current state), use the specified file as the target. Then run the applicable checks:
 
 1. **TypeScript/JavaScript projects**:
    - If `tsconfig.json` exists → `npx tsc --noEmit --incremental 2>&1` (`--incremental` speeds up repeated runs via `.tsbuildinfo` cache)
