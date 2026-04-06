@@ -910,7 +910,7 @@ export class Query implements AsyncIterable<SDKMessage> {
   /**
    * Get context usage breakdown from the CLI
    *
-   * @param showDetails Whether to include per-item detailed breakdowns
+   * @param showDetails Display hint for per-item breakdowns (data is always complete)
    * @returns Promise resolving to context usage data
    * @throws Error if query is closed
    */
