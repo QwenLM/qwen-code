@@ -40,7 +40,7 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
   "ui": {
     "statusLine": {
       "type": "command",
-      "command": "input=$(cat); echo \"$(echo $input | jq -r '.model.id')  ctx:$(echo $input | jq -r '.context_window.last_prompt_token_count')\"",
+      "command": "input=$(cat); model=$(echo \"$input\" | jq -r '.model.id'); tokens=$(echo \"$input\" | jq -r '.context_window.last_prompt_token_count'); echo \"$model  ctx:$tokens\"",
       "padding": 0
     }
   }
@@ -94,7 +94,7 @@ The command receives a JSON object via stdin with the following fields:
   "ui": {
     "statusLine": {
       "type": "command",
-      "command": "input=$(cat); model=$(echo $input | jq -r '.model.id'); tokens=$(echo $input | jq -r '.context_window.last_prompt_token_count'); size=$(echo $input | jq -r '.context_window.context_window_size'); pct=$((tokens * 100 / (size > 0 ? size : 1))); echo \"$model  ctx:${pct}%\""
+      "command": "input=$(cat); model=$(echo \"$input\" | jq -r '.model.id'); tokens=$(echo \"$input\" | jq -r '.context_window.last_prompt_token_count'); size=$(echo \"$input\" | jq -r '.context_window.context_window_size'); pct=$((tokens * 100 / (size > 0 ? size : 1))); echo \"$model  ctx:${pct}%\""
     }
   }
 }
