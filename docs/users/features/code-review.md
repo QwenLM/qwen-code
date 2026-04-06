@@ -207,6 +207,7 @@ The review intentionally excludes:
 - Subjective "consider doing X" suggestions without a real problem
 - Minor refactoring that doesn't fix a bug or risk
 - Missing documentation unless the logic is genuinely confusing
+- Issues already discussed in existing PR comments (avoids duplicating human feedback)
 
 ## Design Philosophy
 
