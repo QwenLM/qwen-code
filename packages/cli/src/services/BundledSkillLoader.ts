@@ -59,12 +59,19 @@ export class BundledSkillLoader implements ICommandLoader {
         description: skill.description,
         kind: CommandKind.SKILL,
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
+          // Resolve template variables in skill body (e.g., {{model}})
+          let body = skill.body;
+          if (body.includes('{{model}}')) {
+            const modelId =
+              (typeof this.config?.getModel === 'function'
+                ? this.config.getModel()
+                : undefined) ?? 'unknown';
+            body = body.replaceAll('{{model}}', modelId);
+          }
+
           const content = context.invocation?.args
-            ? appendToLastTextPart(
-                [{ text: skill.body }],
-                context.invocation.raw,
-              )
-            : [{ text: skill.body }];
+            ? appendToLastTextPart([{ text: body }], context.invocation.raw)
+            : [{ text: body }];
 
           return {
             type: 'submit_prompt',

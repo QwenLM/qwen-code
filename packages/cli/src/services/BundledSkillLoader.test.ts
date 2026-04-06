@@ -127,6 +127,65 @@ describe('BundledSkillLoader', () => {
     expect(commands.map((c) => c.name)).toEqual(['review', 'deploy']);
   });
 
+  it('should resolve {{model}} template variable in skill body', async () => {
+    const skill = makeSkill({
+      body: 'Review by {{model}} via Qwen Code',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    (mockConfig as Record<string, unknown>).getModel = vi
+      .fn()
+      .mockReturnValue('qwen3-coder');
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: 'Review by qwen3-coder via Qwen Code' }],
+    });
+  });
+
+  it('should use "unknown" when model is not available for {{model}}', async () => {
+    const skill = makeSkill({
+      body: 'Review by {{model}}',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    // No getModel on config
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: 'Review by unknown' }],
+    });
+  });
+
+  it('should not modify skill body without {{model}} template', async () => {
+    const skill = makeSkill({ body: 'No template here' });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: 'No template here' }],
+    });
+  });
+
   it('should hide skills with cron allowedTools when cron is disabled', async () => {
     const skills = [
       makeSkill({ name: 'review', description: 'Review code' }),
