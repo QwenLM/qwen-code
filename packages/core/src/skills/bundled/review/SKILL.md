@@ -204,7 +204,7 @@ In addition to their primary focus, each review agent (1-4) MUST perform cross-f
 
 ### Deduplication
 
-Before verification, merge findings that refer to the same issue (same file, same line range, same root cause) even if reported by different agents. Keep the most detailed description and note which agents flagged it. **If a merged finding includes any deterministic source** (`[linter]`, `[typecheck]`, `[build]`, `[test]`), treat the entire merged finding as pre-confirmed — retain all source tags for reporting but skip verification.
+Before verification, merge findings that refer to the same issue (same file, same line range, same root cause) even if reported by different agents. Keep the most detailed description and note which agents flagged it. When severities differ across merged items, use the **highest severity** — never let deduplication downgrade severity. **If a merged finding includes any deterministic source** (`[linter]`, `[typecheck]`, `[build]`, `[test]`), treat the entire merged finding as pre-confirmed — retain all source tags for reporting, preserve deterministic severity as authoritative, and skip verification.
 
 ### Independent verification
 
