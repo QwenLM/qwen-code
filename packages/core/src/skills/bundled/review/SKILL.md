@@ -355,11 +355,7 @@ If there are **Critical** or **Suggestion** findings with clear, unambiguous fix
 
 Skip this step if `--comment` was not specified or the review target is not a PR.
 
-First, get the repository owner/repo:
-
-```bash
-gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'
-```
+First, determine the repository owner/repo. For **same-repo** reviews, run `gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'`. For **cross-repo** reviews, use the owner/repo already extracted from the PR URL in Step 1 — do NOT run `gh repo view` (it returns the current repo, not the PR's repo).
 
 Use the **pre-autofix HEAD commit SHA** captured in Step 1 (not a fresh `gh pr view` call — autofix may have pushed new commits that shift line numbers). If the SHA was not captured in Step 1, fall back to `gh pr view {pr_number} --json headRefOid --jq '.headRefOid'`.
 
