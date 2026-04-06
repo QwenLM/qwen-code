@@ -221,12 +221,7 @@ describe('thinkbackCommand', () => {
     const result = await thinkbackCommand.action(mockContext, '');
 
     expect(mockContext.ui.addItem).toHaveBeenCalled();
-    // Interactive mode returns empty content to avoid duplicate display —
-    // ui.addItem already showed the error.
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content: '',
-    });
+    // Interactive mode returns void — ui.addItem already showed the error.
+    expect(result).toBeUndefined();
   });
 });

@@ -24,7 +24,7 @@ export const thinkbackCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
-  action: async (context, args): Promise<SlashCommandActionReturn> => {
+  action: async (context, args): Promise<void | SlashCommandActionReturn> => {
     const { config } = context.services;
     const { ui } = context;
     const executionMode = context.executionMode ?? 'interactive';
@@ -57,13 +57,9 @@ export const thinkbackCommand: SlashCommand = {
         },
         Date.now(),
       );
-      // Return empty content — ui.addItem already displayed the error.
-      // slashCommandProcessor would add a duplicate if content is non-empty.
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: '',
-      };
+      // Return void — ui.addItem already displayed the error.
+      // Returning a message would create an extra history entry via slashCommandProcessor.
+      return;
     }
 
     let fromTimeRange = '';
@@ -209,8 +205,8 @@ export const thinkbackCommand: SlashCommand = {
             Date.now(),
           );
         }
-        // Return empty content — ui.addItem already displayed the error.
-        return { type: 'message', messageType: 'info', content: '' };
+        // Return void — ui.addItem already displayed the error.
+        return;
       }
 
       return {
