@@ -64,7 +64,7 @@ Clean up (remove worktree + temp files)
 | Agent 4: Undirected Audit         | Business logic, boundary interactions, hidden coupling             |
 | Agent 5: Build & Test             | Runs build and test commands, reports failures                     |
 
-All agents run in parallel. All findings are then verified in a **single batch verification pass** (one agent reviews all findings at once, keeping LLM calls fixed regardless of finding count). After verification, a **reverse audit agent** reviews the diff with knowledge of all confirmed findings to catch issues that every other agent missed. Any reverse audit findings are also batch-verified before inclusion in the final results.
+All agents run in parallel. All findings are then verified in a **single batch verification pass** (one agent reviews all findings at once, keeping LLM calls fixed regardless of finding count). After verification, a **reverse audit agent** re-reads the entire diff with knowledge of all confirmed findings to catch issues that every other agent missed. Reverse audit findings skip verification (the agent already has full context) and are included directly as high-confidence results.
 
 ## Deterministic Analysis
 

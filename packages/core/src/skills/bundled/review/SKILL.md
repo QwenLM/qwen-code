@@ -271,7 +271,7 @@ The reverse audit agent must:
 4. Apply the same **Exclusion Criteria** as other agents
 5. Return findings in the same structured format (with `Source: [review]`)
 
-Any findings from the reverse audit go through the same **batch verification** as Step 2.5 (a single verification agent reviews all reverse audit findings at once, same confidence levels). Verified findings are merged into the final findings list.
+Reverse audit findings are treated as **high confidence** and **skip verification** — the reverse audit agent already has full context (all confirmed findings + entire diff), so its output does not need a second opinion. Findings are merged directly into the final findings list.
 
 If the reverse audit finds nothing, that is a good outcome — it means the initial review had strong coverage.
 
