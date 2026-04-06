@@ -166,12 +166,14 @@ export function useStatusLine(): {
 
     const child = exec(
       cmd,
-      { timeout: 5000, maxBuffer: 1024 * 10 },
+      { cwd: cfg.getTargetDir(), timeout: 5000, maxBuffer: 1024 * 10 },
       (error, stdout) => {
         if (gen !== generationRef.current) return; // stale
         activeChildRef.current = undefined;
         if (!error && stdout) {
-          setOutput(stdout.trim().split('\n')[0] || null);
+          // Strip only the trailing newline to preserve intentional whitespace.
+          const line = stdout.replace(/\r?\n$/, '').split(/\r?\n/, 1)[0];
+          setOutput(line || null);
         } else {
           setOutput(null);
         }

@@ -128,9 +128,9 @@ export const Footer: React.FC = () => {
         </Box>
       </Box>
 
-      {/* Custom status line row */}
+      {/* Custom status line row — match footer's horizontal inset */}
       {statusLineText && (
-        <Box paddingX={statusLinePadding}>
+        <Box marginLeft={2} marginRight={2} paddingX={statusLinePadding}>
           <Text dimColor wrap="truncate">
             {statusLineText}
           </Text>
