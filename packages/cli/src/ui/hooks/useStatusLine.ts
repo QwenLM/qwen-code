@@ -204,6 +204,14 @@ export function useStatusLine(): {
   // Trigger update when meaningful state changes
   useEffect(() => {
     if (!statusLineCommand) {
+      // Command removed — kill any in-flight process and discard callbacks.
+      activeChildRef.current?.kill();
+      activeChildRef.current = undefined;
+      generationRef.current++;
+      if (debounceTimerRef.current !== undefined) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = undefined;
+      }
       setOutput(null);
       return;
     }
@@ -233,9 +241,8 @@ export function useStatusLine(): {
     if (!hasMountedRef.current) return;
     if (statusLineCommand) {
       doUpdate();
-    } else {
-      setOutput(null);
     }
+    // Cleanup when command is removed is handled by the state-change effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusLineCommand]);
 
