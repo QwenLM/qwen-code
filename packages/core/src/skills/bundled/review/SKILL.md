@@ -401,6 +401,8 @@ Do **not** post low-confidence findings as PR inline comments — they appear on
 {prefix} {issue description}
 
 {suggested fix}
+
+_— {{model}}_
 ```
 
 ```bash
@@ -434,7 +436,7 @@ If posting an inline comment fails (e.g., line not part of the diff, auth error)
 - Include the severity tag (Critical/Suggestion) at the start of each comment
 - Include the suggested fix in the comment body when available
 
-After posting all inline comments, use `write_file` to create `/tmp/qwen-review-{target}-summary.txt` with the summary text. Append a model attribution footer at the end of the summary: `_Reviewed by {{model}} via Qwen Code /review_`. Then submit the review using the action that matches the **pre-fix verdict** from Step 7 (if autofix was applied, use the original verdict since the remote PR hasn't been updated yet):
+After posting all inline comments, submit the review verdict. If inline comments were posted successfully, use a **minimal summary** (just the verdict — do NOT repeat findings that are already in the inline comments). Use `write_file` to create `/tmp/qwen-review-{target}-summary.txt` with only the verdict line and model attribution (e.g., "Request changes — see inline comments.\n\n*Reviewed by {{model}} via Qwen Code /review*"). If NO inline comments were posted (all failed or all findings were terminal-only), include the full findings summary in the body. Then submit using the **pre-fix verdict** from Step 7:
 
 ```bash
 # Submit review with the matching action:
