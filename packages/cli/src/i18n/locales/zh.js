@@ -1102,6 +1102,8 @@ export default {
   'Generating thinkback timeline...': '正在生成回顾时间线...',
   'Failed to generate thinkback - no text content received from LLM response':
     '生成回顾失败 - 未从 LLM 响应中接收到文本内容',
+  'Failed to generate thinkback timeline: {{error}}':
+    '生成回顾时间线失败: {{error}}',
 
   // ============================================================================
   // Commands - Model

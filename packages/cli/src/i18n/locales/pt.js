@@ -1004,6 +1004,8 @@ export default {
   'Generating thinkback timeline...': 'Gerando linha do tempo do thinkback...',
   'Failed to generate thinkback - no text content received from LLM response':
     'Falha ao gerar o thinkback - nenhum conteúdo de texto recebido da resposta do LLM',
+  'Failed to generate thinkback timeline: {{error}}':
+    'Falha ao gerar linha do tempo do thinkback: {{error}}',
 
   // ============================================================================
   // Commands - Model

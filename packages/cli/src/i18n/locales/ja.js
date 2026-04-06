@@ -753,6 +753,8 @@ export default {
   'Generating thinkback timeline...': '振り返りタイムラインを生成中...',
   'Failed to generate thinkback - no text content received from LLM response':
     '振り返りの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
+  'Failed to generate thinkback timeline: {{error}}':
+    '振り返りタイムラインの生成に失敗: {{error}}',
   // Model
   'Switch the model for this session': 'このセッションのモデルを切り替え',
   'Set fast model for background tasks':

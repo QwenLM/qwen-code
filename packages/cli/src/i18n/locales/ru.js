@@ -1004,6 +1004,8 @@ export default {
   'Generating thinkback timeline...': 'Генерация хронологии thinkback...',
   'Failed to generate thinkback - no text content received from LLM response':
     'Не удалось сгенерировать thinkback — не получен текстовый контент из ответа LLM',
+  'Failed to generate thinkback timeline: {{error}}':
+    'Не удалось сгенерировать хронологию thinkback: {{error}}',
 
   // ============================================================================
   // Команды - Модель

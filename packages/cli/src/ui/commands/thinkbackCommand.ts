@@ -11,6 +11,11 @@ import {
 } from './types.js';
 import { t } from '../../i18n/index.js';
 
+const formatThinkbackError = (error: unknown): string =>
+  t('Failed to generate thinkback timeline: {{error}}', {
+    error: error instanceof Error ? error.message : String(error),
+  });
+
 export const thinkbackCommand: SlashCommand = {
   name: 'thinkback',
   get description() {
@@ -158,7 +163,7 @@ export const thinkbackCommand: SlashCommand = {
         } catch (error) {
           yield {
             messageType: 'error' as const,
-            content: error instanceof Error ? error.message : String(error),
+            content: formatThinkbackError(error),
           };
         }
       };
@@ -199,7 +204,7 @@ export const thinkbackCommand: SlashCommand = {
           ui.addItem(
             {
               type: 'error' as const,
-              text: `❌ ${error instanceof Error ? error.message : String(error)}`,
+              text: `❌ ${formatThinkbackError(error)}`,
             },
             Date.now(),
           );
@@ -211,7 +216,7 @@ export const thinkbackCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'error',
-        content: error instanceof Error ? error.message : String(error),
+        content: formatThinkbackError(error),
       };
     }
   },
