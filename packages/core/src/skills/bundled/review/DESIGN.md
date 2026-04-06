@@ -113,3 +113,34 @@ For a PR with 15 findings:
 | Our design (original, N verify) | 21        | 5+15+1 — too expensive          |
 | Our design (batch verify)       | 7         | 5+1+1 — fixed, good coverage    |
 | Claude /ultrareview             | 5-20      | Cloud-hosted, cost on Anthropic |
+
+## Future optimization: Fork Subagent
+
+> Dependency: [Fork Subagent proposal](https://github.com/wenshao/codeagents/blob/main/docs/comparison/qwen-code-improvement-report-p0-p1-core.md#2-fork-subagentp0)
+
+**Current problem:** Each of the 7 LLM calls (5 review + 1 verify + 1 reverse) creates a new subagent from scratch. The system prompt (~50K tokens) is sent independently to each, totaling ~350K input tokens with massive redundancy.
+
+**Fork Subagent solution:** Instead of creating independent subagents, fork the current conversation. All forks inherit the parent's full context (system prompt, conversation history, Step 1/1.1/1.5 results) and share a prompt cache prefix. The API caches the common prefix once; each fork only pays for its unique delta (~2K per agent).
+
+```
+Current (independent subagents):
+  Agent 1: [50K system] + [2K task]  = 52K
+  Agent 2: [50K system] + [2K task]  = 52K
+  ...× 7 agents                     = ~350K total input tokens
+
+With Fork + prompt cache sharing:
+  Cached prefix: [50K system + conversation history]  (cached once)
+  Fork 1: [cache hit] + [2K delta]   = ~2K effective
+  Fork 2: [cache hit] + [2K delta]   = ~2K effective
+  ...× 7 forks                       = ~50K cached + ~14K delta = ~65K total
+```
+
+**Additional benefits for /review:**
+
+- Forked agents inherit Step 1.5 linter results, PR context, review rules — no need to repeat in each agent prompt
+- SKILL.md workaround "Do NOT paste the full diff into each agent's prompt" becomes unnecessary — fork already has the context
+- Verification and reverse audit agents inherit all prior findings naturally
+
+**Estimated savings:** ~65% token reduction (350K → ~120K) with zero quality impact.
+
+**Why not implemented now:** Fork Subagent requires changes to the Qwen Code core (`AgentTool`, `forkSubagent.ts`, `CacheSafeParams`). This is a platform-level feature (~400 lines, ~5 days), not a /review-specific change. When available, /review should be updated to use fork instead of independent subagents.
