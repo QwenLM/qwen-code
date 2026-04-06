@@ -136,7 +136,7 @@ With Fork + prompt cache sharing:
 
 **Additional benefits for /review:**
 
-- Forked agents inherit Step 1.5 linter results, PR context, review rules — no need to repeat in each agent prompt
+- Forked agents inherit Step 3 linter results, PR context, review rules — no need to repeat in each agent prompt
 - SKILL.md workaround "Do NOT paste the full diff into each agent's prompt" becomes unnecessary — fork already has the context
 - Verification and reverse audit agents inherit all prior findings naturally
 
