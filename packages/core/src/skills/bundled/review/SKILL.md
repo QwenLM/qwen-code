@@ -338,11 +338,12 @@ Do **not** post low-confidence findings as PR inline comments — they appear on
 
 ```
 # Step A: Use write_file tool to create /tmp/qwen-review-{target}-comment.txt with content:
-# Use the appropriate prefix based on the finding type:
-#   Normal:         **[{severity}]** {issue description}
-#   Auto-fixed:     **[Auto-fixed][{severity}]** {issue description}
+# Choose the correct prefix (including Markdown bold and severity tag):
+#   Normal:     **[Critical]** or **[Suggestion]**
+#   Auto-fixed: **[Auto-fixed][Critical]** or **[Auto-fixed][Suggestion]**
+# Then write:
 
-{prefix} {issue description}
+**[{severity}]** {issue description}
 
 {suggested fix}
 ```
