@@ -23,7 +23,7 @@ Your goal here is to understand the scope of changes so you can dispatch agents 
 
 First, parse the `--comment` flag: split the arguments by whitespace, and if any token is exactly `--comment` (not a substring match — ignore tokens like `--commentary`), set the comment flag and remove that token from the argument list. If `--comment` is set but the review target is not a PR, warn the user: "Warning: `--comment` flag is ignored because the review target is not a PR." and continue without it.
 
-To disambiguate the argument type: if the argument is a pure integer, treat it as a PR number. If it's a URL containing `/pull/`, extract the PR number — but first verify the URL's owner/repo matches the current repository (run `gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'` and compare). If the URL points to a different repository, warn the user: "Cross-repo PR review is not supported. Please run /review from within the target repository." and stop. Otherwise, treat the argument as a file path.
+To disambiguate the argument type: if the argument is a pure integer, treat it as a PR number. If it's a URL containing `/pull/`, extract the PR number and check if the URL's owner/repo matches the current repository (run `gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'`). If it matches, proceed with the normal worktree flow. If it's a **cross-repo URL**, use lightweight mode: run `gh pr diff <url>` to get the diff directly (no worktree, no build/test, no deterministic analysis) and skip Steps 3, 8, 10, 11. Agents review the diff text only. Inform the user: "Cross-repo review: running in lightweight mode (no build/test, no linter)." Otherwise, treat the argument as a file path.
 
 Based on the remaining arguments:
 
