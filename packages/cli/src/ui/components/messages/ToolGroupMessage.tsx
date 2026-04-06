@@ -179,6 +179,12 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
           isFocused &&
           !toolAwaitingApproval &&
           focusedSubagentCallId === tool.callId;
+        // Show the waiting indicator only when this subagent genuinely has a
+        // pending confirmation AND another subagent holds the focus lock.
+        const isWaitingForOtherApproval =
+          isAgentWithPendingConfirmation(tool.resultDisplay) &&
+          focusedSubagentCallId !== null &&
+          focusedSubagentCallId !== tool.callId;
         return (
           <Box key={tool.callId} flexDirection="column" minHeight={1}>
             <Box flexDirection="row" alignItems="center">
@@ -202,6 +208,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   tool.status === ToolCallStatus.Error
                 }
                 isFocused={isSubagentFocused}
+                isWaitingForOtherApproval={isWaitingForOtherApproval}
               />
             </Box>
             {tool.status === ToolCallStatus.Confirming &&

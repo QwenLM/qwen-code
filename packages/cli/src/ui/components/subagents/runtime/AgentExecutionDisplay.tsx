@@ -26,6 +26,8 @@ export interface AgentExecutionDisplayProps {
   config: Config;
   /** Whether this display's confirmation prompt should respond to keyboard input. */
   isFocused?: boolean;
+  /** Whether another subagent's approval currently holds the focus lock, blocking this one. */
+  isWaitingForOtherApproval?: boolean;
 }
 
 const getStatusColor = (
@@ -81,6 +83,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
   childWidth,
   config,
   isFocused = true,
+  isWaitingForOtherApproval = false,
 }) => {
   const [displayMode, setDisplayMode] = React.useState<DisplayMode>('compact');
 
@@ -171,7 +174,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
             {/* Inline approval prompt when awaiting confirmation */}
             {data.pendingConfirmation && (
               <Box flexDirection="column" marginTop={1} paddingLeft={1}>
-                {!isFocused && (
+                {isWaitingForOtherApproval && (
                   <Box marginBottom={0}>
                     <Text color={theme.text.secondary} dimColor>
                       ⏳ Waiting for other approval...
@@ -247,7 +250,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
       {/* Inline approval prompt when awaiting confirmation */}
       {data.pendingConfirmation && (
         <Box flexDirection="column">
-          {!isFocused && (
+          {isWaitingForOtherApproval && (
             <Box marginBottom={0}>
               <Text color={theme.text.secondary} dimColor>
                 ⏳ Waiting for other approval...

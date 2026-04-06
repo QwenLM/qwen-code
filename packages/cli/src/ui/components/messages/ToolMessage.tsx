@@ -174,13 +174,22 @@ const SubagentExecutionRenderer: React.FC<{
   childWidth: number;
   config: Config;
   isFocused?: boolean;
-}> = ({ data, availableHeight, childWidth, config, isFocused }) => (
+  isWaitingForOtherApproval?: boolean;
+}> = ({
+  data,
+  availableHeight,
+  childWidth,
+  config,
+  isFocused,
+  isWaitingForOtherApproval,
+}) => (
   <AgentExecutionDisplay
     data={data}
     availableHeight={availableHeight}
     childWidth={childWidth}
     config={config}
     isFocused={isFocused}
+    isWaitingForOtherApproval={isWaitingForOtherApproval}
   />
 );
 
@@ -253,6 +262,8 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   forceShowResult?: boolean;
   /** Whether this tool's subagent confirmation prompt should respond to keyboard input. */
   isFocused?: boolean;
+  /** Whether another subagent's approval currently holds the focus lock, blocking this one. */
+  isWaitingForOtherApproval?: boolean;
 }
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
@@ -270,6 +281,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   config,
   forceShowResult,
   isFocused,
+  isWaitingForOtherApproval,
 }) => {
   const settings = useSettings();
   const isThisShellFocused =
@@ -376,6 +388,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 childWidth={innerWidth}
                 config={config}
                 isFocused={isFocused}
+                isWaitingForOtherApproval={isWaitingForOtherApproval}
               />
             )}
             {effectiveDisplayRenderer.type === 'diff' && (
