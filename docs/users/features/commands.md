@@ -18,13 +18,14 @@ Slash commands are used to manage Qwen Code sessions, interface, and basic behav
 
 These commands help you save, restore, and summarize work progress.
 
-| Command     | Description                                               | Usage Examples                       |
-| ----------- | --------------------------------------------------------- | ------------------------------------ |
-| `/init`     | Analyze current directory and create initial context file | `/init`                              |
-| `/summary`  | Generate project summary based on conversation history    | `/summary`                           |
-| `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
-| `/resume`   | Resume a previous conversation session                    | `/resume`                            |
-| `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
+| Command      | Description                                               | Usage Examples                       |
+| ------------ | --------------------------------------------------------- | ------------------------------------ |
+| `/init`      | Analyze current directory and create initial context file | `/init`                              |
+| `/summary`   | Generate project summary based on conversation history    | `/summary`                           |
+| `/compress`  | Replace chat history with summary to save Tokens          | `/compress`                          |
+| `/resume`    | Resume a previous conversation session                    | `/resume`                            |
+| `/restore`   | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
+| `/thinkback` | Review session timeline of key decisions, changes & fixes | `/thinkback --topic "auth"`          |
 
 ### 1.2 Interface and Workspace Control
 
@@ -139,7 +140,57 @@ The `/btw` command allows you to ask quick side questions without interrupting o
 >
 > Use `/btw` when you need a quick answer without derailing your main task. It's especially useful for clarifying concepts, checking facts, or getting quick explanations while staying focused on your primary workflow.
 
-### 1.6 Information, Settings, and Help
+### 1.6 Session Timeline Review (`/thinkback`)
+
+The `/thinkback` command analyzes the current conversation history and generates a structured timeline of key events — decisions made, files modified, and bugs fixed during the session.
+
+| Command                                | Description                                     |
+| -------------------------------------- | ----------------------------------------------- |
+| `/thinkback`                           | Generate a full session timeline                |
+| `/thinkback --from "30 min ago"`       | Only include events from a specific time range  |
+| `/thinkback --topic "auth"`            | Only include events related to a specific topic |
+| `/thinkback --from "1h ago" --topic X` | Combine time range and topic filters            |
+
+**How It Works:**
+
+- The curated conversation history is sent to the LLM with a prompt to extract key events
+- The LLM returns a structured Markdown timeline with numbered steps
+- Each step is categorized as a Decision, Fix, or Change, with affected files noted
+- The command blocks the main conversation while generating (unlike `/btw`)
+
+**Example:**
+
+```
+> /thinkback
+
+# Timeline Review
+- **Step 1** — [Change] Updated auth middleware to fix session token storage (auth.ts)
+- **Step 2** — [Decision] Switched to JWT-based tokens for compliance (config.ts, auth.ts)
+- **Step 3** — [Fix] Resolved token refresh race condition (tokenManager.ts)
+```
+
+With filtering:
+
+```
+> /thinkback --from "30 min ago" --topic "auth"
+
+# Timeline Review
+- **Step 1** — [Fix] Fixed session token storage format for compliance (auth.ts)
+```
+
+**Supported Execution Modes:**
+
+| Mode                 | Behavior                                        |
+| -------------------- | ----------------------------------------------- |
+| Interactive          | Shows pending indicator, then displays timeline |
+| Non-interactive      | Returns timeline as text result                 |
+| ACP (Agent Protocol) | Returns stream_messages async generator         |
+
+> [!tip]
+>
+> Use `/thinkback` at the end of a long session to get a quick recap of everything that happened. It's especially useful before creating a commit message, writing a PR description, or handing off work to a colleague.
+
+### 1.7 Information, Settings, and Help
 
 Commands for obtaining information and performing system settings.
 
@@ -154,7 +205,7 @@ Commands for obtaining information and performing system settings.
 | `/copy`     | Copy last output content to clipboard           | `/copy`                          |
 | `/quit`     | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
 
-### 1.7 Common Shortcuts
+### 1.8 Common Shortcuts
 
 | Shortcut           | Function                | Note                   |
 | ------------------ | ----------------------- | ---------------------- |
@@ -164,7 +215,7 @@ Commands for obtaining information and performing system settings.
 | `Ctrl/cmd+Z`       | Undo input              | Text editing           |
 | `Ctrl/cmd+Shift+Z` | Redo input              | Text editing           |
 
-### 1.8 CLI Auth Subcommands
+### 1.9 CLI Auth Subcommands
 
 In addition to the in-session `/auth` slash command, Qwen Code provides standalone CLI subcommands for managing authentication directly from the terminal:
 
