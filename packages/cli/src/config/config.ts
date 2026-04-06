@@ -830,8 +830,11 @@ export async function loadCliConfig(
   } else if (!hasQuery && !hasPrompt) {
     // Priority 3: No query or prompt means interactive only if TTY (format arguments ignored)
     interactive = process.stdin.isTTY ?? false;
-  } else if (hasQuery && argv.query?.trim() === '/resume') {
-    // Priority 4: /resume command should launch interactive UI with resume dialog
+  } else if (
+    hasQuery &&
+    (argv.query?.trim() === '/resume' || argv.query?.trim() === '/res')
+  ) {
+    // Priority 4: /resume (and /res alias) command should launch interactive UI with resume dialog
     interactive = true;
   } else {
     // Default: If we have query/prompt but output format is TEXT, assume non-interactive

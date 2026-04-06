@@ -10,6 +10,7 @@ import { t } from '../../i18n/index.js';
 
 export const resumeCommand: SlashCommand = {
   name: 'resume',
+  altNames: ['res'],
   kind: CommandKind.BUILT_IN,
   get description() {
     return t('Resume a previous session');
