@@ -135,7 +135,7 @@ branch=$(git branch --show-current 2>/dev/null)
 parts=()
 [ -n "$model" ] && parts+=("$model")
 [ -n "$branch" ] && parts+=("($branch)")
-if [ "$tokens" -gt 0 ] 2>/dev/null; then
+if [ "$tokens" -gt 0 ] && [ "$size" -gt 0 ] 2>/dev/null; then
   pct=$((tokens * 100 / size))
   parts+=("ctx:${pct}%")
 fi
