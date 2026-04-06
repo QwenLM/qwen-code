@@ -1,0 +1,60 @@
+name: 'VSCode Companion OAuth Smoke'
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'
+  cancel-in-progress: true
+
+permissions:
+  contents: 'read'
+
+jobs:
+  oauth-smoke:
+    name: 'OAuth Smoke Tests'
+    runs-on: 'ubuntu-latest'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@v4'
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@v4'
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+
+      - name: 'Install dependencies'
+        run: 'npm ci'
+
+      - name: 'Install cached OAuth credentials'
+        run: 'node ./test/oauthCredsInstaller.mjs'
+        working-directory: 'packages/vscode-ide-companion'
+        env:
+          QWEN_TEST_OAUTH_CREDS_JSON: '${{ secrets.QWEN_TEST_OAUTH_CREDS_JSON }}'
+          QWEN_TEST_OAUTH_CREDS_BASE64: '${{ secrets.QWEN_TEST_OAUTH_CREDS_BASE64 }}'
+
+      - name: 'Build webui'
+        run: 'npm run build'
+        working-directory: 'packages/webui'
+
+      - name: 'Build project'
+        run: 'npm run build'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Bundle CLI'
+        run: 'node scripts/prepackage.js'
+        working-directory: 'packages/vscode-ide-companion'
+
+      - name: 'Run OAuth integration smoke'
+        run: 'xvfb-run -a npm run test:integration'
+        working-directory: 'packages/vscode-ide-companion'
+        env:
+          QWEN_OAUTH: '1'
+
+      - name: 'Run OAuth VSCode E2E smoke'
+        run: 'xvfb-run -a npm run test:e2e:vscode'
+        working-directory: 'packages/vscode-ide-companion'
+        env:
+          QWEN_OAUTH: '1'
