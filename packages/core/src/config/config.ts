@@ -1690,8 +1690,16 @@ export class Config {
     const filePath = this.getPlanFilePath();
     try {
       return fs.readFileSync(filePath, 'utf-8');
-    } catch {
-      return undefined;
+    } catch (error: unknown) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        return undefined;
+      }
+      throw error;
     }
   }
 

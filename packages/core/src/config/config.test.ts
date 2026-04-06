@@ -1271,12 +1271,25 @@ describe('setApprovalMode with folder trust', () => {
 
     it('should return undefined when no plan file exists', () => {
       const config = new Config(baseParams);
+      const enoentError = new Error('ENOENT') as NodeJS.ErrnoException;
+      enoentError.code = 'ENOENT';
       (fs.readFileSync as Mock).mockImplementation(() => {
-        throw new Error('ENOENT');
+        throw enoentError;
       });
 
       const plan = config.loadPlan();
       expect(plan).toBeUndefined();
+    });
+
+    it('should rethrow non-ENOENT errors from loadPlan', () => {
+      const config = new Config(baseParams);
+      const permError = new Error('EACCES') as NodeJS.ErrnoException;
+      permError.code = 'EACCES';
+      (fs.readFileSync as Mock).mockImplementation(() => {
+        throw permError;
+      });
+
+      expect(() => config.loadPlan()).toThrow('EACCES');
     });
 
     it('should use session ID in plan file path', () => {
