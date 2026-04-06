@@ -338,10 +338,10 @@ If there are no low-confidence findings, omit this section.
 
 ### Verdict
 
-One of:
+Based on **high-confidence findings only** (low-confidence findings do not influence the verdict — they are terminal-only and "Needs Human Review"):
 
-- **Approve** — No critical issues, good to merge
-- **Request changes** — Has critical issues that need fixing
+- **Approve** — No high-confidence critical issues, good to merge
+- **Request changes** — Has high-confidence critical issues that need fixing
 - **Comment** — Has suggestions but no blockers
 
 Append a follow-up tip after the verdict (and after Step 8 Autofix if applicable). Choose based on remaining state:
@@ -445,14 +445,15 @@ After posting all inline comments, decide whether to submit a review summary:
 Use `write_file` to create `/tmp/qwen-review-{target}-summary.txt` when needed. Use the **pre-fix verdict** from Step 7:
 
 ```bash
-# Submit review with the matching action:
+# Submit review with the matching action (only for Approve/Request changes,
+# or Comment when no inline comments were posted — see rules above):
 # If verdict is "Approve":
 gh pr review {pr_number} --approve --body-file /tmp/qwen-review-{target}-summary.txt
 
 # If verdict is "Request changes":
 gh pr review {pr_number} --request-changes --body-file /tmp/qwen-review-{target}-summary.txt
 
-# If verdict is "Comment":
+# If verdict is "Comment" AND no inline comments posted:
 gh pr review {pr_number} --comment --body-file /tmp/qwen-review-{target}-summary.txt
 ```
 
@@ -512,7 +513,7 @@ If a PR worktree was created in Step 1, remove it and its local ref:
 1. `git worktree remove .qwen/tmp/review-pr-<number> --force` (the `--force` flag handles cases where autofix left uncommitted changes)
 2. `git branch -D qwen-review/pr-<number> 2>/dev/null || true` (clean up the local ref; ignore errors if already deleted)
 
-This step runs **after** Step 9 because Step 9 may still need the worktree for reading file contents when composing inline comments.
+This step runs **after** Step 9 and Step 10 to ensure all review outputs are saved before cleanup.
 
 ## Exclusion Criteria
 
