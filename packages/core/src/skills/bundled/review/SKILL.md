@@ -23,7 +23,7 @@ Your goal here is to understand the scope of changes so you can dispatch agents 
 
 First, parse the `--comment` flag: split the arguments by whitespace, and if any token is exactly `--comment` (not a substring match — ignore tokens like `--commentary`), set the comment flag and remove that token from the argument list. If `--comment` is set but the review target is not a PR, warn the user: "Warning: `--comment` flag is ignored because the review target is not a PR." and continue without it.
 
-To disambiguate the argument type: if the argument is a pure integer, treat it as a PR number. If it's a URL containing `/pull/`, extract the PR number. Otherwise, treat it as a file path.
+To disambiguate the argument type: if the argument is a pure integer, treat it as a PR number. If it's a URL containing `/pull/`, extract the PR number — but first verify the URL's owner/repo matches the current repository (run `gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'` and compare). If the URL points to a different repository, warn the user: "Cross-repo PR review is not supported. Please run /review from within the target repository." and stop. Otherwise, treat the argument as a file path.
 
 Based on the remaining arguments:
 
