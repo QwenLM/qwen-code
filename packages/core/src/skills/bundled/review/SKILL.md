@@ -291,7 +291,9 @@ One of:
 - **Comment** — Has suggestions but no blockers
 
 If the review target is a PR and there are confirmed findings, append a tip after the verdict:
-"Tip: run `/review {actual_pr_number} --comment` to post these findings as PR inline comments." (replace `{actual_pr_number}` with the real PR number from Step 1, e.g., "Tip: run `/review 123 --comment` to post these findings as PR inline comments.")
+"Tip: type `post comments` to publish these findings as PR inline comments."
+
+If the user responds with "post comments" (or similar intent like "yes post them", "publish comments"), proceed directly to Step 4 using the findings already collected — do NOT re-run Steps 1-3.5.
 
 ## Step 3.5: Autofix
 
