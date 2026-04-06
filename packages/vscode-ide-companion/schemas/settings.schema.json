@@ -136,21 +136,7 @@
         "statusLine": {
           "description": "Custom status line display configuration.",
           "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "enum": ["command"]
-            },
-            "command": {
-              "type": "string",
-              "description": "Shell command to execute for status line display. Receives JSON context via stdin."
-            },
-            "padding": {
-              "type": "number",
-              "description": "Horizontal padding for the status line."
-            }
-          },
-          "required": ["type", "command"]
+          "additionalProperties": true
         },
         "customThemes": {
           "description": "Custom theme definitions.",
