@@ -115,6 +115,8 @@ Extract the list of changed files from the diff output. For local uncommitted re
    - If `CMakeLists.txt` or `Makefile` exists → skip per-file linting (C/C++ linters like clang-tidy require full build context). Agent 5 will handle build verification.
    - If `compile_commands.json` exists and `clang-tidy` is available → `clang-tidy <changed-files> 2>&1`
 
+7. **Other / unrecognized projects**: If the project doesn't match any of the above patterns, check for CI configuration files (`.github/workflows/*.yml`, `.gitlab-ci.yml`, `Jenkinsfile`) and read them to discover what lint/check commands the project runs in CI. Run any applicable lint or compile-check commands found. If no CI config exists either, skip Step 3 entirely — LLM agents will still review the diff.
+
 **Important**: For whole-project tools (`tsc`, `npm run lint`, `cargo clippy`, `go vet`), capture the full output first, then filter to only errors/warnings in changed files, then truncate to the first 200 lines. Do NOT pipe to `head` before filtering — this can drop relevant errors for changed files that appear later in the output.
 
 **Timeout**: Set a 120-second timeout (120000ms when using `run_shell_command`) for type checkers (`tsc`, `mypy`) and 60-second timeout (60000ms) for linters. If a command times out or fails to run (tool not installed), skip it and record an informational note naming the skipped check and the reason (e.g., "tsc skipped: timeout after 120s" or "ruff skipped: tool not installed"). Include these notes in the Step 7 summary so the user knows which checks did not run.
@@ -209,6 +211,7 @@ This agent runs deterministic build and test commands to verify the code compile
    - Else if `pytest.ini` or `pyproject.toml` with `[tool.pytest]` → `pytest 2>&1`
    - Else if `Cargo.toml` exists → `cargo test 2>&1`
    - Else if `go.mod` exists → `go test ./... 2>&1`
+   - If none of the above match, read CI configuration files (`.github/workflows/*.yml`, `Makefile`, etc.) to discover the project's build and test commands. For example, OpenJDK uses `make images` to build and `make test TEST=tier1` to test. Use the discovered commands.
 3. Set a **120-second timeout** (120000ms when using `run_shell_command`) for each command. If a command times out, report it as a finding.
 4. If build or tests fail, analyze the error output and correlate failures with specific changes in the diff. Distinguish between:
    - **Code-caused failures** (compilation errors, test assertions) → **Critical**
