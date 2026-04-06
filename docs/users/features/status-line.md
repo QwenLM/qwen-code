@@ -12,6 +12,11 @@ The status line lets you run a shell command whose output is displayed as a pers
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Prerequisites
+
+- [`jq`](https://jqlang.github.io/jq/) is recommended for parsing the JSON input (install via `brew install jq`, `apt install jq`, etc.)
+- Simple commands that don't need JSON data (e.g. `git branch --show-current`) work without `jq`
+
 ## Quick setup
 
 The easiest way to configure a status line is the `/statusline` command. It launches a setup agent that reads your shell PS1 configuration and generates a matching status line:
@@ -117,10 +122,9 @@ Output: `my-project (main)`
 
 ### Script file for complex commands
 
-For longer commands, save a script file:
+For longer commands, save a script file at `~/.qwen/statusline-command.sh`:
 
 ```bash
-# ~/.qwen/statusline-command.sh
 #!/bin/bash
 input=$(cat)
 model=$(echo "$input" | jq -r '.model.id')
@@ -157,13 +161,14 @@ Then reference it in settings:
 - **Update triggers**: The status line updates when the model changes, a new message is sent (token count changes), or vim mode is toggled. Updates are debounced (300ms).
 - **Timeout**: Commands that take longer than 5 seconds are killed. The status line clears on failure.
 - **Output**: Only the first line of stdout is used. The text is rendered with dimmed colors and truncated to terminal width.
+- **Hot reload**: Changes to `ui.statusLine` in settings take effect immediately — no restart required.
 - **Removal**: Delete the `ui.statusLine` key from settings to disable. The status line disappears and the "? for shortcuts" hint returns.
 
 ## Troubleshooting
 
-| Problem                 | Cause                  | Fix                                                                          |
-| ----------------------- | ---------------------- | ---------------------------------------------------------------------------- |
-| Status line not showing | Config at wrong path   | Must be under `ui.statusLine`, not root-level `statusLine`                   |
-| Empty output            | Command fails silently | Test your command manually: `echo '{"model":{"id":"test"}}' \| your_command` |
-| Stale data              | No trigger fired       | Send a message or switch models to trigger an update                         |
-| Command too slow        | Complex script         | Optimize the script or move heavy work to a background cache                 |
+| Problem                 | Cause                  | Fix                                                                                                                                                 |
+| ----------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Status line not showing | Config at wrong path   | Must be under `ui.statusLine`, not root-level `statusLine`                                                                                          |
+| Empty output            | Command fails silently | Test manually: `echo '{"model":{"id":"test"},"cwd":"/tmp","context_window":{"context_window_size":1,"last_prompt_token_count":0}}' \| your_command` |
+| Stale data              | No trigger fired       | Send a message or switch models to trigger an update                                                                                                |
+| Command too slow        | Complex script         | Optimize the script or move heavy work to a background cache                                                                                        |
