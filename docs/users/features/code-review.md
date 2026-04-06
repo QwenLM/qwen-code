@@ -26,32 +26,22 @@ If there are no uncommitted changes, `/review` will let you know and stop — no
 The `/review` command runs a multi-stage pipeline:
 
 ```
-Determine scope (local diff / PR worktree / file)
-        |
-Load project review rules
-        |
-Run deterministic analysis (linter, typecheck)         [zero LLM cost]
-        |
-5 parallel review agents                               [5 LLM calls]
-  |-- Agent 1: Correctness & Security
-  |-- Agent 2: Code Quality
-  |-- Agent 3: Performance & Efficiency
-  |-- Agent 4: Undirected Audit
-  '-- Agent 5: Build & Test (runs shell commands)
-        |
-Deduplicate --> Batch verify --> Aggregate              [1 LLM call]
-        |
-Reverse audit (find coverage gaps)                      [1 LLM call]
-        |
-Present findings + verdict
-        |
-Autofix (user-confirmed, optional)
-        |
-Post PR inline comments (if requested)
-        |
-Save report + incremental cache
-        |
-Clean up (remove worktree + temp files)
+Step 1:  Determine scope (local diff / PR worktree / file)
+Step 2:  Load project review rules
+Step 3:  Run deterministic analysis (linter, typecheck)    [zero LLM cost]
+Step 4:  5 parallel review agents                          [5 LLM calls]
+           |-- Agent 1: Correctness & Security
+           |-- Agent 2: Code Quality
+           |-- Agent 3: Performance & Efficiency
+           |-- Agent 4: Undirected Audit
+           '-- Agent 5: Build & Test (runs shell commands)
+Step 5:  Deduplicate --> Batch verify --> Aggregate         [1 LLM call]
+Step 6:  Reverse audit (find coverage gaps)                 [1 LLM call]
+Step 7:  Present findings + verdict
+Step 8:  Autofix (user-confirmed, optional)
+Step 9:  Post PR inline comments (if requested)
+Step 10: Save report + incremental cache
+Step 11: Clean up (remove worktree + temp files)
 ```
 
 ### Review Agents
@@ -151,7 +141,7 @@ After the review, context-aware tips appear as ghost text. Press Tab to accept:
 | PR review with findings            | `post comments`    | Posts PR inline comments (no re-review) |
 | Local review, all clear            | `commit`           | Commits your changes                    |
 
-Note: `fix these issues` is only available for local reviews. For PR reviews, use Autofix (Step 3.5) — the worktree is cleaned up after the review, so post-review interactive fixing is not possible.
+Note: `fix these issues` is only available for local reviews. For PR reviews, use Autofix (Step 8) — the worktree is cleaned up after the review, so post-review interactive fixing is not possible.
 
 ## Project Review Rules
 
@@ -231,13 +221,13 @@ For large diffs (>10 modified symbols), analysis prioritizes functions with sign
 
 The review pipeline uses a fixed number of LLM calls regardless of how many findings are produced:
 
-| Stage                             | LLM calls | Notes                                                   |
-| --------------------------------- | --------- | ------------------------------------------------------- |
-| Deterministic analysis (Step 1.5) | 0         | Shell commands only                                     |
-| 5 review agents (Step 2)          | 5         | Run in parallel; Agent 5 runs build/test shell commands |
-| Batch verification (Step 2.5)     | 1         | Single agent verifies all findings at once              |
-| Reverse audit (Step 2.6)          | 1         | Finds coverage gaps; findings skip verification         |
-| **Total**                         | **7**     | Fixed, not proportional to finding count                |
+| Stage                           | LLM calls | Notes                                                   |
+| ------------------------------- | --------- | ------------------------------------------------------- |
+| Deterministic analysis (Step 3) | 0         | Shell commands only                                     |
+| 5 review agents (Step 4)        | 5         | Run in parallel; Agent 5 runs build/test shell commands |
+| Batch verification (Step 5)     | 1         | Single agent verifies all findings at once              |
+| Reverse audit (Step 6)          | 1         | Finds coverage gaps; findings skip verification         |
+| **Total**                       | **7**     | Fixed, not proportional to finding count                |
 
 ## What's NOT Flagged
 
