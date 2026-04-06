@@ -180,10 +180,6 @@ export const thinkbackCommand: SlashCommand = {
         throw new DOMException('Thinkback generation cancelled.', 'AbortError');
       }
 
-      if (executionMode === 'interactive') {
-        ui.setPendingItem(null);
-      }
-
       return {
         type: 'message',
         messageType: 'info',
@@ -192,7 +188,6 @@ export const thinkbackCommand: SlashCommand = {
     } catch (error) {
       if (executionMode === 'interactive') {
         if (!abortSignal?.aborted) {
-          ui.setPendingItem(null);
           ui.addItem(
             {
               type: 'error' as const,
@@ -210,6 +205,10 @@ export const thinkbackCommand: SlashCommand = {
         messageType: 'error',
         content: formatThinkbackError(error),
       };
+    } finally {
+      if (executionMode === 'interactive') {
+        ui.setPendingItem(null);
+      }
     }
   },
 };
