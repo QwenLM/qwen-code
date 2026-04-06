@@ -40,6 +40,18 @@ You can switch into Plan Mode during a session using **Shift+Tab** (or **Tab** o
 
 If you are in Normal Mode, **Shift+Tab** (or **Tab** on Windows) first switches into `auto-edits` Mode, indicated by `⏵⏵ accept edits on` at the bottom of the terminal. A subsequent **Shift+Tab** (or **Tab** on Windows) will switch into Plan Mode, indicated by `⏸ plan mode`.
 
+**Use the `/plan` command**
+
+The `/plan` command provides a quick shortcut for entering and exiting Plan Mode:
+
+```bash
+/plan                          # Enter plan mode
+/plan refactor the auth module # Enter plan mode and start planning
+/plan execute                  # Exit plan mode and start executing
+```
+
+When you exit plan mode with `/plan execute`, your previous approval mode is automatically restored (e.g., if you were in Auto-Edit before entering Plan Mode, you'll return to Auto-Edit).
+
 **Start a new session in Plan Mode**
 
 To start a new session in Plan Mode, use the `/approval-mode` then select `plan`
