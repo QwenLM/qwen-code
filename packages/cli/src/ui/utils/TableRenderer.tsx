@@ -473,8 +473,12 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
           .replace(/\s+/g, ' ')
           .trim();
 
+        const linkCode = getColorCode(theme.text.link);
+        const recoloredLabel = linkCode
+          ? recolorAfterResets(`${label}:`, linkCode)
+          : `${label}:`;
         lines.push(
-          `${applyColor(ansiFmt.bold(`${label}:`), theme.text.link)} ${value}`,
+          `${applyColor(ansiFmt.bold(recoloredLabel), theme.text.link)} ${value}`,
         );
       }
     });
