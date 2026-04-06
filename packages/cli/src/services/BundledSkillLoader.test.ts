@@ -34,6 +34,7 @@ describe('BundledSkillLoader', () => {
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       isCronEnabled: vi.fn().mockReturnValue(false),
+      getModel: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
   });
 
@@ -132,9 +133,9 @@ describe('BundledSkillLoader', () => {
       body: 'Review by {{model}} via Qwen Code',
     });
     mockSkillManager.listSkills.mockResolvedValue([skill]);
-    (mockConfig as Record<string, unknown>).getModel = vi
-      .fn()
-      .mockReturnValue('qwen3-coder');
+    (mockConfig.getModel as ReturnType<typeof vi.fn>).mockReturnValue(
+      'qwen3-coder',
+    );
 
     const loader = new BundledSkillLoader(mockConfig);
     const commands = await loader.loadCommands(signal);

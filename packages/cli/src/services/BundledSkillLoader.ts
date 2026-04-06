@@ -62,10 +62,7 @@ export class BundledSkillLoader implements ICommandLoader {
           // Resolve template variables in skill body (e.g., {{model}})
           let body = skill.body;
           if (body.includes('{{model}}')) {
-            const modelId =
-              (typeof this.config?.getModel === 'function'
-                ? this.config.getModel()
-                : undefined) ?? 'unknown';
+            const modelId = this.config?.getModel() ?? 'unknown';
             body = body.replaceAll('{{model}}', modelId);
           }
 
