@@ -120,15 +120,15 @@ You can review PRs from other repositories by passing the full URL:
 
 This runs in **lightweight mode** — no worktree, no linter, no build/test, no autofix. The review is based on the diff text only (fetched via GitHub API). PR comments can still be posted if you have write access.
 
-| Capability                                     | Same-repo | Cross-repo                    |
-| ---------------------------------------------- | --------- | ----------------------------- |
-| LLM review (5 agents + verify + reverse audit) | ✅        | ✅                            |
-| Deterministic analysis (linter/typecheck)      | ✅        | ❌                            |
-| Build & test                                   | ✅        | ❌                            |
-| Cross-file impact analysis                     | ✅        | ❌                            |
-| Autofix                                        | ✅        | ❌                            |
-| PR inline comments                             | ✅        | ✅ (if you have write access) |
-| Incremental review cache                       | ✅        | ❌                            |
+| Capability                                       | Same-repo | Cross-repo                    |
+| ------------------------------------------------ | --------- | ----------------------------- |
+| LLM review (Agents 1-4 + verify + reverse audit) | ✅        | ✅                            |
+| Agent 5: Build & test                            | ✅        | ❌ (no local codebase)        |
+| Deterministic analysis (linter/typecheck)        | ✅        | ❌                            |
+| Cross-file impact analysis                       | ✅        | ❌                            |
+| Autofix                                          | ✅        | ❌                            |
+| PR inline comments                               | ✅        | ✅ (if you have write access) |
+| Incremental review cache                         | ✅        | ❌                            |
 
 ## PR Inline Comments
 

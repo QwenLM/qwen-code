@@ -33,7 +33,7 @@ Based on the remaining arguments:
 
 - **PR number or same-repo URL** (e.g., `123` or a URL whose owner/repo matches the current repo — cross-repo URLs are handled by the lightweight mode above):
   - **Create an ephemeral worktree** to avoid modifying the user's working tree. This eliminates all stash/checkout/restore complexity:
-    1. **Clean up stale worktree** from a previously interrupted review (if any): if `.qwen/tmp/review-pr-<number>` exists, remove it with `git worktree remove .qwen/tmp/review-pr-<number> --force` and delete the stale ref `git branch -D qwen-review/pr-<number>` if it exists. This ensures a fresh start.
+    1. **Clean up stale worktree** from a previously interrupted review (if any): if `.qwen/tmp/review-pr-<number>` exists, remove it with `git worktree remove .qwen/tmp/review-pr-<number> --force` and delete the stale ref `git branch -D qwen-review/pr-<number> 2>/dev/null || true`. This ensures a fresh start.
     2. Fetch the PR branch into a unique local ref: `git fetch origin pull/<number>/head:qwen-review/pr-<number>` (do NOT use `gh pr checkout` — it modifies the current working tree). If fetch fails (auth, network, PR doesn't exist), inform the user and stop.
     3. Get the PR's remote branch name for later push: `gh pr view <number> --json headRefName --jq '.headRefName'`. If this fails, inform the user and stop.
     4. Create a temporary worktree: `git worktree add .qwen/tmp/review-pr-<number> qwen-review/pr-<number>`. If this fails, inform the user and stop.
@@ -483,7 +483,7 @@ Remove all temp files (`/tmp/qwen-review-{target}-context.md`, `/tmp/qwen-review
 If a PR worktree was created in Step 1, remove it and its local ref:
 
 1. `git worktree remove .qwen/tmp/review-pr-<number> --force` (the `--force` flag handles cases where autofix left uncommitted changes)
-2. `git branch -D qwen-review/pr-<number>` (clean up the local ref created during fetch)
+2. `git branch -D qwen-review/pr-<number> 2>/dev/null || true` (clean up the local ref; ignore errors if already deleted)
 
 This step runs **after** Step 9 because Step 9 may still need the worktree for reading file contents when composing inline comments.
 
