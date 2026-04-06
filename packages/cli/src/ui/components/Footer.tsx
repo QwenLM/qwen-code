@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -24,7 +24,7 @@ export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
-  const customStatusLine = useStatusLine();
+  const { text: statusLineText, padding: statusLinePadding } = useStatusLine();
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -64,17 +64,11 @@ export const Footer: React.FC = () => {
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-  ) : (
+  ) : statusLineText ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );
 
   const rightItems: Array<{ key: string; node: React.ReactNode }> = [];
-  if (customStatusLine) {
-    rightItems.push({
-      key: 'customStatusLine',
-      node: <Text color={theme.text.secondary}>{customStatusLine}</Text>,
-    });
-  }
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',
@@ -101,32 +95,46 @@ export const Footer: React.FC = () => {
       ),
     });
   }
+
+  // When a custom status line is configured, render it as a dedicated row
+  // beneath the standard footer (matching upstream placement).
   return (
-    <Box
-      justifyContent="space-between"
-      width="100%"
-      flexDirection="row"
-      alignItems="center"
-    >
-      {/* Left Section: Exactly one status line (exit prompts / mode indicator / default hint) */}
+    <Box flexDirection="column" width="100%">
       <Box
-        marginLeft={2}
-        justifyContent="flex-start"
-        flexDirection={isNarrow ? 'column' : 'row'}
-        alignItems={isNarrow ? 'flex-start' : 'center'}
+        justifyContent="space-between"
+        width="100%"
+        flexDirection="row"
+        alignItems="center"
       >
-        {leftContent}
+        {/* Left Section */}
+        <Box
+          marginLeft={2}
+          justifyContent="flex-start"
+          flexDirection={isNarrow ? 'column' : 'row'}
+          alignItems={isNarrow ? 'flex-start' : 'center'}
+        >
+          {leftContent}
+        </Box>
+
+        {/* Right Section */}
+        <Box alignItems="center" justifyContent="flex-end" marginRight={2}>
+          {rightItems.map(({ key, node }, index) => (
+            <Box key={key} alignItems="center">
+              {index > 0 && <Text color={theme.text.secondary}> | </Text>}
+              {node}
+            </Box>
+          ))}
+        </Box>
       </Box>
 
-      {/* Right Section: Sandbox Info, Debug Mode, Context Usage, and Console Summary */}
-      <Box alignItems="center" justifyContent="flex-end" marginRight={2}>
-        {rightItems.map(({ key, node }, index) => (
-          <Box key={key} alignItems="center">
-            {index > 0 && <Text color={theme.text.secondary}> | </Text>}
-            {node}
-          </Box>
-        ))}
-      </Box>
+      {/* Custom status line row */}
+      {statusLineText && (
+        <Box paddingX={statusLinePadding}>
+          <Text dimColor wrap="truncate">
+            {statusLineText}
+          </Text>
+        </Box>
+      )}
     </Box>
   );
 };

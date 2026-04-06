@@ -134,8 +134,23 @@
           "default": "Qwen Dark"
         },
         "statusLine": {
-          "description": "Shell command to execute periodically to display custom information in the status line (e.g., \"curl -s api/rate-limit | jq .remaining\").",
-          "type": "string"
+          "description": "Custom status line display configuration.",
+          "type": "object",
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["command"]
+            },
+            "command": {
+              "type": "string",
+              "description": "Shell command to execute for status line display. Receives JSON context via stdin."
+            },
+            "padding": {
+              "type": "number",
+              "description": "Horizontal padding for the status line."
+            }
+          },
+          "required": ["type", "command"]
         },
         "customThemes": {
           "description": "Custom theme definitions.",

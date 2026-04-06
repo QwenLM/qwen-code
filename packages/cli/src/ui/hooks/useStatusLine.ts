@@ -1,63 +1,233 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec } from 'child_process';
 import { useSettings } from '../contexts/SettingsContext.js';
-import { isShellCommandReadOnlyAST } from '@qwen-code/qwen-code-core';
+import { useUIState } from '../contexts/UIStateContext.js';
+import { useConfig } from '../contexts/ConfigContext.js';
+import { useVimMode } from '../contexts/VimModeContext.js';
 
-export function useStatusLine(): string | null {
+/**
+ * Structured JSON input passed to the status line command via stdin.
+ * This allows status line commands to display context-aware information
+ * (model, token usage, session, etc.) without running extra queries.
+ */
+export interface StatusLineCommandInput {
+  session_id: string;
+  cwd: string;
+  model: {
+    id: string;
+  };
+  context_window: {
+    context_window_size: number;
+    last_prompt_token_count: number;
+  };
+  vim?: {
+    mode: string;
+  };
+}
+
+interface StatusLineConfig {
+  type: 'command';
+  command: string;
+  padding?: number;
+}
+
+function getStatusLineConfig(
+  settings: ReturnType<typeof useSettings>,
+): StatusLineConfig | undefined {
+  const raw = settings.merged.ui?.statusLine;
+  if (
+    raw &&
+    typeof raw === 'object' &&
+    'type' in raw &&
+    raw.type === 'command' &&
+    'command' in raw &&
+    typeof raw.command === 'string'
+  ) {
+    return raw as StatusLineConfig;
+  }
+  return undefined;
+}
+
+/**
+ * Hook that executes a user-configured shell command and returns its output
+ * for display in the status line. The command receives structured JSON context
+ * via stdin.
+ *
+ * Updates are debounced (300ms) and triggered by state changes (model switch,
+ * new messages, vim mode toggle) rather than blind polling.
+ */
+export function useStatusLine(): {
+  text: string | null;
+  padding: number;
+} {
   const settings = useSettings();
-  const statusLineCommand = settings.merged.ui?.statusLine;
+  const uiState = useUIState();
+  const config = useConfig();
+  const { vimEnabled, vimMode } = useVimMode();
+
+  const statusLineConfig = getStatusLineConfig(settings);
+  const statusLineCommand = statusLineConfig?.command;
+  const padding = statusLineConfig?.padding ?? 0;
+
   const [output, setOutput] = useState<string | null>(null);
 
+  // Keep latest values in refs so the stable doUpdate callback can read them
+  // without being recreated on every render.
+  const uiStateRef = useRef(uiState);
+  uiStateRef.current = uiState;
+  const configRef = useRef(config);
+  configRef.current = config;
+  const vimEnabledRef = useRef(vimEnabled);
+  vimEnabledRef.current = vimEnabled;
+  const vimModeRef = useRef(vimMode);
+  vimModeRef.current = vimMode;
+  const statusLineCommandRef = useRef(statusLineCommand);
+  statusLineCommandRef.current = statusLineCommand;
+
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(
+    undefined,
+  );
+
+  // Track previous trigger values to detect actual changes
+  const prevStateRef = useRef<{
+    promptTokenCount: number;
+    currentModel: string;
+    vimMode: string | undefined;
+  }>({
+    promptTokenCount: 0,
+    currentModel: '',
+    vimMode: undefined,
+  });
+
+  // Guard: when true, the mount effect has already called doUpdate so the
+  // command-change effect should skip its first run to avoid a double exec.
+  const hasMountedRef = useRef(false);
+
+  // Track the active child process so we can ignore stale callbacks.
+  const generationRef = useRef(0);
+
+  const doUpdate = useCallback(() => {
+    const cmd = statusLineCommandRef.current;
+    if (!cmd) {
+      setOutput(null);
+      return;
+    }
+
+    const ui = uiStateRef.current;
+    const cfg = configRef.current;
+
+    const input: StatusLineCommandInput = {
+      session_id: ui.sessionStats.sessionId,
+      cwd: cfg.getTargetDir(),
+      model: {
+        id: ui.currentModel || cfg.getModel() || 'unknown',
+      },
+      context_window: {
+        context_window_size:
+          cfg.getContentGeneratorConfig()?.contextWindowSize || 0,
+        last_prompt_token_count: ui.sessionStats.lastPromptTokenCount,
+      },
+      ...(vimEnabledRef.current && {
+        vim: { mode: vimModeRef.current ?? 'INSERT' },
+      }),
+    };
+
+    // Bump generation so earlier in-flight callbacks are ignored.
+    const gen = ++generationRef.current;
+
+    const child = exec(
+      cmd,
+      { timeout: 5000, maxBuffer: 1024 * 10 },
+      (error, stdout) => {
+        if (gen !== generationRef.current) return; // stale
+        if (!error && stdout) {
+          setOutput(stdout.trim().split('\n')[0] || null);
+        } else {
+          setOutput(null);
+        }
+      },
+    );
+
+    // Pass structured JSON context via stdin.
+    // Guard against EPIPE if the child exits before we finish writing.
+    if (child.stdin) {
+      child.stdin.on('error', () => {});
+      child.stdin.write(JSON.stringify(input));
+      child.stdin.end();
+    }
+  }, []); // No deps — reads everything from refs
+
+  const scheduleUpdate = useCallback(() => {
+    if (debounceTimerRef.current !== undefined) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    debounceTimerRef.current = setTimeout(() => {
+      debounceTimerRef.current = undefined;
+      doUpdate();
+    }, 300);
+  }, [doUpdate]);
+
+  // Trigger update when meaningful state changes
+  const { lastPromptTokenCount } = uiState.sessionStats;
+  const { currentModel } = uiState;
   useEffect(() => {
     if (!statusLineCommand) {
       setOutput(null);
       return;
     }
 
-    let isMounted = true;
+    const prev = prevStateRef.current;
+    if (
+      lastPromptTokenCount !== prev.promptTokenCount ||
+      currentModel !== prev.currentModel ||
+      vimMode !== prev.vimMode
+    ) {
+      prev.promptTokenCount = lastPromptTokenCount;
+      prev.currentModel = currentModel;
+      prev.vimMode = vimMode;
+      scheduleUpdate();
+    }
+  }, [
+    statusLineCommand,
+    lastPromptTokenCount,
+    currentModel,
+    vimMode,
+    scheduleUpdate,
+  ]);
 
-    const executeCommand = async () => {
-      try {
-        const isReadOnly = await isShellCommandReadOnlyAST(statusLineCommand);
-        if (!isReadOnly) {
-          if (isMounted) setOutput('⚠️ Sandbox: Command must be read-only');
-          return;
-        }
-
-        exec(
-          statusLineCommand,
-          { timeout: 5000, maxBuffer: 1024 * 10 },
-          (error, stdout) => {
-            if (!isMounted) return;
-            if (!error && stdout) {
-              setOutput(stdout.trim().split('\n')[0] || null);
-            } else {
-              setOutput(null);
-            }
-          },
-        );
-      } catch {
-        if (isMounted) setOutput('⚠️ Sandbox: Verification failed');
-      }
-    };
-
-    // Execute immediately
-    executeCommand();
-
-    // Poll every 5 seconds
-    const interval = setInterval(executeCommand, 5000);
-
-    return () => {
-      isMounted = false;
-      clearInterval(interval);
-    };
+  // Re-execute immediately when the command itself changes (hot reload).
+  // Skip the first run — the mount effect below already handles it.
+  useEffect(() => {
+    if (!hasMountedRef.current) return;
+    if (statusLineCommand) {
+      doUpdate();
+    } else {
+      setOutput(null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusLineCommand]);
 
-  return output;
+  // Initial execution + cleanup
+  useEffect(() => {
+    hasMountedRef.current = true;
+    const genRef = generationRef;
+    const debounceRef = debounceTimerRef;
+    doUpdate();
+    return () => {
+      // Invalidate any in-flight exec callbacks
+      genRef.current++;
+      if (debounceRef.current !== undefined) {
+        clearTimeout(debounceRef.current);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return { text: output, padding };
 }

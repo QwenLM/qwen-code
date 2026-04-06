@@ -430,14 +430,15 @@ const SETTINGS_SCHEMA = {
         showInDialog: true,
       },
       statusLine: {
-        type: 'string',
+        type: 'object',
         label: 'Status Line',
         category: 'UI',
         requiresRestart: false,
-        default: undefined as string | undefined,
-        description:
-          'Shell command to execute periodically to display custom information in the status line (e.g., "curl -s api/rate-limit | jq .remaining").',
-        showInDialog: true,
+        default: undefined as
+          | { type: 'command'; command: string; padding?: number }
+          | undefined,
+        description: 'Custom status line display configuration.',
+        showInDialog: false,
       },
       customThemes: {
         type: 'object',
