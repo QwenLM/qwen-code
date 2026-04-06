@@ -117,6 +117,7 @@ When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/revi
 - Build and test commands run in isolation without polluting your local build cache
 - If anything goes wrong, your environment is unaffected — just delete the worktree
 - The worktree is automatically cleaned up after the review completes
+- If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh
 - Review reports and cache are saved to the main project directory (not the worktree)
 
 ## PR Inline Comments
