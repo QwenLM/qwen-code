@@ -290,10 +290,13 @@ One of:
 - **Request changes** — Has critical issues that need fixing
 - **Comment** — Has suggestions but no blockers
 
-Append a follow-up tip after the verdict based on the review target:
+Append a follow-up tip after the verdict (and after Step 3.5 Autofix if applicable). Choose based on remaining state:
 
-- **PR review with confirmed findings**: "Tip: type `post comments` to publish these findings as PR inline comments."
-- **Local review with Approve verdict**: "Tip: type `commit` to commit your changes."
+- **Unfixed findings remain** (autofix declined, partial, or not applicable): "Tip: type `fix these issues` to apply fixes interactively."
+- **PR review with findings** (whether fixed or not): also append "Type `post comments` to publish findings as PR inline comments."
+- **Local review, all clear** (Approve or all issues fixed): "Tip: type `commit` to commit your changes."
+
+If the user responds with "fix these issues" (or similar intent), use the `edit` tool to fix each remaining finding interactively based on the suggested fixes from the review — do NOT re-run Steps 1-3.5.
 
 If the user responds with "post comments" (or similar intent like "yes post them", "publish comments"), proceed directly to Step 4 using the findings already collected — do NOT re-run Steps 1-3.5.
 
