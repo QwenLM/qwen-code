@@ -228,7 +228,11 @@ function wrapText(
     trim: false,
     wordWrap: true,
   });
-  const lines = wrapped.split('\n').filter((line) => line.length > 0);
+  const lines = wrapped.split('\n');
+  // Trim trailing empty lines (wrap-ansi artifacts) but preserve internal ones
+  while (lines.length > 1 && lines[lines.length - 1]!.length === 0) {
+    lines.pop();
+  }
   return lines.length > 0 ? lines : [''];
 }
 
