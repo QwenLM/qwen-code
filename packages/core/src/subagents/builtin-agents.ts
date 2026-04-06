@@ -104,7 +104,7 @@ Notes:
       name: 'statusline-setup',
       description:
         "Use this agent to configure the user's Qwen Code status line setting.",
-      tools: [ToolNames.READ_FILE, ToolNames.EDIT],
+      tools: [ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.ASK_USER_QUESTION],
       color: 'orange',
       systemPrompt: `You are a status line setup agent for Qwen Code. Your job is to create or update the statusLine command in the user's Qwen Code settings.
 

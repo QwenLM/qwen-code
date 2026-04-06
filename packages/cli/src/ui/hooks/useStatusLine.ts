@@ -240,6 +240,11 @@ export function useStatusLine(): {
   useEffect(() => {
     if (!hasMountedRef.current) return;
     if (statusLineCommand) {
+      // Clear any pending debounce so we don't get a redundant second run.
+      if (debounceTimerRef.current !== undefined) {
+        clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = undefined;
+      }
       doUpdate();
     }
     // Cleanup when command is removed is handled by the state-change effect.
