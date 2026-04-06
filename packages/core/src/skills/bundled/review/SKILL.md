@@ -72,7 +72,7 @@ Before launching LLM review agents, run the project's existing linter and type c
 Extract the list of changed files from the diff output. For file path reviews with no diff (reviewing a file's current state), use the specified file as the target. Then run the applicable checks:
 
 1. **TypeScript/JavaScript projects**:
-   - If `tsconfig.json` exists → `npx tsc --noEmit 2>&1 | head -100` (this checks the whole project; filter the output to only report errors in changed files)
+   - If `tsconfig.json` exists → `npx tsc --noEmit --incremental 2>&1 | head -100` (this checks the whole project; `--incremental` speeds up repeated runs via `.tsbuildinfo` cache. Filter the output to only report errors in changed files)
    - If `package.json` has a `lint` script → `npm run lint 2>&1 | head -200` (this may lint the whole project; filter output to only report errors in changed files. Do NOT append eslint-specific flags like `--format json` — the lint script may wrap a different tool)
    - If `.eslintrc*` or `eslint.config.*` exists and no `lint` script → `npx eslint <changed-files> 2>&1 | head -200`
 
@@ -87,7 +87,7 @@ Extract the list of changed files from the diff output. For file path reviews wi
 4. **Go projects**:
    - If `go.mod` exists → `go vet ./... 2>&1 | head -100` (this checks all packages; filter output to only report errors in changed files; vet includes compile checks, so Agent 5 can skip `go build` if vet ran successfully) and `golangci-lint run <changed-files> 2>&1 | head -100`
 
-**Timeout**: Set a 60-second timeout for each command. If a command times out or fails to run (tool not installed), skip it silently and move on.
+**Timeout**: Set a 120-second timeout for type checkers (`tsc`, `mypy`) and 60-second timeout for linters. If a command times out or fails to run (tool not installed), skip it silently and move on.
 
 **Output handling**: Parse file paths, line numbers, and error/warning messages from the output. Linter output typically follows formats like `file.ts:42:5: error ...` or `file.py:10: W123 ...`. Add them to the findings as **confirmed deterministic issues** with proper file:line references — these skip Step 2.5 verification entirely. Tag each with `[linter]` or `[typecheck]` in the Issue field.
 
@@ -194,7 +194,7 @@ In addition to their primary focus, each review agent (1-4) MUST perform cross-f
    - Behavioral changes (new exceptions thrown, null returns, changed defaults)
    - Removed or renamed public methods/properties
    - Breaking changes to exported APIs
-4. If `grep_search` results are ambiguous, also use `run_shell_command` with `grep -rn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist --exclude-dir=build "functionName(" .` for precise reference matching (use the project root; always exclude common non-source directories)
+4. If `grep_search` results are ambiguous, also use `run_shell_command` with grep for precise reference matching. Search for multiple access patterns — not just `functionName(` but also `.functionName`, `import { functionName`, and `import functionName`: `grep -rn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist --exclude-dir=build -E "(functionName\(|\.functionName|import.*functionName)" .` (use the project root; always exclude common non-source directories)
 
 ## Step 2.5: Deduplicate, verify, and aggregate
 
@@ -238,7 +238,7 @@ After verification, identify **confirmed** findings that describe the **same typ
    - **Example:** <the most representative instance>
    - **Suggested fix:** <general fix approach>
    - **Severity:** <highest severity among the group>
-3. If the same pattern has more than 5 occurrences, list the first 3 locations plus "and N more locations"
+3. If the same pattern has more than 5 occurrences and severity is **not** Critical, list the first 3 locations plus "and N more locations". For **Critical** patterns, always list all locations — every instance matters.
 
 All confirmed findings (aggregated or standalone) proceed to Step 3.
 
@@ -304,7 +304,7 @@ If there are **Critical** or **Suggestion** findings with clear, unambiguous fix
 **Important**:
 
 - Do NOT auto-fix without user confirmation. Do NOT auto-fix findings marked as "Nice to have" or low-confidence findings.
-- If reviewing a PR, autofix modifies files on the checked-out PR branch. After applying fixes, commit them: `git add <fixed-files> && git commit -m "fix: apply auto-fixes from /review"`. Inform the user: "Auto-fixes committed on the PR branch. Run `git push` to update the PR." If the commit fails or is denied by the user, stash the uncommitted changes (`git stash`) before proceeding to Step 4/5 to avoid blocking the branch switch.
+- If reviewing a PR, autofix modifies files on the checked-out PR branch. After applying fixes, commit them: `git add <fixed-files> && git commit -m "fix: apply auto-fixes from /review"`. Inform the user: "Auto-fixes committed on the PR branch. Run `git push` to update the PR." If the commit fails (pre-commit hooks, permission denied, user denial, etc.), stash the uncommitted changes (`git stash`) before proceeding to Step 4/5 to avoid blocking the branch switch.
 
 ## Step 4: Post PR inline comments (only if `--comment` flag was set)
 
