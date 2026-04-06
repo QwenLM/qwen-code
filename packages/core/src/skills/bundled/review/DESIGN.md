@@ -96,18 +96,28 @@ Our lightweight mode is the best a CLI can do: GitHub API calls work cross-repo 
 
 Key implementation detail: Step 9 must use the owner/repo extracted from the URL, not `gh repo view` (which returns the current repo).
 
+## Why auto-discover tools from CI config instead of user configuration
+
+**Considered:**
+
+- **`.qwen/review-tools.md`**: Let projects define custom lint/build/test commands. Precise, but requires users to learn a new config format and maintain it.
+- **Auto-discovery from CI config (chosen)**: Read `.github/workflows/*.yml`, `Makefile`, etc. to find what commands the project already runs in CI. Zero user effort.
+
+**Decision:** Auto-discovery. Every project already defines its tool chain in CI config. Reading those files leverages existing knowledge without asking users to duplicate it. The LLM is capable of parsing YAML workflow files and extracting the relevant commands. Falls back gracefully: if no CI config exists, Step 3 is simply skipped and LLM agents still review the diff.
+
 ## Rejected alternatives
 
-| Idea                                          | Why rejected                                                                                                              |
-| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| Use fast model for verification/reverse audit | User requirement: quality first. Fast models may miss subtle issues.                                                      |
-| Reduce to 2 agents (like Gemini)              | Loses dimensional focus. Gemini compensates with deterministic tasks; we already have those AND want higher LLM coverage. |
-| Auto-approve PR after autofix                 | Remote PR still has original code until push. Approving unfixed code is misleading.                                       |
-| `mktemp` for temp files                       | Over-engineering for a prompt. `{target}` suffix is sufficient for CLI concurrent sessions.                               |
-| Mermaid diagrams in docs                      | Only renders on GitHub. ASCII diagrams are universally compatible.                                                        |
-| `gh pr checkout --detach` for worktree        | It modifies the current working tree, defeating the purpose of worktree isolation.                                        |
-| Shell-like tokenizer for argument parsing     | LLM handles quoted arguments naturally from conversation context.                                                         |
-| Model attribution via LLM self-identification | Unreliable (hallucination risk). `{{model}}` template variable from `config.getModel()` is accurate.                      |
+| Idea                                           | Why rejected                                                                                                              |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `.qwen/review-tools.md` for custom tool config | Requires users to learn a new format. Auto-discovery from CI config achieves the same result with zero user effort.       |
+| Use fast model for verification/reverse audit  | User requirement: quality first. Fast models may miss subtle issues.                                                      |
+| Reduce to 2 agents (like Gemini)               | Loses dimensional focus. Gemini compensates with deterministic tasks; we already have those AND want higher LLM coverage. |
+| Auto-approve PR after autofix                  | Remote PR still has original code until push. Approving unfixed code is misleading.                                       |
+| `mktemp` for temp files                        | Over-engineering for a prompt. `{target}` suffix is sufficient for CLI concurrent sessions.                               |
+| Mermaid diagrams in docs                       | Only renders on GitHub. ASCII diagrams are universally compatible.                                                        |
+| `gh pr checkout --detach` for worktree         | It modifies the current working tree, defeating the purpose of worktree isolation.                                        |
+| Shell-like tokenizer for argument parsing      | LLM handles quoted arguments naturally from conversation context.                                                         |
+| Model attribution via LLM self-identification  | Unreliable (hallucination risk). `{{model}}` template variable from `config.getModel()` is accurate.                      |
 
 ## Token cost analysis
 

@@ -60,14 +60,17 @@ All agents run in parallel. All findings are then verified in a **single batch v
 
 Before the LLM agents run, `/review` automatically runs your project's existing linters and type checkers:
 
-| Language              | Tools detected                                      |
-| --------------------- | --------------------------------------------------- |
-| TypeScript/JavaScript | `tsc --noEmit`, `npm run lint`, `eslint`            |
-| Python                | `ruff`, `mypy`, `flake8`                            |
-| Rust                  | `cargo clippy`                                      |
-| Go                    | `go vet`, `golangci-lint`                           |
-| Java                  | `mvn compile`, `checkstyle`, `spotbugs`, `pmd`      |
-| C/C++                 | `clang-tidy` (if `compile_commands.json` available) |
+| Language              | Tools detected                                                   |
+| --------------------- | ---------------------------------------------------------------- |
+| TypeScript/JavaScript | `tsc --noEmit`, `npm run lint`, `eslint`                         |
+| Python                | `ruff`, `mypy`, `flake8`                                         |
+| Rust                  | `cargo clippy`                                                   |
+| Go                    | `go vet`, `golangci-lint`                                        |
+| Java                  | `mvn compile`, `checkstyle`, `spotbugs`, `pmd`                   |
+| C/C++                 | `clang-tidy` (if `compile_commands.json` available)              |
+| Other                 | Auto-discovered from CI config (`.github/workflows/*.yml`, etc.) |
+
+For projects that don't match standard patterns (e.g., OpenJDK), `/review` reads CI configuration files to discover what lint/check commands the project uses. No user configuration needed.
 
 Deterministic findings are tagged with `[linter]` or `[typecheck]` and skip LLM verification — they are ground truth.
 
