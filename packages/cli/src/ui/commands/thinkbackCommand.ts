@@ -82,11 +82,14 @@ export const thinkbackCommand: SlashCommand = {
 
     const history = getChatHistory();
     if (history.length <= 2) {
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: t('No conversation found to review.'),
-      };
+      const msg = t('No conversation found to review.');
+      if (executionMode === 'acp') {
+        const messages = async function* () {
+          yield { messageType: 'info' as const, content: msg };
+        };
+        return { type: 'stream_messages', messages: messages() };
+      }
+      return { type: 'message', messageType: 'info', content: msg };
     }
 
     const generateThinkbackMarkdown = async (): Promise<string> => {

@@ -44,6 +44,7 @@ export const ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE = [
   'compress',
   'btw',
   'bug',
+  'thinkback',
 ] as const;
 
 /**
