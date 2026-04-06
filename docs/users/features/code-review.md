@@ -157,7 +157,23 @@ When reviewing a PR that was previously reviewed, `/review` only examines change
 /review 123
 ```
 
-Cache is stored in `.qwen/review-cache/`. Make sure this directory is in your `.gitignore` (a broader rule like `.qwen/*` also works). If the cached commit was rebased away, it falls back to a full review.
+### Cross-model review
+
+If you switch models (via `/model`) and re-review the same PR, `/review` detects the model change and runs a full review instead of skipping:
+
+```bash
+# Review with model A
+/review 123
+
+# Switch model
+/model
+
+# Review again — full review with model B (not skipped)
+/review 123
+# → "Previous review used qwen3-coder. Running full review with gpt-4o for a second opinion."
+```
+
+Cache is stored in `.qwen/review-cache/` and tracks both the commit SHA and model ID. Make sure this directory is in your `.gitignore` (a broader rule like `.qwen/*` also works). If the cached commit was rebased away, it falls back to a full review.
 
 ## Review Reports
 
