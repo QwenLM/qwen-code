@@ -45,7 +45,7 @@ export const planCommand: SlashCommand = {
         };
       }
       try {
-        config.setApprovalMode(ApprovalMode.DEFAULT);
+        config.setApprovalMode(config.getPrePlanMode());
       } catch (e) {
         return {
           type: 'message',

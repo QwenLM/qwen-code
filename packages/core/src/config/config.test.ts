@@ -1203,6 +1203,43 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
   });
 
+  describe('prePlanMode tracking', () => {
+    it('should save pre-plan mode when entering plan mode', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO_EDIT);
+    });
+
+    it('should clear pre-plan mode when leaving plan mode', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('should default to DEFAULT when no pre-plan mode was recorded', () => {
+      const config = new Config(baseParams);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('should not update pre-plan mode when already in plan mode', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      // Setting PLAN again should not overwrite prePlanMode
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    });
+  });
+
   describe('registerCoreTools', () => {
     beforeEach(() => {
       vi.clearAllMocks();

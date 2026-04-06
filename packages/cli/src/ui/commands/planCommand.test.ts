@@ -18,6 +18,7 @@ describe('planCommand', () => {
       services: {
         config: {
           getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+          getPrePlanMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
           setApprovalMode: vi.fn(),
         } as unknown as import('@qwen-code/qwen-code-core').Config,
       },
@@ -108,6 +109,30 @@ describe('planCommand', () => {
 
     expect(mockContext.services.config?.setApprovalMode).toHaveBeenCalledWith(
       ApprovalMode.DEFAULT,
+    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Exited plan mode. The agent will now execute the plan.',
+    });
+  });
+
+  it('should restore pre-plan mode when executing from plan mode', async () => {
+    if (!planCommand.action) {
+      throw new Error('The plan command must have an action.');
+    }
+
+    (mockContext.services.config?.getApprovalMode as Mock).mockReturnValue(
+      ApprovalMode.PLAN,
+    );
+    (mockContext.services.config?.getPrePlanMode as Mock).mockReturnValue(
+      ApprovalMode.AUTO_EDIT,
+    );
+
+    const result = await planCommand.action(mockContext, 'execute');
+
+    expect(mockContext.services.config?.setApprovalMode).toHaveBeenCalledWith(
+      ApprovalMode.AUTO_EDIT,
     );
     expect(result).toEqual({
       type: 'message',

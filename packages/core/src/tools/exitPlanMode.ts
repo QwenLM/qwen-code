@@ -99,7 +99,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
             break;
           case ToolConfirmationOutcome.ProceedOnce:
             this.wasApproved = true;
-            this.setApprovalModeSafely(ApprovalMode.DEFAULT);
+            this.setApprovalModeSafely(this.config.getPrePlanMode());
             break;
           case ToolConfirmationOutcome.Cancel:
             this.wasApproved = false;

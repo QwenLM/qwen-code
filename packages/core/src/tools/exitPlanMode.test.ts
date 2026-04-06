@@ -18,6 +18,7 @@ describe('ExitPlanModeTool', () => {
     approvalMode = ApprovalMode.PLAN;
     mockConfig = {
       getApprovalMode: vi.fn(() => approvalMode),
+      getPrePlanMode: vi.fn(() => ApprovalMode.DEFAULT),
       setApprovalMode: vi.fn((mode: ApprovalMode) => {
         approvalMode = mode;
       }),
@@ -165,6 +166,28 @@ describe('ExitPlanModeTool', () => {
         }
 
         await confirmation.onConfirm(ToolConfirmationOutcome.ProceedAlways);
+      }
+
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.AUTO_EDIT,
+      );
+      expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
+    });
+
+    it('should restore pre-plan mode on ProceedOnce', async () => {
+      // Simulate entering plan mode from AUTO_EDIT
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const params: ExitPlanModeParams = { plan: 'Restore test' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(signal);
+
+      if (confirmation) {
+        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
       }
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
