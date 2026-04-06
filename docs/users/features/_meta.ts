@@ -16,5 +16,6 @@ export default {
   language: 'i18n',
   channels: 'Channels',
   hooks: 'Hooks',
+  'status-line': 'Status Line',
   'scheduled-tasks': 'Scheduled Tasks',
 };
