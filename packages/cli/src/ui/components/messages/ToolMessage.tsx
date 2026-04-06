@@ -173,12 +173,14 @@ const SubagentExecutionRenderer: React.FC<{
   availableHeight?: number;
   childWidth: number;
   config: Config;
-}> = ({ data, availableHeight, childWidth, config }) => (
+  isFocused?: boolean;
+}> = ({ data, availableHeight, childWidth, config, isFocused }) => (
   <AgentExecutionDisplay
     data={data}
     availableHeight={availableHeight}
     childWidth={childWidth}
     config={config}
+    isFocused={isFocused}
   />
 );
 
@@ -249,6 +251,8 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   embeddedShellFocused?: boolean;
   config?: Config;
   forceShowResult?: boolean;
+  /** Whether this tool's subagent confirmation prompt should respond to keyboard input. */
+  isFocused?: boolean;
 }
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
@@ -265,6 +269,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   ptyId,
   config,
   forceShowResult,
+  isFocused,
 }) => {
   const settings = useSettings();
   const isThisShellFocused =
@@ -370,6 +375,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
                 config={config}
+                isFocused={isFocused}
               />
             )}
             {effectiveDisplayRenderer.type === 'diff' && (

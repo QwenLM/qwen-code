@@ -24,6 +24,8 @@ export interface AgentExecutionDisplayProps {
   availableHeight?: number;
   childWidth: number;
   config: Config;
+  /** Whether this display's confirmation prompt should respond to keyboard input. */
+  isFocused?: boolean;
 }
 
 const getStatusColor = (
@@ -78,6 +80,7 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
   availableHeight,
   childWidth,
   config,
+  isFocused = true,
 }) => {
   const [displayMode, setDisplayMode] = React.useState<DisplayMode>('compact');
 
@@ -168,9 +171,16 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
             {/* Inline approval prompt when awaiting confirmation */}
             {data.pendingConfirmation && (
               <Box flexDirection="column" marginTop={1} paddingLeft={1}>
+                {!isFocused && (
+                  <Box marginBottom={0}>
+                    <Text color={theme.text.secondary} dimColor>
+                      ⏳ Waiting for other approval...
+                    </Text>
+                  </Box>
+                )}
                 <ToolConfirmationMessage
                   confirmationDetails={data.pendingConfirmation}
-                  isFocused={true}
+                  isFocused={isFocused}
                   availableTerminalHeight={availableHeight}
                   contentWidth={childWidth - 4}
                   compactMode={true}
@@ -237,10 +247,17 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
       {/* Inline approval prompt when awaiting confirmation */}
       {data.pendingConfirmation && (
         <Box flexDirection="column">
+          {!isFocused && (
+            <Box marginBottom={0}>
+              <Text color={theme.text.secondary} dimColor>
+                ⏳ Waiting for other approval...
+              </Text>
+            </Box>
+          )}
           <ToolConfirmationMessage
             confirmationDetails={data.pendingConfirmation}
             config={config}
-            isFocused={true}
+            isFocused={isFocused}
             availableTerminalHeight={availableHeight}
             contentWidth={childWidth - 4}
             compactMode={true}
