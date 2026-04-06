@@ -36,7 +36,7 @@ Step 3:   Present findings with verdict
 Step 3.5: Offer autofix for fixable issues
 Step 4:   Post PR inline comments (if requested)
 Step 4.5: Save report and incremental cache
-Step 5:   Restore environment
+Step 5:   Clean up (remove worktree and temp files)
 ```
 
 ### Review Agents
@@ -91,6 +91,16 @@ Found 3 issues with auto-fixable suggestions. Apply auto-fixes? (y/n)
 - Per-file linter checks run after fixes to verify they don't introduce new issues
 - For PR reviews, fixes are committed on the PR branch — you need to `git push` to update the PR
 - Nice to have and low-confidence findings are never auto-fixed
+- For PR reviews, autofix operates in an isolated worktree — your working tree stays clean. Fixes are committed and pushed directly from the worktree.
+
+## Worktree Isolation
+
+When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/review-pr-<number>`) instead of switching your current branch. This means:
+
+- Your working tree, staged changes, and current branch are **never touched**
+- Build and test commands run in isolation without polluting your local build cache
+- If anything goes wrong, your environment is unaffected — just delete the worktree
+- The worktree is automatically cleaned up after the review completes
 
 ## PR Inline Comments
 
