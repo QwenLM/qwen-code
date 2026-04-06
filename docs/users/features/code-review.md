@@ -37,7 +37,7 @@ Run deterministic analysis (linter, typecheck)         [zero LLM cost]
   |-- Agent 2: Code Quality
   |-- Agent 3: Performance & Efficiency
   |-- Agent 4: Undirected Audit
-  '-- Agent 5: Build & Test                             [zero LLM cost]
+  '-- Agent 5: Build & Test (runs shell commands)
         |
 Deduplicate --> Batch verify --> Aggregate              [1 LLM call]
         |
@@ -231,14 +231,13 @@ For large diffs (>10 modified symbols), analysis prioritizes functions with sign
 
 The review pipeline uses a fixed number of LLM calls regardless of how many findings are produced:
 
-| Stage                             | LLM calls | Notes                                      |
-| --------------------------------- | --------- | ------------------------------------------ |
-| Deterministic analysis (Step 1.5) | 0         | Shell commands only                        |
-| Build & test (Agent 5)            | 0         | Shell commands only                        |
-| 5 review agents (Step 2)          | 5         | Run in parallel                            |
-| Batch verification (Step 2.5)     | 1         | Single agent verifies all findings at once |
-| Reverse audit (Step 2.6)          | 1         | Finds coverage gaps                        |
-| **Total**                         | **7**     | Fixed, not proportional to finding count   |
+| Stage                             | LLM calls | Notes                                                   |
+| --------------------------------- | --------- | ------------------------------------------------------- |
+| Deterministic analysis (Step 1.5) | 0         | Shell commands only                                     |
+| 5 review agents (Step 2)          | 5         | Run in parallel; Agent 5 runs build/test shell commands |
+| Batch verification (Step 2.5)     | 1         | Single agent verifies all findings at once              |
+| Reverse audit (Step 2.6)          | 1         | Finds coverage gaps; findings skip verification         |
+| **Total**                         | **7**     | Fixed, not proportional to finding count                |
 
 ## What's NOT Flagged
 
