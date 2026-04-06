@@ -144,6 +144,38 @@ describe('thinkbackCommand', () => {
     });
   });
 
+  it('returns error message in non-interactive mode on failure', async () => {
+    const nonInteractiveContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {
+          getGeminiClient: vi.fn(() => mockGeminiClient),
+          getModel: vi.fn(() => 'test-model'),
+        } as unknown as CommandContext['services']['config'],
+      },
+    } as unknown as CommandContext);
+
+    mockGetHistory.mockReturnValue([
+      { role: 'user', parts: [{ text: 'query 1' }] },
+      { role: 'model', parts: [{ text: 'response 1' }] },
+      { role: 'user', parts: [{ text: 'query 2' }] },
+    ]);
+
+    mockGenerateContent.mockRejectedValue(new Error('API error'));
+
+    if (!thinkbackCommand.action) {
+      throw new Error('thinkback command must have action');
+    }
+
+    const result = await thinkbackCommand.action(nonInteractiveContext, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Failed to generate thinkback timeline: API error',
+    });
+  });
+
   it('handles --from and --topic arguments', async () => {
     mockGetHistory.mockReturnValue([
       { role: 'user', parts: [{ text: 'query 1' }] },
