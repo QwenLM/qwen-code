@@ -33,18 +33,17 @@ You can also give it specific instructions:
 
 ## Manual configuration
 
-Add a `statusLine` object under the `ui` key in your settings file:
+Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 
-```jsonc
-// ~/.qwen/settings.json
+```json
 {
   "ui": {
     "statusLine": {
       "type": "command",
       "command": "input=$(cat); echo \"$(echo $input | jq -r '.model.id')  ctx:$(echo $input | jq -r '.context_window.last_prompt_token_count')\"",
-      "padding": 0,
-    },
-  },
+      "padding": 0
+    }
+  }
 }
 ```
 
