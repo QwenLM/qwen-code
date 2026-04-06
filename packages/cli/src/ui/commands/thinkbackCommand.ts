@@ -52,12 +52,12 @@ export const thinkbackCommand: SlashCommand = {
         },
         Date.now(),
       );
+      // Return empty content — ui.addItem already displayed the error.
+      // slashCommandProcessor would add a duplicate if content is non-empty.
       return {
         type: 'message',
-        messageType: 'error',
-        content: t(
-          'Already generating thinkback, wait for previous request to complete',
-        ),
+        messageType: 'info',
+        content: '',
       };
     }
 
@@ -204,6 +204,8 @@ export const thinkbackCommand: SlashCommand = {
             Date.now(),
           );
         }
+        // Return empty content — ui.addItem already displayed the error.
+        return { type: 'message', messageType: 'info', content: '' };
       }
 
       return {
