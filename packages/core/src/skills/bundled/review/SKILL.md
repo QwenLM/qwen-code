@@ -226,9 +226,9 @@ Each verification agent must **independently** (without seeing other agents' fin
    - **confirmed (low confidence)** — likely a problem but not certain, recommend human review, with severity
    - **rejected** — with a one-line reason why it's not a real issue
 
-**When uncertain, lean toward rejecting.** The goal is high signal, low noise — it's better to miss a minor suggestion than to report a false positive.
+**When uncertain, lean toward rejecting.** The goal is high signal, low noise — it's better to miss a minor suggestion than to report a false positive. Reserve "confirmed (low confidence)" for issues that are **likely real but need human judgment to be certain** — not for vague suspicions (those should be rejected).
 
-**After all verification agents complete:** remove all rejected findings. Separate confirmed findings into two groups: high-confidence and low-confidence.
+**After all verification agents complete:** remove all rejected findings. Separate confirmed findings into two groups: high-confidence and low-confidence. Low-confidence findings appear **only in terminal output** (under "Needs Human Review") and are **never posted as PR inline comments** — this preserves the "Silence is better than noise" principle for PR interactions.
 
 ### Pattern aggregation
 
@@ -334,14 +334,13 @@ For pattern-aggregated findings (multiple locations), post the comment on the mo
 
 If a finding was auto-fixed in Step 3.5, prefix its comment with **[Auto-fixed]** so the reviewer knows the issue has already been addressed.
 
-For low-confidence findings, prefix with **[Needs Review][{severity}]** (e.g., `[Needs Review][Suggestion]`) so reviewers see both the confidence level and the severity.
+Do **not** post low-confidence findings as PR inline comments — they appear only in the terminal output under "Needs Human Review." This keeps PR comments high-signal.
 
 ```
 # Step A: Use write_file tool to create /tmp/qwen-review-{target}-comment.txt with content:
 # Use the appropriate prefix based on the finding type:
 #   Normal:         **[{severity}]** {issue description}
 #   Auto-fixed:     **[Auto-fixed][{severity}]** {issue description}
-#   Low-confidence: **[Needs Review][{severity}]** {issue description}
 
 {prefix} {issue description}
 
