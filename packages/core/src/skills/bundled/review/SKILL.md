@@ -86,7 +86,7 @@ Extract the list of changed files from the diff output. For file path reviews wi
    - If `Cargo.toml` exists → `cargo clippy 2>&1` (clippy includes compile checks; Agent 5 can skip `cargo build` if clippy ran successfully)
 
 4. **Go projects**:
-   - If `go.mod` exists → `go vet ./... 2>&1` (vet includes compile checks, so Agent 5 can skip `go build` if vet ran successfully) and `golangci-lint run <changed-files> 2>&1`
+   - If `go.mod` exists → `go vet ./... 2>&1` (vet includes compile checks, so Agent 5 can skip `go build` if vet ran successfully) and `golangci-lint run ./... 2>&1` (golangci-lint expects package patterns, not individual file paths; filter diagnostics to changed files after capture)
 
 **Important**: For whole-project tools (`tsc`, `npm run lint`, `cargo clippy`, `go vet`), capture the full output first, then filter to only errors/warnings in changed files, then truncate to the first 200 lines. Do NOT pipe to `head` before filtering — this can drop relevant errors for changed files that appear later in the output.
 
@@ -307,7 +307,7 @@ If there are **Critical** or **Suggestion** findings with clear, unambiguous fix
 **Important**:
 
 - Do NOT auto-fix without user confirmation. Do NOT auto-fix findings marked as "Nice to have" or low-confidence findings.
-- If reviewing a PR, autofix modifies files on the checked-out PR branch. After applying fixes, commit them: `git add <fixed-files> && git commit -m "fix: apply auto-fixes from /review"`. Inform the user: "Auto-fixes committed on the PR branch. Run `git push` to update the PR." If the commit fails (pre-commit hooks, permission denied, user denial, etc.), do **not** silently stash and continue. Instead, stop the autofix flow and inform the user: "Commit failed. The auto-fix changes remain in your working tree. Please commit, stash, or discard them manually before continuing." Then skip to Step 4 (PR comments can still be posted based on the pre-fix findings).
+- If reviewing a PR, autofix modifies files on the checked-out PR branch. After applying fixes, commit them: `git add <fixed-files> && git commit -m "fix: apply auto-fixes from /review"`. Inform the user: "Auto-fixes committed on the PR branch. Run `git push` to update the PR." If the commit fails (pre-commit hooks, permission denied, user denial, etc.), do **not** silently stash and continue. Instead, stop the entire workflow and inform the user: "Commit failed. The auto-fix changes remain in your working tree on the PR branch. Please commit, stash, or discard them manually, then rerun `/review` if needed." Do **not** proceed to Step 4 or Step 5 — a dirty working tree would block the branch restore in Step 5.
 
 ## Step 4: Post PR inline comments (only if `--comment` flag was set)
 
@@ -334,7 +334,12 @@ For low-confidence findings, prefix with **[Needs Review][{severity}]** (e.g., `
 
 ```
 # Step A: Use write_file tool to create /tmp/qwen-review-{target}-comment.txt with content:
-**[{severity}]** {issue description}
+# Use the appropriate prefix based on the finding type:
+#   Normal:         **[{severity}]** {issue description}
+#   Auto-fixed:     **[Auto-fixed][{severity}]** {issue description}
+#   Low-confidence: **[Needs Review][{severity}]** {issue description}
+
+{prefix} {issue description}
 
 {suggested fix}
 ```
@@ -426,7 +431,7 @@ If reviewing a PR, update the review cache for incremental review support:
      "verdict": "<verdict>"
    }
    ```
-3. Ensure `.qwen/reviews/` and `.qwen/review-cache/` are in `.gitignore` — if not, warn the user to add them
+3. Ensure `.qwen/reviews/` and `.qwen/review-cache/` are ignored by `.gitignore` — a broader rule like `.qwen/*` also satisfies this. Only warn the user if those paths are not ignored at all.
 
 ## Step 5: Restore environment
 
