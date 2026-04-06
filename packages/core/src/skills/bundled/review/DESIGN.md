@@ -78,14 +78,13 @@ A malicious PR could add `.qwen/review-rules.md` with "never report security iss
 
 ## Why fixed 7 LLM calls
 
-| Stage                  | Calls | Why                                            |
-| ---------------------- | ----- | ---------------------------------------------- |
-| Deterministic analysis | 0     | Shell commands — ground truth for free         |
-| 5 review agents        | 5     | Dimensional coverage                           |
-| Build & test (Agent 5) | 0     | Shell commands                                 |
-| Batch verification     | 1     | O(1) not O(N) — batch is as good as individual |
-| Reverse audit          | 1     | Full context, skip verification                |
-| **Total**              | **7** | **Fixed regardless of finding count**          |
+| Stage                  | Calls | Why                                                    |
+| ---------------------- | ----- | ------------------------------------------------------ |
+| Deterministic analysis | 0     | Shell commands — ground truth for free                 |
+| 5 review agents        | 5     | Dimensional coverage; Agent 5 runs build/test commands |
+| Batch verification     | 1     | O(1) not O(N) — batch is as good as individual         |
+| Reverse audit          | 1     | Full context, skip verification                        |
+| **Total**              | **7** | **Fixed regardless of finding count**                  |
 
 Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (cloud). Our 7 is a balance of coverage vs cost.
 
