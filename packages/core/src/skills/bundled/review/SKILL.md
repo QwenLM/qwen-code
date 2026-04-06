@@ -67,7 +67,7 @@ If none of these files exist, skip this step silently.
 
 ## Step 1.5: Run deterministic analysis
 
-Before launching LLM review agents, run the project's existing linter and type checker on **only the files touched by the diff**. These tools provide ground-truth results that LLMs cannot match in accuracy.
+Before launching LLM review agents, run the project's existing linter and type checker. When a tool supports file arguments, run it on changed files only. When a tool is whole-project by nature (e.g., `tsc`, `cargo clippy`, `go vet`), run it on the whole project but **filter reported diagnostics to changed files**. These tools provide ground-truth results that LLMs cannot match in accuracy.
 
 Extract the list of changed files from the diff output. For file path reviews with no diff (reviewing a file's current state), use the specified file as the target. Then run the applicable checks:
 
@@ -202,11 +202,11 @@ In addition to their primary focus, each review agent (1-4) MUST perform cross-f
 
 ### Deduplication
 
-Before verification, merge findings that refer to the same issue (same file, same line range, same root cause) even if reported by different agents. Keep the most detailed description and note which agents flagged it.
+Before verification, merge findings that refer to the same issue (same file, same line range, same root cause) even if reported by different agents. Keep the most detailed description and note which agents flagged it. **If a merged finding includes any deterministic source** (`[linter]`, `[typecheck]`, `[build]`, `[test]`), treat the entire merged finding as pre-confirmed — retain all source tags for reporting but skip verification.
 
 ### Independent verification
 
-For each **unique** finding after deduplication (excluding deterministic findings from Step 1.5 and Agent 5, which are pre-confirmed), launch an **independent verification agent**. Run verification agents in parallel, but if there are more than 10 unique findings, batch them in groups of 10 to avoid resource exhaustion.
+For each **unique** finding after deduplication that is **not** pre-confirmed, launch an **independent verification agent**. Run verification agents in parallel, but if there are more than 10 unique findings, batch them in groups of 10 to avoid resource exhaustion.
 
 Each verification agent receives:
 
@@ -306,7 +306,7 @@ If there are **Critical** or **Suggestion** findings with clear, unambiguous fix
 **Important**:
 
 - Do NOT auto-fix without user confirmation. Do NOT auto-fix findings marked as "Nice to have" or low-confidence findings.
-- If reviewing a PR, autofix modifies files on the checked-out PR branch. After applying fixes, commit them: `git add <fixed-files> && git commit -m "fix: apply auto-fixes from /review"`. Inform the user: "Auto-fixes committed on the PR branch. Run `git push` to update the PR." If the commit fails (pre-commit hooks, permission denied, user denial, etc.), stash the uncommitted changes (`git stash`) before proceeding to Step 4/5 to avoid blocking the branch switch.
+- If reviewing a PR, autofix modifies files on the checked-out PR branch. After applying fixes, commit them: `git add <fixed-files> && git commit -m "fix: apply auto-fixes from /review"`. Inform the user: "Auto-fixes committed on the PR branch. Run `git push` to update the PR." If the commit fails (pre-commit hooks, permission denied, user denial, etc.), do **not** silently stash and continue. Instead, stop the autofix flow and inform the user: "Commit failed. The auto-fix changes remain in your working tree. Please commit, stash, or discard them manually before continuing." Then skip to Step 4 (PR comments can still be posted based on the pre-fix findings).
 
 ## Step 4: Post PR inline comments (only if `--comment` flag was set)
 
