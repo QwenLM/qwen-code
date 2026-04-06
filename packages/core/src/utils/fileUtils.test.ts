@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import type osActual from 'node:os';
 import mime from 'mime/lite';
 
 import {
@@ -34,6 +35,15 @@ import {
 } from './fileUtils.js';
 import type { Config } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+
+vi.mock('node:os', async (importOriginal) => {
+  const actualOs = await importOriginal<typeof osActual>();
+  return {
+    ...actualOs,
+    homedir: vi.fn(() => '/mock/home/user'),
+    platform: vi.fn(() => 'linux'),
+  };
+});
 
 vi.mock('mime/lite', () => ({
   default: { getType: vi.fn() },

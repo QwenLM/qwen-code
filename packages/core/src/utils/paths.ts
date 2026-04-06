@@ -246,9 +246,12 @@ export function isSubpaths(parentPath: string[], childPath: string): boolean {
 }
 
 export function normalizePathForComparison(p: string): string {
-  return os.platform() === 'win32'
-    ? path.normalize(p).toLowerCase()
-    : path.normalize(p);
+  const normalized = path.normalize(p);
+  // Windows and macOS (default) have case-insensitive file systems
+  // Linux is case-sensitive
+  return os.platform() === 'win32' || os.platform() === 'darwin'
+    ? normalized.toLowerCase()
+    : normalized;
 }
 
 /**

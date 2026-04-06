@@ -560,8 +560,14 @@ export function loadSettings(
     // This is okay. The path might not exist yet, and that's a valid state.
   }
 
-  // We expect homedir to always exist and be resolvable.
-  const realHomeDir = fs.realpathSync(resolvedHomeDir);
+  let realHomeDir = resolvedHomeDir;
+  try {
+    // We expect homedir to always exist and be resolvable, but guard against edge cases
+    realHomeDir = fs.realpathSync(resolvedHomeDir);
+  } catch (_e) {
+    // Fallback to resolved path if realpath fails
+    realHomeDir = resolvedHomeDir;
+  }
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,
