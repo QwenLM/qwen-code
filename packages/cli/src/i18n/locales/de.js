@@ -1949,10 +1949,6 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
   verbose: 'ausführlich',
-  'Verbose mode on — showing full tool output and thinking':
-    'Ausführlicher Modus aktiv — vollständige Tool-Ausgabe und Denkprozess werden angezeigt',
-  'Compact mode on — showing tool names and final responses only':
-    'Kompakter Modus aktiv — nur Tool-Namen und abschließende Antworten werden angezeigt',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     'Vollständige Tool-Ausgabe und Denkprozess im ausführlichen Modus anzeigen (mit Strg+O umschalten).',
   'Press Ctrl+O to show full tool output':

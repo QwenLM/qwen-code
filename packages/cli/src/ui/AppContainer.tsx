@@ -970,7 +970,7 @@ export const AppContainer = (props: AppContainerProps) => {
     useState<boolean>(false);
 
   const [verboseMode, setVerboseMode] = useState<boolean>(
-    settings.merged.ui?.verboseMode ?? true,
+    settings.merged.ui?.verboseMode ?? false,
   );
   const [frozenSnapshot, setFrozenSnapshot] = useState<
     HistoryItemWithoutId[] | null
@@ -991,7 +991,13 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
 
   useEffect(() => {
-    if (streamingState === StreamingState.Idle) {
+    // Clear frozen snapshot when streaming ends OR when entering confirmation
+    // state. During WaitingForConfirmation, the user needs to see the latest
+    // pending items (including the confirmation message) rather than a stale snapshot.
+    if (
+      streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.WaitingForConfirmation
+    ) {
       setFrozenSnapshot(null);
     }
   }, [streamingState]);
@@ -1371,9 +1377,9 @@ export const AppContainer = (props: AppContainerProps) => {
         setVerboseMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
         refreshStatic();
-        // Symmetric freeze: capture snapshot on ANY toggle during streaming
-        // (not just to verbose) to prevent abrupt content changes.
-        if (streamingState !== StreamingState.Idle) {
+        // Only freeze during the actual responding phase. WaitingForConfirmation
+        // must keep focus so the user can approve/cancel tool confirmation UI.
+        if (streamingState === StreamingState.Responding) {
           setFrozenSnapshot([...pendingHistoryItems]);
         } else {
           setFrozenSnapshot(null);
@@ -1831,6 +1837,11 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
+  const verboseModeValue = useMemo(
+    () => ({ verboseMode, frozenSnapshot }),
+    [verboseMode, frozenSnapshot],
+  );
+
   return (
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
@@ -1841,7 +1852,7 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <VerboseModeProvider value={{ verboseMode, frozenSnapshot }}>
+            <VerboseModeProvider value={verboseModeValue}>
               <ShellFocusContext.Provider value={isFocused}>
                 <App />
               </ShellFocusContext.Provider>

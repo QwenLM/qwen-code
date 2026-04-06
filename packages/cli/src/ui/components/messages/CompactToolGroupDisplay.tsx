@@ -8,14 +8,10 @@ import type React from 'react';
 import { Box, Text } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
-import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
-import {
-  TOOL_STATUS,
-  SHELL_COMMAND_NAME,
-  SHELL_NAME,
-} from '../../constants.js';
+import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 import { t } from '../../../i18n/index.js';
+import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
 
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
@@ -50,8 +46,6 @@ function getActiveTool(
   );
 }
 
-const STATUS_INDICATOR_WIDTH = 3;
-
 export const CompactToolGroupDisplay: React.FC<
   CompactToolGroupDisplayProps
 > = ({ toolCalls, contentWidth }) => {
@@ -80,40 +74,6 @@ export const CompactToolGroupDisplay: React.FC<
     ? activeTool.description.split('\n')[0]
     : '';
 
-  const renderStatusIcon = () => {
-    switch (overallStatus) {
-      case ToolCallStatus.Executing:
-        return (
-          <GeminiRespondingSpinner
-            spinnerType="toggle"
-            nonRespondingDisplay={TOOL_STATUS.EXECUTING}
-          />
-        );
-      case ToolCallStatus.Success:
-        return <Text color={theme.status.success}>{TOOL_STATUS.SUCCESS}</Text>;
-      case ToolCallStatus.Error:
-        return (
-          <Text color={theme.status.error} bold>
-            {TOOL_STATUS.ERROR}
-          </Text>
-        );
-      case ToolCallStatus.Confirming:
-        return (
-          <Text color={theme.status.warning}>{TOOL_STATUS.CONFIRMING}</Text>
-        );
-      case ToolCallStatus.Canceled:
-        return (
-          <Text color={theme.status.warning} bold>
-            {TOOL_STATUS.CANCELED}
-          </Text>
-        );
-      case ToolCallStatus.Pending:
-        return <Text color={theme.text.secondary}>{TOOL_STATUS.PENDING}</Text>;
-      default:
-        return <Text>{TOOL_STATUS.PENDING}</Text>;
-    }
-  };
-
   return (
     <Box
       flexDirection="column"
@@ -125,7 +85,7 @@ export const CompactToolGroupDisplay: React.FC<
     >
       {/* Status line: icon + tool name + description */}
       <Box flexDirection="row">
-        <Box minWidth={STATUS_INDICATOR_WIDTH}>{renderStatusIcon()}</Box>
+        <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
           <Text wrap="truncate-end">
             <Text bold>{activeTool.name}</Text>
