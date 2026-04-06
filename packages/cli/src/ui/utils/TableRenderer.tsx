@@ -52,28 +52,13 @@ const INK_COLOR_TO_ANSI: Record<string, number> = {
   whitebright: 97,
 };
 
-/** Apply an Ink-compatible color (hex or named) to text via raw ANSI codes */
-function applyColor(text: string, color: string): string {
-  if (!color) return text;
-  if (color.startsWith('#')) {
-    const hex =
-      color.length === 4
-        ? color[1]! + color[1]! + color[2]! + color[2]! + color[3]! + color[3]!
-        : color.slice(1);
-    const r = parseInt(hex.slice(0, 2), 16);
-    const g = parseInt(hex.slice(2, 4), 16);
-    const b = parseInt(hex.slice(4, 6), 16);
-    return `\x1b[38;2;${r};${g};${b}m${text}\x1b[39m`;
-  }
-  const code = INK_COLOR_TO_ANSI[color.toLowerCase()];
-  if (code !== undefined) return `\x1b[${code}m${text}\x1b[39m`;
-  return text;
-}
+const HEX_COLOR_RE = /^#(?:[0-9a-f]{3}|[0-9a-f]{6})$/i;
 
 /** Get raw ANSI foreground color escape (without reset) for re-application */
 function getColorCode(color: string): string {
   if (!color) return '';
   if (color.startsWith('#')) {
+    if (!HEX_COLOR_RE.test(color)) return '';
     const hex =
       color.length === 4
         ? color[1]! + color[1]! + color[2]! + color[2]! + color[3]! + color[3]!
@@ -86,6 +71,13 @@ function getColorCode(color: string): string {
   const code = INK_COLOR_TO_ANSI[color.toLowerCase()];
   if (code !== undefined) return `\x1b[${code}m`;
   return '';
+}
+
+/** Apply an Ink-compatible color (hex or named) to text via raw ANSI codes */
+function applyColor(text: string, color: string): string {
+  const code = getColorCode(color);
+  if (!code) return text;
+  return `${code}${text}\x1b[39m`;
 }
 
 /**
