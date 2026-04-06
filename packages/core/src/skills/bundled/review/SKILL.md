@@ -72,22 +72,24 @@ Before launching LLM review agents, run the project's existing linter and type c
 Extract the list of changed files from the diff output. For file path reviews with no diff (reviewing a file's current state), use the specified file as the target. Then run the applicable checks:
 
 1. **TypeScript/JavaScript projects**:
-   - If `tsconfig.json` exists → `npx tsc --noEmit --incremental 2>&1 | head -100` (this checks the whole project; `--incremental` speeds up repeated runs via `.tsbuildinfo` cache. Filter the output to only report errors in changed files)
-   - If `package.json` has a `lint` script → `npm run lint 2>&1 | head -200` (this may lint the whole project; filter output to only report errors in changed files. Do NOT append eslint-specific flags like `--format json` — the lint script may wrap a different tool)
-   - If `.eslintrc*` or `eslint.config.*` exists and no `lint` script → `npx eslint <changed-files> 2>&1 | head -200`
+   - If `tsconfig.json` exists → `npx tsc --noEmit --incremental 2>&1` (`--incremental` speeds up repeated runs via `.tsbuildinfo` cache)
+   - If `package.json` has a `lint` script → `npm run lint 2>&1` (do NOT append eslint-specific flags like `--format json` — the lint script may wrap a different tool)
+   - If `.eslintrc*` or `eslint.config.*` exists and no `lint` script → `npx eslint <changed-files> 2>&1`
 
 2. **Python projects**:
-   - If `pyproject.toml` contains `[tool.ruff]` or `ruff.toml` exists → `ruff check <changed-files> 2>&1 | head -100`
-   - If `pyproject.toml` contains `[tool.mypy]` or `mypy.ini` exists → `mypy <changed-files> 2>&1 | head -100`
-   - If `.flake8` exists → `flake8 <changed-files> 2>&1 | head -100`
+   - If `pyproject.toml` contains `[tool.ruff]` or `ruff.toml` exists → `ruff check <changed-files> 2>&1`
+   - If `pyproject.toml` contains `[tool.mypy]` or `mypy.ini` exists → `mypy <changed-files> 2>&1`
+   - If `.flake8` exists → `flake8 <changed-files> 2>&1`
 
 3. **Rust projects**:
-   - If `Cargo.toml` exists → `cargo clippy 2>&1 | head -100` (this checks the whole project; filter output to only report warnings/errors in changed files. Clippy includes compile checks; Agent 5 can skip `cargo build` if clippy ran successfully)
+   - If `Cargo.toml` exists → `cargo clippy 2>&1` (clippy includes compile checks; Agent 5 can skip `cargo build` if clippy ran successfully)
 
 4. **Go projects**:
-   - If `go.mod` exists → `go vet ./... 2>&1 | head -100` (this checks all packages; filter output to only report errors in changed files; vet includes compile checks, so Agent 5 can skip `go build` if vet ran successfully) and `golangci-lint run <changed-files> 2>&1 | head -100`
+   - If `go.mod` exists → `go vet ./... 2>&1` (vet includes compile checks, so Agent 5 can skip `go build` if vet ran successfully) and `golangci-lint run <changed-files> 2>&1`
 
-**Timeout**: Set a 120-second timeout for type checkers (`tsc`, `mypy`) and 60-second timeout for linters. If a command times out or fails to run (tool not installed), skip it silently and move on.
+**Important**: For whole-project tools (`tsc`, `npm run lint`, `cargo clippy`, `go vet`), capture the full output first, then filter to only errors/warnings in changed files, then truncate to the first 200 lines. Do NOT pipe to `head` before filtering — this can drop relevant errors for changed files that appear later in the output.
+
+**Timeout**: Set a 120-second timeout for type checkers (`tsc`, `mypy`) and 60-second timeout for linters. If a command times out or fails to run (tool not installed), skip it and record an informational note naming the skipped check and the reason (e.g., "tsc skipped: timeout after 120s" or "ruff skipped: tool not installed"). Include these notes in the Step 3 summary so the user knows which checks did not run.
 
 **Output handling**: Parse file paths, line numbers, and error/warning messages from the output. Linter output typically follows formats like `file.ts:42:5: error ...` or `file.py:10: W123 ...`. Add them to the findings as **confirmed deterministic issues** with proper file:line references — these skip Step 2.5 verification entirely. Tag each with `[linter]` or `[typecheck]` in the Issue field.
 
@@ -164,16 +166,16 @@ Focus areas:
 
 This agent runs deterministic build and test commands to verify the code compiles and tests pass. If Step 1.5 already ran a tool that includes compilation (e.g., `cargo clippy`, `go vet`, `tsc --noEmit`), skip the redundant build command for that language and only run tests.
 
-1. Detect the build system and run the build command (skip if Step 1.5 already verified compilation):
-   - If `package.json` exists with a `build` script → `npm run build 2>&1 | tail -50`
-   - If `Makefile` exists → `make build 2>&1 | tail -50`
-   - If `Cargo.toml` exists → `cargo build 2>&1 | tail -50`
-   - If `go.mod` exists → `go build ./... 2>&1 | tail -50`
-2. Run the test command:
-   - If `package.json` exists with a `test` script → `npm test 2>&1 | tail -100`
-   - If `pytest.ini` or `pyproject.toml` with `[tool.pytest]` → `pytest 2>&1 | tail -100`
-   - If `Cargo.toml` exists → `cargo test 2>&1 | tail -100`
-   - If `go.mod` exists → `go test ./... 2>&1 | tail -100`
+1. Detect the build system and run the build command (skip if Step 1.5 already verified compilation). Capture full output; if it exceeds 200 lines, keep the first 50 and last 100 lines (errors often appear at the beginning or end):
+   - If `package.json` exists with a `build` script → `npm run build 2>&1`
+   - If `Makefile` exists → `make build 2>&1`
+   - If `Cargo.toml` exists → `cargo build 2>&1`
+   - If `go.mod` exists → `go build ./... 2>&1`
+2. Run the test command (same output handling as above):
+   - If `package.json` exists with a `test` script → `npm test 2>&1`
+   - If `pytest.ini` or `pyproject.toml` with `[tool.pytest]` → `pytest 2>&1`
+   - If `Cargo.toml` exists → `cargo test 2>&1`
+   - If `go.mod` exists → `go test ./... 2>&1`
 3. Set a **120-second timeout** for each command. If a command times out, report it as a finding.
 4. If build or tests fail, analyze the error output and correlate failures with specific changes in the diff. Distinguish between:
    - **Code-caused failures** (compilation errors, test assertions) → **Critical**
@@ -327,7 +329,7 @@ For pattern-aggregated findings (multiple locations), post the comment on the mo
 
 If a finding was auto-fixed in Step 3.5, prefix its comment with **[Auto-fixed]** so the reviewer knows the issue has already been addressed.
 
-For low-confidence findings, prefix with **[Needs Review]** instead of the severity tag, so reviewers know these require human judgment.
+For low-confidence findings, prefix with **[Needs Review][{severity}]** (e.g., `[Needs Review][Suggestion]`) so reviewers see both the confidence level and the severity.
 
 ```
 # Step A: Use write_file tool to create /tmp/qwen-review-{target}-comment.txt with content:
