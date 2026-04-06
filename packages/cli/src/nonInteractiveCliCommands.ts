@@ -37,6 +37,9 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
  * - init: Initialize project configuration
  * - summary: Generate session summary
  * - compress: Compress conversation history
+ * - btw: Side question
+ * - bug: Submit bug report
+ * - thinkback: Session timeline review
  */
 export const ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE = [
   'init',
@@ -222,7 +225,7 @@ function filterCommandsForNonInteractive(
  * @param config The configuration object
  * @param settings The loaded settings
  * @param allowedBuiltinCommandNames Optional array of built-in command names that are
- *   allowed. Defaults to ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE (init, summary, compress).
+ *   allowed. Defaults to ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE.
  *   Pass an empty array to only allow file commands.
  * @returns A Promise that resolves to a `NonInteractiveSlashCommandResult` describing
  *   the outcome of the command execution.
@@ -353,7 +356,7 @@ export const handleSlashCommand = async (
  * @param config The configuration object
  * @param abortSignal Signal to cancel the loading process
  * @param allowedBuiltinCommandNames Optional array of built-in command names that are
- *   allowed. Defaults to ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE (init, summary, compress).
+ *   allowed. Defaults to ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE.
  *   Pass an empty array to only include file commands.
  * @returns A Promise that resolves to an array of SlashCommand objects
  */
