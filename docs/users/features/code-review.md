@@ -31,6 +31,7 @@ Step 1.1: Load project review rules
 Step 1.5: Run deterministic analysis (linters, type checkers)
 Step 2:   5 parallel review agents (correctness, quality, performance, undirected, build/test)
 Step 2.5: Deduplicate → verify → aggregate findings
+Step 2.6: Reverse audit — find issues all agents missed
 Step 3:   Present findings with verdict
 Step 3.5: Offer autofix for fixable issues
 Step 4:   Post PR inline comments (if requested)
@@ -48,7 +49,7 @@ Step 5:   Restore environment
 | Agent 4: Undirected Audit         | Business logic, boundary interactions, hidden coupling             |
 | Agent 5: Build & Test             | Runs build and test commands, reports failures                     |
 
-All agents run in parallel. Each finding is independently verified by a separate verification agent to reduce false positives.
+All agents run in parallel. Each finding is independently verified by a separate verification agent to reduce false positives. After verification, a **reverse audit agent** reviews the diff with knowledge of all confirmed findings to catch issues that every other agent missed.
 
 ## Deterministic Analysis
 

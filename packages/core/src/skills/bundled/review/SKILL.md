@@ -244,7 +244,29 @@ After verification, identify **confirmed** findings that describe the **same typ
    - **Severity:** <highest severity among the group>
 3. If the same pattern has more than 5 occurrences and severity is **not** Critical, list the first 3 locations plus "and N more locations". For **Critical** patterns, always list all locations — every instance matters.
 
-All confirmed findings (aggregated or standalone) proceed to Step 3.
+All confirmed findings (aggregated or standalone) proceed to Step 2.6.
+
+### Reverse audit
+
+After aggregation, launch a **single reverse audit agent** to find issues that all previous agents missed. This agent receives:
+
+- The list of all confirmed findings so far (so it knows what's already covered)
+- The command to obtain the diff
+- Access to read files and search the codebase
+
+The reverse audit agent must:
+
+1. Review the diff with full knowledge of what was already found
+2. Focus exclusively on **gaps** — important issues that no other agent caught
+3. Only report **Critical** or **Suggestion** level findings — do not report Nice to have
+4. Apply the same **Exclusion Criteria** as other agents
+5. Return findings in the same structured format (with `Source: [review]`)
+
+Any findings from the reverse audit go through the same independent verification as Step 2.5 (one verification agent per finding, same confidence levels). Verified findings are merged into the final findings list.
+
+If the reverse audit finds nothing, that is a good outcome — it means the initial review had strong coverage.
+
+All confirmed findings (from aggregation + reverse audit) proceed to Step 3.
 
 ## Step 3: Present findings
 
