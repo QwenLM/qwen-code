@@ -477,8 +477,15 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
         const recoloredLabel = linkCode
           ? recolorAfterResets(`${label}:`, linkCode)
           : `${label}:`;
+        const primaryCode = getColorCode(theme.text.primary);
+        const styledValue = primaryCode
+          ? applyColor(
+              recolorAfterResets(value, primaryCode),
+              theme.text.primary,
+            )
+          : value;
         lines.push(
-          `${applyColor(ansiFmt.bold(recoloredLabel), theme.text.link)} ${value}`,
+          `${applyColor(ansiFmt.bold(recoloredLabel), theme.text.link)} ${styledValue}`,
         );
       }
     });
