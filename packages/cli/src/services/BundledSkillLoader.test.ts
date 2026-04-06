@@ -170,6 +170,48 @@ describe('BundledSkillLoader', () => {
     });
   });
 
+  it('should resolve {{model}} when args are provided', async () => {
+    const skill = makeSkill({
+      body: 'Review by {{model}}',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    (mockConfig.getModel as ReturnType<typeof vi.fn>).mockReturnValue(
+      'qwen3-coder',
+    );
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review 123', args: '123' } } as never,
+      '123',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: 'Review by qwen3-coder\n\n/review 123' }],
+    });
+  });
+
+  it('should use "unknown" for {{model}} when getModel returns empty string', async () => {
+    const skill = makeSkill({
+      body: 'Review by {{model}}',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    (mockConfig.getModel as ReturnType<typeof vi.fn>).mockReturnValue('');
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: 'Review by unknown' }],
+    });
+  });
+
   it('should not modify skill body without {{model}} template', async () => {
     const skill = makeSkill({ body: 'No template here' });
     mockSkillManager.listSkills.mockResolvedValue([skill]);

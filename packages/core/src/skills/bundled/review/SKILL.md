@@ -434,7 +434,9 @@ gh pr review {pr_number} --comment --body-file /tmp/qwen-review-{target}-summary
 If there are **no confirmed findings**:
 
 ```bash
-gh pr review {pr_number} --approve --body "No issues found. LGTM! ✅"
+gh pr review {pr_number} --approve --body "No issues found. LGTM! ✅
+
+_Reviewed by {{model}} via Qwen Code /review_"
 ```
 
 ## Step 4.5: Save review report and cache
