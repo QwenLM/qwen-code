@@ -25,18 +25,33 @@ If there are no uncommitted changes, `/review` will let you know and stop — no
 
 The `/review` command runs a multi-stage pipeline:
 
-```
-Step 1:   Determine scope (local diff / PR / file)
-Step 1.1: Load project review rules
-Step 1.5: Run deterministic analysis (linters, type checkers)
-Step 2:   5 parallel review agents (correctness, quality, performance, undirected, build/test)
-Step 2.5: Deduplicate → verify → aggregate findings
-Step 2.6: Reverse audit — find issues all agents missed
-Step 3:   Present findings with verdict
-Step 3.5: Offer autofix for fixable issues
-Step 4:   Post PR inline comments (if requested)
-Step 4.5: Save report and incremental cache
-Step 5:   Clean up (remove worktree and temp files)
+```mermaid
+flowchart TD
+    A["🔍 Determine scope\n(local diff / PR worktree / file)"] --> B["📋 Load project review rules\n(.qwen/review-rules.md, copilot-instructions.md, etc.)"]
+    B --> C["🔧 Deterministic analysis\n(linter, typecheck — zero LLM cost)"]
+    C --> D["🤖 5 parallel review agents"]
+
+    subgraph agents [" "]
+        D1["Agent 1\nCorrectness\n& Security"]
+        D2["Agent 2\nCode\nQuality"]
+        D3["Agent 3\nPerformance\n& Efficiency"]
+        D4["Agent 4\nUndirected\nAudit"]
+        D5["Agent 5\nBuild & Test\n(shell, zero LLM)"]
+    end
+
+    D --> agents
+    agents --> E["🔀 Deduplicate → Batch verify → Aggregate\n(single verification agent for all findings)"]
+    E --> F["🔄 Reverse audit\n(find coverage gaps)"]
+    F --> G["📊 Present findings + verdict"]
+    G --> H{"Autofix?"}
+    H -- "User accepts" --> I["✏️ Apply fixes + verify"]
+    H -- "Declined / N/A" --> J["💬 Follow-up tips"]
+    I --> J
+    J --> K{"PR comments?"}
+    K -- "post comments" --> L["📝 Post inline comments\n(high-confidence Critical/Suggestion only)"]
+    K -- "No" --> M["💾 Save report + cache"]
+    L --> M
+    M --> N["🧹 Clean up\n(remove worktree + temp files)"]
 ```
 
 ### Review Agents
