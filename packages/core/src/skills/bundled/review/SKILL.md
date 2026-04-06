@@ -111,6 +111,7 @@ Each agent must return findings in this structured format (one per issue):
 
 ```
 - **File:** <file path>:<line number or range>
+- **Source:** [review] (Agents 1-4) or [build]/[test] (Agent 5)
 - **Issue:** <clear description of the problem>
 - **Impact:** <why it matters>
 - **Suggested fix:** <concrete code suggestion when possible, or "N/A">
@@ -181,9 +182,9 @@ This agent runs deterministic build and test commands to verify the code compile
 4. If build or tests fail, analyze the error output and correlate failures with specific changes in the diff. Distinguish between:
    - **Code-caused failures** (compilation errors, test assertions) → **Critical**
    - **Environment/setup failures** (missing dependencies, tool not installed, virtualenv not activated) → report as informational note, not Critical
-5. Output format: same as other agents.
+5. Output format: same as other agents, but the **Source** field MUST be `[build]` for build failures or `[test]` for test failures (not `[review]`).
 
-**Note**: Build/test results are deterministic facts. Code-caused failures skip Step 2.5 verification — mark them as confirmed Critical directly. Environment/setup failures are informational only and should not affect the verdict.
+**Note**: Build/test results are deterministic facts. Code-caused failures skip Step 2.5 verification — the `[build]`/`[test]` source tag is how they are recognized as pre-confirmed. Environment/setup failures are informational only and should not affect the verdict.
 
 ### Cross-file impact analysis (applies to Agents 1-4)
 
@@ -197,7 +198,7 @@ In addition to their primary focus, each review agent (1-4) MUST perform cross-f
    - Behavioral changes (new exceptions thrown, null returns, changed defaults)
    - Removed or renamed public methods/properties
    - Breaking changes to exported APIs
-4. If `grep_search` results are ambiguous, also use `run_shell_command` with grep for precise reference matching. Search for multiple access patterns — not just `functionName(` but also `.functionName`, `import { functionName`, and `import functionName`: `grep -rn --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist --exclude-dir=build -E "(functionName\(|\.functionName|import.*functionName)" .` (use the project root; always exclude common non-source directories)
+4. If `grep_search` results are ambiguous, also use `run_shell_command` with fixed-string grep (`grep -F`) for precise reference matching — do NOT use `-E` regex with unescaped symbol names, as symbols may contain regex metacharacters (e.g., `$` in JS). Run separate searches for each access pattern: `grep -rnF --exclude-dir=node_modules --exclude-dir=.git --exclude-dir=dist --exclude-dir=build "functionName(" .` and `.functionName` and `import { functionName` etc. (use the project root; always exclude common non-source directories)
 
 ## Step 2.5: Deduplicate, verify, and aggregate
 
