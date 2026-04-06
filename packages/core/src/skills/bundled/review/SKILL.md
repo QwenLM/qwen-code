@@ -7,6 +7,7 @@ allowedTools:
   - grep_search
   - read_file
   - write_file
+  - edit
   - glob
 ---
 
