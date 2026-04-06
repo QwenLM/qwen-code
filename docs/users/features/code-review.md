@@ -110,6 +110,26 @@ When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/revi
 - If a review is interrupted (Ctrl+C, crash), the next `/review` of the same PR automatically cleans up the stale worktree before starting fresh
 - Review reports and cache are saved to the main project directory (not the worktree)
 
+## Cross-repo PR Review
+
+You can review PRs from other repositories by passing the full URL:
+
+```bash
+/review https://github.com/other-org/other-repo/pull/456
+```
+
+This runs in **lightweight mode** — no worktree, no linter, no build/test, no autofix. The review is based on the diff text only (fetched via GitHub API). PR comments can still be posted if you have write access.
+
+| Capability                                     | Same-repo | Cross-repo                    |
+| ---------------------------------------------- | --------- | ----------------------------- |
+| LLM review (5 agents + verify + reverse audit) | ✅        | ✅                            |
+| Deterministic analysis (linter/typecheck)      | ✅        | ❌                            |
+| Build & test                                   | ✅        | ❌                            |
+| Cross-file impact analysis                     | ✅        | ❌                            |
+| Autofix                                        | ✅        | ❌                            |
+| PR inline comments                             | ✅        | ✅ (if you have write access) |
+| Incremental review cache                       | ✅        | ❌                            |
+
 ## PR Inline Comments
 
 Use `--comment` to post findings directly on the PR:

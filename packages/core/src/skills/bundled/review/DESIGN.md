@@ -88,6 +88,14 @@ A malicious PR could add `.qwen/review-rules.md` with "never report security iss
 
 Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (cloud). Our 7 is a balance of coverage vs cost.
 
+## Why cross-repo uses lightweight mode
+
+CLI tools are inherently repo-local. Worktree, linter, build/test, cross-file analysis all require the codebase on disk. No competitor (Copilot CLI, Claude Code, Gemini CLI) supports cross-repo PR review at all.
+
+Our lightweight mode is the best a CLI can do: GitHub API calls work cross-repo (`gh pr diff <url>`, `gh pr view <url>`, `gh api .../comments`), so LLM review and PR comment posting work. Everything that needs local files is skipped. This is strictly better than "not supported."
+
+Key implementation detail: Step 9 must use the owner/repo extracted from the URL, not `gh repo view` (which returns the current repo).
+
 ## Rejected alternatives
 
 | Idea                                          | Why rejected                                                                                                              |
