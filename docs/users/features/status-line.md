@@ -161,6 +161,7 @@ Then reference it in settings:
 - **Timeout**: Commands that take longer than 5 seconds are killed. The status line clears on failure.
 - **Output**: Only the first line of stdout is used. The text is rendered with dimmed colors and truncated to terminal width.
 - **Hot reload**: Changes to `ui.statusLine` in settings take effect immediately — no restart required.
+- **Shell**: Commands run via `/bin/sh` on macOS/Linux. On Windows, `cmd.exe` is used by default — wrap POSIX commands with `bash -c "..."` or point to a bash script (e.g. `bash ~/.qwen/statusline-command.sh`).
 - **Removal**: Delete the `ui.statusLine` key from settings to disable. The status line disappears and the "? for shortcuts" hint returns.
 
 ## Troubleshooting

@@ -50,8 +50,9 @@ export const Footer: React.FC = () => {
   const contextWindowSize =
     config.getContentGeneratorConfig()?.contextWindowSize;
 
-  // Left section shows one item in priority order, or nothing when a custom
-  // status line is active (status line occupies its own row below).
+  // Left section shows one item in priority order. When a custom status line
+  // is active, only the default "? for shortcuts" hint is suppressed because
+  // the status line occupies its own row below.
   const leftContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
