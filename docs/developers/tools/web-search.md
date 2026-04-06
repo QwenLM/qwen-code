@@ -183,4 +183,4 @@ web_search(query="best practices for React 19", provider="dashscope")
 **Need help?**
 
 - Check your configuration: Run `qwen` and use the settings dialog
-- View your current settings in `~/.qwen-code/settings.json` (macOS/Linux) or `%USERPROFILE%\.qwen-code\settings.json` (Windows)
+- View your current settings in `~/.qwen/settings.json` (macOS/Linux) or `%USERPROFILE%\.qwen\settings.json` (Windows)
