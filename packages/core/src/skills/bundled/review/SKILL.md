@@ -168,17 +168,17 @@ Focus areas:
 
 This agent runs deterministic build and test commands to verify the code compiles and tests pass. If Step 1.5 already ran a tool that includes compilation (e.g., `cargo clippy`, `go vet`, `tsc --noEmit`), skip the redundant build command for that language and only run tests.
 
-1. Detect the build system and run the build command (skip if Step 1.5 already verified compilation). Capture full output; if it exceeds 200 lines, keep the first 50 and last 100 lines (errors often appear at the beginning or end):
+1. Detect the build system and run **exactly one** build command (skip if Step 1.5 already verified compilation). Use this precedence order — choose the **first applicable** option only to avoid duplicate builds (e.g., a Makefile that wraps npm). Capture full output; if it exceeds 200 lines, keep the first 50 and last 100 lines:
    - If `package.json` exists with a `build` script → `npm run build 2>&1`
-   - If `Makefile` exists → `make build 2>&1`
-   - If `Cargo.toml` exists → `cargo build 2>&1`
-   - If `go.mod` exists → `go build ./... 2>&1`
-2. Run the test command (same output handling as above):
+   - Else if `Makefile` exists → `make build 2>&1`
+   - Else if `Cargo.toml` exists → `cargo build 2>&1`
+   - Else if `go.mod` exists → `go build ./... 2>&1`
+2. Run **exactly one** test command (same precedence and output handling):
    - If `package.json` exists with a `test` script → `npm test 2>&1`
-   - If `pytest.ini` or `pyproject.toml` with `[tool.pytest]` → `pytest 2>&1`
-   - If `Cargo.toml` exists → `cargo test 2>&1`
-   - If `go.mod` exists → `go test ./... 2>&1`
-3. Set a **120-second timeout** for each command. If a command times out, report it as a finding.
+   - Else if `pytest.ini` or `pyproject.toml` with `[tool.pytest]` → `pytest 2>&1`
+   - Else if `Cargo.toml` exists → `cargo test 2>&1`
+   - Else if `go.mod` exists → `go test ./... 2>&1`
+3. Set a **120-second timeout** (120000ms when using `run_shell_command`) for each command. If a command times out, report it as a finding.
 4. If build or tests fail, analyze the error output and correlate failures with specific changes in the diff. Distinguish between:
    - **Code-caused failures** (compilation errors, test assertions) → **Critical**
    - **Environment/setup failures** (missing dependencies, tool not installed, virtualenv not activated) → report as informational note, not Critical
@@ -340,12 +340,11 @@ Do **not** post low-confidence findings as PR inline comments — they appear on
 
 ```
 # Step A: Use write_file tool to create /tmp/qwen-review-{target}-comment.txt with content:
-# Choose the correct prefix (including Markdown bold and severity tag):
+# Choose {prefix} from these options (including Markdown bold):
 #   Normal:     **[Critical]** or **[Suggestion]**
 #   Auto-fixed: **[Auto-fixed][Critical]** or **[Auto-fixed][Suggestion]**
-# Then write:
 
-**[{severity}]** {issue description}
+{prefix} {issue description}
 
 {suggested fix}
 ```
