@@ -508,15 +508,20 @@ If reviewing a PR, update the review cache for incremental review support:
 
 1. Create `.qwen/review-cache/` directory if it doesn't exist
 2. Write `.qwen/review-cache/pr-<number>.json` with:
+
    ```json
    {
      "lastCommitSha": "<pre-autofix HEAD SHA captured in Step 1>",
      "lastModelId": "{{model}}",
      "lastReviewDate": "<ISO timestamp>",
      "findingsCount": <number>,
-     "verdict": "<verdict>"
+     "verdict": "<verdict>",
+     "reportPath": "<path to the saved report from Step 10>"
    }
    ```
+
+   The `reportPath` allows Step 9 to load prior findings when `--comment` is used on an unchanged PR (see incremental check in Step 1).
+
 3. Ensure `.qwen/reviews/` and `.qwen/review-cache/` are ignored by `.gitignore` — a broader rule like `.qwen/*` also satisfies this. Only warn the user if those paths are not ignored at all.
 
 ## Step 11: Clean up
