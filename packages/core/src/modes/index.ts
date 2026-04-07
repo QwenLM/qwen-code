@@ -114,3 +114,23 @@ export {
   type ModeUsageStats,
   type ProductivityReport,
 } from './mode-analytics.js';
+
+// Mode quality gates
+export {
+  ModeQualityGateManager,
+  type QualityGate,
+  type QualityGateResult,
+  type ModeQualityConfig,
+  type QualityGateRunResult,
+  type QualityGateThresholds,
+} from './mode-quality-gates.js';
+
+// Mode workflow pipelines
+export {
+  ModeWorkflowRunner,
+  BUILTIN_PIPELINES,
+  type WorkflowStep,
+  type ModeWorkflow,
+  type PipelineResult,
+  type ModeWorkflowEvents,
+} from './mode-workflow.js';

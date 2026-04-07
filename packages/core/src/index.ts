@@ -279,3 +279,55 @@ export {
   firePermissionRequestHook,
   type NotificationHookResult,
 } from './core/toolHookTriggers.js';
+
+// ============================================================================
+// Modes Layer
+// ============================================================================
+
+export {
+  ModeManager,
+  type ModeManagerEvents,
+} from './modes/mode-manager.js';
+
+export type {
+  ModeConfig,
+  ModeRuntime,
+  ModeLevel,
+  ModeApprovalMode,
+  ValidationResult,
+  ListModesOptions,
+  CreateModeOptions,
+} from './modes/types.js';
+
+export {
+  ModeError,
+  ModeErrorCode,
+} from './modes/types.js';
+
+export {
+  ModeQualityGateManager,
+  type QualityGate,
+  type QualityGateResult,
+  type ModeQualityConfig as ModeQualityGateConfig,
+  type QualityGateRunResult,
+  type QualityGateThresholds,
+} from './modes/mode-quality-gates.js';
+
+export {
+  ModeWorkflowRunner,
+  BUILTIN_PIPELINES,
+  type WorkflowStep,
+  type ModeWorkflow,
+  type PipelineResult,
+  type ModeWorkflowEvents,
+} from './modes/mode-workflow.js';
+
+export {
+  ParallelTaskRunner,
+  type ParallelTaskStatus,
+  type ParallelTaskConfig,
+  type ParallelGroupConfig,
+  type ParallelTaskRuntime,
+  type ParallelGroupRuntime,
+  type ParallelRunnerEvents,
+} from './modes/parallel-task-runner.js';
