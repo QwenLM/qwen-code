@@ -85,14 +85,45 @@ export class SessionRouter {
     return this.toTarget.get(sessionId);
   }
 
+  /**
+   * Build the prefix used to scan keys belonging to a given sender on a
+   * channel when no chatId is supplied. Includes the trailing separator so
+   * `user1` doesn't match `user12`. For non-`user` scopes the senderId is
+   * not part of the key, so we have to fall back to a target-based filter.
+   */
+  private senderKeyPrefix(channelName: string, senderId: string): string {
+    return `${channelName}:${senderId}:`;
+  }
+
+  private *senderKeys(
+    channelName: string,
+    senderId: string,
+  ): IterableIterator<string> {
+    const scope = this.channelScopes.get(channelName) || this.defaultScope;
+    if (scope === 'user') {
+      const prefix = this.senderKeyPrefix(channelName, senderId);
+      for (const k of this.toSession.keys()) {
+        if (k.startsWith(prefix)) yield k;
+      }
+      return;
+    }
+    // thread/single scopes don't encode senderId in the key — fall back to
+    // matching via stored target metadata.
+    for (const [k, sessionId] of this.toSession) {
+      const target = this.toTarget.get(sessionId);
+      if (target?.channelName === channelName && target.senderId === senderId) {
+        yield k;
+      }
+    }
+  }
+
   hasSession(channelName: string, senderId: string, chatId?: string): boolean {
-    const key = chatId
-      ? this.routingKey(channelName, senderId, chatId)
-      : `${channelName}:${senderId}`;
-    // If chatId is provided, do exact lookup; otherwise prefix-scan for any match
-    if (chatId) return this.toSession.has(key);
-    for (const k of this.toSession.keys()) {
-      if (k.startsWith(`${channelName}:${senderId}`)) return true;
+    if (chatId) {
+      const key = this.routingKey(channelName, senderId, chatId);
+      return this.toSession.has(key);
+    }
+    for (const _ of this.senderKeys(channelName, senderId)) {
+      return true;
     }
     return false;
   }
@@ -111,13 +142,12 @@ export class SessionRouter {
       const sessionId = this.deleteByKey(key);
       if (sessionId) removedIds.push(sessionId);
     } else {
-      // No chatId: remove all sessions for this sender on this channel
-      const prefix = `${channelName}:${senderId}`;
-      for (const k of [...this.toSession.keys()]) {
-        if (k.startsWith(prefix)) {
-          const sessionId = this.deleteByKey(k);
-          if (sessionId) removedIds.push(sessionId);
-        }
+      // No chatId: remove all sessions for this sender on this channel.
+      // Materialize keys first so we can delete during iteration.
+      const keys = [...this.senderKeys(channelName, senderId)];
+      for (const k of keys) {
+        const sessionId = this.deleteByKey(k);
+        if (sessionId) removedIds.push(sessionId);
       }
     }
     if (removedIds.length > 0) this.persist();
