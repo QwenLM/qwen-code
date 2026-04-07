@@ -403,18 +403,26 @@ If a finding was auto-fixed in Step 8, prefix its comment with **[Auto-fixed]** 
 
 Do **not** post low-confidence findings as PR inline comments — they appear only in the terminal output under "Needs Human Review." This keeps PR comments high-signal.
 
-```
+````
 # Step A: Use write_file tool to create /tmp/qwen-review-{target}-comment.txt
 # The EXACT content must follow this template (do NOT rewrite the footer):
 
 {prefix} {issue description}
 
-{suggested fix}
+```suggestion
+{replacement code that GitHub can apply with one click}
+````
+
+If the fix cannot be expressed as a direct line replacement (e.g., it spans
+multiple locations or requires new code), use a regular code block instead.
 
 _— {{model}} via Qwen Code /review_
-```
+
+````
 
 Where `{prefix}` is one of: `**[Critical]**`, `**[Suggestion]**`, `**[Auto-fixed][Critical]**`, or `**[Auto-fixed][Suggestion]**`.
+
+**Use GitHub `suggestion` blocks** whenever the fix is a direct replacement of the commented lines. This lets the PR author accept the fix with one click. Only fall back to regular code blocks when the fix cannot be expressed as a line replacement.
 
 ⚠️ The footer `_— {{model}} via Qwen Code /review_` must appear **exactly as shown** — including the model name, "via", and "Qwen Code /review". Do NOT shorten, rephrase, or omit any part of it.
 
@@ -436,7 +444,7 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
   -F line={end_line} \
   -f start_side="RIGHT" \
   -f side="RIGHT"
-```
+````
 
 Repeat Steps A-B for each finding, overwriting the temp file each time. Clean up the temp file in Step 11.
 
