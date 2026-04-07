@@ -93,3 +93,24 @@ export {
   isInheritedFrom,
   findDescendants,
 } from './mode-inheritance.js';
+
+// Mode detection
+export {
+  ModeDetector,
+  type ModeSuggestion,
+} from './mode-detection.js';
+
+// Mode context
+export {
+  ContextAwareSwitcher,
+  type ModeContextRule,
+  type ModeContext,
+  type ContextTrigger,
+} from './mode-context.js';
+
+// Mode analytics
+export {
+  ModeAnalytics,
+  type ModeUsageStats,
+  type ProductivityReport,
+} from './mode-analytics.js';

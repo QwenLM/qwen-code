@@ -39,6 +39,7 @@ import {
 import { modeValidator } from './mode-validation.js';
 import { ModeHookRegistry, type HookTrigger, type HookExecutionResult } from './mode-hooks.js';
 import { resolveInheritedMode, getInheritanceChain, isInheritedFrom, findDescendants } from './mode-inheritance.js';
+import { ModeAnalytics } from './mode-analytics.js';
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -60,6 +61,7 @@ export class ModeManager extends EventEmitter {
   private currentMode: ModeRuntime | null = null;
   private modeRegistry: Map<string, ModeConfig> = new Map();
   private hookRegistry: ModeHookRegistry;
+  private analytics: ModeAnalytics;
   private readonly changeListeners: Set<() => void> = new Set();
 
   constructor(
@@ -71,6 +73,7 @@ export class ModeManager extends EventEmitter {
   ) {
     super();
     this.hookRegistry = new ModeHookRegistry(config!);
+    this.analytics = new ModeAnalytics();
   }
 
   // ─── Change Listeners ──────────────────────────────────────────────────────
@@ -271,6 +274,13 @@ export class ModeManager extends EventEmitter {
       appliedAt: new Date(),
       originalSettings,
     };
+
+    // Record analytics for the mode switch
+    this.analytics.recordSession(modeName, 0, {
+      toolCalls: 0,
+      messages: 0,
+      filesModified: 0,
+    });
 
     // Emit events
     this.emit('mode:changed', this.currentMode);
@@ -621,5 +631,40 @@ export class ModeManager extends EventEmitter {
     if (!mode) return false;
 
     return isInheritedFrom(mode, ancestorName, this.modeRegistry);
+  }
+
+  // ─── Analytics ─────────────────────────────────────────────────────────────
+
+  /**
+   * Get the ModeAnalytics instance for tracking mode usage.
+   *
+   * @returns ModeAnalytics instance
+   */
+  getAnalytics(): ModeAnalytics {
+    return this.analytics;
+  }
+
+  /**
+   * Record session statistics for the current mode.
+   * Call this when a session ends to update analytics.
+   *
+   * @param duration - Session duration in seconds
+   * @param stats - Session statistics
+   */
+  recordCurrentModeSession(
+    duration: number,
+    stats: {
+      toolCalls: number;
+      messages: number;
+      filesModified: number;
+    },
+  ): void {
+    const modeName = this.currentMode?.config.name;
+    if (!modeName) {
+      debugLogger.debug('No active mode to record session for');
+      return;
+    }
+
+    this.analytics.recordSession(modeName, duration, stats);
   }
 }
