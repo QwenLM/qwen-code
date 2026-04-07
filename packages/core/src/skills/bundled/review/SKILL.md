@@ -433,6 +433,8 @@ gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
 
 Repeat Steps A-B for each finding, overwriting the temp file each time. Clean up the temp file in Step 11.
 
+**IMPORTANT: Two-phase posting.** Phase 1 is posting individual inline comments using `gh api` (Steps A-B above). Phase 2 is submitting the review verdict using `gh pr review` (below). Do NOT mix them — complete ALL inline comments first, THEN submit the review verdict ONCE. Do NOT call `gh pr review` for each individual comment.
+
 If posting an inline comment fails (e.g., line not part of the diff, auth error), include the finding in the overall review summary comment instead.
 
 **Important rules:**
