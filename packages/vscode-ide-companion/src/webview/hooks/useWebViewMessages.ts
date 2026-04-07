@@ -136,7 +136,10 @@ interface UseWebViewMessagesProps {
 type ConversationResetHandlers = {
   messageHandling: Pick<
     UseWebViewMessagesProps['messageHandling'],
-    'clearMessages'
+    | 'clearMessages'
+    | 'endStreaming'
+    | 'clearWaitingForResponse'
+    | 'clearThinking'
   >;
   clearToolCalls: UseWebViewMessagesProps['clearToolCalls'];
   sessionManagement: Pick<
@@ -155,6 +158,9 @@ export function resetConversationState({
   clearImageResolutions: () => void;
   vscode: { postMessage: (message: unknown) => void };
 }) {
+  handlers.messageHandling.endStreaming();
+  handlers.messageHandling.clearWaitingForResponse();
+  handlers.messageHandling.clearThinking();
   handlers.messageHandling.clearMessages();
   handlers.clearToolCalls();
   handlers.sessionManagement.setCurrentSessionId(null);

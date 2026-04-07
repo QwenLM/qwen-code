@@ -10,6 +10,9 @@ import { resetConversationState } from './useWebViewMessages.js';
 describe('resetConversationState', () => {
   it('clears retained usage stats when a conversation is reset', () => {
     const clearMessages = vi.fn();
+    const endStreaming = vi.fn();
+    const clearWaitingForResponse = vi.fn();
+    const clearThinking = vi.fn();
     const clearToolCalls = vi.fn();
     const setCurrentSessionId = vi.fn();
     const setCurrentSessionTitle = vi.fn();
@@ -21,6 +24,9 @@ describe('resetConversationState', () => {
       handlers: {
         messageHandling: {
           clearMessages,
+          endStreaming,
+          clearWaitingForResponse,
+          clearThinking,
         },
         clearToolCalls,
         sessionManagement: {
@@ -35,6 +41,9 @@ describe('resetConversationState', () => {
       },
     });
 
+    expect(endStreaming).toHaveBeenCalled();
+    expect(clearWaitingForResponse).toHaveBeenCalled();
+    expect(clearThinking).toHaveBeenCalled();
     expect(clearMessages).toHaveBeenCalled();
     expect(clearToolCalls).toHaveBeenCalled();
     expect(setCurrentSessionId).toHaveBeenCalledWith(null);

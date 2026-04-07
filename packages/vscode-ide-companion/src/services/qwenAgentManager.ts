@@ -1206,7 +1206,10 @@ export class QwenAgentManager {
       console.log(
         '[QwenAgentManager] createNewSession: session creation already in flight',
       );
-      return this.sessionCreateInFlight;
+      if (!forceNew) {
+        return this.sessionCreateInFlight;
+      }
+      await this.sessionCreateInFlight;
     }
 
     console.log('[QwenAgentManager] Creating new session...');
