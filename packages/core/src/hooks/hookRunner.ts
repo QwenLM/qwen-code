@@ -420,6 +420,7 @@ export class HookRunner {
           }
         }
 
+        const killedBySignal = exitCode === null;
         resolve({
           hookConfig,
           eventName,
@@ -427,8 +428,11 @@ export class HookRunner {
           output,
           stdout,
           stderr,
-          exitCode: exitCode || EXIT_CODE_SUCCESS,
+          exitCode: exitCode ?? -1,
           duration,
+          ...(killedBySignal && {
+            error: new Error('Hook killed by signal'),
+          }),
         });
       });
 
