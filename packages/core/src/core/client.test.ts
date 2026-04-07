@@ -148,10 +148,15 @@ vi.mock('../ide/ideContext.js');
 vi.mock('../telemetry/uiTelemetry.js', () => ({
   uiTelemetryService: mockUiTelemetryService,
 }));
-vi.mock('../telemetry/loggers.js', () => ({
-  logChatCompression: vi.fn(),
-  logNextSpeakerCheck: vi.fn(),
-}));
+vi.mock('../telemetry/loggers.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../telemetry/loggers.js')>();
+  return {
+    ...actual,
+    logChatCompression: vi.fn(),
+    logNextSpeakerCheck: vi.fn(),
+  };
+});
 
 // Mock RequestTokenizer to use simple character-based estimation
 vi.mock('../utils/request-tokenizer/requestTokenizer.js', () => ({
