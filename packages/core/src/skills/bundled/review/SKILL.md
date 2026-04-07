@@ -408,7 +408,7 @@ Do **not** post low-confidence findings as PR inline comments — they appear on
 
 {suggested fix}
 
-_— {{model}}_
+_— {{model}} via Qwen Code /review_
 ```
 
 ```bash
