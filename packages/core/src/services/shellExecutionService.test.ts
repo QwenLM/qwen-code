@@ -40,6 +40,7 @@ const mockGetShellConfiguration = vi.hoisted(() =>
     shell: 'bash',
   }),
 );
+const mockIsRunningInMSYS2 = vi.hoisted(() => vi.fn().mockReturnValue(false));
 
 // Top-level Mocks
 vi.mock('@lydell/node-pty', () => ({
@@ -77,7 +78,7 @@ vi.mock('../utils/terminalSerializer.js', () => ({
 }));
 vi.mock('../utils/shell-utils.js', () => ({
   getShellConfiguration: mockGetShellConfiguration,
-  isRunningInMSYS2: vi.fn().mockReturnValue(false),
+  isRunningInMSYS2: mockIsRunningInMSYS2,
 }));
 vi.mock('../utils/systemEncoding.js', () => ({
   getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
@@ -1163,6 +1164,7 @@ describe('ShellExecutionService execution method selection', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockIsRunningInMSYS2.mockReturnValue(false);
     onOutputEventMock = vi.fn();
 
     // Mock for pty
@@ -1260,6 +1262,32 @@ describe('ShellExecutionService execution method selection', () => {
     const result = await handle.result;
 
     expect(mockGetPty).toHaveBeenCalled();
+    expect(mockPtySpawn).not.toHaveBeenCalled();
+    expect(mockCpSpawn).toHaveBeenCalled();
+    expect(result.executionMethod).toBe('child_process');
+  });
+
+  it('should use child_process when running in MSYS2 even if shouldUseNodePty is true', async () => {
+    // Simulate MSYS2 environment
+    mockIsRunningInMSYS2.mockReturnValue(true);
+
+    const abortController = new AbortController();
+    const handle = await ShellExecutionService.execute(
+      'test command',
+      '/test/dir',
+      onOutputEventMock,
+      abortController.signal,
+      true, // shouldUseNodePty is true, but MSYS2 should force child_process
+      shellExecutionConfig,
+    );
+
+    // Simulate exit to allow promise to resolve
+    mockChildProcess.emit('exit', 0, null);
+    const result = await handle.result;
+
+    // In MSYS2, should skip PTY and use child_process directly
+    expect(mockIsRunningInMSYS2).toHaveBeenCalled();
+    expect(mockGetPty).not.toHaveBeenCalled();
     expect(mockPtySpawn).not.toHaveBeenCalled();
     expect(mockCpSpawn).toHaveBeenCalled();
     expect(result.executionMethod).toBe('child_process');
