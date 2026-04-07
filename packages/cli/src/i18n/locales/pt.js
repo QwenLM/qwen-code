@@ -651,6 +651,7 @@ export default {
   'User Settings': 'Configurações do Usuário',
   'System Settings': 'Configurações do Sistema',
   Extensions: 'Extensões',
+  'Session (temporary)': 'Sessão (temporário)',
   // Hooks - Status
   '✓ Enabled': '✓ Ativado',
   '✗ Disabled': '✗ Desativado',

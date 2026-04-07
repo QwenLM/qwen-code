@@ -682,6 +682,7 @@ export default {
   'User Settings': '用户设置',
   'System Settings': '系统设置',
   Extensions: '扩展',
+  'Session (temporary)': '会话（临时）',
   // Hooks - Status
   '✓ Enabled': '✓ 已启用',
   '✗ Disabled': '✗ 已禁用',

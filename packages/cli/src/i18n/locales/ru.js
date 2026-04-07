@@ -656,6 +656,7 @@ export default {
   'User Settings': 'Пользовательские настройки',
   'System Settings': 'Системные настройки',
   Extensions: 'Расширения',
+  'Session (temporary)': 'Сессия (временно)',
   // Hooks - Status
   '✓ Enabled': '✓ Включен',
   '✗ Disabled': '✗ Отключен',
