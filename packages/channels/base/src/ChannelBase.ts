@@ -305,7 +305,7 @@ export abstract class ChannelBase {
       ? this.config.groups[envelope.chatId] || this.config.groups['*']
       : undefined;
     const mode: DispatchMode =
-      groupCfg?.dispatchMode || this.config.dispatchMode || 'steer';
+      groupCfg?.dispatchMode || this.config.dispatchMode || 'collect';
 
     const active = this.activePrompts.get(sessionId);
 
