@@ -324,8 +324,8 @@ For **PR comments** (Step 9): do NOT include internal stats (agent count, raw/co
 
 Use severity levels:
 
-- **Critical** — Must fix before merging. Bugs, security issues, data loss risks, build/test failures.
-- **Suggestion** — Recommended improvement. Better patterns, clearer code, potential issues.
+- **Critical** — Must fix before merging. Bugs that cause incorrect behavior (e.g., logic errors, wrong return values, skipped code paths), security vulnerabilities, data loss risks, build/test failures. If code does something wrong, it's Critical — not Suggestion.
+- **Suggestion** — Recommended improvement. Better patterns, clearer code, potential issues that don't cause incorrect behavior today but may in the future.
 - **Nice to have** — Optional optimization. Minor style tweaks, small performance gains.
 
 For each **individual** finding, include:
