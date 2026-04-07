@@ -371,8 +371,10 @@ export async function runNonInteractive(
               toolResponseParts.push(...toolResponse.responseParts);
             }
 
-            // Capture model override from skill tool results
-            if (toolResponse.modelOverride) {
+            // Capture model override from skill tool results.
+            // Use `in` so that undefined (from inherit/no-model skills) clears a prior override,
+            // while non-skill tools (field absent) leave the current override intact.
+            if ('modelOverride' in toolResponse) {
               modelOverride = toolResponse.modelOverride;
             }
           }

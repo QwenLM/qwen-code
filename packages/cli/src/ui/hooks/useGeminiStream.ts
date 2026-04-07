@@ -1165,6 +1165,7 @@ export const useGeminiStream = (
       query: PartListUnion,
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
+      modelOverride?: string,
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
@@ -1300,7 +1301,7 @@ export const useGeminiStream = (
             finalQueryToSend,
             abortSignal,
             prompt_id!,
-            { type: submitType },
+            { type: submitType, modelOverride },
           );
 
           const processingStatus = await processGeminiStreamEvents(
@@ -1566,6 +1567,14 @@ export const useGeminiStream = (
         (toolCall) => toolCall.request.prompt_id,
       );
 
+      // Extract model override from skill tool results (last one wins)
+      let toolModelOverride: string | undefined;
+      for (const toolCall of geminiTools) {
+        if ('modelOverride' in toolCall.response) {
+          toolModelOverride = toolCall.response.modelOverride;
+        }
+      }
+
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
       // Don't continue if model was switched due to quota error
@@ -1590,7 +1599,12 @@ export const useGeminiStream = (
         }
       }
 
-      submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
+      submitQuery(
+        responsesToSend,
+        SendMessageType.ToolResult,
+        prompt_ids[0],
+        toolModelOverride,
+      );
     },
     [
       isResponding,

@@ -1486,7 +1486,9 @@ export class CoreToolScheduler {
           error: undefined,
           errorType: undefined,
           contentLength,
-          ...(toolResult.modelOverride
+          // Propagate modelOverride from skill tools. Use `in` to distinguish
+          // "skill returned undefined (inherit)" from "non-skill tool (no field)".
+          ...('modelOverride' in toolResult
             ? { modelOverride: toolResult.modelOverride }
             : {}),
         };

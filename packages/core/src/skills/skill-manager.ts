@@ -17,7 +17,7 @@ import type {
   ListSkillsOptions,
   SkillValidationResult,
 } from './types.js';
-import { SkillError, SkillErrorCode } from './types.js';
+import { SkillError, SkillErrorCode, parseModelField } from './types.js';
 import type { Config } from '../config/config.js';
 import { validateConfig } from './skill-load.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -397,14 +397,7 @@ export class SkillManager {
       }
 
       // Extract optional model field
-      const modelRaw = frontmatter['model'];
-      let model: string | undefined;
-      if (modelRaw !== undefined) {
-        if (typeof modelRaw !== 'string') {
-          throw new Error('"model" must be a string');
-        }
-        model = modelRaw.trim() === 'inherit' ? undefined : modelRaw.trim();
-      }
+      const model = parseModelField(frontmatter);
 
       const config: SkillConfig = {
         name,

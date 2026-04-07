@@ -1,4 +1,8 @@
-import type { SkillConfig, SkillValidationResult } from './types.js';
+import {
+  type SkillConfig,
+  type SkillValidationResult,
+  parseModelField,
+} from './types.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
@@ -109,15 +113,7 @@ export function parseSkillContent(
   }
 
   // Extract optional model field
-  const modelRaw = frontmatter['model'];
-  let model: string | undefined;
-  if (modelRaw !== undefined) {
-    if (typeof modelRaw !== 'string') {
-      throw new Error('"model" must be a string');
-    }
-    // "inherit" means explicitly use the session model — treat as no override
-    model = modelRaw.trim() === 'inherit' ? undefined : modelRaw.trim();
-  }
+  const model = parseModelField(frontmatter);
 
   const config: SkillConfig = {
     name,

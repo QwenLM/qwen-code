@@ -67,6 +67,27 @@ export interface SkillConfig {
 export type SkillRuntimeConfig = SkillConfig;
 
 /**
+ * Parse the `model` field from skill frontmatter.
+ * Returns `undefined` for omitted, empty, or "inherit" values.
+ */
+export function parseModelField(
+  frontmatter: Record<string, unknown>,
+): string | undefined {
+  const raw = frontmatter['model'];
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'string') {
+    throw new Error('"model" must be a string');
+  }
+  const trimmed = raw.trim();
+  if (trimmed === '' || trimmed === 'inherit') {
+    return undefined;
+  }
+  return trimmed;
+}
+
+/**
  * Result of a validation operation on a skill configuration.
  */
 export interface SkillValidationResult {

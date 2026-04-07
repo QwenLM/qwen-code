@@ -800,6 +800,7 @@ export class GeminiClient {
           prompt_id,
           {
             type: SendMessageType.Hook,
+            modelOverride: options?.modelOverride,
             stopHookState: {
               iterationCount: currentIterationCount,
               reasons: currentReasons,
