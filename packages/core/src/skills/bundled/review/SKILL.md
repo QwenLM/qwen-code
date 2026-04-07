@@ -460,9 +460,9 @@ If posting an inline comment fails (e.g., line not part of the diff, auth error)
 
 Only call `gh pr review` in these cases:
 
-- **Approve** or **Request changes** → submit with a **one-line** body only. Do NOT include analysis, findings summary, or explanations — those are already in the inline comments. Example: "Approve — LGTM.\n\n*Reviewed by {{model}} via Qwen Code /review*" or "Request changes — see inline comments.\n\n*Reviewed by {{model}} via Qwen Code /review*". These verdicts carry approval/blocking status.
-- **Comment** but **some** inline comments failed → submit with **only the failed findings** in the body. Do NOT repeat findings that were already posted as inline comments. Do NOT include internal stats (agent count, raw/confirmed numbers). Keep it concise.
-- **No** inline comments posted (all failed or terminal-only) → submit with full findings summary (no stats).
+- **Approve** or **Request changes** → use the correct `gh pr review` flag: `--approve` for Approve, `--request-changes` for Request changes. Do NOT use `--comment` when the verdict is Request changes — this is wrong and loses the blocking status. Body should be **one-line** if all findings were posted inline, or include **only the failed inline findings** if some could not be posted. Do NOT include analysis, section headers, or internal stats. Do NOT include Nice to have findings (terminal-only). Example: "Request changes — see inline comments.\n\n*Reviewed by {{model}} via Qwen Code /review*".
+- **Comment** with no Critical findings, but **some** inline comments failed → submit with `--comment` and **only the failed findings** (Critical/Suggestion) in the body. Do NOT repeat findings already posted inline. Do NOT include Nice to have findings.
+- **No** inline comments posted (all failed or terminal-only) → submit with full findings summary (Critical/Suggestion only, no Nice to have, no stats).
 
 Use `write_file` to create `/tmp/qwen-review-{target}-summary.txt` when needed. Use the **pre-fix verdict** from Step 7:
 
