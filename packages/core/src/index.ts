@@ -331,3 +331,16 @@ export {
   type ParallelGroupRuntime,
   type ParallelRunnerEvents,
 } from './modes/parallel-task-runner.js';
+
+export {
+  CrossModeCommunicationManager,
+  type CrossModeMessage,
+  type Artifact,
+  type CrossModeCommEvents,
+} from './modes/mode-cross-communication.js';
+
+export {
+  SmartTaskSplitter,
+  type TaskSplit,
+  type SplitAnalysis,
+} from './modes/mode-smart-split.js';

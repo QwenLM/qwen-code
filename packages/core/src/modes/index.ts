@@ -134,3 +134,18 @@ export {
   type PipelineResult,
   type ModeWorkflowEvents,
 } from './mode-workflow.js';
+
+// Mode cross-communication
+export {
+  CrossModeCommunicationManager,
+  type CrossModeMessage,
+  type Artifact,
+  type CrossModeCommEvents,
+} from './mode-cross-communication.js';
+
+// Mode smart task splitting
+export {
+  SmartTaskSplitter,
+  type TaskSplit,
+  type SplitAnalysis,
+} from './mode-smart-split.js';

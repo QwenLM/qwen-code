@@ -54,6 +54,7 @@ import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { insightCommand } from '../ui/commands/insightCommand.js';
 import { analyticsCommand } from '../ui/commands/analyticsCommand.js';
 import { workflowCommand } from '../ui/commands/workflowCommand.js';
+import { splitCommand } from '../ui/commands/splitCommand.js';
 
 const builtinDebugLogger = createDebugLogger('BUILTIN_COMMAND_LOADER');
 
@@ -132,6 +133,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       insightCommand,
       analyticsCommand,
       workflowCommand,
+      splitCommand,
     ];
 
     return allDefinitions.filter((cmd): cmd is SlashCommand => cmd !== null);
