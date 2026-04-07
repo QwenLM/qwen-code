@@ -205,7 +205,10 @@ export const App: React.FC = () => {
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
 
-  const contextUsage = useMemo(() => computeContextUsage(usageStats, modelInfo), [usageStats, modelInfo]);
+  const contextUsage = useMemo(
+    () => computeContextUsage(usageStats, modelInfo),
+    [usageStats, modelInfo],
+  );
 
   // Track a lightweight signature of workspace files to detect content changes even when length is unchanged
   const workspaceFilesSignature = useMemo(
@@ -910,7 +913,9 @@ export const App: React.FC = () => {
       <ChatHeader
         currentSessionTitle={sessionManagement.currentSessionTitle}
         onLoadSessions={sessionManagement.handleLoadQwenSessions}
-        onNewSession={sessionManagement.handleNewQwenSession}
+        onNewSession={() =>
+          sessionManagement.handleNewQwenSession(modelInfo?.modelId ?? null)
+        }
       />
 
       <div

@@ -240,4 +240,35 @@ describe('ExitPlanModeTool', () => {
       expect(tool.description).toContain('Help me implement yank mode for vim');
     });
   });
+
+  describe('YOLO mode', () => {
+    it('should exit plan mode without onConfirm being called when approval mode is YOLO', async () => {
+      // Simulate YOLO: scheduler sets approvalMode=YOLO but never calls onConfirm
+      approvalMode = ApprovalMode.YOLO;
+      const params: ExitPlanModeParams = { plan: 'YOLO test plan' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      // Do NOT call onConfirm — this mirrors what the YOLO scheduler does
+      const result = await invocation.execute(signal);
+
+      expect(result.llmContent).toContain(
+        'User has approved your plan. You can now start coding',
+      );
+      expect(result.llmContent).not.toContain('not approved');
+    });
+
+    it('should not downgrade approval mode to AUTO_EDIT when YOLO', async () => {
+      approvalMode = ApprovalMode.YOLO;
+      const params: ExitPlanModeParams = { plan: 'YOLO test plan' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      await invocation.execute(signal);
+
+      // Approval mode must remain YOLO — do not downgrade to AUTO_EDIT
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.YOLO);
+    });
+  });
 });

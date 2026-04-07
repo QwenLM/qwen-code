@@ -12,6 +12,9 @@ const { mockProcessImageAttachments, mockShowErrorMessage } = vi.hoisted(
     mockShowErrorMessage: vi.fn(),
   }),
 );
+const { mockExecuteCommand } = vi.hoisted(() => ({
+  mockExecuteCommand: vi.fn(),
+}));
 
 vi.mock('vscode', () => ({
   window: {
@@ -19,7 +22,7 @@ vi.mock('vscode', () => ({
     showErrorMessage: mockShowErrorMessage,
   },
   commands: {
-    executeCommand: vi.fn(),
+    executeCommand: mockExecuteCommand,
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
@@ -45,6 +48,27 @@ describe('SessionMessageHandler', () => {
       displayText: '',
       savedImageCount: 0,
       promptImages: [],
+    });
+  });
+
+  it('forwards the active model when opening a new chat tab', async () => {
+    const handler = new SessionMessageHandler(
+      {
+        isConnected: true,
+        currentSessionId: 'session-1',
+      } as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'openNewChatTab',
+      data: { modelId: 'glm-5' },
+    });
+
+    expect(mockExecuteCommand).toHaveBeenCalledWith('qwenCode.openNewChatTab', {
+      initialModelId: 'glm-5',
     });
   });
 

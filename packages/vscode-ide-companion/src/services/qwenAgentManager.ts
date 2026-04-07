@@ -295,6 +295,16 @@ export class QwenAgentManager {
         console.warn('[QwenAgentManager] onInitialized parse error:', err);
       }
     };
+
+    this.connection.onDisconnected = (
+      code: number | null,
+      signal: string | null,
+    ) => {
+      console.log(
+        `[QwenAgentManager] Process disconnected (code: ${code}, signal: ${signal})`,
+      );
+      this.callbacks.onDisconnected?.(code, signal);
+    };
   }
 
   /**
@@ -346,6 +356,23 @@ export class QwenAgentManager {
       });
     }
     return res;
+  }
+
+  /**
+   * Reconnect after unexpected disconnect.
+   * Re-spawns the ACP process and creates a new session.
+   */
+  async reconnect(
+    cliEntryPath: string,
+    options?: AgentConnectOptions,
+  ): Promise<QwenConnectionResult> {
+    console.log('[QwenAgentManager] Attempting reconnection...');
+    try {
+      this.connection.disconnect();
+    } catch (_e) {
+      // Already disconnected
+    }
+    return this.connect(this.currentWorkingDir, cliEntryPath, options);
   }
 
   /**
@@ -1412,6 +1439,15 @@ export class QwenAgentManager {
   onAvailableModels(callback: (models: ModelInfo[]) => void): void {
     this.callbacks.onAvailableModels = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
+   * Register callback for unexpected process disconnection
+   */
+  onDisconnected(
+    callback: (code: number | null, signal: string | null) => void,
+  ): void {
+    this.callbacks.onDisconnected = callback;
   }
 
   /**
