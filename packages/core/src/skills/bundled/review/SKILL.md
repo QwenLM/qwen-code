@@ -314,9 +314,11 @@ Present all confirmed findings (from Steps 5 and 6) as a single, well-organized 
 
 ### Summary
 
-A 1-2 sentence overview of the changes and overall assessment. Include verification stats: "X findings reported, Y confirmed (Z high confidence, W needs human review) after independent verification."
+A 1-2 sentence overview of the changes and overall assessment.
 
-If deterministic analysis (Step 3) or build/test (Agent 5) found issues, mention them: "Additionally, N deterministic issues found by linter/typecheck/build/test."
+For **terminal output**: include verification stats ("X findings reported, Y confirmed after verification") and deterministic analysis results. This helps the user understand the review process.
+
+For **PR comments** (Step 9): do NOT include internal stats (agent count, raw/confirmed numbers, verification details). PR reviewers only care about the findings, not the review process.
 
 ### Findings
 
@@ -456,8 +458,8 @@ If posting an inline comment fails (e.g., line not part of the diff, auth error)
 Only call `gh pr review` in these cases:
 
 - **Approve** or **Request changes** → submit with a **one-line** body only. Do NOT include analysis, findings summary, or explanations — those are already in the inline comments. Example: "Approve — LGTM.\n\n*Reviewed by {{model}} via Qwen Code /review*" or "Request changes — see inline comments.\n\n*Reviewed by {{model}} via Qwen Code /review*". These verdicts carry approval/blocking status.
-- **Comment** but **some** inline comments failed → submit with the failed findings in the body.
-- **No** inline comments posted (all failed or terminal-only) → submit with full findings summary.
+- **Comment** but **some** inline comments failed → submit with **only the failed findings** in the body. Do NOT repeat findings that were already posted as inline comments. Do NOT include internal stats (agent count, raw/confirmed numbers). Keep it concise.
+- **No** inline comments posted (all failed or terminal-only) → submit with full findings summary (no stats).
 
 Use `write_file` to create `/tmp/qwen-review-{target}-summary.txt` when needed. Use the **pre-fix verdict** from Step 7:
 
