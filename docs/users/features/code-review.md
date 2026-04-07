@@ -165,6 +165,7 @@ After the review, context-aware tips appear as ghost text. Press Tab to accept:
 | ---------------------------------- | ------------------ | --------------------------------------- |
 | Local review with unfixed findings | `fix these issues` | LLM interactively fixes each finding    |
 | PR review with findings            | `post comments`    | Posts PR inline comments (no re-review) |
+| PR review, zero findings           | `post comments`    | Approves the PR on GitHub (LGTM)        |
 | Local review, all clear            | `commit`           | Commits your changes                    |
 
 Note: `fix these issues` is only available for local reviews. For PR reviews, use Autofix (Step 8) — the worktree is cleaned up after the review, so post-review interactive fixing is not possible.
