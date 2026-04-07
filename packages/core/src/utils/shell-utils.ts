@@ -13,8 +13,8 @@ import { doesToolInvocationMatch } from './tool-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   execFile,
-  execFileSync,
   type ExecFileOptions,
+  execFileSync,
 } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
 
@@ -113,21 +113,10 @@ function findGitBashPath(): string {
  */
 export function getShellConfiguration(): ShellConfiguration {
   if (isWindows()) {
-    // MSYS2 environments (UCRT64, CLANG64, MSYS, etc.)
-    // Use system default shell (cmd.exe or PowerShell) to avoid crashes
-    // because MSYS2 bash is incompatible with Windows ConPTY
-    if (isRunningInMSYS2()) {
-      const comSpec = process.env['ComSpec'] || 'cmd.exe';
-      return {
-        executable: comSpec,
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      };
-    }
-
     // Git Bash environments (MINGW64, MINGW32, etc.)
     // Use findGitBashPath() to locate Git Bash correctly
-    if (isRunningInGitBash()) {
+    // MSYS2 environments (UCRT64, CLANG64, MSYS, etc.) use system default shell
+    if (!isRunningInMSYS2() && isRunningInGitBash()) {
       return {
         executable: findGitBashPath(),
         argsPrefix: ['-c'],
@@ -179,11 +168,9 @@ export const isWindows = () => os.platform() === 'win32';
  * @returns true if running under MSYS2 (UCRT64, CLANG64, MSYS, etc.)
  */
 export function isRunningInMSYS2(): boolean {
-  const msystem = process.env['MSYSTEM'];
-  return Boolean(
-    msystem === 'MSYS' ||
-      msystem?.startsWith('UCRT') ||
-      msystem?.startsWith('CLANG'),
+  const prefix = process.env['MSYSTEM_PREFIX'] || '';
+  return new Set(['/usr', '/mingw64', '/mingw32', '/ucrt64', '/clang64']).has(
+    prefix,
   );
 }
 
@@ -194,7 +181,12 @@ export function isRunningInMSYS2(): boolean {
 export function isRunningInGitBash(): boolean {
   const msystem = process.env['MSYSTEM'];
   const term = process.env['TERM'] || '';
-  return Boolean(msystem?.startsWith('MINGW') || term.includes('cygwin'));
+  const isGitBash =
+    msystem?.startsWith('MINGW') ||
+    msystem?.startsWith('MSYS') ||
+    term.includes('msys') ||
+    term.includes('cygwin');
+  return isGitBash;
 }
 
 /**
