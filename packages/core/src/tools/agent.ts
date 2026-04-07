@@ -239,7 +239,13 @@ assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-
       return 'Parameter "prompt" must be a non-empty string.';
     }
 
-    if (params.subagent_type) {
+    if (params.subagent_type !== undefined) {
+      if (
+        typeof params.subagent_type !== 'string' ||
+        params.subagent_type.trim() === ''
+      ) {
+        return 'Parameter "subagent_type" must be a non-empty string.';
+      }
       // Validate that the subagent exists (case-insensitive)
       const lowerType = params.subagent_type.toLowerCase();
       const subagentExists = this.availableSubagents.some(
@@ -481,13 +487,31 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       let extraHistory: Array<import('@google/genai').Content> | undefined;
 
       if (!this.params.subagent_type) {
-        const { FORK_AGENT, buildForkedMessages } = await import(
+        const { FORK_AGENT, buildForkedMessages, isInForkChild } = await import(
           '../agents/runtime/forkSubagent.js'
         );
         subagentConfig = FORK_AGENT;
         const geminiClient = this.config.getGeminiClient();
         if (geminiClient) {
           const rawHistory = geminiClient.getHistory(true);
+
+          if (isInForkChild(rawHistory)) {
+            const errorDisplay = {
+              type: 'task_execution' as const,
+              subagentName: FORK_AGENT.name,
+              taskDescription: this.params.description,
+              taskPrompt: this.params.prompt,
+              status: 'failed' as const,
+              terminateReason: 'Recursive forking is not allowed',
+            };
+
+            return {
+              llmContent:
+                'Error: Cannot create a fork from within an existing fork child. Please execute tasks directly.',
+              returnDisplay: errorDisplay,
+            };
+          }
+
           if (rawHistory.length > 0) {
             const lastMessage = rawHistory[rawHistory.length - 1];
             if (lastMessage.role === 'model') {

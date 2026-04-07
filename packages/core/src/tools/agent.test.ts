@@ -398,6 +398,7 @@ describe('AgentTool', () => {
       expect(mockAgent.execute).toHaveBeenCalledWith(
         mockContextState,
         undefined, // signal parameter (undefined when not provided)
+        { extraHistory: undefined }, // extraHistory
       );
 
       const llmText = partToString(result.llmContent);
