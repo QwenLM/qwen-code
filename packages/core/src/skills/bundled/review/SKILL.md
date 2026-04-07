@@ -385,107 +385,62 @@ If there are **Critical** or **Suggestion** findings with clear, unambiguous fix
 - Do NOT auto-fix without user confirmation. Do NOT auto-fix findings marked as "Nice to have" or low-confidence findings.
 - If reviewing a PR (worktree mode), autofix modifies files in the **worktree**, not the user's working tree. After applying fixes, commit from the worktree: `cd <worktree-path> && git add <fixed-files> && git commit -m "fix: apply auto-fixes from /review"`. Then attempt to push: `git push <remote> HEAD:<remote-branch-name>` (use the remote and branch name from Step 1). **Note**: push may fail if the PR is from a fork and the user doesn't have push access to the source repo — this is expected. Inform the user of the outcome: if push succeeds → "Auto-fixes committed and pushed to the PR branch." If push fails → "Auto-fix committed locally but push failed (you may not have push access to this repo). The commit is in the worktree at `<worktree-path>`. You can push manually or create a new PR." Step 9 (PR comments) may still proceed, but **skip Step 11 worktree cleanup** to preserve the commit for manual recovery.
 
-## Step 9: Post PR inline comments
+## Step 9: Submit PR review
 
 Skip this step if the review target is not a PR, or if BOTH of the following are true: `--comment` was not specified AND the user did not request "post comments" via follow-up.
 
-First, determine the repository owner/repo. For **same-repo** reviews, run `gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'`. For **cross-repo** reviews, use the owner/repo already extracted from the PR URL in Step 1 — do NOT run `gh repo view` (it returns the current repo, not the PR's repo).
+**Use the "Create Review" API to submit verdict + inline comments in a single call** (like Copilot Code Review). This eliminates separate summary comments — the inline comments ARE the review.
 
-Use the **pre-autofix HEAD commit SHA** captured in Step 1 (not a fresh `gh pr view` call — autofix may have pushed new commits that shift line numbers). If the SHA was not captured in Step 1, fall back to `gh pr view {pr_number} --json headRefOid --jq '.headRefOid'`.
+First, determine the repository owner/repo. For **same-repo** reviews, run `gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'`. For **cross-repo** reviews, use the owner/repo from the PR URL in Step 1.
 
-**Before posting any comments**, check for existing Qwen Code review comments on this PR: run `gh api repos/{owner}/{repo}/pulls/{pr_number}/comments --jq '.[] | select(.body | test("via Qwen Code /review")) | .id'`. If previous Qwen Code comments exist, inform the user: "Found N existing comments from a previous Qwen Code review. Posting new comments may create duplicates." Let the user decide whether to proceed or skip Step 9.
+Use the **pre-autofix HEAD commit SHA** captured in Step 1. If not captured, fall back to `gh pr view {pr_number} --json headRefOid --jq '.headRefOid'`.
 
-Then, for each confirmed finding that is **Critical or Suggestion severity**, post an **inline comment** on the specific file and line using `gh api`. Skip "Nice to have" findings (including linter warnings) — they appear in the terminal output but are too noisy for PR comments.
+**Before posting**, check for existing Qwen Code review comments: `gh api repos/{owner}/{repo}/pulls/{pr_number}/comments --jq '.[] | select(.body | test("via Qwen Code /review")) | .id'`. If found, inform the user and let them decide whether to proceed.
 
-⚠️ **Every inline comment MUST reference a specific line in the diff.** If a finding cannot be mapped to a line that exists in the diff (e.g., the issue is in unchanged code or spans the entire file), do NOT post it as an inline comment — include it in the review summary instead. Comments without line numbers appear as orphaned PR comments and create noise.
+**Build the review JSON** with `write_file` to create `/tmp/qwen-review-{target}-review.json`:
 
-**Shell safety:** Review content may contain double quotes, `$VAR`, backticks, or other shell-sensitive characters. Do NOT interpolate review text directly into shell arguments. Instead, use a **two-step process**: write the body to a temp file using the `write_file` tool (which bypasses shell interpretation entirely), then reference the file with `-F body=@file` in the shell command.
+````json
+{
+  "commit_id": "{commit_sha}",
+  "event": "REQUEST_CHANGES",
+  "body": "",
+  "comments": [
+    {
+      "path": "src/file.ts",
+      "line": 42,
+      "body": "**[Critical]** issue description\n\n```suggestion\nfix code\n```\n\n_— {{model}} via Qwen Code /review_"
+    }
+  ]
+}
+````
 
-For pattern-aggregated findings (multiple locations), post the comment on the most representative location and reference the other locations in the comment body.
+Rules for building the JSON:
 
-If a finding was auto-fixed in Step 8, prefix its comment with **[Auto-fixed]** so the reviewer knows the issue has already been addressed.
+- `event`: use `APPROVE` (no Critical), `REQUEST_CHANGES` (has Critical), or `COMMENT` (has Suggestion but no Critical). Use the **pre-fix verdict** from Step 7.
+- `body`: leave **empty** `""` when there are inline comments. Only include body text if there are findings that cannot be mapped to diff lines (put those findings in body instead).
+- `comments`: array of inline comments. Only include **high-confidence Critical and Suggestion** findings. Skip Nice to have and low-confidence (terminal-only). Each comment must reference a line that exists in the diff.
+- Each comment body follows this format: `**[Severity]** description\n\n```suggestion\nfix\n```\n\n_— {{model}} via Qwen Code /review_`
+- Use ` ```suggestion ` blocks for one-click fixes; regular code blocks if fix spans multiple locations.
+- Footer `_— {{model}} via Qwen Code /review_` must be copied exactly — do NOT rephrase.
+- Only post **ONE comment per unique issue**.
 
-Do **not** post low-confidence findings as PR inline comments — they appear only in the terminal output under "Needs Human Review." This keeps PR comments high-signal.
-
-**Step A**: Use `write_file` to create `/tmp/qwen-review-{target}-comment.txt` following this exact format:
-
-    **[Critical]** `findNextCjkWordEnd` returns `b.end` when `col < b.start`, skipping non-CJK text.
-
-    ```suggestion
-        if (col < b.start) {
-          return null;
-        }
-    ```
-
-    _— {{model}} via Qwen Code /review_
-
-Rules: prefix is `**[Critical]**` or `**[Suggestion]**` (or `**[Auto-fixed][...]**`). Use ` ```suggestion ` blocks for one-click fixes (GitHub/GitLab/Gitea); regular code blocks if fix spans multiple locations. Footer must be copied exactly — do NOT rephrase.
-
-```bash
-# Step B: Post single-line comment referencing the file:
-gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
-  -F body=@/tmp/qwen-review-{target}-comment.txt \
-  -f commit_id="{commit_sha}" \
-  -f path="{file_path}" \
-  -F line={line_number} \
-  -f side="RIGHT"
-
-# For multi-line findings (e.g., line range 42-50), add start_line and start_side:
-gh api repos/{owner}/{repo}/pulls/{pr_number}/comments \
-  -F body=@/tmp/qwen-review-{target}-comment.txt \
-  -f commit_id="{commit_sha}" \
-  -f path="{file_path}" \
-  -F start_line={start_line} \
-  -F line={end_line} \
-  -f start_side="RIGHT" \
-  -f side="RIGHT"
-```
-
-Repeat Steps A-B for each finding, overwriting the temp file each time. Clean up the temp file in Step 11.
-
-**IMPORTANT: Two-phase posting.** Phase 1 is posting individual inline comments using `gh api` (Steps A-B above). Phase 2 is submitting the review verdict using `gh pr review` (below). Do NOT mix them — complete ALL inline comments first, THEN submit the review verdict ONCE. Do NOT call `gh pr review` for each individual comment.
-
-If posting an inline comment fails (e.g., line not part of the diff, auth error), include the finding in the overall review summary comment instead.
-
-**Important rules:**
-
-- Only post **ONE comment per unique issue** — do not duplicate across lines
-- Keep each comment concise and actionable
-- Include the severity tag (Critical/Suggestion) at the start of each comment
-- Include the suggested fix in the comment body when available
-
-**After ALL inline comments are posted, decide whether to call `gh pr review`:**
-
-⚠️ **If verdict is Comment AND all inline comments succeeded → STOP. Do NOT call `gh pr review`. The inline comments are the review. Posting a summary would be redundant noise.**
-
-Only call `gh pr review` in these cases:
-
-- **Approve** or **Request changes** → use the correct `gh pr review` flag: `--approve` for Approve, `--request-changes` for Request changes. Do NOT use `--comment` when the verdict is Request changes — this is wrong and loses the blocking status. Body should be **one-line** if all findings were posted inline, or include **only the failed inline findings** if some could not be posted. Do NOT include analysis, section headers, or internal stats. Do NOT include Nice to have findings (terminal-only). Example: "Request changes — see inline comments.\n\n*Reviewed by {{model}} via Qwen Code /review*".
-- **Comment** with no Critical findings, but **some** inline comments failed → submit with `--comment` and **only the failed findings** (Critical/Suggestion) in the body. Do NOT repeat findings already posted inline. Do NOT include Nice to have findings.
-- **No** inline comments posted (all failed or terminal-only) → submit with full findings summary (Critical/Suggestion only, no Nice to have, no stats).
-
-Use `write_file` to create `/tmp/qwen-review-{target}-summary.txt` when needed. Use the **pre-fix verdict** from Step 7:
+Then submit:
 
 ```bash
-# Submit review. For cross-repo, add -R {owner}/{repo} to all gh pr review commands.
-# If verdict is "Approve":
-gh pr review {pr_number} --approve --body-file /tmp/qwen-review-{target}-summary.txt
-
-# If verdict is "Request changes":
-gh pr review {pr_number} --request-changes --body-file /tmp/qwen-review-{target}-summary.txt
-
-# If verdict is "Comment" AND no inline comments posted:
-gh pr review {pr_number} --comment --body-file /tmp/qwen-review-{target}-summary.txt
+gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
+  --input /tmp/qwen-review-{target}-review.json
 ```
 
 If there are **no confirmed findings**:
 
-Use `write_file` to create `/tmp/qwen-review-{target}-summary.txt` with content: "No issues found. LGTM! ✅\n\n*Reviewed by {{model}} via Qwen Code /review*", then:
-
 ```bash
-# For cross-repo, add -R {owner}/{repo}
-gh pr review {pr_number} --approve --body-file /tmp/qwen-review-{target}-summary.txt
+gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
+  -f commit_id="{commit_sha}" \
+  -f event="APPROVE" \
+  -f body="No issues found. LGTM! ✅"
 ```
+
+Clean up the JSON file in Step 11.
 
 ## Step 10: Save review report and cache
 
@@ -530,7 +485,7 @@ If reviewing a PR, update the review cache for incremental review support:
 
 ## Step 11: Clean up
 
-Remove all temp files (`/tmp/qwen-review-{target}-context.md`, `/tmp/qwen-review-{target}-comment.txt`, `/tmp/qwen-review-{target}-summary.txt`).
+Remove all temp files (`/tmp/qwen-review-{target}-context.md`, `/tmp/qwen-review-{target}-review.json`).
 
 If a PR worktree was created in Step 1, **and Step 8 did NOT instruct to preserve it** (autofix commit/push failure), remove it and its local ref:
 
