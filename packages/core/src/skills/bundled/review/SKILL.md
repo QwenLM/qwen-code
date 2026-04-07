@@ -393,7 +393,11 @@ First, determine the repository owner/repo. For **same-repo** reviews, run `gh r
 
 Use the **pre-autofix HEAD commit SHA** captured in Step 1 (not a fresh `gh pr view` call — autofix may have pushed new commits that shift line numbers). If the SHA was not captured in Step 1, fall back to `gh pr view {pr_number} --json headRefOid --jq '.headRefOid'`.
 
+**Before posting any comments**, check for existing Qwen Code review comments on this PR: run `gh api repos/{owner}/{repo}/pulls/{pr_number}/comments --jq '.[] | select(.body | test("via Qwen Code /review")) | .id'`. If previous Qwen Code comments exist, inform the user: "Found N existing comments from a previous Qwen Code review. Posting new comments may create duplicates." Let the user decide whether to proceed or skip Step 9.
+
 Then, for each confirmed finding that is **Critical or Suggestion severity**, post an **inline comment** on the specific file and line using `gh api`. Skip "Nice to have" findings (including linter warnings) — they appear in the terminal output but are too noisy for PR comments.
+
+⚠️ **Every inline comment MUST reference a specific line in the diff.** If a finding cannot be mapped to a line that exists in the diff (e.g., the issue is in unchanged code or spans the entire file), do NOT post it as an inline comment — include it in the review summary instead. Comments without line numbers appear as orphaned PR comments and create noise.
 
 **Shell safety:** Review content may contain double quotes, `$VAR`, backticks, or other shell-sensitive characters. Do NOT interpolate review text directly into shell arguments. Instead, use a **two-step process**: write the body to a temp file using the `write_file` tool (which bypasses shell interpretation entirely), then reference the file with `-F body=@file` in the shell command.
 
