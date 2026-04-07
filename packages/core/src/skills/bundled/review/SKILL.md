@@ -130,7 +130,7 @@ Assign severity based on the tool's own categorization:
 
 ## Step 4: Parallel multi-dimensional review
 
-Launch **five parallel review agents** in a single tool call batch — invoke all 5 `task` tools in one response so they run concurrently. Do NOT wait for one agent to finish before starting the next. Each agent should focus exclusively on its dimension.
+Launch **five review agents**. Invoke all 5 `task` tools in a single response so they run concurrently (the runtime supports parallel agent execution). If you cannot fit all 5 tool calls in one response, launch them in as few responses as possible (e.g., 3+2 or 2+2+1) — the key is to avoid waiting for one agent to finish before launching the next. Each agent should focus exclusively on its dimension.
 
 **IMPORTANT**: Do NOT paste the full diff into each agent's prompt — this duplicates it 5x. Instead, give each agent the command to obtain the diff, a concise summary of what the changes are about, its review focus, and any project-specific rules from Step 2. For Agent 5, also include which deterministic tools were already run in Step 3 (e.g., "tsc --noEmit already ran successfully" or "cargo clippy already ran") so it can skip redundant checks.
 
