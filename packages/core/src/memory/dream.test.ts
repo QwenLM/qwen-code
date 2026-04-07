@@ -9,8 +9,9 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import { getAutoMemoryIndexPath, getAutoMemoryTopicPath } from './paths.js';
+import { getAutoMemoryFilePath, getAutoMemoryIndexPath } from './paths.js';
 import { runManagedAutoMemoryDream } from './dream.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
 vi.mock('./dreamAgentPlanner.js', () => ({
@@ -41,121 +42,144 @@ describe('managed auto-memory dream', () => {
   });
 
   it('deduplicates repeated bullet entries in topic files', async () => {
+    const firstPath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse.md'));
+    const duplicatePath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse-duplicate.md'));
+    await fs.mkdir(path.dirname(firstPath), { recursive: true });
     await fs.writeFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
+      firstPath,
       [
         '---',
         'type: user',
-        'title: User Memory',
+        'name: User Memory',
         'description: User profile',
         '---',
         '',
-        '# User Memory',
+        'User prefers terse responses.',
+      ].join('\n'),
+      'utf-8',
+    );
+    await fs.writeFile(
+      duplicatePath,
+      [
+        '---',
+        'type: user',
+        'name: User Memory Duplicate',
+        'description: Duplicate terse preference',
+        '---',
         '',
-        '- User prefers terse responses.',
-        '- User prefers terse responses.',
-        '- User likes dark mode.',
+        'User prefers terse responses.',
       ].join('\n'),
       'utf-8',
     );
 
     const result = await runManagedAutoMemoryDream(projectRoot);
-    const content = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
-      'utf-8',
-    );
     const index = await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    const userDocs = docs.filter((doc) => doc.type === 'user');
 
     expect(result.touchedTopics).toContain('user');
     expect(result.dedupedEntries).toBe(1);
-    expect(content.match(/User prefers terse responses\./g)).toHaveLength(1);
-    expect(index.match(/User prefers terse responses\./g)).toHaveLength(1);
+    expect(userDocs).toHaveLength(1);
+    expect(userDocs[0]?.body).toContain('User prefers terse responses.');
+    expect(index).toContain('(user/');
   });
 
-  it('preserves richer schema metadata when deduplicating entries', async () => {
+  it('preserves Claude-style why/apply metadata when deduplicating entries', async () => {
+    const firstPath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse.md'));
+    const duplicatePath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse-context.md'));
+    await fs.mkdir(path.dirname(firstPath), { recursive: true });
     await fs.writeFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
+      firstPath,
       [
         '---',
         'type: user',
-        'title: User Memory',
+        'name: User Memory',
         'description: User profile',
         '---',
         '',
-        '# User Memory',
+        'User prefers terse responses.',
         '',
-        '- User prefers terse responses.',
-        '  - Why: They repeatedly ask for concise replies.',
-        '- User prefers terse responses.',
-        '  - Stability: stable',
+        'Why: They repeatedly ask for concise replies.',
+      ].join('\n'),
+      'utf-8',
+    );
+    await fs.writeFile(
+      duplicatePath,
+      [
+        '---',
+        'type: user',
+        'name: User Memory Context',
+        'description: Duplicate terse preference with apply guidance',
+        '---',
+        '',
+        'User prefers terse responses.',
+        '',
+        'How to apply: Lead with a short answer before details.',
       ].join('\n'),
       'utf-8',
     );
 
-    const contentBefore = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
-      'utf-8',
-    );
-    expect(contentBefore).toContain('Stability: stable');
-
     await runManagedAutoMemoryDream(projectRoot);
 
-    const content = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
-      'utf-8',
-    );
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    const content = docs.find((doc) => doc.type === 'user')?.body ?? '';
 
     expect(content.match(/User prefers terse responses\./g)).toHaveLength(1);
-    expect(content).toContain('  - Why: They repeatedly ask for concise replies.');
-    expect(content).toContain('  - Stability: stable');
+    expect(content).toContain('Why: They repeatedly ask for concise replies.');
+    expect(content).toContain('How to apply: Lead with a short answer before details.');
   });
 
-  it('restores the empty placeholder when no bullet entries remain', async () => {
+  it('leaves empty placeholder documents unchanged', async () => {
+    const projectPath = getAutoMemoryFilePath(projectRoot, path.join('project', 'empty.md'));
+    await fs.mkdir(path.dirname(projectPath), { recursive: true });
     await fs.writeFile(
-      getAutoMemoryTopicPath(projectRoot, 'project'),
+      projectPath,
       [
         '---',
         'type: project',
-        'title: Project Memory',
+        'name: Project Memory',
         'description: Project facts',
         '---',
         '',
-        '# Project Memory',
-        '',
+        '_No entries yet._',
       ].join('\n'),
       'utf-8',
     );
 
     await runManagedAutoMemoryDream(projectRoot);
-    const content = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'project'),
-      'utf-8',
-    );
+    const content = await fs.readFile(projectPath, 'utf-8');
 
     expect(content).toContain('_No entries yet._');
   });
 
-  it('prefers agent rewrites when config is provided', async () => {
-    vi.mocked(planManagedAutoMemoryDreamByAgent).mockResolvedValue([
-      {
-        topic: 'user',
-        body: '# User Memory\n\n- User prefers terse responses.',
-      },
-    ]);
+  it('falls back to mechanical dedupe when config is provided', async () => {
+    const firstPath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse.md'));
+    const duplicatePath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse-again.md'));
+    await fs.mkdir(path.dirname(firstPath), { recursive: true });
 
     await fs.writeFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
+      firstPath,
       [
         '---',
         'type: user',
-        'title: User Memory',
+        'name: User Memory',
         'description: User profile',
         '---',
         '',
-        '# User Memory',
+        'User prefers terse responses.',
+      ].join('\n'),
+      'utf-8',
+    );
+    await fs.writeFile(
+      duplicatePath,
+      [
+        '---',
+        'type: user',
+        'name: User Memory Duplicate',
+        'description: Duplicate terse preference',
+        '---',
         '',
-        '- User prefers terse responses.',
-        '- User prefers terse responses.',
+        'User prefers terse responses.',
       ].join('\n'),
       'utf-8',
     );
@@ -168,14 +192,11 @@ describe('managed auto-memory dream', () => {
         getModel: vi.fn(),
       } as unknown as Config,
     );
-    const content = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
-      'utf-8',
-    );
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
 
-    expect(result.touchedTopics).toEqual(['user']);
+    expect(result.touchedTopics).toContain('user');
     expect(result.dedupedEntries).toBe(1);
-    expect(content.match(/User prefers terse responses\./g)).toHaveLength(1);
+    expect(docs.filter((doc) => doc.type === 'user')).toHaveLength(1);
   });
 
   it('falls back to mechanical dream when the agent planner fails', async () => {
@@ -183,19 +204,33 @@ describe('managed auto-memory dream', () => {
       new Error('agent failed'),
     );
 
+    const firstPath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse.md'));
+    const duplicatePath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse-failover.md'));
+    await fs.mkdir(path.dirname(firstPath), { recursive: true });
+
     await fs.writeFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
+      firstPath,
       [
         '---',
         'type: user',
-        'title: User Memory',
+        'name: User Memory',
         'description: User profile',
         '---',
         '',
-        '# User Memory',
+        'User prefers terse responses.',
+      ].join('\n'),
+      'utf-8',
+    );
+    await fs.writeFile(
+      duplicatePath,
+      [
+        '---',
+        'type: user',
+        'name: User Memory Duplicate',
+        'description: Duplicate terse preference',
+        '---',
         '',
-        '- User prefers terse responses.',
-        '- User prefers terse responses.',
+        'User prefers terse responses.',
       ].join('\n'),
       'utf-8',
     );

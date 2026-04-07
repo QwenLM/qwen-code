@@ -7,15 +7,13 @@
 import * as fs from 'node:fs/promises';
 import { getManagedAutoMemoryExtractTaskRegistry } from './extractScheduler.js';
 import { getManagedAutoMemoryDreamTaskRegistry } from './dreamScheduler.js';
-import { buildAutoMemoryTopicHooks, countAutoMemoryTopicEntries } from './indexer.js';
 import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
-  getAutoMemoryTopicPath,
 } from './paths.js';
-import { parseAutoMemoryTopicDocument } from './scan.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { isExtractRunning } from './state.js';
 import type {
   AutoMemoryExtractCursor,
@@ -27,10 +25,8 @@ import type { BackgroundTaskState } from '../background/taskRegistry.js';
 
 export interface ManagedAutoMemoryTopicStatus {
   topic: AutoMemoryType;
-  title: string;
   entryCount: number;
-  hooks: string[];
-  filePath: string;
+  filePaths: string[];
 }
 
 export interface ManagedAutoMemoryStatus {
@@ -59,45 +55,29 @@ export async function getManagedAutoMemoryStatus(
 ): Promise<ManagedAutoMemoryStatus> {
   const root = getAutoMemoryRoot(projectRoot);
   const indexPath = getAutoMemoryIndexPath(projectRoot);
-  const [indexContent, cursor, metadata, topics] = await Promise.all([
-    fs.readFile(indexPath, 'utf-8').catch(() => ''),
-    readJsonFile<AutoMemoryExtractCursor>(getAutoMemoryExtractCursorPath(projectRoot)),
-    readJsonFile<AutoMemoryMetadata>(getAutoMemoryMetadataPath(projectRoot)),
-    Promise.all(
-      AUTO_MEMORY_TYPES.map(async (topic) => {
-        const filePath = getAutoMemoryTopicPath(projectRoot, topic);
-        try {
-          const content = await fs.readFile(filePath, 'utf-8');
-          const parsed = parseAutoMemoryTopicDocument(filePath, content);
-          if (!parsed) {
-            return {
-              topic,
-              title: topic,
-              entryCount: 0,
-              hooks: [],
-              filePath,
-            };
-          }
 
-          return {
-            topic,
-            title: parsed.title,
-            entryCount: countAutoMemoryTopicEntries(parsed.body),
-            hooks: buildAutoMemoryTopicHooks(parsed.body),
-            filePath,
-          } satisfies ManagedAutoMemoryTopicStatus;
-        } catch {
-          return {
-            topic,
-            title: topic,
-            entryCount: 0,
-            hooks: [],
-            filePath,
-          } satisfies ManagedAutoMemoryTopicStatus;
-        }
-      }),
+  const [indexContent, cursor, metadata, docs] = await Promise.all([
+    fs.readFile(indexPath, 'utf-8').catch(() => ''),
+    readJsonFile<AutoMemoryExtractCursor>(
+      getAutoMemoryExtractCursorPath(projectRoot),
     ),
+    readJsonFile<AutoMemoryMetadata>(getAutoMemoryMetadataPath(projectRoot)),
+    scanAutoMemoryTopicDocuments(projectRoot),
   ]);
+
+  // Aggregate per-entry files by topic
+  const byTopic = new Map<AutoMemoryType, string[]>();
+  for (const doc of docs) {
+    const list = byTopic.get(doc.type) ?? [];
+    list.push(doc.filePath);
+    byTopic.set(doc.type, list);
+  }
+
+  const topics = AUTO_MEMORY_TYPES.map((topic) => ({
+    topic,
+    entryCount: byTopic.get(topic)?.length ?? 0,
+    filePaths: byTopic.get(topic) ?? [],
+  }));
 
   return {
     root,
@@ -110,6 +90,8 @@ export async function getManagedAutoMemoryStatus(
     extractionTasks: getManagedAutoMemoryExtractTaskRegistry()
       .list(projectRoot)
       .slice(0, 8),
-    dreamTasks: getManagedAutoMemoryDreamTaskRegistry().list(projectRoot).slice(0, 5),
+    dreamTasks: getManagedAutoMemoryDreamTaskRegistry()
+      .list(projectRoot)
+      .slice(0, 5),
   };
 }

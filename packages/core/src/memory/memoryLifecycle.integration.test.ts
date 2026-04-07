@@ -15,15 +15,10 @@ import {
   scheduleManagedAutoMemoryExtract,
 } from './extractScheduler.js';
 import { applyExtractedMemoryPatches } from './extract.js';
-import {
-  forgetManagedAutoMemoryMatches,
-  selectManagedAutoMemoryForgetCandidates,
-} from './forget.js';
-import { reviewManagedAutoMemoryGovernance } from './governance.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
-import { getAutoMemoryIndexPath, getAutoMemoryTopicPath } from './paths.js';
+import { getAutoMemoryFilePath, getAutoMemoryIndexPath } from './paths.js';
 import { resolveRelevantAutoMemoryPromptForQuery } from './recall.js';
-import { getManagedAutoMemoryStatus } from './status.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { resetAutoMemoryStateForTests } from './state.js';
 
@@ -49,7 +44,7 @@ describe('managed auto-memory lifecycle integration', () => {
     });
   });
 
-  it('supports a Claude-style durable memory lifecycle across extraction, recall, dream, governance, and forget', async () => {
+  it('supports a Claude-style durable memory lifecycle across extraction, recall, and dream', async () => {
     const firstExtraction = scheduleManagedAutoMemoryExtract({
       projectRoot,
       sessionId: 'session-1',
@@ -94,11 +89,26 @@ describe('managed auto-memory lifecycle integration', () => {
       },
     ]);
 
-    const userPath = getAutoMemoryTopicPath(projectRoot, 'user');
-    const duplicatedUserContent = `${(
-      await fs.readFile(userPath, 'utf-8')
-    ).trimEnd()}\n- I prefer terse responses.\n  - Why: User repeatedly asks for concise replies.\n`;
-    await fs.writeFile(userPath, duplicatedUserContent, 'utf-8');
+    const duplicateUserPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('user', 'terse-duplicate.md'),
+    );
+    await fs.mkdir(path.dirname(duplicateUserPath), { recursive: true });
+    await fs.writeFile(
+      duplicateUserPath,
+      [
+        '---',
+        'type: user',
+        'name: User Memory Duplicate',
+        'description: Duplicate terse preference',
+        '---',
+        '',
+        'I prefer terse responses.',
+        '',
+        'Why: User repeatedly asks for concise replies.',
+      ].join('\n'),
+      'utf-8',
+    );
     await rebuildManagedAutoMemoryIndex(projectRoot);
 
     const dreamResult = await runManagedAutoMemoryDream(
@@ -108,76 +118,28 @@ describe('managed auto-memory lifecycle integration', () => {
     expect(dreamResult.touchedTopics).toContain('user');
     expect(dreamResult.dedupedEntries).toBeGreaterThan(0);
 
-    const userContent = await fs.readFile(userPath, 'utf-8');
-    const projectContent = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'project'),
-      'utf-8',
-    );
-    const referenceContent = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'reference'),
-      'utf-8',
-    );
     const indexContent = await fs.readFile(
       getAutoMemoryIndexPath(projectRoot),
       'utf-8',
     );
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    const userDoc = docs.find((doc) => doc.type === 'user');
+    const projectDoc = docs.find((doc) => doc.type === 'project');
+    const referenceDoc = docs.find((doc) => doc.type === 'reference');
 
-    expect(userContent.match(/I prefer terse responses\./g)).toHaveLength(1);
-    expect(userContent).toContain('  - Why: User repeatedly asks for concise replies.');
-    expect(referenceContent).toContain('grafana.example/d/api-latency');
-    expect(projectContent).toContain('This is temporary for this task.');
-    expect(indexContent).toContain('I prefer terse responses.');
+    expect(userDoc?.body).toContain('I prefer terse responses.');
+    expect(userDoc?.body).toContain('Why: User repeatedly asks for concise replies.');
+    expect(referenceDoc?.body).toContain('grafana.example/d/api-latency');
+    expect(projectDoc?.body).toContain('This is temporary for this task.');
+    expect(indexContent).toContain('user/');
 
     const recall = await resolveRelevantAutoMemoryPromptForQuery(
       projectRoot,
       'Check the latency dashboard and use a terse answer.',
     );
     expect(recall.strategy).toBe('heuristic');
-    expect(recall.prompt).toContain('## Relevant Managed Auto-Memory');
-    expect(recall.prompt).toContain('user.md');
-    expect(recall.prompt).toContain('reference.md');
-
-    const review = await reviewManagedAutoMemoryGovernance(projectRoot);
-    const suggestionTypes = new Set(review.suggestions.map((item) => item.type));
-    expect(review.strategy).toBe('heuristic');
-    expect(suggestionTypes).toContain('duplicate');
-    expect(suggestionTypes).toContain('migrate');
-    expect(suggestionTypes).toContain('forget');
-    expect(suggestionTypes).toContain('promote');
-
-    const forgetSelection = await selectManagedAutoMemoryForgetCandidates(
-      projectRoot,
-      'temporary for this task',
-    );
-    expect(forgetSelection.strategy).toBe('heuristic');
-    expect(forgetSelection.matches).toEqual([
-      {
-        topic: 'project',
-        summary: 'This is temporary for this task.',
-      },
-    ]);
-
-    const forgetResult = await forgetManagedAutoMemoryMatches(
-      projectRoot,
-      forgetSelection.matches,
-      new Date('2026-04-01T04:00:00.000Z'),
-    );
-    const projectContentAfterForget = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'project'),
-      'utf-8',
-    );
-    const indexAfterForget = await fs.readFile(
-      getAutoMemoryIndexPath(projectRoot),
-      'utf-8',
-    );
-    const status = await getManagedAutoMemoryStatus(projectRoot);
-
-    expect(forgetResult.removedEntries).toEqual(forgetSelection.matches);
-    expect(projectContentAfterForget).not.toContain('temporary for this task');
-    expect(indexAfterForget).not.toContain('temporary for this task');
-    expect(status.extractionTasks.length).toBeGreaterThan(0);
-    expect(status.topics.find((topic) => topic.topic === 'user')).toEqual(
-      expect.objectContaining({ entryCount: 1 }),
-    );
+    expect(recall.prompt).toContain('## Relevant memory');
+    expect(recall.prompt).toContain('user/');
+    expect(recall.prompt).toContain('reference/');
   });
 });

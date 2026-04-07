@@ -29,9 +29,12 @@ describe('planAutoMemoryExtractionPatchesByAgent', () => {
       {
         type: 'user',
         filePath: '/tmp/user.md',
+        relativePath: 'user.md',
+        filename: 'user.md',
         title: 'User Memory',
         description: 'User preferences',
         body: '- Existing terse preference.',
+        mtimeMs: 1,
       },
     ]);
   });

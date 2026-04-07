@@ -4,19 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type ManagedAutoMemoryEntryStability = 'stable' | 'working';
-
 export interface ManagedAutoMemoryEntry {
   summary: string;
   why?: string;
   howToApply?: string;
-  stability?: ManagedAutoMemoryEntryStability;
 }
 
 function normalizeText(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Returns the `# Heading` line from a body, or a default.
+ * Used when reading old-format multi-entry topic files.
+ */
 export function getAutoMemoryBodyHeading(body: string): string {
   return (
     body
@@ -26,6 +27,31 @@ export function getAutoMemoryBodyHeading(body: string): string {
   );
 }
 
+/**
+ * Parses memory entries from a body string.
+ *
+ * Supports two formats:
+ *
+ * **New (per-entry file) format** — the body starts with the plain-text summary,
+ * followed by optional top-level `Why:` / `How to apply:` lines:
+ * ```
+ * Use short responses when debugging
+ *
+ * Why: The user prefers brevity in debug sessions.
+ * How to apply: Keep replies to 3 sentences max.
+ * ```
+ *
+ * **Legacy (multi-entry topic file) format** — each entry begins with a `- bullet`
+ * prefix; nested fields use 2-space indent:
+ * ```
+ * # Feedback Memory
+ *
+ * - Use short responses when debugging
+ *   - Why: The user prefers brevity in debug sessions.
+ * - Always use TypeScript strict mode
+ *   - Why: Catches bugs early.
+ * ```
+ */
 export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
   const entries: ManagedAutoMemoryEntry[] = [];
   let current: ManagedAutoMemoryEntry | null = null;
@@ -36,17 +62,37 @@ export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
       continue;
     }
 
+    // Indented nested field — legacy format: `  - Why: ...` or `  Why: ...`
     if (current) {
-      const nestedMatch = rawLine.match(
-        /^\s{2,}(?:[-*]\s+)?(Why|How to apply|How_to_apply|Stability):\s*(.+)$/i,
+      const indentedMatch = rawLine.match(
+        /^\s{2,}(?:[-*]\s+)?(Why|How to apply|How_to_apply):\s*(.+)$/i,
       );
-      if (nestedMatch) {
-        const [, rawKey, rawValue] = nestedMatch;
+      if (indentedMatch) {
+        const [, rawKey, rawValue] = indentedMatch;
         const value = normalizeText(rawValue);
-        if (!value) {
-          continue;
+        if (value) {
+          switch (rawKey.toLowerCase()) {
+            case 'why':
+              current.why = value;
+              break;
+            case 'how to apply':
+            case 'how_to_apply':
+              current.howToApply = value;
+              break;
+          }
         }
+        continue;
+      }
+    }
 
+    // Top-level named field — new format: `Why: ...` or `**How to apply**: ...`
+    const topLevelMatch = trimmed.match(
+      /^(?:\*\*)?(Why|How to apply|How_to_apply)(?:\*\*)?:\s*(.+)$/i,
+    );
+    if (topLevelMatch) {
+      const [, rawKey, rawValue] = topLevelMatch;
+      const value = normalizeText(rawValue);
+      if (value && current) {
         switch (rawKey.toLowerCase()) {
           case 'why':
             current.why = value;
@@ -55,15 +101,12 @@ export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
           case 'how_to_apply':
             current.howToApply = value;
             break;
-          case 'stability':
-            current.stability =
-              value.toLowerCase() === 'stable' ? 'stable' : 'working';
-            break;
         }
-        continue;
       }
+      continue;
     }
 
+    // Bullet prefix — legacy format: `- Summary text`
     if (/^[-*]\s+/.test(trimmed)) {
       if (current) {
         entries.push(current);
@@ -73,38 +116,36 @@ export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
       };
       continue;
     }
+
+    // Plain text — new per-entry format: first non-special line is the summary
+    if (!current) {
+      current = { summary: normalizeText(trimmed) };
+    }
   }
 
   if (current) {
     entries.push(current);
   }
 
-  return entries.filter((entry) => entry.summary.length > 0);
+  return entries;
 }
 
 export function renderAutoMemoryBody(
-  heading: string,
+  _heading: string,
   entries: ManagedAutoMemoryEntry[],
 ): string {
-  const normalizedHeading = heading.trim().startsWith('# ')
-    ? heading.trim()
-    : '# Memory';
-
   if (entries.length === 0) {
-    return [normalizedHeading, '', '_No entries yet._'].join('\n');
+    return '_No entries yet._';
   }
 
-  const lines = [normalizedHeading, ''];
+  const lines: string[] = [];
   for (const entry of entries) {
-    lines.push(`- ${normalizeText(entry.summary)}`);
+    lines.push(normalizeText(entry.summary));
     if (entry.why) {
-      lines.push(`  - Why: ${normalizeText(entry.why)}`);
+      lines.push('', `Why: ${normalizeText(entry.why)}`);
     }
     if (entry.howToApply) {
-      lines.push(`  - How to apply: ${normalizeText(entry.howToApply)}`);
-    }
-    if (entry.stability) {
-      lines.push(`  - Stability: ${entry.stability}`);
+      lines.push('', `How to apply: ${normalizeText(entry.howToApply)}`);
     }
   }
 
@@ -119,17 +160,13 @@ export function mergeAutoMemoryEntry(
     summary: incoming.summary || current.summary,
     why: current.why ?? incoming.why,
     howToApply: current.howToApply ?? incoming.howToApply,
-    stability:
-      current.stability === 'stable' || incoming.stability === 'stable'
-        ? 'stable'
-        : (current.stability ?? incoming.stability),
   };
 }
 
 export function buildAutoMemoryEntrySearchText(
   entry: ManagedAutoMemoryEntry,
 ): string {
-  return [entry.summary, entry.why, entry.howToApply, entry.stability]
+  return [entry.summary, entry.why, entry.howToApply]
     .filter((value): value is string => Boolean(value))
     .join(' ')
     .toLowerCase();

@@ -11,39 +11,12 @@ import {
   getAutoMemoryIndexPath,
   getAutoMemoryMetadataPath,
   getAutoMemoryRoot,
-  getAutoMemoryTopicPath,
 } from './paths.js';
 import {
   AUTO_MEMORY_SCHEMA_VERSION,
-  AUTO_MEMORY_TYPES,
   type AutoMemoryExtractCursor,
   type AutoMemoryMetadata,
-  type AutoMemoryType,
 } from './types.js';
-import { buildManagedAutoMemoryIndex } from './indexer.js';
-
-const TOPIC_DESCRIPTIONS: Record<AutoMemoryType, string> = {
-  user: 'User profile, preferences, background, and stable collaboration context.',
-  feedback:
-    'Corrections and validated guidance about how the assistant should work with this user/project.',
-  project:
-    'Non-derivable project facts, goals, constraints, incidents, and coordination context.',
-  reference:
-    'Pointers to durable external systems, dashboards, tickets, and reference resources.',
-};
-
-function buildTopicTitle(type: AutoMemoryType): string {
-  switch (type) {
-    case 'user':
-      return 'User Memory';
-    case 'feedback':
-      return 'Feedback Memory';
-    case 'project':
-      return 'Project Memory';
-    case 'reference':
-      return 'Reference Memory';
-  }
-}
 
 export function createDefaultAutoMemoryMetadata(
   now = new Date(),
@@ -65,31 +38,7 @@ export function createDefaultAutoMemoryExtractCursor(
 }
 
 export function createDefaultAutoMemoryIndex(): string {
-  return buildManagedAutoMemoryIndex(
-    AUTO_MEMORY_TYPES.map((type) => ({
-      type,
-      filePath: `${type}.md`,
-      title: buildTopicTitle(type),
-      description: TOPIC_DESCRIPTIONS[type],
-      body: '_No entries yet._',
-    })),
-  );
-}
-
-export function createDefaultAutoMemoryTopic(type: AutoMemoryType): string {
-  const title = buildTopicTitle(type);
-  return [
-    '---',
-    `type: ${type}`,
-    `title: ${title}`,
-    `description: ${TOPIC_DESCRIPTIONS[type]}`,
-    '---',
-    '',
-    `# ${title}`,
-    '',
-    '_No entries yet._',
-    '',
-  ].join('\n');
+  return '';
 }
 
 async function writeFileIfMissing(
@@ -127,15 +76,6 @@ export async function ensureAutoMemoryScaffold(
   await writeFileIfMissing(
     getAutoMemoryExtractCursorPath(projectRoot),
     JSON.stringify(createDefaultAutoMemoryExtractCursor(now), null, 2) + '\n',
-  );
-
-  await Promise.all(
-    AUTO_MEMORY_TYPES.map((type) =>
-      writeFileIfMissing(
-        getAutoMemoryTopicPath(projectRoot, type),
-        createDefaultAutoMemoryTopic(type),
-      ),
-    ),
   );
 }
 

@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getAutoMemoryConsolidationLockPath, getAutoMemoryMetadataPath, getAutoMemoryTopicPath } from './paths.js';
+import {
+  getAutoMemoryConsolidationLockPath,
+  getAutoMemoryFilePath,
+  getAutoMemoryMetadataPath,
+} from './paths.js';
 import {
   createManagedAutoMemoryDreamRuntimeForTests,
   DEFAULT_AUTO_DREAM_MIN_HOURS,
@@ -119,19 +123,32 @@ describe('managed auto-memory dream scheduler', () => {
 
   it('runs the existing mechanical dream logic inside scheduled tasks', async () => {
     const runtime = createManagedAutoMemoryDreamRuntimeForTests();
+    const firstPath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse.md'));
+    const duplicatePath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse-duplicate.md'));
+    await fs.mkdir(path.dirname(firstPath), { recursive: true });
     await fs.writeFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
+      firstPath,
       [
         '---',
         'type: user',
-        'title: User Memory',
+        'name: User Memory',
         'description: User profile',
         '---',
         '',
-        '# User Memory',
+        'User prefers terse responses.',
+      ].join('\n'),
+      'utf-8',
+    );
+    await fs.writeFile(
+      duplicatePath,
+      [
+        '---',
+        'type: user',
+        'name: User Memory Duplicate',
+        'description: Duplicate terse preference',
+        '---',
         '',
-        '- User prefers terse responses.',
-        '- User prefers terse responses.',
+        'User prefers terse responses.',
       ].join('\n'),
       'utf-8',
     );

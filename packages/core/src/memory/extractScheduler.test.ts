@@ -9,7 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { createManagedAutoMemoryExtractRuntimeForTests } from './extractScheduler.js';
-import { getAutoMemoryTopicPath } from './paths.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { markExtractRunning, resetAutoMemoryStateForTests } from './state.js';
 
@@ -66,11 +66,10 @@ describe('managed auto-memory extraction runtime', () => {
     const drained = await runtime.drain({ timeoutMs: 1_000 });
     expect(drained).toBe(true);
 
-    const referenceTopic = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'reference'),
-      'utf-8',
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    expect(docs.find((doc) => doc.type === 'reference')?.body).toContain(
+      'grafana.example/d/api',
     );
-    expect(referenceTopic).toContain('grafana.example/d/api');
 
     const tasks = runtime.listTasks(projectRoot);
     expect(tasks.some((task) => task.status === 'completed')).toBe(true);

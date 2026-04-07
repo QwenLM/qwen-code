@@ -8,11 +8,8 @@ import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../auxiliary/sideQuery.js';
 import { parseAutoMemoryEntries } from './entries.js';
-import { getAutoMemoryTopicPath } from './paths.js';
-import { parseAutoMemoryTopicDocument } from './scan.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
 import type { AutoMemoryType } from './types.js';
-import { AUTO_MEMORY_TYPES } from './types.js';
-import * as fs from 'node:fs/promises';
 
 export type AutoMemoryGovernanceSuggestionType =
   | 'duplicate'
@@ -38,12 +35,13 @@ export interface AutoMemoryGovernanceReview {
 }
 
 interface IndexedGovernanceEntry {
+  /** Relative path of the file (used as stable ID). */
   id: string;
+  filePath: string;
   topic: AutoMemoryType;
   summary: string;
   why?: string;
   howToApply?: string;
-  stability?: 'stable' | 'working';
 }
 
 const RESPONSE_SCHEMA: Record<string, unknown> = {
@@ -56,7 +54,14 @@ const RESPONSE_SCHEMA: Record<string, unknown> = {
         properties: {
           type: {
             type: 'string',
-            enum: ['duplicate', 'conflict', 'outdated', 'promote', 'migrate', 'forget'],
+            enum: [
+              'duplicate',
+              'conflict',
+              'outdated',
+              'promote',
+              'migrate',
+              'forget',
+            ],
           },
           entryId: { type: 'string' },
           relatedEntryId: { type: 'string' },
@@ -86,44 +91,53 @@ interface GovernanceResponse {
 async function listGovernanceEntries(
   projectRoot: string,
 ): Promise<IndexedGovernanceEntry[]> {
+  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
   const entries: IndexedGovernanceEntry[] = [];
-  for (const topic of AUTO_MEMORY_TYPES) {
-    const topicPath = getAutoMemoryTopicPath(projectRoot, topic);
-    try {
-      const content = await fs.readFile(topicPath, 'utf-8');
-      const parsed = parseAutoMemoryTopicDocument(topicPath, content);
-      if (!parsed) {
-        continue;
-      }
 
-      for (const entry of parseAutoMemoryEntries(parsed.body)) {
-        entries.push({
-          id: `${topic}:${entry.summary}`,
-          topic,
-          summary: entry.summary,
-          why: entry.why,
-          howToApply: entry.howToApply,
-          stability: entry.stability,
-        });
-      }
-    } catch {
-      // Ignore missing or invalid topic files.
+  for (const doc of docs) {
+    const docEntries = parseAutoMemoryEntries(doc.body);
+    for (const entry of docEntries) {
+      entries.push({
+        id: doc.relativePath,
+        filePath: doc.filePath,
+        topic: doc.type,
+        summary: entry.summary,
+        why: entry.why,
+        howToApply: entry.howToApply,
+      });
     }
   }
+
   return entries;
 }
 
 function classifyExpectedTopic(summary: string): AutoMemoryType | null {
-  if (/https?:\/\/|\b(grafana|dashboard|runbook|ticket|docs?|wiki|notion|jira)\b/i.test(summary)) {
+  if (
+    /https?:\/\/|\b(grafana|dashboard|runbook|ticket|docs?|wiki|notion|jira)\b/i.test(
+      summary,
+    )
+  ) {
     return 'reference';
   }
-  if (/\b(i|we)\s+(prefer|like|need|want)\b|\bmy\s+(preferred|favorite)\b/i.test(summary)) {
+  if (
+    /\b(i|we)\s+(prefer|like|need|want)\b|\bmy\s+(preferred|favorite)\b/i.test(
+      summary,
+    )
+  ) {
     return 'user';
   }
-  if (/\b(please|always|never|avoid|respond|format|style|terse|concise|detailed)\b/i.test(summary)) {
+  if (
+    /\b(please|always|never|avoid|respond|format|style|terse|concise|detailed)\b/i.test(
+      summary,
+    )
+  ) {
     return 'feedback';
   }
-  if (/\b(project|repo|repository|service|release|deadline|freeze|incident|environment|stack)\b/i.test(summary)) {
+  if (
+    /\b(project|repo|repository|service|release|deadline|freeze|incident|environment|stack)\b/i.test(
+      summary,
+    )
+  ) {
     return 'project';
   }
   return null;
@@ -144,7 +158,7 @@ function buildModelPrompt(entries: IndexedGovernanceEntry[]): string {
   return [
     'Review managed auto-memory entries and emit governance suggestions.',
     'Only suggest duplicate, conflict, outdated, promote, migrate, or forget when the case is strong.',
-    'Prefer promote suggestions for entries that are durable but still missing why/howToApply/stability context.',
+    'Prefer promote suggestions for entries that are durable but still missing why/howToApply context.',
     '',
     'Entries:',
     ...entries.map((entry, index) =>
@@ -155,9 +169,10 @@ function buildModelPrompt(entries: IndexedGovernanceEntry[]): string {
         `summary: ${entry.summary}`,
         `why: ${entry.why ?? '(none)'}`,
         `howToApply: ${entry.howToApply ?? '(none)'}`,
-        `stability: ${entry.stability ?? '(none)'}`,
       ].join('\n'),
     ),
+    '',
+    'Return JSON matching the response schema.',
   ].join('\n');
 }
 
@@ -165,11 +180,12 @@ function buildHeuristicSuggestions(
   entries: IndexedGovernanceEntry[],
 ): AutoMemoryGovernanceSuggestion[] {
   const suggestions: AutoMemoryGovernanceSuggestion[] = [];
-  const seenBySummary = new Map<string, IndexedGovernanceEntry>();
 
+  // Duplicate detection: same summary (case-insensitive) in same topic
+  const summaryByTopic = new Map<string, IndexedGovernanceEntry>();
   for (const entry of entries) {
-    const key = entry.summary.toLowerCase();
-    const existing = seenBySummary.get(key);
+    const key = `${entry.topic}:${entry.summary.toLowerCase()}`;
+    const existing = summaryByTopic.get(key);
     if (existing) {
       suggestions.push({
         type: 'duplicate',
@@ -177,14 +193,15 @@ function buildHeuristicSuggestions(
         summary: entry.summary,
         relatedTopic: existing.topic,
         relatedSummary: existing.summary,
-        rationale: 'This entry duplicates an existing durable memory summary.',
+        rationale: 'Two entries share the same summary text.',
       });
-      continue;
+    } else {
+      summaryByTopic.set(key, entry);
     }
-    seenBySummary.set(key, entry);
   }
 
   for (const entry of entries) {
+    // Migration suggestion: entry may belong in a different topic
     const expectedTopic = classifyExpectedTopic(entry.summary);
     if (expectedTopic && expectedTopic !== entry.topic) {
       suggestions.push({
@@ -192,42 +209,53 @@ function buildHeuristicSuggestions(
         topic: entry.topic,
         summary: entry.summary,
         suggestedTargetTopic: expectedTopic,
-        rationale: 'The summary appears to belong in a different managed memory topic.',
+        rationale: `Entry heuristically belongs in '${expectedTopic}' rather than '${entry.topic}'.`,
       });
     }
 
-    if (/\b(temporary|for this task|this session|currently)\b/i.test(entry.summary)) {
+    // Outdated markers
+    if (
+      /\b(today|now|currently|for this task|this session|temporary|temporarily)\b/i.test(
+        entry.summary,
+      )
+    ) {
       suggestions.push({
-        type: 'forget',
+        type: 'outdated',
         topic: entry.topic,
         summary: entry.summary,
         rationale: 'The entry appears temporary rather than durable.',
       });
     }
 
-    if (/\b(deprecated|obsolete|sunset|legacy|old)\b/i.test(entry.summary)) {
+    if (
+      /\b(deprecated|obsolete|sunset|legacy|old)\b/i.test(entry.summary)
+    ) {
       suggestions.push({
         type: 'outdated',
         topic: entry.topic,
         summary: entry.summary,
-        rationale: 'The entry contains wording that suggests it may be outdated.',
+        rationale:
+          'The entry contains wording that suggests it may be outdated.',
       });
     }
 
-    if (!entry.why || !entry.howToApply || !entry.stability) {
+    // Promote: durable entry missing why/howToApply metadata
+    if (!entry.why || !entry.howToApply) {
       suggestions.push({
         type: 'promote',
         topic: entry.topic,
         summary: entry.summary,
-        rationale: 'This durable entry could be upgraded with why/howToApply/stability metadata.',
+        rationale:
+          'This durable entry could be upgraded with why/howToApply metadata.',
       });
     }
   }
 
-  for (let index = 0; index < entries.length; index += 1) {
-    for (let inner = index + 1; inner < entries.length; inner += 1) {
-      const left = entries[index];
-      const right = entries[inner];
+  // Conflict detection: entries in the same topic that contradict each other
+  for (let i = 0; i < entries.length; i += 1) {
+    for (let j = i + 1; j < entries.length; j += 1) {
+      const left = entries[i];
+      const right = entries[j];
       if (left.topic !== right.topic) {
         continue;
       }
@@ -275,13 +303,18 @@ export async function reviewManagedAutoMemoryGovernance(
           temperature: 0,
         },
         validate: (value) => {
-          if (value.suggestions.some((suggestion) => !entryById.has(suggestion.entryId))) {
+          if (
+            value.suggestions.some(
+              (suggestion) => !entryById.has(suggestion.entryId),
+            )
+          ) {
             return 'Governance reviewer returned an unknown entry id';
           }
           if (
             value.suggestions.some(
               (suggestion) =>
-                suggestion.relatedEntryId && !entryById.has(suggestion.relatedEntryId),
+                suggestion.relatedEntryId &&
+                !entryById.has(suggestion.relatedEntryId),
             )
           ) {
             return 'Governance reviewer returned an unknown related entry id';
@@ -306,7 +339,8 @@ export async function reviewManagedAutoMemoryGovernance(
             suggestedTargetTopic: suggestion.suggestedTargetTopic,
           } satisfies AutoMemoryGovernanceSuggestion;
         }),
-        strategy: response.suggestions.length > 0 ? 'model' : 'none',
+        strategy:
+          response.suggestions.length > 0 ? 'model' : 'none',
       };
     } catch {
       // Fall back to heuristics.

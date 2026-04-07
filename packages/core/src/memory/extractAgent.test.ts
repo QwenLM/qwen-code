@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { planAutoMemoryExtractionPatchesByAgent } from './extractionAgentPlanner.js';
 import { runAutoMemoryExtract } from './extract.js';
-import { getAutoMemoryTopicPath } from './paths.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { resetAutoMemoryStateForTests } from './state.js';
 
@@ -70,10 +70,9 @@ describe('auto-memory extraction with agent planner', () => {
       expect.any(Array),
     );
 
-    const userTopic = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
-      'utf-8',
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    expect(docs.find((doc) => doc.type === 'user')?.body).toContain(
+      'User prefers terse responses.',
     );
-    expect(userTopic).toContain('- User prefers terse responses.');
   });
 });

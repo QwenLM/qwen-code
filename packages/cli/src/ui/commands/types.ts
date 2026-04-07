@@ -156,6 +156,7 @@ export interface OpenDialogActionReturn {
     | 'theme'
     | 'editor'
     | 'settings'
+    | 'memory'
     | 'model'
     | 'subagent_create'
     | 'subagent_list'

@@ -11,14 +11,13 @@ import {
 } from './entries.js';
 
 describe('managed auto-memory entries', () => {
-  it('parses and renders richer schema fields', () => {
+  it('parses and renders Claude-style why/apply fields', () => {
     const body = [
       '# User Memory',
       '',
       '- User prefers terse responses.',
       '  - Why: This reduces back-and-forth.',
       '  - How to apply: Prefer concise summaries first.',
-      '  - Stability: stable',
     ].join('\n');
 
     const entries = parseAutoMemoryEntries(body);
@@ -27,12 +26,12 @@ describe('managed auto-memory entries', () => {
         summary: 'User prefers terse responses.',
         why: 'This reduces back-and-forth.',
         howToApply: 'Prefer concise summaries first.',
-        stability: 'stable',
       },
     ]);
 
-    expect(renderAutoMemoryBody('# User Memory', entries)).toContain(
-      '  - How to apply: Prefer concise summaries first.',
-    );
+    const rendered = renderAutoMemoryBody('# User Memory', entries);
+    expect(rendered).toContain('User prefers terse responses.');
+    expect(rendered).toContain('Why: This reduces back-and-forth.');
+    expect(rendered).toContain('How to apply: Prefer concise summaries first.');
   });
 });

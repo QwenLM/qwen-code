@@ -111,6 +111,7 @@ import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
+import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import {
   requestConsentInteractive,
@@ -518,6 +519,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
+  const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
+    useMemoryDialog();
 
   const { isModelDialogOpen, openModelDialog, closeModelDialog } =
     useModelCommand();
@@ -562,6 +565,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       openSettingsDialog,
       openModelDialog,
       openTrustDialog,
@@ -589,6 +593,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       openSettingsDialog,
       openModelDialog,
       openArenaDialog,
@@ -1153,6 +1158,8 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    isMemoryDialogOpen,
+    closeMemoryDialog,
     activeArenaDialog,
     closeArenaDialog,
     isFolderTrustDialogOpen,
@@ -1434,6 +1441,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
+    isMemoryDialogOpen ||
     isModelDialogOpen ||
     isTrustDialogOpen ||
     activeArenaDialog !== null ||
@@ -1488,6 +1496,7 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isMemoryDialogOpen,
       isModelDialogOpen,
       isTrustDialogOpen,
       activeArenaDialog,
@@ -1590,6 +1599,7 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isMemoryDialogOpen,
       isModelDialogOpen,
       isTrustDialogOpen,
       activeArenaDialog,
@@ -1684,6 +1694,7 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -1696,6 +1707,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeMemoryDialog,
       closeModelDialog,
       openArenaDialog,
       closeArenaDialog,
@@ -1742,6 +1754,7 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -1754,6 +1767,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeMemoryDialog,
       closeModelDialog,
       openArenaDialog,
       closeArenaDialog,

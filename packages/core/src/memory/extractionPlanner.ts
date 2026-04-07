@@ -16,9 +16,11 @@ import type {
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
 
-const SYSTEM_PROMPT = `You maintain durable managed memory for an AI coding assistant.
+const SYSTEM_PROMPT = `You are acting as the managed memory extraction planner for an AI coding assistant.
 
-Review the transcript slice and current topic summaries, then extract only durable memory worth keeping beyond the current task.
+Analyze only the provided recent transcript slice and the existing managed memory topic summaries, then return durable memory patches worth keeping beyond the current task.
+
+Save only information that is likely to matter in future sessions.
 
 Allowed topics:
 - user: stable user preferences, habits, background, recurring requirements
@@ -26,14 +28,19 @@ Allowed topics:
 - project: stable project constraints, environments, releases, architecture facts
 - reference: durable links, dashboards, tickets, docs, runbooks, identifiers
 
+Extract only durable facts stated by the user.
+
 Do not extract:
 - temporary task steps
-- one-off requests for this turn only
+- session-only instructions
 - speculative conclusions
 - questions
 - assistant-only plans not stated by the user
+- content that only makes sense relative to “today”, “this task”, or “right now”
 
-Return concise summaries suitable for bullet points. Do not include leading bullet markers.`;
+If the user explicitly asks the assistant to remember something durable, prefer to keep it.
+
+Return concise summaries suitable for bullet points. Do not include leading bullet markers. Output must match the provided JSON schema exactly.`;
 
 const RESPONSE_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -55,10 +62,6 @@ const RESPONSE_SCHEMA: Record<string, unknown> = {
           },
           howToApply: {
             type: 'string',
-          },
-          stability: {
-            type: 'string',
-            enum: ['stable', 'working'],
           },
           sourceOffset: {
             type: 'integer',
@@ -172,7 +175,6 @@ export async function planAutoMemoryExtractionPatchesByModel(
     summary: patch.summary,
     why: patch.why,
     howToApply: patch.howToApply,
-    stability: patch.stability,
     sourceOffset: patch.sourceOffset,
   }));
 }

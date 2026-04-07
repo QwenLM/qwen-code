@@ -9,7 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import { getAutoMemoryTopicPath } from './paths.js';
+import type { BackgroundAgentResult } from '../background/backgroundAgentRunner.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
@@ -38,84 +38,71 @@ describe('dreamAgentPlanner', () => {
     });
   });
 
-  it('returns validated rewrites from the background agent', async () => {
-    await fs.writeFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
-      [
-        '---',
-        'type: user',
-        'title: User Memory',
-        'description: User profile',
-        '---',
-        '',
-        '# User Memory',
-        '',
-        '- User prefers terse responses.',
-        '- User prefers terse responses.',
-      ].join('\n'),
-      'utf-8',
-    );
-
-    const runner = {
-      run: vi.fn().mockResolvedValue({
-        taskId: 'task-1',
-        status: 'completed',
-        finalText: JSON.stringify({
-          rewrites: [
-            {
-              topic: 'user',
-              body: '# User Memory\n\n- User prefers terse responses.',
-            },
-          ],
-        }),
-        filesTouched: [],
-      }),
+  it('returns the background agent result from the runner', async () => {
+    const mockResult: BackgroundAgentResult = {
+      taskId: 'task-1',
+      status: 'completed',
+      finalText: 'Merged 2 duplicate Vim entries into prefers-vim.md.',
+      filesTouched: [path.join(projectRoot, '.qwen', 'memory', 'user', 'prefers-vim.md')],
     };
 
-    const rewrites = await planManagedAutoMemoryDreamByAgent(
-      config,
-      projectRoot,
-      runner,
-    );
+    const runner = {
+      run: vi.fn().mockResolvedValue(mockResult),
+    };
 
-    expect(rewrites).toEqual([
-      {
-        topic: 'user',
-        body: '# User Memory\n\n- User prefers terse responses.',
-      },
-    ]);
+    const result = await planManagedAutoMemoryDreamByAgent(config, projectRoot, runner);
+
+    expect(result).toBe(mockResult);
     expect(runner.run).toHaveBeenCalledWith(
       expect.objectContaining({
         projectRoot,
         sessionId: 'session-1',
         runConfig: expect.objectContaining({
-          max_turns: 4,
-          max_time_minutes: 2,
+          max_turns: 8,
+          max_time_minutes: 5,
         }),
-        toolConfig: { tools: ['read_file'] },
+        toolConfig: {
+          tools: [
+            'read_file',
+            'write_file',
+            'edit',
+            'list_directory',
+            'glob',
+            'grep_search',
+          ],
+        },
       }),
     );
   });
 
-  it('rejects invalid agent output', async () => {
+  it('throws when the agent fails', async () => {
     const runner = {
       run: vi.fn().mockResolvedValue({
         taskId: 'task-2',
-        status: 'completed',
-        finalText: JSON.stringify({
-          rewrites: [
-            {
-              topic: 'user',
-              body: '   ',
-            },
-          ],
-        }),
+        status: 'failed',
+        error: 'Model timed out',
         filesTouched: [],
-      }),
+      } satisfies BackgroundAgentResult),
     };
 
     await expect(
       planManagedAutoMemoryDreamByAgent(config, projectRoot, runner),
-    ).rejects.toThrow('Invalid dream agent response: empty body');
+    ).rejects.toThrow('Model timed out');
+  });
+
+  it('returns cancelled result without throwing', async () => {
+    const mockResult: BackgroundAgentResult = {
+      taskId: 'task-3',
+      status: 'cancelled',
+      filesTouched: [],
+    };
+
+    const runner = {
+      run: vi.fn().mockResolvedValue(mockResult),
+    };
+
+    const result = await planManagedAutoMemoryDreamByAgent(config, projectRoot, runner);
+    expect(result.status).toBe('cancelled');
+    expect(result.filesTouched).toHaveLength(0);
   });
 });

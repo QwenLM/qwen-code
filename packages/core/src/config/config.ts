@@ -129,6 +129,7 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
+import { getAutoMemoryRoot } from '../memory/paths.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
 import { appendManagedAutoMemoryToUserMemory } from '../memory/prompt.js';
 
@@ -422,6 +423,8 @@ export interface ConfigParameters {
   agents?: AgentsCollabSettings;
   /** Enable hook system for lifecycle events */
   enableHooks?: boolean;
+  /** Enable managed auto-memory background extraction and dream. Defaults to true. */
+  enableManagedAutoMemory?: boolean;
   /** Hooks configuration from settings */
   hooks?: Record<string, unknown>;
   /** Hooks config settings (enabled, disabled list) */
@@ -596,6 +599,7 @@ export class Config {
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableHooks: boolean;
+  private readonly enableManagedAutoMemory: boolean;
   private readonly hooks?: Record<string, unknown>;
   private readonly hooksConfig?: Record<string, unknown>;
   private hookSystem?: HookSystem;
@@ -762,6 +766,7 @@ export class Config {
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
     this.enableHooks = params.enableHooks ?? false;
+    this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.hooks = params.hooks;
     this.hooksConfig = params.hooksConfig;
   }
@@ -999,6 +1004,7 @@ export class Config {
     this.setUserMemory(
       appendManagedAutoMemoryToUserMemory(
         memoryContent,
+        getAutoMemoryRoot(this.getProjectRoot()),
         managedAutoMemoryIndex,
       ),
     );
@@ -1795,6 +1801,10 @@ export class Config {
     return this.enableHooks;
   }
 
+  getManagedAutoMemoryEnabled(): boolean {
+    return this.enableManagedAutoMemory;
+  }
+
   /**
    * Get the message bus instance.
    * Returns undefined if not set.
@@ -2197,7 +2207,14 @@ export class Config {
     await registerCoreTool(EditTool, this);
     await registerCoreTool(WriteFileTool, this);
     await registerCoreTool(ShellTool, this);
-    await registerCoreTool(MemoryTool);
+    // When managed auto-memory is enabled, the model writes per-entry files
+    // directly (as instructed by buildManagedAutoMemoryPrompt). The legacy
+    // save_memory tool writes to a single QWEN.md file and conflicts with that
+    // model. Claude Code solves this the same way: no save_memory tool exists
+    // when the file-based memory system is active.
+    if (!this.getManagedAutoMemoryEnabled()) {
+      await registerCoreTool(MemoryTool);
+    }
     await registerCoreTool(TodoWriteTool, this);
     await registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));

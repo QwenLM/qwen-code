@@ -10,21 +10,18 @@ import type { Config } from '../config/config.js';
 import { runSideQuery } from '../auxiliary/sideQuery.js';
 import {
   buildAutoMemoryEntrySearchText,
-  getAutoMemoryBodyHeading,
   parseAutoMemoryEntries,
-  renderAutoMemoryBody,
-  type ManagedAutoMemoryEntryStability,
 } from './entries.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
-import { getAutoMemoryMetadataPath, getAutoMemoryTopicPath } from './paths.js';
-import { parseAutoMemoryTopicDocument } from './scan.js';
+import { getAutoMemoryMetadataPath } from './paths.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
-import { AUTO_MEMORY_TYPES } from './types.js';
 
 export interface AutoMemoryForgetMatch {
   topic: AutoMemoryType;
   summary: string;
+  filePath: string;
 }
 
 export interface AutoMemoryForgetResult {
@@ -44,7 +41,6 @@ interface IndexedForgetCandidate extends AutoMemoryForgetMatch {
   id: string;
   why?: string;
   howToApply?: string;
-  stability?: ManagedAutoMemoryEntryStability;
 }
 
 const FORGET_SELECTION_RESPONSE_SCHEMA: Record<string, unknown> = {
@@ -69,32 +65,24 @@ interface ForgetSelectionResponse {
 async function listIndexedForgetCandidates(
   projectRoot: string,
 ): Promise<IndexedForgetCandidate[]> {
-  const matches: IndexedForgetCandidate[] = [];
-  for (const topic of AUTO_MEMORY_TYPES) {
-    const topicPath = getAutoMemoryTopicPath(projectRoot, topic);
-    try {
-      const current = await fs.readFile(topicPath, 'utf-8');
-      const parsed = parseAutoMemoryTopicDocument(topicPath, current);
-      if (!parsed) {
-        continue;
-      }
+  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+  const candidates: IndexedForgetCandidate[] = [];
 
-      for (const entry of parseAutoMemoryEntries(parsed.body)) {
-        matches.push({
-          id: `${topic}:${entry.summary}`,
-          topic,
-          summary: entry.summary,
-          why: entry.why,
-          howToApply: entry.howToApply,
-          stability: entry.stability,
-        });
-      }
-    } catch {
-      // Ignore missing or invalid topic files.
+  for (const doc of docs) {
+    const entries = parseAutoMemoryEntries(doc.body);
+    for (const entry of entries) {
+      candidates.push({
+        id: doc.relativePath,
+        topic: doc.type,
+        summary: entry.summary,
+        filePath: doc.filePath,
+        why: entry.why,
+        howToApply: entry.howToApply,
+      });
     }
   }
 
-  return matches;
+  return candidates;
 }
 
 function buildForgetSelectionPrompt(
@@ -119,77 +107,76 @@ function buildForgetSelectionPrompt(
         `summary: ${candidate.summary}`,
         `why: ${candidate.why ?? '(none)'}`,
         `howToApply: ${candidate.howToApply ?? '(none)'}`,
-        `stability: ${candidate.stability ?? '(none)'}`,
       ].join('\n'),
     ),
   ].join('\n');
 }
 
-function buildUpdatedBodyForMatches(
-  body: string,
-  summariesToRemove: Set<string>,
-): { body: string; removedEntries: string[] } {
-  const entries = parseAutoMemoryEntries(body);
-  const removedEntries: string[] = [];
-  const nextEntries = entries.filter((entry) => {
-    if (summariesToRemove.has(entry.summary.toLowerCase())) {
-      removedEntries.push(entry.summary);
-      return false;
-    }
-    return true;
+async function selectByModel(
+  candidates: IndexedForgetCandidate[],
+  query: string,
+  config: Config,
+  limit: number,
+): Promise<AutoMemoryForgetSelectionResult> {
+  const response = await runSideQuery<ForgetSelectionResponse>(config, {
+    purpose: 'auto-memory-forget-selection',
+    contents: [
+      {
+        role: 'user',
+        parts: [
+          {
+            text: buildForgetSelectionPrompt(query, candidates, limit),
+          },
+        ],
+      },
+    ] as Content[],
+    schema: FORGET_SELECTION_RESPONSE_SCHEMA,
+    abortSignal: AbortSignal.timeout(8_000),
+    config: {
+      temperature: 0,
+    },
+    validate: (value) => {
+      const candidateIds = new Set(candidates.map((c) => c.id));
+      for (const id of value.selectedCandidateIds) {
+        if (!candidateIds.has(id)) {
+          return `Unknown candidate id: ${id}`;
+        }
+      }
+      return null;
+    },
   });
 
+  const selectedIds = new Set(response.selectedCandidateIds);
+  const matches = candidates
+    .filter((candidate) => selectedIds.has(candidate.id))
+    .slice(0, limit)
+    .map(({ topic, summary, filePath }) => ({ topic, summary, filePath }));
+
   return {
-    body: renderAutoMemoryBody(getAutoMemoryBodyHeading(body), nextEntries),
-    removedEntries,
+    matches,
+    strategy: matches.length > 0 ? 'model' : 'none',
+    reasoning: response.reasoning,
   };
 }
 
-async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
-  try {
-    const content = await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf-8');
-    const metadata = JSON.parse(content) as AutoMemoryMetadata;
-    metadata.updatedAt = now.toISOString();
-    await fs.writeFile(
-      getAutoMemoryMetadataPath(projectRoot),
-      `${JSON.stringify(metadata, null, 2)}\n`,
-      'utf-8',
-    );
-  } catch {
-    // Best-effort metadata update.
-  }
-}
-
-export async function findManagedAutoMemoryForgetCandidates(
-  projectRoot: string,
+function selectByHeuristic(
+  candidates: IndexedForgetCandidate[],
   query: string,
-): Promise<AutoMemoryForgetMatch[]> {
-  const normalizedQuery = query.trim().toLowerCase();
-  if (!normalizedQuery) {
-    return [];
-  }
+  limit: number,
+): AutoMemoryForgetSelectionResult {
+  const normalizedQuery = query.replace(/\s+/g, ' ').trim();
+  const queryLower = normalizedQuery.toLowerCase();
+  const matches = candidates
+    .filter((candidate) =>
+      buildAutoMemoryEntrySearchText(candidate).includes(queryLower),
+    )
+    .slice(0, limit)
+    .map(({ topic, summary, filePath }) => ({ topic, summary, filePath }));
 
-  const matches: AutoMemoryForgetMatch[] = [];
-  for (const topic of AUTO_MEMORY_TYPES) {
-    const topicPath = getAutoMemoryTopicPath(projectRoot, topic);
-    try {
-      const current = await fs.readFile(topicPath, 'utf-8');
-      const parsed = parseAutoMemoryTopicDocument(topicPath, current);
-      if (!parsed) {
-        continue;
-      }
-
-      for (const entry of parseAutoMemoryEntries(parsed.body)) {
-        if (buildAutoMemoryEntrySearchText(entry).includes(normalizedQuery)) {
-          matches.push({ topic, summary: entry.summary });
-        }
-      }
-    } catch {
-      // Ignore missing or invalid topic files.
-    }
-  }
-
-  return matches;
+  return {
+    matches,
+    strategy: matches.length > 0 ? 'heuristic' : 'none',
+  };
 }
 
 export async function selectManagedAutoMemoryForgetCandidates(
@@ -200,74 +187,39 @@ export async function selectManagedAutoMemoryForgetCandidates(
     limit?: number;
   } = {},
 ): Promise<AutoMemoryForgetSelectionResult> {
-  const normalizedQuery = query.trim();
-  if (!normalizedQuery) {
-    return { matches: [], strategy: 'none' };
-  }
-
+  const limit = options.limit ?? 5;
   const candidates = await listIndexedForgetCandidates(projectRoot);
   if (candidates.length === 0) {
     return { matches: [], strategy: 'none' };
   }
 
-  const limit = Math.max(1, Math.min(options.limit ?? 10, candidates.length));
   if (options.config) {
     try {
-      const candidateIds = new Set(candidates.map((candidate) => candidate.id));
-      const contents: Content[] = [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: buildForgetSelectionPrompt(normalizedQuery, candidates, limit),
-            },
-          ],
-        },
-      ];
-      const response = await runSideQuery<ForgetSelectionResponse>(options.config, {
-        purpose: 'auto-memory-forget-select',
-        contents,
-        schema: FORGET_SELECTION_RESPONSE_SCHEMA,
-        abortSignal: AbortSignal.timeout(7_500),
-        config: {
-          temperature: 0,
-        },
-        validate: (value) => {
-          if (value.selectedCandidateIds.length > limit) {
-            return 'Forget selector returned too many candidates';
-          }
-          if (value.selectedCandidateIds.some((id) => !candidateIds.has(id))) {
-            return 'Forget selector returned an unknown candidate id';
-          }
-          return null;
-        },
-      });
-
-      const selectedIds = new Set(response.selectedCandidateIds);
-      return {
-        matches: candidates
-          .filter((candidate) => selectedIds.has(candidate.id))
-          .map(({ topic, summary }) => ({ topic, summary })),
-        strategy: selectedIds.size > 0 ? 'model' : 'none',
-        reasoning: response.reasoning,
-      };
+      return await selectByModel(candidates, query, options.config, limit);
     } catch {
-      // Fall back to heuristic matching.
+      // Fall through to heuristic.
     }
   }
 
-  const queryLower = normalizedQuery.toLowerCase();
-  const matches = candidates
-    .filter((candidate) =>
-      buildAutoMemoryEntrySearchText(candidate).includes(queryLower),
-    )
-    .slice(0, limit)
-    .map(({ topic, summary }) => ({ topic, summary }));
+  return selectByHeuristic(candidates, query, limit);
+}
 
-  return {
-    matches,
-    strategy: matches.length > 0 ? 'heuristic' : 'none',
-  };
+async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
+  try {
+    const content = await fs.readFile(
+      getAutoMemoryMetadataPath(projectRoot),
+      'utf-8',
+    );
+    const metadata = JSON.parse(content) as AutoMemoryMetadata;
+    metadata.updatedAt = now.toISOString();
+    await fs.writeFile(
+      getAutoMemoryMetadataPath(projectRoot),
+      `${JSON.stringify(metadata, null, 2)}\n`,
+      'utf-8',
+    );
+  } catch {
+    // Best-effort metadata bump.
+  }
 }
 
 export async function forgetManagedAutoMemoryMatches(
@@ -277,39 +229,17 @@ export async function forgetManagedAutoMemoryMatches(
 ): Promise<AutoMemoryForgetResult> {
   await ensureAutoMemoryScaffold(projectRoot, now);
 
-  const removalsByTopic = new Map<AutoMemoryType, Set<string>>();
-  for (const match of matches) {
-    const existing = removalsByTopic.get(match.topic) ?? new Set<string>();
-    existing.add(match.summary.toLowerCase());
-    removalsByTopic.set(match.topic, existing);
-  }
-
   const removedEntries: AutoMemoryForgetMatch[] = [];
   const touchedTopics = new Set<AutoMemoryType>();
 
-  for (const topic of AUTO_MEMORY_TYPES) {
-    const summariesToRemove = removalsByTopic.get(topic);
-    if (!summariesToRemove || summariesToRemove.size === 0) {
-      continue;
+  for (const match of matches) {
+    try {
+      await fs.unlink(match.filePath);
+      removedEntries.push(match);
+      touchedTopics.add(match.topic);
+    } catch {
+      // File may have already been removed; continue.
     }
-
-    const topicPath = getAutoMemoryTopicPath(projectRoot, topic);
-    const current = await fs.readFile(topicPath, 'utf-8');
-    const parsed = parseAutoMemoryTopicDocument(topicPath, current);
-    if (!parsed) {
-      continue;
-    }
-
-    const updated = buildUpdatedBodyForMatches(parsed.body, summariesToRemove);
-    if (updated.removedEntries.length === 0 || updated.body === parsed.body.trim()) {
-      continue;
-    }
-
-    for (const summary of updated.removedEntries) {
-      removedEntries.push({ topic, summary });
-    }
-    await fs.writeFile(topicPath, current.replace(parsed.body, updated.body), 'utf-8');
-    touchedTopics.add(topic);
   }
 
   if (touchedTopics.size > 0) {
@@ -323,7 +253,7 @@ export async function forgetManagedAutoMemoryMatches(
     touchedTopics: [...touchedTopics],
     systemMessage:
       removedEntries.length > 0
-        ? `Managed auto-memory forgot ${removedEntries.length} entr${removedEntries.length === 1 ? 'y' : 'ies'} from ${[...touchedTopics].map((topic) => `${topic}.md`).join(', ')}`
+        ? `Managed auto-memory forgot ${removedEntries.length} entr${removedEntries.length === 1 ? 'y' : 'ies'} from: ${[...touchedTopics].map((topic) => `${topic}/`).join(', ')}`
         : undefined,
   };
 }
@@ -331,27 +261,23 @@ export async function forgetManagedAutoMemoryMatches(
 export async function forgetManagedAutoMemoryEntries(
   projectRoot: string,
   query: string,
+  options: { config?: Config } = {},
   now = new Date(),
 ): Promise<AutoMemoryForgetResult> {
   const trimmedQuery = query.trim();
   if (!trimmedQuery) {
-    return {
-      query: trimmedQuery,
-      removedEntries: [],
-      touchedTopics: [],
-    };
+    return { query: trimmedQuery, removedEntries: [], touchedTopics: [] };
   }
 
-  const selection = await selectManagedAutoMemoryForgetCandidates(projectRoot, trimmedQuery, {
-    limit: Number.MAX_SAFE_INTEGER,
-  });
+  const selection = await selectManagedAutoMemoryForgetCandidates(
+    projectRoot,
+    trimmedQuery,
+    { ...options, limit: Number.MAX_SAFE_INTEGER },
+  );
   const result = await forgetManagedAutoMemoryMatches(
     projectRoot,
     selection.matches,
     now,
   );
-  return {
-    ...result,
-    query: trimmedQuery,
-  };
+  return { ...result, query: trimmedQuery };
 }

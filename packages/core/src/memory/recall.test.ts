@@ -31,23 +31,32 @@ const docs: ScannedAutoMemoryDocument[] = [
   {
     type: 'reference',
     filePath: '/tmp/reference.md',
+    relativePath: 'reference.md',
+    filename: 'reference.md',
     title: 'Reference Memory',
     description: 'Dashboards and external docs',
     body: '# Reference Memory\n\n- Grafana dashboard: grafana.internal/d/api-latency',
+    mtimeMs: 3,
   },
   {
     type: 'project',
     filePath: '/tmp/project.md',
+    relativePath: 'project.md',
+    filename: 'project.md',
     title: 'Project Memory',
     description: 'Project constraints and release context',
     body: '# Project Memory\n\n- Release freeze starts Friday.',
+    mtimeMs: 2,
   },
   {
     type: 'user',
     filePath: '/tmp/user.md',
+    relativePath: 'user.md',
+    filename: 'user.md',
     title: 'User Memory',
     description: 'User preferences',
     body: '# User Memory\n\n- User prefers terse responses.',
+    mtimeMs: 1,
   },
 ];
 
@@ -73,7 +82,7 @@ describe('auto-memory relevant recall', () => {
   it('formats selected documents as a prompt block', () => {
     const prompt = buildRelevantAutoMemoryPrompt([docs[0], docs[2]]);
 
-    expect(prompt).toContain('## Relevant Managed Auto-Memory');
+    expect(prompt).toContain('## Relevant memory');
     expect(prompt).toContain('Reference Memory (reference.md)');
     expect(prompt).toContain('User Memory (user.md)');
   });

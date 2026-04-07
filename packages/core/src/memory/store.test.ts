@@ -19,11 +19,9 @@ import {
 import {
   createDefaultAutoMemoryIndex,
   createDefaultAutoMemoryMetadata,
-  createDefaultAutoMemoryTopic,
   ensureAutoMemoryScaffold,
   readAutoMemoryIndex,
 } from './store.js';
-import { AUTO_MEMORY_TYPES } from './types.js';
 
 describe('auto-memory storage scaffold', () => {
   let tempDir: string;
@@ -84,11 +82,8 @@ describe('auto-memory storage scaffold', () => {
       updatedAt: '2026-04-01T08:00:00.000Z',
     });
 
-    for (const type of AUTO_MEMORY_TYPES) {
-      await expect(fs.readFile(getAutoMemoryTopicPath(projectRoot, type), 'utf-8')).resolves.toBe(
-        createDefaultAutoMemoryTopic(type),
-      );
-    }
+    await expect(fs.stat(getAutoMemoryRoot(projectRoot))).resolves.toBeDefined();
+    await expect(fs.access(getAutoMemoryTopicPath(projectRoot, 'user'))).rejects.toThrow();
   });
 
   it('is idempotent and preserves existing index content', async () => {
@@ -109,8 +104,6 @@ describe('auto-memory storage scaffold', () => {
 
   it('reads the managed auto-memory index after scaffold creation', async () => {
     await ensureAutoMemoryScaffold(projectRoot);
-    await expect(readAutoMemoryIndex(projectRoot)).resolves.toContain(
-      '# Managed Auto-Memory Index',
-    );
+    await expect(readAutoMemoryIndex(projectRoot)).resolves.toBe('');
   });
 });

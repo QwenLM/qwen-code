@@ -23,20 +23,20 @@ const mockCommands: readonly SlashCommand[] = [
     kind: CommandKind.FILE,
   },
   {
-    name: 'memory',
-    description: 'Manage memory',
-    altNames: ['mem'],
+    name: 'config',
+    description: 'Manage configuration',
+    altNames: ['cfg'],
     subCommands: [
       {
-        name: 'add',
-        description: 'Add to memory',
+        name: 'set',
+        description: 'Set configuration',
         action: async () => {},
         kind: CommandKind.BUILT_IN,
       },
       {
-        name: 'clear',
-        description: 'Clear memory',
-        altNames: ['c'],
+        name: 'reset',
+        description: 'Reset configuration',
+        altNames: ['r'],
         action: async () => {},
         kind: CommandKind.BUILT_IN,
       },
@@ -64,34 +64,34 @@ describe('parseSlashCommand', () => {
   });
 
   it('should parse a subcommand', () => {
-    const result = parseSlashCommand('/memory add', mockCommands);
-    expect(result.commandToExecute?.name).toBe('add');
+    const result = parseSlashCommand('/config set', mockCommands);
+    expect(result.commandToExecute?.name).toBe('set');
     expect(result.args).toBe('');
-    expect(result.canonicalPath).toEqual(['memory', 'add']);
+    expect(result.canonicalPath).toEqual(['config', 'set']);
   });
 
   it('should parse a subcommand with arguments', () => {
     const result = parseSlashCommand(
-      '/memory add some important data',
+      '/config set theme dark',
       mockCommands,
     );
-    expect(result.commandToExecute?.name).toBe('add');
-    expect(result.args).toBe('some important data');
-    expect(result.canonicalPath).toEqual(['memory', 'add']);
+    expect(result.commandToExecute?.name).toBe('set');
+    expect(result.args).toBe('theme dark');
+    expect(result.canonicalPath).toEqual(['config', 'set']);
   });
 
   it('should handle a command alias', () => {
-    const result = parseSlashCommand('/mem add some data', mockCommands);
-    expect(result.commandToExecute?.name).toBe('add');
-    expect(result.args).toBe('some data');
-    expect(result.canonicalPath).toEqual(['memory', 'add']);
+    const result = parseSlashCommand('/cfg set theme dark', mockCommands);
+    expect(result.commandToExecute?.name).toBe('set');
+    expect(result.args).toBe('theme dark');
+    expect(result.canonicalPath).toEqual(['config', 'set']);
   });
 
   it('should handle a subcommand alias', () => {
-    const result = parseSlashCommand('/memory c', mockCommands);
-    expect(result.commandToExecute?.name).toBe('clear');
+    const result = parseSlashCommand('/config r', mockCommands);
+    expect(result.commandToExecute?.name).toBe('reset');
     expect(result.args).toBe('');
-    expect(result.canonicalPath).toEqual(['memory', 'clear']);
+    expect(result.canonicalPath).toEqual(['config', 'reset']);
   });
 
   it('should return undefined for an unknown command', () => {
@@ -103,22 +103,22 @@ describe('parseSlashCommand', () => {
 
   it('should return the parent command if subcommand is unknown', () => {
     const result = parseSlashCommand(
-      '/memory unknownsub some args',
+      '/config unknownsub some args',
       mockCommands,
     );
-    expect(result.commandToExecute?.name).toBe('memory');
+    expect(result.commandToExecute?.name).toBe('config');
     expect(result.args).toBe('unknownsub some args');
-    expect(result.canonicalPath).toEqual(['memory']);
+    expect(result.canonicalPath).toEqual(['config']);
   });
 
   it('should handle extra whitespace', () => {
     const result = parseSlashCommand(
-      '  /memory   add  some data  ',
+      '  /config   set  theme dark  ',
       mockCommands,
     );
-    expect(result.commandToExecute?.name).toBe('add');
-    expect(result.args).toBe('some data');
-    expect(result.canonicalPath).toEqual(['memory', 'add']);
+    expect(result.commandToExecute?.name).toBe('set');
+    expect(result.args).toBe('theme dark');
+    expect(result.canonicalPath).toEqual(['config', 'set']);
   });
 
   it('should return undefined if query does not start with a slash', () => {

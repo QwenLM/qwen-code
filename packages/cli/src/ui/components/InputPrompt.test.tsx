@@ -558,18 +558,18 @@ describe('InputPrompt', () => {
   });
 
   it('should handle the "backspace" edge case correctly', async () => {
-    // SCENARIO: /memory -> Backspace -> /memory -> Tab (to accept 'show')
+    // SCENARIO: /config -> Backspace -> /config -> Tab (to accept 'set')
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
       showSuggestions: true,
       suggestions: [
-        { label: 'show', value: 'show' },
-        { label: 'add', value: 'add' },
+        { label: 'set', value: 'set' },
+        { label: 'reset', value: 'reset' },
       ],
-      activeSuggestionIndex: 0, // 'show' is highlighted
+      activeSuggestionIndex: 0, // 'set' is highlighted
     });
-    // The user has backspaced, so the query is now just '/memory'
-    props.buffer.setText('/memory');
+    // The user has backspaced, so the query is now just '/config'
+    props.buffer.setText('/config');
 
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
@@ -577,20 +577,20 @@ describe('InputPrompt', () => {
     stdin.write('\t'); // Press Tab
     await wait();
 
-    // It should NOT become '/show'. It should correctly become '/memory show'.
+    // It should NOT become '/set'. It should correctly become '/config set'.
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
     unmount();
   });
 
   it('should complete a partial argument for a command', async () => {
-    // SCENARIO: /memory add fi- -> Tab
+    // SCENARIO: /config set fi- -> Tab
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
       showSuggestions: true,
       suggestions: [{ label: 'fix-foo', value: 'fix-foo' }],
       activeSuggestionIndex: 0,
     });
-    props.buffer.setText('/memory add fi-');
+    props.buffer.setText('/config set fi-');
 
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
@@ -856,8 +856,8 @@ describe('InputPrompt', () => {
     });
 
     it('should NOT trigger completion when cursor is after space following /', async () => {
-      mockBuffer.text = '/memory add';
-      mockBuffer.lines = ['/memory add'];
+      mockBuffer.text = '/config set';
+      mockBuffer.lines = ['/config set'];
       mockBuffer.cursor = [0, 11];
 
       mockedUseCommandCompletion.mockReturnValue({

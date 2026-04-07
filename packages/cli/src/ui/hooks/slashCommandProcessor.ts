@@ -73,6 +73,7 @@ interface SlashCommandProcessorActions {
   openArenaDialog?: (type: Exclude<ArenaDialogType, null>) => void;
   openThemeDialog: () => void;
   openEditorDialog: () => void;
+  openMemoryDialog: () => void;
   openSettingsDialog: () => void;
   openModelDialog: () => void;
   openTrustDialog: () => void;
@@ -248,6 +249,7 @@ export const useSlashCommandProcessor = (
   );
   const commandContext = useMemo(
     (): CommandContext => ({
+      executionMode: 'interactive',
       services: {
         config,
         settings,
@@ -505,6 +507,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'settings':
                       actions.openSettingsDialog();
+                      return { type: 'handled' };
+                    case 'memory':
+                      actions.openMemoryDialog();
                       return { type: 'handled' };
                     case 'model':
                       actions.openModelDialog();

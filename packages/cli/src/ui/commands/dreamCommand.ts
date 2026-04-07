@@ -4,9 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  runManagedAutoMemoryDream,
-} from '@qwen-code/qwen-code-core';
+import { runManagedAutoMemoryDream } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
@@ -27,7 +25,11 @@ export const dreamCommand: SlashCommand = {
       };
     }
 
-    const result = await runManagedAutoMemoryDream(config.getProjectRoot());
+    const result = await runManagedAutoMemoryDream(
+      config.getProjectRoot(),
+      new Date(),
+      config,
+    );
     return {
       type: 'message',
       messageType: 'info',

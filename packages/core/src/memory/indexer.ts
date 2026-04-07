@@ -5,73 +5,47 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { parseAutoMemoryEntries } from './entries.js';
 import { getAutoMemoryIndexPath, getAutoMemoryMetadataPath } from './paths.js';
 import { scanAutoMemoryTopicDocuments, type ScannedAutoMemoryDocument } from './scan.js';
 import type { AutoMemoryMetadata } from './types.js';
 
-const MAX_TOPIC_HOOKS = 3;
+const MAX_INDEX_LINE_CHARS = 150;
+const MAX_INDEX_LINES = 200;
+const MAX_INDEX_BYTES = 25_000;
 
-function getBodyBulletLines(body: string): string[] {
-  return parseAutoMemoryEntries(body)
-    .map((entry) => entry.summary)
-    .filter((summary) => summary.length > 0);
-}
-
-export function countAutoMemoryTopicEntries(body: string): number {
-  return getBodyBulletLines(body).length;
-}
-
-export function buildAutoMemoryTopicHooks(body: string): string[] {
-  const hooks = getBodyBulletLines(body);
-  return Array.from(
-    new Map(hooks.map((hook) => [hook.toLowerCase(), hook])).values(),
-  ).slice(0, MAX_TOPIC_HOOKS);
+function truncateIndexLine(text: string): string {
+  if (text.length <= MAX_INDEX_LINE_CHARS) {
+    return text;
+  }
+  return `${text.slice(0, MAX_INDEX_LINE_CHARS - 1).trimEnd()}…`;
 }
 
 export function buildManagedAutoMemoryIndex(
   docs: ScannedAutoMemoryDocument[],
-  metadata?: Pick<AutoMemoryMetadata, 'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'>,
+  _metadata?: Pick<AutoMemoryMetadata, 'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'>,
 ): string {
-  const totalEntries = docs.reduce(
-    (sum, doc) => sum + countAutoMemoryTopicEntries(doc.body),
-    0,
-  );
+  const raw = docs
+    .map((doc) =>
+      truncateIndexLine(
+        `- [${doc.title}](${doc.relativePath}) — ${doc.description || doc.type}`,
+      ),
+    )
+    .join('\n');
 
-  const lines = [
-    '# Managed Auto-Memory Index',
-    '',
-    'This index is maintained by Qwen Code. It summarizes durable topic files and short hooks for recall and manual review.',
-    '',
-    `Topics: ${docs.length} | Durable entries: ${totalEntries}`,
-  ];
+  const lines = raw.split('\n');
+  const wasLineTruncated = lines.length > MAX_INDEX_LINES;
+  let truncated = wasLineTruncated ? lines.slice(0, MAX_INDEX_LINES).join('\n') : raw;
 
-  if (metadata?.updatedAt) {
-    lines.push(`Updated: ${metadata.updatedAt}`);
-  }
-  if (metadata?.lastDreamAt) {
-    lines.push(`Last dream: ${metadata.lastDreamAt}${metadata.lastDreamSessionId ? ` (session ${metadata.lastDreamSessionId})` : ''}`);
+  if (truncated.length > MAX_INDEX_BYTES) {
+    const cutAt = truncated.lastIndexOf('\n', MAX_INDEX_BYTES);
+    truncated = truncated.slice(0, cutAt > 0 ? cutAt : MAX_INDEX_BYTES);
   }
 
-  lines.push('', '## Topics', '');
-
-  for (const doc of docs) {
-    const entryCount = countAutoMemoryTopicEntries(doc.body);
-    const hooks = buildAutoMemoryTopicHooks(doc.body);
-    lines.push(
-      `- [${doc.title}](${doc.type}.md) — ${doc.description} (${entryCount} durable ${entryCount === 1 ? 'entry' : 'entries'})`,
-    );
-    if (hooks.length === 0) {
-      lines.push('  - Hook: empty');
-      continue;
-    }
-    for (const hook of hooks) {
-      lines.push(`  - ${hook}`);
-    }
+  if (!wasLineTruncated && truncated.length === raw.length) {
+    return truncated;
   }
 
-  lines.push('');
-  return lines.join('\n');
+  return `${truncated}\n\n> WARNING: MEMORY.md is too large; only part of it was written. Keep index entries concise and move detail into topic files.`;
 }
 
 async function readAutoMemoryMetadata(

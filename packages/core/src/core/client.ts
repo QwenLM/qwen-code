@@ -49,7 +49,10 @@ import { LoopDetectionService } from '../services/loopDetectionService.js';
 import { AgentTool } from '../tools/agent.js';
 import { scheduleAutoMemoryExtract } from '../memory/extract.js';
 import { scheduleManagedAutoMemoryDream } from '../memory/dreamScheduler.js';
-import { resolveRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
+import {
+  type RelevantAutoMemoryPromptResult,
+  resolveRelevantAutoMemoryPromptForQuery,
+} from '../memory/recall.js';
 
 // Telemetry
 import {
@@ -100,6 +103,12 @@ export enum SendMessageType {
 export interface SendMessageOptions {
   type: SendMessageType;
 }
+
+const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
+  prompt: '',
+  selectedDocs: [],
+  strategy: 'none',
+};
 
 export class GeminiClient {
   private chat?: GeminiChat;
@@ -454,34 +463,40 @@ export class GeminiClient {
     }
   }
 
-  private async *runManagedAutoMemoryExtraction(
+  private runManagedAutoMemoryBackgroundTasks(
     messageType: SendMessageType,
-  ): AsyncGenerator<ServerGeminiStreamEvent, void> {
+  ): void {
     if (messageType !== SendMessageType.UserQuery) {
       return;
     }
 
-    const result = await scheduleAutoMemoryExtract({
-      projectRoot: this.config.getProjectRoot(),
-      sessionId: this.config.getSessionId(),
-      history: this.getHistory(),
+    if (!this.config.getManagedAutoMemoryEnabled()) {
+      return;
+    }
+
+    const projectRoot = this.config.getProjectRoot();
+    const sessionId = this.config.getSessionId();
+    const history = this.getHistory();
+
+    void scheduleAutoMemoryExtract({
+      projectRoot,
+      sessionId,
+      history,
       config: this.config,
+    }).catch((error) => {
+      debugLogger.warn(
+        'Failed to schedule managed auto-memory extraction.',
+        error,
+      );
     });
 
     void scheduleManagedAutoMemoryDream({
-      projectRoot: this.config.getProjectRoot(),
-      sessionId: this.config.getSessionId(),
+      projectRoot,
+      sessionId,
       config: this.config,
     }).catch((error) => {
       debugLogger.warn('Failed to schedule managed auto-memory dream.', error);
     });
-
-    if (result?.systemMessage) {
-      yield {
-        type: GeminiEventType.HookSystemMessage,
-        value: result.systemMessage,
-      };
-    }
   }
 
   async *sendMessageStream(
@@ -492,6 +507,11 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    let relevantAutoMemoryPromise:
+      | Promise<
+          Awaited<ReturnType<typeof resolveRelevantAutoMemoryPromptForQuery>>
+        >
+      | undefined;
 
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();
@@ -550,6 +570,20 @@ export class GeminiClient {
     if (messageType === SendMessageType.UserQuery) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
+
+      if (this.config.getManagedAutoMemoryEnabled()) {
+        relevantAutoMemoryPromise = resolveRelevantAutoMemoryPromptForQuery(
+          this.config.getProjectRoot(),
+          partToString(request),
+          {
+            config: this.config,
+            excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+          },
+        ).catch((error) => {
+          debugLogger.warn('Managed auto-memory recall prefetch failed.', error);
+          return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+        });
+      }
 
       // record user message for session management
       this.config.getChatRecordingService()?.recordUserMessage(request);
@@ -647,14 +681,9 @@ export class GeminiClient {
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
     if (messageType === SendMessageType.UserQuery) {
       const systemReminders = [];
-      const relevantAutoMemory = await resolveRelevantAutoMemoryPromptForQuery(
-        this.config.getProjectRoot(),
-        partToString(request),
-        {
-          config: this.config,
-          excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-        },
-      );
+      const relevantAutoMemory = relevantAutoMemoryPromise
+        ? await relevantAutoMemoryPromise
+        : EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
       const relevantAutoMemoryPrompt = relevantAutoMemory.prompt;
 
       if (relevantAutoMemoryPrompt) {
@@ -811,7 +840,7 @@ export class GeminiClient {
 
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
       if (this.config.getSkipNextSpeakerCheck()) {
-        yield* this.runManagedAutoMemoryExtraction(messageType);
+        this.runManagedAutoMemoryBackgroundTasks(messageType);
         // Report completed before returning — agent has no more work to do
         if (arenaAgentClient) {
           await arenaAgentClient.reportCompleted();
@@ -846,7 +875,7 @@ export class GeminiClient {
         );
       }
 
-      yield* this.runManagedAutoMemoryExtraction(messageType);
+      this.runManagedAutoMemoryBackgroundTasks(messageType);
 
       if (arenaAgentClient) {
         // No continuation needed — agent completed its task

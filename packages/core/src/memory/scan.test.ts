@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getAutoMemoryTopicPath } from './paths.js';
+import { getAutoMemoryFilePath } from './paths.js';
 import {
   parseAutoMemoryTopicDocument,
   scanAutoMemoryTopicDocuments,
@@ -54,25 +54,31 @@ describe('auto-memory topic scanning', () => {
     expect(parsed).toEqual({
       type: 'project',
       filePath: '/tmp/project.md',
+      relativePath: 'project.md',
+      filename: 'project.md',
       title: 'Project Memory',
       description: 'Project context',
       body: '# Project Memory\n\n- Release freeze starts Friday.',
+      mtimeMs: 0,
     });
   });
 
-  it('scans existing auto-memory topic files from the project scaffold', async () => {
+  it('scans existing auto-memory files from nested topic folders', async () => {
+    const referencePath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('reference', 'grafana.md'),
+    );
+    await fs.mkdir(path.dirname(referencePath), { recursive: true });
     await fs.writeFile(
-      getAutoMemoryTopicPath(projectRoot, 'reference'),
+      referencePath,
       [
         '---',
         'type: reference',
-        'title: Reference Memory',
+        'name: Reference Memory',
         'description: External references',
         '---',
         '',
-        '# Reference Memory',
-        '',
-        '- Oncall dashboard: grafana.internal/d/api-latency',
+        'Oncall dashboard: grafana.internal/d/api-latency',
       ].join('\n'),
       'utf-8',
     );
@@ -81,6 +87,7 @@ describe('auto-memory topic scanning', () => {
     const referenceDoc = docs.find((doc) => doc.type === 'reference');
 
     expect(referenceDoc?.description).toBe('External references');
+    expect(referenceDoc?.relativePath).toBe(path.join('reference', 'grafana.md'));
     expect(referenceDoc?.body).toContain('grafana.internal/d/api-latency');
   });
 });

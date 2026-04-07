@@ -5,20 +5,27 @@
  */
 
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { partToString } from '../utils/partUtils.js';
-import { getAutoMemoryExtractCursorPath, getAutoMemoryMetadataPath, getAutoMemoryTopicPath } from './paths.js';
+import {
+  getAutoMemoryExtractCursorPath,
+  getAutoMemoryFilePath,
+  getAutoMemoryMetadataPath,
+} from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
-  getAutoMemoryBodyHeading,
   mergeAutoMemoryEntry,
   parseAutoMemoryEntries,
   renderAutoMemoryBody,
-  type ManagedAutoMemoryEntryStability,
 } from './entries.js';
-import { parseAutoMemoryTopicDocument } from './scan.js';
+import {
+  parseAutoMemoryTopicDocument,
+  scanAutoMemoryTopicDocuments,
+  type ScannedAutoMemoryDocument,
+} from './scan.js';
 import { planAutoMemoryExtractionPatchesByAgent } from './extractionAgentPlanner.js';
 import { planAutoMemoryExtractionPatchesByModel } from './extractionPlanner.js';
 import { scheduleManagedAutoMemoryExtract } from './extractScheduler.js';
@@ -43,7 +50,6 @@ export interface AutoMemoryExtractPatch {
   summary: string;
   why?: string;
   howToApply?: string;
-  stability?: ManagedAutoMemoryEntryStability;
   sourceOffset: number;
 }
 
@@ -57,6 +63,24 @@ export interface AutoMemoryExtractResult {
 
 function normalizeSummary(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
+}
+
+function slugify(text: string): string {
+  return (
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 80) || 'memory'
+  );
+}
+
+function buildMemoryTitle(summary: string): string {
+  const trimmed = normalizeSummary(summary);
+  if (trimmed.length <= 72) {
+    return trimmed;
+  }
+  return `${trimmed.slice(0, 69).trimEnd()}...`;
 }
 
 function stripRememberLead(text: string): string {
@@ -208,10 +232,6 @@ function normalizeExtractPatch(
     howToApply: patch.howToApply
       ? normalizeSummary(patch.howToApply)
       : undefined,
-    stability:
-      patch.stability === 'stable' || patch.stability === 'working'
-        ? patch.stability
-        : undefined,
     sourceOffset: patch.sourceOffset,
   };
 }
@@ -343,7 +363,6 @@ function appendPatchToTopicContent(
     return null;
   }
 
-  const heading = getAutoMemoryBodyHeading(parsed.body);
   const entries = parseAutoMemoryEntries(parsed.body);
   const normalizedSummary = patch.summary.toLowerCase();
   const existingIndex = entries.findIndex(
@@ -355,30 +374,81 @@ function appendPatchToTopicContent(
       summary: patch.summary,
       why: patch.why,
       howToApply: patch.howToApply,
-      stability: patch.stability,
     });
     const current = entries[existingIndex];
     if (
       current.summary === merged.summary &&
       current.why === merged.why &&
-      current.howToApply === merged.howToApply &&
-      current.stability === merged.stability
+      current.howToApply === merged.howToApply
     ) {
       return null;
     }
 
     entries[existingIndex] = merged;
-    return content.replace(parsed.body, renderAutoMemoryBody(heading, entries));
+    return content.replace(parsed.body, renderAutoMemoryBody('', entries));
   }
 
   entries.push({
     summary: patch.summary,
     why: patch.why,
     howToApply: patch.howToApply,
-    stability: patch.stability,
   });
 
-  return content.replace(parsed.body, renderAutoMemoryBody(heading, entries));
+  return content.replace(parsed.body, renderAutoMemoryBody('', entries));
+}
+
+function buildMemoryDocumentContent(
+  patch: AutoMemoryExtractPatch,
+  title = buildMemoryTitle(patch.summary),
+): string {
+  return [
+    '---',
+    `name: ${title}`,
+    `description: ${patch.summary}`,
+    `type: ${patch.topic}`,
+    '---',
+    '',
+    renderAutoMemoryBody('', [
+      {
+        summary: patch.summary,
+        why: patch.why,
+        howToApply: patch.howToApply,
+      },
+    ]),
+    '',
+  ].join('\n');
+}
+
+function findExistingMemoryDocument(
+  docs: ScannedAutoMemoryDocument[],
+  patch: AutoMemoryExtractPatch,
+): ScannedAutoMemoryDocument | undefined {
+  const targetSummary = patch.summary.toLowerCase();
+  return docs.find((doc) => {
+    if (doc.type !== patch.topic) {
+      return false;
+    }
+    const [entry] = parseAutoMemoryEntries(doc.body);
+    return entry?.summary.toLowerCase() === targetSummary;
+  });
+}
+
+function allocateMemoryRelativePath(
+  docs: ScannedAutoMemoryDocument[],
+  patch: AutoMemoryExtractPatch,
+): string {
+  const baseSlug = slugify(patch.summary);
+  const used = new Set(docs.map((doc) => doc.relativePath));
+
+  for (let index = 0; index < 100; index += 1) {
+    const filename = index === 0 ? `${baseSlug}.md` : `${baseSlug}-${index + 1}.md`;
+    const relativePath = path.join(patch.topic, filename);
+    if (!used.has(relativePath)) {
+      return relativePath;
+    }
+  }
+
+  return path.join(patch.topic, `${baseSlug}-${Date.now()}.md`);
 }
 
 export async function applyExtractedMemoryPatches(
@@ -388,16 +458,49 @@ export async function applyExtractedMemoryPatches(
   sessionId?: string,
 ): Promise<AutoMemoryType[]> {
   const touchedTopics = new Set<AutoMemoryType>();
+  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
 
   for (const patch of patches) {
-    const topicPath = getAutoMemoryTopicPath(projectRoot, patch.topic);
-    const current = await fs.readFile(topicPath, 'utf-8');
-    const next = appendPatchToTopicContent(current, patch);
-    if (!next) {
+    const existingDoc = findExistingMemoryDocument(docs, patch);
+
+    if (existingDoc) {
+      const current = await fs.readFile(existingDoc.filePath, 'utf-8');
+      const next = appendPatchToTopicContent(current, patch);
+      if (!next) {
+        continue;
+      }
+
+      await fs.writeFile(existingDoc.filePath, next, 'utf-8');
+      const updatedDoc = parseAutoMemoryTopicDocument(
+        existingDoc.filePath,
+        next,
+        0,
+        existingDoc.relativePath,
+      );
+      if (updatedDoc) {
+        const existingIndex = docs.findIndex((doc) => doc.filePath === existingDoc.filePath);
+        if (existingIndex >= 0) {
+          docs[existingIndex] = updatedDoc;
+        }
+      }
+      touchedTopics.add(patch.topic);
       continue;
     }
 
-    await fs.writeFile(topicPath, next, 'utf-8');
+    const relativePath = allocateMemoryRelativePath(docs, patch);
+    const absolutePath = getAutoMemoryFilePath(projectRoot, relativePath);
+    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
+    const content = buildMemoryDocumentContent(patch);
+    await fs.writeFile(absolutePath, content, 'utf-8');
+    const createdDoc = parseAutoMemoryTopicDocument(
+      absolutePath,
+      content,
+      0,
+      relativePath,
+    );
+    if (createdDoc) {
+      docs.push(createdDoc);
+    }
     touchedTopics.add(patch.topic);
   }
 

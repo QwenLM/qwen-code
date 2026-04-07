@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getAutoMemoryExtractCursorPath, getAutoMemoryIndexPath, getAutoMemoryTopicPath } from './paths.js';
+import { getAutoMemoryExtractCursorPath, getAutoMemoryIndexPath } from './paths.js';
 import {
   applyExtractedMemoryPatches,
   buildTranscriptMessages,
@@ -16,6 +16,7 @@ import {
   loadUnprocessedTranscriptSlice,
   runAutoMemoryExtract,
 } from './extract.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { resetAutoMemoryStateForTests } from './state.js';
 
@@ -77,37 +78,34 @@ describe('auto-memory extraction', () => {
     const touched = await applyExtractedMemoryPatches(projectRoot, patches);
     expect(touched).toEqual(['user', 'reference']);
 
-    const userTopic = await fs.readFile(getAutoMemoryTopicPath(projectRoot, 'user'), 'utf-8');
-    const referenceTopic = await fs.readFile(getAutoMemoryTopicPath(projectRoot, 'reference'), 'utf-8');
     const index = await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    const userDoc = docs.find((doc) => doc.type === 'user');
+    const referenceDoc = docs.find((doc) => doc.type === 'reference');
 
-    expect(userTopic).toContain('- I prefer terse responses.');
-    expect(referenceTopic).toContain('grafana.internal/d/api-latency');
+    expect(userDoc?.body).toContain('I prefer terse responses.');
+    expect(referenceDoc?.body).toContain('grafana.internal/d/api-latency');
     expect(index).toContain('I prefer terse responses.');
     expect(index).toContain('grafana.internal/d/api-latency');
   });
 
-  it('writes richer schema fields when extraction patches include them', async () => {
+  it('writes why and how-to-apply fields when extraction patches include them', async () => {
     const touched = await applyExtractedMemoryPatches(projectRoot, [
       {
         topic: 'user',
         summary: 'User prefers terse responses.',
         why: 'They explicitly asked for concise replies.',
         howToApply: 'Lead with a short answer before details.',
-        stability: 'stable',
         sourceOffset: 0,
       },
     ]);
 
-    const userTopic = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
-      'utf-8',
-    );
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    const userDoc = docs.find((doc) => doc.type === 'user');
 
     expect(touched).toEqual(['user']);
-    expect(userTopic).toContain('  - Why: They explicitly asked for concise replies.');
-    expect(userTopic).toContain('  - How to apply: Lead with a short answer before details.');
-    expect(userTopic).toContain('  - Stability: stable');
+    expect(userDoc?.body).toContain('Why: They explicitly asked for concise replies.');
+    expect(userDoc?.body).toContain('How to apply: Lead with a short answer before details.');
   });
 
   it('updates cursor and avoids duplicate writes for repeated extraction', async () => {

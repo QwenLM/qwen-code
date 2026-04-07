@@ -29,6 +29,7 @@ export interface OpenAICredentials {
 export interface UIActions {
   openThemeDialog: () => void;
   openEditorDialog: () => void;
+  openMemoryDialog: () => void;
   handleThemeSelect: (
     themeName: string | undefined,
     scope: SettingScope,
@@ -60,6 +61,7 @@ export interface UIActions {
   ) => void;
   exitEditorDialog: () => void;
   closeSettingsDialog: () => void;
+  closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;

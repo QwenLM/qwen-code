@@ -19,22 +19,22 @@ import { compressCommand } from '../ui/commands/compressCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
-import { dreamCommand } from '../ui/commands/dreamCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
-import { forgetCommand } from '../ui/commands/forgetCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
 import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
 import { initCommand } from '../ui/commands/initCommand.js';
 import { languageCommand } from '../ui/commands/languageCommand.js';
 import { mcpCommand } from '../ui/commands/mcpCommand.js';
+import { dreamCommand } from '../ui/commands/dreamCommand.js';
+import { forgetCommand } from '../ui/commands/forgetCommand.js';
 import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
-import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { rememberCommand } from '../ui/commands/rememberCommand.js';
+import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
@@ -78,22 +78,22 @@ export class BuiltinCommandLoader implements ICommandLoader {
       contextCommand,
       copyCommand,
       docsCommand,
-      dreamCommand,
       directoryCommand,
       editorCommand,
       exportCommand,
       extensionsCommand,
-      forgetCommand,
       helpCommand,
       ...(this.config?.getEnableHooks() ? [hooksCommand] : []),
       await ideCommand(),
       initCommand,
       languageCommand,
       mcpCommand,
+      dreamCommand,
+      forgetCommand,
       memoryCommand,
       modelCommand,
-      permissionsCommand,
       rememberCommand,
+      permissionsCommand,
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,
       restoreCommand(this.config),

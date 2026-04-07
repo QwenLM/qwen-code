@@ -127,9 +127,6 @@ export * from './memory/entries.js';
 export * from './memory/indexer.js';
 export * from './memory/prompt.js';
 export * from './memory/state.js';
-export * from './memory/status.js';
-export * from './memory/forget.js';
-export * from './memory/governance.js';
 export * from './memory/extractionAgentPlanner.js';
 export * from './memory/extractionPlanner.js';
 export * from './memory/extract.js';
@@ -140,6 +137,9 @@ export * from './memory/dreamScheduler.js';
 export * from './memory/scan.js';
 export * from './memory/relevanceSelector.js';
 export * from './memory/recall.js';
+export * from './memory/forget.js';
+export * from './memory/governance.js';
+export * from './memory/status.js';
 
 // ============================================================================
 // IDE Support

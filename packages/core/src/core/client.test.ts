@@ -398,6 +398,7 @@ describe('Gemini Client (client.ts)', () => {
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getEnableHooks: vi.fn().mockReturnValue(false),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
@@ -1331,14 +1332,17 @@ hello
 
     it('should prepend relevant managed auto-memory prompt when recall returns content', async () => {
       vi.mocked(resolveRelevantAutoMemoryPromptForQuery).mockResolvedValue({
-        prompt: '## Relevant Managed Auto-Memory\n\n- User prefers terse responses.',
+        prompt: '## Relevant memory\n\nUser prefers terse responses.',
         selectedDocs: [
           {
             type: 'user',
             filePath: '/test/project/root/.qwen/memory/user.md',
+            relativePath: 'user.md',
+            filename: 'user.md',
             title: 'User Memory',
             description: 'User preferences',
             body: '- User prefers terse responses.',
+            mtimeMs: 1,
           },
         ],
         strategy: 'model',
@@ -1376,7 +1380,7 @@ hello
       expect(mockTurnRunFn).toHaveBeenCalledWith(
         'test-model',
         expect.arrayContaining([
-          '## Relevant Managed Auto-Memory\n\n- User prefers terse responses.',
+          '## Relevant memory\n\nUser prefers terse responses.',
           'Please answer tersely',
         ]),
         expect.any(AbortSignal),
@@ -1386,14 +1390,17 @@ hello
     it('should track surfaced managed memory paths across user queries', async () => {
       vi.mocked(resolveRelevantAutoMemoryPromptForQuery)
         .mockResolvedValueOnce({
-          prompt: '## Relevant Managed Auto-Memory\n\n- User prefers terse responses.',
+          prompt: '## Relevant memory\n\nUser prefers terse responses.',
           selectedDocs: [
             {
               type: 'user',
               filePath: '/test/project/root/.qwen/memory/user.md',
+              relativePath: 'user.md',
+              filename: 'user.md',
               title: 'User Memory',
               description: 'User preferences',
               body: '- User prefers terse responses.',
+              mtimeMs: 1,
             },
           ],
           strategy: 'model',
@@ -1492,7 +1499,7 @@ hello
         sessionId: 'test-session-id',
         config: mockConfig,
       });
-      expect(events).toContainEqual({
+      expect(events).not.toContainEqual({
         type: GeminiEventType.HookSystemMessage,
         value: 'Managed auto-memory updated: user.md',
       });

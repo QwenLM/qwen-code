@@ -17,27 +17,8 @@ export const AUTO_MEMORY_SCHEMA_VERSION = 1;
 
 export interface AutoMemorySourceRef {
   sessionId?: string;
-  transcriptPath?: string;
   recordedAt: string;
   messageIds?: string[];
-}
-
-export interface AutoMemoryEntry {
-  id: string;
-  type: AutoMemoryType;
-  title: string;
-  summary: string;
-  tags: string[];
-  lastUpdated: string;
-  stability: 'working' | 'stable';
-  sources: AutoMemorySourceRef[];
-}
-
-export interface AutoMemoryTopicDocument {
-  type: AutoMemoryType;
-  title: string;
-  description: string;
-  entries: AutoMemoryEntry[];
 }
 
 export interface AutoMemoryMetadata {
@@ -57,7 +38,6 @@ export interface AutoMemoryMetadata {
 
 export interface AutoMemoryExtractCursor {
   sessionId?: string;
-  transcriptPath?: string;
   processedOffset?: number;
   updatedAt: string;
 }

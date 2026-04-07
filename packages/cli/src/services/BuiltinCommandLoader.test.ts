@@ -82,23 +82,9 @@ vi.mock('../ui/commands/clearCommand.js', () => ({ clearCommand: {} }));
 vi.mock('../ui/commands/compressCommand.js', () => ({ compressCommand: {} }));
 vi.mock('../ui/commands/docsCommand.js', () => ({ docsCommand: {} }));
 vi.mock('../ui/commands/exportCommand.js', () => ({ exportCommand: {} }));
-vi.mock('../ui/commands/dreamCommand.js', () => ({
-  dreamCommand: {
-    name: 'dream',
-    description: 'Dream command',
-    kind: 'built-in',
-  },
-}));
 vi.mock('../ui/commands/editorCommand.js', () => ({ editorCommand: {} }));
 vi.mock('../ui/commands/extensionsCommand.js', () => ({
   extensionsCommand: {},
-}));
-vi.mock('../ui/commands/forgetCommand.js', () => ({
-  forgetCommand: {
-    name: 'forget',
-    description: 'Forget command',
-    kind: 'built-in',
-  },
 }));
 vi.mock('../ui/commands/helpCommand.js', () => ({ helpCommand: {} }));
 vi.mock('../ui/commands/memoryCommand.js', () => ({ memoryCommand: {} }));
@@ -108,13 +94,6 @@ vi.mock('../ui/commands/modelCommand.js', () => ({
 }));
 vi.mock('../ui/commands/quitCommand.js', () => ({
   quitCommand: {},
-}));
-vi.mock('../ui/commands/rememberCommand.js', () => ({
-  rememberCommand: {
-    name: 'remember',
-    description: 'Remember command',
-    kind: 'built-in',
-  },
 }));
 vi.mock('../ui/commands/statsCommand.js', () => ({ statsCommand: {} }));
 vi.mock('../ui/commands/themeCommand.js', () => ({ themeCommand: {} }));
@@ -206,14 +185,6 @@ describe('BuiltinCommandLoader', () => {
     const modelCmd = commands.find((c) => c.name === 'model');
     expect(modelCmd).toBeDefined();
 
-    const dreamCmd = commands.find((c) => c.name === 'dream');
-    expect(dreamCmd).toBeDefined();
-
-    const forgetCmd = commands.find((c) => c.name === 'forget');
-    expect(forgetCmd).toBeDefined();
-
-    const rememberCmd = commands.find((c) => c.name === 'remember');
-    expect(rememberCmd).toBeDefined();
   });
 
   it('should include trust command when folder trust is enabled', async () => {

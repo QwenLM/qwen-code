@@ -8,50 +8,64 @@ import { describe, expect, it } from 'vitest';
 import {
   appendManagedAutoMemoryToUserMemory,
   buildManagedAutoMemoryPrompt,
-  MANAGED_AUTO_MEMORY_HEADER,
-  MAX_MANAGED_AUTO_MEMORY_CHARS,
+  MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
 } from './prompt.js';
 
 describe('managed auto-memory prompt helpers', () => {
-  it('returns empty string when no managed index content exists', () => {
-    expect(buildManagedAutoMemoryPrompt()).toBe('');
-    expect(buildManagedAutoMemoryPrompt('   \n\n ')).toBe('');
+  it('builds the Claude-style memory mechanics prompt even when MEMORY.md is empty', () => {
+    const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
+
+    expect(prompt).toContain('# auto memory');
+    expect(prompt).toContain('persistent, file-based memory system');
+    expect(prompt).toContain('/tmp/project/.qwen/memory');
+    expect(prompt).toContain('Your MEMORY.md is currently empty');
   });
 
-  it('builds a managed auto-memory prompt block from the index content', () => {
-    const prompt = buildManagedAutoMemoryPrompt('# Managed Auto-Memory Index');
+  it('embeds the current MEMORY.md index content', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      '- [User Memory](user/terse.md) — User prefers terse responses.',
+    );
 
-    expect(prompt).toContain(MANAGED_AUTO_MEMORY_HEADER);
-    expect(prompt).toContain('# Managed Auto-Memory Index');
-    expect(prompt).toContain('durable project memory');
+    expect(prompt).toContain('## MEMORY.md');
+    expect(prompt).toContain('[User Memory](user/terse.md)');
+    expect(prompt).toContain('User prefers terse responses.');
   });
 
   it('appends managed auto-memory after existing hierarchical memory', () => {
     const result = appendManagedAutoMemoryToUserMemory(
       '--- Context from: QWEN.md ---\nProject rules',
-      '# Managed Auto-Memory Index',
+      '/tmp/project/.qwen/memory',
+      '- [Project Memory](project/release-freeze.md) — Release freeze starts Friday.',
     );
 
     expect(result).toContain('Project rules');
     expect(result).toContain('\n\n---\n\n');
-    expect(result).toContain(MANAGED_AUTO_MEMORY_HEADER);
+    expect(result).toContain('# auto memory');
   });
 
   it('returns only managed auto-memory when hierarchical memory is empty', () => {
     const result = appendManagedAutoMemoryToUserMemory(
       '   ',
-      '# Managed Auto-Memory Index',
+      '/tmp/project/.qwen/memory',
+      '- [Reference](reference/grafana.md) — Grafana dashboard link.',
     );
 
-    expect(result).toContain(MANAGED_AUTO_MEMORY_HEADER);
-    expect(result.startsWith(MANAGED_AUTO_MEMORY_HEADER)).toBe(true);
+    expect(result).toContain('# auto memory');
+    expect(result.startsWith('# auto memory')).toBe(true);
   });
 
   it('truncates oversized managed auto-memory index content', () => {
-    const oversizedIndex = 'x'.repeat(MAX_MANAGED_AUTO_MEMORY_CHARS + 100);
-    const result = buildManagedAutoMemoryPrompt(oversizedIndex);
+    const oversizedIndex = Array.from(
+      { length: MAX_MANAGED_AUTO_MEMORY_INDEX_LINES + 50 },
+      (_, index) => `- [Memory ${index}](memory-${index}.md) — hook ${index}`,
+    ).join('\n');
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      oversizedIndex,
+    );
 
-    expect(result.length).toBeLessThan(13_000);
-    expect(result).toContain('truncated for prompt budget');
+    expect(result).toContain('WARNING: MEMORY.md is 250 lines (limit: 200). Only part of it was loaded.');
+    expect(result.split('\n').length).toBeLessThan(400);
   });
 });

@@ -11,9 +11,10 @@ import {
   scanAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
+import { memoryAge, memoryFreshnessText } from './memoryAge.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 
-const MAX_RELEVANT_DOCS = 3;
+const MAX_RELEVANT_DOCS = 5;
 const MAX_DOC_BODY_CHARS = 1_200;
 const debugLogger = createDebugLogger('AUTO_MEMORY_RECALL');
 
@@ -104,17 +105,20 @@ export function buildRelevantAutoMemoryPrompt(
   }
 
   return [
-    '## Relevant Managed Auto-Memory',
+    '## Relevant memory',
     '',
-    'Use the following project memory only when it is directly relevant to the current request.',
+    'Use the following memories only when they are directly relevant to the current request. Verify file/function claims before relying on them.',
     '',
     ...docs.flatMap((doc) => {
       const body = truncateBody(doc.body);
+      const staleness = memoryFreshnessText(doc.mtimeMs);
       return [
-        `### ${doc.title} (${path.basename(doc.filePath)})`,
+        `### ${doc.title} (${doc.relativePath || path.basename(doc.filePath)})`,
+        `Saved ${memoryAge(doc.mtimeMs)}.`,
         doc.description,
         '',
         body || '_No detailed entries yet._',
+        ...(staleness ? ['', `> NOTE: ${staleness}`] : []),
         '',
       ];
     }),
@@ -125,6 +129,7 @@ export interface ResolveRelevantAutoMemoryPromptOptions {
   config?: Config;
   excludedFilePaths?: Iterable<string>;
   limit?: number;
+  recentTools?: readonly string[];
 }
 
 export interface RelevantAutoMemoryPromptResult {
@@ -175,6 +180,7 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         query,
         docs,
         limit,
+        options.recentTools ?? [],
       );
       return {
         prompt: buildRelevantAutoMemoryPrompt(selectedDocs),

@@ -40,9 +40,12 @@ describe('planAutoMemoryExtractionPatchesByModel', () => {
       {
         type: 'user',
         filePath: '/tmp/user.md',
+        relativePath: 'user.md',
+        filename: 'user.md',
         title: 'User Memory',
         description: 'User preferences',
         body: '- Existing terse preference.',
+        mtimeMs: 1,
       },
     ]);
   });
@@ -77,7 +80,9 @@ describe('planAutoMemoryExtractionPatchesByModel', () => {
       mockConfig,
       expect.objectContaining({
         purpose: 'auto-memory-extract',
-        systemInstruction: expect.stringContaining('You maintain durable managed memory'),
+        systemInstruction: expect.stringContaining(
+          'You are acting as the managed memory extraction planner',
+        ),
       }),
     );
   });

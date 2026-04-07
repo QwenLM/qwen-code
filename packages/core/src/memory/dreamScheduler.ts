@@ -25,6 +25,7 @@ import type { AutoMemoryMetadata } from './types.js';
 
 export const DEFAULT_AUTO_DREAM_MIN_HOURS = 24;
 export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
+const DREAM_LOCK_STALE_MS = 2 * 60 * 60 * 1000;
 
 export interface ScheduleManagedAutoMemoryDreamParams {
   projectRoot: string;
@@ -76,7 +77,13 @@ function hoursSince(lastDreamAt: string | undefined, now: Date): number | null {
 
 async function lockExists(projectRoot: string): Promise<boolean> {
   try {
-    await fs.access(getAutoMemoryConsolidationLockPath(projectRoot));
+    const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
+    const stats = await fs.stat(lockPath);
+    const ageMs = Date.now() - stats.mtimeMs;
+    if (ageMs > DREAM_LOCK_STALE_MS) {
+      await fs.rm(lockPath, { force: true });
+      return false;
+    }
     return true;
   } catch {
     return false;

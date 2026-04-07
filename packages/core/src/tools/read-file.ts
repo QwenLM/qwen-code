@@ -6,6 +6,7 @@
 
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
@@ -24,6 +25,8 @@ import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { isSubpaths, isSubpath } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
+import { isAutoMemPath, getMemoryBaseDir } from '../memory/paths.js';
+import { memoryFreshnessNote } from '../memory/memoryAge.js';
 
 /**
  * Parameters for the ReadFile tool
@@ -92,13 +95,17 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const userExtensionsDir = Storage.getUserExtensionsDir();
     const osTempDir = os.tmpdir();
 
+    // Auto-allow reads of any file under the global memory base dir — models
+    // legitimately read their own memory files without needing user approval.
+    const memoryBaseDir = getMemoryBaseDir();
     if (
       workspaceContext.isPathWithinWorkspace(filePath) ||
       isSubpath(projectTempDir, filePath) ||
       isSubpath(globalTempDir, filePath) ||
       isSubpath(osTempDir, filePath) ||
       isSubpaths(userSkillsDirs, filePath) ||
-      isSubpath(userExtensionsDir, filePath)
+      isSubpath(userExtensionsDir, filePath) ||
+      isSubpath(memoryBaseDir, filePath)
     ) {
       return 'allow';
     }
@@ -131,6 +138,26 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       llmContent = `Showing lines ${start}-${end} of ${total} total lines.\n\n---\n\n${result.llmContent}`;
     } else {
       llmContent = result.llmContent || '';
+    }
+
+    // For memory files, prepend a per-file staleness caveat so the model knows
+    // the content is a point-in-time snapshot and may be stale.
+    const projectRoot = this.config.getTargetDir();
+    if (
+      typeof llmContent === 'string' &&
+      isAutoMemPath(path.resolve(this.params.file_path), projectRoot)
+    ) {
+      // Only compute mtime when we actually need the note (avoids extra stat on
+      // every non-memory file read).
+      try {
+        const stat = await fs.stat(path.resolve(this.params.file_path));
+        const note = memoryFreshnessNote(stat.mtimeMs);
+        if (note) {
+          llmContent = note + llmContent;
+        }
+      } catch {
+        // Best-effort — if stat fails, omit the note silently.
+      }
     }
 
     const lines =

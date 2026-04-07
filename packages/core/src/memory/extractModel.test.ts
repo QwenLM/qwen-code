@@ -12,7 +12,7 @@ import type { Config } from '../config/config.js';
 import { planAutoMemoryExtractionPatchesByAgent } from './extractionAgentPlanner.js';
 import { planAutoMemoryExtractionPatchesByModel } from './extractionPlanner.js';
 import { runAutoMemoryExtract } from './extract.js';
-import { getAutoMemoryTopicPath } from './paths.js';
+import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { resetAutoMemoryStateForTests } from './state.js';
 
@@ -78,11 +78,10 @@ describe('auto-memory extraction with model planner', () => {
       expect.any(Array),
     );
 
-    const referenceTopic = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'reference'),
-      'utf-8',
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    expect(docs.find((doc) => doc.type === 'reference')?.body).toContain(
+      'Latency dashboard: https://grafana.internal/d/api-latency',
     );
-    expect(referenceTopic).toContain('Latency dashboard: https://grafana.internal/d/api-latency');
   });
 
   it('falls back to heuristic extraction when the model planner fails', async () => {
@@ -106,10 +105,9 @@ describe('auto-memory extraction with model planner', () => {
     });
 
     expect(result.touchedTopics).toEqual(['user']);
-    const userTopic = await fs.readFile(
-      getAutoMemoryTopicPath(projectRoot, 'user'),
-      'utf-8',
+    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+    expect(docs.find((doc) => doc.type === 'user')?.body).toContain(
+      'I prefer terse responses.',
     );
-    expect(userTopic).toContain('- I prefer terse responses.');
   });
 });

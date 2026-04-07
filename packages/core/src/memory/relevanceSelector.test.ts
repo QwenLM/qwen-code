@@ -18,16 +18,22 @@ const docs: ScannedAutoMemoryDocument[] = [
   {
     type: 'user',
     filePath: '/tmp/user.md',
+    relativePath: 'user.md',
+    filename: 'user.md',
     title: 'User Memory',
     description: 'User preferences',
     body: '- User prefers terse responses.',
+    mtimeMs: 1,
   },
   {
     type: 'reference',
     filePath: '/tmp/reference.md',
+    relativePath: 'reference.md',
+    filename: 'reference.md',
     title: 'Reference Memory',
     description: 'Operational references',
     body: '- Grafana dashboard: https://grafana.internal/d/api-latency',
+    mtimeMs: 2,
   },
 ];
 
@@ -40,8 +46,7 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
 
   it('returns documents chosen by the side-query selector', async () => {
     vi.mocked(runSideQuery).mockResolvedValue({
-      relevantFilePaths: ['/tmp/reference.md'],
-      reasoning: 'The request asks for dashboard information.',
+      selected_memories: ['reference.md'],
     });
 
     const selected = await selectRelevantAutoMemoryDocumentsByModel(
@@ -71,15 +76,15 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
     expect(runSideQuery).not.toHaveBeenCalled();
   });
 
-  it('throws when selector returns unknown file paths', async () => {
+  it('throws when selector returns unknown relative paths', async () => {
     vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
       const error = options.validate?.({
-        relevantFilePaths: ['/tmp/unknown.md'],
+        selected_memories: ['unknown.md'],
       });
       if (error) {
         throw new Error(error);
       }
-      return { relevantFilePaths: [] };
+      return { selected_memories: [] };
     });
 
     await expect(
@@ -89,6 +94,6 @@ describe('selectRelevantAutoMemoryDocumentsByModel', () => {
         docs,
         2,
       ),
-    ).rejects.toThrow('Recall selector returned unknown file path');
+    ).rejects.toThrow('Recall selector returned unknown relative path');
   });
 });

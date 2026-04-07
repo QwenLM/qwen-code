@@ -11,6 +11,11 @@ import {
 } from '../background/backgroundAgentRunner.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { safeJsonParse } from '../utils/safeJsonParse.js';
+import {
+  MEMORY_FRONTMATTER_EXAMPLE,
+  TYPES_SECTION_INDIVIDUAL,
+  WHAT_NOT_TO_SAVE_SECTION,
+} from './prompt.js';
 import type { AutoMemoryType } from './types.js';
 import type {
   AutoMemoryExtractPatch,
@@ -20,19 +25,31 @@ import { scanAutoMemoryTopicDocuments } from './scan.js';
 
 const MAX_TOPIC_SUMMARY_CHARS = 280;
 
-const EXTRACTION_AGENT_SYSTEM_PROMPT = `You are a background memory extraction agent for an AI coding assistant.
-
-Your job is to read the provided transcript slice and current managed memory topic summaries, then return only durable memory patches worth saving long-term.
-
-Rules:
-- Output JSON only.
-- Follow the schema exactly.
-- Extract only durable facts stated by the user.
-- Ignore temporary, session-specific, speculative, or question content.
-- Use one of the allowed topics: user, feedback, project, reference.
-- Keep summaries concise and suitable for bullet points.
-- Do not include leading bullet markers.
-- You may use read-only tools to inspect topic files when the summaries seem insufficient.`;
+const EXTRACTION_AGENT_SYSTEM_PROMPT = [
+  'You are now acting as the managed memory extraction subagent for an AI coding assistant.',
+  '',
+  'Analyze the provided recent transcript slice and use it to update durable managed memory.',
+  '',
+  'You will be given current managed memory topic summaries. Improve existing memory rather than creating duplicate facts.',
+  '',
+  'Rules:',
+  '- Output JSON only.',
+  '- Follow the schema exactly.',
+  '- Extract only durable facts stated by the user.',
+  '- Ignore temporary, session-specific, speculative, or question content.',
+  '- If the user explicitly asks the assistant to remember something durable, preserve it.',
+  '- Use one of the allowed topics: user, feedback, project, reference.',
+  '- Keep summaries concise and suitable for bullet points.',
+  '- Do not include leading bullet markers.',
+  '- You may use read-only tools to inspect topic files when the provided summaries seem insufficient.',
+  '- Do not investigate the repository or verify the memory against unrelated code. Work only from the provided transcript slice and managed memory context.',
+  '',
+  ...TYPES_SECTION_INDIVIDUAL,
+  ...WHAT_NOT_TO_SAVE_SECTION,
+  '',
+  'Memory file format reference:',
+  ...MEMORY_FRONTMATTER_EXAMPLE,
+].join('\n');
 
 const EXTRACTION_AGENT_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: 'object',
@@ -54,10 +71,6 @@ const EXTRACTION_AGENT_RESPONSE_SCHEMA: Record<string, unknown> = {
           },
           howToApply: {
             type: 'string',
-          },
-          stability: {
-            type: 'string',
-            enum: ['stable', 'working'],
           },
           sourceOffset: {
             type: 'integer',
@@ -158,7 +171,6 @@ function validateExtractionAgentResponse(
     summary: patch.summary.trim(),
     why: patch.why?.trim(),
     howToApply: patch.howToApply?.trim(),
-    stability: patch.stability,
     sourceOffset: patch.sourceOffset,
   }));
 }

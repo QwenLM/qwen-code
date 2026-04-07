@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import {
   BackgroundTaskDrainer,
@@ -14,7 +14,6 @@ import {
   BackgroundTaskRegistry,
   type BackgroundTaskState,
 } from '../background/taskRegistry.js';
-import { partToString } from '../utils/partUtils.js';
 import {
   type AutoMemoryExtractResult,
   runAutoMemoryExtract,
@@ -53,14 +52,17 @@ function buildSkippedExtractResult(
   };
 }
 
+function partIsSaveMemoryCall(part: Part): boolean {
+  return (
+    (part.functionCall?.name === 'save_memory') ||
+    (part.functionResponse?.name === 'save_memory')
+  );
+}
+
 function historySliceUsesMemoryTool(history: Content[]): boolean {
-  return history.some((message) => {
-    const rendered = partToString(message.parts ?? [], { verbose: true });
-    return (
-      rendered.includes('[Function Response: save_memory]') ||
-      rendered.includes('[Function Call: save_memory]')
-    );
-  });
+  return history.some((message) =>
+    (message.parts ?? []).some(partIsSaveMemoryCall),
+  );
 }
 
 export class ManagedAutoMemoryExtractRuntime {

@@ -578,11 +578,11 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('## Managed Auto-Memory');
+    expect(config.getUserMemory()).toContain('# auto memory');
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
   });
 
-  it('refreshHierarchicalMemory should preserve legacy behavior when no managed auto-memory index exists', async () => {
+  it('refreshHierarchicalMemory should include empty memory prompt when no managed auto-memory index exists', async () => {
     const config = new Config(baseParams);
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
@@ -593,9 +593,9 @@ describe('Server Config (config.ts)', () => {
 
     await config.refreshHierarchicalMemory();
 
-    expect(config.getUserMemory()).toBe(
-      '--- Context from: QWEN.md ---\nProject rules',
-    );
+    expect(config.getUserMemory()).toContain('Project rules');
+    expect(config.getUserMemory()).toContain('# auto memory');
+    expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
   });
 
   it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {

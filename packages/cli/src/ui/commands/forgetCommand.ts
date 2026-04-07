@@ -24,6 +24,7 @@ export const forgetCommand: SlashCommand = {
     const query = apply
       ? trimmedArgs.slice('--apply '.length).trim()
       : trimmedArgs;
+
     if (!query) {
       return {
         type: 'message',
@@ -41,12 +42,13 @@ export const forgetCommand: SlashCommand = {
       };
     }
 
+    const selection = await selectManagedAutoMemoryForgetCandidates(
+      config.getProjectRoot(),
+      query,
+      { config },
+    );
+
     if (!apply) {
-      const selection = await selectManagedAutoMemoryForgetCandidates(
-        config.getProjectRoot(),
-        query,
-        { config },
-      );
       return {
         type: 'message',
         messageType: 'info',
@@ -70,11 +72,6 @@ export const forgetCommand: SlashCommand = {
       };
     }
 
-    const selection = await selectManagedAutoMemoryForgetCandidates(
-      config.getProjectRoot(),
-      query,
-      { config },
-    );
     const result = await forgetManagedAutoMemoryMatches(
       config.getProjectRoot(),
       selection.matches,
