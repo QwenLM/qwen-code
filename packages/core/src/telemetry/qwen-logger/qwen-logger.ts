@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import { HttpsProxyAgent } from 'https-proxy-agent';
+import { Storage } from '../../config/storage.js';
 
 import type {
   StartSessionEvent,
@@ -302,7 +303,10 @@ export class QwenLogger {
 
   readSourceInfo(): string {
     try {
-      const sourceJsonPath = path.join(os.homedir(), '.qwen', 'source.json');
+      const sourceJsonPath = path.join(
+        Storage.getGlobalQwenDir(),
+        'source.json',
+      );
       if (fs.existsSync(sourceJsonPath)) {
         const sourceJsonContent = fs.readFileSync(sourceJsonPath, 'utf8');
         const sourceData = JSON.parse(sourceJsonContent);

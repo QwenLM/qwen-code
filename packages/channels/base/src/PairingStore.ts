@@ -22,7 +22,12 @@ export class PairingStore {
   private allowlistPath: string;
 
   constructor(channelName: string) {
-    this.dir = path.join(os.homedir(), '.qwen', 'channels');
+    const configDir = process.env['QWEN_CONFIG_DIR']
+      ? path.isAbsolute(process.env['QWEN_CONFIG_DIR'])
+        ? process.env['QWEN_CONFIG_DIR']
+        : path.resolve(process.env['QWEN_CONFIG_DIR'])
+      : path.join(os.homedir(), '.qwen');
+    this.dir = path.join(configDir, 'channels');
     this.pendingPath = path.join(this.dir, `${channelName}-pairing.json`);
     this.allowlistPath = path.join(this.dir, `${channelName}-allowlist.json`);
   }

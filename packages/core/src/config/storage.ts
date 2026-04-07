@@ -118,6 +118,10 @@ export class Storage {
   }
 
   static getGlobalQwenDir(): string {
+    const envDir = process.env['QWEN_CONFIG_DIR'];
+    if (envDir) {
+      return path.isAbsolute(envDir) ? envDir : path.resolve(envDir);
+    }
     const homeDir = os.homedir();
     if (!homeDir) {
       return path.join(os.tmpdir(), '.qwen');

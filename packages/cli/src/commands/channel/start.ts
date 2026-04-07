@@ -1,5 +1,4 @@
 import * as path from 'node:path';
-import * as os from 'node:os';
 import type { CommandModule } from 'yargs';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -17,13 +16,14 @@ import {
   removeServiceInfo,
 } from './pidfile.js';
 import { getExtensionManager } from '../extensions/utils.js';
+import { Storage } from '@qwen-code/qwen-code-core';
 
 const MAX_CRASH_RESTARTS = 3;
 const CRASH_WINDOW_MS = 5 * 60 * 1000; // 5-minute window for counting crashes
 const RESTART_DELAY_MS = 3000;
 
 function sessionsPath(): string {
-  return path.join(os.homedir(), '.qwen', 'channels', 'sessions.json');
+  return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
 }
 
 function loadChannelsConfig(): Record<string, unknown> {

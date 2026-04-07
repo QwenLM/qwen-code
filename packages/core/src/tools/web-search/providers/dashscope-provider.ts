@@ -5,7 +5,6 @@
  */
 
 import { promises as fs } from 'node:fs';
-import * as os from 'os';
 import * as path from 'path';
 import { BaseWebSearchProvider } from '../base-provider.js';
 import type {
@@ -14,6 +13,7 @@ import type {
   DashScopeProviderConfig,
 } from '../types.js';
 import type { QwenCredentials } from '../../../qwen/qwenOAuth2.js';
+import { Storage } from '../../../config/storage.js';
 
 interface DashScopeSearchItem {
   _id: string;
@@ -59,14 +59,13 @@ interface DashScopeSearchResponse {
 }
 
 // File System Configuration
-const QWEN_DIR = '.qwen';
 const QWEN_CREDENTIAL_FILENAME = 'oauth_creds.json';
 
 /**
  * Get the path to the cached OAuth credentials file.
  */
 function getQwenCachedCredentialPath(): string {
-  return path.join(os.homedir(), QWEN_DIR, QWEN_CREDENTIAL_FILENAME);
+  return path.join(Storage.getGlobalQwenDir(), QWEN_CREDENTIAL_FILENAME);
 }
 
 /**

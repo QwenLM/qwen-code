@@ -11,7 +11,7 @@ import {
   unlinkSync,
   chmodSync,
 } from 'node:fs';
-import { join } from 'node:path';
+import { join, isAbsolute, resolve } from 'node:path';
 import { homedir } from 'node:os';
 
 export const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com';
@@ -23,10 +23,18 @@ export interface AccountData {
   savedAt: string;
 }
 
+function getGlobalQwenDir(): string {
+  const envDir = process.env['QWEN_CONFIG_DIR'];
+  if (envDir) {
+    return isAbsolute(envDir) ? envDir : resolve(envDir);
+  }
+  return join(homedir(), '.qwen');
+}
+
 export function getStateDir(): string {
   const dir =
     process.env['WEIXIN_STATE_DIR'] ||
-    join(homedir(), '.qwen', 'channels', 'weixin');
+    join(getGlobalQwenDir(), 'channels', 'weixin');
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }

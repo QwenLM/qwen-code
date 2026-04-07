@@ -19,7 +19,8 @@
 
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join, dirname } from 'node:path';
+import path from 'node:path';
+const { join, dirname } = path;
 import stripJsonComments from 'strip-json-comments';
 import os from 'node:os';
 import yargs from 'yargs';
@@ -35,7 +36,12 @@ const argv = yargs(hideBin(process.argv)).option('q', {
 let qwenSandbox = process.env.QWEN_SANDBOX;
 
 if (!qwenSandbox) {
-  const userSettingsFile = join(os.homedir(), '.qwen', 'settings.json');
+  const configDir = process.env.QWEN_CONFIG_DIR
+    ? path.isAbsolute(process.env.QWEN_CONFIG_DIR)
+      ? process.env.QWEN_CONFIG_DIR
+      : path.resolve(process.env.QWEN_CONFIG_DIR)
+    : join(os.homedir(), '.qwen');
+  const userSettingsFile = join(configDir, 'settings.json');
   if (existsSync(userSettingsFile)) {
     const settings = JSON.parse(
       stripJsonComments(readFileSync(userSettingsFile, 'utf-8')),

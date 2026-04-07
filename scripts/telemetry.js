@@ -7,22 +7,22 @@
  */
 
 import { execSync } from 'node:child_process';
-import { join } from 'node:path';
+import path from 'node:path';
+const { join } = path;
 import { existsSync, readFileSync } from 'node:fs';
 
 const projectRoot = join(import.meta.dirname, '..');
 
-const SETTINGS_DIRECTORY_NAME = '.qwen';
-const USER_SETTINGS_DIR = join(
-  process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '',
-  SETTINGS_DIRECTORY_NAME,
-);
+const USER_SETTINGS_DIR = process.env.QWEN_CONFIG_DIR
+  ? path.isAbsolute(process.env.QWEN_CONFIG_DIR)
+    ? process.env.QWEN_CONFIG_DIR
+    : path.resolve(process.env.QWEN_CONFIG_DIR)
+  : join(
+      process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '',
+      '.qwen',
+    );
 const USER_SETTINGS_PATH = join(USER_SETTINGS_DIR, 'settings.json');
-const WORKSPACE_SETTINGS_PATH = join(
-  projectRoot,
-  SETTINGS_DIRECTORY_NAME,
-  'settings.json',
-);
+const WORKSPACE_SETTINGS_PATH = join(projectRoot, '.qwen', 'settings.json');
 
 let settingsTarget = undefined;
 

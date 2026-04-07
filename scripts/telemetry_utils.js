@@ -34,8 +34,12 @@ function getProjectHash(projectRoot) {
 
 const projectHash = getProjectHash(projectRoot);
 
-// User-level .gemini directory in home
-const USER_GEMINI_DIR = path.join(os.homedir(), '.qwen');
+// User-level config directory (respects QWEN_CONFIG_DIR env var)
+const USER_GEMINI_DIR = process.env.QWEN_CONFIG_DIR
+  ? path.isAbsolute(process.env.QWEN_CONFIG_DIR)
+    ? process.env.QWEN_CONFIG_DIR
+    : path.resolve(process.env.QWEN_CONFIG_DIR)
+  : path.join(os.homedir(), '.qwen');
 // Project-level .gemini directory in the workspace
 const WORKSPACE_QWEN_DIR = path.join(projectRoot, '.qwen');
 

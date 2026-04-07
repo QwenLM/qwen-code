@@ -24,7 +24,12 @@ export class QwenSessionManager {
   private qwenDir: string;
 
   constructor() {
-    this.qwenDir = path.join(os.homedir(), '.qwen');
+    const envDir = process.env['QWEN_CONFIG_DIR'];
+    this.qwenDir = envDir
+      ? path.isAbsolute(envDir)
+        ? envDir
+        : path.resolve(envDir)
+      : path.join(os.homedir(), '.qwen');
   }
 
   /**
