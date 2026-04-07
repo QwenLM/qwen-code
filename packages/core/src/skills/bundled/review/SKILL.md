@@ -43,7 +43,8 @@ Based on the remaining arguments:
     2. Fetch the PR branch into a unique local ref: `git fetch <remote> pull/<number>/head:qwen-review/pr-<number>` where `<remote>` is the matched remote from the URL-based detection above, or `origin` by default for pure integer PR numbers. Do NOT use `gh pr checkout` — it modifies the current working tree. If fetch fails (auth, network, PR doesn't exist), inform the user and stop.
     3. **Incremental review check** (run BEFORE creating worktree to avoid wasting time): If `.qwen/review-cache/pr-<number>.json` exists, read the cached `lastCommitSha` and `lastModelId`. Get the fetched HEAD SHA via `git rev-parse qwen-review/pr-<number>` and the current model ID (`{{model}}`). Then:
        - If SHAs differ → continue to create worktree (step 4).
-       - If SHAs are the same **and** model is the same **and** `--comment` was NOT specified → inform the user "No new changes since last review", delete the fetched ref (`git branch -D qwen-review/pr-<number> 2>/dev/null || true`), and stop. No worktree needed. However, if `--comment` WAS specified, inform the user "No new code changes, but posting comments from previous review" and proceed to Step 9 directly using cached findings (skip Steps 2-8).
+       - If SHAs are the same **and** model is the same **and** `--comment` was NOT specified → inform the user "No new changes since last review", delete the fetched ref (`git branch -D qwen-review/pr-<number> 2>/dev/null || true`), and stop. No worktree needed.
+       - If SHAs are the same **and** model is the same **but** `--comment` WAS specified → run the full review anyway (the user explicitly wants comments posted). Inform the user: "No new code changes. Running review to post inline comments."
        - If SHAs are the same **but** model is different → continue to create worktree. Inform the user: "Previous review used {cached_model}. Running full review with {{model}} for a second opinion."
     4. Get the PR's remote branch name for later push: `gh pr view <number> --json headRefName --jq '.headRefName'`. If this fails, inform the user and stop.
     5. Create a temporary worktree: `git worktree add .qwen/tmp/review-pr-<number> qwen-review/pr-<number>`. If this fails, inform the user and stop.
@@ -515,12 +516,9 @@ If reviewing a PR, update the review cache for incremental review support:
      "lastModelId": "{{model}}",
      "lastReviewDate": "<ISO timestamp>",
      "findingsCount": <number>,
-     "verdict": "<verdict>",
-     "reportPath": "<path to the saved report from Step 10>"
+     "verdict": "<verdict>"
    }
    ```
-
-   The `reportPath` allows Step 9 to load prior findings when `--comment` is used on an unchanged PR (see incremental check in Step 1).
 
 3. Ensure `.qwen/reviews/` and `.qwen/review-cache/` are ignored by `.gitignore` — a broader rule like `.qwen/*` also satisfies this. Only warn the user if those paths are not ignored at all.
 
