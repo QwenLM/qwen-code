@@ -455,7 +455,7 @@ If posting an inline comment fails (e.g., line not part of the diff, auth error)
 
 Only call `gh pr review` in these cases:
 
-- **Approve** or **Request changes** → submit with minimal body (e.g., "Request changes — see inline comments.\n\n*Reviewed by {{model}} via Qwen Code /review*"). These verdicts carry approval/blocking status.
+- **Approve** or **Request changes** → submit with a **one-line** body only. Do NOT include analysis, findings summary, or explanations — those are already in the inline comments. Example: "Approve — LGTM.\n\n*Reviewed by {{model}} via Qwen Code /review*" or "Request changes — see inline comments.\n\n*Reviewed by {{model}} via Qwen Code /review*". These verdicts carry approval/blocking status.
 - **Comment** but **some** inline comments failed → submit with the failed findings in the body.
 - **No** inline comments posted (all failed or terminal-only) → submit with full findings summary.
 
