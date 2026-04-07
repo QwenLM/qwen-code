@@ -37,6 +37,7 @@ import {
   getProjectModesDir,
 } from './mode-load.js';
 import { modeValidator } from './mode-validation.js';
+import { ModeHookRegistry, type HookTrigger, type HookExecutionResult } from './mode-hooks.js';
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -57,15 +58,18 @@ export type ModeManagerEvents = {
 export class ModeManager extends EventEmitter {
   private currentMode: ModeRuntime | null = null;
   private modeRegistry: Map<string, ModeConfig> = new Map();
+  private hookRegistry: ModeHookRegistry;
   private readonly changeListeners: Set<() => void> = new Set();
 
   constructor(
     private readonly toolRegistry: ToolRegistry,
     private readonly skillManager: SkillManager,
     private readonly subagentManager: SubagentManager,
+    private readonly config?: Config,
     private readonly projectDir?: string,
   ) {
     super();
+    this.hookRegistry = new ModeHookRegistry(config!);
   }
 
   // ─── Change Listeners ──────────────────────────────────────────────────────
@@ -250,6 +254,15 @@ export class ModeManager extends EventEmitter {
 
     // Apply mode settings to config
     await this.applyModeToConfig(modeConfig, config);
+
+    // Execute onEnter hooks
+    const enterResults = await this.executeHooks(modeName, 'onEnter');
+    const failedHooks = enterResults.filter((r) => !r.success);
+    if (failedHooks.length > 0) {
+      debugLogger.warn(
+        `${failedHooks.length} onEnter hook(s) failed for mode "${modeName}"`,
+      );
+    }
 
     // Update runtime state
     this.currentMode = {
@@ -509,5 +522,38 @@ export class ModeManager extends EventEmitter {
     debugLogger.debug(
       `Applied mode settings: ${modeConfig.icon} ${modeConfig.displayName}`,
     );
+  }
+
+  // ─── Hook Management ───────────────────────────────────────────────────────
+
+  /**
+   * Execute hooks for a given trigger in the current mode.
+   *
+   * @param modeName - Mode name
+   * @param trigger - Hook trigger type
+   * @returns Array of execution results
+   */
+  async executeHooks(
+    modeName: string,
+    trigger: HookTrigger,
+  ): Promise<HookExecutionResult[]> {
+    return this.hookRegistry.executeHooks(modeName, trigger);
+  }
+
+  /**
+   * Register hooks for a mode.
+   *
+   * @param modeName - Mode name
+   * @param hooks - Array of hook configurations
+   */
+  registerHooks(modeName: string, hooks: ModeHook[]): void {
+    this.hookRegistry.registerHooks(modeName, hooks);
+  }
+
+  /**
+   * Get the hook registry for inspection.
+   */
+  getHookRegistry(): ModeHookRegistry {
+    return this.hookRegistry;
   }
 }

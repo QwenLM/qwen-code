@@ -69,3 +69,12 @@ export {
   type ParallelGroupRuntime,
   type ParallelRunnerEvents,
 } from './parallel-task-runner.js';
+
+// Mode hooks
+export {
+  ModeHookRegistry,
+  type ModeHook,
+  type HookTrigger,
+  type HookCommandType,
+  type HookExecutionResult,
+} from './mode-hooks.js';

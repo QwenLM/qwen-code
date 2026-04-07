@@ -34,6 +34,7 @@ import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
 import { modeCommand } from '../ui/commands/modeCommand.js';
 import { parallelCommand } from '../ui/commands/parallelCommand.js';
+import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
@@ -107,6 +108,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       modelCommand,
       modeCommand,
       parallelCommand,
+      hooksCommand,
       permissionsCommand,
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,

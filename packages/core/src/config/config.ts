@@ -79,6 +79,7 @@ import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { ModeManager } from '../modes/mode-manager.js';
 import type { ModeRuntime } from '../modes/types.js';
+import type { ModeHook, HookExecutionResult } from '../modes/mode-hooks.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -997,6 +998,7 @@ export class Config {
       this.toolRegistry,
       this.skillManager!,
       this.subagentManager,
+      this,
       this.targetDir,
     );
     await this.modeManager.loadAllModes(this);
@@ -2165,6 +2167,15 @@ export class Config {
 
   async resetMode(): Promise<void> {
     await this.modeManager.resetToDefault(this);
+  }
+
+  registerModeHooks(hooks: ModeHook[]): void {
+    this.modeManager.registerHooks(this.modeManager.getCurrentMode()?.config.name ?? 'general', hooks);
+  }
+
+  async executeModeHooks(trigger: 'onEnter' | 'onExit' | 'onStart' | 'beforeAction' | 'afterAction'): Promise<HookExecutionResult[]> {
+    const modeName = this.modeManager.getCurrentMode()?.config.name ?? 'general';
+    return this.modeManager.executeHooks(modeName, trigger);
   }
 
   getSkillManager(): SkillManager | null {
