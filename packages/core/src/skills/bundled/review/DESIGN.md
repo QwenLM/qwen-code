@@ -11,7 +11,7 @@
 
 **Decision:** 5 agents. The marginal cost (5x vs 1x) is acceptable because:
 
-1. Parallel execution means time cost is ~1x
+1. Parallel execution means time cost is ~1x (all 5 agents must launch in one response)
 2. Dimensional focus produces higher recall (fewer missed issues)
 3. Agent 4 (Undirected Audit) catches cross-dimensional issues
 4. The "Silence is better than noise" principle + verification controls precision
@@ -107,17 +107,19 @@ Key implementation detail: Step 9 must use the owner/repo extracted from the URL
 
 ## Rejected alternatives
 
-| Idea                                           | Why rejected                                                                                                              |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `.qwen/review-tools.md` for custom tool config | Requires users to learn a new format. Auto-discovery from CI config achieves the same result with zero user effort.       |
-| Use fast model for verification/reverse audit  | User requirement: quality first. Fast models may miss subtle issues.                                                      |
-| Reduce to 2 agents (like Gemini)               | Loses dimensional focus. Gemini compensates with deterministic tasks; we already have those AND want higher LLM coverage. |
-| Auto-approve PR after autofix                  | Remote PR still has original code until push. Approving unfixed code is misleading.                                       |
-| `mktemp` for temp files                        | Over-engineering for a prompt. `{target}` suffix is sufficient for CLI concurrent sessions.                               |
-| Mermaid diagrams in docs                       | Only renders on GitHub. ASCII diagrams are universally compatible.                                                        |
-| `gh pr checkout --detach` for worktree         | It modifies the current working tree, defeating the purpose of worktree isolation.                                        |
-| Shell-like tokenizer for argument parsing      | LLM handles quoted arguments naturally from conversation context.                                                         |
-| Model attribution via LLM self-identification  | Unreliable (hallucination risk). `{{model}}` template variable from `config.getModel()` is accurate.                      |
+| Idea                                                         | Why rejected                                                                                                              |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `.qwen/review-tools.md` for custom tool config               | Requires users to learn a new format. Auto-discovery from CI config achieves the same result with zero user effort.       |
+| Use fast model for verification/reverse audit                | User requirement: quality first. Fast models may miss subtle issues.                                                      |
+| Reduce to 2 agents (like Gemini)                             | Loses dimensional focus. Gemini compensates with deterministic tasks; we already have those AND want higher LLM coverage. |
+| Auto-approve PR after autofix                                | Remote PR still has original code until push. Approving unfixed code is misleading.                                       |
+| `mktemp` for temp files                                      | Over-engineering for a prompt. `{target}` suffix is sufficient for CLI concurrent sessions.                               |
+| Mermaid diagrams in docs                                     | Only renders on GitHub. ASCII diagrams are universally compatible.                                                        |
+| `gh pr checkout --detach` for worktree                       | It modifies the current working tree, defeating the purpose of worktree isolation.                                        |
+| Shell-like tokenizer for argument parsing                    | LLM handles quoted arguments naturally from conversation context.                                                         |
+| Model attribution via LLM self-identification                | Unreliable (hallucination risk). `{{model}}` template variable from `config.getModel()` is accurate.                      |
+| Verbose agent prompts (no length limit)                      | 5 long prompts exceed output token budget → model falls back to serial. Each prompt must be ≤200 words for parallel.      |
+| Relaxed parallel instruction ("if you can't fit 5, try 3+2") | Model always takes the fallback. Strict "MUST include all in one response" is required.                                   |
 
 ## Token cost analysis
 
