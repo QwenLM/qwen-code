@@ -192,8 +192,11 @@ export class AgentHeadless {
   async execute(
     context: ContextState,
     externalSignal?: AbortSignal,
+    options?: { extraHistory?: Array<import('@google/genai').Content> },
   ): Promise<void> {
-    const chat = await this.core.createChat(context);
+    const chat = await this.core.createChat(context, {
+      extraHistory: options?.extraHistory,
+    });
 
     if (!chat) {
       this.terminateMode = AgentTerminateMode.ERROR;
