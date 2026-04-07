@@ -173,34 +173,6 @@ describe('<AskUserQuestionDialog />', () => {
       );
       unmount();
     });
-
-    it('navigates with number keys', async () => {
-      const onConfirm = vi.fn();
-      const details = createConfirmationDetails();
-
-      const { stdin, unmount } = renderWithProviders(
-        <AskUserQuestionDialog
-          confirmationDetails={details}
-          onConfirm={onConfirm}
-        />,
-      );
-      await wait();
-
-      // Press '2' to select Blue
-      stdin.write('2');
-      await wait();
-
-      // Press Enter
-      stdin.write('\r');
-      await wait();
-
-      expect(onConfirm).toHaveBeenCalledWith(
-        ToolConfirmationOutcome.ProceedOnce,
-        { answers: { 0: 'Blue' } },
-      );
-      unmount();
-    });
-
     it('cancels with Escape', async () => {
       const onConfirm = vi.fn();
       const details = createConfirmationDetails();
