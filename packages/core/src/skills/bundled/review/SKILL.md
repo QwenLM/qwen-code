@@ -439,7 +439,8 @@ If posting an inline comment fails (e.g., line not part of the diff, auth error)
 After posting all inline comments, decide whether to submit a review summary:
 
 - If the verdict is **Approve** or **Request changes** → submit `gh pr review` with the verdict and a minimal body (e.g., "Request changes — see inline comments.\n\n*Reviewed by {{model}} via Qwen Code /review*"). These verdicts carry approval/blocking status that must be recorded.
-- If the verdict is **Comment** and inline comments were posted successfully → do **NOT** submit an additional `gh pr review` — the inline comments are sufficient. A redundant summary adds noise.
+- If the verdict is **Comment** and **all** inline comments were posted successfully (none failed) → do **NOT** submit an additional `gh pr review` — the inline comments are sufficient. A redundant summary adds noise.
+- If the verdict is **Comment** but **some** inline comments failed → submit `gh pr review --comment` with the failed findings in the body (so they are not lost).
 - If NO inline comments were posted (all failed or all findings were terminal-only) → submit `gh pr review` with the full findings summary in the body.
 
 Use `write_file` to create `/tmp/qwen-review-{target}-summary.txt` when needed. Use the **pre-fix verdict** from Step 7:
