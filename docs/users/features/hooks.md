@@ -1,4 +1,4 @@
-# Qwen Code Hooks Documentation
+# Qwen Code Hooks
 
 ## Overview
 
@@ -28,46 +28,204 @@ Hooks are user-defined scripts or programs that are automatically executed by Qw
 - Integrate with external systems and services
 - Modify tool inputs or responses programmatically
 
-## Hook Architecture
+## Hook Types
 
-The Qwen Code hook system consists of several key components:
+Qwen Code supports three hook executor types:
 
-1. **Hook Registry**: Stores and manages all configured hooks
-2. **Hook Planner**: Determines which hooks should run for each event
-3. **Hook Runner**: Executes individual hooks with proper context
-4. **Hook Aggregator**: Combines results from multiple hooks
-5. **Hook Event Handler**: Coordinates the firing of hooks for events
+| Type       | Description                                                                                    |
+| :--------- | :--------------------------------------------------------------------------------------------- |
+| `command`  | Execute a shell command. Receives JSON via `stdin`, returns results via `stdout`.              |
+| `http`     | Send JSON as a `POST` request body to a specified URL. Returns results via HTTP response body. |
+| `function` | Directly call a registered JavaScript function (session-level hooks only).                     |
+
+### Command Hooks
+
+Command hooks execute commands via child processes. Input JSON is passed through stdin, and output is returned via stdout.
+
+**Configuration:**
+
+| Field           | Type                     | Required | Description                                 |
+| :-------------- | :----------------------- | :------- | :------------------------------------------ |
+| `type`          | `"command"`              | Yes      | Hook type                                   |
+| `command`       | `string`                 | Yes      | Command to execute                          |
+| `name`          | `string`                 | No       | Hook name (for logging)                     |
+| `description`   | `string`                 | No       | Hook description                            |
+| `timeout`       | `number`                 | No       | Timeout in milliseconds, default 60000      |
+| `async`         | `boolean`                | No       | Whether to run asynchronously in background |
+| `env`           | `Record<string, string>` | No       | Environment variables                       |
+| `shell`         | `"bash" \| "powershell"` | No       | Shell to use                                |
+| `statusMessage` | `string`                 | No       | Status message displayed during execution   |
+
+**Example:**
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "WriteFile",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$QWEN_PROJECT_DIR/.qwen/hooks/security-check.sh",
+            "name": "security-check",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### HTTP Hooks
+
+HTTP hooks send hook input as POST requests to specified URLs. They support URL whitelists, DNS-level SSRF protection, environment variable interpolation, and other security features.
+
+**Configuration:**
+
+| Field            | Type                     | Required | Description                                               |
+| :--------------- | :----------------------- | :------- | :-------------------------------------------------------- |
+| `type`           | `"http"`                 | Yes      | Hook type                                                 |
+| `url`            | `string`                 | Yes      | Target URL                                                |
+| `headers`        | `Record<string, string>` | No       | Request headers (supports env var interpolation)          |
+| `allowedEnvVars` | `string[]`               | No       | Whitelist of environment variables allowed in URL/headers |
+| `timeout`        | `number`                 | No       | Timeout in seconds, default 600                           |
+| `name`           | `string`                 | No       | Hook name (for logging)                                   |
+| `statusMessage`  | `string`                 | No       | Status message displayed during execution                 |
+| `once`           | `boolean`                | No       | Execute only once per event per session (HTTP hooks only) |
+
+**Security Features:**
+
+- **URL Whitelist**: Configure allowed URL patterns via `allowedUrls`
+- **SSRF Protection**: Blocks private IPs (10.x.x.x, 172.16-31.x.x, 192.168.x.x, etc.) but allows loopback addresses (127.0.0.1, ::1)
+- **DNS Validation**: Validates domain resolution before requests to prevent DNS rebinding attacks
+- **Environment Variable Interpolation**: `${VAR}` syntax, only allows variables in `allowedEnvVars` whitelist
+
+**Example:**
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "http://127.0.0.1:8080/hooks/pre-tool-use",
+            "headers": {
+              "Authorization": "Bearer ${HOOK_API_KEY}"
+            },
+            "allowedEnvVars": ["HOOK_API_KEY"],
+            "timeout": 10,
+            "name": "remote-security-check"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Function Hooks
+
+Function hooks directly call registered JavaScript/TypeScript functions. They are used internally by the Skill system and are not currently exposed as a public API for end users.
+
+**Note**: For most use cases, use **command hooks** or **HTTP hooks** instead, which can be configured in settings files.
 
 ## Hook Events
 
-Hooks fire at specific points during a Qwen Code session. When an event fires and a matcher matches, Qwen Code passes JSON context about the event to your hook handler. For command hooks, input arrives on stdin. Your handler can inspect the input, take action, and optionally return a decision. Some events fire once per session, while others fire repeatedly inside the agentic loop.
+Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-<div align="center">
-<img src="https://img.alicdn.com/imgextra/i4/O1CN01sYWUTh1RDJl7Lz2ne_!!6000000002077-2-tps-812-1212.png" alt="Hook Lifecycle Diagram" width="400"/>
-</div>
+| Event                | Triggered When                            | Matcher Target                                            |
+| :------------------- | :---------------------------------------- | :-------------------------------------------------------- |
+| `PreToolUse`         | Before tool execution                     | Tool name (`WriteFile`, `ReadFile`, `Bash`, etc.)         |
+| `PostToolUse`        | After successful tool execution           | Tool name                                                 |
+| `PostToolUseFailure` | After tool execution fails                | Tool name                                                 |
+| `UserPromptSubmit`   | After user submits prompt                 | None (always fires)                                       |
+| `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)          |
+| `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)     |
+| `Stop`               | When Claude prepares to conclude response | None (always fires)                                       |
+| `SubagentStart`      | When subagent starts                      | Agent type (`Bash`, `Explorer`, `Plan`, etc.)             |
+| `SubagentStop`       | When subagent stops                       | Agent type                                                |
+| `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                |
+| `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`) |
+| `PermissionRequest`  | When permission dialog is shown           | Tool name                                                 |
 
-The following table lists all available hook events in Qwen Code:
+### Matcher Patterns
 
-| Event Name           | Description                                 | Use Case                                        |
-| -------------------- | ------------------------------------------- | ----------------------------------------------- |
-| `PreToolUse`         | Fired before tool execution                 | Permission checking, input validation, logging  |
-| `PostToolUse`        | Fired after successful tool execution       | Logging, output processing, monitoring          |
-| `PostToolUseFailure` | Fired when tool execution fails             | Error handling, alerting, remediation           |
-| `Notification`       | Fired when notifications are sent           | Notification customization, logging             |
-| `UserPromptSubmit`   | Fired when user submits a prompt            | Input processing, validation, context injection |
-| `SessionStart`       | Fired when a new session starts             | Initialization, context setup                   |
-| `Stop`               | Fired before Qwen concludes its response    | Finalization, cleanup                           |
-| `SubagentStart`      | Fired when a subagent starts                | Subagent initialization                         |
-| `SubagentStop`       | Fired when a subagent stops                 | Subagent finalization                           |
-| `PreCompact`         | Fired before conversation compaction        | Pre-compaction processing                       |
-| `SessionEnd`         | Fired when a session ends                   | Cleanup, reporting                              |
-| `PermissionRequest`  | Fired when permission dialogs are displayed | Permission automation, policy enforcement       |
+`matcher` is a regular expression used to filter trigger conditions.
+
+| Event Type          | Events                                                                 | Matcher Support | Matcher Target                                           |
+| :------------------ | :--------------------------------------------------------------------- | :-------------- | :------------------------------------------------------- |
+| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest` | ✅ Regex        | Tool name: `WriteFile`, `ReadFile`, `Bash`, etc.         |
+| Subagent Events     | `SubagentStart`, `SubagentStop`                                        | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                     |
+| Session Events      | `SessionStart`                                                         | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`          |
+| Session Events      | `SessionEnd`                                                           | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.     |
+| Notification Events | `Notification`                                                         | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success` |
+| Compact Events      | `PreCompact`                                                           | ✅ Exact match  | Trigger: `manual`, `auto`                                |
+| Prompt Events       | `UserPromptSubmit`                                                     | ❌ No           | N/A                                                      |
+| Stop Events         | `Stop`                                                                 | ❌ No           | N/A                                                      |
+
+**Matcher Syntax:**
+
+- Empty string `""` or `"*"` matches all events of that type
+- Standard regex syntax supported (e.g., `^Bash$`, `Read.*`, `(WriteFile|Edit)`)
+
+**Examples:**
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'bash check' >> /tmp/hooks.log"
+          }
+        ]
+      },
+      {
+        "matcher": "Write.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'write check' >> /tmp/hooks.log"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "echo 'all tools' >> /tmp/hooks.log" }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "^(Bash|Explorer)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo 'subagent check' >> /tmp/hooks.log"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
 
 ## Input/Output Rules
 
 ### Hook Input Structure
 
-All hooks receive standardized input in JSON format through stdin. Common fields included in every hook event:
+All hooks receive standardized input in JSON format through stdin (command) or POST body (http).
+
+**Common Fields:**
 
 ```json
 {
@@ -79,7 +237,39 @@ All hooks receive standardized input in JSON format through stdin. Common fields
 }
 ```
 
-Event-specific fields are added based on the hook type. Below are the event-specific fields for each hook event:
+Event-specific fields are added based on the hook type. When running in a subagent, `agent_id` and `agent_type` are additionally included.
+
+### Hook Output Structure
+
+Hook output is returned via `stdout` (command) or HTTP response body (http) as JSON.
+
+**Exit Code Behavior (Command Hooks):**
+
+| Exit Code | Behavior                                                                              |
+| :-------- | :------------------------------------------------------------------------------------ |
+| `0`       | Success. Parse JSON in `stdout` to control behavior.                                  |
+| `2`       | **Blocking error**. Ignores `stdout`, passes `stderr` as error feedback to the model. |
+| Other     | Non-blocking error. `stderr` only shown in debug mode, execution continues.           |
+
+**Output Structure:**
+
+Hook output supports three categories of fields:
+
+1. **Common Fields**: `continue`, `stopReason`, `suppressOutput`, `systemMessage`
+2. **Top-level Decision**: `decision`, `reason` (used by some events)
+3. **Event-specific Control**: `hookSpecificOutput` (must include `hookEventName`)
+
+```json
+{
+  "continue": true,
+  "decision": "allow",
+  "reason": "Operation approved",
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "additionalContext": "Additional context information"
+  }
+}
+```
 
 ### Individual Hook Event Details
 
@@ -113,11 +303,8 @@ Event-specific fields are added based on the hook type. Below are the event-spec
 {
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
-    "permissionDecision": "allow",
-    "permissionDecisionReason": "My reason here",
-    "updatedInput": {
-      "field_to_modify": "new value"
-    },
+    "permissionDecision": "deny",
+    "permissionDecisionReason": "Security policy blocks database writes",
     "additionalContext": "Current environment: production. Proceed with caution."
   }
 }
@@ -465,12 +652,12 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^bash$", // Regex to match tool names
-        "sequential": false, // Whether to run hooks sequentially
+        "matcher": "^Bash$",
+        "sequential": false,
         "hooks": [
           {
             "type": "command",
-            "command": "/path/to/script.sh",
+            "command": "/path/to/security-check.sh",
             "name": "security-check",
             "description": "Run security checks before tool execution",
             "timeout": 30000
@@ -493,62 +680,6 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
 }
 ```
 
-### Matcher Patterns
-
-Matchers allow filtering hooks based on context. Not all hook events support matchers:
-
-| Event Type          | Events                                                                 | Matcher Support | Matcher Target (Values)                                                                |
-| ------------------- | ---------------------------------------------------------------------- | --------------- | -------------------------------------------------------------------------------------- |
-| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest` | ✅ Yes (regex)  | Tool name: `bash`, `read_file`, `write_file`, `edit`, `glob`, `grep_search`, etc.      |
-| Subagent Events     | `SubagentStart`, `SubagentStop`                                        | ✅ Yes (regex)  | Agent type: `Bash`, `Explorer`, etc.                                                   |
-| Session Events      | `SessionStart`                                                         | ✅ Yes (regex)  | Source: `startup`, `resume`, `clear`, `compact`                                        |
-| Session Events      | `SessionEnd`                                                           | ✅ Yes (regex)  | Reason: `clear`, `logout`, `prompt_input_exit`, `bypass_permissions_disabled`, `other` |
-| Notification Events | `Notification`                                                         | ✅ Yes (exact)  | Type: `permission_prompt`, `idle_prompt`, `auth_success`                               |
-| Compact Events      | `PreCompact`                                                           | ✅ Yes (exact)  | Trigger: `manual`, `auto`                                                              |
-| Prompt Events       | `UserPromptSubmit`                                                     | ❌ No           | N/A                                                                                    |
-| Stop Events         | `Stop`                                                                 | ❌ No           | N/A                                                                                    |
-
-**Matcher Syntax**:
-
-- Regex pattern matched against the target field
-- Empty string `""` or `"*"` matches all events of that type
-- Standard regex syntax supported (e.g., `^bash$`, `read.*`, `(bash|run_shell_command)`)
-
-**Examples**:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "^bash$",           // Only match bash tool
-        "hooks": [...]
-      },
-      {
-        "matcher": "read.*",           // Match read_file, read_multiple_files, etc.
-        "hooks": [...]
-      },
-      {
-        "matcher": "",                 // Match all tools (same as "*" or omitting matcher)
-        "hooks": [...]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "matcher": "^(Bash|Explorer)$", // Only match Bash and Explorer agents
-        "hooks": [...]
-      }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "^(startup|resume)$", // Only match startup and resume sources
-        "hooks": [...]
-      }
-    ]
-  }
-}
-```
-
 ## Hook Execution
 
 ### Parallel vs Sequential Execution
@@ -557,37 +688,56 @@ Matchers allow filtering hooks based on context. Not all hook events support mat
 - Use `sequential: true` in hook definition to enforce order-dependent execution
 - Sequential hooks can modify input for subsequent hooks in the chain
 
+### Async Hooks
+
+Only `command` type supports asynchronous execution. Setting `"async": true` runs the hook in the background without blocking the main flow.
+
+**Features:**
+
+- Cannot return decision control (operation has already occurred)
+- Results are injected in the next conversation turn via `systemMessage` or `additionalContext`
+- Suitable for auditing, logging, background testing, etc.
+
+**Example:**
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "WriteFile|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$QWEN_PROJECT_DIR/.qwen/hooks/run-tests-async.sh",
+            "async": true,
+            "timeout": 300000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+```bash
+#!/bin/bash
+INPUT=$(cat)
+FILE_PATH=$(echo "$INPUT" | jq -r '.tool_input.file_path // empty')
+if [[ "$FILE_PATH" != *.ts && "$FILE_PATH" != *.js ]]; then exit 0; fi
+RESULT=$(npm test 2>&1)
+if [ $? -eq 0 ]; then
+  echo "{\"systemMessage\": \"Tests passed after editing $FILE_PATH\"}"
+else
+  echo "{\"systemMessage\": \"Tests failed: $RESULT\"}"
+fi
+```
+
 ### Security Model
 
 - Hooks run in the user's environment with user privileges
 - Project-level hooks require trusted folder status
 - Timeouts prevent hanging hooks (default: 60 seconds)
-
-### Exit Codes
-
-Hook scripts communicate their result through exit codes:
-
-| Exit Code | Meaning            | Behavior                                        |
-| --------- | ------------------ | ----------------------------------------------- |
-| `0`       | Success            | stdout/stderr not shown                         |
-| `2`       | Blocking error     | Show stderr to model and block tool call        |
-| Other     | Non-blocking error | Show stderr to user only but continue tool call |
-
-**Examples**:
-
-```bash
-#!/bin/bash
-
-# Success (exit 0 is default, can be omitted)
-echo '{"decision": "allow"}'
-exit 0
-
-# Blocking error - prevents operation
-echo "Dangerous operation blocked by security policy" >&2
-exit 2
-```
-
-> **Note**: If no exit code is specified, the script defaults to `0` (success).
 
 ## Best Practices
 
@@ -610,24 +760,20 @@ TOOL_INPUT=$(echo "$INPUT" | jq -r '.tool_input')
 # Check for potentially dangerous operations
 if echo "$TOOL_INPUT" | grep -qiE "(rm.*-rf|mv.*\/|chmod.*777)"; then
   echo '{
-    "decision": "deny",
-    "reason": "Potentially dangerous operation detected",
     "hookSpecificOutput": {
       "hookEventName": "PreToolUse",
       "permissionDecision": "deny",
-      "permissionDecisionReason": "Dangerous command blocked by security policy"
+      "permissionDecisionReason": "Security policy blocks dangerous command"
     }
   }'
   exit 2  # Blocking error
 fi
 
-# Allow the operation with a log
+# Log the operation
 echo "INFO: Tool $TOOL_NAME executed safely at $(date)" >> /var/log/qwen-security.log
 
 # Allow with additional context
 echo '{
-  "decision": "allow",
-  "reason": "Operation approved by security checker",
   "hookSpecificOutput": {
     "hookEventName": "PreToolUse",
     "permissionDecision": "allow",
@@ -660,7 +806,36 @@ Configure in `.qwen/settings.json`:
 }
 ```
 
-### Example 2: User Prompt Validation Hook
+### Example 2: HTTP Audit Hook
+
+A PostToolUse HTTP hook that sends all tool execution records to a remote audit service:
+
+```json
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "http",
+            "url": "https://audit.example.com/api/tool-execution",
+            "headers": {
+              "Authorization": "Bearer ${AUDIT_API_TOKEN}",
+              "Content-Type": "application/json"
+            },
+            "allowedEnvVars": ["AUDIT_API_TOKEN"],
+            "timeout": 10,
+            "name": "audit-logger"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Example 3: User Prompt Validation Hook
 
 A UserPromptSubmit hook that validates user prompts for sensitive information and provides context for long prompts:
 
@@ -718,3 +893,5 @@ exit(0)
 - Verify hook script permissions and executability
 - Ensure proper JSON formatting in hook outputs
 - Use specific matcher patterns to avoid unintended hook execution
+- Use `--debug` mode to see detailed hook matching and execution information
+- Temporarily disable all hooks: add `"disableAllHooks": true` in settings
