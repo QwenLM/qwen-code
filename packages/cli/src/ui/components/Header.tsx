@@ -99,11 +99,11 @@ export const Header: React.FC<HeaderProps> = ({
         : shortenedPath;
 
   // Use theme gradient colors if available, otherwise use text colors (excluding primary)
-  const gradientColors = theme.ui.gradient || [
-    theme.text.secondary,
-    theme.text.link,
-    theme.text.accent,
-  ];
+  // Note: tinygradient requires at least 2 colors, so check length
+  const gradientColors =
+    theme.ui.gradient && theme.ui.gradient.length >= 2
+      ? theme.ui.gradient
+      : [theme.text.secondary, theme.text.link, theme.text.accent];
 
   return (
     <Box

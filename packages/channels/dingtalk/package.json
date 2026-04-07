@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code-channel-dingtalk",
-  "version": "0.13.2-dataworks.7",
+  "version": "0.14.1",
   "description": "DingTalk channel adapter for Qwen Code",
   "repository": {
     "type": "git",
@@ -25,7 +25,7 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "npm:@alife/dataworks-qwen-code-channel-base@0.13.2-dataworks.7",
+    "@qwen-code/channel-base": "npm:@alife/dataworks-qwen-code-channel-base@*",
     "dingtalk-stream-sdk-nodejs": "^2.0.4"
   },
   "devDependencies": {
