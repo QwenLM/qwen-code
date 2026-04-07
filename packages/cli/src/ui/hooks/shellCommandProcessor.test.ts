@@ -143,6 +143,7 @@ describe('useShellCommandProcessor', () => {
           status: ToolCallStatus.Executing,
         }),
       ],
+      isUserInitiated: true,
     });
     const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
     const wrappedCommand = `{ ls -l; }; __code=$?; pwd > "${tmpFile}"; exit $__code`;
