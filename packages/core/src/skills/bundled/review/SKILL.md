@@ -356,6 +356,7 @@ Append a follow-up tip after the verdict (and after Step 8 Autofix if applicable
 
 - **Local review with unfixed findings**: "Tip: type `fix these issues` to apply fixes interactively."
 - **PR review with findings** (only if `--comment` was NOT specified — if `--comment` was set, comments are already being posted in Step 9, so this tip is unnecessary): "Tip: type `post comments` to publish findings as PR inline comments." (Do NOT offer "fix these issues" for PR reviews — the worktree is cleaned up after the review, so interactive fixing is not possible. Autofix in Step 8 is the PR fix mechanism.)
+- **PR review, zero findings** (only if `--comment` was NOT specified): "Tip: type `post comments` to approve this PR on GitHub."
 - **Local review, all clear** (Approve or all issues fixed): "Tip: type `commit` to commit your changes."
 
 If the user responds with "fix these issues" (local review only), use the `edit` tool to fix each remaining finding interactively based on the suggested fixes from the review — do NOT re-run Steps 1-8.
