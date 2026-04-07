@@ -54,7 +54,7 @@ Step 11: Clean up (remove worktree + temp files)
 | Agent 4: Undirected Audit         | Business logic, boundary interactions, hidden coupling             |
 | Agent 5: Build & Test             | Runs build and test commands, reports failures                     |
 
-All agents run in parallel. All findings are then verified in a **single batch verification pass** (one agent reviews all findings at once, keeping LLM calls fixed regardless of finding count). After verification, a **reverse audit agent** re-reads the entire diff with knowledge of all confirmed findings to catch issues that every other agent missed. Reverse audit findings skip verification (the agent already has full context) and are included directly as high-confidence results.
+All agents run in parallel. Findings from Agents 1-4 are verified in a **single batch verification pass** (one agent reviews all findings at once, keeping LLM calls fixed). After verification, a **reverse audit agent** re-reads the entire diff with knowledge of all confirmed findings to catch issues that every other agent missed. Reverse audit findings skip the verification step (the agent already has full context) and are included directly as high-confidence results.
 
 ## Deterministic Analysis
 
@@ -148,8 +148,9 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 **What gets posted:**
 
 - High-confidence Critical and Suggestion findings as inline comments on specific lines
-- A review summary with verdict (Approve / Request changes / Comment)
-- Model attribution footer (e.g., _Reviewed by qwen3-coder via Qwen Code /review_)
+- For Approve/Request changes verdicts: a review summary with the verdict
+- For Comment verdict with all inline comments posted: no separate summary (inline comments are sufficient)
+- Model attribution footer on each comment (e.g., _— qwen3-coder via Qwen Code /review_)
 
 **What stays terminal-only:**
 
@@ -222,7 +223,7 @@ Cache is stored in `.qwen/review-cache/` and tracks both the commit SHA and mode
 
 ## Review Reports
 
-Every review is saved as a Markdown file in your project's `.qwen/reviews/` directory:
+For same-repo reviews, results are saved as a Markdown file in your project's `.qwen/reviews/` directory (cross-repo lightweight reviews skip report persistence):
 
 ```
 .qwen/reviews/2026-04-06-143022-pr-123.md
