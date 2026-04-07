@@ -532,12 +532,17 @@ export class DingtalkChannel extends ChannelBase {
 
       const chatId = conversationId || sessionWebhook;
 
+      // After stripping the bot @mention, cleanText may legitimately be empty
+      // (user pinged the bot with no other text). Don't fall back to the
+      // original text in that case — it would re-introduce the @mention.
+      const envelopeText = isMentioned ? cleanText : cleanText || content.text;
+
       const envelope: Envelope = {
         channelName: this.name,
         senderId: data.senderId || data.senderStaffId || '',
         senderName: data.senderNick || 'Unknown',
         chatId,
-        text: cleanText || content.text,
+        text: envelopeText,
         isGroup,
         isMentioned,
         isReplyToBot: quoted.isReplyToBot,
