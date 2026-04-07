@@ -594,6 +594,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
 
       await this.agentManager.createNewSession(workingDir, { forceNew: true });
+      this.currentConversationId = null;
 
       this.sendToWebView({
         type: 'conversationCleared',

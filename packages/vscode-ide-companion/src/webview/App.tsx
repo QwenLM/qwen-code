@@ -53,9 +53,7 @@ import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
 import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../types/acpTypes.js';
 import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
-
-// Keep aligned with packages/core/src/core/tokenLimits.ts.
-const DEFAULT_CONTEXT_LIMIT = 131_072;
+import { computeContextUsage } from './utils/contextUsage.js';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -207,36 +205,10 @@ export const App: React.FC = () => {
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
 
-  const contextUsage = useMemo(() => {
-    if (!usageStats && !modelInfo) {
-      return null;
-    }
-
-    // Note: In the webview context, the contextWindowSize is already reflected in
-    // modelInfo._meta.contextLimit which is computed on the extension side with the proper config.
-    // Avoid importing qwen-code-core into the browser bundle; fall back to the default limit locally.
-    const metaLimitRaw = modelInfo?._meta?.['contextLimit'];
-    const metaLimit =
-      typeof metaLimitRaw === 'number' || metaLimitRaw === null
-        ? metaLimitRaw
-        : undefined;
-
-    const limit = usageStats?.tokenLimit ?? metaLimit ?? DEFAULT_CONTEXT_LIMIT;
-
-    const used = usageStats?.usage?.promptTokens ?? 0;
-    if (typeof limit !== 'number' || limit <= 0 || used < 0) {
-      return null;
-    }
-    const percentLeft = Math.max(
-      0,
-      Math.min(100, Math.round(((limit - used) / limit) * 100)),
-    );
-    return {
-      percentLeft,
-      usedTokens: used,
-      tokenLimit: limit,
-    };
-  }, [usageStats, modelInfo]);
+  const contextUsage = useMemo(
+    () => computeContextUsage(usageStats, modelInfo),
+    [usageStats, modelInfo],
+  );
 
   // Track a lightweight signature of workspace files to detect content changes even when length is unchanged
   const workspaceFilesSignature = useMemo(
