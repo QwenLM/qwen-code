@@ -132,7 +132,13 @@ Assign severity based on the tool's own categorization:
 
 Launch review agents by invoking all `task` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **5 agents** for same-repo reviews, or **4 agents** (skip Agent 5: Build & Test) for cross-repo lightweight mode since there is no local codebase to build/test. Each agent should focus exclusively on its dimension.
 
-**IMPORTANT**: Do NOT paste the full diff into each agent's prompt — this duplicates it 5x. Instead, give each agent the command to obtain the diff, a concise summary of what the changes are about, its review focus, and any project-specific rules from Step 2. For Agent 5, also include which deterministic tools were already run in Step 3 (e.g., "tsc --noEmit already ran successfully" or "cargo clippy already ran") so it can skip redundant checks.
+**IMPORTANT**: Keep each agent's prompt **short** (under 200 words) to fit all tool calls in one response. Do NOT paste the full diff — give each agent:
+
+- The diff command (e.g., `git diff main...HEAD`)
+- A one-sentence summary of what the changes are about
+- Its review focus (copy the focus areas from its section below)
+- Project-specific rules from Step 2 (if any)
+- For Agent 5: which tools Step 3 already ran
 
 Apply the **Exclusion Criteria** (defined at the end of this document) — do NOT flag anything that matches those criteria.
 
