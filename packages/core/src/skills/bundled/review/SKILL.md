@@ -560,4 +560,5 @@ These criteria apply to both Step 4 (review agents) and Step 5 (verification age
 - When suggesting a fix, show the actual code change.
 - Flag any exposed secrets, credentials, API keys, or tokens in the diff as **Critical**.
 - Silence is better than noise. If you have nothing important to say, say nothing.
+- **Do NOT use `#N` notation** (e.g., `#1`, `#2`) in PR comments or summaries — GitHub auto-links these to issues/PRs. Use `(1)`, `[1]`, or descriptive references instead.
 - **Match the language of the PR.** Write review comments, findings, and summaries in the same language as the PR title/description/code comments. If the PR is in English, write in English. If in Chinese, write in Chinese. Do NOT switch languages.
