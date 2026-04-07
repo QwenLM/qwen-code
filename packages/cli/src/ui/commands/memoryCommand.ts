@@ -8,10 +8,9 @@ import {
   getErrorMessage,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
-  QWEN_DIR,
+  Storage,
 } from '@qwen-code/qwen-code-core';
 import path from 'node:path';
-import os from 'node:os';
 import fs from 'node:fs/promises';
 import { MessageType } from '../types.js';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
@@ -118,7 +117,7 @@ export const memoryCommand: SlashCommand = {
           },
           kind: CommandKind.BUILT_IN,
           action: async (context) => {
-            const globalDir = path.join(os.homedir(), QWEN_DIR);
+            const globalDir = Storage.getGlobalQwenDir();
             const results = await findAllExistingMemoryFiles(globalDir);
 
             if (results.length > 0) {

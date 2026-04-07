@@ -239,7 +239,9 @@ export class Storage {
   getUserSkillsDirs(): string[] {
     const homeDir = os.homedir() || os.tmpdir();
     return SKILL_PROVIDER_CONFIG_DIRS.map((dir) =>
-      path.join(homeDir, dir, 'skills'),
+      dir === QWEN_DIR
+        ? path.join(Storage.getGlobalQwenDir(), 'skills')
+        : path.join(homeDir, dir, 'skills'),
     );
   }
 
