@@ -168,12 +168,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     }
   }, []);
 
-  const currentDirs = config.getWorkspaceContext().getDirectories();
-  const dirKey = currentDirs.join('\0');
-  const [dirs, setDirs] = useState<readonly string[]>(currentDirs);
-  useEffect(() => {
-    setDirs(currentDirs);
-  }, [dirKey]); // eslint-disable-line react-hooks/exhaustive-deps
   const [reverseSearchActive, setReverseSearchActive] = useState(false);
   const [commandSearchActive, setCommandSearchActive] = useState(false);
   const [textBeforeReverseSearch, setTextBeforeReverseSearch] = useState('');
@@ -187,7 +181,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const completion = useCommandCompletion(
     buffer,
-    dirs,
     config.getTargetDir(),
     slashCommands,
     commandContext,
