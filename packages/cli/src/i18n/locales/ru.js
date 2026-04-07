@@ -1965,4 +1965,9 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
+  verbose: 'подробный',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Показывать полный вывод инструментов и процесс рассуждений в подробном режиме (переключить с помощью Ctrl+O).',
+  'Press Ctrl+O to show full tool output':
+    'Нажмите Ctrl+O для показа полного вывода инструментов',
 };
