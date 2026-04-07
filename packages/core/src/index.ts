@@ -344,3 +344,17 @@ export {
   type TaskSplit,
   type SplitAnalysis,
 } from './modes/mode-smart-split.js';
+
+export {
+  ModeMemoryManager,
+  type ModeMemoryEntry,
+  type ModeMemoryBlock,
+} from './modes/mode-memory.js';
+
+export {
+  ModeCollaborationManager,
+  type CollaboratorRole,
+  type CollaborationSession,
+  type ModeCollaborationEvents,
+  type CommunicationEntry,
+} from './modes/mode-collaboration.js';

@@ -149,3 +149,19 @@ export {
   type TaskSplit,
   type SplitAnalysis,
 } from './mode-smart-split.js';
+
+// Mode memory (per-mode isolated conversation memory)
+export {
+  ModeMemoryManager,
+  type ModeMemoryEntry,
+  type ModeMemoryBlock,
+} from './mode-memory.js';
+
+// Mode collaboration (multi-user mode collaboration)
+export {
+  ModeCollaborationManager,
+  type CollaboratorRole,
+  type CollaborationSession,
+  type ModeCollaborationEvents,
+  type CommunicationEntry,
+} from './mode-collaboration.js';

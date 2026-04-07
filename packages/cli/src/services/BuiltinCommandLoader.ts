@@ -55,6 +55,8 @@ import { insightCommand } from '../ui/commands/insightCommand.js';
 import { analyticsCommand } from '../ui/commands/analyticsCommand.js';
 import { workflowCommand } from '../ui/commands/workflowCommand.js';
 import { splitCommand } from '../ui/commands/splitCommand.js';
+import { modeMemoryCommand } from '../ui/commands/modeMemoryCommand.js';
+import { modeCollabCommand } from '../ui/commands/modeCollabCommand.js';
 
 const builtinDebugLogger = createDebugLogger('BUILTIN_COMMAND_LOADER');
 
@@ -134,6 +136,8 @@ export class BuiltinCommandLoader implements ICommandLoader {
       analyticsCommand,
       workflowCommand,
       splitCommand,
+      modeMemoryCommand,
+      modeCollabCommand,
     ];
 
     return allDefinitions.filter((cmd): cmd is SlashCommand => cmd !== null);
