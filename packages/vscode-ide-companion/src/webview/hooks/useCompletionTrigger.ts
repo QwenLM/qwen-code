@@ -293,11 +293,7 @@ export function useCompletionTrigger(
       }
 
       // Find trigger character before cursor
-      // Use text length if cursorPosition is 0 but we have text (edge case for first character)
-      const effectiveCursorPosition =
-        cursorPosition === 0 && text.length > 0 ? text.length : cursorPosition;
-
-      const textBeforeCursor = text.substring(0, effectiveCursorPosition);
+      const textBeforeCursor = text.substring(0, cursorPosition);
       const lastAtMatch = textBeforeCursor.lastIndexOf('@');
       const lastSlashMatch = textBeforeCursor.lastIndexOf('/');
 
