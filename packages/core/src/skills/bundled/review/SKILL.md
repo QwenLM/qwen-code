@@ -108,14 +108,14 @@ Extract the list of changed files from the diff output. For local uncommitted re
 5. **Java projects**:
    - If `pom.xml` exists (Maven) → `mvn compile -q 2>&1` (compilation check; Agent 5 can skip build if this succeeds). If `checkstyle` plugin is configured → `mvn checkstyle:check -q 2>&1`
    - Else if `build.gradle` or `build.gradle.kts` exists (Gradle) → `gradle compileJava -q 2>&1`. If `checkstyle` plugin is configured → `gradle checkstyleMain -q 2>&1`
-   - Else if `Makefile` exists (e.g., OpenJDK) → skip deterministic analysis for Java (build system is too project-specific; Agent 5 will handle build/test)
+   - Else if `Makefile` exists (e.g., OpenJDK) → no standard Java linter applies; fall through to CI config discovery below.
    - If `spotbugs` or `pmd` is available → `mvn spotbugs:check -q 2>&1` or `mvn pmd:check -q 2>&1`
 
 6. **C/C++ projects**:
-   - If `CMakeLists.txt` or `Makefile` exists → skip per-file linting (C/C++ linters like clang-tidy require full build context). Agent 5 will handle build verification.
+   - If `CMakeLists.txt` or `Makefile` exists and no `compile_commands.json` → no per-file linter; fall through to CI config discovery below.
    - If `compile_commands.json` exists and `clang-tidy` is available → `clang-tidy <changed-files> 2>&1`
 
-7. **Other / unrecognized projects**: If the project doesn't match any of the above patterns, check for CI configuration files (`.github/workflows/*.yml`, `.gitlab-ci.yml`, `Jenkinsfile`) and read them to discover what lint/check commands the project runs in CI. Run any applicable lint or compile-check commands found. If no CI config exists either, skip Step 3 entirely — LLM agents will still review the diff.
+7. **CI config auto-discovery** (applies to ALL projects — runs after language-specific checks above, not instead of them): Check for CI configuration files (`.github/workflows/*.yml`, `.gitlab-ci.yml`, `Jenkinsfile`, `.jcheck/conf`) and read them to discover additional lint/check commands the project runs in CI. Run any applicable commands not already covered by rules 1-6 above. This is especially important for projects with custom build systems (e.g., OpenJDK uses `jcheck` and custom Makefile targets). If no CI config exists and no language-specific tools matched, skip Step 3 entirely — LLM agents will still review the diff.
 
 **Important**: For whole-project tools (`tsc`, `npm run lint`, `cargo clippy`, `go vet`), capture the full output first, then filter to only errors/warnings in changed files, then truncate to the first 200 lines. Do NOT pipe to `head` before filtering — this can drop relevant errors for changed files that appear later in the output.
 
