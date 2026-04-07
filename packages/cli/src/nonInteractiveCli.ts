@@ -251,6 +251,7 @@ export async function runNonInteractive(
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
       let isFirstTurn = true;
+      let modelOverride: string | undefined;
       while (true) {
         turnCount++;
         if (
@@ -270,6 +271,7 @@ export async function runNonInteractive(
             type: isFirstTurn
               ? SendMessageType.UserQuery
               : SendMessageType.ToolResult,
+            modelOverride,
           },
         );
         isFirstTurn = false;
@@ -367,6 +369,11 @@ export async function runNonInteractive(
 
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
+            }
+
+            // Capture model override from skill tool results
+            if (toolResponse.modelOverride) {
+              modelOverride = toolResponse.modelOverride;
             }
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];

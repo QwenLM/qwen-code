@@ -109,6 +109,8 @@ export interface SendMessageOptions {
     iterationCount: number;
     reasons: string[];
   };
+  /** Model override from skill execution. When present, overrides the session model for this turn. */
+  modelOverride?: string;
 }
 
 export class GeminiClient {
@@ -626,6 +628,9 @@ export class GeminiClient {
 
     const turn = new Turn(this.getChat(), prompt_id);
 
+    // Determine the model to use for this turn
+    const model = options?.modelOverride ?? this.config.getModel();
+
     // append system reminders to the request
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
     if (
@@ -668,11 +673,7 @@ export class GeminiClient {
       requestToSent = [...systemReminders, ...requestToSent];
     }
 
-    const resultStream = turn.run(
-      this.config.getModel(),
-      requestToSent,
-      signal,
-    );
+    const resultStream = turn.run(model, requestToSent, signal);
     for await (const event of resultStream) {
       if (!this.config.getSkipLoopDetection()) {
         if (this.loopDetector.addAndCheck(event)) {

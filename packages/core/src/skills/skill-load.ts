@@ -108,10 +108,22 @@ export function parseSkillContent(
     }
   }
 
+  // Extract optional model field
+  const modelRaw = frontmatter['model'];
+  let model: string | undefined;
+  if (modelRaw !== undefined) {
+    if (typeof modelRaw !== 'string') {
+      throw new Error('"model" must be a string');
+    }
+    // "inherit" means explicitly use the session model — treat as no override
+    model = modelRaw.trim() === 'inherit' ? undefined : modelRaw.trim();
+  }
+
   const config: SkillConfig = {
     name,
     description,
     allowedTools,
+    model,
     filePath,
     body: body.trim(),
     level: 'extension',

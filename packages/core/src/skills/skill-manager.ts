@@ -396,10 +396,21 @@ export class SkillManager {
         }
       }
 
+      // Extract optional model field
+      const modelRaw = frontmatter['model'];
+      let model: string | undefined;
+      if (modelRaw !== undefined) {
+        if (typeof modelRaw !== 'string') {
+          throw new Error('"model" must be a string');
+        }
+        model = modelRaw.trim() === 'inherit' ? undefined : modelRaw.trim();
+      }
+
       const config: SkillConfig = {
         name,
         description,
         allowedTools,
+        model,
         level,
         filePath,
         body: body.trim(),

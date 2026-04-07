@@ -32,6 +32,14 @@ export interface SkillConfig {
   allowedTools?: string[];
 
   /**
+   * Optional model override for this skill's execution.
+   * Uses the same selector syntax as subagent model selectors:
+   * bare model ID (e.g., `qwen-coder-plus`), `authType:modelId`
+   * for cross-provider, or omitted/`inherit` to use the session model.
+   */
+  model?: string;
+
+  /**
    * Storage level - determines where the configuration file is stored
    */
   level: SkillLevel;
