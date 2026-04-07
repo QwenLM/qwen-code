@@ -17,4 +17,5 @@ export default {
   channels: 'Channels',
   hooks: 'Hooks',
   'scheduled-tasks': 'Scheduled Tasks',
+  tips: 'Contextual Tips',
 };
