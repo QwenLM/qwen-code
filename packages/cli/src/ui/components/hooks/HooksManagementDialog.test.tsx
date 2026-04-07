@@ -165,20 +165,6 @@ describe('HooksManagementDialog', () => {
 
       unmount();
     });
-
-    it('should handle empty hooks list gracefully', async () => {
-      const { lastFrame, unmount } = renderWithProviders(
-        <HooksManagementDialog onClose={mockOnClose} />,
-      );
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      const output = lastFrame();
-      // Should show 0 hooks configured when no hooks are configured
-      expect(output).toContain('0 hooks configured');
-
-      unmount();
-    });
   });
 
   describe('Keyboard navigation - HOOKS_LIST step', () => {

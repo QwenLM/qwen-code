@@ -11,6 +11,7 @@ import { HookRunner } from './hookRunner.js';
 import { HookAggregator } from './hookAggregator.js';
 import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
+import { SessionHooksManager } from './sessionHooksManager.js';
 import {
   HookType,
   HooksConfigSource,
@@ -117,6 +118,7 @@ describe('HookSystem', () => {
         mockHookPlanner,
         mockHookRunner,
         mockHookAggregator,
+        expect.any(SessionHooksManager),
       );
     });
   });

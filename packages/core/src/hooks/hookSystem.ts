@@ -61,13 +61,14 @@ export class HookSystem {
     this.hookRunner = new HookRunner(allowedHttpUrls);
     this.hookAggregator = new HookAggregator();
     this.hookPlanner = new HookPlanner(this.hookRegistry);
+    this.sessionHooksManager = new SessionHooksManager();
     this.hookEventHandler = new HookEventHandler(
       config,
       this.hookPlanner,
       this.hookRunner,
       this.hookAggregator,
+      this.sessionHooksManager,
     );
-    this.sessionHooksManager = new SessionHooksManager();
   }
 
   /**

@@ -23,6 +23,7 @@ import type {
   HookRunner,
   HookAggregator,
   AggregatedHookResult,
+  SessionHooksManager,
 } from './index.js';
 import type { HookConfig, HookOutput, PermissionSuggestion } from './types.js';
 import type { HookExecutionResult } from './types.js';
@@ -38,6 +39,7 @@ describe('HookEventHandler', () => {
   let mockHookPlanner: HookPlanner;
   let mockHookRunner: HookRunner;
   let mockHookAggregator: HookAggregator;
+  let mockSessionHooksManager: SessionHooksManager;
   let hookEventHandler: HookEventHandler;
 
   beforeEach(() => {
@@ -60,11 +62,26 @@ describe('HookEventHandler', () => {
       aggregateResults: vi.fn(),
     } as unknown as HookAggregator;
 
+    mockSessionHooksManager = {
+      getMatchingHooks: vi.fn().mockReturnValue([]),
+      getHooksForEvent: vi.fn().mockReturnValue([]),
+      hasSessionHooks: vi.fn().mockReturnValue(false),
+      addSessionHook: vi.fn(),
+      addFunctionHook: vi.fn(),
+      removeHook: vi.fn(),
+      removeFunctionHook: vi.fn(),
+      clearSessionHooks: vi.fn(),
+      getActiveSessions: vi.fn().mockReturnValue([]),
+      getHookCount: vi.fn().mockReturnValue(0),
+      getAllSessionHooks: vi.fn().mockReturnValue([]),
+    } as unknown as SessionHooksManager;
+
     hookEventHandler = new HookEventHandler(
       mockConfig,
       mockHookPlanner,
       mockHookRunner,
       mockHookAggregator,
+      mockSessionHooksManager,
     );
   });
 
@@ -2626,6 +2643,7 @@ describe('HookEventHandler', () => {
         mockHookPlanner,
         mockHookRunner,
         mockHookAggregator,
+        mockSessionHooksManager,
         messagesProvider,
       );
 
