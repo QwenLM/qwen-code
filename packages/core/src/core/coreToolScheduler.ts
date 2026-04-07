@@ -1486,7 +1486,9 @@ export class CoreToolScheduler {
           error: undefined,
           errorType: undefined,
           contentLength,
-          modelOverride: toolResult.modelOverride,
+          ...(toolResult.modelOverride
+            ? { modelOverride: toolResult.modelOverride }
+            : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
       } else {
