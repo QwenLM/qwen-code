@@ -495,7 +495,7 @@ If reviewing a PR, update the review cache for incremental review support:
 2. Write `.qwen/review-cache/pr-<number>.json` with:
    ```json
    {
-     "lastCommitSha": "<current HEAD SHA>",
+     "lastCommitSha": "<pre-autofix HEAD SHA captured in Step 1>",
      "lastModelId": "{{model}}",
      "lastReviewDate": "<ISO timestamp>",
      "findingsCount": <number>,
@@ -508,10 +508,12 @@ If reviewing a PR, update the review cache for incremental review support:
 
 Remove all temp files (`/tmp/qwen-review-{target}-context.md`, `/tmp/qwen-review-{target}-comment.txt`, `/tmp/qwen-review-{target}-summary.txt`).
 
-If a PR worktree was created in Step 1, remove it and its local ref:
+If a PR worktree was created in Step 1, **and Step 8 did NOT instruct to preserve it** (autofix commit/push failure), remove it and its local ref:
 
-1. `git worktree remove .qwen/tmp/review-pr-<number> --force` (the `--force` flag handles cases where autofix left uncommitted changes)
-2. `git branch -D qwen-review/pr-<number> 2>/dev/null || true` (clean up the local ref; ignore errors if already deleted)
+1. `git worktree remove .qwen/tmp/review-pr-<number> --force`
+2. `git branch -D qwen-review/pr-<number> 2>/dev/null || true`
+
+If Step 8 flagged the worktree for preservation (autofix failure), skip worktree removal but still clean up temp files.
 
 This step runs **after** Step 9 and Step 10 to ensure all review outputs are saved before cleanup.
 
