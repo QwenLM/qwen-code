@@ -77,6 +77,8 @@ import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
+import { ModeManager } from '../modes/mode-manager.js';
+import type { ModeRuntime } from '../modes/types.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -489,6 +491,7 @@ export class Config {
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
+  private modeManager!: ModeManager;
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -990,6 +993,15 @@ export class Config {
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
     );
 
+    this.modeManager = new ModeManager(
+      this.toolRegistry,
+      this.skillManager!,
+      this.subagentManager,
+      this.targetDir,
+    );
+    await this.modeManager.loadAllModes(this);
+    this.debugLogger.debug('Mode manager initialized');
+
     await this.geminiClient.initialize();
     this.debugLogger.info('Gemini client initialized');
 
@@ -1370,6 +1382,37 @@ export class Config {
 
   getToolRegistry(): ToolRegistry {
     return this.toolRegistry;
+  }
+
+  /**
+   * Get tool names available for the current mode.
+   * Respects mode's allowedTools/deniedTools constraints.
+   *
+   * @returns Array of tool names available for the current mode
+   */
+  getAvailableToolNamesForMode(): string[] {
+    return this.modeManager?.getAvailableToolNames() ??
+      this.toolRegistry.getAllToolNames();
+  }
+
+  /**
+   * Get sub-agent names available for the current mode.
+   *
+   * @returns Array of sub-agent names available for the current mode
+   */
+  getAvailableSubagentNamesForMode(): string[] {
+    return this.modeManager?.getAvailableSubagentNames() ??
+      this.subagentManager.listSubagents().map((s) => s.name);
+  }
+
+  /**
+   * Get skill names available for the current mode.
+   *
+   * @returns Array of skill names available for the current mode
+   */
+  getAvailableSkillNamesForMode(): string[] {
+    return this.modeManager?.getAvailableSkillNames() ??
+      this.skillManager?.listSkills().map((s) => s.name) ?? [];
   }
 
   /**
@@ -2106,6 +2149,22 @@ export class Config {
 
   getSubagentManager(): SubagentManager {
     return this.subagentManager;
+  }
+
+  getModeManager(): ModeManager {
+    return this.modeManager;
+  }
+
+  getCurrentMode(): ModeRuntime | null {
+    return this.modeManager?.getCurrentMode() ?? null;
+  }
+
+  async switchMode(modeName: string): Promise<ModeRuntime> {
+    return this.modeManager.switchMode(modeName, this);
+  }
+
+  async resetMode(): Promise<void> {
+    await this.modeManager.resetToDefault(this);
   }
 
   getSkillManager(): SkillManager | null {

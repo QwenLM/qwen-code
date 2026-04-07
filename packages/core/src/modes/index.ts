@@ -1,0 +1,71 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/**
+ * @fileoverview Public API for the Modes Layer.
+ *
+ * Modes are specialized agent profiles that configure system prompts,
+ * tool access, model parameters, and sub-agent/skill availability
+ * for specific development workflows.
+ */
+
+// Types
+export type {
+  ModeConfig,
+  ModeRuntime,
+  ModeLevel,
+  ModeApprovalMode,
+  ValidationResult,
+  ListModesOptions,
+  CreateModeOptions,
+} from './types.js';
+
+export {
+  ModeError,
+  ModeErrorCode,
+} from './types.js';
+
+// Manager
+export { ModeManager, type ModeManagerEvents } from './mode-manager.js';
+
+// Validation
+export { ModeValidator, modeValidator } from './mode-validation.js';
+
+// Loading
+export {
+  loadModesFromDir,
+  loadModeFile,
+  parseModeContent,
+  getUserModesDir,
+  getProjectModesDir,
+  getModeFilePath,
+} from './mode-load.js';
+
+// Built-in modes
+export {
+  BUILTIN_MODES,
+  GENERAL_MODE,
+  ARCHITECT_MODE,
+  DEVELOPER_MODE,
+  REVIEWER_MODE,
+  DEBUGGER_MODE,
+  TESTER_MODE,
+  DEVOPS_MODE,
+  PRODUCT_MODE,
+  SECURITY_MODE,
+  OPTIMIZER_MODE,
+} from './builtin-modes.js';
+
+// Parallel execution
+export {
+  ParallelTaskRunner,
+  type ParallelTaskStatus,
+  type ParallelTaskConfig,
+  type ParallelGroupConfig,
+  type ParallelTaskRuntime,
+  type ParallelGroupRuntime,
+  type ParallelRunnerEvents,
+} from './parallel-task-runner.js';

@@ -1617,6 +1617,38 @@ const SETTINGS_SCHEMA = {
       },
     },
   },
+  modes: {
+    type: 'object',
+    label: 'Modes',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Settings for the Modes Layer (specialized agent profiles).',
+    showInDialog: false,
+    properties: {
+      defaultMode: {
+        type: 'string',
+        label: 'Default Mode',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: 'general' as string | undefined,
+        description:
+          'The default mode to activate on session start. Set to a mode name (e.g., "developer", "architect") or "general" for the default behavior.',
+        showInDialog: false,
+      },
+      autoSwitchOnCommand: {
+        type: 'boolean',
+        label: 'Auto-switch on Command',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Automatically suggest mode switches based on detected commands or context.',
+        showInDialog: false,
+      },
+    },
+  },
 
   experimental: {
     type: 'object',
