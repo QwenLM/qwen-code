@@ -67,6 +67,7 @@
     "pre-commit": "node scripts/pre-commit.js"
   },
   "overrides": {
+    "ink": "6.2.3",
     "wrap-ansi": "9.0.2",
     "ansi-regex": "6.2.2",
     "cliui": {
