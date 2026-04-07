@@ -403,15 +403,7 @@ If a finding was auto-fixed in Step 8, prefix its comment with **[Auto-fixed]** 
 
 Do **not** post low-confidence findings as PR inline comments — they appear only in the terminal output under "Needs Human Review." This keeps PR comments high-signal.
 
-**Step A**: Use `write_file` to create `/tmp/qwen-review-{target}-comment.txt`. The content MUST follow this exact structure:
-
-1. First line: the prefix — one of `**[Critical]**`, `**[Suggestion]**`, `**[Auto-fixed][Critical]**`, or `**[Auto-fixed][Suggestion]**` — followed by the issue description.
-2. Then a blank line.
-3. Then the suggested fix. **Use a `suggestion` code block** (supported by GitHub, GitLab, Gitea, etc.) whenever the fix is a direct replacement of the commented lines — this lets the PR author accept it with one click. If the fix spans multiple locations or adds new code, use a regular code block instead.
-4. Then a blank line.
-5. Last line: the footer `_— {{model}} via Qwen Code /review_` — copy this EXACTLY, do NOT shorten or rephrase.
-
-Example (single-line fix with suggestion block):
+**Step A**: Use `write_file` to create `/tmp/qwen-review-{target}-comment.txt` following this exact format:
 
     **[Critical]** `findNextCjkWordEnd` returns `b.end` when `col < b.start`, skipping non-CJK text.
 
@@ -421,7 +413,9 @@ Example (single-line fix with suggestion block):
         }
     ```
 
-    _— glm-5.1 via Qwen Code /review_
+    _— {{model}} via Qwen Code /review_
+
+Rules: prefix is `**[Critical]**` or `**[Suggestion]**` (or `**[Auto-fixed][...]**`). Use ` ```suggestion ` blocks for one-click fixes (GitHub/GitLab/Gitea); regular code blocks if fix spans multiple locations. Footer must be copied exactly — do NOT rephrase.
 
 ```bash
 # Step B: Post single-line comment referencing the file:
