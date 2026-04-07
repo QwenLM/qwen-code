@@ -400,10 +400,8 @@ If a finding was auto-fixed in Step 8, prefix its comment with **[Auto-fixed]** 
 Do **not** post low-confidence findings as PR inline comments — they appear only in the terminal output under "Needs Human Review." This keeps PR comments high-signal.
 
 ```
-# Step A: Use write_file tool to create /tmp/qwen-review-{target}-comment.txt with content:
-# Choose {prefix} from these options (including Markdown bold):
-#   Normal:     **[Critical]** or **[Suggestion]**
-#   Auto-fixed: **[Auto-fixed][Critical]** or **[Auto-fixed][Suggestion]**
+# Step A: Use write_file tool to create /tmp/qwen-review-{target}-comment.txt
+# The EXACT content must follow this template (do NOT rewrite the footer):
 
 {prefix} {issue description}
 
@@ -411,6 +409,10 @@ Do **not** post low-confidence findings as PR inline comments — they appear on
 
 _— {{model}} via Qwen Code /review_
 ```
+
+Where `{prefix}` is one of: `**[Critical]**`, `**[Suggestion]**`, `**[Auto-fixed][Critical]**`, or `**[Auto-fixed][Suggestion]**`.
+
+⚠️ The footer `_— {{model}} via Qwen Code /review_` must appear **exactly as shown** — including the model name, "via", and "Qwen Code /review". Do NOT shorten, rephrase, or omit any part of it.
 
 ```bash
 # Step B: Post single-line comment referencing the file:
