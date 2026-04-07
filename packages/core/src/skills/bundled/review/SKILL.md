@@ -422,7 +422,7 @@ _— {{model}} via Qwen Code /review_
 
 Where `{prefix}` is one of: `**[Critical]**`, `**[Suggestion]**`, `**[Auto-fixed][Critical]**`, or `**[Auto-fixed][Suggestion]**`.
 
-**Use GitHub `suggestion` blocks** whenever the fix is a direct replacement of the commented lines. This lets the PR author accept the fix with one click. Only fall back to regular code blocks when the fix cannot be expressed as a line replacement.
+**Use `suggestion` code blocks** (supported by GitHub, GitLab, Gitea, etc.) whenever the fix is a direct replacement of the commented lines. This lets the PR author accept the fix with one click. Only fall back to regular code blocks when the fix cannot be expressed as a line replacement (e.g., spans multiple locations or adds new code).
 
 ⚠️ The footer `_— {{model}} via Qwen Code /review_` must appear **exactly as shown** — including the model name, "via", and "Qwen Code /review". Do NOT shorten, rephrase, or omit any part of it.
 
