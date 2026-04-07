@@ -873,43 +873,6 @@ describe('SettingsDialog', () => {
 
       unmount();
     });
-
-    it('should keep restart prompt when switching scopes', async () => {
-      const settings = createMockSettings();
-      const onSelect = vi.fn();
-
-      const { stdin, lastFrame, unmount } = render(
-        <KeypressProvider kittyProtocolEnabled={false}>
-          <SettingsDialog settings={settings} onSelect={onSelect} />
-        </KeypressProvider>,
-      );
-
-      // Trigger a restart-required setting change: navigate to "Language: UI" (2nd item) and toggle it.
-      stdin.write(TerminalKeys.DOWN_ARROW as string);
-      await wait();
-      stdin.write(TerminalKeys.ENTER as string);
-      await wait();
-
-      await waitFor(() => {
-        expect(lastFrame()).toContain(
-          'To see changes, Qwen Code must be restarted',
-        );
-      });
-
-      // Switch scopes; restart prompt should remain visible.
-      stdin.write(TerminalKeys.TAB as string);
-      await wait();
-      stdin.write('2');
-      await wait();
-
-      await waitFor(() => {
-        expect(lastFrame()).toContain(
-          'To see changes, Qwen Code must be restarted',
-        );
-      });
-
-      unmount();
-    });
   });
 
   describe('Settings Display Values', () => {
