@@ -246,13 +246,13 @@ For large diffs (>10 modified symbols), analysis prioritizes functions with sign
 
 The review pipeline uses a fixed number of LLM calls regardless of how many findings are produced:
 
-| Stage                           | LLM calls | Notes                                                   |
-| ------------------------------- | --------- | ------------------------------------------------------- |
-| Deterministic analysis (Step 3) | 0         | Shell commands only                                     |
-| 5 review agents (Step 4)        | 5         | Run in parallel; Agent 5 runs build/test shell commands |
-| Batch verification (Step 5)     | 1         | Single agent verifies all findings at once              |
-| Reverse audit (Step 6)          | 1         | Finds coverage gaps; findings skip verification         |
-| **Total**                       | **7**     | Fixed, not proportional to finding count                |
+| Stage                           | LLM calls  | Notes                                               |
+| ------------------------------- | ---------- | --------------------------------------------------- |
+| Deterministic analysis (Step 3) | 0          | Shell commands only                                 |
+| Review agents (Step 4)          | 5 (or 4)   | Run in parallel; Agent 5 skipped in cross-repo mode |
+| Batch verification (Step 5)     | 1          | Single agent verifies all findings at once          |
+| Reverse audit (Step 6)          | 1          | Finds coverage gaps; findings skip verification     |
+| **Total**                       | **7 or 6** | Same-repo: 7; cross-repo: 6 (no Agent 5)            |
 
 ## What's NOT Flagged
 
