@@ -353,7 +353,7 @@ Based on **high-confidence findings only** (low-confidence findings do not influ
 Append a follow-up tip after the verdict (and after Step 8 Autofix if applicable). Choose based on remaining state:
 
 - **Local review with unfixed findings**: "Tip: type `fix these issues` to apply fixes interactively."
-- **PR review with findings**: "Tip: type `post comments` to publish findings as PR inline comments." (Do NOT offer "fix these issues" for PR reviews — the worktree is cleaned up after the review, so interactive fixing is not possible. Autofix in Step 8 is the PR fix mechanism.)
+- **PR review with findings** (only if `--comment` was NOT specified — if `--comment` was set, comments are already being posted in Step 9, so this tip is unnecessary): "Tip: type `post comments` to publish findings as PR inline comments." (Do NOT offer "fix these issues" for PR reviews — the worktree is cleaned up after the review, so interactive fixing is not possible. Autofix in Step 8 is the PR fix mechanism.)
 - **Local review, all clear** (Approve or all issues fixed): "Tip: type `commit` to commit your changes."
 
 If the user responds with "fix these issues" (local review only), use the `edit` tool to fix each remaining finding interactively based on the suggested fixes from the review — do NOT re-run Steps 1-8.
@@ -380,9 +380,9 @@ If there are **Critical** or **Suggestion** findings with clear, unambiguous fix
 - Do NOT auto-fix without user confirmation. Do NOT auto-fix findings marked as "Nice to have" or low-confidence findings.
 - If reviewing a PR (worktree mode), autofix modifies files in the **worktree**, not the user's working tree. After applying fixes, commit from the worktree: `cd <worktree-path> && git add <fixed-files> && git commit -m "fix: apply auto-fixes from /review"`. Then attempt to push: `git push <remote> HEAD:<remote-branch-name>` (use the remote and branch name from Step 1). **Note**: push may fail if the PR is from a fork and the user doesn't have push access to the source repo — this is expected. Inform the user of the outcome: if push succeeds → "Auto-fixes committed and pushed to the PR branch." If push fails → "Auto-fix committed locally but push failed (you may not have push access to this repo). The commit is in the worktree at `<worktree-path>`. You can push manually or create a new PR." Step 9 (PR comments) may still proceed, but **skip Step 11 worktree cleanup** to preserve the commit for manual recovery.
 
-## Step 9: Post PR inline comments (only if `--comment` flag was set)
+## Step 9: Post PR inline comments
 
-Skip this step if `--comment` was not specified or the review target is not a PR.
+Skip this step if the review target is not a PR, or if BOTH of the following are true: `--comment` was not specified AND the user did not request "post comments" via follow-up.
 
 First, determine the repository owner/repo. For **same-repo** reviews, run `gh repo view --json owner,name --jq '"\(.owner.login)/\(.name)"'`. For **cross-repo** reviews, use the owner/repo already extracted from the PR URL in Step 1 — do NOT run `gh repo view` (it returns the current repo, not the PR's repo).
 
@@ -457,8 +457,7 @@ Only call `gh pr review` in these cases:
 Use `write_file` to create `/tmp/qwen-review-{target}-summary.txt` when needed. Use the **pre-fix verdict** from Step 7:
 
 ```bash
-# Submit review with the matching action (only for Approve/Request changes,
-# or Comment when no inline comments were posted — see rules above):
+# Submit review. For cross-repo, add -R {owner}/{repo} to all gh pr review commands.
 # If verdict is "Approve":
 gh pr review {pr_number} --approve --body-file /tmp/qwen-review-{target}-summary.txt
 
@@ -474,6 +473,7 @@ If there are **no confirmed findings**:
 Use `write_file` to create `/tmp/qwen-review-{target}-summary.txt` with content: "No issues found. LGTM! ✅\n\n*Reviewed by {{model}} via Qwen Code /review*", then:
 
 ```bash
+# For cross-repo, add -R {owner}/{repo}
 gh pr review {pr_number} --approve --body-file /tmp/qwen-review-{target}-summary.txt
 ```
 
