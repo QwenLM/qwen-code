@@ -106,8 +106,8 @@ Extract the list of changed files from the diff output. For local uncommitted re
    - If `go.mod` exists → `go vet ./... 2>&1` (vet includes compile checks, so Agent 5 can skip `go build` if vet ran successfully) and `golangci-lint run ./... 2>&1` (golangci-lint expects package patterns, not individual file paths; filter diagnostics to changed files after capture)
 
 5. **Java projects**:
-   - If `pom.xml` exists (Maven) → `mvn compile -q 2>&1` (compilation check; Agent 5 can skip build if this succeeds). If `checkstyle` plugin is configured → `mvn checkstyle:check -q 2>&1`
-   - Else if `build.gradle` or `build.gradle.kts` exists (Gradle) → `gradle compileJava -q 2>&1`. If `checkstyle` plugin is configured → `gradle checkstyleMain -q 2>&1`
+   - If `pom.xml` exists (Maven) → prefer `./mvnw` wrapper if it exists, else `mvn`: `./mvnw compile -q 2>&1` (compilation check; Agent 5 can skip build if this succeeds). If `checkstyle` plugin is configured → `./mvnw checkstyle:check -q 2>&1`
+   - Else if `build.gradle` or `build.gradle.kts` exists (Gradle) → prefer `./gradlew` wrapper if it exists, else `gradle`: `./gradlew compileJava -q 2>&1`. If `checkstyle` plugin is configured → `./gradlew checkstyleMain -q 2>&1`
    - Else if `Makefile` exists (e.g., OpenJDK) → no standard Java linter applies; fall through to CI config discovery below.
    - If `spotbugs` or `pmd` is available → `mvn spotbugs:check -q 2>&1` or `mvn pmd:check -q 2>&1`
 
@@ -199,15 +199,15 @@ This agent runs deterministic build and test commands to verify the code compile
 
 1. Detect the build system and run **exactly one** build command (skip if Step 3 already verified compilation). Use this precedence order — choose the **first applicable** option only to avoid duplicate builds (e.g., a Makefile that wraps npm). Capture full output; if it exceeds 200 lines, keep the first 50 and last 100 lines:
    - If `package.json` exists with a `build` script → `npm run build 2>&1`
-   - Else if `pom.xml` exists → `mvn compile -q 2>&1`
-   - Else if `build.gradle` or `build.gradle.kts` exists → `gradle compileJava -q 2>&1`
+   - Else if `pom.xml` exists → `./mvnw compile -q 2>&1` (prefer `./mvnw` wrapper if it exists, else `mvn`)
+   - Else if `build.gradle` or `build.gradle.kts` exists → `./gradlew compileJava -q 2>&1` (prefer `./gradlew` wrapper if it exists, else `gradle`)
    - Else if `Makefile` exists → `make build 2>&1`
    - Else if `Cargo.toml` exists → `cargo build 2>&1`
    - Else if `go.mod` exists → `go build ./... 2>&1`
 2. Run **exactly one** test command (same precedence and output handling):
    - If `package.json` exists with a `test` script → `npm test 2>&1`
-   - Else if `pom.xml` exists → `mvn test -q 2>&1`
-   - Else if `build.gradle` or `build.gradle.kts` exists → `gradle test -q 2>&1`
+   - Else if `pom.xml` exists → `./mvnw test -q 2>&1` (prefer `./mvnw` if it exists)
+   - Else if `build.gradle` or `build.gradle.kts` exists → `./gradlew test -q 2>&1` (prefer `./gradlew` if it exists)
    - Else if `pytest.ini` or `pyproject.toml` with `[tool.pytest]` → `pytest 2>&1`
    - Else if `Cargo.toml` exists → `cargo test 2>&1`
    - Else if `go.mod` exists → `go test ./... 2>&1`
