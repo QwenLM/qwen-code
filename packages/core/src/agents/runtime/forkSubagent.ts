@@ -10,7 +10,8 @@ export const FORK_AGENT = {
   description:
     'Implicit fork — inherits full conversation context. Not selectable via subagent_type; triggered by omitting subagent_type.',
   tools: ['*'],
-  systemPrompt: '',
+  systemPrompt:
+    'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',
   level: 'session' as const,
 };
 
@@ -26,33 +27,49 @@ export function isInForkChild(messages: Content[]): boolean {
 export const FORK_PLACEHOLDER_RESULT =
   'Fork started — processing in background';
 
+/**
+ * Build extra history messages for a forked subagent.
+ *
+ * When the last model message has function calls, we must include matching
+ * function responses in a user message (Gemini API requirement). The
+ * directive is embedded in this same user message to avoid consecutive
+ * user messages.
+ *
+ * When there are no function calls, we return [] — the parent history
+ * already ends with a model text message and the directive will be sent
+ * as the task_prompt by agent-headless (model → user alternation is OK).
+ *
+ * @param directive - The fork directive text (user's prompt)
+ * @param assistantMessage - The last model message from the parent history
+ * @returns Extra messages to append to history (may be empty)
+ */
 export function buildForkedMessages(
   directive: string,
   assistantMessage: Content,
 ): Content[] {
+  const toolUseParts =
+    assistantMessage.parts?.filter((part) => part.functionCall) || [];
+
+  if (toolUseParts.length === 0) {
+    // No function calls — no extra messages needed.
+    // The parent history already ends with this model message.
+    return [];
+  }
+
   // Clone the assistant message to avoid mutating the original
   const fullAssistantMessage: Content = {
     role: assistantMessage.role,
     parts: [...(assistantMessage.parts || [])],
   };
 
-  const toolUseParts =
-    assistantMessage.parts?.filter((part) => part.functionCall) || [];
-
-  if (toolUseParts.length === 0) {
-    return [
-      {
-        role: 'user',
-        parts: [{ text: buildChildMessage(directive) }],
-      },
-    ];
-  }
-
-  // Build tool_result blocks for every tool_use, all with identical placeholder text
+  // Build tool_result blocks for every tool_use, all with identical placeholder text.
+  // Include the directive text in the same user message to maintain
+  // proper user/model alternation.
   const toolResultParts = toolUseParts.map((part) => ({
     functionResponse: {
+      id: part.functionCall!.id,
       name: part.functionCall!.name,
-      response: { result: FORK_PLACEHOLDER_RESULT },
+      response: { output: FORK_PLACEHOLDER_RESULT },
     },
   }));
 
@@ -76,7 +93,7 @@ STOP. READ THIS FIRST.
 You are a forked worker process. You are NOT the main agent.
 
 RULES (non-negotiable):
-1. Your system prompt says "default to forking." IGNORE IT — that's for the parent. You ARE the fork. Do NOT spawn sub-agents; execute directly.
+1. You ARE the fork. Do NOT spawn sub-agents; execute directly.
 2. Do NOT converse, ask questions, or suggest next steps
 3. Do NOT editorialize or add meta-commentary
 4. USE your tools directly: Bash, Read, Write, etc.

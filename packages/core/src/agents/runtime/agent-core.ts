@@ -101,6 +101,15 @@ export interface CreateChatOptions {
    * conversational context (e.g., from the main session that spawned it).
    */
   extraHistory?: Content[];
+  /**
+   * When provided, replaces the auto-built generationConfig
+   * (systemInstruction, temperature, etc.) with this exact config.
+   * Used by fork subagents to share the parent conversation's cache
+   * prefix for DashScope prompt caching.
+   */
+  generationConfigOverride?: GenerateContentConfig & {
+    systemInstruction?: string | Content;
+  };
 }
 
 /**
@@ -222,7 +231,12 @@ export class AgentCore {
       );
     }
 
-    const envHistory = await getInitialChatHistory(this.runtimeContext);
+    // When generationConfigOverride is provided (fork path), the extraHistory
+    // already contains the parent's env context. Skip getInitialChatHistory
+    // to avoid duplicating the env messages and breaking cache prefix match.
+    const envHistory = options?.generationConfigOverride
+      ? []
+      : await getInitialChatHistory(this.runtimeContext);
 
     const startHistory = [
       ...envHistory,
@@ -230,22 +244,30 @@ export class AgentCore {
       ...(this.promptConfig.initialMessages ?? []),
     ];
 
-    const systemInstruction = this.promptConfig.systemPrompt
-      ? this.buildChatSystemPrompt(context, options)
-      : undefined;
+    // If an override is provided (fork path), use it directly for cache
+    // sharing. Otherwise, build the config from this agent's promptConfig.
+    // Note: buildChatSystemPrompt is called OUTSIDE the try/catch so template
+    // errors propagate to the caller (not swallowed by reportError).
+    let generationConfig: GenerateContentConfig & {
+      systemInstruction?: string | Content;
+    };
 
-    try {
-      const generationConfig: GenerateContentConfig & {
-        systemInstruction?: string | Content;
-      } = {
+    if (options?.generationConfigOverride) {
+      generationConfig = options.generationConfigOverride;
+    } else {
+      const systemInstruction = this.promptConfig.systemPrompt
+        ? this.buildChatSystemPrompt(context, options)
+        : undefined;
+      generationConfig = {
         temperature: this.modelConfig.temp,
         topP: this.modelConfig.top_p,
       };
-
       if (systemInstruction) {
         generationConfig.systemInstruction = systemInstruction;
       }
+    }
 
+    try {
       return new GeminiChat(
         this.runtimeContext,
         generationConfig,

@@ -192,10 +192,17 @@ export class AgentHeadless {
   async execute(
     context: ContextState,
     externalSignal?: AbortSignal,
-    options?: { extraHistory?: Array<import('@google/genai').Content> },
+    options?: {
+      extraHistory?: Array<import('@google/genai').Content>;
+      /** Override generationConfig for cache sharing (fork subagent). */
+      generationConfigOverride?: import('@google/genai').GenerateContentConfig;
+      /** Override tool declarations for cache sharing (fork subagent). */
+      toolsOverride?: Array<import('@google/genai').FunctionDeclaration>;
+    },
   ): Promise<void> {
     const chat = await this.core.createChat(context, {
       extraHistory: options?.extraHistory,
+      generationConfigOverride: options?.generationConfigOverride,
     });
 
     if (!chat) {
@@ -215,7 +222,7 @@ export class AgentHeadless {
       abortController.abort();
     }
 
-    const toolsList = this.core.prepareTools();
+    const toolsList = options?.toolsOverride ?? this.core.prepareTools();
 
     const initialTaskText = String(
       (context.get('task_prompt') as string) ?? 'Get Started!',

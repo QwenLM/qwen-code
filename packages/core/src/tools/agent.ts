@@ -40,7 +40,7 @@ import type { StopHookOutput } from '../hooks/types.js';
 export interface AgentParams {
   description: string;
   prompt: string;
-  subagent_type: string;
+  subagent_type?: string;
 }
 
 const debugLogger = createDebugLogger('AGENT');
@@ -485,12 +485,48 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     try {
       let subagentConfig: SubagentConfig;
       let extraHistory: Array<import('@google/genai').Content> | undefined;
+      let forkPlaceholderResult: string | undefined;
+      let forkTaskPrompt: string | undefined;
+      let forkGenerationConfig:
+        | import('@google/genai').GenerateContentConfig
+        | undefined;
+      let forkToolsOverride:
+        | Array<import('@google/genai').FunctionDeclaration>
+        | undefined;
 
       if (!this.params.subagent_type) {
-        const { FORK_AGENT, buildForkedMessages, isInForkChild } = await import(
-          '../agents/runtime/forkSubagent.js'
-        );
+        const {
+          FORK_AGENT,
+          FORK_PLACEHOLDER_RESULT,
+          buildForkedMessages,
+          buildChildMessage,
+          isInForkChild,
+        } = await import('../agents/runtime/forkSubagent.js');
+        forkPlaceholderResult = FORK_PLACEHOLDER_RESULT;
         subagentConfig = FORK_AGENT;
+
+        // Retrieve the parent's cached generationConfig (systemInstruction +
+        // tools) so the fork's API requests share the same prefix for
+        // DashScope prompt cache hits.
+        const { getCacheSafeParams } = await import(
+          '../followup/forkedQuery.js'
+        );
+        const cacheSafeParams = getCacheSafeParams();
+        if (cacheSafeParams) {
+          forkGenerationConfig = cacheSafeParams.generationConfig;
+          const tools = cacheSafeParams.generationConfig.tools;
+          if (tools && tools.length > 0) {
+            forkToolsOverride = tools.flatMap(
+              (t) =>
+                (
+                  t as {
+                    functionDeclarations?: Array<import('@google/genai').FunctionDeclaration>;
+                  }
+                ).functionDeclarations ?? [],
+            );
+          }
+        }
+
         const geminiClient = this.config.getGeminiClient();
         if (geminiClient) {
           const rawHistory = geminiClient.getHistory(true);
@@ -512,6 +548,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             };
           }
 
+          // Build extraHistory ensuring it ends with a model message so
+          // agent-headless can send the task_prompt as a user message
+          // without creating consecutive user messages.
           if (rawHistory.length > 0) {
             const lastMessage = rawHistory[rawHistory.length - 1];
             if (lastMessage.role === 'model') {
@@ -519,18 +558,36 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                 this.params.prompt,
                 lastMessage,
               );
-              extraHistory = [...rawHistory.slice(0, -1), ...forkedMessages];
+              if (forkedMessages.length > 0) {
+                // Model had function calls: append tool responses + directive,
+                // then a model ack so history ends with model.
+                extraHistory = [
+                  ...rawHistory.slice(0, -1),
+                  ...forkedMessages,
+                  {
+                    role: 'model' as const,
+                    parts: [{ text: 'Understood. Executing directive now.' }],
+                  },
+                ];
+                // task_prompt is a trigger to start execution
+                forkTaskPrompt = 'Begin.';
+              } else {
+                // Model had no function calls: history ends with model,
+                // directive goes via task_prompt.
+                extraHistory = [...rawHistory];
+              }
             } else {
-              extraHistory = [
-                ...rawHistory,
-                { role: 'user', parts: [{ text: this.params.prompt }] },
-              ];
+              // History ends with user (unusual) — drop the trailing user
+              // message to avoid consecutive user messages when agent-headless
+              // sends the task_prompt.
+              extraHistory = rawHistory.slice(0, -1);
             }
-          } else {
-            extraHistory = [
-              { role: 'user', parts: [{ text: this.params.prompt }] },
-            ];
           }
+        }
+
+        // Default: directive with fork boilerplate as task_prompt
+        if (!forkTaskPrompt) {
+          forkTaskPrompt = buildChildMessage(this.params.prompt);
         }
       } else {
         // Load the subagent configuration
@@ -580,13 +637,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       );
 
       // Create context state with the task prompt
+      // For fork agents, use the fork directive (with boilerplate) as the task
+      // prompt so it's sent as the first user message by agent-headless.
       const contextState = new ContextState();
-      contextState.set('task_prompt', this.params.prompt);
+      contextState.set('task_prompt', forkTaskPrompt || this.params.prompt);
 
       // Fire SubagentStart hook before execution
       const hookSystem = this.config.getHookSystem();
       const agentId = `${subagentConfig.name}-${Date.now()}`;
-      const agentType = this.params.subagent_type;
+      const agentType = this.params.subagent_type || subagentConfig.name;
 
       const executeSubagent = async () => {
         try {
@@ -612,7 +671,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           }
 
           // Execute the subagent (blocking)
-          await subagent.execute(contextState, signal, { extraHistory });
+          await subagent.execute(contextState, signal, {
+            extraHistory,
+            generationConfigOverride: forkGenerationConfig,
+            toolsOverride: forkToolsOverride,
+          });
 
           // Fire SubagentStop hook after execution and handle block decisions
           if (hookSystem && !signal?.aborted) {
@@ -661,7 +724,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
                   const continueContext = new ContextState();
                   continueContext.set('task_prompt', continueReason);
-                  await subagent.execute(continueContext, signal);
+                  await subagent.execute(continueContext, signal, {
+                    extraHistory,
+                    generationConfigOverride: forkGenerationConfig,
+                    toolsOverride: forkToolsOverride,
+                  });
 
                   if (signal?.aborted) {
                     continueExecution = false;
@@ -724,17 +791,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       if (!this.params.subagent_type) {
         // Background fork execution
         void executeSubagent();
-        const { FORK_PLACEHOLDER_RESULT } = await import(
-          '../agents/runtime/forkSubagent.js'
-        );
         return {
-          llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
+          llmContent: [{ text: forkPlaceholderResult! }],
           returnDisplay: this.currentDisplay!,
         };
       } else {
         await executeSubagent();
+        const finalText = subagent.getFinalText();
+        const terminateMode = subagent.getTerminateMode();
+        if (terminateMode === AgentTerminateMode.ERROR) {
+          return {
+            llmContent: finalText || 'Subagent execution failed.',
+            returnDisplay: this.currentDisplay!,
+          };
+        }
         return {
-          llmContent: [{ text: subagent.getFinalText() }],
+          llmContent: [{ text: finalText }],
           returnDisplay: this.currentDisplay!,
         };
       }
