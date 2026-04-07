@@ -78,3 +78,10 @@ export {
   type HookCommandType,
   type HookExecutionResult,
 } from './mode-hooks.js';
+
+// Mode presets
+export {
+  ModePresetRegistry,
+  type ModePreset,
+  BUILTIN_PRESETS,
+} from './mode-presets.js';
