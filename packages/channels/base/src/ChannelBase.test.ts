@@ -570,7 +570,7 @@ describe('ChannelBase', () => {
       ]);
     });
 
-    it('steer is the default mode when dispatchMode not set', async () => {
+    it('collect is the default mode when dispatchMode not set', async () => {
       let resolveFirst!: (v: string) => void;
       const firstPrompt = new Promise<string>((r) => {
         resolveFirst = r;
@@ -579,35 +579,39 @@ describe('ChannelBase', () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
         callCount++;
         if (callCount === 1) return firstPrompt;
-        return Promise.resolve('steered response');
+        return Promise.resolve('coalesced response');
       });
 
-      // Add cancelSession mock
-      (bridge as unknown as Record<string, unknown>).cancelSession = vi
-        .fn()
-        .mockImplementation(() => {
-          resolveFirst('cancelled');
-          return Promise.resolve();
-        });
+      // cancelSession should NOT be called under collect — provide a mock so
+      // we can assert it stays untouched.
+      const cancelSessionMock = vi.fn().mockResolvedValue(undefined);
+      (bridge as unknown as Record<string, unknown>).cancelSession =
+        cancelSessionMock;
 
-      // No dispatchMode set — should default to steer
+      // No dispatchMode set — should default to collect (matches the
+      // documented default in ChannelConfig.dispatchMode JSDoc).
       const ch = createChannel();
 
       const p1 = ch.handleInbound(envelope({ text: 'first' }));
       await new Promise((r) => setTimeout(r, 10));
 
-      // Second message should cancel the first (steer behavior)
+      // Second message arrives while first is in flight — collect mode
+      // buffers it instead of cancelling the first.
       const p2 = ch.handleInbound(envelope({ text: 'second' }));
+      await p2; // returns immediately after buffering
 
+      // First still running, only one prompt call so far.
+      expect(callCount).toBe(1);
+
+      // Let the first prompt finish; the buffered second message drains as
+      // a coalesced follow-up.
+      resolveFirst('first response');
       await p1;
-      await p2;
+      await new Promise((r) => setTimeout(r, 50));
 
-      // cancelSession should have been called (steer behavior)
-      expect(
-        (bridge as unknown as Record<string, () => unknown>).cancelSession,
-      ).toHaveBeenCalledTimes(1);
-
-      // Both prompts ran
+      // cancelSession should never be called under collect.
+      expect(cancelSessionMock).not.toHaveBeenCalled();
+      // Both prompts ran (first + coalesced follow-up).
       expect(callCount).toBe(2);
     });
 
