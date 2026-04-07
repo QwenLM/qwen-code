@@ -219,6 +219,11 @@
           "description": "The last time the feedback dialog was shown.",
           "type": "number",
           "default": 0
+        },
+        "verboseMode": {
+          "description": "Show full tool output and thinking in verbose mode (toggle with Ctrl+O).",
+          "type": "boolean",
+          "default": true
         }
       }
     },

@@ -593,6 +593,16 @@ const SETTINGS_SCHEMA = {
         description: 'The last time the feedback dialog was shown.',
         showInDialog: false,
       },
+      verboseMode: {
+        type: 'boolean',
+        label: 'Verbose Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
+        showInDialog: false,
+      },
     },
   },
 
