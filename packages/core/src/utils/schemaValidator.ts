@@ -151,6 +151,10 @@ function getAcceptedTypes(
       for (const variant of variants as Array<Record<string, unknown>>) {
         if (typeof variant['type'] === 'string') {
           types.add(variant['type'] as string);
+        } else if (Array.isArray(variant['type'])) {
+          for (const t of variant['type'] as string[]) {
+            types.add(t);
+          }
         }
       }
     }
