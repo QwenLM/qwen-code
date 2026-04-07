@@ -38,6 +38,7 @@ import {
 } from './mode-load.js';
 import { modeValidator } from './mode-validation.js';
 import { ModeHookRegistry, type HookTrigger, type HookExecutionResult } from './mode-hooks.js';
+import { resolveInheritedMode, getInheritanceChain, isInheritedFrom, findDescendants } from './mode-inheritance.js';
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -339,7 +340,15 @@ export class ModeManager extends EventEmitter {
    * @returns Mode config or undefined
    */
   getMode(name: string): ModeConfig | undefined {
-    return this.modeRegistry.get(name);
+    const mode = this.modeRegistry.get(name);
+    if (!mode) return undefined;
+
+    // Return resolved version if it has inheritance
+    if (mode.inheritedFrom) {
+      return this.getResolvedMode(name);
+    }
+
+    return mode;
   }
 
   /**
@@ -555,5 +564,62 @@ export class ModeManager extends EventEmitter {
    */
   getHookRegistry(): ModeHookRegistry {
     return this.hookRegistry;
+  }
+
+  // ─── Inheritance Management ────────────────────────────────────────────────
+
+  /**
+   * Get a mode by name, with inheritance resolved.
+   *
+   * @param name - Mode name
+   * @returns Fully resolved mode config
+   */
+  getResolvedMode(name: string): ModeConfig | undefined {
+    const mode = this.modeRegistry.get(name);
+    if (!mode) return undefined;
+
+    try {
+      return resolveInheritedMode(mode, this.modeRegistry);
+    } catch (error) {
+      debugLogger.error(`Failed to resolve inheritance for mode "${name}":`, error);
+      return undefined;
+    }
+  }
+
+  /**
+   * Get the inheritance chain for a mode.
+   *
+   * @param name - Mode name
+   * @returns Array of mode names in the inheritance chain
+   */
+  getModeInheritanceChain(name: string): string[] {
+    const mode = this.modeRegistry.get(name);
+    if (!mode) return [];
+
+    return getInheritanceChain(mode, this.modeRegistry);
+  }
+
+  /**
+   * Find all modes that inherit from a given mode.
+   *
+   * @param ancestorName - Ancestor mode name
+   * @returns Array of descendant mode configs
+   */
+  findModeDescendants(ancestorName: string): ModeConfig[] {
+    return findDescendants(ancestorName, this.modeRegistry);
+  }
+
+  /**
+   * Check if a mode inherits from another.
+   *
+   * @param modeName - Mode name
+   * @param ancestorName - Potential ancestor name
+   * @returns True if mode inherits from ancestor
+   */
+  isModeInheritedFrom(modeName: string, ancestorName: string): boolean {
+    const mode = this.modeRegistry.get(modeName);
+    if (!mode) return false;
+
+    return isInheritedFrom(mode, ancestorName, this.modeRegistry);
   }
 }

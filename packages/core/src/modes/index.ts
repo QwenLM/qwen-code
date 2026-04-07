@@ -85,3 +85,11 @@ export {
   type ModePreset,
   BUILTIN_PRESETS,
 } from './mode-presets.js';
+
+// Mode inheritance
+export {
+  resolveInheritedMode,
+  getInheritanceChain,
+  isInheritedFrom,
+  findDescendants,
+} from './mode-inheritance.js';
