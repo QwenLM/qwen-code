@@ -69,7 +69,7 @@ export const Footer: React.FC = () => {
   ) : uiState.shellModeActive ? (
     <ShellModeIndicator />
   ) : statusLineText ? (
-    <Text dimColor wrap="truncate">
+    <Text dimColor wrap="wrap">
       {statusLineText}
     </Text>
   ) : (
