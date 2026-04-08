@@ -401,29 +401,26 @@ export class HookRunner {
           : stdout.trim() || stderr.trim();
 
         if (textToParse) {
-          // Only parse JSON on exit 0
-          if (!isBlockingError) {
-            try {
-              let parsed = JSON.parse(textToParse);
-              if (typeof parsed === 'string') {
-                parsed = JSON.parse(parsed);
-              }
-              if (parsed && typeof parsed === 'object') {
-                output = parsed as HookOutput;
-              }
-            } catch {
-              // Not JSON, convert plain text to structured output
-              output = this.convertPlainTextToHookOutput(
-                textToParse,
-                exitCode || EXIT_CODE_SUCCESS,
-              );
+          // Try parsing as JSON to preserve structured output like
+          // hookSpecificOutput.additionalContext (applies to both exit 0 and exit 2)
+          try {
+            let parsed = JSON.parse(textToParse);
+            if (typeof parsed === 'string') {
+              parsed = JSON.parse(parsed);
             }
-          } else {
-            // Exit code 2: blocking error, use stderr as reason
-            output = this.convertPlainTextToHookOutput(textToParse, exitCode);
+            if (parsed && typeof parsed === 'object') {
+              output = parsed as HookOutput;
+            }
+          } catch {
+            // Not JSON, convert plain text to structured output
+            output = this.convertPlainTextToHookOutput(
+              textToParse,
+              isBlockingError ? exitCode : exitCode || EXIT_CODE_SUCCESS,
+            );
           }
         }
 
+        const killedBySignal = exitCode === null;
         resolve({
           hookConfig,
           eventName,
@@ -431,8 +428,11 @@ export class HookRunner {
           output,
           stdout,
           stderr,
-          exitCode: exitCode || EXIT_CODE_SUCCESS,
+          exitCode: exitCode ?? -1,
           duration,
+          ...(killedBySignal && {
+            error: new Error('Hook killed by signal'),
+          }),
         });
       });
 

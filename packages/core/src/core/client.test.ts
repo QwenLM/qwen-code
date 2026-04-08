@@ -323,6 +323,7 @@ describe('Gemini Client (client.ts)', () => {
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
       getFileService: vi.fn().mockReturnValue(fileService),
       getMaxSessionTurns: vi.fn().mockReturnValue(0),
+      getThinkingIdleThresholdMs: vi.fn().mockReturnValue(5 * 60 * 1000),
       getSessionTokenLimit: vi.fn().mockReturnValue(32000),
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
@@ -449,9 +450,9 @@ describe('Gemini Client (client.ts)', () => {
       client['chat'] = mockChat as GeminiChat;
     });
 
-    it('should not strip thoughts on active session (< 1h idle)', async () => {
-      // Simulate a recent API completion (5 minutes ago)
-      client['lastApiCompletionTimestamp'] = Date.now() - 5 * 60 * 1000;
+    it('should not strip thoughts on active session (< 5min idle)', async () => {
+      // Simulate a recent API completion (2 minutes ago — within default 5 min threshold)
+      client['lastApiCompletionTimestamp'] = Date.now() - 2 * 60 * 1000;
       client['thinkingClearLatched'] = false;
 
       const gen = client.sendMessageStream(
@@ -469,9 +470,9 @@ describe('Gemini Client (client.ts)', () => {
       ).not.toHaveBeenCalled();
     });
 
-    it('should latch and strip thoughts after > 1h idle', async () => {
-      // Simulate an old API completion (2 hours ago)
-      client['lastApiCompletionTimestamp'] = Date.now() - 2 * 60 * 60 * 1000;
+    it('should latch and strip thoughts after > 5min idle', async () => {
+      // Simulate an old API completion (10 minutes ago — exceeds default 5 min threshold)
+      client['lastApiCompletionTimestamp'] = Date.now() - 10 * 60 * 1000;
       client['thinkingClearLatched'] = false;
 
       const gen = client.sendMessageStream(
@@ -490,9 +491,9 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
-    it('should keep stripping once latched even if idle < 1h', async () => {
-      // Pre-set latch with a recent timestamp
-      client['lastApiCompletionTimestamp'] = Date.now() - 5 * 60 * 1000;
+    it('should keep stripping once latched even if idle < 5min', async () => {
+      // Pre-set latch with a recent timestamp (2 minutes ago — within threshold)
+      client['lastApiCompletionTimestamp'] = Date.now() - 2 * 60 * 1000;
       client['thinkingClearLatched'] = true;
 
       const gen = client.sendMessageStream(

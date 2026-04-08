@@ -1070,6 +1070,7 @@ export async function loadCliConfig(
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     microcompaction: settings.context?.microcompaction,
     fileFiltering: settings.context?.fileFiltering,
+    thinkingIdleThresholdMinutes: settings.context?.gapThresholdMinutes,
     checkpointing:
       argv.checkpointing || settings.general?.checkpointing?.enabled,
     proxy:

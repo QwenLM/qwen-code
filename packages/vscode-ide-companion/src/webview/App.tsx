@@ -52,10 +52,7 @@ import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
 import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../types/acpTypes.js';
-import {
-  DEFAULT_TOKEN_LIMIT,
-  tokenLimit,
-} from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
+import { DEFAULT_TOKEN_LIMIT, tokenLimit } from '../utils/tokenLimits.js';
 import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
 
 export const App: React.FC = () => {
@@ -958,7 +955,9 @@ export const App: React.FC = () => {
       <ChatHeader
         currentSessionTitle={sessionManagement.currentSessionTitle}
         onLoadSessions={sessionManagement.handleLoadQwenSessions}
-        onNewSession={sessionManagement.handleNewQwenSession}
+        onNewSession={() =>
+          sessionManagement.handleNewQwenSession(modelInfo?.modelId ?? null)
+        }
       />
 
       <div

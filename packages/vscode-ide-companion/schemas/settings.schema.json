@@ -214,6 +214,11 @@
           "description": "The last time the feedback dialog was shown.",
           "type": "number",
           "default": 0
+        },
+        "verboseMode": {
+          "description": "Show full tool output and thinking in verbose mode (toggle with Ctrl+O).",
+          "type": "boolean",
+          "default": true
         }
       }
     },
@@ -383,6 +388,11 @@
               "default": true
             }
           }
+        },
+        "gapThresholdMinutes": {
+          "description": "Minutes of inactivity after which retained thinking blocks are cleared to free context tokens. Aligns with provider prompt-cache TTL.",
+          "type": "number",
+          "default": 5
         }
       }
     },
