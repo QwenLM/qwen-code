@@ -192,7 +192,12 @@ export interface UseFollowupSuggestionsReturn {
   state: FollowupState;
   getPlaceholder: (defaultPlaceholder: string) => string;
   setSuggestion: (text: string | null) => void;
-  accept: (method?: 'tab' | 'enter' | 'right') => void;
+  /** Accept the current suggestion */
+  accept: (
+    method?: 'tab' | 'enter' | 'right',
+    options?: { skipOnAccept?: boolean },
+  ) => void;
+  /** Dismiss the current suggestion */
   dismiss: () => void;
   clear: () => void;
 }
