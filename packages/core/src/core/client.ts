@@ -560,15 +560,16 @@ export class GeminiClient {
       // record user message for session management
       this.config.getChatRecordingService()?.recordUserMessage(request);
 
-      // Thinking block cross-turn retention with idle cleanup:
-      // - Active session (< threshold idle): keep thinking blocks for reasoning coherence
-      // - Idle > threshold: clear old thinking, keep only last 1 turn to free context
-      // - Latch: once triggered, never revert — prevents oscillation
+      // Idle cleanup: clear stale thinking blocks after idle period.
+      // Latch: once triggered, never revert — prevents oscillation.
+      const idleConfig = this.config.getClearContextOnIdle();
+      const thinkingThresholdMin = idleConfig.thinkingThresholdMinutes ?? 5;
       if (
+        thinkingThresholdMin >= 0 &&
         !this.thinkingClearLatched &&
         this.lastApiCompletionTimestamp !== null
       ) {
-        const thresholdMs = this.config.getThinkingIdleThresholdMs();
+        const thresholdMs = thinkingThresholdMin * 60 * 1000;
         const idleMs = Date.now() - this.lastApiCompletionTimestamp;
         if (idleMs > thresholdMs) {
           this.thinkingClearLatched = true;
@@ -600,13 +601,12 @@ export class GeminiClient {
       return new Turn(this.getChat(), prompt_id);
     }
 
-    // Microcompaction: clear old tool results when idle > threshold.
+    // Idle cleanup: clear old tool results when idle > threshold.
     // Runs before full compression so it can shed tokens cheaply first.
-    // Reuses lastApiCompletionTimestamp from thinking block cleanup.
     const mcResult = microcompactHistory(
       this.getChat().getHistory(),
       this.lastApiCompletionTimestamp,
-      this.config.getMicrocompaction(),
+      this.config.getClearContextOnIdle(),
     );
     if (mcResult.meta) {
       this.getChat().setHistory(mcResult.history);

@@ -1068,9 +1068,8 @@ export async function loadCliConfig(
     },
     telemetry: telemetrySettings,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
-    microcompaction: settings.context?.microcompaction,
+    clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
-    thinkingIdleThresholdMinutes: settings.context?.gapThresholdMinutes,
     checkpointing:
       argv.checkpointing || settings.general?.checkpointing?.enabled,
     proxy:

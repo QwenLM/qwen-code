@@ -6,7 +6,7 @@
 
 import type { Content, Part } from '@google/genai';
 
-import type { MicrocompactionSettings } from '../../config/config.js';
+import type { ClearContextOnIdleSettings } from '../../config/config.js';
 import { ToolNames } from '../../tools/tool-names.js';
 
 export const MICROCOMPACT_CLEARED_MESSAGE = '[Old tool result content cleared]';
@@ -22,74 +22,31 @@ const COMPACTABLE_TOOLS = new Set<string>([
   ToolNames.WRITE_FILE,
 ]);
 
-// --- Config resolution ---
-
-interface MicrocompactionConfig {
-  enabled: boolean;
-  gapThresholdMinutes: number;
-  keepRecent: number;
-}
-
-const DEFAULTS: MicrocompactionConfig = {
-  enabled: true,
-  gapThresholdMinutes: 60,
-  keepRecent: 5,
-};
-
-/**
- * Resolve microcompaction config. Priority:
- * 1. Environment variables (for E2E testing)
- * 2. Settings from settings.json (context.microcompaction)
- * 3. Hardcoded defaults
- */
-function getMicrocompactionConfig(
-  settings?: MicrocompactionSettings,
-): MicrocompactionConfig {
-  const envEnabled = process.env['QWEN_MC_ENABLED'];
-  const envGap = process.env['QWEN_MC_GAP_THRESHOLD_MINUTES'];
-  const envKeep = process.env['QWEN_MC_KEEP_RECENT'];
-
-  return {
-    enabled:
-      envEnabled !== undefined
-        ? envEnabled === 'true'
-        : (settings?.enabled ?? DEFAULTS.enabled),
-    gapThresholdMinutes:
-      envGap !== undefined && Number.isFinite(Number(envGap))
-        ? Number(envGap)
-        : (settings?.gapThresholdMinutes ?? DEFAULTS.gapThresholdMinutes),
-    keepRecent:
-      envKeep !== undefined && Number.isFinite(Number(envKeep))
-        ? Number(envKeep)
-        : (settings?.keepRecent ?? DEFAULTS.keepRecent),
-  };
-}
-
 // --- Trigger evaluation ---
 
 /**
  * Check whether the time-based trigger should fire.
  *
- * Returns the measured gap (ms) and config when the trigger fires,
- * or null when it doesn't (disabled, gap under threshold, no prior
- * API completion).
+ * A toolResultsThresholdMinutes of -1 means disabled (never clear).
  */
 export function evaluateTimeBasedTrigger(
   lastApiCompletionTimestamp: number | null,
-  settings?: MicrocompactionSettings,
-): { gapMs: number; config: MicrocompactionConfig } | null {
-  const config = getMicrocompactionConfig(settings);
-  if (!config.enabled) {
+  settings: ClearContextOnIdleSettings,
+): { gapMs: number } | null {
+  const thresholdMin = settings.toolResultsThresholdMinutes ?? 60;
+  // -1 means disabled
+  if (thresholdMin < 0) {
     return null;
   }
   if (lastApiCompletionTimestamp === null) {
     return null;
   }
+  const thresholdMs = thresholdMin * 60_000;
   const gapMs = Date.now() - lastApiCompletionTimestamp;
-  if (!Number.isFinite(gapMs) || gapMs < config.gapThresholdMinutes * 60_000) {
+  if (!Number.isFinite(gapMs) || gapMs < thresholdMs) {
     return null;
   }
-  return { gapMs, config };
+  return { gapMs };
 }
 
 // --- Collection ---
@@ -165,7 +122,7 @@ export interface MicrocompactMeta {
 export function microcompactHistory(
   history: Content[],
   lastApiCompletionTimestamp: number | null,
-  settings?: MicrocompactionSettings,
+  settings: ClearContextOnIdleSettings,
 ): { history: Content[]; meta?: MicrocompactMeta } {
   const trigger = evaluateTimeBasedTrigger(
     lastApiCompletionTimestamp,
@@ -174,10 +131,16 @@ export function microcompactHistory(
   if (!trigger) {
     return { history };
   }
-  const { gapMs, config } = trigger;
+  const { gapMs } = trigger;
+
+  const envKeep = process.env['QWEN_MC_KEEP_RECENT'];
+  const configKeepRecent =
+    envKeep !== undefined && Number.isFinite(Number(envKeep))
+      ? Number(envKeep)
+      : (settings.toolResultsNumToKeep ?? 5);
 
   const allRefs = collectCompactablePartRefs(history);
-  const keepRecent = Math.max(1, config.keepRecent);
+  const keepRecent = Math.max(1, configKeepRecent);
   const keepRefs = new Set(
     allRefs.slice(-keepRecent).map((r) => `${r.contentIndex}:${r.partIndex}`),
   );
@@ -237,14 +200,16 @@ export function microcompactHistory(
     return { history };
   }
 
+  const thresholdMinutes = settings.toolResultsThresholdMinutes ?? 60;
+
   return {
     history: result,
     meta: {
       gapMinutes: Math.round(gapMs / 60_000),
-      thresholdMinutes: config.gapThresholdMinutes,
+      thresholdMinutes,
       toolsCleared,
       toolsKept: allRefs.length - clearRefs.length,
-      keepRecent: config.keepRecent,
+      keepRecent: configKeepRecent,
       tokensSaved,
     },
   };
