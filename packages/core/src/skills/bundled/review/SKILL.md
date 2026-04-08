@@ -422,7 +422,7 @@ Rules:
 - `body`: **empty `""`** when there are inline comments. Only put text here if some findings cannot be mapped to diff lines (those go in body as a last resort). Never put section headers, "Review Summary", or analysis in body.
 - `comments`: **ALL** high-confidence Critical/Suggestion findings go here. Skip Nice to have and low-confidence. Each must reference a line in the diff.
 - Comment body format: `**[Severity]** description\n\n```suggestion\nfix\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_`
-- The variable `YOUR_MODEL_ID` is declared at the top of this prompt (e.g., `YOUR_MODEL_ID="glm-5.1"`). You MUST include it in every footer. Do NOT omit the model name.
+- The model name is declared at the top of this prompt. You MUST include it in every footer. Do NOT omit the model name.
 - Use ` ```suggestion ` for one-click fixes; regular code blocks if fix spans multiple locations.
 - Only ONE comment per unique issue.
 
