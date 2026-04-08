@@ -69,7 +69,6 @@ export interface StatusLineCommandInput {
 interface StatusLineConfig {
   type: 'command';
   command: string;
-  padding?: number;
 }
 
 const debugLog = createDebugLogger('STATUS_LINE');
@@ -91,13 +90,6 @@ function getStatusLineConfig(
       type: 'command',
       command: raw.command,
     };
-    if (
-      'padding' in raw &&
-      typeof raw.padding === 'number' &&
-      Number.isFinite(raw.padding)
-    ) {
-      config.padding = Math.max(0, raw.padding);
-    }
     return config;
   }
   return undefined;
@@ -142,7 +134,6 @@ function buildMetricsPayload(
  */
 export function useStatusLine(): {
   text: string | null;
-  padding: number;
 } {
   const settings = useSettings();
   const uiState = useUIState();
@@ -151,7 +142,6 @@ export function useStatusLine(): {
 
   const statusLineConfig = getStatusLineConfig(settings);
   const statusLineCommand = statusLineConfig?.command;
-  const padding = statusLineConfig?.padding ?? 0;
 
   const [output, setOutput] = useState<string | null>(null);
 
@@ -402,5 +392,5 @@ export function useStatusLine(): {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { text: output, padding };
+  return { text: output };
 }

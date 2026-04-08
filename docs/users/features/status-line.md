@@ -40,8 +40,7 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
   "ui": {
     "statusLine": {
       "type": "command",
-      "command": "input=$(cat); model=$(echo \"$input\" | jq -r '.model.display_name'); pct=$(echo \"$input\" | jq -r '.context_window.used_percentage'); echo \"$model  ctx:${pct}%\"",
-      "padding": 0
+      "command": "input=$(cat); model=$(echo \"$input\" | jq -r '.model.display_name'); pct=$(echo \"$input\" | jq -r '.context_window.used_percentage'); echo \"$model  ctx:${pct}%\""
     }
   }
 }
@@ -51,7 +50,6 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 | --------- | ----------- | -------- | ------------------------------------------------------------------------------------- |
 | `type`    | `"command"` | Yes      | Must be `"command"`                                                                   |
 | `command` | string      | Yes      | Shell command to execute. Receives JSON via stdin, first line of stdout is displayed. |
-| `padding` | number      | No       | Horizontal padding (default: `0`)                                                     |
 
 ## JSON input
 

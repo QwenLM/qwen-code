@@ -434,9 +434,7 @@ const SETTINGS_SCHEMA = {
         label: 'Status Line',
         category: 'UI',
         requiresRestart: false,
-        default: undefined as
-          | { type: 'command'; command: string; padding?: number }
-          | undefined,
+        default: undefined as { type: 'command'; command: string } | undefined,
         description: 'Custom status line display configuration.',
         showInDialog: false,
       },

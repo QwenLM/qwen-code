@@ -136,25 +136,7 @@
         "statusLine": {
           "description": "Custom status line display configuration.",
           "type": "object",
-          "properties": {
-            "type": {
-              "type": "string",
-              "enum": ["command"],
-              "description": "Status line type. Currently only 'command' is supported."
-            },
-            "command": {
-              "type": "string",
-              "description": "Shell command to execute. Receives JSON context via stdin."
-            },
-            "padding": {
-              "type": "number",
-              "default": 0,
-              "minimum": 0,
-              "description": "Horizontal padding (characters)."
-            }
-          },
-          "required": ["type", "command"],
-          "additionalProperties": false
+          "additionalProperties": true
         },
         "customThemes": {
           "description": "Custom theme definitions.",
