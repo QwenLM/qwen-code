@@ -51,6 +51,7 @@ import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
+import { channelCommand } from '../commands/channel.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -128,7 +129,6 @@ export interface CliArgs {
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
   experimentalLsp: boolean | undefined;
-  experimentalHooks: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
   openaiLogging: boolean | undefined;
@@ -161,6 +161,9 @@ export interface CliArgs {
   excludeTools: string[] | undefined;
   authType: string | undefined;
   channel: string | undefined;
+  jsonFd?: number | undefined;
+  jsonFile?: string | undefined;
+  inputFile?: string | undefined;
 }
 
 function normalizeOutputFormat(
@@ -352,12 +355,6 @@ export async function parseArguments(): Promise<CliArgs> {
             'Enable experimental LSP (Language Server Protocol) feature for code intelligence',
           default: false,
         })
-        .option('experimental-hooks', {
-          type: 'boolean',
-          description:
-            'Enable experimental hooks feature for lifecycle event customization',
-          default: false,
-        })
         .option('channel', {
           type: 'string',
           choices: ['VSCode', 'ACP', 'SDK', 'CI'],
@@ -464,6 +461,25 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Include partial assistant messages when using stream-json output.',
           default: false,
+        })
+        .option('json-fd', {
+          type: 'number',
+          description:
+            'File descriptor for structured JSON event output (dual output mode). ' +
+            'The TUI renders normally on stdout while JSON events are written to this fd. ' +
+            'The caller must provide this fd via spawn stdio configuration.',
+        })
+        .option('json-file', {
+          type: 'string',
+          description:
+            'File path for structured JSON event output (dual output mode). ' +
+            'Can be a regular file, FIFO (named pipe), or /dev/fd/N.',
+        })
+        .option('input-file', {
+          type: 'string',
+          description:
+            'File path for receiving remote input commands (bidirectional sync). ' +
+            'An external process writes JSONL commands; the TUI watches and processes them.',
         })
         .option('continue', {
           alias: 'c',
@@ -580,6 +596,9 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['resume'] && !isValidSessionId(argv['resume'] as string)) {
             return `Invalid --resume: "${argv['resume']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
+          if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
+            return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
+          }
           return true;
         }),
     )
@@ -590,7 +609,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register Auth subcommands
     .command(authCommand)
     // Register Hooks subcommands
-    .command(hooksCommand);
+    .command(hooksCommand)
+    // Register Channel subcommands
+    .command(channelCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -611,7 +632,8 @@ export async function parseArguments(): Promise<CliArgs> {
     result._.length > 0 &&
     (result._[0] === 'mcp' ||
       result._[0] === 'extensions' ||
-      result._[0] === 'hooks')
+      result._[0] === 'hooks' ||
+      result._[0] === 'channel')
   ) {
     // MCP/Extensions/Hooks commands handle their own execution and process exit
     process.exit(0);
@@ -1089,6 +1111,7 @@ export async function loadCliConfig(
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
+    cronEnabled: settings.experimental?.cron ?? false,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
@@ -1121,10 +1144,11 @@ export async function loadCliConfig(
       format: outputSettingsFormat,
     },
     hooks: settings.hooks,
-    hooksConfig: settings.hooksConfig,
-    enableHooks:
-      argv.experimentalHooks === true || settings.hooksConfig?.enabled === true,
+    disableAllHooks: settings.disableAllHooks ?? false,
     channel: argv.channel,
+    jsonFd: argv.jsonFd,
+    jsonFile: argv.jsonFile,
+    inputFile: argv.inputFile,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
     // always be true and the settings file can never disable recording.

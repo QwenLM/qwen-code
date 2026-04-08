@@ -7,6 +7,7 @@
 import type { AnyToolInvocation } from '../index.js';
 import type { Config } from '../config/config.js';
 import os from 'node:os';
+import path from 'node:path';
 import { quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
@@ -38,6 +39,70 @@ export interface ShellConfiguration {
   shell: ShellType;
 }
 
+let cachedBashPath: string | undefined;
+
+/**
+ * Attempts to find the Git Bash executable path on Windows.
+ * Checks common installation locations and PATH.
+ * @returns The path to bash.exe if found, or 'bash' as fallback.
+ */
+function findGitBashPath(): string {
+  // Return cached result if available
+  if (cachedBashPath) {
+    return cachedBashPath;
+  }
+
+  // Search in PATH directories
+  const pathEnv = process.env['PATH'] || '';
+  const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
+
+  for (const dir of pathDirs) {
+    const bashPath = path.join(dir, 'bash.exe');
+    try {
+      accessSync(bashPath, fsConstants.X_OK);
+      cachedBashPath = bashPath;
+      return bashPath;
+    } catch {
+      // Continue searching
+    }
+  }
+
+  // Check common Git Bash installation locations
+  const commonPaths = [
+    path.join('C:', 'Program Files', 'Git', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files', 'Git', 'usr', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files (x86)', 'Git', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files (x86)', 'Git', 'usr', 'bin', 'bash.exe'),
+    path.join(
+      process.env['ProgramFiles'] || path.join('C:', 'Program Files'),
+      'Git',
+      'bin',
+      'bash.exe',
+    ),
+    path.join(
+      process.env['ProgramFiles(x86)'] ||
+        path.join('C:', 'Program Files (x86)'),
+      'Git',
+      'bin',
+      'bash.exe',
+    ),
+  ];
+
+  for (const bashPath of commonPaths) {
+    try {
+      accessSync(bashPath, fsConstants.X_OK);
+      cachedBashPath = bashPath;
+      return bashPath;
+    } catch {
+      // Continue searching
+    }
+  }
+
+  // Fallback to 'bash' and let the system handle it
+  cachedBashPath = 'bash';
+  return 'bash';
+}
+
 /**
  * Determines the appropriate shell configuration for the current platform.
  *
@@ -60,7 +125,7 @@ export function getShellConfiguration(): ShellConfiguration {
 
     if (isGitBash) {
       return {
-        executable: 'bash',
+        executable: findGitBashPath(),
         argsPrefix: ['-c'],
         shell: 'bash',
       };
@@ -224,11 +289,8 @@ export function splitCommands(command: string): string[] {
 
 /**
  * Extracts the root command from a given shell command string.
- * This is used to identify the base command for permission checks.
- * @param command The shell command string to parse
- * @returns The root command name, or undefined if it cannot be determined
- * @example getCommandRoot("ls -la /tmp") returns "ls"
- * @example getCommandRoot("git status && npm test") returns "git"
+ * Skips leading env var assignments (VAR=value) so that
+ * `PYTHONPATH=/tmp python3 -c "..."` returns `python3`.
  */
 export function getCommandRoot(command: string): string | undefined {
   const trimmedCommand = command.trim();
@@ -236,22 +298,21 @@ export function getCommandRoot(command: string): string | undefined {
     return undefined;
   }
 
-  // This regex is designed to find the first "word" of a command,
-  // while respecting quotes. It looks for a sequence of non-whitespace
-  // characters that are not inside quotes.
-  const match = trimmedCommand.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
-  if (match) {
-    // The first element in the match array is the full match.
-    // The subsequent elements are the capture groups.
-    // We prefer a captured group because it will be unquoted.
-    const commandRoot = match[1] || match[2] || match[3];
-    if (commandRoot) {
-      // If the command is a path, return the last component.
-      return commandRoot.split(/[\\/]/).pop();
-    }
+  // Split on whitespace and skip leading VAR=value tokens.
+  const tokens = trimmedCommand.split(/\s+/);
+  let idx = 0;
+  while (idx < tokens.length && /^[A-Za-z_]\w*=/.test(tokens[idx]!)) {
+    idx++;
   }
 
-  return undefined;
+  const firstToken = tokens[idx];
+  if (!firstToken) {
+    return undefined;
+  }
+
+  // Strip quotes and extract last path component.
+  const unquoted = firstToken.replace(/^["']|["']$/g, '');
+  return unquoted ? unquoted.split(/[\\/]/).pop() : undefined;
 }
 
 export function getCommandRoots(command: string): string[] {

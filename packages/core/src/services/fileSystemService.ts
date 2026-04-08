@@ -21,12 +21,15 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 
+export type LineEnding = 'crlf' | 'lf';
+
 export type ReadTextFileResponse = {
   content: string;
   _meta?: {
     bom?: boolean;
     encoding?: string;
     originalLineCount?: number;
+    lineEnding?: LineEnding;
   };
 };
 
@@ -148,10 +151,20 @@ function needsCrlfLineEndings(filePath: string): boolean {
 
 /**
  * Ensures content uses CRLF line endings. First normalizes any existing
- * \r\n to \n to avoid double-conversion, then converts all \n to \r\n.
+ * CRLF to LF to avoid double-conversion, then converts all LF to CRLF.
  */
-function ensureCrlfLineEndings(content: string): string {
-  return content.replace(/\r\n/g, '\n').replace(/\n/g, '\r\n');
+export function ensureCrlfLineEndings(content: string): string {
+  // First normalize CRLF to LF to avoid double-conversion, then convert all LF to CRLF
+  return content.split('\r\n').join('\n').split('\n').join('\r\n');
+}
+
+/**
+ * Detects whether the content uses CRLF or LF line endings.
+ * Returns 'crlf' if the content contains at least one CRLF sequence,
+ * 'lf' otherwise (including for content with no line endings).
+ */
+export function detectLineEnding(content: string): LineEnding {
+  return content.includes('\r\n') ? 'crlf' : 'lf';
 }
 
 /**
@@ -194,15 +207,21 @@ export class StandardFileSystemService implements FileSystemService {
         limit: limit ?? Number.POSITIVE_INFINITY,
         line: line || 0,
       });
-    return { content, _meta: { bom, encoding, originalLineCount } };
+    const lineEnding = detectLineEnding(content);
+    return { content, _meta: { bom, encoding, originalLineCount, lineEnding } };
   }
 
   async writeTextFile(
     params: Omit<WriteTextFileRequest, 'sessionId'>,
   ): Promise<WriteTextFileResponse> {
     const { path: filePath, _meta } = params;
-    // Convert LF to CRLF for file types that require it (e.g. .bat, .cmd)
-    const content = needsCrlfLineEndings(filePath)
+    const lineEnding = _meta?.['lineEnding'] as string | undefined;
+    // Convert LF to CRLF when:
+    // 1. The file type requires it (e.g. .bat, .cmd on Windows), OR
+    // 2. The original file used CRLF line endings (preserve original style)
+    const shouldUseCrlf =
+      needsCrlfLineEndings(filePath) || lineEnding === 'crlf';
+    const content = shouldUseCrlf
       ? ensureCrlfLineEndings(params.content)
       : params.content;
     const bom = _meta?.['bom'] ?? (false as boolean);

@@ -37,7 +37,7 @@ describe('mcp command', () => {
 
     mcpCommand.builder(mockYargs as unknown as Argv);
 
-    expect(mockYargs.command).toHaveBeenCalledTimes(3);
+    expect(mockYargs.command).toHaveBeenCalledTimes(4);
 
     // Verify that the specific subcommands are registered
     const commandCalls = mockYargs.command.mock.calls;
@@ -46,6 +46,7 @@ describe('mcp command', () => {
     expect(commandNames).toContain('add <name> <commandOrUrl> [args...]');
     expect(commandNames).toContain('remove <name>');
     expect(commandNames).toContain('list');
+    expect(commandNames).toContain('reconnect [server-name]');
 
     expect(mockYargs.demandCommand).toHaveBeenCalledWith(
       1,

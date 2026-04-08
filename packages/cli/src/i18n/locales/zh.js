@@ -69,7 +69,8 @@ export default {
   'Initializing...': '正在初始化...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     '正在连接到 MCP 服务器... ({{connected}}/{{total}})',
-  'Type your message or @path/to/file': '输入您的消息或 @ 文件路径',
+  'Type your message or @path/to/file':
+    '输入您的消息, 比如:帮我确认下在 DataWorks 的身份和常用工作空间？',
   '? for shortcuts': '按 ? 查看快捷键',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "按 'i' 进入插入模式，按 'Esc' 进入普通模式",
@@ -96,6 +97,7 @@ export default {
   'CLI Version': 'CLI 版本',
   'Git Commit': 'Git 提交',
   Model: '模型',
+  'Fast Model': '快速模型',
   Sandbox: '沙箱',
   'OS Platform': '操作系统平台',
   'OS Arch': '操作系统架构',
@@ -660,6 +662,19 @@ export default {
   'No hook config selected': '未选择 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    '所有 Hook 当前已禁用。您有 {{count}} 未运行。',
+  '{{count}} configured hook': '{{count}} 个已配置的 Hook',
+  '{{count}} configured hooks': '{{count}} 个已配置的 Hook',
+  'When hooks are disabled:': '当 Hook 被禁用时：',
+  'No hook commands will execute': '不会执行任何 Hook 命令',
+  'StatusLine will not be displayed': '不会显示状态栏',
+  'Tool operations will proceed without hook validation':
+    '工具操作将在没有 Hook 验证的情况下继续',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    '要重新启用 Hook，请从 settings.json 中删除 "disableAllHooks" 或询问 Qwen Code。',
   // Hooks - Source
   Project: '项目',
   User: '用户',
@@ -1388,6 +1403,7 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
+  'Press ↑ to edit queued messages': '按 ↑ 编辑排队消息',
 
   // ============================================================================
   // MCP Status
@@ -1430,9 +1446,9 @@ export default {
   'Restarting MCP servers...': '正在重启 MCP 服务器...',
 
   // ============================================================================
-  // Startup Tips
+  // Startup Examples
   // ============================================================================
-  'Tips:': '提示：',
+  'Example: ': '示例：',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     '对话变长时用 /compress，总结历史并释放上下文。',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
@@ -1452,6 +1468,19 @@ export default {
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '试试 /insight，从聊天记录中生成个性化洞察。',
+  // DataWorks usage examples
+  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
+    '👤 身份确认："帮我确认下在 DataWorks 的身份和权限？"',
+  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
+    '📊 任务分析："帮我分析下 dataworks_analyze 这个工作空间最近一周新建的节点有哪些，并分析下具体在做什么？"',
+  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
+    '🧹 任务治理："在 dataworks_analyze 工作空间中，帮我找出创建时间长但一直没有发布的节点。"',
+  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
+    '🔍 问题定位："现在发现 dwd_is_it_software_released_df 和 ads_is_it_sfw_moni_key_released_recycled_df 的数据不一致，他们上游都是 ods_ism_it_software_key_released_df。帮我看一下他们的逻辑有什么不一样？"',
+  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
+    '🛠️ 问题修复："员工信息表 my_project.ods_emp_info_d 中，工号 EMP001 的部门数据为空。请帮我排查原因并提供修复建议。"',
+  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
+    '当前为 Beta 版本，个人开发环境实例删除后，历史会话记录将无法恢复。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1795,4 +1824,11 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    '已切换到详细模式 — 完整显示工具输出和思考过程',
+  'Compact mode on — showing tool names and final responses only':
+    '已切换到精简模式 — 仅显示工具名称和最终回答',
+  verbose: '详细',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    '详细模式下显示完整工具输出和思考过程（Ctrl+O 切换）。',
 };

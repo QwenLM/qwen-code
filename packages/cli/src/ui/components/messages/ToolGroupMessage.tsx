@@ -11,9 +11,11 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
+import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
 import { theme } from '../../semantic-colors.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { useVerboseMode } from '../../contexts/VerboseModeContext.js';
 
 interface ToolGroupMessageProps {
   groupId: number;
@@ -24,6 +26,7 @@ interface ToolGroupMessageProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   onShellInputSubmit?: (input: string) => void;
+  isUserInitiated?: boolean;
 }
 
 // Main component renders the border and maps the tools using ToolMessage
@@ -34,6 +37,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   isFocused = true,
   activeShellPtyId,
   embeddedShellFocused,
+  isUserInitiated,
 }) => {
   const isEmbeddedShellFocused =
     embeddedShellFocused &&
@@ -47,6 +51,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   );
 
   const config = useConfig();
+  const { verboseMode } = useVerboseMode();
   const isShellCommand = toolCalls.some(
     (t) => t.name === SHELL_COMMAND_NAME || t.name === SHELL_NAME,
   );
@@ -67,6 +72,27 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     () => toolCalls.find((tc) => tc.status === ToolCallStatus.Confirming),
     [toolCalls],
   );
+
+  const hasConfirmingTool = toolAwaitingApproval !== undefined;
+  const hasErrorTool = toolCalls.some((t) => t.status === ToolCallStatus.Error);
+  // Compact mode: entire group → single line summary
+  // Force-expand when: user must interact (Confirming), tool errored,
+  // shell is focused, or user-initiated
+  const showCompact =
+    !verboseMode &&
+    !hasConfirmingTool &&
+    !hasErrorTool &&
+    !isEmbeddedShellFocused &&
+    !isUserInitiated;
+
+  if (showCompact) {
+    return (
+      <CompactToolGroupDisplay
+        toolCalls={toolCalls}
+        contentWidth={contentWidth}
+      />
+    );
+  }
 
   let countToolCallsWithResults = 0;
   for (const tool of toolCalls) {
@@ -121,6 +147,11 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 activeShellPtyId={activeShellPtyId}
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
+                forceShowResult={
+                  isUserInitiated ||
+                  tool.status === ToolCallStatus.Confirming ||
+                  tool.status === ToolCallStatus.Error
+                }
               />
             </Box>
             {tool.status === ToolCallStatus.Confirming &&

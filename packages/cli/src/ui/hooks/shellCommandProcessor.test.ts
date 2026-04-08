@@ -135,15 +135,18 @@ describe('useShellCommandProcessor', () => {
       { type: 'user_shell', text: 'ls -l' },
       expect.any(Number),
     );
-    expect(setPendingHistoryItemMock).toHaveBeenCalledWith({
-      type: 'tool_group',
-      tools: [
-        expect.objectContaining({
-          name: 'Shell Command',
-          status: ToolCallStatus.Executing,
-        }),
-      ],
-    });
+    expect(setPendingHistoryItemMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'tool_group',
+        isUserInitiated: true,
+        tools: [
+          expect.objectContaining({
+            name: 'Shell Command',
+            status: ToolCallStatus.Executing,
+          }),
+        ],
+      }),
+    );
     const tmpFile = path.join(os.tmpdir(), 'shell_pwd_abcdef.tmp');
     const wrappedCommand = `{ ls -l; }; __code=$?; pwd > "${tmpFile}"; exit $__code`;
     expect(mockShellExecutionService).toHaveBeenCalledWith(

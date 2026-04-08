@@ -87,8 +87,9 @@ describe('<AppHeader />', () => {
 
   it('shows the header with all info when banner is visible', () => {
     const { lastFrame } = renderWithProviders(createMockUIState());
-    expect(lastFrame()).toContain('>_ Qwen Code');
-    expect(lastFrame()).toContain('gemini-pro');
+    // dataworks rebrands the header title; the auth/model panel was removed
+    // from Header.tsx, so 'gemini-pro' is intentionally no longer asserted.
+    expect(lastFrame()).toContain('>_ DataWorks DataAgent');
     expect(lastFrame()).toContain('/projects/qwen-code');
   });
 });

@@ -1,0 +1,33 @@
+{
+  "name": "@alife/dataworks-qwen-code-channel-base",
+  "version": "0.14.1",
+  "description": "Base channel infrastructure for Qwen Code",
+  "repository": {
+    "type": "git",
+    "url": "git@gitlab.alibaba-inc.com:alishu/qwen-code.git"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.anpm.alibaba-inc.com"
+  },
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.14.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

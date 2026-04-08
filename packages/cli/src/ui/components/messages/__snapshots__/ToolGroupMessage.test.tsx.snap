@@ -20,6 +20,13 @@ exports[`<ToolGroupMessage /> > Border Color Logic > uses yellow border when too
 ╰──────────────────────────────────────────────────────────────────────────────╯"
 `;
 
+exports[`<ToolGroupMessage /> > Compact Mode (dataworks fork) > uses CompactToolGroupDisplay when verboseMode is false 1`] = `
+"╭──────────────────────────────────────────────────────────────────────────────╮
+│⊷  second-tool  A tool for testing                                            │
+│使用 ctrl+o 可查看详细工具调用结果                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯"
+`;
+
 exports[`<ToolGroupMessage /> > Confirmation Handling > shows confirmation dialog for first confirming tool only 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────╮
 │MockTool[tool-1]: ? first-confirm - A tool for testing (high)                 │

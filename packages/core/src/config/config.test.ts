@@ -347,7 +347,7 @@ describe('Server Config (config.ts)', () => {
       const mockMessageBus = { request: vi.fn() };
       const config = new Config({
         ...baseParams,
-        enableHooks: true,
+        disableAllHooks: false,
       });
       // Set messageBus using the setter
       config.setMessageBus(mockMessageBus as unknown as MessageBus);
@@ -378,7 +378,7 @@ describe('Server Config (config.ts)', () => {
     it('should not fire notification hook when hooks are disabled', async () => {
       const config = new Config({
         ...baseParams,
-        enableHooks: false,
+        disableAllHooks: true,
       });
       const authType = AuthType.USE_GEMINI;
       const mockContentConfig = {
@@ -1581,5 +1581,38 @@ describe('Model Switching and Config Updates', () => {
     // Verify limits are now defined
     const updatedConfig = config.getContentGeneratorConfig();
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
+  });
+
+  describe('hasHooksForEvent', () => {
+    it('should return false when hookSystem is not initialized', () => {
+      const config = new Config(baseParams);
+      expect(config.hasHooksForEvent('Stop')).toBe(false);
+    });
+
+    it('should delegate to hookSystem.hasHooksForEvent when hookSystem exists', () => {
+      const config = new Config(baseParams);
+      const mockHasHooksForEvent = vi.fn().mockReturnValue(true);
+      const mockHookSystem = {
+        hasHooksForEvent: mockHasHooksForEvent,
+      };
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = mockHookSystem;
+
+      expect(config.hasHooksForEvent('UserPromptSubmit')).toBe(true);
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith('UserPromptSubmit');
+    });
+
+    it('should return false when hookSystem has no hooks for the event', () => {
+      const config = new Config(baseParams);
+      const mockHasHooksForEvent = vi.fn().mockReturnValue(false);
+      const mockHookSystem = {
+        hasHooksForEvent: mockHasHooksForEvent,
+      };
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = mockHookSystem;
+
+      expect(config.hasHooksForEvent('Stop')).toBe(false);
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith('Stop');
+    });
   });
 });

@@ -441,6 +441,22 @@
   max-width: calc(100% - 28px);
 }
 
+/* Prompt suggestion styling - different from normal placeholder */
+.composer-input[data-has-suggestion='true']:empty::before,
+.composer-input[data-has-suggestion='true'][data-empty='true']::before {
+  color: var(--app-primary, #3b82f6);
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.composer-input[data-has-suggestion='true']:hover:empty::before,
+.composer-input[data-has-suggestion='true']:hover[data-empty='true']::before {
+  opacity: 0.9;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
 .composer-input:focus {
   outline: none;
 }

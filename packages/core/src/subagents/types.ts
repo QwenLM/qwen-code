@@ -64,10 +64,12 @@ export interface SubagentConfig {
   filePath?: string;
 
   /**
-   * Optional model configuration. If not provided, uses defaults.
-   * Can specify model name, temperature, and top_p values.
+   * Optional model selector.
+   * - Omitted or 'inherit': use the main conversation model
+   * - 'model-id': use the given model with the main conversation authType
+   * - 'authType:model-id': use the given authType and model ID
    */
-  modelConfig?: Partial<ModelConfig>;
+  model?: string;
 
   /**
    * Optional runtime configuration. If not provided, uses defaults.

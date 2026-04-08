@@ -91,6 +91,7 @@ export default {
   'CLI Version': 'Versão da CLI',
   'Git Commit': 'Commit do Git',
   Model: 'Modelo',
+  'Fast Model': 'Modelo Rápido',
   Sandbox: 'Sandbox',
   'OS Platform': 'Plataforma do SO',
   'OS Arch': 'Arquitetura do SO',
@@ -629,6 +630,19 @@ export default {
   'No hook config selected': 'Nenhuma configuração de hook selecionada',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'Para modificar ou remover este hook, edite settings.json diretamente ou pergunte ao Qwen.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Configuração de Hook - Desativado',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'Todos os hooks estão desativados. Você tem {{count}} que não estão em execução.',
+  '{{count}} configured hook': '{{count}} hook configurado',
+  '{{count}} configured hooks': '{{count}} hooks configurados',
+  'When hooks are disabled:': 'Quando os hooks estão desativados:',
+  'No hook commands will execute': 'Nenhum comando de hook será executado',
+  'StatusLine will not be displayed': 'StatusLine não será exibido',
+  'Tool operations will proceed without hook validation':
+    'As operações de ferramentas prosseguirão sem validação de hook',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'Para reativar os hooks, remova "disableAllHooks" do settings.json ou pergunte ao Qwen Code.',
   // Hooks - Source
   Project: 'Projeto',
   User: 'Usuário',
@@ -1422,6 +1436,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Pressione Ctrl+C novamente para sair.',
   'Press Ctrl+D again to exit.': 'Pressione Ctrl+D novamente para sair.',
   'Press Esc again to clear.': 'Pressione Esc novamente para limpar.',
+  'Press ↑ to edit queued messages':
+    'Pressione ↑ para editar mensagens na fila',
 
   // ============================================================================
   // MCP Status
@@ -1468,9 +1484,9 @@ export default {
   'Restarting MCP servers...': 'Reiniciando servidores MCP...',
 
   // ============================================================================
-  // Startup Tips
+  // Startup Examples
   // ============================================================================
-  'Tips:': 'Dicas:',
+  'Example: ': 'Exemplo: ',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     'Use /compress quando a conversa ficar longa para resumir o histórico e liberar contexto.',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
@@ -1487,8 +1503,23 @@ export default {
     'Você pode retomar uma conversa anterior executando qwen --continue ou qwen --resume.',
   'You can switch permission mode quickly with Shift+Tab or /approval-mode.':
     'Você pode alternar o modo de permissão rapidamente com Shift+Tab ou /approval-mode.',
+  'You can switch permission mode quickly with Tab or /approval-mode.':
+    'Você pode alternar o modo de permissão rapidamente com Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Experimente /insight para gerar insights personalizados do seu histórico de conversas.',
+  // DataWorks usage examples
+  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
+    '👤 Confirmação de identidade：「Ajude-me a confirmar minha identidade e permissões no DataWorks?」',
+  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
+    '📊 Análise de tarefas：「Analise os nós recém-criados no espaço de trabalho dataworks_analyze na última semana e o que estão fazendo」',
+  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
+    '🧹 Governança de tarefas：「No espaço de trabalho dataworks_analyze, ajude-me a encontrar nós criados há muito tempo, mas nunca publicados」',
+  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
+    '🔍 Diagnóstico de problemas：「Os dados em dwd_is_it_software_released_df e ads_is_it_sfw_moni_key_released_recycled_df são inconsistentes, ambos têm a fonte ods_ism_it_software_key_released_df. Verifique a diferença na lógica deles」',
+  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
+    '🛠️ Correção de problemas：「Na tabela de funcionários my_project.ods_emp_info_d, os dados do departamento para o funcionário EMP001 estão vazios. Ajude-me a investigar a causa e fornecer sugestões de correção」',
+  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
+    'Esta é uma versão Beta. O histórico de conversas será perdido após a exclusão da instância do ambiente de desenvolvimento pessoal.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1938,4 +1969,11 @@ export default {
     'Modo raw não disponível. Execute em um terminal interativo.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    'Modo detalhado ativado — exibindo saída completa da ferramenta e raciocínio',
+  'Compact mode on — showing tool names and final responses only':
+    'Modo compacto ativado — exibindo apenas nomes de ferramentas e respostas finais',
+  verbose: 'detalhado',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Mostrar saída completa da ferramenta e raciocínio no modo detalhado (alternar com Ctrl+O).',
 };

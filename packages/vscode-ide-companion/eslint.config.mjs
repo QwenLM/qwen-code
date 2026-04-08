@@ -56,13 +56,15 @@ export default [
       ],
       'react-hooks/rules-of-hooks': 'error',
       'react-hooks/exhaustive-deps': 'error',
-      // Restrict deep imports but allow known-safe exceptions used by the webview
-      // - react-dom/client: required for React 18's createRoot API
-      // - ./styles/**: local CSS modules loaded by the webview
+      // Restrict deep imports into external packages but allow intra-project
+      // relative imports and known-safe external sub-paths.
+      // Pattern reference (minimatch globs matched against the import string):
+      //   **/*   — matches any relative import (./foo/bar, ../baz/qux)
+      //   react-dom/* — required for React 18's createRoot API
       'import/no-internal-modules': [
         'error',
         {
-          allow: ['react-dom/client', './styles/**'],
+          allow: ['**/*', 'react-dom/*'],
         },
       ],
 

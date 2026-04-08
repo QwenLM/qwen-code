@@ -157,6 +157,7 @@ export interface OpenDialogActionReturn {
     | 'editor'
     | 'settings'
     | 'model'
+    | 'fast-model'
     | 'subagent_create'
     | 'subagent_list'
     | 'trust'

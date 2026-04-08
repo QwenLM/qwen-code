@@ -1,0 +1,35 @@
+{
+  "name": "@alife/dataworks-qwen-code-channel-telegram",
+  "version": "0.14.1",
+  "description": "Telegram channel adapter for Qwen Code",
+  "repository": {
+    "type": "git",
+    "url": "git@gitlab.alibaba-inc.com:alishu/qwen-code.git"
+  },
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "registry": "https://registry.anpm.alibaba-inc.com"
+  },
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@qwen-code/channel-base": "npm:@alife/dataworks-qwen-code-channel-base@*",
+    "grammy": "^1.41.1",
+    "telegram-markdown-formatter": "^0.1.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

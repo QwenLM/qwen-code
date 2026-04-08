@@ -21,19 +21,28 @@ const defaultProps = {
 
 describe('<Header />', () => {
   beforeEach(() => {
-    useTerminalSizeMock.mockReturnValue({ columns: 120, rows: 24 });
+    // dataworks "DATA AGENT" ASCII logo is ~81 cols wide (vs official Qwen
+    // logo which is narrower); need a wider terminal for the wide-mode test.
+    useTerminalSizeMock.mockReturnValue({ columns: 200, rows: 24 });
   });
+
+  // NOTE: dataworks fork rebrands the Header to "DataWorks DataAgent" and
+  // removes the auth/model info panel from Header.tsx. The assertions below
+  // reflect that. When merging from official, expect conflicts here — the
+  // auth-related tests upstream test functionality that no longer exists in
+  // this fork's Header.tsx.
 
   it('renders the ASCII logo on wide terminal', () => {
     const { lastFrame } = render(<Header {...defaultProps} />);
-    expect(lastFrame()).toContain('██╔═══██╗');
+    // dataworks "DATA AGENT" ASCII art — first row of the new logo
+    expect(lastFrame()).toContain('██████╗  █████╗ ████████╗');
   });
 
   it('hides the ASCII logo on narrow terminal', () => {
     useTerminalSizeMock.mockReturnValue({ columns: 60, rows: 24 });
     const { lastFrame } = render(<Header {...defaultProps} />);
-    expect(lastFrame()).not.toContain('██╔═══██╗');
-    expect(lastFrame()).toContain('>_ Qwen Code');
+    expect(lastFrame()).not.toContain('██████╗  █████╗ ████████╗');
+    expect(lastFrame()).toContain('>_ DataWorks DataAgent');
   });
 
   it('displays the version number', () => {
@@ -41,35 +50,16 @@ describe('<Header />', () => {
     expect(lastFrame()).toContain('v1.0.0');
   });
 
-  it('displays auth type and model', () => {
+  it('displays the DataWorks branding line', () => {
     const { lastFrame } = render(<Header {...defaultProps} />);
-    expect(lastFrame()).toContain('Qwen OAuth');
-    expect(lastFrame()).toContain('qwen-coder-plus');
+    expect(lastFrame()).toContain('DataWorks DataAgent');
+    expect(lastFrame()).toContain('Built-in DataWorks Official Skills');
   });
 
-  it('displays Coding Plan auth type', () => {
-    const { lastFrame } = render(
-      <Header
-        {...defaultProps}
-        authDisplayType={AuthDisplayType.CODING_PLAN}
-      />,
-    );
-    expect(lastFrame()).toContain('Coding Plan');
-  });
-
-  it('displays API Key auth type', () => {
-    const { lastFrame } = render(
-      <Header {...defaultProps} authDisplayType={AuthDisplayType.API_KEY} />,
-    );
-    expect(lastFrame()).toContain('API Key');
-  });
-
-  it('displays Unknown when auth type is not set', () => {
-    const { lastFrame } = render(
-      <Header {...defaultProps} authDisplayType={undefined} />,
-    );
-    expect(lastFrame()).toContain('Unknown');
-  });
+  // Auth-type tests removed: dataworks Header.tsx no longer renders the
+  // auth/model panel (the destructured props and the JSX block are commented
+  // out). The AuthDisplayType prop is still accepted for API compatibility
+  // but is intentionally not displayed.
 
   it('displays working directory', () => {
     const { lastFrame } = render(<Header {...defaultProps} />);

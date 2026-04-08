@@ -41,6 +41,7 @@ export interface ExtendedSystemInfo extends SystemInfo {
   apiKeyEnvKey?: string;
   gitCommit?: string;
   proxy?: string;
+  fastModel?: string;
 }
 
 /**
@@ -170,6 +171,9 @@ export async function getExtendedSystemInfo(
       ? GIT_COMMIT_INFO
       : undefined;
 
+  // Get fast model from settings
+  const fastModel = context.services.settings?.merged?.fastModel || undefined;
+
   return {
     ...baseInfo,
     sandboxEnv,
@@ -177,5 +181,6 @@ export async function getExtendedSystemInfo(
     baseUrl,
     apiKeyEnvKey,
     gitCommit,
+    fastModel,
   };
 }

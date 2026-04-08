@@ -189,7 +189,7 @@ export const StatsDisplay: React.FC<StatsDisplayProps> = ({
 
   const renderTitle = () => {
     if (title) {
-      return theme.ui.gradient && theme.ui.gradient.length > 0 ? (
+      return theme.ui.gradient && theme.ui.gradient.length >= 2 ? (
         <Gradient colors={theme.ui.gradient}>
           <Text bold color={theme.text.primary}>
             {title}

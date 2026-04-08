@@ -26,6 +26,7 @@ import { HOOKS_MANAGEMENT_STEPS } from './types.js';
 import { HooksListStep } from './HooksListStep.js';
 import { HookDetailStep } from './HookDetailStep.js';
 import { HookConfigDetailStep } from './HookConfigDetailStep.js';
+import { HooksDisabledStep } from './HooksDisabledStep.js';
 import {
   DISPLAY_HOOK_EVENTS,
   getTranslatedSourceDisplayMap,
@@ -111,8 +112,17 @@ export function HooksManagementDialog({
   const { columns: width } = useTerminalSize();
   const boxWidth = width - 4;
 
+  // Check if hooks are disabled
+  // Note: This value is captured at dialog open time. If disableAllHooks
+  // changes while the dialog is open (e.g., via settings.json edit),
+  // the dialog will not react to the change until it's closed and reopened.
+  // This is intentional - the dialog represents a snapshot of the current state.
+  const disableAllHooks = config?.getDisableAllHooks() ?? false;
+
   const [navigationStack, setNavigationStack] = useState<string[]>([
-    HOOKS_MANAGEMENT_STEPS.HOOKS_LIST,
+    disableAllHooks
+      ? HOOKS_MANAGEMENT_STEPS.HOOKS_DISABLED
+      : HOOKS_MANAGEMENT_STEPS.HOOKS_LIST,
   ]);
   const [selectedHookIndex, setSelectedHookIndex] = useState<number>(-1);
   const [selectedConfigIndex, setSelectedConfigIndex] = useState<number>(-1);
@@ -148,6 +158,12 @@ export function HooksManagementDialog({
       }
 
       switch (currentStep) {
+        case HOOKS_MANAGEMENT_STEPS.HOOKS_DISABLED:
+          if (key.name === 'escape') {
+            onClose();
+          }
+          break;
+
         case HOOKS_MANAGEMENT_STEPS.HOOKS_LIST:
           if (key.name === 'up') {
             setListSelectedIndex((prev) => Math.max(0, prev - 1));
@@ -339,8 +355,19 @@ export function HooksManagementDialog({
     return null;
   }, [selectedHook, selectedConfigIndex]);
 
+  // Calculate total configured hooks count
+  const configuredHooksCount = useMemo(
+    () => hooks.reduce((sum, hook) => sum + hook.configs.length, 0),
+    [hooks],
+  );
+
   // Render based on current step
   const renderContent = () => {
+    // Show disabled state first (before loading check)
+    if (currentStep === HOOKS_MANAGEMENT_STEPS.HOOKS_DISABLED) {
+      return <HooksDisabledStep configuredHooksCount={configuredHooksCount} />;
+    }
+
     if (isLoading) {
       return (
         <Box flexDirection="column" paddingX={1}>

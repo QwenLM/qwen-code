@@ -51,6 +51,10 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 
 ```json
 {
+  "env": {
+    "OPENAI_API_KEY": "sk-your-actual-openai-key-here",
+    "OPENROUTER_API_KEY": "sk-or-your-actual-openrouter-key-here"
+  },
   "modelProviders": {
     "openai": [
       {
@@ -117,6 +121,9 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 
 ```json
 {
+  "env": {
+    "ANTHROPIC_API_KEY": "sk-ant-your-actual-anthropic-key-here"
+  },
   "modelProviders": {
     "anthropic": [
       {
@@ -157,6 +164,9 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
 
 ```json
 {
+  "env": {
+    "GEMINI_API_KEY": "AIza-your-actual-gemini-key-here"
+  },
   "modelProviders": {
     "gemini": [
       {
@@ -191,6 +201,11 @@ Most local inference servers (vLLM, Ollama, LM Studio, etc.) provide an OpenAI-c
 
 ```json
 {
+  "env": {
+    "OLLAMA_API_KEY": "ollama",
+    "VLLM_API_KEY": "not-needed",
+    "LMSTUDIO_API_KEY": "lm-studio"
+  },
   "modelProviders": {
     "openai": [
       {
@@ -254,6 +269,27 @@ export VLLM_API_KEY="not-needed"
 > [!note]
 >
 > The `extra_body` parameter is **only supported for OpenAI-compatible providers** (`openai`, `qwen-oauth`). It is ignored for Anthropic, and Gemini providers.
+
+> [!note]
+>
+> **About `envKey`**: The `envKey` field specifies the **name of an environment variable**, not the actual API key value. For the configuration to work, you need to ensure the corresponding environment variable is set with your real API key. There are two ways to do this:
+>
+> - **Option 1: Using a `.env` file** (recommended for security):
+>   ```bash
+>   # ~/.qwen/.env (or project root)
+>   OPENAI_API_KEY=sk-your-actual-key-here
+>   ```
+>   Be sure to add `.env` to your `.gitignore` to prevent accidentally committing secrets.
+> - **Option 2: Using the `env` field in `settings.json`** (as shown in the examples above):
+>   ```json
+>   {
+>     "env": {
+>       "OPENAI_API_KEY": "sk-your-actual-key-here"
+>     }
+>   }
+>   ```
+>
+> Each provider example includes an `env` field to illustrate how the API key should be configured.
 
 ## Alibaba Cloud Coding Plan
 

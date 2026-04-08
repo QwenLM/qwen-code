@@ -782,7 +782,7 @@ export const App: React.FC = () => {
 
   // When user sends a message after scrolling up, re-pin and jump to the bottom
   const handleSubmitWithScroll = useCallback(
-    (e: React.FormEvent) => {
+    (e: React.FormEvent | React.KeyboardEvent, explicitText?: string) => {
       setPinnedToBottom(true);
 
       const container = messagesContainerRef.current;
@@ -791,7 +791,7 @@ export const App: React.FC = () => {
         container.scrollTo({ top });
       }
 
-      submitMessage(e);
+      submitMessage(e, explicitText);
     },
     [submitMessage],
   );

@@ -35,7 +35,6 @@ import {
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
@@ -72,8 +71,26 @@ const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
 // reason. All are retried with an independent budget (similar to rate-limit
 // retries) so they do not consume each other's retry budgets.
 const INVALID_STREAM_RETRY_CONFIG = {
-  maxRetries: 2,
-  initialDelayMs: 2000,
+  /**
+   * Maximum number of retries for transient stream errors (NO_FINISH_REASON,
+   * NO_RESPONSE_TEXT).
+   *
+   * Raised from 2 → 3 after production traces (sessions 188c5d3e, 934160dd)
+   * showed DashScope NO_FINISH_REASON storms lasting 2–3 minutes. With
+   * linear back-off (3 s + 6 s + 9 s = 18 s total wait), three retries give
+   * the provider a meaningful recovery window — and for subagents there is
+   * an additional outer retry layer in AgentToolInvocation that multiplies
+   * coverage to ~2 minutes.
+   */
+  maxRetries: 3,
+  /**
+   * Initial delay in milliseconds; multiplied by (retryCount) for linear
+   * back-off: 3 s → 6 s → 9 s.
+   *
+   * Raised from 2 s after production traces showed DashScope
+   * NO_FINISH_REASON bursts lasting 2–3 minutes under /review fan-out.
+   */
+  initialDelayMs: 3000,
 };
 
 /**
@@ -595,6 +612,11 @@ export class GeminiChat {
     this.generationConfig.tools = tools;
   }
 
+  /** Returns a shallow copy of the current generation config (for cache param snapshots). */
+  getGenerationConfig(): GenerateContentConfig {
+    return { ...this.generationConfig };
+  }
+
   async maybeIncludeSchemaDepthContext(error: StructuredError): Promise<void> {
     // Check for potentially problematic cyclic tools with cyclic schemas
     // and include a recommendation to remove potentially problematic tools.
@@ -659,15 +681,11 @@ export class GeminiChat {
         // Some providers omit total_tokens or return 0 in streaming usage chunks.
         const lastPromptTokenCount =
           usageMetadata.totalTokenCount || usageMetadata.promptTokenCount;
-        if (lastPromptTokenCount) {
-          (this.telemetryService ?? uiTelemetryService).setLastPromptTokenCount(
-            lastPromptTokenCount,
-          );
+        if (lastPromptTokenCount && this.telemetryService) {
+          this.telemetryService.setLastPromptTokenCount(lastPromptTokenCount);
         }
-        if (usageMetadata.cachedContentTokenCount) {
-          (
-            this.telemetryService ?? uiTelemetryService
-          ).setLastCachedContentTokenCount(
+        if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
+          this.telemetryService.setLastCachedContentTokenCount(
             usageMetadata.cachedContentTokenCount,
           );
         }
@@ -739,23 +757,69 @@ export class GeminiChat {
       });
     }
 
-    // Stream validation logic: A stream is considered successful if:
-    // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
-    // 2. There's a finish reason AND we have non-empty response text
+    // ---------------------------------------------------------------------------
+    // Stream validation — why this matters and what can go wrong
+    // ---------------------------------------------------------------------------
     //
-    // We throw an error only when there's no tool call AND:
-    // - No finish reason, OR
-    // - Empty response text (e.g., only thoughts with no actual content)
-    if (!hasToolCall && (!hasFinishReason || !contentText)) {
-      if (!hasFinishReason) {
+    // ROOT CAUSE (observed in production via DashScope pipeline):
+    //   Some model providers / gateways terminate the SSE stream WITHOUT sending
+    //   a `finishReason` field (e.g. "STOP", "SAFETY"). This violates the
+    //   streaming protocol contract. Known triggers include:
+    //     - Transient network interruptions between gateway and model backend
+    //     - Model refusing to respond to nonsensical / policy-violating input
+    //       but not emitting a proper SAFETY finish reason
+    //     - Provider-side timeout or internal error that silently closes the
+    //       connection instead of sending an error frame
+    //
+    //   The absence of `finishReason` is the ONLY signal we have — the HTTP
+    //   status is 200, the SSE stream closes cleanly, and no error is thrown
+    //   by the transport layer.
+    //
+    // IMPACT (before this fix):
+    //   ALL missing-finishReason cases were treated identically: the already-
+    //   streamed content (visible to the user in the TUI) was silently
+    //   discarded, the request was retried up to 2 times, and if still failing
+    //   the user saw "[API Error: Model stream ended without a finish reason.]"
+    //   This was especially bad when the model had already delivered useful
+    //   partial content (e.g. half a code block) — the user saw it disappear
+    //   and then got an error.
+    //
+    // FIX — three-way validation:
+    //   1. Tool call present → always accept (tool calls may lack finishReason)
+    //   2. No tool call, no content, no finishReason → throw NO_FINISH_REASON
+    //      (genuinely broken / empty stream, retry is appropriate)
+    //   3. No tool call, has finishReason, but no content → throw NO_RESPONSE_TEXT
+    //      (model explicitly finished but gave nothing useful, retry is appropriate)
+    //   4. No tool call, has content, but no finishReason → ACCEPT with warning
+    //      (content was already streamed to user; discarding it is worse than
+    //       accepting a potentially truncated response)
+    //
+    // Additionally, `hasAnyContent` now includes thought/reasoning text so that
+    // thinking-mode models (which may emit only thought parts) are not
+    // incorrectly rejected as "empty".
+    // ---------------------------------------------------------------------------
+    const hasAnyContent = contentText || thoughtText;
+    if (!hasToolCall) {
+      if (!hasFinishReason && !hasAnyContent) {
+        // Genuinely broken stream — no content delivered, no finish signal.
         throw new InvalidStreamError(
           'Model stream ended without a finish reason.',
           'NO_FINISH_REASON',
         );
-      } else {
+      } else if (hasFinishReason && !hasAnyContent) {
+        // Model sent a finish signal but produced zero usable content.
         throw new InvalidStreamError(
           'Model stream ended with empty response text.',
           'NO_RESPONSE_TEXT',
+        );
+      } else if (!hasFinishReason && hasAnyContent) {
+        // Stream was cut off but useful content has already been delivered.
+        // Accept the partial response to preserve user-visible output rather
+        // than discarding it and showing an error.
+        debugLogger.warn(
+          'Stream ended without a finish reason but has content ' +
+            `(${contentText.length} chars text, ${thoughtText.length} chars thought). ` +
+            'Accepting partial response to preserve user-visible output.',
         );
       }
     }

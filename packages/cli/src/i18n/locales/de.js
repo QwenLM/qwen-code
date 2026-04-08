@@ -79,6 +79,7 @@ export default {
   'CLI Version': 'CLI-Version',
   'Git Commit': 'Git-Commit',
   Model: 'Modell',
+  'Fast Model': 'Schnelles Modell',
   Sandbox: 'Sandbox',
   'OS Platform': 'Betriebssystem',
   'OS Arch': 'OS-Architektur',
@@ -623,6 +624,19 @@ export default {
   'No hook config selected': 'Keine Hook-Konfiguration ausgewählt',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'Um diesen Hook zu ändern oder zu entfernen, bearbeiten Sie settings.json direkt oder fragen Sie Qwen.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook-Konfiguration - Deaktiviert',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'Alle Hooks sind derzeit deaktiviert. Sie haben {{count}} die nicht ausgeführt werden.',
+  '{{count}} configured hook': '{{count}} konfigurierter Hook',
+  '{{count}} configured hooks': '{{count}} konfigurierte Hooks',
+  'When hooks are disabled:': 'Wenn Hooks deaktiviert sind:',
+  'No hook commands will execute': 'Keine Hook-Befehle werden ausgeführt',
+  'StatusLine will not be displayed': 'StatusLine wird nicht angezeigt',
+  'Tool operations will proceed without hook validation':
+    'Tool-Operationen werden ohne Hook-Validierung fortgesetzt',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'Um Hooks wieder zu aktivieren, entfernen Sie "disableAllHooks" aus settings.json oder fragen Sie Qwen Code.',
   // Hooks - Source
   Project: 'Projekt',
   User: 'Benutzer',
@@ -1419,6 +1433,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Drücken Sie erneut Strg+C zum Beenden.',
   'Press Ctrl+D again to exit.': 'Drücken Sie erneut Strg+D zum Beenden.',
   'Press Esc again to clear.': 'Drücken Sie erneut Esc zum Löschen.',
+  'Press ↑ to edit queued messages':
+    'Drücken Sie ↑, um Nachrichten in der Warteschlange zu bearbeiten',
 
   // ============================================================================
   // MCP Status
@@ -1464,9 +1480,9 @@ export default {
   'Restarting MCP servers...': 'MCP-Server werden neu gestartet...',
 
   // ============================================================================
-  // Startup Tips
+  // Startup Examples
   // ============================================================================
-  'Tips for getting started:': 'Tipps zum Einstieg:',
+  'Example: ': 'Beispiel: ',
   '1. Ask questions, edit files, or run commands.':
     '1. Stellen Sie Fragen, bearbeiten Sie Dateien oder führen Sie Befehle aus.',
   '2. Be specific for the best results.':
@@ -1756,6 +1772,19 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
+  // DataWorks usage examples
+  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
+    '👤 Identitätsbestätigung：「Helfen Sie mir, meine Identität und Berechtigungen in DataWorks zu bestätigen?」',
+  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
+    '📊 Aufgabenanalyse：「Analysieren Sie die neu erstellten Knoten im Arbeitsbereich dataworks_analyze der letzten Woche und was sie tun」',
+  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
+    '🧹 Aufgabengovernance：「Finden Sie im Arbeitsbereich dataworks_analyze Knoten, die vor langer Zeit erstellt, aber nie veröffentlicht wurden」',
+  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
+    '🔍 Problembehebung：「Die Daten in dwd_is_it_software_released_df und ads_is_it_sfw_moni_key_released_recycled_df sind inkonsistent, beide haben die Quelle ods_ism_it_software_key_released_df. Prüfen Sie den Unterschied in ihrer Logik」',
+  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
+    '🛠️ Problemlösung：「In der Mitarbeitertabelle my_project.ods_emp_info_d sind die Abteilungsdaten für Mitarbeiter EMP001 leer. Helfen Sie bei der Ursachenforschung und schlagen Sie Lösungen vor」',
+  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
+    'Dies ist eine Beta-Version. Der Chatverlauf geht verloren, wenn die persönliche Entwicklungsumgebungsinstanz gelöscht wird.',
 
   // ============================================================================
   // Custom API Key Configuration
@@ -1948,4 +1977,11 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    'Ausführlicher Modus aktiv — vollständige Tool-Ausgabe und Denkprozess werden angezeigt',
+  'Compact mode on — showing tool names and final responses only':
+    'Kompakter Modus aktiv — nur Tool-Namen und abschließende Antworten werden angezeigt',
+  verbose: 'ausführlich',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Vollständige Tool-Ausgabe und Denkprozess im ausführlichen Modus anzeigen (mit Strg+O umschalten).',
 };

@@ -1303,4 +1303,318 @@ describe('AgentTool', () => {
       expect(snapshots.some((s) => !s.hasPendingConfirmation)).toBe(true);
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // Subagent retry on transient InvalidStreamError
+  // ---------------------------------------------------------------------------
+  describe('Subagent stream error retry', () => {
+    let mockAgent: AgentHeadless;
+    let mockContextState: ContextState;
+
+    beforeEach(() => {
+      mockAgent = {
+        execute: vi.fn().mockResolvedValue(undefined),
+        result: 'Task completed successfully',
+        terminateMode: AgentTerminateMode.GOAL,
+        getFinalText: vi.fn().mockReturnValue('Task completed successfully'),
+        formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
+        getExecutionSummary: vi.fn().mockReturnValue({
+          rounds: 1,
+          totalDurationMs: 500,
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          failedToolCalls: 0,
+          successRate: 100,
+          inputTokens: 100,
+          outputTokens: 50,
+          totalTokens: 150,
+          estimatedCost: 0.01,
+          toolUsage: [],
+        }),
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+      } as unknown as AgentHeadless;
+
+      mockContextState = new ContextState();
+      MockedContextState.mockImplementation(() => mockContextState);
+
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockSubagents[0],
+      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
+        mockAgent,
+      );
+    });
+
+    it('should succeed on first attempt without retry', async () => {
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(vi.mocked(mockAgent.execute)).toHaveBeenCalledTimes(1);
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('completed');
+    });
+
+    it('should retry on InvalidStreamError and succeed on second attempt', async () => {
+      // Dynamically import the real InvalidStreamError class
+      const { InvalidStreamError } = await import('../core/geminiChat.js');
+
+      vi.mocked(mockAgent.execute)
+        .mockRejectedValueOnce(
+          new InvalidStreamError(
+            'Model stream ended without a finish reason.',
+            'NO_FINISH_REASON',
+          ),
+        )
+        .mockResolvedValueOnce(undefined);
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+
+      // Start the execute and advance timers to cover the backoff delay
+      const resultPromise = invocation.execute();
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      expect(vi.mocked(mockAgent.execute)).toHaveBeenCalledTimes(2);
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('completed');
+    });
+
+    it('should retry up to 3 times and then fail with retry count in message', async () => {
+      const { InvalidStreamError } = await import('../core/geminiChat.js');
+      const streamError = new InvalidStreamError(
+        'Model stream ended without a finish reason.',
+        'NO_FINISH_REASON',
+      );
+
+      // All 4 attempts (1 initial + 3 retries) fail
+      vi.mocked(mockAgent.execute).mockRejectedValue(streamError);
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+
+      const resultPromise = invocation.execute();
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      // 1 initial + 3 retries = 4 total calls
+      expect(vi.mocked(mockAgent.execute)).toHaveBeenCalledTimes(4);
+
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+      // Verify the error message mentions retry count
+      expect(display.terminateReason).toContain('after 3 retries');
+      expect(display.terminateReason).toContain('without a finish reason');
+    });
+
+    it('should NOT retry non-InvalidStreamError errors', async () => {
+      const genericError = new Error('Connection timeout');
+      vi.mocked(mockAgent.execute).mockRejectedValue(genericError);
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+
+      const resultPromise = invocation.execute();
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      // Should only attempt once — no retry for non-stream errors
+      expect(vi.mocked(mockAgent.execute)).toHaveBeenCalledTimes(1);
+
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+      expect(display.terminateReason).toContain('Connection timeout');
+      // Should NOT mention retry count
+      expect(display.terminateReason).not.toContain('after');
+    });
+
+    it('should succeed on third attempt after two InvalidStreamError failures', async () => {
+      const { InvalidStreamError } = await import('../core/geminiChat.js');
+
+      vi.mocked(mockAgent.execute)
+        .mockRejectedValueOnce(
+          new InvalidStreamError(
+            'Model stream ended without a finish reason.',
+            'NO_FINISH_REASON',
+          ),
+        )
+        .mockRejectedValueOnce(
+          new InvalidStreamError(
+            'Model stream ended with empty response text.',
+            'NO_RESPONSE_TEXT',
+          ),
+        )
+        .mockResolvedValueOnce(undefined);
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+
+      const resultPromise = invocation.execute();
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      expect(vi.mocked(mockAgent.execute)).toHaveBeenCalledTimes(3);
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('completed');
+    });
+
+    it('should abort retry when signal is aborted during backoff', async () => {
+      const { InvalidStreamError } = await import('../core/geminiChat.js');
+      const abortController = new AbortController();
+
+      vi.mocked(mockAgent.execute).mockRejectedValueOnce(
+        new InvalidStreamError(
+          'Model stream ended without a finish reason.',
+          'NO_FINISH_REASON',
+        ),
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+
+      // Abort the signal immediately — the retry should not proceed
+      abortController.abort();
+      const resultPromise = invocation.execute(abortController.signal);
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      // Only 1 attempt — retry was skipped because signal was aborted
+      expect(vi.mocked(mockAgent.execute)).toHaveBeenCalledTimes(1);
+
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+    });
+
+    it('should use exponential backoff with increasing delays', async () => {
+      const { InvalidStreamError } = await import('../core/geminiChat.js');
+      const streamError = new InvalidStreamError(
+        'Model stream ended without a finish reason.',
+        'NO_FINISH_REASON',
+      );
+
+      // All attempts fail
+      vi.mocked(mockAgent.execute).mockRejectedValue(streamError);
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+
+      // Spy on setTimeout to check delay values
+      const setTimeoutSpy = vi.spyOn(globalThis, 'setTimeout');
+
+      const resultPromise = invocation.execute();
+      await vi.runAllTimersAsync();
+      await resultPromise;
+
+      // Collect delays from setTimeout calls related to retry backoff
+      // (filter out any 0-delay or non-numeric calls)
+      const retryDelays = setTimeoutSpy.mock.calls
+        .map((call) => call[1])
+        .filter(
+          (delay): delay is number =>
+            typeof delay === 'number' && delay >= 5000,
+        );
+
+      // Should have 3 retry delays (for 3 retry attempts)
+      expect(retryDelays.length).toBe(3);
+
+      // Delays should be approximately 5000ms, 10000ms, 20000ms (before jitter)
+      // With jitter (0-25%), ranges are: [5000,6250], [10000,12500], [20000,25000]
+      expect(retryDelays[0]).toBeGreaterThanOrEqual(5000);
+      expect(retryDelays[0]).toBeLessThanOrEqual(6250);
+      expect(retryDelays[1]).toBeGreaterThanOrEqual(10000);
+      expect(retryDelays[1]).toBeLessThanOrEqual(12500);
+      expect(retryDelays[2]).toBeGreaterThanOrEqual(20000);
+      expect(retryDelays[2]).toBeLessThanOrEqual(25000);
+
+      setTimeoutSpy.mockRestore();
+    });
+
+    it('should propagate non-stream error immediately even after a retryable failure', async () => {
+      const { InvalidStreamError } = await import('../core/geminiChat.js');
+
+      // First call: transient stream error (retryable)
+      // Second call: generic error (NOT retryable — should propagate immediately)
+      vi.mocked(mockAgent.execute)
+        .mockRejectedValueOnce(
+          new InvalidStreamError(
+            'Model stream ended without a finish reason.',
+            'NO_FINISH_REASON',
+          ),
+        )
+        .mockRejectedValueOnce(new Error('Network connection reset'));
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+
+      const resultPromise = invocation.execute();
+      await vi.runAllTimersAsync();
+      const result = await resultPromise;
+
+      // Only 2 calls: initial (stream error) + retry 1 (network error, stops)
+      expect(vi.mocked(mockAgent.execute)).toHaveBeenCalledTimes(2);
+
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+      // Non-stream error should NOT include retry annotation
+      expect(display.terminateReason).toContain('Network connection reset');
+      expect(display.terminateReason).not.toContain('retries');
+    });
+  });
 });

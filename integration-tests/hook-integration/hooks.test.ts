@@ -44,7 +44,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-allow-decision', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -73,7 +73,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-allow-tool', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -108,7 +108,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-block-decision', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -137,7 +137,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-block-tool', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -184,7 +184,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-modify-prompt', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -214,7 +214,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-add-context', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -241,7 +241,7 @@ describe('Hooks System Integration', () => {
       it('should continue execution when hook times out', async () => {
         await rig.setup('ups-timeout', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -269,7 +269,7 @@ describe('Hooks System Integration', () => {
       it('should continue execution when hook exits with non-blocking error (exit code 1)', async () => {
         await rig.setup('ups-nonblocking-error', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -295,7 +295,7 @@ describe('Hooks System Integration', () => {
       it('should block execution when hook exits with blocking error (exit code 2)', async () => {
         await rig.setup('ups-blocking-error', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -320,7 +320,7 @@ describe('Hooks System Integration', () => {
       it('should continue execution when hook command is empty', async () => {
         await rig.setup('ups-missing-command', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -352,7 +352,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-correct-input', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -382,7 +382,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-system-message', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -414,7 +414,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-multi-one-blocks', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -452,7 +452,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-seq-first-blocks', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -486,7 +486,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-seq-second-blocks', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -525,7 +525,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-multi-all-allow', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -569,7 +569,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-multi-all-block', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -605,7 +605,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-multi-context', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -639,7 +639,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-error-with-block', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -673,7 +673,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-timeout-with-block', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -709,7 +709,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-multi-groups', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -750,7 +750,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-multi-groups-one-blocks', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -790,7 +790,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-multi-modify', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -827,7 +827,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('ups-multi-system-msg', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -869,7 +869,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-allow', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -897,7 +897,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-allow-final', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -931,7 +931,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-block-decision', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -972,7 +972,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-block-custom-reason', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1014,7 +1014,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-add-context', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1044,7 +1044,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-multi-context', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1077,7 +1077,7 @@ describe('Hooks System Integration', () => {
       it('should continue stopping when hook times out', async () => {
         await rig.setup('stop-timeout', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1105,7 +1105,7 @@ describe('Hooks System Integration', () => {
       it('should continue stopping when hook has non-blocking error', async () => {
         await rig.setup('stop-error', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1131,7 +1131,7 @@ describe('Hooks System Integration', () => {
       it('should continue stopping when hook command does not exist', async () => {
         await rig.setup('stop-missing-command', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1162,7 +1162,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-system-message', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1196,7 +1196,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-multi-one-blocks', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1249,7 +1249,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-seq-first-blocks', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1303,7 +1303,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-seq-second-blocks', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1358,7 +1358,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-multi-all-allow', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1402,7 +1402,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('stop-multi-all-block', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Stop: [
                 {
@@ -1457,7 +1457,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('multi-sequential', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -1493,7 +1493,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('multi-first-blocks', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -1532,7 +1532,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('multi-passthrough', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -1569,7 +1569,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('multi-parallel', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -1604,7 +1604,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('multi-mixed', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -1641,7 +1641,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('multi-or-logic', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               UserPromptSubmit: [
                 {
@@ -3265,7 +3265,7 @@ describe('Hooks System Integration', () => {
 
       await rig.setup('combined-both-hooks', {
         settings: {
-          hooksConfig: { enabled: true },
+          disableAllHooks: false,
           hooks: {
             Stop: [
               {
@@ -3306,7 +3306,7 @@ describe('Hooks System Integration', () => {
 
       await rig.setup('combined-ups-sessionend', {
         settings: {
-          hooksConfig: { enabled: true },
+          disableAllHooks: false,
           hooks: {
             UserPromptSubmit: [
               {
@@ -3348,7 +3348,7 @@ describe('Hooks System Integration', () => {
 
       await rig.setup('combined-three-hooks', {
         settings: {
-          hooksConfig: { enabled: true },
+          disableAllHooks: false,
           hooks: {
             Stop: [
               {
@@ -3403,7 +3403,7 @@ describe('Hooks System Integration', () => {
 
       await rig.setup('combined-all-hooks', {
         settings: {
-          hooksConfig: { enabled: true },
+          disableAllHooks: false,
           hooks: {
             Stop: [
               {
@@ -3474,7 +3474,7 @@ describe('Hooks System Integration', () => {
 
       await rig.setup('script-file-hook', {
         settings: {
-          hooksConfig: { enabled: true },
+          disableAllHooks: false,
           hooks: {
             UserPromptSubmit: [
               {
@@ -3503,7 +3503,7 @@ describe('Hooks System Integration', () => {
 
       await rig.setup('script-file-block-hook', {
         settings: {
-          hooksConfig: { enabled: true },
+          disableAllHooks: false,
           hooks: {
             UserPromptSubmit: [
               {
@@ -3539,7 +3539,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('permission-req-allow-basic', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PermissionRequest: [
                 {
@@ -3580,7 +3580,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('permission-req-allow-safe-tools', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PermissionRequest: [
                 {
@@ -3612,7 +3612,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('permission-req-deny-basic', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PermissionRequest: [
                 {
@@ -3657,7 +3657,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('permission-req-block-dangerous', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PermissionRequest: [
                 {
@@ -3695,7 +3695,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('permission-req-multi-allow', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PermissionRequest: [
                 {
@@ -3736,7 +3736,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('permission-req-sequential-allow', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PermissionRequest: [
                 {
@@ -3774,7 +3774,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('permission-req-multi-one-denies', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PermissionRequest: [
                 {
@@ -3816,7 +3816,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('permission-req-sequential-first-denies', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PermissionRequest: [
                 {
@@ -3861,7 +3861,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('permission-req-matcher-specific', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PermissionRequest: [
                 {
@@ -3890,7 +3890,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('permission-req-matcher-wildcard', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PermissionRequest: [
                 {
@@ -3927,7 +3927,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-start-basic', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStart: [
                 {
@@ -3958,7 +3958,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-start-context', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStart: [
                 {
@@ -3989,7 +3989,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-start-context-only', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStart: [
                 {
@@ -4019,7 +4019,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-start-error', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStart: [
                 {
@@ -4054,7 +4054,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-start-parallel', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStart: [
                 {
@@ -4102,7 +4102,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-start-sequential', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStart: [
                 {
@@ -4151,7 +4151,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-start-matcher-specific', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStart: [
                 {
@@ -4183,7 +4183,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-start-matcher-wildcard', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStart: [
                 {
@@ -4222,7 +4222,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-stop-basic', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStop: [
                 {
@@ -4254,7 +4254,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-stop-block-once', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStop: [
                 {
@@ -4288,7 +4288,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-stop-error', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStop: [
                 {
@@ -4323,7 +4323,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-stop-parallel', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStop: [
                 {
@@ -4371,7 +4371,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-stop-sequential', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStop: [
                 {
@@ -4420,7 +4420,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-stop-matcher-specific', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStop: [
                 {
@@ -4452,7 +4452,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('subagent-stop-matcher-wildcard', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               SubagentStop: [
                 {
@@ -4490,7 +4490,7 @@ describe('Hooks System Integration', () => {
           'echo \'{"additionalContext": "Idle prompt notification processed"}\'';
         await rig.setup('notification-idle-prompt', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Notification: [
                 {
@@ -4521,7 +4521,7 @@ describe('Hooks System Integration', () => {
           'echo \'{"additionalContext": "Second idle prompt notification"}\'';
         await rig.setup('notification-idle-prompt-multiple', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Notification: [
                 {
@@ -4560,7 +4560,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('notification-elication-dialog', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Notification: [
                 {
@@ -4591,7 +4591,7 @@ describe('Hooks System Integration', () => {
           'echo \'{"additionalContext": "Second elication dialog notification"}\'';
         await rig.setup('notification-elication-dialog-multiple', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Notification: [
                 {
@@ -4625,7 +4625,7 @@ describe('Hooks System Integration', () => {
       it('should handle elication dialog notification with error', async () => {
         await rig.setup('notification-elication-dialog-error', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Notification: [
                 {
@@ -4659,7 +4659,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('notification-multiple-different', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Notification: [
                 {
@@ -4695,7 +4695,7 @@ describe('Hooks System Integration', () => {
       it('should handle missing command gracefully', async () => {
         await rig.setup('notification-missing-command', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Notification: [
                 {
@@ -4722,7 +4722,7 @@ describe('Hooks System Integration', () => {
       it('should handle non-executable command gracefully', async () => {
         await rig.setup('notification-non-executable', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Notification: [
                 {
@@ -4749,7 +4749,7 @@ describe('Hooks System Integration', () => {
       it('should handle command with non-zero exit code gracefully', async () => {
         await rig.setup('notification-nonzero-exit', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Notification: [
                 {
@@ -4776,7 +4776,7 @@ describe('Hooks System Integration', () => {
       it('should handle command timeout gracefully', async () => {
         await rig.setup('notification-timeout', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               Notification: [
                 {
@@ -4814,7 +4814,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-allow-decision', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -4845,7 +4845,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-allow-with-context', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -4878,7 +4878,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-block-decision', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -4918,7 +4918,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-block-specific-tool', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -4957,7 +4957,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-matcher-specific', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -4989,7 +4989,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-matcher-wildcard', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -5021,7 +5021,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-matcher-no-match', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -5052,7 +5052,7 @@ describe('Hooks System Integration', () => {
       it('should continue execution when hook exits with non-blocking error', async () => {
         await rig.setup('pretooluse-nonblocking-error', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -5080,7 +5080,7 @@ describe('Hooks System Integration', () => {
       it('should continue execution when hook command does not exist', async () => {
         await rig.setup('pretooluse-missing-command', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -5115,7 +5115,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-multi-parallel', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -5154,7 +5154,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-multi-sequential', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -5193,7 +5193,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-multi-one-blocks', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -5232,7 +5232,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-seq-first-blocks', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -5273,7 +5273,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('pretooluse-multi-context', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreToolUse: [
                 {
@@ -5318,7 +5318,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('posttooluse-basic', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PostToolUse: [
                 {
@@ -5351,7 +5351,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('posttooluse-matcher-specific', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PostToolUse: [
                 {
@@ -5383,7 +5383,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('posttooluse-matcher-wildcard', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PostToolUse: [
                 {
@@ -5415,7 +5415,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('posttooluse-matcher-no-match', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PostToolUse: [
                 {
@@ -5451,7 +5451,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('posttooluse-multi-parallel', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PostToolUse: [
                 {
@@ -5490,7 +5490,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('posttooluse-multi-sequential', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PostToolUse: [
                 {
@@ -5530,7 +5530,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('posttooluse-multi-context', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PostToolUse: [
                 {
@@ -5575,7 +5575,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('posttoolusefailure-basic', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PostToolUseFailure: [
                 {
@@ -5611,7 +5611,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('posttoolusefailure-with-details', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PostToolUseFailure: [
                 {
@@ -5650,7 +5650,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('precompact-basic', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {
@@ -5686,7 +5686,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('precompact-with-details', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {
@@ -5719,7 +5719,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('precompact-context', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {
@@ -5752,7 +5752,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('precompact-matcher-wildcard', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {
@@ -5784,7 +5784,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('precompact-matcher-no-match', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {
@@ -5820,7 +5820,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('precompact-multi-parallel', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {
@@ -5859,7 +5859,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('precompact-multi-sequential', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {
@@ -5899,7 +5899,7 @@ describe('Hooks System Integration', () => {
 
         await rig.setup('precompact-multi-context', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {
@@ -5935,7 +5935,7 @@ describe('Hooks System Integration', () => {
       it('should continue execution when hook exits with error', async () => {
         await rig.setup('precompact-error', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {
@@ -5963,7 +5963,7 @@ describe('Hooks System Integration', () => {
       it('should continue execution when hook command does not exist', async () => {
         await rig.setup('precompact-missing-command', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {
@@ -5991,7 +5991,7 @@ describe('Hooks System Integration', () => {
       it('should handle hook timeout gracefully', async () => {
         await rig.setup('precompact-timeout', {
           settings: {
-            hooksConfig: { enabled: true },
+            disableAllHooks: false,
             hooks: {
               PreCompact: [
                 {

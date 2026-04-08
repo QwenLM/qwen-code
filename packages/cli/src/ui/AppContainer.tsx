@@ -41,7 +41,20 @@ import {
   Storage,
   SessionEndReason,
   SessionStartSource,
+  generatePromptSuggestion,
+  logPromptSuggestion,
+  PromptSuggestionEvent,
+  logSpeculation,
+  SpeculationEvent,
+  startSpeculation,
+  acceptSpeculation,
+  abortSpeculation,
+  type SpeculationState,
+  IDLE_SPECULATION,
+  ApprovalMode,
   type PermissionMode,
+  ToolConfirmationOutcome,
+  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -102,6 +115,7 @@ import {
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
+import { VerboseModeProvider } from './contexts/VerboseModeContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -112,10 +126,13 @@ import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.j
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+// [CUSTOM] Dual output confirmation bridge
+import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -519,8 +536,12 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
 
-  const { isModelDialogOpen, openModelDialog, closeModelDialog } =
-    useModelCommand();
+  const {
+    isModelDialogOpen,
+    isFastModelMode,
+    openModelDialog,
+    closeModelDialog,
+  } = useModelCommand();
   const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
     useArenaCommand();
 
@@ -697,6 +718,7 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [config, historyManager, settings.merged]);
 
   const cancelHandlerRef = useRef<() => void>(() => {});
+  const midTurnDrainRef = useRef<(() => string[]) | null>(null);
 
   const {
     streamingState,
@@ -709,6 +731,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    pendingToolCalls, // [CUSTOM] Exposed for dual-output confirmation bridge
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -728,6 +751,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
+    midTurnDrainRef,
   );
 
   // Track whether suggestions are visible for Tab key handling
@@ -735,7 +759,22 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const agentViewState = useAgentViewState();
 
+  // Prompt suggestion state
+  const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
+  const prevStreamingStateRef = useRef<StreamingState>(StreamingState.Idle);
+  const speculationRef = useRef<SpeculationState>(IDLE_SPECULATION);
+  const suggestionAbortRef = useRef<AbortController | null>(null);
+
+  // Dismiss callback — clears suggestion + aborts in-flight generation/speculation
+  const dismissPromptSuggestion = useCallback(() => {
+    setPromptSuggestion(null);
+    suggestionAbortRef.current?.abort();
+    suggestionAbortRef.current = null;
+  }, []);
+
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
+  const geminiClient = config.getGeminiClient();
+
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
     config,
     addItem: historyManager.addItem,
@@ -744,12 +783,137 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
-    useMessageQueue({
-      isConfigInitialized,
-      streamingState,
-      submitQuery,
+  const {
+    messageQueue,
+    addMessage,
+    clearQueue,
+    getQueuedMessagesText,
+    drainQueue,
+    popAllMessages,
+  } = useMessageQueue({
+    isConfigInitialized,
+    streamingState,
+    submitQuery,
+  });
+
+  // Connect remote input watcher to submitQuery for bidirectional sync.
+  // When an external process writes a command to the input-file,
+  // the watcher calls submitQuery as if the user typed it in the TUI.
+  const remoteInput = useRemoteInput();
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setSubmitFn((text: string) => submitQuery(text));
+  }, [remoteInput, submitQuery]);
+
+  // Notify remote input watcher when TUI becomes idle so it can
+  // retry queued commands that were deferred while TUI was busy.
+  useEffect(() => {
+    if (!remoteInput) return;
+    if (streamingState === StreamingState.Idle) {
+      remoteInput.notifyIdle();
+    }
+  }, [remoteInput, streamingState]);
+
+  // [CUSTOM] Dual output confirmation bridge — connects tool approval events
+  // between the TUI and external consumers via --json-file / --input-file.
+  const dualOutput = useDualOutput();
+  const confirmRequestMap = useRef(new Map<string, string>()); // requestId → callId
+  const confirmCallIdMap = useRef(new Map<string, string>()); // callId → requestId
+  const confirmEmitted = useRef(new Set<string>());
+
+  // Emit control_request when tools enter awaiting_approval
+  useEffect(() => {
+    if (!dualOutput || !dualOutput.isConnected) return;
+    for (const tc of pendingToolCalls) {
+      if (
+        tc.status === 'awaiting_approval' &&
+        !confirmEmitted.current.has(tc.request.callId)
+      ) {
+        const requestId = crypto.randomUUID();
+        confirmRequestMap.current.set(requestId, tc.request.callId);
+        confirmCallIdMap.current.set(tc.request.callId, requestId);
+        confirmEmitted.current.add(tc.request.callId);
+        dualOutput.emitControlRequest(
+          requestId,
+          tc.request.name,
+          tc.request.callId,
+          tc.request.args,
+          null,
+        );
+      }
+    }
+    // Detect tools that left awaiting_approval (TUI native resolution)
+    for (const [callId, requestId] of confirmCallIdMap.current) {
+      const tc = pendingToolCalls.find((t) => t.request.callId === callId);
+      if (
+        tc &&
+        tc.status !== 'awaiting_approval' &&
+        confirmEmitted.current.has(callId)
+      ) {
+        const allowed = tc.status !== 'cancelled' && tc.status !== 'error';
+        dualOutput.emitControlResponse(requestId, allowed);
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      }
+    }
+  }, [dualOutput, pendingToolCalls]);
+
+  // Register confirmation handler for external responses via --input-file
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setConfirmationHandler(
+      (requestId: string, allowed: boolean) => {
+        const callId = confirmRequestMap.current.get(requestId);
+        if (!callId) return;
+        const tc = pendingToolCalls.find(
+          (t) =>
+            t.request.callId === callId && t.status === 'awaiting_approval',
+        );
+        if (!tc) return;
+        const waitingTc = tc as WaitingToolCall;
+        if (!waitingTc.confirmationDetails?.onConfirm) return;
+        void waitingTc.confirmationDetails.onConfirm(
+          allowed
+            ? ToolConfirmationOutcome.ProceedOnce
+            : ToolConfirmationOutcome.Cancel,
+        );
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      },
+    );
+
+    return () => {
+      remoteInput.setConfirmationHandler(() => {});
+    };
+  }, [remoteInput, pendingToolCalls]);
+
+  // [CUSTOM] Emit session_start event to dual output channel
+  useEffect(() => {
+    if (!dualOutput) return;
+    dualOutput.emitSystemMessage('session_start', {
+      session_id: sessionStats.sessionId,
+      cwd: process.cwd(),
     });
+  }, [dualOutput, sessionStats.sessionId]);
+
+  // Bridge message queue to mid-turn drain via ref.
+  // drainQueue is a stable callback from useMessageQueue that atomically
+  // clears both the synchronous ref and React state.
+  midTurnDrainRef.current = drainQueue;
+
+  // Bridge message queue to mid-turn drain via ref.
+  // Sync ref on every render so the drain callback always reads latest state.
+  const messageQueueRef = useRef(messageQueue);
+  messageQueueRef.current = messageQueue;
+  midTurnDrainRef.current = () => {
+    const queue = messageQueueRef.current;
+    if (queue.length === 0) return [];
+    messageQueueRef.current = [];
+    clearQueue();
+    return [...queue];
+  };
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
@@ -769,9 +933,136 @@ export const AppContainer = (props: AppContainerProps) => {
         void submitQuery(submittedValue);
         return;
       }
+
+      // Check if speculation has results for this submission
+      const spec = speculationRef.current;
+      if (
+        spec.status !== 'idle' &&
+        spec.suggestion === submittedValue &&
+        spec.status === 'completed'
+      ) {
+        // Accept completed speculation: inject messages and apply files
+        acceptSpeculation(spec, geminiClient)
+          .then((result) => {
+            logSpeculation(
+              config,
+              new SpeculationEvent({
+                outcome: 'accepted',
+                turns_used: spec.messages.filter((m) => m.role === 'model')
+                  .length,
+                files_written: result.filesApplied.length,
+                tool_use_count: spec.toolUseCount,
+                duration_ms: Date.now() - spec.startTime,
+                boundary_type: spec.boundary?.type,
+                had_pipelined_suggestion: !!result.nextSuggestion,
+              }),
+            );
+            // Speculation completed fully (no boundary) — render results in UI
+            {
+              const now = Date.now();
+
+              // Render each speculated message as the appropriate HistoryItem
+              for (let mi = 0; mi < result.messages.length; mi++) {
+                const msg = result.messages[mi];
+                if (msg.role === 'user' && msg.parts) {
+                  // Check if this is a tool result (functionResponse) or user text
+                  const hasText = msg.parts.some(
+                    (p) => p.text && !p.functionResponse,
+                  );
+                  if (hasText) {
+                    const text = msg.parts
+                      .map((p) => p.text ?? '')
+                      .filter(Boolean)
+                      .join('');
+                    if (text) {
+                      historyManager.addItem(
+                        { type: 'user' as const, text },
+                        now,
+                      );
+                    }
+                  }
+                  // functionResponse parts are rendered as part of the tool_group below
+                } else if (msg.role === 'model' && msg.parts) {
+                  // Extract text and tool calls separately
+                  const textParts = msg.parts
+                    .filter((p) => p.text && !p.functionCall)
+                    .map((p) => p.text!)
+                    .join('');
+                  const toolCalls = msg.parts.filter((p) => p.functionCall);
+
+                  if (textParts) {
+                    historyManager.addItem(
+                      { type: 'gemini' as const, text: textParts },
+                      now,
+                    );
+                  }
+
+                  if (toolCalls.length > 0) {
+                    // Find matching tool results from the next message
+                    const nextMsg = result.messages[mi + 1];
+                    const toolResults =
+                      nextMsg?.parts?.filter((p) => p.functionResponse) ?? [];
+
+                    const tools = toolCalls.map((tc, i) => {
+                      const name = tc.functionCall?.name ?? 'unknown';
+                      const args = tc.functionCall?.args ?? {};
+                      const resp = toolResults[i]?.functionResponse?.response;
+                      const resultText =
+                        typeof resp === 'object' && resp
+                          ? ((resp as Record<string, unknown>)['output'] ??
+                            JSON.stringify(resp))
+                          : String(resp ?? '');
+                      return {
+                        callId: `spec-${name}-${i}`,
+                        name,
+                        description:
+                          Object.entries(args)
+                            .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
+                            .join(', ') || name,
+                        resultDisplay: String(resultText).slice(0, 500),
+                        status: ToolCallStatus.Success,
+                        confirmationDetails: undefined,
+                      };
+                    });
+
+                    const toolGroupItem: HistoryItemWithoutId = {
+                      type: 'tool_group' as const,
+                      tools,
+                    };
+                    historyManager.addItem(toolGroupItem, now);
+                  }
+                }
+              }
+            }
+            if (result.nextSuggestion) {
+              setPromptSuggestion(result.nextSuggestion);
+            }
+          })
+          .catch(() => {
+            // Fallback: submit normally
+            addMessage(submittedValue);
+          });
+        speculationRef.current = IDLE_SPECULATION;
+        return;
+      }
+
+      // Abort any running speculation since we're submitting something different
+      if (spec.status === 'running') {
+        abortSpeculation(spec).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
+
       addMessage(submittedValue);
     },
-    [addMessage, agentViewState, streamingState, submitQuery],
+    [
+      addMessage,
+      agentViewState,
+      streamingState,
+      submitQuery,
+      config,
+      geminiClient,
+      historyManager,
+    ],
   );
 
   const handleArenaModelsSelected = useCallback(
@@ -845,6 +1136,20 @@ export const AppContainer = (props: AppContainerProps) => {
     (streamingState === StreamingState.Idle ||
       streamingState === StreamingState.Responding);
 
+  // Auto-clear frozen snapshot when streaming ends so the live view
+  // is restored without requiring a second Ctrl+O press.
+  // Clear frozen snapshot when streaming ends OR when entering confirmation
+  // state. During WaitingForConfirmation, the user needs to see the latest
+  // pending items (including the confirmation message) rather than a stale snapshot.
+  useEffect(() => {
+    if (
+      streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.WaitingForConfirmation
+    ) {
+      setFrozenSnapshot(null);
+    }
+  }, [streamingState]);
+
   const [controlsHeight, setControlsHeight] = useState(0);
 
   useLayoutEffect(() => {
@@ -894,7 +1199,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Initial prompt handling
   const initialPrompt = useMemo(() => config.getQuestion(), [config]);
   const initialPromptSubmitted = useRef(false);
-  const geminiClient = config.getGeminiClient();
 
   useEffect(() => {
     if (activePtyId) {
@@ -935,6 +1239,137 @@ export const AppContainer = (props: AppContainerProps) => {
     geminiClient,
   ]);
 
+  // Generate prompt suggestions when streaming completes
+  const followupSuggestionsEnabled =
+    settings.merged.ui?.enableFollowupSuggestions !== false;
+
+  useEffect(() => {
+    // Clear suggestion when feature is disabled at runtime
+    if (!followupSuggestionsEnabled) {
+      suggestionAbortRef.current?.abort();
+      setPromptSuggestion(null);
+      if (speculationRef.current.status === 'running') {
+        abortSpeculation(speculationRef.current).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
+    }
+
+    // Clear suggestion and abort pending generation/speculation when a new turn starts
+    if (
+      prevStreamingStateRef.current === StreamingState.Idle &&
+      streamingState === StreamingState.Responding
+    ) {
+      suggestionAbortRef.current?.abort();
+      setPromptSuggestion(null);
+      if (speculationRef.current.status !== 'idle') {
+        abortSpeculation(speculationRef.current).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
+    }
+
+    // Only trigger when transitioning from Responding to Idle (and enabled)
+    // Skip when dialogs are active, in plan mode, elicitation pending, or last response was error
+    const isTransitionToIdle =
+      prevStreamingStateRef.current === StreamingState.Responding &&
+      streamingState === StreamingState.Idle;
+    if (
+      followupSuggestionsEnabled &&
+      config.isInteractive() &&
+      !config.getSdkMode() &&
+      isTransitionToIdle &&
+      // Check both committed history and pending items for errors
+      // (API errors go to pendingGeminiHistoryItems, not historyManager.history)
+      historyManager.history[historyManager.history.length - 1]?.type !==
+        'error' &&
+      !pendingGeminiHistoryItems.some((item) => item.type === 'error') &&
+      !shellConfirmationRequest &&
+      !confirmationRequest &&
+      !loopDetectionConfirmationRequest &&
+      !isPermissionsDialogOpen &&
+      settingInputRequests.length === 0 &&
+      config.getApprovalMode() !== ApprovalMode.PLAN
+    ) {
+      const ac = new AbortController();
+      suggestionAbortRef.current = ac;
+
+      // Use curated history to avoid invalid/empty entries causing API errors
+      const fullHistory = geminiClient.getChat().getHistory(true);
+      const conversationHistory =
+        fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+      const enableCacheSharing =
+        settings.merged.ui?.enableCacheSharing === true;
+      const fastModel = settings.merged.fastModel || undefined;
+      generatePromptSuggestion(config, conversationHistory, ac.signal, {
+        enableCacheSharing,
+        model: fastModel,
+      })
+        .then((result) => {
+          if (ac.signal.aborted) return;
+          if (result.suggestion) {
+            setPromptSuggestion(result.suggestion);
+            // Start speculation if enabled (runs in background)
+            if (settings.merged.ui?.enableSpeculation) {
+              startSpeculation(config, result.suggestion, ac.signal, {
+                model: fastModel,
+              })
+                .then((state) => {
+                  speculationRef.current = state;
+                })
+                .catch(() => {
+                  // Speculation failure is non-blocking
+                });
+            }
+          } else if (result.filterReason) {
+            // Log suppressed suggestion for analytics
+            logPromptSuggestion(
+              config,
+              new PromptSuggestionEvent({
+                outcome: 'suppressed',
+                reason: result.filterReason,
+              }),
+            );
+          }
+        })
+        .catch(() => {
+          // Silently degrade — don't disrupt the user experience
+        });
+    }
+
+    // Only update prev ref when streamingState actually changes, so that
+    // dialog-dependency re-runs don't cause us to miss a Responding→Idle transition.
+    if (prevStreamingStateRef.current !== streamingState) {
+      prevStreamingStateRef.current = streamingState;
+    }
+
+    return () => {
+      suggestionAbortRef.current?.abort();
+      // Cleanup speculation on unmount (#21)
+      if (speculationRef.current.status !== 'idle') {
+        abortSpeculation(speculationRef.current).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- guards may change independently
+  }, [
+    streamingState,
+    followupSuggestionsEnabled,
+    shellConfirmationRequest,
+    confirmationRequest,
+    loopDetectionConfirmationRequest,
+    isPermissionsDialogOpen,
+    settingInputRequests,
+  ]);
+
+  // Abort speculation when promptSuggestion is cleared (new turn, feature toggle, or
+  // user-initiated dismiss via typing/paste). InputPrompt calls onPromptSuggestionDismiss
+  // on user input, which clears promptSuggestion, triggering this effect to abort speculation.
+  useEffect(() => {
+    if (!promptSuggestion && speculationRef.current.status !== 'idle') {
+      abortSpeculation(speculationRef.current).catch(() => {});
+      speculationRef.current = IDLE_SPECULATION;
+    }
+  }, [promptSuggestion]);
+
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);
 
@@ -962,6 +1397,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
+
+  const [verboseMode, setVerboseMode] = useState<boolean>(
+    settings.merged.ui?.verboseMode ?? true,
+  );
+
+  const [frozenSnapshot, setFrozenSnapshot] = useState<
+    HistoryItemWithoutId[] | null
+  >(null);
 
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -1225,6 +1668,11 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
+  const pendingHistoryItems = useMemo(
+    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
+    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
+  );
+
   const handleGlobalKeypress = useCallback(
     (key: Key) => {
       // Debug log keystrokes if enabled
@@ -1332,6 +1780,18 @@ export const AppContainer = (props: AppContainerProps) => {
         if (Object.keys(mcpServers || {}).length > 0) {
           handleSlashCommand(newValue ? '/mcp desc' : '/mcp nodesc');
         }
+      } else if (keyMatchers[Command.TOGGLE_VERBOSE_MODE](key)) {
+        const newValue = !verboseMode;
+        setVerboseMode(newValue);
+        settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
+        refreshStatic();
+        // Only freeze during the actual responding phase. WaitingForConfirmation
+        // must keep focus so the user can approve/cancel tool confirmation UI.
+        if (streamingState === StreamingState.Responding) {
+          setFrozenSnapshot([...pendingHistoryItems]);
+        } else {
+          setFrozenSnapshot(null);
+        }
       } else if (
         keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key) &&
         config.getIdeMode() &&
@@ -1354,6 +1814,8 @@ export const AppContainer = (props: AppContainerProps) => {
       setConstrainHeight,
       showToolDescriptions,
       setShowToolDescriptions,
+      verboseMode,
+      setVerboseMode,
       config,
       ideContextState,
       handleExit,
@@ -1375,8 +1837,11 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      settings.merged.general?.debugKeystrokeLogging,
       isAuthenticating,
+      settings,
+      refreshStatic,
+      pendingHistoryItems,
+      setFrozenSnapshot,
     ],
   );
 
@@ -1465,11 +1930,6 @@ export const AppContainer = (props: AppContainerProps) => {
     sessionStats,
   });
 
-  const pendingHistoryItems = useMemo(
-    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
-    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
-  );
-
   const uiState: UIState = useMemo(
     () => ({
       history: historyManager.history,
@@ -1489,6 +1949,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
+      isFastModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -1574,6 +2035,9 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Prompt suggestion
+      promptSuggestion,
+      dismissPromptSuggestion,
     }),
     [
       isThemeDialogOpen,
@@ -1591,6 +2055,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
+      isFastModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -1677,6 +2142,9 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Prompt suggestion
+      promptSuggestion,
+      dismissPromptSuggestion,
     ],
   );
 
@@ -1715,6 +2183,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
+      popAllQueuedMessages: popAllMessages,
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
@@ -1772,6 +2241,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       retryLastPrompt,
       handleClearScreen,
+      popAllMessages,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       // Subagent dialogs
@@ -1797,6 +2267,11 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
+  const verboseModeValue = useMemo(
+    () => ({ verboseMode, frozenSnapshot }),
+    [verboseMode, frozenSnapshot],
+  );
+
   return (
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
@@ -1807,9 +2282,11 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <ShellFocusContext.Provider value={isFocused}>
-              <App />
-            </ShellFocusContext.Provider>
+            <VerboseModeProvider value={verboseModeValue}>
+              <ShellFocusContext.Provider value={isFocused}>
+                <App />
+              </ShellFocusContext.Provider>
+            </VerboseModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>

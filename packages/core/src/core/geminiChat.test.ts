@@ -230,45 +230,57 @@ describe('GeminiChat', async () => {
       expect(modelTurn?.parts![0]!.functionCall).toBeDefined();
     });
 
-    it('should fail if the stream ends with an empty part and has no finishReason', async () => {
-      vi.useFakeTimers();
-      try {
-        const streamWithNoFinish = (async function* () {
-          yield {
-            candidates: [
-              {
-                content: {
-                  role: 'model',
-                  parts: [{ text: 'Initial content...' }],
-                },
+    it('should accept content when stream ends with an empty part and has no finishReason but had prior content', async () => {
+      // Scenario: Stream delivered valid content, then an empty trailing chunk, but
+      // never sent a finishReason. Since there is meaningful content, we accept
+      // the partial response (graceful degradation) instead of retrying.
+      const streamWithNoFinish = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: 'Initial content...' }],
               },
-            ],
-          } as unknown as GenerateContentResponse;
-          yield {
-            candidates: [
-              {
-                content: {
-                  role: 'model',
-                  parts: [{ text: '' }],
-                },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: '' }],
               },
-            ],
-          } as unknown as GenerateContentResponse;
-        })();
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
 
-        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-          streamWithNoFinish,
-        );
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamWithNoFinish,
+      );
 
-        const stream = await chat.sendMessageStream(
-          'test-model',
-          { message: 'test message' },
-          'prompt-id-no-finish-empty-end',
-        );
-        await expectStreamExhaustion(stream);
-      } finally {
-        vi.useRealTimers();
-      }
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test message' },
+        'prompt-id-no-finish-empty-end',
+      );
+
+      // Should NOT throw — partial content is accepted gracefully
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })(),
+      ).resolves.not.toThrow();
+
+      // Verify partial content preserved in history
+      const history = chat.getHistory();
+      expect(history.length).toBe(2);
+      const modelTurn = history[1]!;
+      expect(modelTurn.parts![0]!.text).toBe('Initial content...');
     });
 
     it('should succeed if the stream ends with an invalid part but has a finishReason and contained a valid part', async () => {
@@ -584,17 +596,62 @@ describe('GeminiChat', async () => {
       ).resolves.not.toThrow();
     });
 
-    it('should throw InvalidStreamError when no tool call and no finish reason', async () => {
+    it('should accept partial content when stream has text but no finish reason (graceful degradation)', async () => {
+      // Scenario: Model streamed valid text but the connection was cut off before
+      // sending a finishReason. The CLI should accept the partial response rather
+      // than discarding it, since the content is already visible to the user.
+      const streamWithContentButNoFinish = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: 'some response' }],
+              },
+              // No finishReason — simulates a transient network cut-off
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamWithContentButNoFinish,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-partial-accept',
+      );
+
+      // Should NOT throw — partial content is accepted gracefully
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })(),
+      ).resolves.not.toThrow();
+
+      // Verify the partial content was preserved in history
+      const history = chat.getHistory();
+      expect(history.length).toBe(2); // user turn + model turn
+      const modelTurn = history[1]!;
+      expect(modelTurn.parts![0]!.text).toBe('some response');
+    });
+
+    it('should throw InvalidStreamError when stream is truly empty with no finish reason', async () => {
       vi.useFakeTimers();
       try {
-        // Setup: Stream with text but no finish reason and no tool call
-        const streamWithoutFinishReason = (async function* () {
+        // Scenario: Model returned nothing useful — no text, no thought, no
+        // finish reason. This is a genuinely broken stream that should be retried.
+        const emptyStreamNoFinish = (async function* () {
           yield {
             candidates: [
               {
                 content: {
                   role: 'model',
-                  parts: [{ text: 'some response' }],
+                  parts: [],
                 },
                 // No finishReason
               },
@@ -603,13 +660,13 @@ describe('GeminiChat', async () => {
         })();
 
         vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-          streamWithoutFinishReason,
+          emptyStreamNoFinish,
         );
 
         const stream = await chat.sendMessageStream(
           'test-model',
           { message: 'test' },
-          'prompt-id-1',
+          'prompt-id-empty-no-finish',
         );
         await expectStreamExhaustion(stream);
       } finally {
@@ -617,17 +674,18 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('should throw InvalidStreamError when no tool call and empty response text', async () => {
+    it('should throw InvalidStreamError when finish reason present but truly empty content (no text, no thought)', async () => {
       vi.useFakeTimers();
       try {
-        // Setup: Stream with finish reason but empty response (only thoughts)
-        const streamWithEmptyResponse = (async function* () {
+        // Scenario: Model explicitly finished (STOP) but produced no content
+        // at all — no text, no thought. This is a NO_RESPONSE_TEXT error.
+        const emptyContentWithFinish = (async function* () {
           yield {
             candidates: [
               {
                 content: {
                   role: 'model',
-                  parts: [{ thought: 'thinking...' }],
+                  parts: [],
                 },
                 finishReason: 'STOP',
               },
@@ -636,18 +694,122 @@ describe('GeminiChat', async () => {
         })();
 
         vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-          streamWithEmptyResponse,
+          emptyContentWithFinish,
         );
 
         const stream = await chat.sendMessageStream(
           'test-model',
           { message: 'test' },
-          'prompt-id-1',
+          'prompt-id-empty-with-finish',
         );
         await expectStreamExhaustion(stream);
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('should succeed when stream has only thought content with finish reason (reasoning models)', async () => {
+      // Scenario: Thinking/reasoning models may emit only thought content
+      // without explicit text output. This is a valid response.
+      const thoughtOnlyStream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    thought: true,
+                    text: 'Let me think through this problem step by step...',
+                  },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        thoughtOnlyStream,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-thought-only',
+      );
+
+      // Should NOT throw — thought-only responses are valid
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })(),
+      ).resolves.not.toThrow();
+
+      // Verify the thought content is preserved in history
+      const history = chat.getHistory();
+      expect(history.length).toBe(2); // user turn + model turn
+      const modelTurn = history[1]!;
+      expect(modelTurn.parts!.length).toBe(1);
+      expect(modelTurn.parts![0]).toEqual({
+        thought: true,
+        text: 'Let me think through this problem step by step...',
+      });
+    });
+
+    it('should accept thought-only content when finish reason is missing (network cut-off during reasoning)', async () => {
+      // Scenario: Model was in thinking mode, streamed thought content, but
+      // connection dropped before finishReason arrived. Accept the partial
+      // thought rather than discarding it.
+      const thoughtOnlyNoFinish = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    thought: true,
+                    text: 'Analyzing the problem...',
+                  },
+                ],
+              },
+              // No finishReason
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        thoughtOnlyNoFinish,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-thought-no-finish',
+      );
+
+      // Should NOT throw — partial thought content is accepted
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })(),
+      ).resolves.not.toThrow();
+
+      // Verify the thought content is preserved in history
+      const history = chat.getHistory();
+      expect(history.length).toBe(2);
+      const modelTurn = history[1]!;
+      expect(modelTurn.parts![0]).toEqual({
+        thought: true,
+        text: 'Analyzing the problem...',
+      });
     });
 
     it('should succeed when there is finish reason and response text', async () => {
@@ -786,6 +948,48 @@ describe('GeminiChat', async () => {
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(
         1,
       );
+    });
+
+    it('should not update global telemetry when no telemetryService is provided (subagent isolation)', async () => {
+      // Simulate a subagent GeminiChat: created without a telemetryService
+      const subagentChat = new GeminiChat(mockConfig, config, []);
+
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'subagent response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+              index: 0,
+              safetyRatings: [],
+            },
+          ],
+          text: () => 'subagent response',
+          usageMetadata: {
+            promptTokenCount: 12000,
+            candidatesTokenCount: 500,
+            totalTokenCount: 12500,
+          },
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await subagentChat.sendMessageStream(
+        'test-model',
+        { message: 'subagent task' },
+        'prompt-id-subagent',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      // The global uiTelemetryService must NOT be called by subagent chats
+      expect(uiTelemetryService.setLastPromptTokenCount).not.toHaveBeenCalled();
     });
 
     it('should keep parts with thoughtSignature when consolidating history', async () => {
@@ -955,11 +1159,11 @@ describe('GeminiChat', async () => {
         );
         await expectStreamExhaustion(stream);
 
-        // Should be called 3 times (1 initial + 2 transient retries)
+        // Should be called 4 times (1 initial + 3 transient retries)
         expect(
           mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(3);
-        expect(mockLogContentRetry).toHaveBeenCalledTimes(2);
+        ).toHaveBeenCalledTimes(4);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(3);
         expect(mockLogContentRetryFailure).toHaveBeenCalledTimes(1);
 
         // History should still contain the user message.
@@ -1152,15 +1356,22 @@ describe('GeminiChat', async () => {
         expect(second.done).toBe(false);
         expect(second.value.type).toBe(StreamEventType.RETRY);
 
-        // Verify retryInfo contains retry metadata
-        if (
-          second.value.type === StreamEventType.RETRY &&
-          second.value.retryInfo
-        ) {
-          expect(second.value.retryInfo.attempt).toBe(1);
-          expect(second.value.retryInfo.maxRetries).toBe(10);
-          expect(second.value.retryInfo.delayMs).toBe(60000);
-        }
+        // Verify first RETRY event contains retry metadata (from the rate-limit retry path).
+        // The second RETRY event may or may not have retryInfo, depending on whether it
+        // originates from the rate-limit path or the content retry path.
+        const firstRetryInfo = (
+          first.value as {
+            retryInfo?: {
+              attempt: number;
+              maxRetries: number;
+              delayMs: number;
+            };
+          }
+        ).retryInfo;
+        expect(firstRetryInfo).toBeDefined();
+        expect(firstRetryInfo!.attempt).toBe(1);
+        expect(firstRetryInfo!.maxRetries).toBe(10);
+        expect(firstRetryInfo!.delayMs).toBe(60000);
 
         const events: StreamEvent[] = [first.value, second.value];
         for (;;) {
@@ -1622,23 +1833,25 @@ describe('GeminiChat', async () => {
     });
   });
 
-  it('should discard valid partial content from a failed attempt upon retry', async () => {
-    // Mock the stream to fail on the first attempt after yielding some valid content.
+  it('should discard partial content from a failed attempt upon retry', async () => {
+    // Mock the stream to fail on the first attempt with an empty stream
+    // (no content, no finish reason), then succeed on the second attempt.
+    // Note: Streams with substantial content but no finish reason are now
+    // accepted gracefully. Only truly empty/broken streams trigger retries.
     vi.mocked(mockContentGenerator.generateContentStream)
       .mockImplementationOnce(async () =>
-        // First attempt: yields one valid chunk, then one invalid chunk
+        // First attempt: truly empty stream — no content, no finish reason
         (async function* () {
           yield {
             candidates: [
               {
                 content: {
-                  parts: [{ text: 'This valid part should be discarded' }],
+                  role: 'model',
+                  parts: [],
                 },
+                // No finishReason — this triggers NO_FINISH_REASON retry
               },
             ],
-          } as unknown as GenerateContentResponse;
-          yield {
-            candidates: [{ content: { parts: [{ text: '' }] } }], // Invalid chunk triggers retry
           } as unknown as GenerateContentResponse;
         })(),
       )
@@ -1680,10 +1893,6 @@ describe('GeminiChat', async () => {
     const modelTurn = history[1]!;
     // The model turn should only contain the text from the successful attempt
     expect(modelTurn!.parts![0]!.text).toBe('Successful final response');
-    // It should NOT contain any text from the failed attempt
-    expect(modelTurn!.parts![0]!.text).not.toContain(
-      'This valid part should be discarded',
-    );
   });
 
   describe('stripThoughtsFromHistory', () => {

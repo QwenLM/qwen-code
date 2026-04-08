@@ -6,7 +6,11 @@
 
 import type React from 'react';
 import { useMemo } from 'react';
-import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  sanitizeSensitiveText,
+} from '../utils/textUtils.js';
+import { useVerboseMode } from '../contexts/VerboseModeContext.js';
 import type { HistoryItem } from '../types.js';
 import {
   UserMessage,
@@ -26,7 +30,9 @@ import {
   RetryCountdownMessage,
   SuccessMessage,
 } from './messages/StatusMessages.js';
-import { Box } from 'ink';
+import { Box, Text } from 'ink';
+import { theme } from '../semantic-colors.js';
+import { MarkdownDisplay } from '../utils/MarkdownDisplay.js';
 import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
@@ -69,14 +75,23 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   embeddedShellFocused,
   availableTerminalHeightGemini,
 }) => {
-  const marginTop =
-    item.type === 'gemini_content' || item.type === 'gemini_thought_content'
-      ? 0
-      : 1;
-
+  const { verboseMode } = useVerboseMode();
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
+
+  const isCompactSpacing =
+    !verboseMode &&
+    (item.type === 'tool_group' ||
+      item.type === 'gemini' ||
+      item.type === 'gemini_thought');
+
+  const marginTop =
+    item.type === 'gemini_content' || item.type === 'gemini_thought_content'
+      ? 0
+      : isCompactSpacing
+        ? 0
+        : 1;
 
   return (
     <Box
@@ -113,7 +128,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {itemForDisplay.type === 'gemini_thought' && (
+      {verboseMode && itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
           text={itemForDisplay.text}
           isPending={isPending}
@@ -123,7 +138,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {itemForDisplay.type === 'gemini_thought_content' && (
+      {verboseMode && itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
           text={itemForDisplay.text}
           isPending={isPending}
@@ -178,12 +193,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isFocused={isFocused}
           activeShellPtyId={activeShellPtyId}
           embeddedShellFocused={embeddedShellFocused}
+          isUserInitiated={itemForDisplay.isUserInitiated}
         />
       )}
       {itemForDisplay.type === 'compression' && (
         <CompressionMessage compression={itemForDisplay.compression} />
       )}
-      {item.type === 'summary' && <SummaryMessage summary={item.summary} />}
+      {itemForDisplay.type === 'summary' && (
+        <SummaryMessage summary={itemForDisplay.summary} />
+      )}
       {itemForDisplay.type === 'extensions_list' && <ExtensionsList />}
       {itemForDisplay.type === 'tools_list' && (
         <ToolsList
@@ -229,6 +247,30 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
         <BtwMessage btw={itemForDisplay.btw} />
+      )}
+      {itemForDisplay.type === 'user_prompt_submit_blocked' && (
+        <Box flexDirection="column">
+          <Text color={theme.status.warning}>
+            {`✕ UserPromptSubmit operation blocked by hook:\n${itemForDisplay.reason}\n\nOriginal prompt: ${sanitizeSensitiveText(itemForDisplay.originalPrompt)}`}
+          </Text>
+        </Box>
+      )}
+      {itemForDisplay.type === 'stop_hook_loop' && (
+        <InfoMessage
+          text={`Ran ${itemForDisplay.stopHookCount} stop hooks\n  ⎿  Stop hook error: ${itemForDisplay.reasons[itemForDisplay.reasons.length - 1]}`}
+        />
+      )}
+      {itemForDisplay.type === 'stop_hook_system_message' && (
+        <Box flexDirection="column">
+          <Text color={theme.text.primary}> ⎿ Stop says:</Text>
+          <Box marginLeft={4} flexDirection="column">
+            <MarkdownDisplay
+              text={itemForDisplay.message}
+              isPending={false}
+              contentWidth={contentWidth - 4}
+            />
+          </Box>
+        </Box>
       )}
     </Box>
   );

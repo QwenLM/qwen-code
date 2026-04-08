@@ -37,11 +37,20 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
     const onTimeout = () => {
       timeoutId = undefined;
       process.stdin.removeListener('data', handleData);
-      if (!originalRawMode) {
-        process.stdin.setRawMode(false);
-      }
-      detectionComplete = true;
-      resolve(false);
+
+      // Keep a drain handler briefly to consume any late-arriving terminal
+      // responses that would otherwise leak into the application input.
+      const drainHandler = () => {};
+      process.stdin.on('data', drainHandler);
+
+      setTimeout(() => {
+        process.stdin.removeListener('data', drainHandler);
+        if (!originalRawMode) {
+          process.stdin.setRawMode(false);
+        }
+        detectionComplete = true;
+        resolve(false);
+      }, 100);
     };
 
     const handleData = (data: Buffer) => {

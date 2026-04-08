@@ -99,6 +99,7 @@ export default {
   'CLI Version': 'Версия CLI',
   'Git Commit': 'Git-коммит',
   Model: 'Модель',
+  'Fast Model': 'Быстрая модель',
   Sandbox: 'Песочница',
   'OS Platform': 'Платформа ОС',
   'OS Arch': 'Архитектура ОС',
@@ -634,6 +635,19 @@ export default {
   'No hook config selected': 'Конфигурация хука не выбрана',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'Чтобы изменить или удалить этот хук, отредактируйте settings.json напрямую или спросите Qwen.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Конфигурация хуков - Отключено',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'Все хуки в данный момент отключены. У вас {{count}} не выполняются.',
+  '{{count}} configured hook': '{{count}} настроенный хук',
+  '{{count}} configured hooks': '{{count}} настроенных хуков',
+  'When hooks are disabled:': 'Когда хуки отключены:',
+  'No hook commands will execute': 'Никакие команды хуков не будут выполняться',
+  'StatusLine will not be displayed': 'StatusLine не будет отображаться',
+  'Tool operations will proceed without hook validation':
+    'Операции инструментов будут выполняться без проверки хуков',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'Чтобы снова включить хуки, удалите "disableAllHooks" из settings.json или спросите Qwen Code.',
   // Hooks - Source
   Project: 'Проект',
   User: 'Пользователь',
@@ -1344,6 +1358,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Нажмите Ctrl+C снова для выхода.',
   'Press Ctrl+D again to exit.': 'Нажмите Ctrl+D снова для выхода.',
   'Press Esc again to clear.': 'Нажмите Esc снова для очистки.',
+  'Press ↑ to edit queued messages':
+    'Нажмите ↑ для редактирования сообщений в очереди',
 
   // ============================================================================
   // Статус MCP
@@ -1389,9 +1405,9 @@ export default {
   'Restarting MCP servers...': 'Перезапуск MCP-серверов...',
 
   // ============================================================================
-  // Подсказки при запуске
+  // Примеры при запуске
   // ============================================================================
-  'Tips for getting started:': 'Подсказки для начала работы:',
+  'Example: ': 'Пример: ',
   '1. Ask questions, edit files, or run commands.':
     '1. Задавайте вопросы, редактируйте файлы или выполняйте команды.',
   '2. Be specific for the best results.':
@@ -1683,6 +1699,19 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
+  // DataWorks usage examples
+  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
+    '👤 Подтверждение личности：「Помогите подтвердить мою личность и права в DataWorks?」',
+  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
+    '📊 Анализ задач：「Проанализируйте новые узлы в рабочей области dataworks_analyze за последнюю неделю и что они делают」',
+  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
+    '🧹 Управление задачами：「В рабочей области dataworks_analyze помогите найти узлы, созданные давно, но никогда не опубликованные」',
+  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
+    '🔍 Диагностика проблем：「Данные в dwd_is_it_software_released_df и ads_is_it_sfw_moni_key_released_recycled_df несовместимы, оба имеют источник ods_ism_it_software_key_released_df. Проверьте разницу в их логике」',
+  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
+    '🛠️ Исправление проблем：「В таблице сотрудников my_project.ods_emp_info_d данные отдела для сотрудника EMP001 пусты. Помогите диагностировать причину и предложите варианты исправления」',
+  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
+    'Это бета-версия. История чата будет потеряна после удаления экземпляра персональной среды разработки.',
 
   // ============================================================================
   // Custom API Key Configuration
@@ -1945,4 +1974,11 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    'Подробный режим включён — отображается полный вывод инструментов и рассуждения',
+  'Compact mode on — showing tool names and final responses only':
+    'Компактный режим включён — отображаются только имена инструментов и окончательные ответы',
+  verbose: 'подробный',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Показывать полный вывод инструментов и процесс рассуждений в подробном режиме (переключить с помощью Ctrl+O).',
 };

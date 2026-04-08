@@ -37,7 +37,6 @@ import {
   getCommandRoots,
   splitCommands,
   stripShellWrapper,
-  detectCommandSubstitution,
 } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -92,17 +91,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * AST-based permission check for the shell command.
-   * - Command substitution → 'deny' (security)
    * - Read-only commands (via AST analysis) → 'allow'
    * - All other commands → 'ask'
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const command = stripShellWrapper(this.params.command);
-
-    // Security: command substitution ($(), ``, <(), >()) → deny
-    if (detectCommandSubstitution(command)) {
-      return 'deny';
-    }
 
     // AST-based read-only detection
     try {
@@ -598,18 +591,10 @@ ${processGroupNote}
 }
 
 function getCommandDescription(): string {
-  const cmd_substitution_warning =
-    '\n*** WARNING: Command substitution using $(), `` ` ``, <(), or >() is not allowed for security reasons.';
   if (os.platform() === 'win32') {
-    return (
-      'Exact command to execute as `cmd.exe /c <command>`' +
-      cmd_substitution_warning
-    );
+    return 'Exact command to execute as `cmd.exe /c <command>`';
   } else {
-    return (
-      'Exact bash command to execute as `bash -c <command>`' +
-      cmd_substitution_warning
-    );
+    return 'Exact bash command to execute as `bash -c <command>`';
   }
 }
 
@@ -662,9 +647,9 @@ export class ShellTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: ShellToolParams,
   ): string | null {
-    // NOTE: Permission checks (command substitution, read-only detection, PM rules)
-    // are now handled at L3 (getDefaultPermission) and L4 (PM override) in
-    // coreToolScheduler. This method only performs pure parameter validation.
+    // NOTE: Permission checks (read-only detection, PM rules) are handled at
+    // L3 (getDefaultPermission) and L4 (PM override) in coreToolScheduler.
+    // This method only performs pure parameter validation.
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
     }

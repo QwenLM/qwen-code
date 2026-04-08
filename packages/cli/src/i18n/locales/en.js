@@ -98,6 +98,7 @@ export default {
   'CLI Version': 'CLI Version',
   'Git Commit': 'Git Commit',
   Model: 'Model',
+  'Fast Model': 'Fast Model',
   Sandbox: 'Sandbox',
   'OS Platform': 'OS Platform',
   'OS Arch': 'OS Arch',
@@ -696,6 +697,19 @@ export default {
   'No hook config selected': 'No hook config selected',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook Configuration - Disabled',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'All hooks are currently disabled. You have {{count}} that are not running.',
+  '{{count}} configured hook': '{{count}} configured hook',
+  '{{count}} configured hooks': '{{count}} configured hooks',
+  'When hooks are disabled:': 'When hooks are disabled:',
+  'No hook commands will execute': 'No hook commands will execute',
+  'StatusLine will not be displayed': 'StatusLine will not be displayed',
+  'Tool operations will proceed without hook validation':
+    'Tool operations will proceed without hook validation',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.',
   // Hooks - Source
   Project: 'Project',
   User: 'User',
@@ -1466,6 +1480,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
+  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
 
   // ============================================================================
   // MCP Status
@@ -1510,9 +1525,9 @@ export default {
   'Restarting MCP servers...': 'Restarting MCP servers...',
 
   // ============================================================================
-  // Startup Tips
+  // Startup Examples
   // ============================================================================
-  'Tips:': 'Tips:',
+  'Example: ': 'Example: ',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     'Use /compress when the conversation gets long to summarize history and free up context.',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
@@ -1533,6 +1548,19 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
+  // DataWorks usage examples
+  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
+    '👤 Identity: "Help me verify my identity and permissions in DataWorks?"',
+  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
+    '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"',
+  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
+    '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."',
+  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
+    '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"',
+  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
+    '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."',
+  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
+    'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1989,4 +2017,11 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    'Verbose mode on — showing full tool output and thinking',
+  'Compact mode on — showing tool names and final responses only':
+    'Compact mode on — showing tool names and final responses only',
+  verbose: 'verbose',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
 };
