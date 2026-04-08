@@ -14,16 +14,6 @@ import {
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import type { GenerateContentConfig } from '@google/genai';
-import type { Config } from '../config/config.js';
-import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
-
-vi.mock('../core/geminiChat.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../core/geminiChat.js')>();
-  return {
-    ...actual,
-    GeminiChat: vi.fn(),
-  };
-});
 
 vi.mock('../core/geminiChat.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../core/geminiChat.js')>();
