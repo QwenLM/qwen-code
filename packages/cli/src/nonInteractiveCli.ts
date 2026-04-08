@@ -409,6 +409,7 @@ export async function runNonInteractive(
                       { role: 'user', parts: [{ text: cronPrompt }] },
                     ];
                     let cronIsFirstTurn = true;
+                    let cronModelOverride: string | undefined;
 
                     while (true) {
                       const cronToolCallRequests: ToolCallRequestInfo[] = [];
@@ -421,6 +422,7 @@ export async function runNonInteractive(
                           type: cronIsFirstTurn
                             ? SendMessageType.Cron
                             : SendMessageType.ToolResult,
+                          modelOverride: cronModelOverride,
                         },
                       );
                       cronIsFirstTurn = false;
@@ -484,6 +486,10 @@ export async function runNonInteractive(
                             cronToolResponseParts.push(
                               ...toolResponse.responseParts,
                             );
+                          }
+
+                          if ('modelOverride' in toolResponse) {
+                            cronModelOverride = toolResponse.modelOverride;
                           }
                         }
                         cronMessages = [

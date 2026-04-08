@@ -199,6 +199,7 @@ export const useGeminiStream = (
     null,
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
+  const modelOverrideRef = useRef<string | undefined>(undefined);
   const {
     startNewPrompt,
     getPromptCount,
@@ -1165,7 +1166,6 @@ export const useGeminiStream = (
       query: PartListUnion,
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
-      modelOverride?: string,
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
@@ -1202,6 +1202,7 @@ export const useGeminiStream = (
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
+        modelOverrideRef.current = undefined;
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
         // Clear both countdown-based errors AND static errors (those without
@@ -1301,7 +1302,7 @@ export const useGeminiStream = (
             finalQueryToSend,
             abortSignal,
             prompt_id!,
-            { type: submitType, modelOverride },
+            { type: submitType, modelOverride: modelOverrideRef.current },
           );
 
           const processingStatus = await processGeminiStreamEvents(
@@ -1567,11 +1568,12 @@ export const useGeminiStream = (
         (toolCall) => toolCall.request.prompt_id,
       );
 
-      // Extract model override from skill tool results (last one wins)
-      let toolModelOverride: string | undefined;
+      // Persist model override from skill tool results (last one wins).
+      // Uses `in` so that undefined (from inherit/no-model skills) clears a
+      // prior override, while non-skill tools (field absent) leave it intact.
       for (const toolCall of geminiTools) {
         if ('modelOverride' in toolCall.response) {
-          toolModelOverride = toolCall.response.modelOverride;
+          modelOverrideRef.current = toolCall.response.modelOverride;
         }
       }
 
@@ -1599,12 +1601,7 @@ export const useGeminiStream = (
         }
       }
 
-      submitQuery(
-        responsesToSend,
-        SendMessageType.ToolResult,
-        prompt_ids[0],
-        toolModelOverride,
-      );
+      submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
     },
     [
       isResponding,
