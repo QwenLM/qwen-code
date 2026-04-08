@@ -2663,7 +2663,7 @@ describe('InputPrompt', () => {
     });
 
     it('should pop queued messages into input on Up arrow when queue is non-empty', async () => {
-      const mockPopAll = vi.fn(() => 'queued msg 1\nqueued msg 2');
+      const mockPopAll = vi.fn(() => 'queued msg 1\n\nqueued msg 2');
       vi.mocked(useUIState).mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued msg 1', 'queued msg 2'],
@@ -2684,7 +2684,7 @@ describe('InputPrompt', () => {
 
       expect(mockPopAll).toHaveBeenCalled();
       expect(props.buffer.setText).toHaveBeenCalledWith(
-        'queued msg 1\nqueued msg 2',
+        'queued msg 1\n\nqueued msg 2',
       );
       unmount();
     });

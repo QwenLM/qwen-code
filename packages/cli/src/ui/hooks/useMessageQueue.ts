@@ -68,7 +68,7 @@ export function useMessageQueue({
   const popAllMessages = useCallback((): string | null => {
     const current = queueRef.current;
     if (current.length === 0) return null;
-    const allText = current.join('\n');
+    const allText = current.join('\n\n');
     queueRef.current = [];
     setMessageQueue([]);
     return allText;

@@ -253,7 +253,7 @@ describe('useMessageQueue', () => {
       popped = result.current.popAllMessages();
     });
 
-    expect(popped).toBe('Message 1\nMessage 2\nMessage 3');
+    expect(popped).toBe('Message 1\n\nMessage 2\n\nMessage 3');
     expect(result.current.messageQueue).toEqual([]);
   });
 
