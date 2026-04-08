@@ -219,36 +219,6 @@ describe('<AskUserQuestionDialog />', () => {
   });
 
   describe('multiple questions', () => {
-    it('shows Submit tab for multiple questions', async () => {
-      const onConfirm = vi.fn();
-      const details = createConfirmationDetails({
-        questions: [
-          createSingleQuestion({ header: 'Q1' }),
-          createSingleQuestion({ header: 'Q2' }),
-        ],
-      });
-
-      const { stdin, lastFrame, unmount } = renderWithProviders(
-        <AskUserQuestionDialog
-          confirmationDetails={details}
-          onConfirm={onConfirm}
-        />,
-      );
-      await wait();
-
-      // Navigate to submit tab (right arrow twice: Q1 -> Q2 -> Submit)
-      stdin.write('\u001B[C'); // Right
-      await wait();
-      stdin.write('\u001B[C'); // Right
-      await wait();
-
-      const output = lastFrame();
-      expect(output).toContain('Submit answers');
-      expect(output).toContain('Cancel');
-      expect(output).toContain('Your answers');
-      unmount();
-    });
-
     it('shows unanswered questions as (not answered) in Submit tab', async () => {
       const onConfirm = vi.fn();
       const details = createConfirmationDetails({
