@@ -98,9 +98,10 @@ export class SystemController extends BaseController {
         throw new Error('Request aborted');
       }
 
+      const { type: _type, ...contextData } = contextUsageItem;
       return {
         subtype: 'get_context_usage',
-        ...contextUsageItem,
+        ...contextData,
       };
     } catch (error) {
       const errorMessage =
