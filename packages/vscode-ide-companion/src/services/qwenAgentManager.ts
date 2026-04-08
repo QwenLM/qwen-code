@@ -424,6 +424,15 @@ export class QwenAgentManager {
     }
   }
 
+  async getAccountInfo(): Promise<{
+    authType: string | null;
+    model: string | null;
+    baseUrl: string | null;
+    apiKeyEnvKey: string | null;
+  }> {
+    return this.connection.getAccountInfo();
+  }
+
   /**
    * Validate if current session is still active
    * This is a lightweight check to verify session validity

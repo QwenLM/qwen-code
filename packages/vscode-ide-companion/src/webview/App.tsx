@@ -47,6 +47,10 @@ import {
   SessionSelector,
 } from '@qwen-code/webui';
 import { InputForm } from './components/layout/InputForm.js';
+import {
+  AccountInfoDialog,
+  type AccountInfo,
+} from './components/AccountInfoDialog.js';
 import { ApprovalMode, NEXT_APPROVAL_MODE } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
@@ -92,6 +96,7 @@ export const App: React.FC = () => {
   >([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [showModelSelector, setShowModelSelector] = useState(false);
+  const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   // Scroll container for message list; used to keep the view anchored to the latest content
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
@@ -166,6 +171,13 @@ export const App: React.FC = () => {
             id: 'login',
             label: 'Login',
             description: 'Login to Qwen Code',
+            type: 'command',
+            group: 'Account',
+          },
+          {
+            id: 'account',
+            label: 'Account',
+            description: 'Show current account and authentication info',
             type: 'command',
             group: 'Account',
           },
@@ -362,6 +374,9 @@ export const App: React.FC = () => {
     },
     setAvailableModels: (models) => {
       setAvailableModels(models);
+    },
+    setAccountInfo: (info) => {
+      setAccountInfo(info);
     },
   });
 
@@ -612,6 +627,13 @@ export const App: React.FC = () => {
         if (itemId === 'login') {
           clearTriggerText();
           vscode.postMessage({ type: 'login', data: {} });
+          completion.closeCompletion();
+          return;
+        }
+
+        if (itemId === 'account') {
+          clearTriggerText();
+          vscode.postMessage({ type: 'getAccountInfo', data: {} });
           completion.closeCompletion();
           return;
         }
@@ -1097,6 +1119,13 @@ export const App: React.FC = () => {
           questions={askUserQuestionRequest.questions}
           onSubmit={handleAskUserQuestionResponse}
           onCancel={handleAskUserQuestionCancel}
+        />
+      )}
+
+      {accountInfo && (
+        <AccountInfoDialog
+          info={accountInfo}
+          onClose={() => setAccountInfo(null)}
         />
       )}
     </div>

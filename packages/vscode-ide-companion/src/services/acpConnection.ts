@@ -565,6 +565,22 @@ export class AcpConnection {
     return res;
   }
 
+  async getAccountInfo(): Promise<{
+    authType: string | null;
+    model: string | null;
+    baseUrl: string | null;
+    apiKeyEnvKey: string | null;
+  }> {
+    const conn = this.ensureConnection();
+    const result = await conn.extMethod('getAccountInfo', {});
+    return {
+      authType: (result['authType'] as string | null) ?? null,
+      model: (result['model'] as string | null) ?? null,
+      baseUrl: (result['baseUrl'] as string | null) ?? null,
+      apiKeyEnvKey: (result['apiKeyEnvKey'] as string | null) ?? null,
+    };
+  }
+
   async setModel(modelId: string): Promise<SetSessionModelResponse> {
     const conn = this.ensureConnection();
     if (!this.sessionId) {

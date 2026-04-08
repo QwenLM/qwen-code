@@ -131,6 +131,16 @@ interface UseWebViewMessagesProps {
   setAvailableCommands?: (commands: AvailableCommand[]) => void;
   // Available models setter
   setAvailableModels?: (models: ModelInfo[]) => void;
+  // Account info setter (triggers dialog)
+  setAccountInfo?: (
+    info: {
+      authType?: string | null;
+      baseUrl?: string | null;
+      envKey?: string | null;
+      modelId?: string | null;
+      error?: string;
+    } | null,
+  ) => void;
 }
 
 /**
@@ -154,6 +164,7 @@ export const useWebViewMessages = ({
   setModelInfo,
   setAvailableCommands,
   setAvailableModels,
+  setAccountInfo,
 }: UseWebViewMessagesProps) => {
   // VS Code API for posting messages back to the extension host
   const vscode = useVSCode();
@@ -190,6 +201,7 @@ export const useWebViewMessages = ({
     setModelInfo,
     setAvailableCommands,
     setAvailableModels,
+    setAccountInfo,
   });
 
   // Track last "Updated Plan" snapshot toolcall to support merge/dedupe
@@ -240,6 +252,7 @@ export const useWebViewMessages = ({
       setModelInfo,
       setAvailableCommands,
       setAvailableModels,
+      setAccountInfo,
     };
   });
 
@@ -421,6 +434,20 @@ export const useWebViewMessages = ({
           } else {
             handlers.setIsAuthenticated?.(null);
           }
+          break;
+        }
+
+        case 'accountInfo': {
+          const info = message?.data as
+            | {
+                authType?: string | null;
+                baseUrl?: string | null;
+                envKey?: string | null;
+                modelId?: string | null;
+                error?: string;
+              }
+            | undefined;
+          handlers.setAccountInfo?.(info ?? null);
           break;
         }
 
