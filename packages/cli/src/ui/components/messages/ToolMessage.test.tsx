@@ -12,6 +12,7 @@ import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
+import { VerboseModeProvider } from '../../contexts/VerboseModeContext.js';
 import type {
   AnsiOutput,
   AnsiOutputDisplay,
@@ -101,18 +102,21 @@ const mockSettings: LoadedSettings = {
   },
 } as LoadedSettings;
 
-// Helper to render with context
+// Helper to render with context (verbose=true by default to show tool output)
 const renderWithContext = (
   ui: React.ReactElement,
   streamingState: StreamingState,
+  verboseMode = true,
 ) => {
   const contextValue: StreamingState = streamingState;
   return render(
-    <SettingsContext.Provider value={mockSettings}>
-      <StreamingContext.Provider value={contextValue}>
-        {ui}
-      </StreamingContext.Provider>
-    </SettingsContext.Provider>,
+    <VerboseModeProvider value={{ verboseMode, frozenSnapshot: null }}>
+      <SettingsContext.Provider value={mockSettings}>
+        <StreamingContext.Provider value={contextValue}>
+          {ui}
+        </StreamingContext.Provider>
+      </SettingsContext.Provider>
+    </VerboseModeProvider>,
   );
 };
 
@@ -141,6 +145,18 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('test-tool');
     expect(output).toContain('A tool for testing');
     expect(output).toContain('MockMarkdown:Test result');
+  });
+
+  it('hides result output in compact mode (verboseMode=false)', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} />,
+      StreamingState.Idle,
+      false, // compact mode
+    );
+    const output = lastFrame();
+    expect(output).toContain('✓'); // status indicator still visible
+    expect(output).toContain('test-tool'); // tool name still visible
+    expect(output).not.toContain('MockMarkdown:Test result'); // result hidden
   });
 
   describe('ToolStatusIndicator rendering', () => {

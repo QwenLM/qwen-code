@@ -1254,6 +1254,57 @@ describe('PermissionManager', () => {
       expect(await pm.isToolEnabled('read_file')).toBe(true);
       expect(await pm.isToolEnabled('run_shell_command')).toBe(true); // not denied, just unreviewed
     });
+
+    // Non-core tools bypass coreTools allowlist
+    it('MCP tools bypass coreTools allowlist check', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      // MCP tools should be enabled even if not in coreTools
+      expect(
+        await pm.isToolEnabled('mcp__markitdown__convert_to_markdown'),
+      ).toBe(true);
+      expect(await pm.isToolEnabled('mcp__puppeteer__navigate')).toBe(true);
+    });
+
+    it('Skill tool bypasses coreTools allowlist check', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('skill')).toBe(true);
+    });
+
+    it('Agent tool bypasses coreTools allowlist check', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('agent')).toBe(true);
+    });
+
+    it('exit_plan_mode tool bypasses coreTools allowlist check', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('exit_plan_mode')).toBe(true);
+    });
+
+    it('ask_user_question tool bypasses coreTools allowlist check', async () => {
+      pm = new PermissionManager(makeConfig({ coreTools: ['read_file'] }));
+      pm.initialize();
+      expect(await pm.isToolEnabled('ask_user_question')).toBe(true);
+    });
+
+    it('Non-core tools still respect deny rules', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          coreTools: ['read_file'],
+          permissionsDeny: ['mcp__markitdown'],
+        }),
+      );
+      pm.initialize();
+      // MCP tool should be disabled due to deny rule, even though it bypasses coreTools
+      expect(
+        await pm.isToolEnabled('mcp__markitdown__convert_to_markdown'),
+      ).toBe(false);
+      // Other MCP tools without deny rule should still be enabled
+      expect(await pm.isToolEnabled('mcp__puppeteer__navigate')).toBe(true);
+    });
   });
 
   describe('session rules', () => {

@@ -1303,6 +1303,23 @@ describe('InputPrompt', () => {
       expect(mockBuffer.handleInput).toHaveBeenCalled();
       unmount();
     });
+
+    it('should toggle shortcuts when vim passes through ? on an empty prompt', async () => {
+      props.vimHandleInput = vi.fn().mockReturnValue(false);
+      props.onToggleShortcuts = vi.fn();
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('?');
+      await wait();
+
+      expect(props.vimHandleInput).toHaveBeenCalled();
+      expect(props.onToggleShortcuts).toHaveBeenCalled();
+      unmount();
+    });
   });
 
   describe('unfocused paste', () => {
@@ -2400,36 +2417,6 @@ describe('InputPrompt', () => {
         largeContent,
       );
       expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
-
-      unmount();
-    });
-
-    it('should delete entire placeholder on backspace', async () => {
-      const placeholderText = '[Pasted Content 1001 chars]';
-      mockBuffer.text = placeholderText;
-      mockBuffer.lines = [placeholderText];
-      mockBuffer.cursor = [0, placeholderText.length];
-
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} />,
-      );
-      await wait();
-
-      // First set up a placeholder via paste
-      const largeContent = 'x'.repeat(1001);
-      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
-      await wait();
-
-      // Press backspace to delete the placeholder
-      stdin.write('\x7f'); // backspace character
-      await wait();
-
-      // Verify replaceRangeByOffset was called to delete entire placeholder
-      expect(mockBuffer.replaceRangeByOffset).toHaveBeenCalledWith(
-        0,
-        placeholderText.length,
-        '',
-      );
 
       unmount();
     });

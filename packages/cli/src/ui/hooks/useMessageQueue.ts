@@ -19,6 +19,12 @@ export interface UseMessageQueueReturn {
   clearQueue: () => void;
   getQueuedMessagesText: () => string;
   popAllMessages: () => string | null;
+  /**
+   * Atomically drain all queued messages. Returns the drained messages
+   * and clears both the synchronous ref and React state. Safe to call
+   * from non-React contexts (e.g., tool completion callbacks).
+   */
+  drainQueue: () => string[];
 }
 
 /**
@@ -32,19 +38,16 @@ export function useMessageQueue({
   submitQuery,
 }: UseMessageQueueOptions): UseMessageQueueReturn {
   const [messageQueue, setMessageQueue] = useState<string[]>([]);
-  // Ref keeps queue in sync for atomic popAllMessages (avoids stale closure reads)
-  const queueRef = useRef<string[]>(messageQueue);
-  queueRef.current = messageQueue;
+  // Synchronous ref mirrors React state so non-React callbacks (e.g.,
+  // mid-turn drain in handleCompletedTools) always see the latest queue.
+  const queueRef = useRef<string[]>([]);
 
   // Add a message to the queue
   const addMessage = useCallback((message: string) => {
     const trimmedMessage = message.trim();
     if (trimmedMessage.length > 0) {
-      setMessageQueue((prev) => {
-        const next = [...prev, trimmedMessage];
-        queueRef.current = next;
-        return next;
-      });
+      queueRef.current = [...queueRef.current, trimmedMessage];
+      setMessageQueue(queueRef.current);
     }
   }, []);
 
@@ -71,6 +74,15 @@ export function useMessageQueue({
     return allText;
   }, []);
 
+  // Atomically drain all queued messages (synchronous, safe from callbacks).
+  const drainQueue = useCallback((): string[] => {
+    const drained = queueRef.current;
+    if (drained.length === 0) return [];
+    queueRef.current = [];
+    setMessageQueue([]);
+    return drained;
+  }, []);
+
   // Process queued messages when streaming becomes idle
   useEffect(() => {
     if (
@@ -81,10 +93,16 @@ export function useMessageQueue({
       // Combine all messages with double newlines for clarity
       const combinedMessage = messageQueue.join('\n\n');
       // Clear the queue and submit
-      setMessageQueue([]);
+      clearQueue();
       submitQuery(combinedMessage);
     }
-  }, [isConfigInitialized, streamingState, messageQueue, submitQuery]);
+  }, [
+    isConfigInitialized,
+    streamingState,
+    messageQueue,
+    submitQuery,
+    clearQueue,
+  ]);
 
   return {
     messageQueue,
@@ -92,5 +110,6 @@ export function useMessageQueue({
     clearQueue,
     getQueuedMessagesText,
     popAllMessages,
+    drainQueue,
   };
 }

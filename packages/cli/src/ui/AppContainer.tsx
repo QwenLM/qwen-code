@@ -71,6 +71,7 @@ import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
+import { VerboseModeProvider } from './contexts/VerboseModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -712,6 +713,7 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [config, historyManager, settings.merged]);
 
   const cancelHandlerRef = useRef<() => void>(() => {});
+  const midTurnDrainRef = useRef<(() => string[]) | null>(null);
 
   const {
     streamingState,
@@ -743,6 +745,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
+    midTurnDrainRef,
   );
 
   // Track whether suggestions are visible for Tab key handling
@@ -785,6 +788,18 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     submitQuery,
   });
+
+  // Bridge message queue to mid-turn drain via ref.
+  // Sync ref on every render so the drain callback always reads latest state.
+  const messageQueueRef = useRef(messageQueue);
+  messageQueueRef.current = messageQueue;
+  midTurnDrainRef.current = () => {
+    const queue = messageQueueRef.current;
+    if (queue.length === 0) return [];
+    messageQueueRef.current = [];
+    clearQueue();
+    return [...queue];
+  };
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
@@ -954,6 +969,11 @@ export const AppContainer = (props: AppContainerProps) => {
     handleWelcomeBackClose,
   } = useWelcomeBack(config, handleFinalSubmit, buffer, settings.merged);
 
+  const pendingHistoryItems = useMemo(
+    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
+    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
+  );
+
   cancelHandlerRef.current = useCallback(() => {
     const pendingHistoryItems = [
       ...pendingSlashCommandHistoryItems,
@@ -1098,7 +1118,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Generate prompt suggestions when streaming completes
   const followupSuggestionsEnabled =
-    settings.merged.ui?.enableFollowupSuggestions !== false;
+    settings.merged.ui?.enableFollowupSuggestions === true;
 
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
@@ -1250,6 +1270,13 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
+  const [verboseMode, setVerboseMode] = useState<boolean>(
+    settings.merged.ui?.verboseMode ?? true,
+  );
+  const [frozenSnapshot, setFrozenSnapshot] = useState<
+    HistoryItemWithoutId[] | null
+  >(null);
+
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -1263,6 +1290,18 @@ export const AppContainer = (props: AppContainerProps) => {
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
+
+  useEffect(() => {
+    // Clear frozen snapshot when streaming ends OR when entering confirmation
+    // state. During WaitingForConfirmation, the user needs to see the latest
+    // pending items (including the confirmation message) rather than a stale snapshot.
+    if (
+      streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.WaitingForConfirmation
+    ) {
+      setFrozenSnapshot(null);
+    }
+  }, [streamingState]);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
@@ -1650,6 +1689,18 @@ export const AppContainer = (props: AppContainerProps) => {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);
         }
+      } else if (keyMatchers[Command.TOGGLE_VERBOSE_MODE](key)) {
+        const newValue = !verboseMode;
+        setVerboseMode(newValue);
+        void settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
+        refreshStatic();
+        // Only freeze during the actual responding phase. WaitingForConfirmation
+        // must keep focus so the user can approve/cancel tool confirmation UI.
+        if (streamingState === StreamingState.Responding) {
+          setFrozenSnapshot([...pendingHistoryItems]);
+        } else {
+          setFrozenSnapshot(null);
+        }
       }
     },
     [
@@ -1678,8 +1729,16 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      settings.merged.general?.debugKeystrokeLogging,
+      // `settings` is a stable LoadedSettings instance (not recreated on render).
+      // ESLint requires it here because the callback calls settings.setValue().
+      // debugKeystrokeLogging is read at call time, so no stale closure risk.
+      settings,
       isAuthenticating,
+      verboseMode,
+      setVerboseMode,
+      setFrozenSnapshot,
+      pendingHistoryItems,
+      refreshStatic,
     ],
   );
 
@@ -1767,11 +1826,6 @@ export const AppContainer = (props: AppContainerProps) => {
     history: historyManager.history,
     sessionStats,
   });
-
-  const pendingHistoryItems = useMemo(
-    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
-    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
-  );
 
   const uiState: UIState = useMemo(
     () => ({
@@ -2110,6 +2164,11 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
+  const verboseModeValue = useMemo(
+    () => ({ verboseMode, frozenSnapshot }),
+    [verboseMode, frozenSnapshot],
+  );
+
   return (
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
@@ -2120,9 +2179,11 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <ShellFocusContext.Provider value={isFocused}>
-              <App />
-            </ShellFocusContext.Provider>
+            <VerboseModeProvider value={verboseModeValue}>
+              <ShellFocusContext.Provider value={isFocused}>
+                <App />
+              </ShellFocusContext.Provider>
+            </VerboseModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>
