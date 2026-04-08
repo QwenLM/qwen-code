@@ -1,16 +1,23 @@
 # Status Line
 
-> Display custom information beneath the footer using a shell command.
+> Display custom information in the footer using a shell command.
 
-The status line lets you run a shell command whose output is displayed as a persistent line below the footer bar. The command receives structured JSON context via stdin, so it can show session-aware information like the current model, token usage, git branch, or anything else you can script.
+The status line lets you run a shell command whose output is displayed in the footer's left section. The command receives structured JSON context via stdin, so it can show session-aware information like the current model, token usage, git branch, or anything else you can script.
 
 ```
+With status line (default approval mode — 1 row):
 ┌─────────────────────────────────────────────────────────────────┐
-│  ? for shortcuts                  🔒 docker | Debug | ◼◼◼◻ 67% │
-├─────────────────────────────────────────────────────────────────┤
-│  user@host ~/project (main) qwen-3-235b  ctx:34%               │  ← status line
+│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line
+└─────────────────────────────────────────────────────────────────┘
+
+With status line + non-default mode (2 rows):
+┌─────────────────────────────────────────────────────────────────┐
+│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line
+│  auto-accept edits (shift + tab to cycle)                       │  ← mode indicator
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+When configured, the status line replaces the default "? for shortcuts" hint. High-priority messages (Ctrl+C/D exit prompts, Esc, vim INSERT mode) temporarily override the status line. The status line text is truncated to fit within the available width.
 
 ## Prerequisites
 
@@ -213,10 +220,10 @@ Then reference it in settings:
 
 - **Update triggers**: The status line updates when the model changes, a new message is sent (token count changes), vim mode is toggled, git branch changes, tool calls complete, or file changes occur. Updates are debounced (300ms).
 - **Timeout**: Commands that take longer than 5 seconds are killed. The status line clears on failure.
-- **Output**: Only the first line of stdout is used. The text is rendered with dimmed colors and truncated to terminal width.
+- **Output**: Only the first line of stdout is used. The text is rendered with dimmed colors in the footer's left section and truncated if it exceeds the available width.
 - **Hot reload**: Changes to `ui.statusLine` in settings take effect immediately — no restart required.
 - **Shell**: Commands run via `/bin/sh` on macOS/Linux. On Windows, `cmd.exe` is used by default — wrap POSIX commands with `bash -c "..."` or point to a bash script (e.g. `bash ~/.qwen/statusline-command.sh`).
-- **Removal**: Delete the `ui.statusLine` key from settings to disable. The status line disappears and the "? for shortcuts" hint returns.
+- **Removal**: Delete the `ui.statusLine` key from settings to disable. The "? for shortcuts" hint returns.
 
 ## Troubleshooting
 
