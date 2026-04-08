@@ -120,18 +120,26 @@ export const Footer: React.FC = () => {
         flexDirection="row"
         alignItems="center"
       >
-        {/* Left Section */}
+        {/* Left Section — shrinks to accommodate right items */}
         <Box
           marginLeft={2}
+          flexGrow={1}
+          flexShrink={1}
           justifyContent="flex-start"
           flexDirection={isNarrow ? 'column' : 'row'}
           alignItems={isNarrow ? 'flex-start' : 'center'}
+          overflow="hidden"
         >
           {leftContent}
         </Box>
 
-        {/* Right Section */}
-        <Box alignItems="center" justifyContent="flex-end" marginRight={2}>
+        {/* Right Section — never compressed */}
+        <Box
+          flexShrink={0}
+          alignItems="center"
+          justifyContent="flex-end"
+          marginRight={2}
+        >
           {rightItems.map(({ key, node }, index) => (
             <Box key={key} alignItems="center">
               {index > 0 && <Text color={theme.text.secondary}> | </Text>}
