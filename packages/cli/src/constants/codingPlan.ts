@@ -53,6 +53,18 @@ export function generateCodingPlanTemplate(
     // This ensures existing users don't get prompted for unnecessary updates
     return [
       {
+        id: 'qwen3.6-plus',
+        name: '[ModelStudio Coding Plan] qwen3.6-plus',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+          contextWindowSize: 1000000,
+        },
+      },
+      {
         id: 'qwen3.5-plus',
         name: '[ModelStudio Coding Plan] qwen3.5-plus',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
@@ -147,6 +159,18 @@ export function generateCodingPlanTemplate(
 
   // Global region uses ModelStudio Coding Plan branding for Global/Intl
   return [
+    {
+      id: 'qwen3.6-plus',
+      name: '[ModelStudio Coding Plan for Global/Intl] qwen3.6-plus',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+        contextWindowSize: 1000000,
+      },
+    },
     {
       id: 'qwen3.5-plus',
       name: '[ModelStudio Coding Plan for Global/Intl] qwen3.5-plus',

@@ -1970,4 +1970,15 @@ export default {
     'Показывать полный вывод инструментов и процесс рассуждений в подробном режиме (переключить с помощью Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Нажмите Ctrl+O для показа полного вывода инструментов',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
 };

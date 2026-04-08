@@ -179,7 +179,12 @@ async function main() {
     // Since @qwen-code/webui marks it as external in its own Vite build, the
     // browser bundle must also mark it external to avoid bundling Node.js-only
     // modules (undici, @grpc/grpc-js, fs, stream, etc.) into the webview.
-    external: ['@qwen-code/qwen-code-core'],
+    // The wildcard ensures deep sub-path imports (e.g.
+    // '@qwen-code/qwen-code-core/src/core/tokenLimits.js') are also excluded;
+    // without it esbuild only matches the bare package name and attempts to
+    // bundle the sub-path, which triggers "Dynamic require is not supported"
+    // at runtime in the browser.
+    external: ['@qwen-code/qwen-code-core', '@qwen-code/qwen-code-core/*'],
     logLevel: 'silent',
     plugins: [reactDedupPlugin, cssInjectPlugin, esbuildProblemMatcherPlugin],
     jsx: 'automatic', // Use new JSX transform (React 17+)

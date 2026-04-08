@@ -1113,7 +1113,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Generate prompt suggestions when streaming completes
   const followupSuggestionsEnabled =
-    settings.merged.ui?.enableFollowupSuggestions !== false;
+    settings.merged.ui?.enableFollowupSuggestions === true;
 
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
