@@ -143,7 +143,10 @@ export interface InputFormProps {
   /** Prompt suggestion state */
   followupState?: InputFormFollowupState;
   /** Callback to accept prompt suggestion */
-  onAcceptFollowup?: (method?: 'tab' | 'enter' | 'right') => void;
+  onAcceptFollowup?: (
+    method?: 'tab' | 'enter' | 'right',
+    options?: { skipOnAccept?: boolean },
+  ) => void;
   /** Callback to dismiss prompt suggestion */
   onDismissFollowup?: () => void;
 }
@@ -278,9 +281,10 @@ export const InputForm: FC<InputFormProps> = ({
       // Accept and submit prompt suggestion on Enter when input is empty
       if (hasFollowup && !inputText && followupSuggestion) {
         e.preventDefault();
-        onAcceptFollowup?.('enter');
-        // Pass suggestion text explicitly — onInputChange is async (React setState)
-        // so onSubmit cannot rely on reading inputText from the closure.
+        // Skip onAccept callback — we pass the text directly to onSubmit.
+        // Without skipOnAccept the microtask in accept() would re-insert
+        // the suggestion into the input after it was already cleared.
+        onAcceptFollowup?.('enter', { skipOnAccept: true });
         onSubmit(e, followupSuggestion);
         return;
       }
