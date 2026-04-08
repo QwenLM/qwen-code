@@ -11,7 +11,10 @@ import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { AnsiOutputText } from '../AnsiOutput.js';
-import { MaxSizedBox } from '../shared/MaxSizedBox.js';
+import {
+  SlicingMaxSizedBox,
+  MAXIMUM_RESULT_DISPLAY_CHARACTERS,
+} from '../shared/SlicingMaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
   TodoResultDisplay,
@@ -39,9 +42,9 @@ const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
 const MIN_LINES_SHOWN = 2; // show at least this many lines
 
-// Large threshold to ensure we don't cause performance issues for very large
-// outputs that will get truncated further MaxSizedBox anyway.
-const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
+// Character limit moved to SlicingMaxSizedBox (20,000 chars).
+// SlicingMaxSizedBox truncates data BEFORE React rendering to prevent
+// Ink from laying out massive invisible content that causes flickering.
 export type TextEmphasis = 'high' | 'medium' | 'low';
 
 type DisplayRendererResult =
@@ -202,18 +205,18 @@ const StringResultRenderer: React.FC<{
   availableHeight?: number;
   childWidth: number;
 }> = ({ data, renderAsMarkdown, availableHeight, childWidth }) => {
-  let displayData = data;
-
-  // Truncate if too long
-  if (displayData.length > MAXIMUM_RESULT_DISPLAY_CHARACTERS) {
-    displayData = '...' + displayData.slice(-MAXIMUM_RESULT_DISPLAY_CHARACTERS);
-  }
+  // Truncate oversized data for the markdown path as well, since
+  // MarkdownDisplay has no pre-render slicing of its own.
+  const markdownData =
+    data.length > MAXIMUM_RESULT_DISPLAY_CHARACTERS
+      ? '...' + data.slice(-MAXIMUM_RESULT_DISPLAY_CHARACTERS)
+      : data;
 
   if (renderAsMarkdown) {
     return (
       <Box flexDirection="column">
         <MarkdownDisplay
-          text={displayData}
+          text={markdownData}
           isPending={false}
           availableTerminalHeight={availableHeight}
           contentWidth={childWidth}
@@ -223,13 +226,20 @@ const StringResultRenderer: React.FC<{
   }
 
   return (
-    <MaxSizedBox maxHeight={availableHeight} maxWidth={childWidth}>
-      <Box>
-        <Text wrap="wrap" color={theme.text.primary}>
-          {displayData}
-        </Text>
-      </Box>
-    </MaxSizedBox>
+    <SlicingMaxSizedBox
+      data={data}
+      maxLines={availableHeight}
+      maxHeight={availableHeight}
+      maxWidth={childWidth}
+    >
+      {(truncatedData) => (
+        <Box>
+          <Text wrap="wrap" color={theme.text.primary}>
+            {truncatedData}
+          </Text>
+        </Box>
+      )}
+    </SlicingMaxSizedBox>
   );
 };
 
