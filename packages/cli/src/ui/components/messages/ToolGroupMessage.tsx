@@ -136,6 +136,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // account for border (2 chars) and padding (2 chars)
   const innerWidth = contentWidth - 4;
 
+  // Minimum height per tool output prevents dramatic jumps when tool count
+  // changes (e.g., 2 tools → 3 tools would shrink each from 15 → 9 lines).
+  const MIN_TOOL_OUTPUT_HEIGHT = 8;
+
   let countToolCallsWithResults = 0;
   for (const tool of toolCalls) {
     if (tool.resultDisplay !== undefined && tool.resultDisplay !== '') {
@@ -145,11 +149,17 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const countOneLineToolCalls = toolCalls.length - countToolCallsWithResults;
   const availableTerminalHeightPerToolMessage = availableTerminalHeight
     ? Math.max(
+        // In tiny terminals, don't exceed the proportional share
+        Math.min(
+          MIN_TOOL_OUTPUT_HEIGHT,
+          Math.floor(
+            availableTerminalHeight / Math.max(1, countToolCallsWithResults),
+          ),
+        ),
         Math.floor(
           (availableTerminalHeight - staticHeight - countOneLineToolCalls) /
             Math.max(1, countToolCallsWithResults),
         ),
-        1,
       )
     : undefined;
 

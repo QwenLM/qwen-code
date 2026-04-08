@@ -124,6 +124,7 @@ import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.j
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { useStableHeight } from './hooks/useStableHeight.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
@@ -1038,15 +1039,23 @@ export const AppContainer = (props: AppContainerProps) => {
   // row at the top of the layout; subtract it so downstream consumers
   // (shell, transcript, etc.) don't overestimate available space.
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
-  const availableTerminalHeight = Math.max(
+  const rawAvailableHeight = Math.max(
     0,
     terminalHeight - controlsHeight - staticExtraHeight - 2 - tabBarHeight,
   );
+  // Stabilize height during streaming to prevent visual flickering caused by
+  // controlsHeight remeasurement and other layout fluctuations.
+  const availableTerminalHeight = useStableHeight(
+    rawAvailableHeight,
+    streamingState === StreamingState.Responding,
+  );
 
+  // Shell PTY uses the raw (unstabilized) height so the underlying process
+  // always sees the real terminal dimensions, avoiding truncated output.
   config.setShellExecutionConfig({
     terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
     terminalHeight: Math.max(
-      Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING),
+      Math.floor(rawAvailableHeight - SHELL_HEIGHT_PADDING),
       1,
     ),
     pager: settings.merged.tools?.shell?.pager,
@@ -1071,13 +1080,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   useEffect(() => {
     if (activePtyId) {
+      // Use raw height for PTY resize (same rationale as setShellExecutionConfig).
       ShellExecutionService.resizePty(
         activePtyId,
         Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
-        Math.max(Math.floor(availableTerminalHeight - SHELL_HEIGHT_PADDING), 1),
+        Math.max(Math.floor(rawAvailableHeight - SHELL_HEIGHT_PADDING), 1),
       );
     }
-  }, [terminalWidth, availableTerminalHeight, activePtyId]);
+  }, [terminalWidth, rawAvailableHeight, activePtyId]);
 
   useEffect(() => {
     if (
