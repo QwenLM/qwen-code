@@ -162,3 +162,13 @@ export {
 
 // Mode session management (save/restore)
 export { ModeSessionManager, type SessionState } from './mode-session.js';
+
+// Mode templates (file generation)
+export {
+  ModeTemplateManager,
+  type ModeTemplate,
+  type TemplateCategory,
+  toPascalCase,
+  toCamelCase,
+  toConstantCase,
+} from './mode-templates.js';
