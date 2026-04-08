@@ -255,6 +255,44 @@ describe('MessageBus', () => {
       ).rejects.toThrow('Request timed out');
     });
 
+    it('should reject immediately when signal is already aborted', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        bus.request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'TestEvent',
+            input: {},
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+          5000,
+          controller.signal,
+        ),
+      ).rejects.toThrow('Request aborted');
+    });
+
+    it('should reject when signal is aborted during wait', async () => {
+      const controller = new AbortController();
+
+      const promise = bus.request<HookExecutionRequest, HookExecutionResponse>(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'TestEvent',
+          input: {},
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+        5000,
+        controller.signal,
+      );
+
+      // Abort after a tick
+      setTimeout(() => controller.abort(), 10);
+
+      await expect(promise).rejects.toThrow('Request aborted');
+    });
+
     it('should auto-confirm tool confirmation via request pattern', async () => {
       const response = await bus.request<
         ToolConfirmationRequest,
