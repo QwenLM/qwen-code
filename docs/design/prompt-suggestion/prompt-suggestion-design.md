@@ -64,10 +64,19 @@ A **prompt suggestion** (Next-step Suggestion / NES) is a short prediction (2-12
 ```
 [SUGGESTION MODE: Suggest what the user might naturally type next.]
 
+FIRST: Read the LAST FEW LINES of the assistant's most recent message — that's where
+next-step hints, tips, and actionable suggestions usually appear. Then check the user's
+recent messages and original request.
+
 Your job is to predict what THEY would type - not what you think they should do.
 THE TEST: Would they think "I was just about to type that"?
 
+PRIORITY: If the assistant's last message contains a tip or hint like "Tip: type X to ..."
+or "type X to ...", extract X as the suggestion. These are explicit next-step hints.
+
 EXAMPLES:
+Assistant says "Tip: type post comments to publish findings" → "post comments"
+Assistant says "type /review to start" → "/review"
 User asked "fix the bug and run tests", bug is fixed → "run the tests"
 After code written → "try it out"
 Task complete, obvious follow-up → "commit this" or "push it"
@@ -196,6 +205,23 @@ The Tab handler uses `key.name === 'tab'` explicitly (not `ACCEPT_SUGGESTION` ma
 | `enableCacheSharing`        | boolean | true    | Use cache-aware forked queries                                                   |
 | `enableSpeculation`         | boolean | false   | Predictive execution engine                                                      |
 | `fastModel` (top-level)     | string  | ""      | Model for all background tasks (empty = use main model). Set via `/model --fast` |
+
+### Internal Prompt ID Filtering
+
+Background operations use dedicated prompt IDs (`INTERNAL_PROMPT_IDS` in `utils/internalPromptIds.ts`) to prevent their API traffic and tool calls from appearing in the user-visible UI:
+
+| Prompt ID           | Used by                    |
+| ------------------- | -------------------------- |
+| `prompt_suggestion` | Suggestion generation      |
+| `forked_query`      | Cache-aware forked queries |
+| `speculation`       | Speculation engine         |
+
+**Filtering applied:**
+
+- `loggingContentGenerator` — skips `logApiRequest` and OpenAI interaction logging for internal IDs
+- `logApiResponse` / `logApiError` — skips `chatRecordingService.recordUiTelemetryEvent`
+- `logToolCall` — skips `chatRecordingService.recordUiTelemetryEvent`
+- `uiTelemetryService.addEvent` — **not filtered** (ensures `/stats` token tracking works)
 
 ### Thinking Mode
 

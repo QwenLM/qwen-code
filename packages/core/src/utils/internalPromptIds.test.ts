@@ -16,6 +16,10 @@ describe('isInternalPromptId', () => {
     expect(isInternalPromptId('forked_query')).toBe(true);
   });
 
+  it('returns true for speculation', () => {
+    expect(isInternalPromptId('speculation')).toBe(true);
+  });
+
   it('returns false for user_query', () => {
     expect(isInternalPromptId('user_query')).toBe(false);
   });
