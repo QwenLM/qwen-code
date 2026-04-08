@@ -1115,6 +1115,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Ctrl+C をもう一度押すと終了します',
   'Press Ctrl+D again to exit.': 'Ctrl+D をもう一度押すと終了します',
   'Press Esc again to clear.': 'Esc をもう一度押すとクリアします',
+  'Press ↑ to edit queued messages': '↑ を押してキュー内のメッセージを編集',
   // MCP Status
   '⏳ MCP servers are starting up ({{count}} initializing)...':
     '⏳ MCPサーバーを起動中({{count}} 初期化中)...',
@@ -1468,6 +1469,10 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    '詳細モードオン — 完全なツール出力と思考を表示しています',
+  'Compact mode on — showing tool names and final responses only':
+    'コンパクトモードオン — ツール名と最終応答のみ表示しています',
   verbose: '詳細',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     '詳細モードで完全なツール出力と思考を表示します（Ctrl+O で切り替え）。',

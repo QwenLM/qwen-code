@@ -1436,6 +1436,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Pressione Ctrl+C novamente para sair.',
   'Press Ctrl+D again to exit.': 'Pressione Ctrl+D novamente para sair.',
   'Press Esc again to clear.': 'Pressione Esc novamente para limpar.',
+  'Press ↑ to edit queued messages':
+    'Pressione ↑ para editar mensagens na fila',
 
   // ============================================================================
   // MCP Status
@@ -1967,6 +1969,10 @@ export default {
     'Modo raw não disponível. Execute em um terminal interativo.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    'Modo detalhado ativado — exibindo saída completa da ferramenta e raciocínio',
+  'Compact mode on — showing tool names and final responses only':
+    'Modo compacto ativado — exibindo apenas nomes de ferramentas e respostas finais',
   verbose: 'detalhado',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     'Mostrar saída completa da ferramenta e raciocínio no modo detalhado (alternar com Ctrl+O).',

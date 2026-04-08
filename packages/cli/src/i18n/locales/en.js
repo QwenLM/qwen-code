@@ -1480,6 +1480,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
+  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
 
   // ============================================================================
   // MCP Status
@@ -2016,6 +2017,10 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    'Verbose mode on — showing full tool output and thinking',
+  'Compact mode on — showing tool names and final responses only':
+    'Compact mode on — showing tool names and final responses only',
   verbose: 'verbose',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',

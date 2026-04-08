@@ -1403,6 +1403,7 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
+  'Press ↑ to edit queued messages': '按 ↑ 编辑排队消息',
 
   // ============================================================================
   // MCP Status
@@ -1823,6 +1824,10 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    '已切换到详细模式 — 完整显示工具输出和思考过程',
+  'Compact mode on — showing tool names and final responses only':
+    '已切换到精简模式 — 仅显示工具名称和最终回答',
   verbose: '详细',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     '详细模式下显示完整工具输出和思考过程（Ctrl+O 切换）。',

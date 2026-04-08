@@ -1433,6 +1433,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Drücken Sie erneut Strg+C zum Beenden.',
   'Press Ctrl+D again to exit.': 'Drücken Sie erneut Strg+D zum Beenden.',
   'Press Esc again to clear.': 'Drücken Sie erneut Esc zum Löschen.',
+  'Press ↑ to edit queued messages':
+    'Drücken Sie ↑, um Nachrichten in der Warteschlange zu bearbeiten',
 
   // ============================================================================
   // MCP Status
@@ -1975,6 +1977,10 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    'Ausführlicher Modus aktiv — vollständige Tool-Ausgabe und Denkprozess werden angezeigt',
+  'Compact mode on — showing tool names and final responses only':
+    'Kompakter Modus aktiv — nur Tool-Namen und abschließende Antworten werden angezeigt',
   verbose: 'ausführlich',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     'Vollständige Tool-Ausgabe und Denkprozess im ausführlichen Modus anzeigen (mit Strg+O umschalten).',

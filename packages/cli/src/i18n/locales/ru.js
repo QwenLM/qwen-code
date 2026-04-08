@@ -1358,6 +1358,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Нажмите Ctrl+C снова для выхода.',
   'Press Ctrl+D again to exit.': 'Нажмите Ctrl+D снова для выхода.',
   'Press Esc again to clear.': 'Нажмите Esc снова для очистки.',
+  'Press ↑ to edit queued messages':
+    'Нажмите ↑ для редактирования сообщений в очереди',
 
   // ============================================================================
   // Статус MCP
@@ -1972,6 +1974,10 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
+  'Verbose mode on — showing full tool output and thinking':
+    'Подробный режим включён — отображается полный вывод инструментов и рассуждения',
+  'Compact mode on — showing tool names and final responses only':
+    'Компактный режим включён — отображаются только имена инструментов и окончательные ответы',
   verbose: 'подробный',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     'Показывать полный вывод инструментов и процесс рассуждений в подробном режиме (переключить с помощью Ctrl+O).',
