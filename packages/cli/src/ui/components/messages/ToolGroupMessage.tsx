@@ -5,8 +5,8 @@
  */
 
 import type React from 'react';
-import { useMemo } from 'react';
-import { Box, Text } from 'ink';
+import { useMemo, useState } from 'react';
+import { Box, Text, useInput } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
@@ -74,6 +74,34 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
     [toolCalls],
   );
 
+  // Detect if this is a "memory-only" group (all tool calls are memory ops)
+  const isMemoryOnlyGroup = useMemo(
+    () => toolCalls.length > 0 && toolCalls.every((t) => t.isMemoryOp != null),
+    [toolCalls],
+  );
+
+  const allComplete = useMemo(
+    () =>
+      toolCalls.every(
+        (t) =>
+          t.status === ToolCallStatus.Success ||
+          t.status === ToolCallStatus.Error,
+      ),
+    [toolCalls],
+  );
+
+  // Expand/collapse state for memory-only groups
+  const [isExpanded, setIsExpanded] = useState(false);
+
+  useInput(
+    (_input, key) => {
+      if (key.ctrl && _input === 'o') {
+        setIsExpanded((prev) => !prev);
+      }
+    },
+    { isActive: isFocused && isMemoryOnlyGroup && allComplete },
+  );
+
   let countToolCallsWithResults = 0;
   for (const tool of toolCalls) {
     if (tool.resultDisplay !== undefined && tool.resultDisplay !== '') {
@@ -90,6 +118,43 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         1,
       )
     : undefined;
+
+  // For completed memory-only groups, show a compact summary instead of individual tool calls
+  if (isMemoryOnlyGroup && allComplete && !isExpanded) {
+    const readCount = memoryReadCount ?? 0;
+    const writeCount = memoryWriteCount ?? 0;
+    return (
+      <Box
+        flexDirection="column"
+        borderStyle="round"
+        width={contentWidth}
+        borderColor={theme.border.default}
+      >
+        {readCount > 0 && (
+          <Box paddingLeft={1}>
+            <Text>
+              {'● '}
+              <Text>
+                Recalled {readCount} {readCount === 1 ? 'memory' : 'memories'}
+              </Text>
+              <Text dimColor> (ctrl+o to expand)</Text>
+            </Text>
+          </Box>
+        )}
+        {writeCount > 0 && (
+          <Box paddingLeft={1}>
+            <Text>
+              {'● '}
+              <Text>
+                Wrote {writeCount} {writeCount === 1 ? 'memory' : 'memories'}
+              </Text>
+              <Text dimColor> (ctrl+o to expand)</Text>
+            </Text>
+          </Box>
+        )}
+      </Box>
+    );
+  }
 
   return (
     <Box
@@ -108,8 +173,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
       borderColor={borderColor}
       gap={1}
     >
-      {/* Memory operation badge — shown when tool group contains memory reads/writes */}
-      {((memoryWriteCount ?? 0) > 0 || (memoryReadCount ?? 0) > 0) && (() => {
+      {/* Memory badge for mixed groups (some memory ops + other ops) */}
+      {!isMemoryOnlyGroup && ((memoryWriteCount ?? 0) > 0 || (memoryReadCount ?? 0) > 0) && (() => {
         const parts: string[] = [];
         if ((memoryReadCount ?? 0) > 0) {
           const n = memoryReadCount!;
@@ -125,6 +190,12 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
           </Box>
         );
       })()}
+      {/* Expanded memory-only group header */}
+      {isMemoryOnlyGroup && isExpanded && (
+        <Box paddingLeft={1}>
+          <Text dimColor>● Memory operations <Text dimColor>(ctrl+o to collapse)</Text></Text>
+        </Box>
+      )}
       {toolCalls.map((tool) => {
         const isConfirming = toolAwaitingApproval?.callId === tool.callId;
         return (

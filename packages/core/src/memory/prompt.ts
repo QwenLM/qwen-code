@@ -186,9 +186,9 @@ export function buildManagedAutoMemoryPrompt(
     '',
     ...MEMORY_FRONTMATTER_EXAMPLE,
     '',
-    `**Step 2** — add a pointer to that file in \`MEMORY.md\`. \`MEMORY.md\` is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. Never write memory content directly into \`MEMORY.md\`.`,
+    `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
     '',
-    `- \`MEMORY.md\` is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
+    `- \`${memoryDir}/MEMORY.md\` is always loaded into your conversation context — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
     '- Keep the name, description, and type fields in memory files up-to-date with the content',
     '- Organize memory semantically by topic, not chronologically.',
     '- Update or remove memories that turn out to be wrong or outdated.',
@@ -203,7 +203,7 @@ export function buildManagedAutoMemoryPrompt(
     '- When to use or update a plan instead of memory: If you are about to start a non-trivial implementation task and would like to reach alignment with the user on your approach you should use a Plan rather than saving this information to memory. Similarly, if you already have a plan within the conversation and you have changed your approach persist that change by updating the plan rather than saving a memory.',
     '- When to use or update tasks instead of memory: When you need to break your work in current conversation into discrete steps or keep track of your progress use tasks instead of saving to memory. Tasks are great for persisting information about the work that needs to be done in the current conversation, but memory should be reserved for information that will be useful in future conversations.',
     '',
-    '## MEMORY.md',
+    `## ${memoryDir}/MEMORY.md`,
     '',
     trimmed
       ? truncateManagedAutoMemoryIndex(trimmed)

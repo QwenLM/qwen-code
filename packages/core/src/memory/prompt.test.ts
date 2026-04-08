@@ -27,7 +27,7 @@ describe('managed auto-memory prompt helpers', () => {
       '- [User Memory](user/terse.md) — User prefers terse responses.',
     );
 
-    expect(prompt).toContain('## MEMORY.md');
+    expect(prompt).toContain('## /tmp/project/.qwen/memory/MEMORY.md');
     expect(prompt).toContain('[User Memory](user/terse.md)');
     expect(prompt).toContain('User prefers terse responses.');
   });

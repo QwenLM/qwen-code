@@ -21,6 +21,7 @@ import { makeRelative, shortenPath } from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { isAutoMemPath } from '../memory/paths.js';
 import {
   FileEncoding,
   needsUtf8Bom,
@@ -272,9 +273,14 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   }
 
   /**
-   * Edit operations always need user confirmation (unless overridden by PM or ApprovalMode).
+   * Edit operations always need user confirmation, except for managed
+   * auto-memory files which are written autonomously by the model.
    */
   async getDefaultPermission(): Promise<PermissionDecision> {
+    const projectRoot = this.config.getProjectRoot();
+    if (isAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
+      return 'allow';
+    }
     return 'ask';
   }
 
