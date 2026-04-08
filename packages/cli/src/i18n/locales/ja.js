@@ -1464,4 +1464,15 @@ export default {
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     '詳細モードで完全なツール出力と思考を表示します（Ctrl+O で切り替え）。',
   'Press Ctrl+O to toggle verbose mode': 'Ctrl+O で詳細モードを切り替え',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
 };

@@ -1963,4 +1963,15 @@ export default {
     'Mostrar saída completa da ferramenta e raciocínio no modo detalhado (alternar com Ctrl+O).',
   'Press Ctrl+O to toggle verbose mode':
     'Pressione Ctrl+O para alternar o modo detalhado',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
 };
