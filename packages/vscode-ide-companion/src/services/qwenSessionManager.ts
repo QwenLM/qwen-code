@@ -6,9 +6,9 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import * as crypto from 'crypto';
 import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
+import { getRuntimeBaseDir } from '../utils/paths.js';
 import type { QwenSession } from './qwenSessionReader.js';
 
 /**
@@ -21,23 +21,17 @@ import type { QwenSession } from './qwenSessionReader.js';
  * when ACP methods are unavailable or fail.
  */
 export class QwenSessionManager {
-  private qwenDir: string;
-
-  constructor() {
-    const envDir = process.env['QWEN_CONFIG_DIR'];
-    this.qwenDir = envDir
-      ? path.isAbsolute(envDir)
-        ? envDir
-        : path.resolve(envDir)
-      : path.join(os.homedir(), '.qwen');
-  }
-
   /**
    * Get the session directory for a project with backward compatibility
    */
   private getSessionDir(workingDir: string): string {
     const projectHash = getProjectHash(workingDir);
-    const sessionDir = path.join(this.qwenDir, 'tmp', projectHash, 'chats');
+    const sessionDir = path.join(
+      getRuntimeBaseDir(),
+      'tmp',
+      projectHash,
+      'chats',
+    );
     return sessionDir;
   }
 

@@ -11,8 +11,8 @@ import {
   unlinkSync,
   chmodSync,
 } from 'node:fs';
-import { join, isAbsolute, resolve } from 'node:path';
-import { homedir } from 'node:os';
+import { join } from 'node:path';
+import { getGlobalQwenDir } from '@qwen-code/channel-base';
 
 export const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com';
 
@@ -21,14 +21,6 @@ export interface AccountData {
   baseUrl: string;
   userId?: string;
   savedAt: string;
-}
-
-function getGlobalQwenDir(): string {
-  const envDir = process.env['QWEN_CONFIG_DIR'];
-  if (envDir) {
-    return isAbsolute(envDir) ? envDir : resolve(envDir);
-  }
-  return join(homedir(), '.qwen');
 }
 
 export function getStateDir(): string {

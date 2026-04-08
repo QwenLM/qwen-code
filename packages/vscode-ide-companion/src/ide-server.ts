@@ -24,11 +24,11 @@ import { randomUUID } from 'node:crypto';
 import { type Server as HTTPServer } from 'node:http';
 import * as path from 'node:path';
 import * as fs from 'node:fs/promises';
-import * as os from 'node:os';
 import type { z } from 'zod';
 import type { DiffManager } from './diff-manager.js';
 import { OpenFilesManager } from './open-files-manager.js';
 import { ACP_ERROR_CODES } from './constants/acpSchema.js';
+import { getRuntimeBaseDir } from './utils/paths.js';
 
 class CORSError extends Error {
   constructor(message: string) {
@@ -42,19 +42,8 @@ const IDE_SERVER_PORT_ENV_VAR = 'QWEN_CODE_IDE_SERVER_PORT';
 const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
 const IDE_DIR = 'ide';
 
-function getGlobalQwenDir(): string {
-  const envDir = process.env['QWEN_CONFIG_DIR'];
-  if (envDir) {
-    return path.isAbsolute(envDir) ? envDir : path.resolve(envDir);
-  }
-  const homeDir = os.homedir();
-  return homeDir
-    ? path.join(homeDir, '.qwen')
-    : path.join(os.tmpdir(), '.qwen');
-}
-
 async function getGlobalIdeDir(): Promise<string> {
-  const ideDir = path.join(getGlobalQwenDir(), IDE_DIR);
+  const ideDir = path.join(getRuntimeBaseDir(), IDE_DIR);
   await fs.mkdir(ideDir, { recursive: true });
   return ideDir;
 }

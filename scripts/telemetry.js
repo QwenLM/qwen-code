@@ -13,10 +13,10 @@ import { existsSync, readFileSync } from 'node:fs';
 
 const projectRoot = join(import.meta.dirname, '..');
 
-const USER_SETTINGS_DIR = process.env.QWEN_CONFIG_DIR
-  ? path.isAbsolute(process.env.QWEN_CONFIG_DIR)
-    ? process.env.QWEN_CONFIG_DIR
-    : path.resolve(process.env.QWEN_CONFIG_DIR)
+const USER_SETTINGS_DIR = process.env.QWEN_HOME
+  ? path.isAbsolute(process.env.QWEN_HOME)
+    ? process.env.QWEN_HOME
+    : path.resolve(process.env.QWEN_HOME)
   : join(
       process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '',
       '.qwen',

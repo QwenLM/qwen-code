@@ -34,17 +34,30 @@ function getProjectHash(projectRoot) {
 
 const projectHash = getProjectHash(projectRoot);
 
-// User-level config directory (respects QWEN_CONFIG_DIR env var)
-const USER_GEMINI_DIR = process.env.QWEN_CONFIG_DIR
-  ? path.isAbsolute(process.env.QWEN_CONFIG_DIR)
-    ? process.env.QWEN_CONFIG_DIR
-    : path.resolve(process.env.QWEN_CONFIG_DIR)
-  : path.join(os.homedir(), '.qwen');
-// Project-level .gemini directory in the workspace
+// Runtime base directory for ephemeral data (tmp, otel, etc.)
+// Priority: QWEN_RUNTIME_DIR > QWEN_HOME > ~/.qwen
+function getRuntimeBaseDir() {
+  const runtimeDir = process.env.QWEN_RUNTIME_DIR;
+  if (runtimeDir) {
+    return path.isAbsolute(runtimeDir) ? runtimeDir : path.resolve(runtimeDir);
+  }
+  const homeEnv = process.env.QWEN_HOME;
+  if (homeEnv) {
+    return path.isAbsolute(homeEnv) ? homeEnv : path.resolve(homeEnv);
+  }
+  return path.join(os.homedir(), '.qwen');
+}
+
+// Project-level .qwen directory in the workspace
 const WORKSPACE_QWEN_DIR = path.join(projectRoot, '.qwen');
 
-// Telemetry artifacts are stored in a hashed directory under the user's ~/.qwen/tmp
-export const OTEL_DIR = path.join(USER_GEMINI_DIR, 'tmp', projectHash, 'otel');
+// Telemetry artifacts are stored in a hashed directory under the runtime dir
+export const OTEL_DIR = path.join(
+  getRuntimeBaseDir(),
+  'tmp',
+  projectHash,
+  'otel',
+);
 export const BIN_DIR = path.join(OTEL_DIR, 'bin');
 
 // Workspace settings remain in the project's .gemini directory

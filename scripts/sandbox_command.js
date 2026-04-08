@@ -36,10 +36,10 @@ const argv = yargs(hideBin(process.argv)).option('q', {
 let qwenSandbox = process.env.QWEN_SANDBOX;
 
 if (!qwenSandbox) {
-  const configDir = process.env.QWEN_CONFIG_DIR
-    ? path.isAbsolute(process.env.QWEN_CONFIG_DIR)
-      ? process.env.QWEN_CONFIG_DIR
-      : path.resolve(process.env.QWEN_CONFIG_DIR)
+  const configDir = process.env.QWEN_HOME
+    ? path.isAbsolute(process.env.QWEN_HOME)
+      ? process.env.QWEN_HOME
+      : path.resolve(process.env.QWEN_HOME)
     : join(os.homedir(), '.qwen');
   const userSettingsFile = join(configDir, 'settings.json');
   if (existsSync(userSettingsFile)) {

@@ -6,9 +6,10 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import * as readline from 'readline';
+
 import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
+import { getRuntimeBaseDir } from '../utils/paths.js';
 
 export interface QwenMessage {
   id: string;
@@ -40,15 +41,8 @@ export interface QwenSession {
 }
 
 export class QwenSessionReader {
-  private qwenDir: string;
-
-  constructor() {
-    const envDir = process.env['QWEN_CONFIG_DIR'];
-    this.qwenDir = envDir
-      ? path.isAbsolute(envDir)
-        ? envDir
-        : path.resolve(envDir)
-      : path.join(os.homedir(), '.qwen');
+  private get runtimeDir(): string {
+    return getRuntimeBaseDir();
   }
 
   /**
@@ -64,12 +58,17 @@ export class QwenSessionReader {
       if (!allProjects && workingDir) {
         // Current project only
         const projectHash = getProjectHash(workingDir);
-        const chatsDir = path.join(this.qwenDir, 'tmp', projectHash, 'chats');
+        const chatsDir = path.join(
+          this.runtimeDir,
+          'tmp',
+          projectHash,
+          'chats',
+        );
         const projectSessions = await this.readSessionsFromDir(chatsDir);
         sessions.push(...projectSessions);
       } else {
         // All projects
-        const tmpDir = path.join(this.qwenDir, 'tmp');
+        const tmpDir = path.join(this.runtimeDir, 'tmp');
         if (!fs.existsSync(tmpDir)) {
           console.log('[QwenSessionReader] Tmp directory not found:', tmpDir);
           return [];

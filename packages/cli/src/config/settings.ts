@@ -423,7 +423,7 @@ function findEnvFile(settings: Settings, startDir: string): string | null {
   const canUseEnvFile = (filePath: string): boolean =>
     isTrusted !== false || userLevelPaths.has(path.normalize(filePath));
 
-  // When QWEN_CONFIG_DIR overrides the default, skip legacy ~/.qwen/.env
+  // When QWEN_HOME overrides the default, skip legacy ~/.qwen/.env
   // during walk-up so the fallback correctly picks up globalQwenDir/.env.
   const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
   const hasCustomConfigDir = path.normalize(globalQwenDir) !== legacyQwenDir;
