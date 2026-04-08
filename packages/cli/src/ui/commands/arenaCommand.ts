@@ -412,7 +412,7 @@ export const arenaCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'error',
-            content: 'Configuration not available.',
+            content: t('Configuration not available.'),
           };
         }
 
