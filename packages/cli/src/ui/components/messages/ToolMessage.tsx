@@ -9,12 +9,8 @@ import { Box, Text } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
-import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { AnsiOutputText } from '../AnsiOutput.js';
-import {
-  SlicingMaxSizedBox,
-  MAXIMUM_RESULT_DISPLAY_CHARACTERS,
-} from '../shared/SlicingMaxSizedBox.js';
+import { SlicingMaxSizedBox } from '../shared/SlicingMaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
   TodoResultDisplay,
@@ -41,6 +37,9 @@ import {
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
 const MIN_LINES_SHOWN = 2; // show at least this many lines
+// Hard cap for tool output height, independent of terminal size.
+// Matches Gemini CLI's ACTIVE_SHELL_MAX_LINES / COMPLETED_SHELL_MAX_LINES.
+const MAX_TOOL_OUTPUT_LINES = 15;
 
 // Character limit moved to SlicingMaxSizedBox (20,000 chars).
 // SlicingMaxSizedBox truncates data BEFORE React rendering to prevent
@@ -197,35 +196,15 @@ const SubagentExecutionRenderer: React.FC<{
 );
 
 /**
- * Component to render string results (markdown or plain text)
+ * Component to render string results as plain text with height limiting.
+ * Markdown rendering is intentionally disabled for tool outputs because
+ * MarkdownDisplay does not respect availableTerminalHeight properly.
  */
 const StringResultRenderer: React.FC<{
   data: string;
-  renderAsMarkdown: boolean;
-  availableHeight?: number;
+  availableHeight: number;
   childWidth: number;
-}> = ({ data, renderAsMarkdown, availableHeight, childWidth }) => {
-  // Truncate oversized data for the markdown path as well, since
-  // MarkdownDisplay has no pre-render slicing of its own.
-  const markdownData =
-    data.length > MAXIMUM_RESULT_DISPLAY_CHARACTERS
-      ? '...' + data.slice(-MAXIMUM_RESULT_DISPLAY_CHARACTERS)
-      : data;
-
-  if (renderAsMarkdown) {
-    return (
-      <Box flexDirection="column">
-        <MarkdownDisplay
-          text={markdownData}
-          isPending={false}
-          availableTerminalHeight={availableHeight}
-          contentWidth={childWidth}
-        />
-      </Box>
-    );
-  }
-
-  return (
+}> = ({ data, availableHeight, childWidth }) => (
     <SlicingMaxSizedBox
       data={data}
       maxLines={availableHeight}
@@ -241,7 +220,6 @@ const StringResultRenderer: React.FC<{
       )}
     </SlicingMaxSizedBox>
   );
-};
 
 /**
  * Component to render diff results
@@ -265,7 +243,6 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   availableTerminalHeight?: number;
   contentWidth: number;
   emphasis?: TextEmphasis;
-  renderOutputAsMarkdown?: boolean;
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   config?: Config;
@@ -284,7 +261,6 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   emphasis = 'medium',
-  renderOutputAsMarkdown = true,
   activeShellPtyId,
   embeddedShellFocused,
   ptyId,
@@ -337,19 +313,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     isThisShellFocusable && (showFocusHint || userHasFocused);
 
   const availableHeight = availableTerminalHeight
-    ? Math.max(
-        availableTerminalHeight - STATIC_HEIGHT - RESERVED_LINE_COUNT,
-        MIN_LINES_SHOWN + 1, // enforce minimum lines shown
+    ? Math.min(
+        MAX_TOOL_OUTPUT_LINES,
+        Math.max(
+          availableTerminalHeight - STATIC_HEIGHT - RESERVED_LINE_COUNT,
+          MIN_LINES_SHOWN + 1, // enforce minimum lines shown
+        ),
       )
-    : undefined;
+    : MAX_TOOL_OUTPUT_LINES;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
-
-  // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
-  // we're forcing it to not render as markdown when the response is too long, it will fallback
-  // to render as plain text, which is contained within the terminal using MaxSizedBox
-  if (availableHeight) {
-    renderOutputAsMarkdown = false;
-  }
 
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
@@ -418,7 +390,6 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
             {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
                 data={effectiveDisplayRenderer.data}
-                renderAsMarkdown={renderOutputAsMarkdown}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
               />
