@@ -9,11 +9,16 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render } from 'ink-testing-library';
 import { MemoryDialog } from './MemoryDialog.js';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 import { useLaunchEditor } from '../hooks/useLaunchEditor.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 
 vi.mock('../contexts/ConfigContext.js', () => ({
   useConfig: vi.fn(),
+}));
+
+vi.mock('../contexts/SettingsContext.js', () => ({
+  useSettings: vi.fn(),
 }));
 
 vi.mock('../hooks/useLaunchEditor.js', () => ({
@@ -25,6 +30,7 @@ vi.mock('../hooks/useKeypress.js', () => ({
 }));
 
 const mockedUseConfig = vi.mocked(useConfig);
+const mockedUseSettings = vi.mocked(useSettings);
 const mockedUseLaunchEditor = vi.mocked(useLaunchEditor);
 const mockedUseKeypress = vi.mocked(useKeypress);
 
@@ -35,8 +41,11 @@ describe('MemoryDialog', () => {
     mockedUseConfig.mockReturnValue({
       getWorkingDir: vi.fn(() => '/tmp/project'),
       getProjectRoot: vi.fn(() => '/tmp/project'),
+      getManagedAutoMemoryEnabled: vi.fn(() => false),
+      getManagedAutoDreamEnabled: vi.fn(() => false),
     } as never);
 
+    mockedUseSettings.mockReturnValue({ setValue: vi.fn() } as never);
     mockedUseLaunchEditor.mockReturnValue(vi.fn());
   });
 

@@ -864,6 +864,38 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  memory: {
+    type: 'object',
+    label: 'Memory',
+    category: 'Memory',
+    requiresRestart: false,
+    default: {},
+    description: 'Settings for managed auto-memory.',
+    showInDialog: false,
+    properties: {
+      enableManagedAutoMemory: {
+        type: 'boolean',
+        label: 'Enable Managed Auto-Memory',
+        category: 'Memory',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Enable background extraction of memories from conversations.',
+        showInDialog: false,
+      },
+      enableManagedAutoDream: {
+        type: 'boolean',
+        label: 'Enable Managed Auto-Dream',
+        category: 'Memory',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Enable automatic consolidation (dream) of collected memories.',
+        showInDialog: false,
+      },
+    },
+  },
+
   permissions: {
     type: 'object',
     label: 'Permissions',

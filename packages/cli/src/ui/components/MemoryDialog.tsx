@@ -13,11 +13,15 @@ import { spawnSync } from 'node:child_process';
 import {
   getAllGeminiMdFilenames,
   QWEN_DIR,
+  getAutoMemoryRoot,
 } from '@qwen-code/qwen-code-core';
 import { useConfig } from '../contexts/ConfigContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
+import { SettingScope } from '../../config/settings.js';
 import { useLaunchEditor } from '../hooks/useLaunchEditor.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { theme } from '../semantic-colors.js';
+import { formatRelativeTime } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 
 type MemoryDialogTarget = 'project' | 'global' | 'managed';
@@ -29,12 +33,7 @@ interface MemoryDialogProps {
 interface DialogItem {
   label: string;
   value: MemoryDialogTarget;
-  description: string;
-}
-
-interface MemoryStatusState {
-  lastExtractionAt?: string;
-  lastDreamAt?: string;
+  description?: string;
 }
 
 async function resolvePreferredMemoryFile(
@@ -103,36 +102,43 @@ function formatDisplayPath(filePath: string): string {
   return filePath;
 }
 
-function formatStatusTime(iso?: string): string {
-  if (!iso) {
-    return t('never');
-  }
-
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) {
-    return t('never');
-  }
-
-  return date.toLocaleString();
-}
-
 export function MemoryDialog({ onClose }: MemoryDialogProps) {
   const config = useConfig();
+  const loadedSettings = useSettings();
   const launchEditor = useLaunchEditor();
   const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<MemoryStatusState>({});
   const [highlightedIndex, setHighlightedIndex] = useState(0);
+  // 'autoMemory' | 'autoDream' = focus on that toggle row; 'list' = focus on the file list
+  const [focusedSection, setFocusedSection] = useState<
+    'autoMemory' | 'autoDream' | 'list'
+  >('list');
+  const [autoMemoryOn, setAutoMemoryOn] = useState(() =>
+    config.getManagedAutoMemoryEnabled(),
+  );
+  const [autoDreamOn, setAutoDreamOn] = useState(() =>
+    config.getManagedAutoDreamEnabled(),
+  );
+  const [lastDreamAt, setLastDreamAt] = useState<number | null>(null);
 
   const globalMemoryPath = useMemo(
-    () => path.join(os.homedir(), QWEN_DIR, getAllGeminiMdFilenames()[0] ?? 'QWEN.md'),
+    () =>
+      path.join(
+        os.homedir(),
+        QWEN_DIR,
+        getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
+      ),
     [],
   );
   const projectMemoryPath = useMemo(
-    () => path.join(config.getWorkingDir(), getAllGeminiMdFilenames()[0] ?? 'QWEN.md'),
+    () =>
+      path.join(
+        config.getWorkingDir(),
+        getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
+      ),
     [config],
   );
   const managedMemoryPath = useMemo(
-    () => path.join(config.getProjectRoot(), '.qwen', 'memory'),
+    () => getAutoMemoryRoot(config.getProjectRoot()),
     [config],
   );
 
@@ -148,44 +154,50 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       {
         label: t('Project memory'),
         value: 'project',
-        description: t('Checked in at {{path}}', {
-          path: path.relative(config.getWorkingDir(), projectMemoryPath) || path.basename(projectMemoryPath),
+        description: t('Saved in {{path}}', {
+          path:
+            path.relative(config.getWorkingDir(), projectMemoryPath) ||
+            path.basename(projectMemoryPath),
         }),
       },
       {
         label: t('Open auto-memory folder'),
         value: 'managed',
-        description: t('Browse indexed memory files in {{path}}', {
-          path: path.relative(config.getWorkingDir(), managedMemoryPath) || '.qwen/memory',
-        }),
       },
     ],
-    [config, globalMemoryPath, managedMemoryPath, projectMemoryPath],
+    [config, globalMemoryPath, projectMemoryPath],
   );
 
+  // Load lastDreamAt from meta.json
   useEffect(() => {
     let cancelled = false;
 
-    async function loadStatus() {
+    async function loadMeta() {
       try {
         const metadataPath = path.join(managedMemoryPath, 'meta.json');
         const content = await fs.readFile(metadataPath, 'utf-8');
-        const parsed = JSON.parse(content) as MemoryStatusState;
-        if (!cancelled) {
-          setStatus(parsed);
+        const parsed = JSON.parse(content) as { lastDreamAt?: string };
+        if (!cancelled && parsed.lastDreamAt) {
+          const ts = new Date(parsed.lastDreamAt).getTime();
+          if (!Number.isNaN(ts)) {
+            setLastDreamAt(ts);
+          }
         }
       } catch {
-        if (!cancelled) {
-          setStatus({});
-        }
+        // meta.json not found or invalid — keep null
       }
     }
 
-    void loadStatus();
+    void loadMeta();
     return () => {
       cancelled = true;
     };
   }, [managedMemoryPath]);
+
+  const dreamStatusText = useMemo(() => {
+    if (lastDreamAt !== null) return formatRelativeTime(lastDreamAt);
+    return t('never');
+  }, [lastDreamAt]);
 
   const resolveTargetPath = useCallback(
     async (target: MemoryDialogTarget): Promise<string> => {
@@ -201,14 +213,12 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
             getAllGeminiMdFilenames()[0] ?? 'QWEN.md',
           );
         case 'managed':
-          return path.join(
-            config.getProjectRoot(),
-            '.qwen',
-            'memory',
-          );
+          return managedMemoryPath;
+        default:
+          return managedMemoryPath;
       }
     },
-    [config],
+    [config, managedMemoryPath],
   );
 
   const handleSelect = useCallback(
@@ -235,6 +245,26 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
     [launchEditor, onClose, resolveTargetPath],
   );
 
+  const handleToggleAutoMemory = useCallback(() => {
+    const newValue = !autoMemoryOn;
+    loadedSettings.setValue(
+      SettingScope.Workspace,
+      'memory.enableManagedAutoMemory',
+      newValue,
+    );
+    setAutoMemoryOn(newValue);
+  }, [autoMemoryOn, loadedSettings]);
+
+  const handleToggleAutoDream = useCallback(() => {
+    const newValue = !autoDreamOn;
+    loadedSettings.setValue(
+      SettingScope.Workspace,
+      'memory.enableManagedAutoDream',
+      newValue,
+    );
+    setAutoDreamOn(newValue);
+  }, [autoDreamOn, loadedSettings]);
+
   useKeypress(
     (key) => {
       if (key.name === 'escape') {
@@ -242,10 +272,42 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
         return;
       }
 
+      if (focusedSection === 'autoMemory') {
+        if (key.name === 'down') {
+          setFocusedSection('autoDream');
+          return;
+        }
+        if (key.name === 'return') {
+          handleToggleAutoMemory();
+          return;
+        }
+        return;
+      }
+
+      if (focusedSection === 'autoDream') {
+        if (key.name === 'up') {
+          setFocusedSection('autoMemory');
+          return;
+        }
+        if (key.name === 'down') {
+          setFocusedSection('list');
+          setHighlightedIndex(0);
+          return;
+        }
+        if (key.name === 'return') {
+          handleToggleAutoDream();
+          return;
+        }
+        return;
+      }
+
+      // focusedSection === 'list'
       if (key.name === 'up') {
-        setHighlightedIndex((current) =>
-          current === 0 ? items.length - 1 : current - 1,
-        );
+        if (highlightedIndex === 0) {
+          setFocusedSection('autoDream');
+        } else {
+          setHighlightedIndex((current) => current - 1);
+        }
         return;
       }
 
@@ -279,16 +341,29 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
       width="100%"
     >
       <Text bold>{t('Memory')}</Text>
+
       <Box marginTop={1} flexDirection="column">
-        <Text color={theme.text.secondary}>
-          {t('Auto-memory: on · Last write {{time}}', {
-            time: formatStatusTime(status.lastExtractionAt),
+        <Text
+          color={
+            focusedSection === 'autoMemory'
+              ? theme.status.success
+              : theme.text.secondary
+          }
+        >
+          {focusedSection === 'autoMemory' ? '› ' : '  '}
+          {t('Auto-memory: {{status}}', {
+            status: autoMemoryOn ? t('on') : t('off'),
           })}
         </Text>
-        <Text color={theme.text.secondary}>
-          {t('Auto-dream: on · Last run {{time}}', {
-            time: formatStatusTime(status.lastDreamAt),
-          })}
+        <Text
+          color={
+            focusedSection === 'autoDream'
+              ? theme.status.success
+              : theme.text.secondary
+          }
+        >
+          {focusedSection === 'autoDream' ? '› ' : '  '}
+          {`Auto-dream: ${autoDreamOn ? 'on' : 'off'} · ${dreamStatusText} · /dream to run`}
         </Text>
       </Box>
 
@@ -300,20 +375,23 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
 
       <Box marginTop={1} flexDirection="column">
         {items.map((item, index) => {
-          const isSelected = index === highlightedIndex;
+          const isSelected =
+            focusedSection === 'list' && index === highlightedIndex;
           return (
-            <Box key={item.value} flexDirection="column" marginBottom={1}>
+            <Box key={item.value} flexDirection="row">
               <Text color={isSelected ? theme.status.success : undefined}>
-                {`${isSelected ? '›' : ' '} ${index + 1}. ${item.label}`}
+                {isSelected ? '› ' : '  '}
+                {index + 1}. {item.label}
               </Text>
-              <Box marginLeft={4}>
-                <Text color={theme.text.secondary}>{item.description}</Text>
-              </Box>
+              {item.description ? (
+                <Text color={theme.text.secondary}>{`  ${item.description}`}</Text>
+              ) : null}
             </Box>
           );
         })}
       </Box>
-      <Box marginTop={1} flexDirection="column">
+
+      <Box marginTop={1}>
         <Text color={theme.text.secondary}>
           {t('Enter to confirm · Esc to cancel')}
         </Text>

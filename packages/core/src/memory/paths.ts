@@ -82,14 +82,14 @@ function findCanonicalGitRoot(startPath: string): string | null {
  * Defaults to `~/.qwen`; overridable via QWEN_CODE_MEMORY_BASE_DIR for tests.
  */
 export function getMemoryBaseDir(): string {
-  if (process.env.QWEN_CODE_MEMORY_BASE_DIR) {
-    return process.env.QWEN_CODE_MEMORY_BASE_DIR;
+  if (process.env['QWEN_CODE_MEMORY_BASE_DIR']) {
+    return process.env['QWEN_CODE_MEMORY_BASE_DIR'];
   }
   return path.join(os.homedir(), QWEN_DIR);
 }
 
 export function getAutoMemoryRoot(projectRoot: string): string {
-  if (process.env.QWEN_CODE_MEMORY_LOCAL === '1') {
+  if (process.env['QWEN_CODE_MEMORY_LOCAL'] === '1') {
     return path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   }
 

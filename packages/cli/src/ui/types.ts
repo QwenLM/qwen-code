@@ -69,6 +69,8 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
+  /** If this tool call operated on a managed-auto-memory file, indicates whether it was a read or write. */
+  isMemoryOp?: 'read' | 'write';
 }
 
 export interface CompressionProps {
@@ -182,9 +184,25 @@ export type HistoryItemQuit = HistoryItemBase & {
   duration: string;
 };
 
+/**
+ * Displayed after a turn when managed-auto-memory files were written
+ * (either in-turn by the model, or by the post-turn dream/extract pipeline).
+ */
+export type HistoryItemMemorySaved = HistoryItemBase & {
+  type: 'memory_saved';
+  /** Number of memory files written / updated. */
+  writtenCount: number;
+  /** Verb to display, e.g. 'Saved' or 'Updated'. Defaults to 'Saved'. */
+  verb?: string;
+};
+
 export type HistoryItemToolGroup = HistoryItemBase & {
   type: 'tool_group';
   tools: IndividualToolCallDisplay[];
+  /** Count of tool calls that wrote to managed-auto-memory files. Pre-computed for badge rendering. */
+  memoryWriteCount?: number;
+  /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
+  memoryReadCount?: number;
 };
 
 export type HistoryItemUserShell = HistoryItemBase & {
@@ -395,7 +413,8 @@ export type HistoryItemWithoutId =
   | HistoryItemArenaAgentComplete
   | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress
-  | HistoryItemBtw;
+  | HistoryItemBtw
+  | HistoryItemMemorySaved;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 

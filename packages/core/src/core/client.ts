@@ -126,6 +126,13 @@ export class GeminiClient {
    */
   private hasFailedCompressionAttempt = false;
 
+  /**
+   * Promises for pending background memory tasks (dream / extract).
+   * Each promise resolves with a count of memory files touched (0 = nothing written).
+   * Consumed by the CLI via `consumePendingMemoryTaskPromises()`.
+   */
+  private pendingMemoryTaskPromises: Array<Promise<number>> = [];
+
   constructor(private readonly config: Config) {
     this.loopDetector = new LoopDetectionService(config);
   }
@@ -478,25 +485,50 @@ export class GeminiClient {
     const sessionId = this.config.getSessionId();
     const history = this.getHistory();
 
-    void scheduleAutoMemoryExtract({
+    const extractPromise = scheduleAutoMemoryExtract({
       projectRoot,
       sessionId,
       history,
       config: this.config,
+    }).then((result) => {
+      return result.touchedTopics.length;
     }).catch((error) => {
       debugLogger.warn(
         'Failed to schedule managed auto-memory extraction.',
         error,
       );
+      return 0;
     });
+    this.pendingMemoryTaskPromises.push(extractPromise);
 
-    void scheduleManagedAutoMemoryDream({
+    const dreamPromise = scheduleManagedAutoMemoryDream({
       projectRoot,
       sessionId,
       config: this.config,
+    }).then((schedResult) => {
+      if (schedResult.status === 'scheduled' && schedResult.promise) {
+        return schedResult.promise.then((state) => {
+          const topics = state.metadata?.['touchedTopics'] as string[] | undefined;
+          return topics ? topics.length : 0;
+        });
+      }
+      return 0;
     }).catch((error) => {
       debugLogger.warn('Failed to schedule managed auto-memory dream.', error);
+      return 0;
     });
+    this.pendingMemoryTaskPromises.push(dreamPromise);
+  }
+
+  /**
+   * Returns and clears the list of pending background memory task promises.
+   * Each promise resolves with the number of memory files touched (0 = nothing
+   * was written, caller should ignore).
+   */
+  consumePendingMemoryTaskPromises(): Array<Promise<number>> {
+    const promises = this.pendingMemoryTaskPromises;
+    this.pendingMemoryTaskPromises = [];
+    return promises;
   }
 
   async *sendMessageStream(

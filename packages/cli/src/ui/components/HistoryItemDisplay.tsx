@@ -43,6 +43,7 @@ import { ContextUsage } from './views/ContextUsage.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
+import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -178,6 +179,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isFocused={isFocused}
           activeShellPtyId={activeShellPtyId}
           embeddedShellFocused={embeddedShellFocused}
+          memoryWriteCount={itemForDisplay.memoryWriteCount}
+          memoryReadCount={itemForDisplay.memoryReadCount}
         />
       )}
       {itemForDisplay.type === 'compression' && (
@@ -229,6 +232,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
         <BtwMessage btw={itemForDisplay.btw} />
+      )}
+      {itemForDisplay.type === 'memory_saved' && (
+        <MemorySavedMessage item={itemForDisplay} />
       )}
     </Box>
   );

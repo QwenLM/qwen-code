@@ -1122,6 +1122,8 @@ export async function loadCliConfig(
     },
     hooks: settings.hooks,
     hooksConfig: settings.hooksConfig,
+    enableManagedAutoMemory: settings.memory?.enableManagedAutoMemory ?? true,
+    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? true,
     enableHooks:
       argv.experimentalHooks === true || settings.hooksConfig?.enabled === true,
     channel: argv.channel,

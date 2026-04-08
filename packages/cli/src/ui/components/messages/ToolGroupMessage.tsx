@@ -6,7 +6,7 @@
 
 import type React from 'react';
 import { useMemo } from 'react';
-import { Box } from 'ink';
+import { Box, Text } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
@@ -24,6 +24,10 @@ interface ToolGroupMessageProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   onShellInputSubmit?: (input: string) => void;
+  /** Pre-computed count of write ops to managed-auto-memory files. */
+  memoryWriteCount?: number;
+  /** Pre-computed count of read ops from managed-auto-memory files. */
+  memoryReadCount?: number;
 }
 
 // Main component renders the border and maps the tools using ToolMessage
@@ -34,6 +38,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   isFocused = true,
   activeShellPtyId,
   embeddedShellFocused,
+  memoryWriteCount,
+  memoryReadCount,
 }) => {
   const isEmbeddedShellFocused =
     embeddedShellFocused &&
@@ -102,6 +108,23 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
       borderColor={borderColor}
       gap={1}
     >
+      {/* Memory operation badge — shown when tool group contains memory reads/writes */}
+      {((memoryWriteCount ?? 0) > 0 || (memoryReadCount ?? 0) > 0) && (() => {
+        const parts: string[] = [];
+        if ((memoryReadCount ?? 0) > 0) {
+          const n = memoryReadCount!;
+          parts.push(`Recalled ${n} ${n === 1 ? 'memory' : 'memories'}`);
+        }
+        if ((memoryWriteCount ?? 0) > 0) {
+          const n = memoryWriteCount!;
+          parts.push(`Wrote ${n} ${n === 1 ? 'memory' : 'memories'}`);
+        }
+        return (
+          <Box paddingLeft={1}>
+            <Text dimColor>● {parts.join(', ')}</Text>
+          </Box>
+        );
+      })()}
       {toolCalls.map((tool) => {
         const isConfirming = toolAwaitingApproval?.callId === tool.callId;
         return (

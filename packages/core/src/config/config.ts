@@ -425,6 +425,8 @@ export interface ConfigParameters {
   enableHooks?: boolean;
   /** Enable managed auto-memory background extraction and dream. Defaults to true. */
   enableManagedAutoMemory?: boolean;
+  /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
+  enableManagedAutoDream?: boolean;
   /** Hooks configuration from settings */
   hooks?: Record<string, unknown>;
   /** Hooks config settings (enabled, disabled list) */
@@ -600,6 +602,7 @@ export class Config {
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableHooks: boolean;
   private readonly enableManagedAutoMemory: boolean;
+  private readonly enableManagedAutoDream: boolean;
   private readonly hooks?: Record<string, unknown>;
   private readonly hooksConfig?: Record<string, unknown>;
   private hookSystem?: HookSystem;
@@ -767,6 +770,7 @@ export class Config {
     });
     this.enableHooks = params.enableHooks ?? false;
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
+    this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
     this.hooks = params.hooks;
     this.hooksConfig = params.hooksConfig;
   }
@@ -1803,6 +1807,10 @@ export class Config {
 
   getManagedAutoMemoryEnabled(): boolean {
     return this.enableManagedAutoMemory;
+  }
+
+  getManagedAutoDreamEnabled(): boolean {
+    return this.enableManagedAutoDream;
   }
 
   /**

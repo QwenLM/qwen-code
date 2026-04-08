@@ -40,6 +40,7 @@ export interface ManagedAutoMemoryDreamScheduleResult {
   status: 'scheduled' | 'skipped';
   taskId?: string;
   skippedReason?:
+    | 'disabled'
     | 'same_session'
     | 'min_hours'
     | 'min_sessions'
@@ -109,6 +110,12 @@ export class ManagedAutoMemoryDreamRuntime {
   async schedule(
     params: ScheduleManagedAutoMemoryDreamParams,
   ): Promise<ManagedAutoMemoryDreamScheduleResult> {
+    if (params.config && !params.config.getManagedAutoDreamEnabled()) {
+      return {
+        status: 'skipped',
+        skippedReason: 'disabled',
+      };
+    }
     const now = params.now ?? new Date();
     const minHoursBetweenDreams =
       params.minHoursBetweenDreams ?? DEFAULT_AUTO_DREAM_MIN_HOURS;
