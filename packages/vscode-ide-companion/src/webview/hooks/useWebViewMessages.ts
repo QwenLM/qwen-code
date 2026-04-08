@@ -142,6 +142,10 @@ type ConversationResetHandlers = {
     | 'clearThinking'
   >;
   clearToolCalls: UseWebViewMessagesProps['clearToolCalls'];
+  clearActiveExecToolCalls: () => void;
+  setPlanEntries: UseWebViewMessagesProps['setPlanEntries'];
+  handlePermissionRequest: UseWebViewMessagesProps['handlePermissionRequest'];
+  handleAskUserQuestion: UseWebViewMessagesProps['handleAskUserQuestion'];
   sessionManagement: Pick<
     UseWebViewMessagesProps['sessionManagement'],
     'setCurrentSessionId' | 'setCurrentSessionTitle'
@@ -159,10 +163,14 @@ export function resetConversationState({
   vscode: { postMessage: (message: unknown) => void };
 }) {
   handlers.messageHandling.endStreaming();
+  handlers.clearActiveExecToolCalls();
   handlers.messageHandling.clearWaitingForResponse();
   handlers.messageHandling.clearThinking();
   handlers.messageHandling.clearMessages();
   handlers.clearToolCalls();
+  handlers.setPlanEntries([]);
+  handlers.handlePermissionRequest(null);
+  handlers.handleAskUserQuestion(null);
   handlers.sessionManagement.setCurrentSessionId(null);
   clearImageResolutions();
   handlers.setUsageStats?.(undefined);
@@ -956,7 +964,12 @@ export const useWebViewMessages = ({
 
         case 'conversationCleared':
           resetConversationState({
-            handlers,
+            handlers: {
+              ...handlers,
+              clearActiveExecToolCalls: () => {
+                activeExecToolCallsRef.current.clear();
+              },
+            },
             clearImageResolutions,
             vscode,
           });

@@ -14,6 +14,10 @@ describe('resetConversationState', () => {
     const clearWaitingForResponse = vi.fn();
     const clearThinking = vi.fn();
     const clearToolCalls = vi.fn();
+    const clearActiveExecToolCalls = vi.fn();
+    const setPlanEntries = vi.fn();
+    const handlePermissionRequest = vi.fn();
+    const handleAskUserQuestion = vi.fn();
     const setCurrentSessionId = vi.fn();
     const setCurrentSessionTitle = vi.fn();
     const setUsageStats = vi.fn();
@@ -29,6 +33,10 @@ describe('resetConversationState', () => {
           clearThinking,
         },
         clearToolCalls,
+        clearActiveExecToolCalls,
+        setPlanEntries,
+        handlePermissionRequest,
+        handleAskUserQuestion,
         sessionManagement: {
           setCurrentSessionId,
           setCurrentSessionTitle,
@@ -46,6 +54,10 @@ describe('resetConversationState', () => {
     expect(clearThinking).toHaveBeenCalled();
     expect(clearMessages).toHaveBeenCalled();
     expect(clearToolCalls).toHaveBeenCalled();
+    expect(clearActiveExecToolCalls).toHaveBeenCalled();
+    expect(setPlanEntries).toHaveBeenCalledWith([]);
+    expect(handlePermissionRequest).toHaveBeenCalledWith(null);
+    expect(handleAskUserQuestion).toHaveBeenCalledWith(null);
     expect(setCurrentSessionId).toHaveBeenCalledWith(null);
     expect(clearImageResolutions).toHaveBeenCalled();
     expect(setUsageStats).toHaveBeenCalledWith(undefined);

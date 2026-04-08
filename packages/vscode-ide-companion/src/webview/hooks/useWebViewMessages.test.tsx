@@ -42,8 +42,7 @@ function renderHookHarness(overrides?: {
 
   const setUsageStats = overrides?.setUsageStats ?? vi.fn();
   const endStreaming = overrides?.endStreaming ?? vi.fn();
-  const clearWaitingForResponse =
-    overrides?.clearWaitingForResponse ?? vi.fn();
+  const clearWaitingForResponse = overrides?.clearWaitingForResponse ?? vi.fn();
 
   const handlers = {
     sessionManagement: {
@@ -101,7 +100,14 @@ function renderHookHarness(overrides?: {
     root.render(<Harness />);
   });
 
-  return { container, root, handlers, setUsageStats, endStreaming, clearWaitingForResponse };
+  return {
+    container,
+    root,
+    handlers,
+    setUsageStats,
+    endStreaming,
+    clearWaitingForResponse,
+  };
 }
 
 describe('useWebViewMessages', () => {
@@ -146,13 +152,18 @@ describe('useWebViewMessages', () => {
 
     expect(rendered.handlers.messageHandling.clearMessages).toHaveBeenCalled();
     expect(rendered.handlers.clearToolCalls).toHaveBeenCalled();
-    expect(rendered.handlers.sessionManagement.setCurrentSessionId).toHaveBeenCalledWith(
-      null,
-    );
+    expect(
+      rendered.handlers.sessionManagement.setCurrentSessionId,
+    ).toHaveBeenCalledWith(null);
     expect(rendered.endStreaming).toHaveBeenCalled();
     expect(rendered.clearWaitingForResponse).toHaveBeenCalled();
     expect(mockClearImageResolutions).toHaveBeenCalled();
     expect(rendered.setUsageStats).toHaveBeenCalledWith(undefined);
+    expect(rendered.handlers.setPlanEntries).toHaveBeenCalledWith([]);
+    expect(rendered.handlers.handlePermissionRequest).toHaveBeenCalledWith(
+      null,
+    );
+    expect(rendered.handlers.handleAskUserQuestion).toHaveBeenCalledWith(null);
     expect(
       rendered.handlers.sessionManagement.setCurrentSessionTitle,
     ).toHaveBeenCalledWith('Past Conversations');
@@ -160,5 +171,53 @@ describe('useWebViewMessages', () => {
       type: 'updatePanelTitle',
       data: { title: 'Qwen Code' },
     });
+  });
+
+  it('clears stale execute-tool tracking before the next session ends', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'toolCall',
+            data: {
+              toolCallId: 'exec-1',
+              kind: 'execute',
+              status: 'in_progress',
+              rawInput: 'ls',
+            },
+          },
+        }),
+      );
+    });
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'conversationCleared',
+            data: {},
+          },
+        }),
+      );
+    });
+
+    rendered.clearWaitingForResponse.mockClear();
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'streamEnd',
+            data: {},
+          },
+        }),
+      );
+    });
+
+    expect(rendered.clearWaitingForResponse).toHaveBeenCalled();
   });
 });
