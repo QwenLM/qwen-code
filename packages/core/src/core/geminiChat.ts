@@ -71,15 +71,24 @@ const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
 // reason. All are retried with an independent budget (similar to rate-limit
 // retries) so they do not consume each other's retry budgets.
 const INVALID_STREAM_RETRY_CONFIG = {
-  maxRetries: 2,
+  /**
+   * Maximum number of retries for transient stream errors (NO_FINISH_REASON,
+   * NO_RESPONSE_TEXT).
+   *
+   * Raised from 2 → 3 after production traces (sessions 188c5d3e, 934160dd)
+   * showed DashScope NO_FINISH_REASON storms lasting 2–3 minutes. With
+   * linear back-off (3 s + 6 s + 9 s = 18 s total wait), three retries give
+   * the provider a meaningful recovery window — and for subagents there is
+   * an additional outer retry layer in AgentToolInvocation that multiplies
+   * coverage to ~2 minutes.
+   */
+  maxRetries: 3,
   /**
    * Initial delay in milliseconds; multiplied by (retryCount) for linear
-   * back-off: 3 s → 6 s.
+   * back-off: 3 s → 6 s → 9 s.
    *
    * Raised from 2 s after production traces showed DashScope
    * NO_FINISH_REASON bursts lasting 2–3 minutes under /review fan-out.
-   * An extra second per internal retry gives the outer subagent-level retry
-   * a better chance of landing in a recovery window.
    */
   initialDelayMs: 3000,
 };
