@@ -81,7 +81,8 @@ function getStatusLineConfig(
     'type' in raw &&
     raw.type === 'command' &&
     'command' in raw &&
-    typeof raw.command === 'string'
+    typeof raw.command === 'string' &&
+    raw.command.trim().length > 0
   ) {
     const config: StatusLineConfig = {
       type: 'command',
@@ -247,18 +248,7 @@ export function useStatusLine(): {
       context_window: {
         context_window_size: contextWindowSize,
         used_percentage: usedPercentage,
-        remaining_percentage:
-          contextWindowSize > 0
-            ? Math.min(
-                100,
-                Math.max(
-                  0,
-                  Math.round(
-                    (1 - stats.lastPromptTokenCount / contextWindowSize) * 1000,
-                  ) / 10,
-                ),
-              )
-            : 100,
+        remaining_percentage: Math.round((100 - usedPercentage) * 10) / 10,
         current_usage: stats.lastPromptTokenCount,
         total_input_tokens: totalInputTokens,
         total_output_tokens: totalOutputTokens,
