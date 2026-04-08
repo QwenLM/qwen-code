@@ -178,8 +178,9 @@ describe('ExitPlanModeTool', () => {
       expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
     });
 
-    it('should restore pre-plan mode on ProceedOnce', async () => {
-      // Simulate entering plan mode from AUTO_EDIT
+    it('should set DEFAULT mode on ProceedOnce regardless of pre-plan mode', async () => {
+      // Even if pre-plan mode was AUTO_EDIT, ProceedOnce ("manually approve
+      // edits") should always set DEFAULT to match the option label semantics.
       (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
         ApprovalMode.AUTO_EDIT,
       );
@@ -195,9 +196,9 @@ describe('ExitPlanModeTool', () => {
       }
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
-        ApprovalMode.AUTO_EDIT,
+        ApprovalMode.DEFAULT,
       );
-      expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
+      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
     });
 
     it('should remain in plan mode when confirmation is rejected', async () => {
