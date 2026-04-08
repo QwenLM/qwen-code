@@ -13,7 +13,7 @@ interface VerboseModeContextType {
 }
 
 const VerboseModeContext = createContext<VerboseModeContextType>({
-  verboseMode: false, // default: compact mode
+  verboseMode: true,
   frozenSnapshot: null,
 });
 

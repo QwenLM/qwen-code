@@ -183,7 +183,7 @@
         "verboseMode": {
           "description": "Show full tool output and thinking in verbose mode (toggle with Ctrl+O).",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "enableFollowupSuggestions": {
           "description": "Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.",
