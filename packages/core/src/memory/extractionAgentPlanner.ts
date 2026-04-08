@@ -52,38 +52,6 @@ const EXTRACTION_AGENT_SYSTEM_PROMPT = [
   ...MEMORY_FRONTMATTER_EXAMPLE,
 ].join('\n');
 
-const EXTRACTION_AGENT_RESPONSE_SCHEMA: Record<string, unknown> = {
-  type: 'object',
-  properties: {
-    patches: {
-      type: 'array',
-      items: {
-        type: 'object',
-        properties: {
-          topic: {
-            type: 'string',
-            enum: ['user', 'feedback', 'project', 'reference'],
-          },
-          summary: {
-            type: 'string',
-          },
-          why: {
-            type: 'string',
-          },
-          howToApply: {
-            type: 'string',
-          },
-          sourceOffset: {
-            type: 'integer',
-          },
-        },
-        required: ['topic', 'summary', 'sourceOffset'],
-      },
-    },
-  },
-  required: ['patches'],
-};
-
 const EXTRACTION_AGENT_EXECUTION_RESPONSE_SCHEMA: Record<string, unknown> = {
   type: 'object',
   properties: {
@@ -122,10 +90,6 @@ const EXTRACTION_AGENT_EXECUTION_RESPONSE_SCHEMA: Record<string, unknown> = {
   },
   required: ['patches', 'touchedTopics'],
 };
-
-interface ExtractionAgentResponse {
-  patches: AutoMemoryExtractPatch[];
-}
 
 interface ExtractionAgentExecutionResponse {
   patches: AutoMemoryExtractPatch[];
@@ -178,22 +142,6 @@ async function buildTopicSummaryBlock(projectRoot: string): Promise<string> {
     .join('\n\n');
 }
 
-function buildTaskPrompt(
-  messages: AutoMemoryTranscriptMessage[],
-  topicSummaries: string,
-): string {
-  return [
-    'Return a JSON object that matches this schema:',
-    JSON.stringify(EXTRACTION_AGENT_RESPONSE_SCHEMA, null, 2),
-    '',
-    'Transcript slice:',
-    buildTranscriptBlock(messages),
-    '',
-    'Current topic summaries:',
-    topicSummaries || '(no topics found)',
-  ].join('\n');
-}
-
 function buildExecutionTaskPrompt(
   memoryRoot: string,
   messages: AutoMemoryTranscriptMessage[],
@@ -231,38 +179,6 @@ function buildExecutionTaskPrompt(
   ].join('\n');
 }
 
-function validateExtractionAgentResponse(
-  parsed: ExtractionAgentResponse,
-  userOffsets: Set<number>,
-): AutoMemoryExtractPatch[] {
-  const schemaError = SchemaValidator.validate(
-    EXTRACTION_AGENT_RESPONSE_SCHEMA,
-    parsed,
-  );
-  if (schemaError) {
-    throw new Error(`Invalid extraction agent response: ${schemaError}`);
-  }
-
-  for (const patch of parsed.patches) {
-    if (!patch.summary?.trim()) {
-      throw new Error('Invalid extraction agent response: empty summary');
-    }
-    if (!userOffsets.has(patch.sourceOffset)) {
-      throw new Error(
-        'Invalid extraction agent response: invalid sourceOffset',
-      );
-    }
-  }
-
-  return parsed.patches.map((patch) => ({
-    topic: patch.topic as AutoMemoryType,
-    summary: patch.summary.trim(),
-    why: patch.why?.trim(),
-    howToApply: patch.howToApply?.trim(),
-    sourceOffset: patch.sourceOffset,
-  }));
-}
-
 function validateExtractionExecutionResponse(
   parsed: ExtractionAgentExecutionResponse,
   userOffsets: Set<number>,
@@ -275,7 +191,24 @@ function validateExtractionExecutionResponse(
     throw new Error(`Invalid extraction agent response: ${schemaError}`);
   }
 
-  const patches = validateExtractionAgentResponse(parsed, userOffsets);
+  const patches = parsed.patches.map((patch) => {
+    if (!patch.summary?.trim()) {
+      throw new Error('Invalid extraction agent response: empty summary');
+    }
+    if (!userOffsets.has(patch.sourceOffset)) {
+      throw new Error(
+        'Invalid extraction agent response: invalid sourceOffset',
+      );
+    }
+
+    return {
+      topic: patch.topic as AutoMemoryType,
+      summary: patch.summary.trim(),
+      why: patch.why?.trim(),
+      howToApply: patch.howToApply?.trim(),
+      sourceOffset: patch.sourceOffset,
+    };
+  });
   const touchedTopics = Array.from(
     new Set(
       (parsed.touchedTopics ?? []).filter(
@@ -296,66 +229,6 @@ function validateExtractionExecutionResponse(
         ? `Managed auto-memory updated: ${touchedTopics.map((topic) => `${topic}.md`).join(', ')}`
         : undefined,
   };
-}
-
-export async function planAutoMemoryExtractionPatchesByAgent(
-  config: Config,
-  projectRoot: string,
-  messages: AutoMemoryTranscriptMessage[],
-  runner: BackgroundAgentRunnerLike = new BackgroundAgentRunner(),
-): Promise<AutoMemoryExtractPatch[]> {
-  if (messages.length === 0) {
-    return [];
-  }
-
-  const userOffsets = new Set(
-    messages
-      .filter((message) => message.role === 'user')
-      .map((message) => message.offset),
-  );
-  if (userOffsets.size === 0) {
-    return [];
-  }
-
-  const topicSummaries = await buildTopicSummaryBlock(projectRoot);
-  const result = await runner.run({
-    taskType: 'managed-auto-memory-extraction-agent',
-    title: 'Managed auto-memory extraction agent',
-    description: 'Extract durable managed memory patches from transcript history.',
-    projectRoot,
-    sessionId: config.getSessionId(),
-    dedupeKey: `managed-auto-memory-extraction-agent:${projectRoot}`,
-    name: 'managed-auto-memory-extractor',
-    runtimeContext: config,
-    taskPrompt: buildTaskPrompt(messages, topicSummaries),
-    promptConfig: {
-      systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
-    },
-    modelConfig: {
-      model: config.getModel(),
-      temp: 0,
-    },
-    runConfig: {
-      max_turns: 4,
-      max_time_minutes: 2,
-    },
-    toolConfig: {
-      tools: ['read_file'],
-    },
-    metadata: {
-      planner: 'extraction-agent',
-      stage: 'agent-b',
-    },
-  });
-
-  if (result.status !== 'completed' || !result.finalText) {
-    throw new Error(result.error || 'Extraction agent did not complete successfully');
-  }
-
-  const parsed = safeJsonParse<ExtractionAgentResponse>(result.finalText, {
-    patches: [],
-  });
-  return validateExtractionAgentResponse(parsed, userOffsets);
 }
 
 export async function runAutoMemoryExtractionByAgent(

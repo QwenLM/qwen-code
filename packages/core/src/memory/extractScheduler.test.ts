@@ -7,15 +7,23 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Config } from '../config/config.js';
 import { createManagedAutoMemoryExtractRuntimeForTests } from './extractScheduler.js';
+import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
+import { getAutoMemoryFilePath } from './paths.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { markExtractRunning, resetAutoMemoryStateForTests } from './state.js';
 
+vi.mock('./extractionAgentPlanner.js', () => ({
+  runAutoMemoryExtractionByAgent: vi.fn(),
+}));
+
 describe('managed auto-memory extraction runtime', () => {
   let tempDir: string;
   let projectRoot: string;
+  let mockConfig: Config;
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(
@@ -24,6 +32,53 @@ describe('managed auto-memory extraction runtime', () => {
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
     await ensureAutoMemoryScaffold(projectRoot);
+    mockConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+      getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+    } as unknown as Config;
+    vi.clearAllMocks();
+    vi.mocked(runAutoMemoryExtractionByAgent).mockImplementation(
+      async (_config, root, messages) => {
+        const lastUserText = messages
+          .filter((message) => message.role === 'user')
+          .at(-1)?.text;
+        const topic = lastUserText?.includes('grafana.example/d/api')
+          ? 'reference'
+          : 'user';
+        const relativePath =
+          topic === 'reference'
+            ? path.join('reference', 'latency-dashboard.md')
+            : path.join('user', 'terse-responses.md');
+        const filePath = getAutoMemoryFilePath(root, relativePath);
+        await fs.mkdir(path.dirname(filePath), { recursive: true });
+        await fs.writeFile(
+          filePath,
+          [
+            '---',
+            `type: ${topic}`,
+            `name: ${topic === 'reference' ? 'Latency Dashboard' : 'Terse Responses'}`,
+            `description: ${lastUserText ?? 'User prefers terse responses.'}`,
+            '---',
+            '',
+            lastUserText ?? 'User prefers terse responses.',
+            '',
+          ].join('\n'),
+          'utf-8',
+        );
+
+        return {
+          patches: [
+            {
+              topic,
+              summary: lastUserText ?? 'User prefers terse responses.',
+              sourceOffset: messages.at(-1)?.offset ?? 0,
+            },
+          ],
+          touchedTopics: [topic],
+          systemMessage: undefined,
+        };
+      },
+    );
   });
 
   afterEach(async () => {
@@ -42,12 +97,14 @@ describe('managed auto-memory extraction runtime', () => {
     const firstPromise = runtime.schedule({
       projectRoot,
       sessionId: 'session-1',
+      config: mockConfig,
       history: [{ role: 'user', parts: [{ text: 'I prefer terse responses.' }] }],
     });
 
     const queued = await runtime.schedule({
       projectRoot,
       sessionId: 'session-1',
+      config: mockConfig,
       history: [
         { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
         { role: 'model', parts: [{ text: 'Done.' }] },
@@ -82,6 +139,7 @@ describe('managed auto-memory extraction runtime', () => {
     const result = await runtime.schedule({
       projectRoot,
       sessionId: 'session-1',
+      config: mockConfig,
       history: [
         {
           role: 'model',
@@ -101,6 +159,7 @@ describe('managed auto-memory extraction runtime', () => {
     const result = await runtime.schedule({
       projectRoot,
       sessionId: 'session-1',
+      config: mockConfig,
       history: [{ role: 'user', parts: [{ text: 'I prefer terse responses.' }] }],
     });
 

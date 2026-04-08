@@ -128,7 +128,6 @@ export * from './memory/indexer.js';
 export * from './memory/prompt.js';
 export * from './memory/state.js';
 export * from './memory/extractionAgentPlanner.js';
-export * from './memory/extractionPlanner.js';
 export * from './memory/extract.js';
 export * from './memory/extractScheduler.js';
 export * from './memory/dreamAgentPlanner.js';

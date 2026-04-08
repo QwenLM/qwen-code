@@ -7,28 +7,38 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Config } from '../config/config.js';
 import { getAutoMemoryExtractCursorPath, getAutoMemoryIndexPath } from './paths.js';
 import {
-  applyExtractedMemoryPatches,
   buildTranscriptMessages,
-  extractMemoryPatchesFromTranscript,
   loadUnprocessedTranscriptSlice,
   runAutoMemoryExtract,
 } from './extract.js';
+import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { resetAutoMemoryStateForTests } from './state.js';
 
+vi.mock('./extractionAgentPlanner.js', () => ({
+  runAutoMemoryExtractionByAgent: vi.fn(),
+}));
+
 describe('auto-memory extraction', () => {
   let tempDir: string;
   let projectRoot: string;
+  let mockConfig: Config;
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-memory-extract-'));
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
     await ensureAutoMemoryScaffold(projectRoot);
+    mockConfig = {
+      getSessionId: vi.fn().mockReturnValue('session-1'),
+      getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+    } as unknown as Config;
+    vi.clearAllMocks();
   });
 
   afterEach(async () => {
@@ -63,52 +73,54 @@ describe('auto-memory extraction', () => {
     expect(slice.nextProcessedOffset).toBe(3);
   });
 
-  it('extracts and applies durable memory patches', async () => {
-    const transcript = buildTranscriptMessages([
-      { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
-      {
-        role: 'user',
-        parts: [{ text: 'The latency dashboard is https://grafana.internal/d/api-latency' }],
-      },
-    ]);
+  it('dedupes agent-reported patches while preserving touched topics', async () => {
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      patches: [
+        {
+          topic: 'user',
+          summary: 'User prefers terse responses.',
+          sourceOffset: 0,
+        },
+        {
+          topic: 'user',
+          summary: 'User prefers terse responses.',
+          sourceOffset: 0,
+        },
+      ],
+      touchedTopics: ['user'],
+      systemMessage: 'Managed auto-memory updated: user.md',
+    });
 
-    const patches = extractMemoryPatchesFromTranscript(transcript);
-    expect(patches.map((patch) => patch.topic)).toEqual(['user', 'reference']);
+    const result = await runAutoMemoryExtract({
+      projectRoot,
+      sessionId: 'session-1',
+      config: mockConfig,
+      history: [{ role: 'user', parts: [{ text: 'I prefer terse responses.' }] }],
+    });
 
-    const touched = await applyExtractedMemoryPatches(projectRoot, patches);
-    expect(touched).toEqual(['user', 'reference']);
-
-    const index = await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
-    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
-    const userDoc = docs.find((doc) => doc.type === 'user');
-    const referenceDoc = docs.find((doc) => doc.type === 'reference');
-
-    expect(userDoc?.body).toContain('I prefer terse responses.');
-    expect(referenceDoc?.body).toContain('grafana.internal/d/api-latency');
-    expect(index).toContain('I prefer terse responses.');
-    expect(index).toContain('grafana.internal/d/api-latency');
-  });
-
-  it('writes why and how-to-apply fields when extraction patches include them', async () => {
-    const touched = await applyExtractedMemoryPatches(projectRoot, [
+    expect(result.patches).toEqual([
       {
         topic: 'user',
         summary: 'User prefers terse responses.',
-        why: 'They explicitly asked for concise replies.',
-        howToApply: 'Lead with a short answer before details.',
         sourceOffset: 0,
       },
     ]);
-
-    const docs = await scanAutoMemoryTopicDocuments(projectRoot);
-    const userDoc = docs.find((doc) => doc.type === 'user');
-
-    expect(touched).toEqual(['user']);
-    expect(userDoc?.body).toContain('Why: They explicitly asked for concise replies.');
-    expect(userDoc?.body).toContain('How to apply: Lead with a short answer before details.');
+    expect(result.touchedTopics).toEqual(['user']);
   });
 
   it('updates cursor and avoids duplicate writes for repeated extraction', async () => {
+    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
+      patches: [
+        {
+          topic: 'user',
+          summary: 'User prefers terse responses.',
+          sourceOffset: 0,
+        },
+      ],
+      touchedTopics: [],
+      systemMessage: undefined,
+    });
+
     const history = [
       { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
       { role: 'model', parts: [{ text: 'Understood.' }] },
@@ -117,15 +129,17 @@ describe('auto-memory extraction', () => {
     const first = await runAutoMemoryExtract({
       projectRoot,
       sessionId: 'session-1',
+      config: mockConfig,
       history: [...history],
     });
     const second = await runAutoMemoryExtract({
       projectRoot,
       sessionId: 'session-1',
+      config: mockConfig,
       history: [...history],
     });
 
-    expect(first.touchedTopics).toEqual(['user']);
+    expect(first.touchedTopics).toEqual([]);
     expect(second.touchedTopics).toEqual([]);
 
     const cursor = JSON.parse(
@@ -134,5 +148,15 @@ describe('auto-memory extraction', () => {
 
     expect(cursor.sessionId).toBe('session-1');
     expect(cursor.processedOffset).toBe(2);
+  });
+
+  it('throws when config is missing because heuristic fallback was removed', async () => {
+    await expect(
+      runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        history: [{ role: 'user', parts: [{ text: 'I prefer terse responses.' }] }],
+      }),
+    ).rejects.toThrow('Managed auto-memory extraction requires config');
   });
 });

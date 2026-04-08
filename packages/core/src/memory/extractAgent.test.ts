@@ -9,10 +9,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import {
-  planAutoMemoryExtractionPatchesByAgent,
-  runAutoMemoryExtractionByAgent,
-} from './extractionAgentPlanner.js';
+import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { runAutoMemoryExtract } from './extract.js';
 import { getAutoMemoryRoot } from './paths.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
@@ -20,7 +17,6 @@ import { ensureAutoMemoryScaffold } from './store.js';
 import { resetAutoMemoryStateForTests } from './state.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
-  planAutoMemoryExtractionPatchesByAgent: vi.fn(),
   runAutoMemoryExtractionByAgent: vi.fn(),
 }));
 
@@ -98,7 +94,6 @@ describe('auto-memory extraction with agent planner', () => {
       projectRoot,
       expect.any(Array),
     );
-    expect(planAutoMemoryExtractionPatchesByAgent).not.toHaveBeenCalled();
 
     const docs = await scanAutoMemoryTopicDocuments(projectRoot);
     expect(docs.find((doc) => doc.type === 'user')?.body).toContain(

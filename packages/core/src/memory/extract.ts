@@ -5,32 +5,16 @@
  */
 
 import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { partToString } from '../utils/partUtils.js';
 import {
   getAutoMemoryExtractCursorPath,
-  getAutoMemoryFilePath,
   getAutoMemoryMetadataPath,
 } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
-import {
-  mergeAutoMemoryEntry,
-  parseAutoMemoryEntries,
-  renderAutoMemoryBody,
-} from './entries.js';
-import {
-  parseAutoMemoryTopicDocument,
-  scanAutoMemoryTopicDocuments,
-  type ScannedAutoMemoryDocument,
-} from './scan.js';
-import {
-  planAutoMemoryExtractionPatchesByAgent,
-  runAutoMemoryExtractionByAgent,
-} from './extractionAgentPlanner.js';
-import { planAutoMemoryExtractionPatchesByModel } from './extractionPlanner.js';
+import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scheduleManagedAutoMemoryExtract } from './extractScheduler.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
 import {
@@ -68,150 +52,10 @@ function normalizeSummary(text: string): string {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-function slugify(text: string): string {
-  return (
-    text
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-+|-+$/g, '')
-      .slice(0, 80) || 'memory'
-  );
-}
-
-function buildMemoryTitle(summary: string): string {
-  const trimmed = normalizeSummary(summary);
-  if (trimmed.length <= 72) {
-    return trimmed;
-  }
-  return `${trimmed.slice(0, 69).trimEnd()}...`;
-}
-
-function stripRememberLead(text: string): string {
-  return text
-    .replace(/^please\s+/i, '')
-    .replace(/^(remember|save|note)\s+(that\s+)?/i, '')
-    .replace(/^[:\-\s]+/, '')
-    .trim();
-}
-
 function isTemporaryTask(text: string): boolean {
   return /\b(today|now|currently|for this task|this session|temporary|temporarily)\b/i.test(
     text,
   );
-}
-
-function classifyTopic(text: string): AutoMemoryType | null {
-  if (/https?:\/\/|\b(grafana|dashboard|runbook|ticket|docs?|wiki|notion|jira)\b/i.test(text)) {
-    return 'reference';
-  }
-  if (/\b(i|we)\s+(prefer|like|need|want)\b|\bmy\s+(preferred|favorite)\b/i.test(text)) {
-    return 'user';
-  }
-  if (/\b(please|always|never|avoid|respond|format|style|terse|concise|detailed)\b/i.test(text)) {
-    return 'feedback';
-  }
-  if (/\b(project|repo|repository|service|release|deadline|freeze|incident|environment|stack)\b/i.test(text)) {
-    return 'project';
-  }
-  return null;
-}
-
-function extractCandidateSummary(text: string): string | null {
-  const trimmed = normalizeSummary(text);
-  if (trimmed.length < MIN_CANDIDATE_LENGTH || trimmed.endsWith('?')) {
-    return null;
-  }
-
-  if (isTemporaryTask(trimmed)) {
-    return null;
-  }
-
-  const explicitRemember = trimmed.match(
-    /^(?:please\s+)?(?:remember|save|note)\s+(?:that\s+)?(.+)$/i,
-  );
-  if (explicitRemember?.[1]) {
-    return normalizeSummary(stripRememberLead(explicitRemember[1]));
-  }
-
-  if (
-    /\b(i|we)\s+(prefer|like|need|want)\b/i.test(trimmed) ||
-    /\bmy\s+(preferred|favorite)\b/i.test(trimmed) ||
-    /https?:\/\//i.test(trimmed) ||
-    /\b(grafana|dashboard|runbook|ticket|docs?|wiki|notion|jira|release|deadline|freeze|incident)\b/i.test(trimmed)
-  ) {
-    return trimmed;
-  }
-
-  if (/\b(please|always|never|avoid|respond)\b/i.test(trimmed)) {
-    return trimmed;
-  }
-
-  return null;
-}
-
-export function buildTranscriptMessages(
-  history: Content[],
-): AutoMemoryTranscriptMessage[] {
-  return history
-    .map((message, index) => ({
-      offset: index,
-      role: message.role,
-      text: normalizeSummary(partToString(message.parts ?? [])),
-    }))
-    .filter(
-      (message): message is AutoMemoryTranscriptMessage =>
-        (message.role === 'user' || message.role === 'model') &&
-        message.text.length > 0,
-    );
-}
-
-export function loadUnprocessedTranscriptSlice(
-  sessionId: string,
-  messages: AutoMemoryTranscriptMessage[],
-  cursor: AutoMemoryExtractCursor,
-): { messages: AutoMemoryTranscriptMessage[]; nextProcessedOffset: number } {
-  const startOffset = cursor.sessionId === sessionId ? cursor.processedOffset ?? 0 : 0;
-  return {
-    messages: messages.filter((message) => message.offset >= startOffset),
-    nextProcessedOffset: messages.length,
-  };
-}
-
-export function extractMemoryPatchesFromTranscript(
-  messages: AutoMemoryTranscriptMessage[],
-): AutoMemoryExtractPatch[] {
-  const seen = new Set<string>();
-  const patches: AutoMemoryExtractPatch[] = [];
-
-  for (const message of messages) {
-    if (message.role !== 'user') {
-      continue;
-    }
-
-    const summary = extractCandidateSummary(message.text);
-    if (!summary) {
-      continue;
-    }
-
-    const topic = classifyTopic(summary);
-    if (!topic) {
-      continue;
-    }
-
-    const dedupeKey = `${topic}:${summary.toLowerCase()}`;
-    if (seen.has(dedupeKey)) {
-      continue;
-    }
-    seen.add(dedupeKey);
-
-    patches.push({
-      topic,
-      summary,
-      sourceOffset: message.offset,
-    });
-  }
-
-  return patches;
 }
 
 function normalizeExtractPatch(
@@ -262,46 +106,33 @@ function dedupeExtractPatches(
   return deduped;
 }
 
-async function planAutoMemoryExtractPatches(params: {
-  projectRoot: string;
-  messages: AutoMemoryTranscriptMessage[];
-  config?: Config;
-}): Promise<AutoMemoryExtractPatch[]> {
-  if (params.messages.length === 0) {
-    return [];
-  }
+export function buildTranscriptMessages(
+  history: Content[],
+): AutoMemoryTranscriptMessage[] {
+  return history
+    .map((message, index) => ({
+      offset: index,
+      role: message.role,
+      text: normalizeSummary(partToString(message.parts ?? [])),
+    }))
+    .filter(
+      (message): message is AutoMemoryTranscriptMessage =>
+        (message.role === 'user' || message.role === 'model') &&
+        message.text.length > 0,
+    );
+}
 
-  if (params.config) {
-    try {
-        const plannedPatches = await planAutoMemoryExtractionPatchesByAgent(
-          params.config,
-          params.projectRoot,
-          params.messages,
-        );
-        return dedupeExtractPatches(plannedPatches);
-      } catch (error) {
-        debugLogger.warn(
-          'Agent-driven auto-memory extraction failed; falling back to side-query extraction.',
-          error,
-        );
-      }
-
-      try {
-      const plannedPatches = await planAutoMemoryExtractionPatchesByModel(
-        params.config,
-        params.projectRoot,
-        params.messages,
-      );
-      return dedupeExtractPatches(plannedPatches);
-    } catch (error) {
-      debugLogger.warn(
-        'Model-driven auto-memory extraction failed; falling back to heuristic extraction.',
-        error,
-      );
-    }
-  }
-
-  return dedupeExtractPatches(extractMemoryPatchesFromTranscript(params.messages));
+export function loadUnprocessedTranscriptSlice(
+  sessionId: string,
+  messages: AutoMemoryTranscriptMessage[],
+  cursor: AutoMemoryExtractCursor,
+): { messages: AutoMemoryTranscriptMessage[]; nextProcessedOffset: number } {
+  const startOffset =
+    cursor.sessionId === sessionId ? cursor.processedOffset ?? 0 : 0;
+  return {
+    messages: messages.filter((message) => message.offset >= startOffset),
+    nextProcessedOffset: messages.length,
+  };
 }
 
 async function readExtractCursor(
@@ -340,7 +171,10 @@ async function bumpMetadata(
   touchedTopics: AutoMemoryType[],
 ): Promise<void> {
   try {
-    const content = await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf-8');
+    const content = await fs.readFile(
+      getAutoMemoryMetadataPath(projectRoot),
+      'utf-8',
+    );
     const metadata = JSON.parse(content) as AutoMemoryMetadata;
     metadata.updatedAt = now.toISOString();
     metadata.lastExtractionAt = now.toISOString();
@@ -355,169 +189,6 @@ async function bumpMetadata(
   } catch {
     // Scaffold creation already writes metadata; ignore non-critical update errors.
   }
-}
-
-function appendPatchToTopicContent(
-  content: string,
-  patch: AutoMemoryExtractPatch,
-): string | null {
-  const parsed = parseAutoMemoryTopicDocument('/virtual/topic.md', content);
-  if (!parsed) {
-    return null;
-  }
-
-  const entries = parseAutoMemoryEntries(parsed.body);
-  const normalizedSummary = patch.summary.toLowerCase();
-  const existingIndex = entries.findIndex(
-    (entry) => entry.summary.toLowerCase() === normalizedSummary,
-  );
-
-  if (existingIndex >= 0) {
-    const merged = mergeAutoMemoryEntry(entries[existingIndex], {
-      summary: patch.summary,
-      why: patch.why,
-      howToApply: patch.howToApply,
-    });
-    const current = entries[existingIndex];
-    if (
-      current.summary === merged.summary &&
-      current.why === merged.why &&
-      current.howToApply === merged.howToApply
-    ) {
-      return null;
-    }
-
-    entries[existingIndex] = merged;
-    return content.replace(parsed.body, renderAutoMemoryBody('', entries));
-  }
-
-  entries.push({
-    summary: patch.summary,
-    why: patch.why,
-    howToApply: patch.howToApply,
-  });
-
-  return content.replace(parsed.body, renderAutoMemoryBody('', entries));
-}
-
-function buildMemoryDocumentContent(
-  patch: AutoMemoryExtractPatch,
-  title = buildMemoryTitle(patch.summary),
-): string {
-  return [
-    '---',
-    `name: ${title}`,
-    `description: ${patch.summary}`,
-    `type: ${patch.topic}`,
-    '---',
-    '',
-    renderAutoMemoryBody('', [
-      {
-        summary: patch.summary,
-        why: patch.why,
-        howToApply: patch.howToApply,
-      },
-    ]),
-    '',
-  ].join('\n');
-}
-
-function findExistingMemoryDocument(
-  docs: ScannedAutoMemoryDocument[],
-  patch: AutoMemoryExtractPatch,
-): ScannedAutoMemoryDocument | undefined {
-  const targetSummary = patch.summary.toLowerCase();
-  return docs.find((doc) => {
-    if (doc.type !== patch.topic) {
-      return false;
-    }
-    const [entry] = parseAutoMemoryEntries(doc.body);
-    return entry?.summary.toLowerCase() === targetSummary;
-  });
-}
-
-function allocateMemoryRelativePath(
-  docs: ScannedAutoMemoryDocument[],
-  patch: AutoMemoryExtractPatch,
-): string {
-  const baseSlug = slugify(patch.summary);
-  const used = new Set(docs.map((doc) => doc.relativePath));
-
-  for (let index = 0; index < 100; index += 1) {
-    const filename = index === 0 ? `${baseSlug}.md` : `${baseSlug}-${index + 1}.md`;
-    const relativePath = path.join(patch.topic, filename);
-    if (!used.has(relativePath)) {
-      return relativePath;
-    }
-  }
-
-  return path.join(patch.topic, `${baseSlug}-${Date.now()}.md`);
-}
-
-export async function applyExtractedMemoryPatches(
-  projectRoot: string,
-  patches: AutoMemoryExtractPatch[],
-  now = new Date(),
-  sessionId?: string,
-): Promise<AutoMemoryType[]> {
-  const touchedTopics = new Set<AutoMemoryType>();
-  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
-
-  for (const patch of patches) {
-    const existingDoc = findExistingMemoryDocument(docs, patch);
-
-    if (existingDoc) {
-      const current = await fs.readFile(existingDoc.filePath, 'utf-8');
-      const next = appendPatchToTopicContent(current, patch);
-      if (!next) {
-        continue;
-      }
-
-      await fs.writeFile(existingDoc.filePath, next, 'utf-8');
-      const updatedDoc = parseAutoMemoryTopicDocument(
-        existingDoc.filePath,
-        next,
-        0,
-        existingDoc.relativePath,
-      );
-      if (updatedDoc) {
-        const existingIndex = docs.findIndex((doc) => doc.filePath === existingDoc.filePath);
-        if (existingIndex >= 0) {
-          docs[existingIndex] = updatedDoc;
-        }
-      }
-      touchedTopics.add(patch.topic);
-      continue;
-    }
-
-    const relativePath = allocateMemoryRelativePath(docs, patch);
-    const absolutePath = getAutoMemoryFilePath(projectRoot, relativePath);
-    await fs.mkdir(path.dirname(absolutePath), { recursive: true });
-    const content = buildMemoryDocumentContent(patch);
-    await fs.writeFile(absolutePath, content, 'utf-8');
-    const createdDoc = parseAutoMemoryTopicDocument(
-      absolutePath,
-      content,
-      0,
-      relativePath,
-    );
-    if (createdDoc) {
-      docs.push(createdDoc);
-    }
-    touchedTopics.add(patch.topic);
-  }
-
-  if (sessionId) {
-    await bumpMetadata(projectRoot, now, sessionId, [...touchedTopics]);
-  } else if (touchedTopics.size > 0) {
-    await bumpMetadata(projectRoot, now, 'unknown', [...touchedTopics]);
-  }
-
-  if (touchedTopics.size > 0) {
-    await rebuildManagedAutoMemoryIndex(projectRoot);
-  }
-
-  return [...touchedTopics];
 }
 
 export async function runAutoMemoryExtract(params: {
@@ -538,56 +209,28 @@ export async function runAutoMemoryExtract(params: {
     currentCursor,
   );
 
-  if (params.config) {
-    try {
-      const agentResult = await runAutoMemoryExtractionByAgent(
-        params.config,
-        params.projectRoot,
-        slice.messages,
-      );
-
-      if (agentResult.touchedTopics.length > 0) {
-        await bumpMetadata(
-          params.projectRoot,
-          now,
-          params.sessionId,
-          agentResult.touchedTopics,
-        );
-        await rebuildManagedAutoMemoryIndex(params.projectRoot);
-      }
-
-      const cursor: AutoMemoryExtractCursor = {
-        sessionId: params.sessionId,
-        processedOffset: slice.nextProcessedOffset,
-        updatedAt: now.toISOString(),
-      };
-      await writeExtractCursor(params.projectRoot, cursor);
-
-      return {
-        patches: dedupeExtractPatches(agentResult.patches),
-        touchedTopics: agentResult.touchedTopics,
-        cursor,
-        systemMessage: agentResult.systemMessage,
-      };
-    } catch (error) {
-      debugLogger.warn(
-        'Forked-agent auto-memory extraction failed; falling back to patch-based extraction.',
-        error,
-      );
-    }
+  if (!params.config) {
+    throw new Error(
+      'Managed auto-memory extraction requires config for forked-agent execution.',
+    );
   }
 
-  const patches = await planAutoMemoryExtractPatches({
-    projectRoot: params.projectRoot,
-    messages: slice.messages,
-    config: params.config,
-  });
-  const touchedTopics = await applyExtractedMemoryPatches(
+  const agentResult = await runAutoMemoryExtractionByAgent(
+    params.config,
     params.projectRoot,
-    patches,
-    now,
-    params.sessionId,
+    slice.messages,
   );
+  const patches = dedupeExtractPatches(agentResult.patches);
+
+  if (agentResult.touchedTopics.length > 0) {
+    await bumpMetadata(
+      params.projectRoot,
+      now,
+      params.sessionId,
+      agentResult.touchedTopics,
+    );
+    await rebuildManagedAutoMemoryIndex(params.projectRoot);
+  }
 
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
@@ -596,14 +239,15 @@ export async function runAutoMemoryExtract(params: {
   };
   await writeExtractCursor(params.projectRoot, cursor);
 
+  debugLogger.debug(
+    `Managed auto-memory extract completed with ${patches.length} patch(es) and ${agentResult.touchedTopics.length} touched topic(s).`,
+  );
+
   return {
     patches,
-    touchedTopics,
+    touchedTopics: agentResult.touchedTopics,
     cursor,
-    systemMessage:
-      touchedTopics.length > 0
-        ? `Managed auto-memory updated: ${touchedTopics.map((topic) => `${topic}.md`).join(', ')}`
-        : undefined,
+    systemMessage: agentResult.systemMessage,
   };
 }
 
