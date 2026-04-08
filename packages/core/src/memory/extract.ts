@@ -26,7 +26,10 @@ import {
   scanAutoMemoryTopicDocuments,
   type ScannedAutoMemoryDocument,
 } from './scan.js';
-import { planAutoMemoryExtractionPatchesByAgent } from './extractionAgentPlanner.js';
+import {
+  planAutoMemoryExtractionPatchesByAgent,
+  runAutoMemoryExtractionByAgent,
+} from './extractionAgentPlanner.js';
 import { planAutoMemoryExtractionPatchesByModel } from './extractionPlanner.js';
 import { scheduleManagedAutoMemoryExtract } from './extractScheduler.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
@@ -534,6 +537,46 @@ export async function runAutoMemoryExtract(params: {
     transcript,
     currentCursor,
   );
+
+  if (params.config) {
+    try {
+      const agentResult = await runAutoMemoryExtractionByAgent(
+        params.config,
+        params.projectRoot,
+        slice.messages,
+      );
+
+      if (agentResult.touchedTopics.length > 0) {
+        await bumpMetadata(
+          params.projectRoot,
+          now,
+          params.sessionId,
+          agentResult.touchedTopics,
+        );
+        await rebuildManagedAutoMemoryIndex(params.projectRoot);
+      }
+
+      const cursor: AutoMemoryExtractCursor = {
+        sessionId: params.sessionId,
+        processedOffset: slice.nextProcessedOffset,
+        updatedAt: now.toISOString(),
+      };
+      await writeExtractCursor(params.projectRoot, cursor);
+
+      return {
+        patches: dedupeExtractPatches(agentResult.patches),
+        touchedTopics: agentResult.touchedTopics,
+        cursor,
+        systemMessage: agentResult.systemMessage,
+      };
+    } catch (error) {
+      debugLogger.warn(
+        'Forked-agent auto-memory extraction failed; falling back to patch-based extraction.',
+        error,
+      );
+    }
+  }
+
   const patches = await planAutoMemoryExtractPatches({
     projectRoot: params.projectRoot,
     messages: slice.messages,

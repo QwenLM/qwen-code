@@ -16,6 +16,7 @@ import {
   TYPES_SECTION_INDIVIDUAL,
   WHAT_NOT_TO_SAVE_SECTION,
 } from './prompt.js';
+import { AUTO_MEMORY_INDEX_FILENAME, getAutoMemoryRoot } from './paths.js';
 import type { AutoMemoryType } from './types.js';
 import type {
   AutoMemoryExtractPatch,
@@ -83,8 +84,58 @@ const EXTRACTION_AGENT_RESPONSE_SCHEMA: Record<string, unknown> = {
   required: ['patches'],
 };
 
+const EXTRACTION_AGENT_EXECUTION_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    patches: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          topic: {
+            type: 'string',
+            enum: ['user', 'feedback', 'project', 'reference'],
+          },
+          summary: {
+            type: 'string',
+          },
+          why: {
+            type: 'string',
+          },
+          howToApply: {
+            type: 'string',
+          },
+          sourceOffset: {
+            type: 'integer',
+          },
+        },
+        required: ['topic', 'summary', 'sourceOffset'],
+      },
+    },
+    touchedTopics: {
+      type: 'array',
+      items: {
+        type: 'string',
+        enum: ['user', 'feedback', 'project', 'reference'],
+      },
+    },
+  },
+  required: ['patches', 'touchedTopics'],
+};
+
 interface ExtractionAgentResponse {
   patches: AutoMemoryExtractPatch[];
+}
+
+interface ExtractionAgentExecutionResponse {
+  patches: AutoMemoryExtractPatch[];
+  touchedTopics: AutoMemoryType[];
+}
+
+export interface AutoMemoryExtractionExecutionResult {
+  patches: AutoMemoryExtractPatch[];
+  touchedTopics: AutoMemoryType[];
+  systemMessage?: string;
 }
 
 interface BackgroundAgentRunnerLike {
@@ -143,6 +194,43 @@ function buildTaskPrompt(
   ].join('\n');
 }
 
+function buildExecutionTaskPrompt(
+  memoryRoot: string,
+  messages: AutoMemoryTranscriptMessage[],
+  topicSummaries: string,
+): string {
+  return [
+    `Managed memory directory: \`${memoryRoot}\``,
+    '',
+    'You must update durable managed memory by directly using tools to read and write files inside the managed memory directory.',
+    '',
+    'Available tools in this run: `read_file`, `list_directory`, `glob`, `grep_search`, `write_file`, `edit`.',
+    '- Do not use any other tools.',
+    '- Do not inspect repository code, git history, or unrelated files.',
+    '- Work only from the transcript slice below plus the current managed memory files.',
+    '- Prefer updating an existing memory file over creating a duplicate.',
+    '- If you create or delete a memory file, also update the managed memory index.',
+    `- The managed memory index is \`${memoryRoot}/${AUTO_MEMORY_INDEX_FILENAME}\`.`,
+    '- Keep one durable memory per file under `user/`, `feedback/`, `project/`, or `reference/`.',
+    '- If nothing durable should be saved, make no file changes.',
+    '',
+    'Memory file format reference:',
+    ...MEMORY_FRONTMATTER_EXAMPLE,
+    '',
+    ...TYPES_SECTION_INDIVIDUAL,
+    ...WHAT_NOT_TO_SAVE_SECTION,
+    '',
+    'After all tool work is complete, output JSON only matching this schema:',
+    JSON.stringify(EXTRACTION_AGENT_EXECUTION_RESPONSE_SCHEMA, null, 2),
+    '',
+    'Transcript slice:',
+    buildTranscriptBlock(messages),
+    '',
+    'Current topic summaries:',
+    topicSummaries || '(no topics found)',
+  ].join('\n');
+}
+
 function validateExtractionAgentResponse(
   parsed: ExtractionAgentResponse,
   userOffsets: Set<number>,
@@ -173,6 +261,41 @@ function validateExtractionAgentResponse(
     howToApply: patch.howToApply?.trim(),
     sourceOffset: patch.sourceOffset,
   }));
+}
+
+function validateExtractionExecutionResponse(
+  parsed: ExtractionAgentExecutionResponse,
+  userOffsets: Set<number>,
+): AutoMemoryExtractionExecutionResult {
+  const schemaError = SchemaValidator.validate(
+    EXTRACTION_AGENT_EXECUTION_RESPONSE_SCHEMA,
+    parsed,
+  );
+  if (schemaError) {
+    throw new Error(`Invalid extraction agent response: ${schemaError}`);
+  }
+
+  const patches = validateExtractionAgentResponse(parsed, userOffsets);
+  const touchedTopics = Array.from(
+    new Set(
+      (parsed.touchedTopics ?? []).filter(
+        (topic): topic is AutoMemoryType =>
+          topic === 'user' ||
+          topic === 'feedback' ||
+          topic === 'project' ||
+          topic === 'reference',
+      ),
+    ),
+  );
+
+  return {
+    patches,
+    touchedTopics,
+    systemMessage:
+      touchedTopics.length > 0
+        ? `Managed auto-memory updated: ${touchedTopics.map((topic) => `${topic}.md`).join(', ')}`
+        : undefined,
+  };
 }
 
 export async function planAutoMemoryExtractionPatchesByAgent(
@@ -233,4 +356,82 @@ export async function planAutoMemoryExtractionPatchesByAgent(
     patches: [],
   });
   return validateExtractionAgentResponse(parsed, userOffsets);
+}
+
+export async function runAutoMemoryExtractionByAgent(
+  config: Config,
+  projectRoot: string,
+  messages: AutoMemoryTranscriptMessage[],
+  runner: BackgroundAgentRunnerLike = new BackgroundAgentRunner(),
+): Promise<AutoMemoryExtractionExecutionResult> {
+  if (messages.length === 0) {
+    return {
+      patches: [],
+      touchedTopics: [],
+    };
+  }
+
+  const userOffsets = new Set(
+    messages
+      .filter((message) => message.role === 'user')
+      .map((message) => message.offset),
+  );
+  if (userOffsets.size === 0) {
+    return {
+      patches: [],
+      touchedTopics: [],
+    };
+  }
+
+  const topicSummaries = await buildTopicSummaryBlock(projectRoot);
+  const memoryRoot = getAutoMemoryRoot(projectRoot);
+  const result = await runner.run({
+    taskType: 'managed-auto-memory-extraction-agent',
+    title: 'Managed auto-memory extraction agent',
+    description: 'Extract durable managed memory directly into topic files.',
+    projectRoot,
+    sessionId: config.getSessionId(),
+    dedupeKey: `managed-auto-memory-extraction-agent:${projectRoot}`,
+    name: 'managed-auto-memory-extractor',
+    runtimeContext: config,
+    taskPrompt: buildExecutionTaskPrompt(memoryRoot, messages, topicSummaries),
+    promptConfig: {
+      systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
+    },
+    modelConfig: {
+      model: config.getModel(),
+      temp: 0,
+    },
+    runConfig: {
+      max_turns: 5,
+      max_time_minutes: 2,
+    },
+    toolConfig: {
+      tools: [
+        'read_file',
+        'write_file',
+        'edit',
+        'list_directory',
+        'glob',
+        'grep_search',
+      ],
+    },
+    metadata: {
+      planner: 'extraction-agent',
+      stage: 'apply',
+    },
+  });
+
+  if (result.status !== 'completed' || !result.finalText) {
+    throw new Error(result.error || 'Extraction agent did not complete successfully');
+  }
+
+  const parsed = safeJsonParse<ExtractionAgentExecutionResponse>(
+    result.finalText,
+    {
+      patches: [],
+      touchedTopics: [],
+    },
+  );
+  return validateExtractionExecutionResponse(parsed, userOffsets);
 }
