@@ -697,6 +697,10 @@ export class Session implements SessionContext {
       case ToolConfirmationOutcome.ProceedAlways:
         newModeId = 'auto-edit';
         break;
+      case ToolConfirmationOutcome.RestorePrevious:
+        // onConfirm has already restored the mode; read the actual current mode
+        newModeId = this.config.getApprovalMode() as ApprovalModeValue;
+        break;
       case ToolConfirmationOutcome.ProceedOnce:
       default:
         newModeId = 'default';
