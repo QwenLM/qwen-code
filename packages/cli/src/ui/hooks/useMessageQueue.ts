@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { StreamingState } from '../types.js';
 
 export interface UseMessageQueueOptions {
@@ -18,6 +18,7 @@ export interface UseMessageQueueReturn {
   addMessage: (message: string) => void;
   clearQueue: () => void;
   getQueuedMessagesText: () => string;
+  popAllMessages: () => string | null;
 }
 
 /**
@@ -31,17 +32,25 @@ export function useMessageQueue({
   submitQuery,
 }: UseMessageQueueOptions): UseMessageQueueReturn {
   const [messageQueue, setMessageQueue] = useState<string[]>([]);
+  // Ref keeps queue in sync for atomic popAllMessages (avoids stale closure reads)
+  const queueRef = useRef<string[]>(messageQueue);
+  queueRef.current = messageQueue;
 
   // Add a message to the queue
   const addMessage = useCallback((message: string) => {
     const trimmedMessage = message.trim();
     if (trimmedMessage.length > 0) {
-      setMessageQueue((prev) => [...prev, trimmedMessage]);
+      setMessageQueue((prev) => {
+        const next = [...prev, trimmedMessage];
+        queueRef.current = next;
+        return next;
+      });
     }
   }, []);
 
   // Clear the entire queue
   const clearQueue = useCallback(() => {
+    queueRef.current = [];
     setMessageQueue([]);
   }, []);
 
@@ -50,6 +59,17 @@ export function useMessageQueue({
     if (messageQueue.length === 0) return '';
     return messageQueue.join('\n\n');
   }, [messageQueue]);
+
+  // Pop all messages from the queue for editing (atomic via ref to prevent
+  // duplicate pops from key auto-repeat before React re-renders)
+  const popAllMessages = useCallback((): string | null => {
+    const current = queueRef.current;
+    if (current.length === 0) return null;
+    const allText = current.join('\n');
+    queueRef.current = [];
+    setMessageQueue([]);
+    return allText;
+  }, []);
 
   // Process queued messages when streaming becomes idle
   useEffect(() => {
@@ -71,5 +91,6 @@ export function useMessageQueue({
     addMessage,
     clearQueue,
     getQueuedMessagesText,
+    popAllMessages,
   };
 }
