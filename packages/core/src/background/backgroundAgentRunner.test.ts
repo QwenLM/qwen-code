@@ -5,7 +5,8 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { AgentEventEmitter, AgentEventType, AgentTerminateMode } from '../agents/index.js';
+import { ApprovalMode } from '../config/config.js';
+import { AgentEventType, AgentTerminateMode, type AgentEventEmitter } from '../agents/index.js';
 import { BackgroundAgentRunner } from './backgroundAgentRunner.js';
 
 describe('BackgroundAgentRunner', () => {
@@ -145,5 +146,41 @@ describe('BackgroundAgentRunner', () => {
 
     expect(result.status).toBe('cancelled');
     expect(result.error).toContain('CANCELLED');
+  });
+
+  it('forces yolo approval mode for background agents so asks cannot hang', async () => {
+    const runtimeContext = {
+      getApprovalMode: vi.fn(() => 'default'),
+    } as never;
+
+    const createMock = vi.fn().mockImplementation(async (
+      _name,
+      wrappedRuntimeContext,
+    ) => {
+      expect(wrappedRuntimeContext).not.toBe(runtimeContext);
+      expect(wrappedRuntimeContext.getApprovalMode()).toBe(ApprovalMode.YOLO);
+
+      return {
+        execute: vi.fn().mockResolvedValue(undefined),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'Done',
+      };
+    });
+
+    const runner = new BackgroundAgentRunner(undefined, undefined, undefined, createMock);
+    const result = await runner.run({
+      taskType: 'background-agent',
+      title: 'Review code',
+      description: 'Run a background code review',
+      projectRoot: '/tmp/project',
+      name: 'code-reviewer',
+      runtimeContext,
+      taskPrompt: 'Review the recent code changes',
+      promptConfig: { systemPrompt: 'You are a reviewer.' },
+      modelConfig: { model: 'qwen3-coder-plus' },
+      runConfig: { max_turns: 3 },
+    });
+
+    expect(result.status).toBe('completed');
   });
 });

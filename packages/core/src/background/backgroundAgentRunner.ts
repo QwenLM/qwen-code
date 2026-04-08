@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '../config/config.js';
+import { ApprovalMode, type Config } from '../config/config.js';
 import {
   AgentHeadless,
   AgentEventEmitter,
@@ -71,6 +71,12 @@ type CreateAgentHeadlessFn = (
   eventEmitter?: AgentEventEmitter,
 ) => Promise<AgentHeadlessLike>;
 
+function createBackgroundConfig(config: Config): Config {
+  const backgroundConfig = Object.create(config) as Config;
+  backgroundConfig.getApprovalMode = () => ApprovalMode.YOLO;
+  return backgroundConfig;
+}
+
 export class BackgroundAgentRunner {
   readonly registry: BackgroundTaskRegistry;
   readonly drainer: BackgroundTaskDrainer;
@@ -116,9 +122,18 @@ export class BackgroundAgentRunner {
           roundCount = Math.max(roundCount, nextRound);
         });
 
+        // Background agents must never block on permission prompts — there is
+        // no user present to answer them. Wrap the config to force YOLO mode
+        // so any tool call that would return 'ask' is auto-approved instead of
+        // hanging the process indefinitely. This mirrors Claude Code's
+        // shouldAvoidPermissionPrompts: true pattern in createSubagentContext().
+        // Safety boundary: toolConfig.tools already restricts the model to the
+        // declared tool set; prompt instructions constrain intended paths.
+        const backgroundConfig = createBackgroundConfig(request.runtimeContext);
+
         const headless = await this.createAgentHeadless(
           request.name,
-          request.runtimeContext,
+          backgroundConfig,
           request.promptConfig,
           request.modelConfig,
           request.runConfig,
