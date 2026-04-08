@@ -1,7 +1,8 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
 exports[`<HistoryItemDisplay /> > should render a full gemini item when using availableTerminalHeightGemini 1`] = `
-"  ✦ Example code block:
+"
+  ✦ Example code block:
       1 Line 1
       2 Line 2
       3 Line 3
@@ -109,7 +110,8 @@ exports[`<HistoryItemDisplay /> > should render a full gemini_content item when 
 `;
 
 exports[`<HistoryItemDisplay /> > should render a truncated gemini item 1`] = `
-"  ✦ Example code block:
+"
+  ✦ Example code block:
      ... first 41 lines hidden ...
      42 Line 42
      43 Line 43
