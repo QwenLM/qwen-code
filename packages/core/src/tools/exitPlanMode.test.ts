@@ -239,6 +239,28 @@ describe('ExitPlanModeTool', () => {
       });
     });
 
+    it('should fall back to DEFAULT on RestorePrevious when no prePlanMode recorded', async () => {
+      // getPrePlanMode() defaults to DEFAULT when prePlanMode is undefined
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.DEFAULT,
+      );
+
+      const params: ExitPlanModeParams = { plan: 'Fallback test' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(signal);
+
+      if (confirmation) {
+        await confirmation.onConfirm(ToolConfirmationOutcome.RestorePrevious);
+      }
+
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.DEFAULT,
+      );
+      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+    });
+
     it('should remain in plan mode when confirmation is rejected', async () => {
       const params: ExitPlanModeParams = {
         plan: 'Remain in planning',
