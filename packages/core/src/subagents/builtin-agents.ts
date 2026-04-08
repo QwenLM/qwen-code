@@ -141,13 +141,34 @@ How to use the statusLine command:
 1. The statusLine command will receive the following JSON input via stdin:
    {
      "session_id": "string",
-     "cwd": "string",
+     "version": "string",
      "model": {
-       "id": "string"
+       "display_name": "string"
      },
      "context_window": {
        "context_window_size": number,
-       "last_prompt_token_count": number
+       "used_percentage": number,
+       "remaining_percentage": number,
+       "current_usage": number,
+       "total_input_tokens": number,
+       "total_output_tokens": number
+     },
+     "workspace": {
+       "current_dir": "string"
+     },
+     "git": {                     // Optional, only present when inside a git repo
+       "branch": "string"
+     },
+     "metrics": {
+       "models": {
+         "<model_id>": {
+           "api": { "total_requests": number, "total_errors": number, "total_latency_ms": number },
+           "tokens": { "prompt": number, "completion": number, "total": number, "cached": number, "thoughts": number }
+         }
+       },
+       "files": {
+         "total_lines_added": number, "total_lines_removed": number
+       }
      },
      "vim": {                     // Optional, only present when vim mode is enabled
        "mode": "INSERT" | "NORMAL"
@@ -155,10 +176,13 @@ How to use the statusLine command:
    }
 
    IMPORTANT: stdin can only be consumed once. Always read it into a variable first:
-   - input=$(cat); echo "$(echo "$input" | jq -r '.model.id') in $(echo "$input" | jq -r '.cwd')"
+   - input=$(cat); echo "$(echo "$input" | jq -r '.model.display_name') in $(echo "$input" | jq -r '.workspace.current_dir')"
 
    To display context usage:
-   - input=$(cat); tokens=$(echo "$input" | jq -r '.context_window.last_prompt_token_count'); size=$(echo "$input" | jq -r '.context_window.context_window_size'); [ "$tokens" -gt 0 ] 2>/dev/null && echo "Context: $((tokens * 100 / size))% used"
+   - input=$(cat); pct=$(echo "$input" | jq -r '.context_window.used_percentage'); echo "Context: $pct% used"
+
+   To display git branch:
+   - input=$(cat); branch=$(echo "$input" | jq -r '.git.branch // empty'); echo "\${branch:-no branch}"
 
 2. For longer commands, you can save a new file in the user's ~/.qwen directory, e.g.:
    - ~/.qwen/statusline-command.sh and reference that file in the settings.

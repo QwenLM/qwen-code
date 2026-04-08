@@ -10,6 +10,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
+import type { SessionMetrics } from '../contexts/SessionContext.js';
 
 /**
  * Structured JSON input passed to the status line command via stdin.
@@ -18,13 +19,46 @@ import { useVimMode } from '../contexts/VimModeContext.js';
  */
 export interface StatusLineCommandInput {
   session_id: string;
-  cwd: string;
+  version: string;
   model: {
-    id: string;
+    display_name: string;
   };
   context_window: {
     context_window_size: number;
-    last_prompt_token_count: number;
+    used_percentage: number;
+    remaining_percentage: number;
+    current_usage: number;
+    total_input_tokens: number;
+    total_output_tokens: number;
+  };
+  workspace: {
+    current_dir: string;
+  };
+  git?: {
+    branch: string;
+  };
+  metrics: {
+    models: Record<
+      string,
+      {
+        api: {
+          total_requests: number;
+          total_errors: number;
+          total_latency_ms: number;
+        };
+        tokens: {
+          prompt: number;
+          completion: number;
+          total: number;
+          cached: number;
+          thoughts: number;
+        };
+      }
+    >;
+    files: {
+      total_lines_added: number;
+      total_lines_removed: number;
+    };
   };
   vim?: {
     mode: string;
@@ -63,6 +97,35 @@ function getStatusLineConfig(
     return config;
   }
   return undefined;
+}
+
+function buildMetricsPayload(
+  m: SessionMetrics,
+): StatusLineCommandInput['metrics'] {
+  const models: StatusLineCommandInput['metrics']['models'] = {};
+  for (const [id, mm] of Object.entries(m.models)) {
+    models[id] = {
+      api: {
+        total_requests: mm.api.totalRequests,
+        total_errors: mm.api.totalErrors,
+        total_latency_ms: mm.api.totalLatencyMs,
+      },
+      tokens: {
+        prompt: mm.tokens.prompt,
+        completion: mm.tokens.candidates,
+        total: mm.tokens.total,
+        cached: mm.tokens.cached,
+        thoughts: mm.tokens.thoughts,
+      },
+    };
+  }
+  return {
+    models,
+    files: {
+      total_lines_added: m.files.totalLinesAdded,
+      total_lines_removed: m.files.totalLinesRemoved,
+    },
+  };
 }
 
 /**
@@ -109,16 +172,24 @@ export function useStatusLine(): {
   // Initialized with current values so the state-change effect
   // does not fire redundantly on mount.
   const { lastPromptTokenCount } = uiState.sessionStats;
-  const { currentModel } = uiState;
+  const { currentModel, branchName } = uiState;
+  const totalToolCalls = uiState.sessionStats.metrics.tools.totalCalls;
+  const totalLinesAdded = uiState.sessionStats.metrics.files.totalLinesAdded;
   const effectiveVim = vimEnabled ? vimMode : undefined;
   const prevStateRef = useRef<{
     promptTokenCount: number;
     currentModel: string;
     effectiveVim: string | undefined;
+    branchName: string | undefined;
+    totalToolCalls: number;
+    totalLinesAdded: number;
   }>({
     promptTokenCount: lastPromptTokenCount,
     currentModel,
     effectiveVim,
+    branchName,
+    totalToolCalls,
+    totalLinesAdded,
   });
 
   // Guard: when true, the mount effect has already called doUpdate so the
@@ -138,18 +209,52 @@ export function useStatusLine(): {
 
     const ui = uiStateRef.current;
     const cfg = configRef.current;
+    const stats = ui.sessionStats;
+    const m = stats.metrics;
+
+    const contextWindowSize =
+      cfg.getContentGeneratorConfig()?.contextWindowSize || 0;
+    const usedPercentage =
+      contextWindowSize > 0
+        ? Math.round((stats.lastPromptTokenCount / contextWindowSize) * 1000) /
+          10
+        : 0;
+
+    let totalInputTokens = 0;
+    let totalOutputTokens = 0;
+    for (const mm of Object.values(m.models)) {
+      totalInputTokens += mm.tokens.prompt;
+      totalOutputTokens += mm.tokens.candidates;
+    }
 
     const input: StatusLineCommandInput = {
-      session_id: ui.sessionStats.sessionId,
-      cwd: cfg.getTargetDir(),
+      session_id: stats.sessionId,
+      version: cfg.getCliVersion() || 'unknown',
       model: {
-        id: ui.currentModel || cfg.getModel() || 'unknown',
+        display_name: ui.currentModel || cfg.getModel() || 'unknown',
       },
       context_window: {
-        context_window_size:
-          cfg.getContentGeneratorConfig()?.contextWindowSize || 0,
-        last_prompt_token_count: ui.sessionStats.lastPromptTokenCount,
+        context_window_size: contextWindowSize,
+        used_percentage: usedPercentage,
+        remaining_percentage:
+          contextWindowSize > 0
+            ? Math.round(
+                (1 - stats.lastPromptTokenCount / contextWindowSize) * 1000,
+              ) / 10
+            : 100,
+        current_usage: stats.lastPromptTokenCount,
+        total_input_tokens: totalInputTokens,
+        total_output_tokens: totalOutputTokens,
       },
+      workspace: {
+        current_dir: cfg.getTargetDir(),
+      },
+      ...(ui.branchName && {
+        git: {
+          branch: ui.branchName,
+        },
+      }),
+      metrics: buildMetricsPayload(m),
       ...(vimEnabledRef.current && {
         vim: { mode: vimModeRef.current ?? 'INSERT' },
       }),
@@ -220,11 +325,17 @@ export function useStatusLine(): {
     if (
       lastPromptTokenCount !== prev.promptTokenCount ||
       currentModel !== prev.currentModel ||
-      effectiveVim !== prev.effectiveVim
+      effectiveVim !== prev.effectiveVim ||
+      branchName !== prev.branchName ||
+      totalToolCalls !== prev.totalToolCalls ||
+      totalLinesAdded !== prev.totalLinesAdded
     ) {
       prev.promptTokenCount = lastPromptTokenCount;
       prev.currentModel = currentModel;
       prev.effectiveVim = effectiveVim;
+      prev.branchName = branchName;
+      prev.totalToolCalls = totalToolCalls;
+      prev.totalLinesAdded = totalLinesAdded;
       scheduleUpdate();
     }
   }, [
@@ -232,6 +343,9 @@ export function useStatusLine(): {
     lastPromptTokenCount,
     currentModel,
     effectiveVim,
+    branchName,
+    totalToolCalls,
+    totalLinesAdded,
     scheduleUpdate,
   ]);
 
