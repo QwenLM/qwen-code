@@ -397,7 +397,9 @@ Use the **pre-autofix HEAD commit SHA** captured in Step 1. If not captured, fal
 
 **Before posting**, check for existing Qwen Code review comments: `gh api repos/{owner}/{repo}/pulls/{pr_number}/comments --jq '.[] | select(.body | test("via Qwen Code /review")) | .id'`. If found, inform the user and let them decide whether to proceed.
 
-**Build the review JSON** with `write_file` to create `/tmp/qwen-review-{target}-review.json`:
+⚠️ **Findings go in the `comments` array, NOT in `body`.** The `body` field is for the review summary (usually empty). Do NOT put findings in `body` — that creates a summary comment instead of inline comments.
+
+**Build the review JSON** with `write_file` to create `/tmp/qwen-review-{target}-review.json`. Every high-confidence Critical/Suggestion finding that can be mapped to a diff line MUST be an entry in the `comments` array:
 
 ````json
 {
@@ -414,15 +416,15 @@ Use the **pre-autofix HEAD commit SHA** captured in Step 1. If not captured, fal
 }
 ````
 
-Rules for building the JSON:
+Rules:
 
-- `event`: use `APPROVE` (no Critical), `REQUEST_CHANGES` (has Critical), or `COMMENT` (has Suggestion but no Critical). Use the **pre-fix verdict** from Step 7.
-- `body`: leave **empty** `""` when there are inline comments. Only include body text if there are findings that cannot be mapped to diff lines (put those findings in body instead).
-- `comments`: array of inline comments. Only include **high-confidence Critical and Suggestion** findings. Skip Nice to have and low-confidence (terminal-only). Each comment must reference a line that exists in the diff.
-- Each comment body follows this format: `**[Severity]** description\n\n```suggestion\nfix\n```\n\n_— {{model}} via Qwen Code /review_`
-- Use ` ```suggestion ` blocks for one-click fixes; regular code blocks if fix spans multiple locations.
-- Footer `_— {{model}} via Qwen Code /review_` must be copied exactly — do NOT rephrase.
-- Only post **ONE comment per unique issue**.
+- `event`: `APPROVE` (no Critical), `REQUEST_CHANGES` (has Critical), or `COMMENT` (Suggestion only). Do NOT use `COMMENT` when there are Critical findings.
+- `body`: **empty `""`** when there are inline comments. Only put text here if some findings cannot be mapped to diff lines (those go in body as a last resort). Never put section headers, "Review Summary", or analysis in body.
+- `comments`: **ALL** high-confidence Critical/Suggestion findings go here. Skip Nice to have and low-confidence. Each must reference a line in the diff.
+- Comment body format: `**[Severity]** description\n\n```suggestion\nfix\n```\n\n_— {{model}} via Qwen Code /review_`
+- Use ` ```suggestion ` for one-click fixes; regular code blocks if fix spans multiple locations.
+- Footer must be copied exactly — do NOT rephrase.
+- Only ONE comment per unique issue.
 
 Then submit:
 
