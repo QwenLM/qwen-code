@@ -488,4 +488,97 @@ describe('ModeManager', () => {
       expect(result.isValid).toBe(true);
     });
   });
+
+  describe('Alias Management', () => {
+    beforeEach(async () => {
+      await modeManager.loadBuiltinModes();
+    });
+
+    describe('resolveAlias', () => {
+      it('should resolve built-in alias to full mode name', () => {
+        expect(modeManager.resolveAlias('dev')).toBe('developer');
+        expect(modeManager.resolveAlias('arch')).toBe('architect');
+        expect(modeManager.resolveAlias('rev')).toBe('reviewer');
+        expect(modeManager.resolveAlias('debug')).toBe('debugger');
+        expect(modeManager.resolveAlias('test')).toBe('tester');
+        expect(modeManager.resolveAlias('ops')).toBe('devops');
+        expect(modeManager.resolveAlias('pm')).toBe('product');
+        expect(modeManager.resolveAlias('sec')).toBe('security');
+        expect(modeManager.resolveAlias('opt')).toBe('optimizer');
+      });
+
+      it('should return original name if not an alias', () => {
+        expect(modeManager.resolveAlias('developer')).toBe('developer');
+        expect(modeManager.resolveAlias('unknown')).toBe('unknown');
+      });
+
+      it('should resolve custom alias', () => {
+        modeManager.addAlias('my-dev', 'developer');
+        expect(modeManager.resolveAlias('my-dev')).toBe('developer');
+      });
+
+      it('should prioritize custom alias over built-in', () => {
+        // Add a custom alias that shadows a built-in
+        modeManager.addAlias('dev', 'architect');
+        expect(modeManager.resolveAlias('dev')).toBe('architect');
+      });
+    });
+
+    describe('addAlias', () => {
+      it('should add a custom alias for an existing mode', () => {
+        const result = modeManager.addAlias('my-alias', 'general');
+        expect(result).toBe(true);
+        expect(modeManager.resolveAlias('my-alias')).toBe('general');
+      });
+
+      it('should return false for non-existent target mode', () => {
+        const result = modeManager.addAlias('bad-alias', 'nonexistent');
+        expect(result).toBe(false);
+      });
+    });
+
+    describe('removeAlias', () => {
+      it('should remove a custom alias', () => {
+        modeManager.addAlias('temp-alias', 'general');
+        const result = modeManager.removeAlias('temp-alias');
+        expect(result).toBe(true);
+        expect(modeManager.resolveAlias('temp-alias')).toBe('temp-alias');
+      });
+
+      it('should not remove built-in aliases', () => {
+        const result = modeManager.removeAlias('dev');
+        expect(result).toBe(false);
+        expect(modeManager.resolveAlias('dev')).toBe('developer');
+      });
+
+      it('should return false for non-existent alias', () => {
+        const result = modeManager.removeAlias('nonexistent');
+        expect(result).toBe(false);
+      });
+    });
+
+    describe('getAllAliases', () => {
+      it('should include all built-in aliases', () => {
+        const aliases = modeManager.getAllAliases();
+        expect(aliases.has('dev')).toBe(true);
+        expect(aliases.has('arch')).toBe(true);
+        expect(aliases.has('pm')).toBe(true);
+      });
+
+      it('should include custom aliases', () => {
+        modeManager.addAlias('custom', 'general');
+        const aliases = modeManager.getAllAliases();
+        expect(aliases.has('custom')).toBe(true);
+      });
+    });
+
+    describe('getCustomAliases', () => {
+      it('should return only custom aliases', () => {
+        modeManager.addAlias('custom', 'general');
+        const customAliases = modeManager.getCustomAliases();
+        expect(customAliases.has('custom')).toBe(true);
+        expect(customAliases.has('dev')).toBe(false);
+      });
+    });
+  });
 });

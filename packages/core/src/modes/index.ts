@@ -23,10 +23,7 @@ export type {
   CreateModeOptions,
 } from './types.js';
 
-export {
-  ModeError,
-  ModeErrorCode,
-} from './types.js';
+export { ModeError, ModeErrorCode } from './types.js';
 
 // Manager
 export { ModeManager, type ModeManagerEvents } from './mode-manager.js';
@@ -95,10 +92,7 @@ export {
 } from './mode-inheritance.js';
 
 // Mode detection
-export {
-  ModeDetector,
-  type ModeSuggestion,
-} from './mode-detection.js';
+export { ModeDetector, type ModeSuggestion } from './mode-detection.js';
 
 // Mode context
 export {
@@ -165,3 +159,6 @@ export {
   type ModeCollaborationEvents,
   type CommunicationEntry,
 } from './mode-collaboration.js';
+
+// Mode session management (save/restore)
+export { ModeSessionManager, type SessionState } from './mode-session.js';

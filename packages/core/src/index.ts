@@ -284,10 +284,7 @@ export {
 // Modes Layer
 // ============================================================================
 
-export {
-  ModeManager,
-  type ModeManagerEvents,
-} from './modes/mode-manager.js';
+export { ModeManager, type ModeManagerEvents } from './modes/mode-manager.js';
 
 export type {
   ModeConfig,
@@ -299,10 +296,7 @@ export type {
   CreateModeOptions,
 } from './modes/types.js';
 
-export {
-  ModeError,
-  ModeErrorCode,
-} from './modes/types.js';
+export { ModeError, ModeErrorCode } from './modes/types.js';
 
 export {
   ModeQualityGateManager,
@@ -358,3 +352,5 @@ export {
   type ModeCollaborationEvents,
   type CommunicationEntry,
 } from './modes/mode-collaboration.js';
+
+export { ModeSessionManager, type SessionState } from './modes/mode-session.js';

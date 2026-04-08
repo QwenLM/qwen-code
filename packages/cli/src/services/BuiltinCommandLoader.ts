@@ -9,6 +9,7 @@ import type { SlashCommand } from '../ui/commands/types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { aboutCommand } from '../ui/commands/aboutCommand.js';
 import { agentsCommand } from '../ui/commands/agentsCommand.js';
+import { aliasCommand } from '../ui/commands/aliasCommand.js';
 import { arenaCommand } from '../ui/commands/arenaCommand.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
 import { authCommand } from '../ui/commands/authCommand.js';
@@ -34,7 +35,6 @@ import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
 import { modeCommand } from '../ui/commands/modeCommand.js';
 import { parallelCommand } from '../ui/commands/parallelCommand.js';
-import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { presetCommand } from '../ui/commands/presetCommand.js';
 import { inheritCommand } from '../ui/commands/inheritCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
@@ -91,6 +91,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
     const allDefinitions: Array<SlashCommand | null> = [
       aboutCommand,
       agentsCommand,
+      aliasCommand,
       arenaCommand,
       approvalModeCommand,
       authCommand,

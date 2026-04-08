@@ -80,6 +80,7 @@ import type { SubagentConfig } from '../subagents/types.js';
 import { ModeManager } from '../modes/mode-manager.js';
 import type { ModeRuntime } from '../modes/types.js';
 import type { ModeHook, HookExecutionResult } from '../modes/mode-hooks.js';
+import { ModeSessionManager } from '../modes/mode-session.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -493,6 +494,7 @@ export class Config {
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
   private modeManager!: ModeManager;
+  private sessionManager: ModeSessionManager | null = null;
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -1393,8 +1395,10 @@ export class Config {
    * @returns Array of tool names available for the current mode
    */
   getAvailableToolNamesForMode(): string[] {
-    return this.modeManager?.getAvailableToolNames() ??
-      this.toolRegistry.getAllToolNames();
+    return (
+      this.modeManager?.getAvailableToolNames() ??
+      this.toolRegistry.getAllToolNames()
+    );
   }
 
   /**
@@ -1403,8 +1407,10 @@ export class Config {
    * @returns Array of sub-agent names available for the current mode
    */
   getAvailableSubagentNamesForMode(): string[] {
-    return this.modeManager?.getAvailableSubagentNames() ??
-      this.subagentManager.listSubagents().map((s) => s.name);
+    return (
+      this.modeManager?.getAvailableSubagentNames() ??
+      this.subagentManager.listSubagents().map((s) => s.name)
+    );
   }
 
   /**
@@ -1413,8 +1419,11 @@ export class Config {
    * @returns Array of skill names available for the current mode
    */
   getAvailableSkillNamesForMode(): string[] {
-    return this.modeManager?.getAvailableSkillNames() ??
-      this.skillManager?.listSkills().map((s) => s.name) ?? [];
+    return (
+      this.modeManager?.getAvailableSkillNames() ??
+      this.skillManager?.listSkills().map((s) => s.name) ??
+      []
+    );
   }
 
   /**
@@ -2162,19 +2171,85 @@ export class Config {
   }
 
   async switchMode(modeName: string): Promise<ModeRuntime> {
-    return this.modeManager.switchMode(modeName, this);
+    const runtime = await this.modeManager.switchMode(modeName, this);
+    // Auto-save session after successful mode switch
+    await this.saveSession();
+    return runtime;
   }
 
   async resetMode(): Promise<void> {
     await this.modeManager.resetToDefault(this);
+    // Auto-save session after mode reset
+    await this.saveSession();
+  }
+
+  /**
+   * Save the current session state (mode + approval mode).
+   */
+  private async saveSession(): Promise<void> {
+    try {
+      if (!this.sessionManager) {
+        this.sessionManager = new ModeSessionManager(this.targetDir);
+      }
+      const currentMode = this.modeManager.getCurrentMode();
+      if (currentMode) {
+        await this.sessionManager.saveSession(
+          currentMode.config.name,
+          this.getApprovalMode(),
+        );
+      }
+    } catch {
+      // Silently fail - session save is non-critical
+    }
+  }
+
+  /**
+   * Check if there is a saved session to restore.
+   */
+  hasSavedSession(): boolean {
+    try {
+      if (!this.sessionManager) {
+        this.sessionManager = new ModeSessionManager(this.targetDir);
+      }
+      return this.sessionManager.hasSavedSession();
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Get the last saved session info.
+   */
+  getLastSessionInfo(): { modeName: string; savedAt: Date } | null {
+    try {
+      if (!this.sessionManager) {
+        this.sessionManager = new ModeSessionManager(this.targetDir);
+      }
+      const session = this.sessionManager.loadLastSession();
+      if (session) {
+        return {
+          modeName: session.modeName,
+          savedAt: session.savedAt,
+        };
+      }
+    } catch {
+      // Silently fail
+    }
+    return null;
   }
 
   registerModeHooks(hooks: ModeHook[]): void {
-    this.modeManager.registerHooks(this.modeManager.getCurrentMode()?.config.name ?? 'general', hooks);
+    this.modeManager.registerHooks(
+      this.modeManager.getCurrentMode()?.config.name ?? 'general',
+      hooks,
+    );
   }
 
-  async executeModeHooks(trigger: 'onEnter' | 'onExit' | 'onStart' | 'beforeAction' | 'afterAction'): Promise<HookExecutionResult[]> {
-    const modeName = this.modeManager.getCurrentMode()?.config.name ?? 'general';
+  async executeModeHooks(
+    trigger: 'onEnter' | 'onExit' | 'onStart' | 'beforeAction' | 'afterAction',
+  ): Promise<HookExecutionResult[]> {
+    const modeName =
+      this.modeManager.getCurrentMode()?.config.name ?? 'general';
     return this.modeManager.executeHooks(modeName, trigger);
   }
 

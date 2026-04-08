@@ -12,8 +12,6 @@
  */
 
 import { EventEmitter } from 'node:events';
-import * as fs from 'fs/promises';
-import * as path from 'path';
 import * as os from 'os';
 
 import type { Config } from '../config/config.js';
@@ -27,9 +25,7 @@ import type {
   ModeLevel,
   ValidationResult,
   ListModesOptions,
-  CreateModeOptions,
 } from './types.js';
-import { ModeError, ModeErrorCode, ModeApprovalMode } from './types.js';
 import { BUILTIN_MODES } from './builtin-modes.js';
 import {
   loadModesFromDir,
@@ -37,8 +33,17 @@ import {
   getProjectModesDir,
 } from './mode-load.js';
 import { modeValidator } from './mode-validation.js';
-import { ModeHookRegistry, type HookTrigger, type HookExecutionResult } from './mode-hooks.js';
-import { resolveInheritedMode, getInheritanceChain, isInheritedFrom, findDescendants } from './mode-inheritance.js';
+import {
+  ModeHookRegistry,
+  type HookTrigger,
+  type HookExecutionResult,
+} from './mode-hooks.js';
+import {
+  resolveInheritedMode,
+  getInheritanceChain,
+  isInheritedFrom,
+  findDescendants,
+} from './mode-inheritance.js';
 import { ModeAnalytics } from './mode-analytics.js';
 
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -55,11 +60,28 @@ export type ModeManagerEvents = {
 };
 
 /**
+ * Built-in mode aliases for quick access.
+ */
+const BUILTIN_ALIASES: Map<string, string> = new Map([
+  ['dev', 'developer'],
+  ['arch', 'architect'],
+  ['rev', 'reviewer'],
+  ['debug', 'debugger'],
+  ['test', 'tester'],
+  ['ops', 'devops'],
+  ['pm', 'product'],
+  ['sec', 'security'],
+  ['opt', 'optimizer'],
+]);
+
+/**
  * Manages mode lifecycle, loading, and switching.
  */
 export class ModeManager extends EventEmitter {
   private currentMode: ModeRuntime | null = null;
   private modeRegistry: Map<string, ModeConfig> = new Map();
+  private aliases: Map<string, string>;
+  private customAliases: Map<string, string> = new Map();
   private hookRegistry: ModeHookRegistry;
   private analytics: ModeAnalytics;
   private readonly changeListeners: Set<() => void> = new Set();
@@ -72,6 +94,7 @@ export class ModeManager extends EventEmitter {
     private readonly projectDir?: string,
   ) {
     super();
+    this.aliases = new Map(BUILTIN_ALIASES);
     this.hookRegistry = new ModeHookRegistry(config!);
     this.analytics = new ModeAnalytics();
   }
@@ -95,7 +118,7 @@ export class ModeManager extends EventEmitter {
     for (const listener of this.changeListeners) {
       try {
         listener();
-      } catch (error) {
+      } catch (_error) {
         debugLogger.warn('Mode change listener threw an error:', error);
       }
     }
@@ -123,9 +146,7 @@ export class ModeManager extends EventEmitter {
       await this.loadProjectModes(config);
     }
 
-    debugLogger.debug(
-      `Loaded ${this.modeRegistry.size} modes total`,
-    );
+    debugLogger.debug(`Loaded ${this.modeRegistry.size} modes total`);
   }
 
   /**
@@ -144,7 +165,7 @@ export class ModeManager extends EventEmitter {
    *
    * @param config - Config instance
    */
-  async loadUserModes(config: Config): Promise<void> {
+  async loadUserModes(_config: Config): Promise<void> {
     const homeDir = os.homedir();
     const userModesDir = getUserModesDir(homeDir);
 
@@ -163,7 +184,7 @@ export class ModeManager extends EventEmitter {
           );
         }
       }
-    } catch (error) {
+    } catch (_error) {
       // Directory may not exist, that's fine
       debugLogger.debug(`User modes directory not found: ${userModesDir}`);
     }
@@ -174,7 +195,7 @@ export class ModeManager extends EventEmitter {
    *
    * @param config - Config instance
    */
-  async loadProjectModes(config: Config): Promise<void> {
+  async loadProjectModes(_config: Config): Promise<void> {
     if (!this.projectDir) return;
 
     const projectModesDir = getProjectModesDir(this.projectDir);
@@ -194,7 +215,7 @@ export class ModeManager extends EventEmitter {
           );
         }
       }
-    } catch (error) {
+    } catch (_error) {
       debugLogger.debug(
         `Project modes directory not found: ${projectModesDir}`,
       );
@@ -226,9 +247,7 @@ export class ModeManager extends EventEmitter {
     }
 
     // Validate mode against current tool/subagent/skill availability
-    const availableTools = new Set(
-      this.toolRegistry.getAllToolNames(),
-    );
+    const availableTools = new Set(this.toolRegistry.getAllToolNames());
     const availableSubagents = new Set(
       this.subagentManager.listSubagents().map((s) => s.name),
     );
@@ -304,9 +323,7 @@ export class ModeManager extends EventEmitter {
     // If we have original settings, restore them
     if (this.currentMode?.originalSettings) {
       if (this.currentMode.originalSettings.approvalMode) {
-        config.setApprovalMode(
-          this.currentMode.originalSettings.approvalMode,
-        );
+        config.setApprovalMode(this.currentMode.originalSettings.approvalMode);
       }
     } else {
       // Switch to general mode
@@ -498,9 +515,7 @@ export class ModeManager extends EventEmitter {
    * @returns Validation result
    */
   validateMode(config: ModeConfig): ValidationResult {
-    const availableTools = new Set(
-      this.toolRegistry.getAllToolNames(),
-    );
+    const availableTools = new Set(this.toolRegistry.getAllToolNames());
     const availableSubagents = new Set(
       this.subagentManager.listSubagents().map((s) => s.name),
     );
@@ -590,8 +605,11 @@ export class ModeManager extends EventEmitter {
 
     try {
       return resolveInheritedMode(mode, this.modeRegistry);
-    } catch (error) {
-      debugLogger.error(`Failed to resolve inheritance for mode "${name}":`, error);
+    } catch (_error) {
+      debugLogger.error(
+        `Failed to resolve inheritance for mode "${name}":`,
+        error,
+      );
       return undefined;
     }
   }
@@ -631,6 +649,73 @@ export class ModeManager extends EventEmitter {
     if (!mode) return false;
 
     return isInheritedFrom(mode, ancestorName, this.modeRegistry);
+  }
+
+  // ─── Alias Management ──────────────────────────────────────────────────────
+
+  /**
+   * Resolve a mode name through aliases.
+   * If the name is a known alias, returns the full mode name.
+   * Otherwise, returns the original name.
+   *
+   * @param name - Alias or mode name
+   * @returns Resolved mode name
+   */
+  resolveAlias(name: string): string {
+    return this.aliases.get(name) ?? this.customAliases.get(name) ?? name;
+  }
+
+  /**
+   * Add a custom alias.
+   *
+   * @param alias - The alias name
+   * @param targetMode - The target mode name
+   * @returns True if the alias was added successfully
+   */
+  addAlias(alias: string, targetMode: string): boolean {
+    // Validate that the target mode exists
+    if (!this.modeRegistry.has(targetMode)) {
+      return false;
+    }
+    this.customAliases.set(alias, targetMode);
+    debugLogger.debug(`Added custom alias: ${alias} -> ${targetMode}`);
+    return true;
+  }
+
+  /**
+   * Remove a custom alias.
+   *
+   * @param alias - The alias to remove
+   * @returns True if the alias was removed
+   */
+  removeAlias(alias: string): boolean {
+    // Don't allow removing built-in aliases
+    if (BUILTIN_ALIASES.has(alias)) {
+      return false;
+    }
+    const removed = this.customAliases.delete(alias);
+    if (removed) {
+      debugLogger.debug(`Removed custom alias: ${alias}`);
+    }
+    return removed;
+  }
+
+  /**
+   * Get all aliases (built-in + custom).
+   *
+   * @returns Map of alias -> mode name
+   */
+  getAllAliases(): Map<string, string> {
+    return new Map([...BUILTIN_ALIASES, ...this.customAliases]);
+  }
+
+  /**
+   * Get custom aliases only.
+   *
+   * @returns Map of custom alias -> mode name
+   */
+  getCustomAliases(): Map<string, string> {
+    return new Map(this.customAliases);
   }
 
   // ─── Analytics ─────────────────────────────────────────────────────────────

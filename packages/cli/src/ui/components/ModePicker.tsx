@@ -4,35 +4,43 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useCallback } from 'react';
+import type React from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Box, Text, useInput } from 'ink';
 import type { Config } from '@qwen-code/qwen-code-core';
-import type { ModeConfig } from '@qwen-code/qwen-code-core';
 import { theme } from '../semantic-colors.js';
 
 interface ModePickerProps {
   config: Config | null;
   onSelect: (modeName: string) => void;
   onCancel: () => void;
+  variant?: 'quick' | 'default';
 }
 
 /**
  * Interactive mode picker dialog.
  * Displayed when user presses 'M' key.
+ * Supports two variants:
+ * - 'default': Standard mode picker with navigation
+ * - 'quick': Numbered quick switch menu for fast mode selection
  */
 export const ModePicker: React.FC<ModePickerProps> = ({
   config,
   onSelect,
   onCancel,
+  variant = 'default',
 }) => {
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  const modes = config?.getModeManager().getAvailableModes() ?? [];
+  const modes = useMemo(
+    () => config?.getModeManager().getAvailableModes() ?? [],
+    [config],
+  );
   const currentMode = config?.getCurrentMode();
   const currentName = currentMode?.config.name;
 
   // Find index of current mode
-  React.useEffect(() => {
+  useEffect(() => {
     if (currentName) {
       const idx = modes.findIndex((m) => m.name === currentName);
       if (idx >= 0) {
@@ -54,6 +62,15 @@ export const ModePicker: React.FC<ModePickerProps> = ({
         return;
       }
 
+      // Handle numbered input for quick variant
+      if (variant === 'quick') {
+        const num = parseInt(input, 10);
+        if (!isNaN(num) && num >= 1 && num <= modes.length) {
+          onSelect(modes[num - 1].name);
+          return;
+        }
+      }
+
       switch (input) {
         case 'up':
         case 'k':
@@ -65,6 +82,8 @@ export const ModePicker: React.FC<ModePickerProps> = ({
           break;
         case 'return':
           handleSelect();
+          break;
+        default:
           break;
       }
     },
@@ -78,6 +97,53 @@ export const ModePicker: React.FC<ModePickerProps> = ({
     );
   }
 
+  // Quick variant: numbered list
+  if (variant === 'quick') {
+    return (
+      <Box flexDirection="column" paddingX={1} paddingY={1} width={70}>
+        <Box>
+          <Text bold color={theme.ui.accent}>
+            Quick Switch Menu
+          </Text>
+          <Text color={theme.text.secondary}>
+            {' '}
+            (press number or navigate + Enter)
+          </Text>
+        </Box>
+        <Box marginTop={1} flexDirection="column">
+          {modes.map((mode, index) => {
+            const isSelected = index === selectedIndex;
+            const isCurrent = mode.name === currentName;
+            const color = mode.color || theme.ui.accent;
+            const number = index + 1;
+
+            return (
+              <Box key={mode.name}>
+                <Text color={isSelected ? color : theme.text.secondary}>
+                  {isSelected ? '▸ ' : '  '}
+                  {number}. {mode.icon} {mode.displayName}
+                  {isCurrent && !isSelected ? ' (current)' : ''}
+                </Text>
+                {isSelected && (
+                  <Text color={theme.text.secondary}>
+                    {' '}
+                    — {mode.description}
+                  </Text>
+                )}
+              </Box>
+            );
+          })}
+        </Box>
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary}>
+            Press 1-{modes.length} to switch, Esc to cancel
+          </Text>
+        </Box>
+      </Box>
+    );
+  }
+
+  // Default variant
   return (
     <Box flexDirection="column" paddingX={1} paddingY={1} width={60}>
       <Box>
@@ -85,7 +151,8 @@ export const ModePicker: React.FC<ModePickerProps> = ({
           Select Mode
         </Text>
         <Text color={theme.text.secondary}>
-          {' '}(↑↓ navigate, enter select, esc cancel)
+          {' '}
+          (navigate with arrows, enter select, esc cancel)
         </Text>
       </Box>
       <Box marginTop={1} flexDirection="column">
@@ -102,10 +169,7 @@ export const ModePicker: React.FC<ModePickerProps> = ({
                 {isCurrent && !isSelected ? ' (current)' : ''}
               </Text>
               {isSelected && (
-                <Text color={theme.text.secondary}>
-                  {' '}
-                  — {mode.description}
-                </Text>
+                <Text color={theme.text.secondary}> — {mode.description}</Text>
               )}
             </Box>
           );
