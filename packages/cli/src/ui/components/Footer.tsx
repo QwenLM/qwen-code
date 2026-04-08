@@ -122,7 +122,7 @@ export const Footer: React.FC = () => {
             {statusLineText}
           </Text>
         )}
-        {leftBottomContent}
+        <Text wrap="truncate">{leftBottomContent}</Text>
       </Box>
 
       {/* Right Section — never compressed */}
