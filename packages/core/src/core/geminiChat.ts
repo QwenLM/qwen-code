@@ -584,8 +584,9 @@ export class GeminiChat {
    * model turns) so the most recent reasoning chain is always preserved
    * even if later model turns happen to have no thinking.
    *
-   * Used for idle cleanup: after >1h idle the old thinking blocks are no
-   * longer useful for reasoning coherence but still consume context tokens.
+   * Used for idle cleanup: after exceeding the configured idle threshold
+   * the old thinking blocks are no longer useful for reasoning coherence
+   * but still consume context tokens.
    */
   stripThoughtsFromHistoryKeepRecent(keepTurns: number): void {
     keepTurns = Number.isFinite(keepTurns)

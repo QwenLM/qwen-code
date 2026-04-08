@@ -111,13 +111,6 @@ export interface SendMessageOptions {
   };
 }
 
-/**
- * Idle threshold for thinking block cleanup. After this period without any
- * API call the old thinking blocks are unlikely to aid reasoning coherence
- * and only waste context tokens.
- */
-const THINKING_IDLE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
-
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
@@ -143,11 +136,11 @@ export class GeminiClient {
 
   /**
    * Sticky-on latch for clearing thinking blocks from prior turns.
-   * Triggered when >1h since last API call — old thinking is no longer
-   * useful for reasoning coherence. Once latched, stays true to prevent
-   * oscillation: without it, thinking would accumulate → get stripped →
-   * accumulate again, causing the message prefix to change repeatedly
-   * (bad for any provider-side prompt caching and wastes context).
+   * Triggered when idle exceeds the configured threshold (default 5 min,
+   * aligned with provider prompt-cache TTL). Once latched, stays true to
+   * prevent oscillation: without it, thinking would accumulate → get
+   * stripped → accumulate again, causing the message prefix to change
+   * repeatedly (bad for provider-side prompt caching and wastes context).
    * Reset on /clear (resetChat).
    */
   private thinkingClearLatched = false;
@@ -567,18 +560,19 @@ export class GeminiClient {
       this.config.getChatRecordingService()?.recordUserMessage(request);
 
       // Thinking block cross-turn retention with idle cleanup:
-      // - Active session (< 1h idle): keep thinking blocks for reasoning coherence
-      // - Idle > 1h: clear old thinking, keep only last 1 turn to free context
+      // - Active session (< threshold idle): keep thinking blocks for reasoning coherence
+      // - Idle > threshold: clear old thinking, keep only last 1 turn to free context
       // - Latch: once triggered, never revert — prevents oscillation
       if (
         !this.thinkingClearLatched &&
         this.lastApiCompletionTimestamp !== null
       ) {
+        const thresholdMs = this.config.getThinkingIdleThresholdMs();
         const idleMs = Date.now() - this.lastApiCompletionTimestamp;
-        if (idleMs > THINKING_IDLE_THRESHOLD_MS) {
+        if (idleMs > thresholdMs) {
           this.thinkingClearLatched = true;
           debugLogger.debug(
-            `Thinking clear latched: idle ${Math.round(idleMs / 1000)}s > threshold ${THINKING_IDLE_THRESHOLD_MS / 1000}s`,
+            `Thinking clear latched: idle ${Math.round(idleMs / 1000)}s > threshold ${thresholdMs / 1000}s`,
           );
         }
       }

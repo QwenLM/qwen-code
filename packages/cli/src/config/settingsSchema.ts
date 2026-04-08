@@ -914,6 +914,16 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      gapThresholdMinutes: {
+        type: 'number',
+        label: 'Thinking Block Idle Threshold (minutes)',
+        category: 'Context',
+        requiresRestart: false,
+        default: 5,
+        description:
+          'Minutes of inactivity after which retained thinking blocks are cleared to free context tokens. Aligns with provider prompt-cache TTL.',
+        showInDialog: false,
+      },
     },
   },
 

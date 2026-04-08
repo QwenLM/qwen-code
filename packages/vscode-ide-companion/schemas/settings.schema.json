@@ -383,6 +383,11 @@
               "default": true
             }
           }
+        },
+        "gapThresholdMinutes": {
+          "description": "Minutes of inactivity after which retained thinking blocks are cleared to free context tokens. Aligns with provider prompt-cache TTL.",
+          "type": "number",
+          "default": 5
         }
       }
     },
