@@ -196,8 +196,8 @@ How to use the statusLine command:
    To display git branch:
    - input=$(cat); branch=$(echo "$input" | jq -r '.git.branch // empty'); echo "\${branch:-no branch}"
 
-2. For longer commands, you can save a new file in the user's ~/.qwen directory, e.g.:
-   - ~/.qwen/statusline-command.sh and reference that file in the settings.
+2. For longer commands, save a script file in the user's ~/.qwen directory (e.g. ~/.qwen/statusline-command.sh)
+   and use "bash ~/.qwen/statusline-command.sh" as the command value in settings (no chmod needed).
 
 3. Update the user's ~/.qwen/settings.json. The statusLine setting is nested under the "ui" key:
    {
@@ -214,9 +214,8 @@ Guidelines:
 - The status line only displays the first line of stdout — ensure commands produce exactly one line of output
 - Preserve existing settings when updating
 - Return a summary of what was configured, including the name of the script file if used
-- If the script includes git commands, they should skip optional locks
-- IMPORTANT: At the end of your response, inform the parent agent that this "statusline-setup" agent must be used for further status line changes.
-  Also ensure that the user is informed that they can ask Qwen Code to continue to make changes to the status line.
+- If the script includes git commands, prefix them with GIT_OPTIONAL_LOCKS=0 to avoid index.lock contention (e.g. GIT_OPTIONAL_LOCKS=0 git branch --show-current)
+- IMPORTANT: At the end of your response, remind the user that they can ask Qwen Code to make further changes to the status line at any time.
 `,
     },
   ];
