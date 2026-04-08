@@ -1236,6 +1236,8 @@ export default {
   'Always allow for this user': 'Always allow for this user',
   'Always allow {{action}} for this user':
     'Always allow {{action}} for this user',
+  'Yes, restore previous mode ({{mode}})':
+    'Yes, restore previous mode ({{mode}})',
   'Yes, and auto-accept edits': 'Yes, and auto-accept edits',
   'Yes, and manually approve edits': 'Yes, and manually approve edits',
   'No, keep planning (esc)': 'No, keep planning (esc)',

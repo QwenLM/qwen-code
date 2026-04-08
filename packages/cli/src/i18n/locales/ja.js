@@ -918,6 +918,8 @@ export default {
     'このプロジェクトで{{action}}を常に許可',
   'Always allow for this user': 'このユーザーに常に許可',
   'Always allow {{action}} for this user': 'このユーザーに{{action}}を常に許可',
+  'Yes, restore previous mode ({{mode}})':
+    'はい、以前のモードに戻す ({{mode}})',
   'Yes, and auto-accept edits': 'はい、編集を自動承認',
   'Yes, and manually approve edits': 'はい、編集を手動承認',
   'No, keep planning (esc)': 'いいえ、計画を続ける (Esc)',

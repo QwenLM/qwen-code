@@ -1072,6 +1072,7 @@ export class Session implements SessionContext {
             case ToolConfirmationOutcome.ProceedAlwaysServer:
             case ToolConfirmationOutcome.ProceedAlwaysTool:
             case ToolConfirmationOutcome.ModifyWithEditor:
+            case ToolConfirmationOutcome.RestorePrevious:
               break;
             default: {
               const resultOutcome: never = outcome;
