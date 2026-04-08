@@ -739,38 +739,68 @@ export class GeminiChat {
       });
     }
 
-    // Stream validation logic: A stream is considered successful if:
-    // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
-    // 2. There's a finish reason AND we have non-empty response content (text or thought), OR
-    // 3. There's no finish reason BUT we have substantial content — the stream was
-    //    likely cut off by a transient network issue. We accept the partial response
-    //    with a warning rather than discarding it and retrying (which causes worse UX).
+    // ---------------------------------------------------------------------------
+    // Stream validation — why this matters and what can go wrong
+    // ---------------------------------------------------------------------------
     //
-    // We throw an error only when there's no tool call AND:
-    // - No finish reason AND no content at all (truly empty / broken stream), OR
-    // - Has finish reason but no content (empty response from model)
+    // ROOT CAUSE (observed in production via DashScope pipeline):
+    //   Some model providers / gateways terminate the SSE stream WITHOUT sending
+    //   a `finishReason` field (e.g. "STOP", "SAFETY"). This violates the
+    //   streaming protocol contract. Known triggers include:
+    //     - Transient network interruptions between gateway and model backend
+    //     - Model refusing to respond to nonsensical / policy-violating input
+    //       but not emitting a proper SAFETY finish reason
+    //     - Provider-side timeout or internal error that silently closes the
+    //       connection instead of sending an error frame
     //
-    // Note: Thoughts-only responses are valid for models that use thinking modes.
-    // These models may send only reasoning content without explicit text output.
+    //   The absence of `finishReason` is the ONLY signal we have — the HTTP
+    //   status is 200, the SSE stream closes cleanly, and no error is thrown
+    //   by the transport layer.
+    //
+    // IMPACT (before this fix):
+    //   ALL missing-finishReason cases were treated identically: the already-
+    //   streamed content (visible to the user in the TUI) was silently
+    //   discarded, the request was retried up to 2 times, and if still failing
+    //   the user saw "[API Error: Model stream ended without a finish reason.]"
+    //   This was especially bad when the model had already delivered useful
+    //   partial content (e.g. half a code block) — the user saw it disappear
+    //   and then got an error.
+    //
+    // FIX — three-way validation:
+    //   1. Tool call present → always accept (tool calls may lack finishReason)
+    //   2. No tool call, no content, no finishReason → throw NO_FINISH_REASON
+    //      (genuinely broken / empty stream, retry is appropriate)
+    //   3. No tool call, has finishReason, but no content → throw NO_RESPONSE_TEXT
+    //      (model explicitly finished but gave nothing useful, retry is appropriate)
+    //   4. No tool call, has content, but no finishReason → ACCEPT with warning
+    //      (content was already streamed to user; discarding it is worse than
+    //       accepting a potentially truncated response)
+    //
+    // Additionally, `hasAnyContent` now includes thought/reasoning text so that
+    // thinking-mode models (which may emit only thought parts) are not
+    // incorrectly rejected as "empty".
+    // ---------------------------------------------------------------------------
     const hasAnyContent = contentText || thoughtText;
     if (!hasToolCall) {
       if (!hasFinishReason && !hasAnyContent) {
-        // Truly empty stream with no finish reason — broken connection or empty response.
+        // Genuinely broken stream — no content delivered, no finish signal.
         throw new InvalidStreamError(
           'Model stream ended without a finish reason.',
           'NO_FINISH_REASON',
         );
       } else if (hasFinishReason && !hasAnyContent) {
-        // Model explicitly finished but produced no usable content.
+        // Model sent a finish signal but produced zero usable content.
         throw new InvalidStreamError(
           'Model stream ended with empty response text.',
           'NO_RESPONSE_TEXT',
         );
       } else if (!hasFinishReason && hasAnyContent) {
-        // Stream delivered content but was cut off without a finish reason.
-        // Accept the partial response to avoid discarding useful content.
+        // Stream was cut off but useful content has already been delivered.
+        // Accept the partial response to preserve user-visible output rather
+        // than discarding it and showing an error.
         debugLogger.warn(
-          'Stream ended without a finish reason but has content. ' +
+          'Stream ended without a finish reason but has content ' +
+            `(${contentText.length} chars text, ${thoughtText.length} chars thought). ` +
             'Accepting partial response to preserve user-visible output.',
         );
       }
