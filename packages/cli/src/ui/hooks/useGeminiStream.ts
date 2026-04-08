@@ -224,17 +224,6 @@ export const useGeminiStream = (
           );
           addItem(toolGroupDisplay, Date.now());
 
-          // If any in-turn tools wrote to managed-auto-memory files, emit a notification.
-          if (toolGroupDisplay.memoryWriteCount) {
-            addItem(
-              {
-                type: 'memory_saved',
-                writtenCount: toolGroupDisplay.memoryWriteCount,
-              } as HistoryItemWithoutId,
-              Date.now(),
-            );
-          }
-
           // Handle tool response submission immediately when tools complete
           await handleCompletedTools(
             completedToolCallsFromScheduler as TrackedToolCall[],

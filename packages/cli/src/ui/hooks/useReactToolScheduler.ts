@@ -220,7 +220,7 @@ function detectMemoryOp(
   args: Record<string, unknown>,
   projectRoot: string,
 ): 'read' | 'write' | undefined {
-  const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'create_file']);
+  const WRITE_TOOLS = new Set(['write_file', 'edit']);
   const READ_TOOLS = new Set(['read_file']);
   const filePath = args?.['file_path'] as string | undefined;
   if (!filePath) return undefined;
