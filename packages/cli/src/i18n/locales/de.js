@@ -1971,6 +1971,6 @@ export default {
   verbose: 'ausführlich',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     'Vollständige Tool-Ausgabe und Denkprozess im ausführlichen Modus anzeigen (mit Strg+O umschalten).',
-  'Press Ctrl+O to show full tool output':
-    'Strg+O für vollständige Tool-Ausgabe drücken',
+  'Press Ctrl+O to toggle verbose mode':
+    'Strg+O zum Umschalten des ausführlichen Modus drücken',
 };

@@ -101,7 +101,7 @@ export const CompactToolGroupDisplay: React.FC<
 
       {/* Hint line */}
       <Text color={theme.text.secondary}>
-        {t('Press Ctrl+O to show full tool output')}
+        {t('Press Ctrl+O to toggle verbose mode')}
       </Text>
     </Box>
   );

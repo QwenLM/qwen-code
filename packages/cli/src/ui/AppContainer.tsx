@@ -776,24 +776,22 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
-    useMessageQueue({
-      isConfigInitialized,
-      streamingState,
-      submitQuery,
-    });
+  const {
+    messageQueue,
+    addMessage,
+    clearQueue,
+    getQueuedMessagesText,
+    drainQueue,
+  } = useMessageQueue({
+    isConfigInitialized,
+    streamingState,
+    submitQuery,
+  });
 
   // Bridge message queue to mid-turn drain via ref.
-  // Sync ref on every render so the drain callback always reads latest state.
-  const messageQueueRef = useRef(messageQueue);
-  messageQueueRef.current = messageQueue;
-  midTurnDrainRef.current = () => {
-    const queue = messageQueueRef.current;
-    if (queue.length === 0) return [];
-    messageQueueRef.current = [];
-    clearQueue();
-    return [...queue];
-  };
+  // drainQueue reads from the synchronous queueRef inside useMessageQueue,
+  // so it always sees the latest state even between renders.
+  midTurnDrainRef.current = drainQueue;
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(

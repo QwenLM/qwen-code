@@ -175,6 +175,8 @@ export function useStatusLine(): {
   const { currentModel, branchName } = uiState;
   const totalToolCalls = uiState.sessionStats.metrics.tools.totalCalls;
   const totalLinesAdded = uiState.sessionStats.metrics.files.totalLinesAdded;
+  const totalLinesRemoved =
+    uiState.sessionStats.metrics.files.totalLinesRemoved;
   const effectiveVim = vimEnabled ? vimMode : undefined;
   const prevStateRef = useRef<{
     promptTokenCount: number;
@@ -183,6 +185,7 @@ export function useStatusLine(): {
     branchName: string | undefined;
     totalToolCalls: number;
     totalLinesAdded: number;
+    totalLinesRemoved: number;
   }>({
     promptTokenCount: lastPromptTokenCount,
     currentModel,
@@ -190,6 +193,7 @@ export function useStatusLine(): {
     branchName,
     totalToolCalls,
     totalLinesAdded,
+    totalLinesRemoved,
   });
 
   // Guard: when true, the mount effect has already called doUpdate so the
@@ -216,8 +220,15 @@ export function useStatusLine(): {
       cfg.getContentGeneratorConfig()?.contextWindowSize || 0;
     const usedPercentage =
       contextWindowSize > 0
-        ? Math.round((stats.lastPromptTokenCount / contextWindowSize) * 1000) /
-          10
+        ? Math.min(
+            100,
+            Math.max(
+              0,
+              Math.round(
+                (stats.lastPromptTokenCount / contextWindowSize) * 1000,
+              ) / 10,
+            ),
+          )
         : 0;
 
     let totalInputTokens = 0;
@@ -238,9 +249,15 @@ export function useStatusLine(): {
         used_percentage: usedPercentage,
         remaining_percentage:
           contextWindowSize > 0
-            ? Math.round(
-                (1 - stats.lastPromptTokenCount / contextWindowSize) * 1000,
-              ) / 10
+            ? Math.min(
+                100,
+                Math.max(
+                  0,
+                  Math.round(
+                    (1 - stats.lastPromptTokenCount / contextWindowSize) * 1000,
+                  ) / 10,
+                ),
+              )
             : 100,
         current_usage: stats.lastPromptTokenCount,
         total_input_tokens: totalInputTokens,
@@ -256,7 +273,7 @@ export function useStatusLine(): {
       }),
       metrics: buildMetricsPayload(m),
       ...(vimEnabledRef.current && {
-        vim: { mode: vimModeRef.current ?? 'INSERT' },
+        vim: { mode: vimModeRef.current },
       }),
     };
 
@@ -328,7 +345,8 @@ export function useStatusLine(): {
       effectiveVim !== prev.effectiveVim ||
       branchName !== prev.branchName ||
       totalToolCalls !== prev.totalToolCalls ||
-      totalLinesAdded !== prev.totalLinesAdded
+      totalLinesAdded !== prev.totalLinesAdded ||
+      totalLinesRemoved !== prev.totalLinesRemoved
     ) {
       prev.promptTokenCount = lastPromptTokenCount;
       prev.currentModel = currentModel;
@@ -336,6 +354,7 @@ export function useStatusLine(): {
       prev.branchName = branchName;
       prev.totalToolCalls = totalToolCalls;
       prev.totalLinesAdded = totalLinesAdded;
+      prev.totalLinesRemoved = totalLinesRemoved;
       scheduleUpdate();
     }
   }, [
@@ -346,6 +365,7 @@ export function useStatusLine(): {
     branchName,
     totalToolCalls,
     totalLinesAdded,
+    totalLinesRemoved,
     scheduleUpdate,
   ]);
 
@@ -379,6 +399,7 @@ export function useStatusLine(): {
       genRef.current++;
       if (debounceRef.current !== undefined) {
         clearTimeout(debounceRef.current);
+        debounceRef.current = undefined;
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps

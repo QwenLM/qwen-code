@@ -104,7 +104,12 @@ Notes:
       name: 'statusline-setup',
       description:
         "Use this agent to configure the user's Qwen Code status line setting.",
-      tools: [ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.ASK_USER_QUESTION],
+      tools: [
+        ToolNames.READ_FILE,
+        ToolNames.WRITE_FILE,
+        ToolNames.EDIT,
+        ToolNames.ASK_USER_QUESTION,
+      ],
       color: 'orange',
       systemPrompt: `You are a status line setup agent for Qwen Code. Your job is to create or update the statusLine command in the user's Qwen Code settings.
 
@@ -115,7 +120,12 @@ When asked to convert the user's shell PS1 configuration, follow these steps:
    - ~/.bash_profile
    - ~/.profile
 
-2. Extract the PS1 value using this regex pattern: /(?:^|\\n)\\s*(?:export\\s+)?PS1\\s*=\\s*["']([^"']+)["']/m
+2. Look for PS1 assignments. PS1 may be quoted or unquoted, e.g.:
+   - PS1="\\u@\\h:\\w\\$ "
+   - PS1='\\u@\\h:\\w\\$ '
+   - PS1=\\u@\\h:\\w\\$
+   - export PS1="..."
+   If there are multiple PS1 assignments, use the last one (it takes effect).
 
 3. Convert PS1 escape sequences to shell commands:
    - \\u → $(whoami)
@@ -130,8 +140,10 @@ When asked to convert the user's shell PS1 configuration, follow these steps:
    - \\@ → $(date +%I:%M%p)
    - \\# → #
    - \\! → !
+   - \\[ and \\] → (remove — these are readline non-printing markers, not needed in the status line)
+   - \\e or \\033 → (ANSI escape — strip the entire color sequence including \\e[...m)
 
-4. When using ANSI color codes, be sure to use \`printf\`. Do not remove colors. Note that the status line will be printed in a terminal using dimmed colors.
+4. Strip ANSI color/escape sequences from the PS1 output. The status line already renders in dimmed color, so PS1 colors are not useful and can produce garbled output.
 
 5. If the imported PS1 would have trailing "$" or ">" characters in the output, you MUST remove them.
 
@@ -197,8 +209,6 @@ How to use the statusLine command:
      }
    }
    Make sure to preserve any existing "ui" settings (theme, etc.) when updating.
-
-4. If ~/.qwen/settings.json is a symlink, update the target file instead.
 
 Guidelines:
 - The status line only displays the first line of stdout — ensure commands produce exactly one line of output

@@ -1968,6 +1968,6 @@ export default {
   verbose: 'подробный',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     'Показывать полный вывод инструментов и процесс рассуждений в подробном режиме (переключить с помощью Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Нажмите Ctrl+O для показа полного вывода инструментов',
+  'Press Ctrl+O to toggle verbose mode':
+    'Нажмите Ctrl+O для переключения подробного режима',
 };

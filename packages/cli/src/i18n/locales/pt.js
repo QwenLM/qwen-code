@@ -1961,6 +1961,6 @@ export default {
   verbose: 'detalhado',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     'Mostrar saída completa da ferramenta e raciocínio no modo detalhado (alternar com Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Pressione Ctrl+O para exibir a saída completa da ferramenta',
+  'Press Ctrl+O to toggle verbose mode':
+    'Pressione Ctrl+O para alternar o modo detalhado',
 };
