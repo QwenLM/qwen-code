@@ -49,7 +49,10 @@ export interface UseFollowupSuggestionsReturn {
   /** Set suggestion text (called by parent component) */
   setSuggestion: (text: string | null) => void;
   /** Accept the current suggestion */
-  accept: (method?: 'tab' | 'enter' | 'right') => void;
+  accept: (
+    method?: 'tab' | 'enter' | 'right',
+    options?: { skipOnAccept?: boolean },
+  ) => void;
   /** Dismiss the current suggestion */
   dismiss: () => void;
   /** Clear all state */

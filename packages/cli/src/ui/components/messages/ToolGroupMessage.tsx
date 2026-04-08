@@ -74,9 +74,14 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   );
 
   const hasConfirmingTool = toolAwaitingApproval !== undefined;
+  const hasErrorTool = toolCalls.some((t) => t.status === ToolCallStatus.Error);
+  // Compact mode: entire group → single line summary
+  // Force-expand when: user must interact (Confirming), tool errored,
+  // shell is focused, or user-initiated
   const showCompact =
     !verboseMode &&
     !hasConfirmingTool &&
+    !hasErrorTool &&
     !isEmbeddedShellFocused &&
     !isUserInitiated;
 
@@ -142,7 +147,11 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 activeShellPtyId={activeShellPtyId}
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
-                forceShowResult={isUserInitiated}
+                forceShowResult={
+                  isUserInitiated ||
+                  tool.status === ToolCallStatus.Confirming ||
+                  tool.status === ToolCallStatus.Error
+                }
               />
             </Box>
             {tool.status === ToolCallStatus.Confirming &&

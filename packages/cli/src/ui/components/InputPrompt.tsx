@@ -839,6 +839,24 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
+        // Pop all queued messages into input when pressing Up arrow at top of input
+        if (
+          !isAttachmentMode &&
+          uiState.messageQueue.length > 0 &&
+          keyMatchers[Command.NAVIGATION_UP](key) &&
+          (buffer.allVisualLines.length === 1 ||
+            (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
+        ) {
+          const popped = uiActions.popAllQueuedMessages();
+          if (popped) {
+            const currentText = buffer.text;
+            const newText = currentText ? `${popped}\n${currentText}` : popped;
+            buffer.setText(newText);
+            return true;
+          }
+          // popped is null (queue already cleared) — fall through to history
+        }
+
         if (keyMatchers[Command.HISTORY_UP](key)) {
           inputHistory.navigateUp();
           return true;
@@ -892,7 +910,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           followup.state.suggestion
         ) {
           const text = followup.state.suggestion;
-          followup.accept('enter');
+          // Skip onAccept (buffer.insert) — we pass the text directly to
+          // handleSubmitAndClear which clears the buffer synchronously.
+          // Without skipOnAccept the microtask in accept() would re-insert
+          // the suggestion into the buffer after it was already cleared.
+          followup.accept('enter', { skipOnAccept: true });
           handleSubmitAndClear(text);
           return true;
         }
