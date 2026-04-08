@@ -52,13 +52,9 @@ export const Footer: React.FC = () => {
   const contextWindowSize =
     config.getContentGeneratorConfig()?.contextWindowSize;
 
-  // Left section priority: high-priority messages > status line > hint.
-  // Approval mode indicator is rendered as a separate row below when non-default.
-  const isNonDefaultMode =
-    showAutoAcceptIndicator !== undefined &&
-    showAutoAcceptIndicator !== ApprovalMode.DEFAULT;
-
-  const leftContent = uiState.ctrlCPressedOnce ? (
+  // Left bottom row: high-priority messages > approval mode > hint.
+  // Matches upstream layout where status line and hints coexist vertically.
+  const leftBottomContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
@@ -68,10 +64,9 @@ export const Footer: React.FC = () => {
     <Text color={theme.text.secondary}>-- INSERT --</Text>
   ) : uiState.shellModeActive ? (
     <ShellModeIndicator />
-  ) : statusLineText ? (
-    <Text dimColor wrap="wrap">
-      {statusLineText}
-    </Text>
+  ) : showAutoAcceptIndicator !== undefined &&
+    showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
+    <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );
@@ -110,51 +105,35 @@ export const Footer: React.FC = () => {
     });
   }
 
-  // Status line is inlined in the footer's left section.
-  // Approval mode indicator renders as a separate row below when non-default.
+  // Layout matches upstream: left column has status line (top) + hints/mode
+  // (bottom), right section has indicators. Status line and hints coexist.
   return (
-    <Box flexDirection="column" width="100%">
-      <Box
-        justifyContent="space-between"
-        width="100%"
-        flexDirection="row"
-        alignItems="center"
-      >
-        {/* Left Section — shrinks to accommodate right items */}
-        <Box
-          marginLeft={2}
-          flexGrow={1}
-          flexShrink={1}
-          justifyContent="flex-start"
-          flexDirection={isNarrow ? 'column' : 'row'}
-          alignItems={isNarrow ? 'flex-start' : 'center'}
-          overflow="hidden"
-        >
-          {leftContent}
-        </Box>
-
-        {/* Right Section — never compressed */}
-        <Box
-          flexShrink={0}
-          alignItems="center"
-          justifyContent="flex-end"
-          marginRight={2}
-        >
-          {rightItems.map(({ key, node }, index) => (
-            <Box key={key} alignItems="center">
-              {index > 0 && <Text color={theme.text.secondary}> | </Text>}
-              {node}
-            </Box>
-          ))}
-        </Box>
+    <Box
+      flexDirection={isNarrow ? 'column' : 'row'}
+      justifyContent={isNarrow ? 'flex-start' : 'space-between'}
+      width="100%"
+      paddingX={2}
+      gap={isNarrow ? 0 : 1}
+    >
+      {/* Left column — status line on top, hints/mode on bottom */}
+      <Box flexDirection="column" flexShrink={isNarrow ? 0 : 1}>
+        {statusLineText && (
+          <Text dimColor wrap="truncate">
+            {statusLineText}
+          </Text>
+        )}
+        {leftBottomContent}
       </Box>
 
-      {/* Approval mode indicator — shown as separate row when non-default */}
-      {isNonDefaultMode && (
-        <Box marginLeft={2} marginRight={2}>
-          <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-        </Box>
-      )}
+      {/* Right Section — never compressed */}
+      <Box flexShrink={0} gap={1}>
+        {rightItems.map(({ key, node }, index) => (
+          <Box key={key} alignItems="center">
+            {index > 0 && <Text color={theme.text.secondary}> | </Text>}
+            {node}
+          </Box>
+        ))}
+      </Box>
     </Box>
   );
 };
