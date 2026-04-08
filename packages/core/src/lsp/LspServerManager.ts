@@ -28,6 +28,7 @@ import type {
   LspServerStatus,
   LspSocketOptions,
 } from './types.js';
+import { isPublishDiagnosticsParams } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('LSP');
@@ -58,6 +59,8 @@ export class LspServerManager {
       this.serverHandles.set(config.name, {
         config,
         status: 'NOT_STARTED',
+        cachedDiagnostics: new Map(),
+        pendingDiagnostics: new Map(),
       });
     }
   }
@@ -264,6 +267,21 @@ export class LspServerManager {
       handle.connection = connection.connection;
       handle.process = connection.process;
 
+      handle.connection.onNotification((msg) => {
+        if (
+          msg &&
+          msg.method === 'textDocument/publishDiagnostics' &&
+          isPublishDiagnosticsParams(msg.params)
+        ) {
+          handle.cachedDiagnostics.set(msg.params.uri, msg.params.diagnostics);
+          const pending = handle.pendingDiagnostics.get(msg.params.uri);
+          if (pending) {
+            handle.pendingDiagnostics.delete(msg.params.uri);
+            pending.resolve();
+          }
+        }
+      });
+
       // Initialize LSP server
       await this.initializeLspServer(connection, handle.config);
 
@@ -370,6 +388,8 @@ export class LspServerManager {
     handle.error = undefined;
     handle.warmedUp = false;
     handle.stopRequested = false;
+    handle.cachedDiagnostics?.clear();
+    handle.pendingDiagnostics?.clear();
   }
 
   private buildProcessEnv(
@@ -527,6 +547,8 @@ export class LspServerManager {
           references: { dynamicRegistration: true },
           documentSymbol: { dynamicRegistration: true },
           codeAction: { dynamicRegistration: true },
+          // Signal acceptance of publishDiagnostics notifications from server
+          publishDiagnostics: {},
         },
         workspace: {
           workspaceFolders: true,

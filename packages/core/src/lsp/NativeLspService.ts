@@ -1064,6 +1064,85 @@ export class NativeLspService {
           `LSP textDocument/diagnostic failed for ${name}:`,
           error,
         );
+
+        // Force-refresh the document: send didClose + didOpen to trigger fresh analysis
+        const openedForServer = this.openedDocuments.get(name);
+        if (openedForServer?.has(uri)) {
+          openedForServer.delete(uri);
+          try {
+            const filePath = fileURLToPath(uri);
+            const text = fs.readFileSync(filePath, 'utf-8');
+            const languageId =
+              this.resolveLanguageId(filePath, handle) ?? 'plaintext';
+            handle.connection.send({
+              jsonrpc: '2.0',
+              method: 'textDocument/didClose',
+              params: { textDocument: { uri } },
+            });
+            handle.connection.send({
+              jsonrpc: '2.0',
+              method: 'textDocument/didOpen',
+              params: {
+                textDocument: {
+                  uri,
+                  languageId,
+                  version: Date.now(),
+                  text,
+                },
+              },
+            });
+            await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS * 5);
+          } catch (err) {
+            debugLogger.warn(`Failed to refresh document:`, err);
+            openedForServer.add(uri);
+          }
+        }
+        // Check push diagnostics cache (freshly updated after didOpen)
+        const cache = handle.cachedDiagnostics;
+        if (cache) {
+          const cached = cache.get(uri);
+          if (cached && cached.length > 0) {
+            for (const item of cached) {
+              const normalized2 = this.normalizer.normalizeDiagnostic(
+                item,
+                name,
+              );
+              if (normalized2) {
+                allDiagnostics.push(normalized2);
+              }
+            }
+            return allDiagnostics;
+          }
+        }
+        // Await push diagnostics via pub/sub (Promise.race with 5s timeout)
+        if (handle.pendingDiagnostics) {
+          await Promise.race([
+            new Promise<void>((resolve) => {
+              handle.pendingDiagnostics!.set(uri, { resolve });
+            }),
+            new Promise<void>((resolve) => {
+              setTimeout(() => {
+                handle.pendingDiagnostics!.delete(uri);
+                resolve();
+              }, 5000);
+            }),
+          ]);
+        }
+        // Read diagnostics after notification arrives or timeout
+        if (cache) {
+          const cached = cache.get(uri);
+          if (cached) {
+            for (const item of cached) {
+              const normalized = this.normalizer.normalizeDiagnostic(
+                item,
+                name,
+              );
+              if (normalized) {
+                allDiagnostics.push(normalized);
+              }
+            }
+          }
+        }
       }
     }
 
@@ -1112,6 +1191,28 @@ export class NativeLspService {
         }
       } catch (error) {
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
+
+        if (handle.cachedDiagnostics) {
+          const workspaceRootUri = pathToFileURL(this.workspaceRoot).toString();
+          for (const [uri, diagnostics] of handle.cachedDiagnostics) {
+            if (!uri.startsWith(workspaceRootUri)) continue;
+            if (results.length >= limit) break;
+            if (diagnostics && diagnostics.length > 0) {
+              const normalizedDiagnostics = [];
+              for (const diag of diagnostics) {
+                const n = this.normalizer.normalizeDiagnostic(diag, name);
+                if (n) normalizedDiagnostics.push(n);
+              }
+              if (normalizedDiagnostics.length > 0) {
+                results.push({
+                  uri,
+                  diagnostics: normalizedDiagnostics,
+                  serverName: name,
+                });
+              }
+            }
+          }
+        }
       }
 
       if (results.length >= limit) {
