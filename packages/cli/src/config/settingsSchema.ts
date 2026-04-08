@@ -867,6 +867,48 @@ const SETTINGS_SCHEMA = {
         description: 'Whether to load memory files from include directories.',
         showInDialog: false,
       },
+      microcompaction: {
+        type: 'object',
+        label: 'Microcompaction',
+        category: 'Context',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for context microcompaction. Clears old tool result content after idle periods to free context tokens.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Enable Microcompaction',
+            category: 'Context',
+            requiresRestart: false,
+            default: true,
+            description:
+              'Enable automatic context microcompaction after idle periods.',
+            showInDialog: false,
+          },
+          gapThresholdMinutes: {
+            type: 'number',
+            label: 'Gap Threshold (minutes)',
+            category: 'Context',
+            requiresRestart: false,
+            default: 60 as number,
+            description:
+              'Trigger microcompaction when idle for more than this many minutes. 60 ensures the server prompt cache has expired.',
+            showInDialog: false,
+          },
+          keepRecent: {
+            type: 'number',
+            label: 'Keep Recent',
+            category: 'Context',
+            requiresRestart: false,
+            default: 5 as number,
+            description:
+              'Number of most-recent compactable tool results to preserve. Floor at 1.',
+            showInDialog: false,
+          },
+        },
+      },
       fileFiltering: {
         type: 'object',
         label: 'File Filtering',

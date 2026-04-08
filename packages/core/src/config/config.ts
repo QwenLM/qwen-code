@@ -208,6 +208,12 @@ export interface ChatCompressionSettings {
   contextPercentageThreshold?: number;
 }
 
+export interface MicrocompactionSettings {
+  enabled?: boolean;
+  gapThresholdMinutes?: number;
+  keepRecent?: number;
+}
+
 export interface TelemetrySettings {
   enabled?: boolean;
   target?: TelemetryTarget;
@@ -402,6 +408,7 @@ export interface ConfigParameters {
     default: string;
   };
   chatCompression?: ChatCompressionSettings;
+  microcompaction?: MicrocompactionSettings;
   interactive?: boolean;
   trustedFolder?: boolean;
   defaultFileEncoding?: FileEncodingType;
@@ -576,6 +583,7 @@ export class Config {
     default: string;
   };
   private readonly chatCompression: ChatCompressionSettings | undefined;
+  private readonly microcompaction: MicrocompactionSettings | undefined;
   private readonly interactive: boolean;
   private readonly trustedFolder: boolean | undefined;
   private readonly useRipgrep: boolean;
@@ -702,6 +710,7 @@ export class Config {
       params.loadMemoryFromIncludeDirectories ?? false;
     this.importFormat = params.importFormat ?? 'tree';
     this.chatCompression = params.chatCompression;
+    this.microcompaction = params.microcompaction;
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
@@ -1986,6 +1995,10 @@ export class Config {
 
   getChatCompression(): ChatCompressionSettings | undefined {
     return this.chatCompression;
+  }
+
+  getMicrocompaction(): MicrocompactionSettings | undefined {
+    return this.microcompaction;
   }
 
   isInteractive(): boolean {

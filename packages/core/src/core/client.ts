@@ -16,6 +16,7 @@ import type {
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -603,6 +604,24 @@ export class GeminiClient {
     const boundedTurns = Math.min(turns, MAX_TURNS);
     if (!boundedTurns) {
       return new Turn(this.getChat(), prompt_id);
+    }
+
+    // Microcompaction: clear old tool results when idle > threshold.
+    // Runs before full compression so it can shed tokens cheaply first.
+    // Reuses lastApiCompletionTimestamp from thinking block cleanup.
+    const mcResult = microcompactHistory(
+      this.getChat().getHistory(),
+      this.lastApiCompletionTimestamp,
+      this.config.getMicrocompaction(),
+    );
+    if (mcResult.meta) {
+      this.getChat().setHistory(mcResult.history);
+      const m = mcResult.meta;
+      debugLogger.debug(
+        `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+          `cleared ${m.toolsCleared} tool results (~${m.tokensSaved} tokens), ` +
+          `kept last ${m.toolsKept}`,
+      );
     }
 
     const compressed = await this.tryCompressChat(prompt_id, false, signal);
