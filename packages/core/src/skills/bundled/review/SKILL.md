@@ -410,7 +410,7 @@ Use the **pre-autofix HEAD commit SHA** captured in Step 1. If not captured, fal
     {
       "path": "src/file.ts",
       "line": 42,
-      "body": "**[Critical]** issue description\n\n```suggestion\nfix code\n```\n\n_— {{model}} via Qwen Code /review_"
+      "body": "**[Critical]** issue description\n\n```suggestion\nfix code\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_"
     }
   ]
 }
@@ -421,9 +421,9 @@ Rules:
 - `event`: `APPROVE` (no Critical), `REQUEST_CHANGES` (has Critical), or `COMMENT` (Suggestion only). Do NOT use `COMMENT` when there are Critical findings.
 - `body`: **empty `""`** when there are inline comments. Only put text here if some findings cannot be mapped to diff lines (those go in body as a last resort). Never put section headers, "Review Summary", or analysis in body.
 - `comments`: **ALL** high-confidence Critical/Suggestion findings go here. Skip Nice to have and low-confidence. Each must reference a line in the diff.
-- Comment body format: `**[Severity]** description\n\n```suggestion\nfix\n```\n\n_— {{model}} via Qwen Code /review_`
+- Comment body format: `**[Severity]** description\n\n```suggestion\nfix\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_`
+- The variable `YOUR_MODEL_ID` is declared at the top of this prompt (e.g., `YOUR_MODEL_ID="glm-5.1"`). You MUST include it in every footer. Do NOT omit the model name.
 - Use ` ```suggestion ` for one-click fixes; regular code blocks if fix spans multiple locations.
-- Footer must be copied exactly — do NOT rephrase.
 - Only ONE comment per unique issue.
 
 Then submit:

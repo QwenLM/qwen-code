@@ -59,11 +59,17 @@ export class BundledSkillLoader implements ICommandLoader {
         description: skill.description,
         kind: CommandKind.SKILL,
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
-          // Resolve template variables in skill body (e.g., {{model}})
+          // Resolve template variables in skill body
           let body = skill.body;
-          if (body.includes('{{model}}')) {
-            const modelId = this.config?.getModel()?.trim() || 'unknown';
+          const modelId = this.config?.getModel()?.trim() || '';
+          if (body.includes('{{model}}') || body.includes('YOUR_MODEL_ID')) {
             body = body.replaceAll('{{model}}', modelId);
+            body = body.replaceAll('YOUR_MODEL_ID', modelId);
+            // Prepend model identity as a top-level declaration so the LLM
+            // cannot miss it even if it doesn't copy the template exactly.
+            if (modelId) {
+              body = `YOUR_MODEL_ID="${modelId}"\n\n${body}`;
+            }
           }
 
           const content = context.invocation?.args

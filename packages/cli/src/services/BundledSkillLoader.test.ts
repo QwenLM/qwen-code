@@ -146,11 +146,15 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'Review by qwen3-coder via Qwen Code' }],
+      content: [
+        {
+          text: 'YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder via Qwen Code',
+        },
+      ],
     });
   });
 
-  it('should use "unknown" for {{model}} when getModel returns undefined', async () => {
+  it('should use empty string for {{model}} when getModel returns undefined', async () => {
     const skill = makeSkill({
       body: 'Review by {{model}}',
     });
@@ -166,7 +170,7 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'Review by unknown' }],
+      content: [{ text: 'Review by ' }],
     });
   });
 
@@ -188,11 +192,15 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'Review by qwen3-coder\n\n/review 123' }],
+      content: [
+        {
+          text: 'YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder\n\n/review 123',
+        },
+      ],
     });
   });
 
-  it('should use "unknown" for {{model}} when getModel returns empty string', async () => {
+  it('should use empty string for {{model}} when getModel returns empty string', async () => {
     const skill = makeSkill({
       body: 'Review by {{model}}',
     });
@@ -208,7 +216,7 @@ describe('BundledSkillLoader', () => {
 
     expect(result).toEqual({
       type: 'submit_prompt',
-      content: [{ text: 'Review by unknown' }],
+      content: [{ text: 'Review by ' }],
     });
   });
 
