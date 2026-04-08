@@ -19,7 +19,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
- 
+
 import { StreamJsonOutputAdapter } from '../nonInteractive/io/index.js';
 
 const debugLogger = createDebugLogger('DUAL_OUTPUT');
