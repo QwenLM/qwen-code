@@ -10,7 +10,7 @@ import { Text } from 'ink';
 import type React from 'react';
 import { ToolGroupMessage } from './ToolGroupMessage.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
-import { ToolCallStatus , StreamingState } from '../../types.js';
+import { ToolCallStatus, StreamingState } from '../../types.js';
 import type {
   Config,
   ToolCallConfirmationDetails,

@@ -450,8 +450,7 @@ describe('InputPrompt', () => {
     });
 
     // Windows uses Alt+V (\x1Bv), non-Windows uses Ctrl+V (\x16)
-    const describeConditional = isWindows ? it.skip : it;
-    describeConditional(
+    it.skipIf(isWindows)(
       'should handle Ctrl+V when clipboard has an image',
       async () => {
         vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
@@ -2078,44 +2077,7 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it.skip('expands and collapses long suggestion via Right/Left arrows', async () => {
-      props.shellModeActive = false;
-      const longValue = 'l'.repeat(200);
-
-      vi.mocked(useReverseSearchCompletion).mockReturnValue({
-        ...mockReverseSearchCompletion,
-        suggestions: [{ label: longValue, value: longValue, matchedIndex: 0 }],
-        showSuggestions: true,
-        activeSuggestionIndex: 0,
-        visibleStartIndex: 0,
-        isLoadingSuggestions: false,
-      });
-
-      const { stdin, stdout, unmount } = renderWithProviders(
-        <InputPrompt {...props} />,
-      );
-      await wait();
-
-      stdin.write('\x12');
-      await wait();
-
-      expect(clean(stdout.lastFrame())).toContain('→');
-
-      stdin.write('\u001B[C');
-      await wait(200);
-      expect(clean(stdout.lastFrame())).toContain('←');
-      expect(stdout.lastFrame()).toMatchSnapshot(
-        'command-search-expanded-match',
-      );
-
-      stdin.write('\u001B[D');
-      await wait();
-      expect(clean(stdout.lastFrame())).toContain('→');
-      expect(stdout.lastFrame()).toMatchSnapshot(
-        'command-search-collapsed-match',
-      );
-      unmount();
-    });
+    it.todo('expands and collapses long suggestion via Right/Left arrows');
 
     it('renders match window and expanded view (snapshots)', async () => {
       props.shellModeActive = false;

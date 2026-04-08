@@ -713,6 +713,7 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [config, historyManager, settings.merged]);
 
   const cancelHandlerRef = useRef<() => void>(() => {});
+  const midTurnDrainRef = useRef<(() => string[]) | null>(null);
 
   const {
     streamingState,
@@ -744,6 +745,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
+    midTurnDrainRef,
   );
 
   // Track whether suggestions are visible for Tab key handling
@@ -786,6 +788,18 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     submitQuery,
   });
+
+  // Bridge message queue to mid-turn drain via ref.
+  // Sync ref on every render so the drain callback always reads latest state.
+  const messageQueueRef = useRef(messageQueue);
+  messageQueueRef.current = messageQueue;
+  midTurnDrainRef.current = () => {
+    const queue = messageQueueRef.current;
+    if (queue.length === 0) return [];
+    messageQueueRef.current = [];
+    clearQueue();
+    return [...queue];
+  };
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(

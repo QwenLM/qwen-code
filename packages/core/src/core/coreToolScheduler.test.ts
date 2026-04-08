@@ -621,14 +621,14 @@ describe('CoreToolScheduler', () => {
       const completedCall = completedCalls[0];
       expect(completedCall.status).toBe('error');
 
-      if (completedCall.status === 'error') {
-        const errorMessage = completedCall.response.error?.message;
-        expect(errorMessage).toBe(
-          'Qwen Code requires permission to use write_file, but that permission was declined.',
-        );
-        // Should NOT contain "not found in registry"
-        expect(errorMessage).not.toContain('not found in registry');
-      }
+      const errorMessage = (
+        completedCall as Extract<typeof completedCall, { status: 'error' }>
+      ).response.error?.message;
+      expect(errorMessage).toBe(
+        'Qwen Code requires permission to use write_file, but that permission was declined.',
+      );
+      // Should NOT contain "not found in registry"
+      expect(errorMessage).not.toContain('not found in registry');
     });
 
     it('should return "not found" message for truly missing tools (not excluded)', async () => {
@@ -709,13 +709,13 @@ describe('CoreToolScheduler', () => {
       const completedCall = completedCalls[0];
       expect(completedCall.status).toBe('error');
 
-      if (completedCall.status === 'error') {
-        const errorMessage = completedCall.response.error?.message;
-        // Should contain "not found in registry"
-        expect(errorMessage).toContain('not found in registry');
-        // Should NOT contain permission message
-        expect(errorMessage).not.toContain('requires permission');
-      }
+      const errorMessage = (
+        completedCall as Extract<typeof completedCall, { status: 'error' }>
+      ).response.error?.message;
+      // Should contain "not found in registry"
+      expect(errorMessage).toContain('not found in registry');
+      // Should NOT contain permission message
+      expect(errorMessage).not.toContain('requires permission');
     });
   });
 });
@@ -1271,9 +1271,10 @@ describe('CoreToolScheduler YOLO mode', () => {
     expect(completedCalls).toHaveLength(1);
     const completedCall = completedCalls[0];
     expect(completedCall.status).toBe('success');
-    if (completedCall.status === 'success') {
-      expect(completedCall.response.resultDisplay).toBe('Tool executed');
-    }
+    expect(
+      (completedCall as Extract<typeof completedCall, { status: 'success' }>)
+        .response.resultDisplay,
+    ).toBe('Tool executed');
   });
 });
 
@@ -1879,13 +1880,13 @@ describe('CoreToolScheduler truncated output protection', () => {
     const completedCall = completedCalls[0];
     expect(completedCall.status).toBe('error');
 
-    if (completedCall.status === 'error') {
-      const errorMessage = completedCall.response.error?.message;
-      expect(errorMessage).toContain('truncated due to max_tokens limit');
-      expect(errorMessage).toContain(
-        'rejected to prevent writing truncated content',
-      );
-    }
+    const errorMessage = (
+      completedCall as Extract<typeof completedCall, { status: 'error' }>
+    ).response.error?.message;
+    expect(errorMessage).toContain('truncated due to max_tokens limit');
+    expect(errorMessage).toContain(
+      'rejected to prevent writing truncated content',
+    );
   });
 
   it('should allow Kind.Edit tool calls when wasOutputTruncated is false', async () => {
@@ -2434,11 +2435,14 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('success');
-    if (completedCalls[0].status === 'success') {
-      expect(completedCalls[0].response.resultDisplay).toContain(
-        'User has provided the following answers',
-      );
-    }
+    expect(
+      (
+        completedCalls[0] as Extract<
+          (typeof completedCalls)[0],
+          { status: 'success' }
+        >
+      ).response.resultDisplay,
+    ).toContain('User has provided the following answers');
   });
 
   it('should block non-ask_user_question tools that need confirmation in plan mode', async () => {
@@ -2473,11 +2477,14 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('error');
-    if (completedCalls[0].status === 'error') {
-      expect(completedCalls[0].response.resultDisplay).toBe(
-        'Plan mode blocked a non-read-only tool call.',
-      );
-    }
+    expect(
+      (
+        completedCalls[0] as Extract<
+          (typeof completedCalls)[0],
+          { status: 'error' }
+        >
+      ).response.resultDisplay,
+    ).toBe('Plan mode blocked a non-read-only tool call.');
   });
 
   it('should allow info confirmation tools in plan mode after approval', async () => {
@@ -2778,9 +2785,8 @@ describe('Fire hook functions integration', () => {
 
   describe('firePostToolUseFailureHook', () => {
     it('should return additional context when hook provides it', async () => {
-      const { firePostToolUseFailureHook } = await import(
-        './toolHookTriggers.js'
-      );
+      const { firePostToolUseFailureHook } =
+        await import('./toolHookTriggers.js');
 
       const mockResponse: HookExecutionResponse = {
         type: MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -2809,9 +2815,8 @@ describe('Fire hook functions integration', () => {
     });
 
     it('should return empty object when no message bus is provided', async () => {
-      const { firePostToolUseFailureHook } = await import(
-        './toolHookTriggers.js'
-      );
+      const { firePostToolUseFailureHook } =
+        await import('./toolHookTriggers.js');
 
       const result = await firePostToolUseFailureHook(
         undefined,
@@ -2882,9 +2887,8 @@ describe('Fire hook functions integration', () => {
 
   describe('firePermissionRequestHook', () => {
     it('should return hasDecision: false when hook makes no decision', async () => {
-      const { firePermissionRequestHook } = await import(
-        './toolHookTriggers.js'
-      );
+      const { firePermissionRequestHook } =
+        await import('./toolHookTriggers.js');
 
       const mockResponse: HookExecutionResponse = {
         type: MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -2908,9 +2912,8 @@ describe('Fire hook functions integration', () => {
     });
 
     it('should return hasDecision: true with allow decision when hook allows', async () => {
-      const { firePermissionRequestHook } = await import(
-        './toolHookTriggers.js'
-      );
+      const { firePermissionRequestHook } =
+        await import('./toolHookTriggers.js');
 
       const mockResponse: HookExecutionResponse = {
         type: MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -2941,9 +2944,8 @@ describe('Fire hook functions integration', () => {
     });
 
     it('should return hasDecision: true with deny decision when hook denies', async () => {
-      const { firePermissionRequestHook } = await import(
-        './toolHookTriggers.js'
-      );
+      const { firePermissionRequestHook } =
+        await import('./toolHookTriggers.js');
 
       const mockResponse: HookExecutionResponse = {
         type: MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -2976,9 +2978,8 @@ describe('Fire hook functions integration', () => {
     });
 
     it('should return hasDecision: false when no message bus is provided', async () => {
-      const { firePermissionRequestHook } = await import(
-        './toolHookTriggers.js'
-      );
+      const { firePermissionRequestHook } =
+        await import('./toolHookTriggers.js');
 
       const result = await firePermissionRequestHook(
         undefined,
