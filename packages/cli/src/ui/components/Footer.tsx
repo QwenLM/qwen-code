@@ -25,7 +25,7 @@ export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
-  const { text: statusLineText, padding: statusLinePadding } = useStatusLine();
+  const { text: statusLineText } = useStatusLine();
   const { verboseMode } = useVerboseMode();
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -52,9 +52,12 @@ export const Footer: React.FC = () => {
   const contextWindowSize =
     config.getContentGeneratorConfig()?.contextWindowSize;
 
-  // Left section shows one item in priority order. When a custom status line
-  // is active, only the default "? for shortcuts" hint is suppressed because
-  // the status line occupies its own row below.
+  // Left section priority: high-priority messages > status line > hint.
+  // Approval mode indicator is rendered as a separate row below when non-default.
+  const isNonDefaultMode =
+    showAutoAcceptIndicator !== undefined &&
+    showAutoAcceptIndicator !== ApprovalMode.DEFAULT;
+
   const leftContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
@@ -65,10 +68,11 @@ export const Footer: React.FC = () => {
     <Text color={theme.text.secondary}>-- INSERT --</Text>
   ) : uiState.shellModeActive ? (
     <ShellModeIndicator />
-  ) : showAutoAcceptIndicator !== undefined &&
-    showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
-    <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-  ) : statusLineText ? null : (
+  ) : statusLineText ? (
+    <Text dimColor wrap="truncate">
+      {statusLineText}
+    </Text>
+  ) : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );
 
@@ -106,8 +110,8 @@ export const Footer: React.FC = () => {
     });
   }
 
-  // When a custom status line is configured, render it as a dedicated row
-  // beneath the standard footer (matching upstream placement).
+  // Status line is inlined in the footer's left section.
+  // Approval mode indicator renders as a separate row below when non-default.
   return (
     <Box flexDirection="column" width="100%">
       <Box
@@ -137,12 +141,10 @@ export const Footer: React.FC = () => {
         </Box>
       </Box>
 
-      {/* Custom status line row — match footer's horizontal inset */}
-      {statusLineText && (
-        <Box marginLeft={2} marginRight={2} paddingX={statusLinePadding}>
-          <Text dimColor wrap="truncate">
-            {statusLineText}
-          </Text>
+      {/* Approval mode indicator — shown as separate row when non-default */}
+      {isNonDefaultMode && (
+        <Box marginLeft={2} marginRight={2}>
+          <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
         </Box>
       )}
     </Box>
