@@ -13,13 +13,17 @@ import type {
   HookExecutionResult,
   PreToolUseInput,
   UserPromptSubmitInput,
+  PromptHookConfig,
+  CommandHookConfig,
 } from './types.js';
+import { PromptHookRunner } from './execPromptHook.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   escapeShellArg,
   getShellConfiguration,
   type ShellType,
 } from '../utils/shell-utils.js';
+import type { Config } from '../config/config.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -41,9 +45,22 @@ const EXIT_CODE_SUCCESS = 0;
 const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 
 /**
- * Hook runner that executes command hooks
+ * Default timeout for prompt hook execution (30 seconds)
+ */
+const DEFAULT_PROMPT_HOOK_TIMEOUT = 30000;
+
+/**
+ * Hook runner that executes command and prompt hooks
  */
 export class HookRunner {
+  private promptHookRunner?: PromptHookRunner;
+
+  constructor(config?: Config) {
+    if (config) {
+      this.promptHookRunner = new PromptHookRunner(config);
+    }
+  }
+
   /**
    * Execute a single hook
    * @param hookConfig Hook configuration
@@ -61,7 +78,7 @@ export class HookRunner {
 
     // Check if already aborted before starting
     if (signal?.aborted) {
-      const hookId = hookConfig.name || hookConfig.command || 'unknown';
+      const hookId = this.getHookId(hookConfig);
       return {
         hookConfig,
         eventName,
@@ -72,6 +89,18 @@ export class HookRunner {
     }
 
     try {
+      // Dispatch based on hook type
+      if (hookConfig.type === 'prompt') {
+        return await this.executePromptHook(
+          hookConfig as PromptHookConfig,
+          eventName,
+          input,
+          startTime,
+          signal,
+        );
+      }
+
+      // Default: execute as command hook
       return await this.executeCommandHook(
         hookConfig,
         eventName,
@@ -81,7 +110,7 @@ export class HookRunner {
       );
     } catch (error) {
       const duration = Date.now() - startTime;
-      const hookId = hookConfig.name || hookConfig.command || 'unknown';
+      const hookId = this.getHookId(hookConfig);
       const errorMessage = `Hook execution failed for event '${eventName}' (hook: ${hookId}): ${error}`;
       debugLogger.warn(`Hook execution error (non-fatal): ${errorMessage}`);
 
@@ -93,6 +122,78 @@ export class HookRunner {
         duration,
       };
     }
+  }
+
+  /**
+   * Get a unique identifier for a hook config
+   */
+  private getHookId(hookConfig: HookConfig): string {
+    if (hookConfig.type === 'prompt') {
+      return hookConfig.name || 'anonymous-prompt-hook';
+    }
+    return hookConfig.name || hookConfig.command || 'unknown-command';
+  }
+
+  /**
+   * Execute a prompt hook using LLM evaluation
+   */
+  private async executePromptHook(
+    hookConfig: PromptHookConfig,
+    eventName: HookEventName,
+    input: HookInput,
+    startTime: number,
+    signal?: AbortSignal,
+  ): Promise<HookExecutionResult> {
+    if (!this.promptHookRunner) {
+      const errorMessage =
+        'PromptHookRunner not available — Config not provided to HookRunner';
+      debugLogger.warn(errorMessage);
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        error: new Error(errorMessage),
+        duration: Date.now() - startTime,
+      };
+    }
+
+    // Create abort signal with timeout
+    const timeout = hookConfig.timeout ?? DEFAULT_PROMPT_HOOK_TIMEOUT;
+    const timeoutSignal = AbortSignal.timeout(timeout);
+    const combinedSignal = this.combineSignals(signal, timeoutSignal);
+
+    return this.promptHookRunner.execute(
+      hookConfig,
+      eventName,
+      input as unknown as Record<string, unknown>,
+      combinedSignal,
+    );
+  }
+
+  /**
+   * Combine multiple abort signals (if any signal aborts, the combined signal aborts)
+   */
+  private combineSignals(
+    signal1?: AbortSignal,
+    signal2?: AbortSignal,
+  ): AbortSignal {
+    if (!signal1 && !signal2) {
+      return AbortSignal.timeout(DEFAULT_PROMPT_HOOK_TIMEOUT);
+    }
+    if (!signal1) return signal2!;
+    if (!signal2) return signal1;
+
+    // Create a controller that aborts when either signal aborts
+    const controller = new AbortController();
+
+    const abortHandler = () => {
+      controller.abort();
+    };
+
+    signal1.addEventListener('abort', abortHandler);
+    signal2.addEventListener('abort', abortHandler);
+
+    return controller.signal;
   }
 
   /**
@@ -222,7 +323,7 @@ export class HookRunner {
    * @param signal Optional AbortSignal to cancel hook execution
    */
   private async executeCommandHook(
-    hookConfig: HookConfig,
+    hookConfig: CommandHookConfig,
     eventName: HookEventName,
     input: HookInput,
     startTime: number,

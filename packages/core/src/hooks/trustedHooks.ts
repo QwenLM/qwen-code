@@ -81,8 +81,15 @@ export class TrustedHooksManager {
         for (const hook of def.hooks) {
           const key = getHookKey(hook);
           if (!trustedKeys.has(key)) {
-            // Return friendly name or command
-            untrusted.push(hook.name || hook.command || 'unknown-hook');
+            // Return friendly name, command, or prompt preview
+            const displayName =
+              hook.name ||
+              (hook.type === 'command'
+                ? hook.command
+                : hook.type === 'prompt'
+                  ? hook.prompt?.slice(0, 30)
+                  : 'unknown-hook');
+            untrusted.push(displayName || 'unknown-hook');
           }
         }
       }

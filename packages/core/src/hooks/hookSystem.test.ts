@@ -12,7 +12,6 @@ import { HookAggregator } from './hookAggregator.js';
 import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import {
-  HookType,
   HooksConfigSource,
   HookEventName,
   SessionStartSource,
@@ -169,7 +168,7 @@ describe('HookSystem', () => {
       const mockHooks = [
         {
           config: {
-            type: HookType.Command,
+            type: 'command' as const,
             command: 'echo test',
             source: HooksConfigSource.Project,
           },
@@ -199,7 +198,7 @@ describe('HookSystem', () => {
       vi.mocked(mockHookRegistry.getHooksForEvent).mockReturnValue([
         {
           config: {
-            type: HookType.Command,
+            type: 'command',
             command: 'echo test',
             source: HooksConfigSource.Project,
           },

@@ -131,18 +131,27 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
       items: {
         type: 'object',
         description:
-          'A hook configuration entry that defines a command to execute.',
+          'A hook configuration entry. Can be either a command hook or a prompt hook.',
         properties: {
           type: {
             type: 'string',
             description: 'The type of hook.',
-            enum: ['command'],
-            required: true,
+            enum: ['command', 'prompt'],
           },
           command: {
             type: 'string',
-            description: 'The command to execute when the hook is triggered.',
-            required: true,
+            description:
+              'The command to execute when the hook is triggered. Required for command hooks.',
+          },
+          prompt: {
+            type: 'string',
+            description:
+              'The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.',
+          },
+          model: {
+            type: 'string',
+            description:
+              'Optional model name for prompt hooks. Defaults to fast model.',
           },
           name: {
             type: 'string',
@@ -159,7 +168,7 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
           env: {
             type: 'object',
             description:
-              'Environment variables to set when executing the hook command.',
+              'Environment variables to set when executing the hook command. Only for command hooks.',
             additionalProperties: { type: 'string' },
           },
         },

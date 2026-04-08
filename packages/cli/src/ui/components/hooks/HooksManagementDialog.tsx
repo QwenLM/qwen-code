@@ -40,13 +40,22 @@ const debugLogger = createDebugLogger('HOOKS_DIALOG');
  * Type guard to check if a value is a valid HookConfig
  */
 function isValidHookConfig(config: unknown): config is HookConfig {
-  return (
-    typeof config === 'object' &&
-    config !== null &&
-    'type' in config &&
-    'command' in config &&
-    typeof (config as HookConfig).command === 'string'
-  );
+  if (typeof config !== 'object' || config === null) {
+    return false;
+  }
+  const obj = config as Record<string, unknown>;
+
+  // Check for command hook
+  if (obj['type'] === 'command') {
+    return typeof obj['command'] === 'string';
+  }
+
+  // Check for prompt hook
+  if (obj['type'] === 'prompt') {
+    return typeof obj['prompt'] === 'string';
+  }
+
+  return false;
 }
 
 /**

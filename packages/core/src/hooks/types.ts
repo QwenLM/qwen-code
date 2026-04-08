@@ -53,7 +53,7 @@ export const HOOKS_CONFIG_FIELDS = ['enabled', 'disabled', 'notifications'];
  * Hook configuration entry
  */
 export interface CommandHookConfig {
-  type: HookType.Command;
+  type: 'command';
   command: string;
   name?: string;
   description?: string;
@@ -62,7 +62,49 @@ export interface CommandHookConfig {
   env?: Record<string, string>;
 }
 
-export type HookConfig = CommandHookConfig;
+/**
+ * Prompt Hook configuration entry
+ * Uses LLM to evaluate conditions and return structured JSON response
+ */
+export interface PromptHookConfig {
+  type: 'prompt';
+  prompt: string; // LLM evaluation prompt template, supports $ARGUMENTS placeholder
+  model?: string; // Optional model name, defaults to fast model
+  name?: string;
+  description?: string;
+  timeout?: number; // Timeout in ms, defaults to 30000
+  source?: HooksConfigSource;
+}
+
+export type HookConfig = CommandHookConfig | PromptHookConfig;
+
+/**
+ * Prompt Hook response schema
+ */
+export const PROMPT_HOOK_RESPONSE_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  properties: {
+    ok: {
+      type: 'boolean',
+      description: 'Whether the hook condition was met',
+    },
+    reason: {
+      type: 'string',
+      description:
+        'Reason for why the condition was not met (only present when ok is false)',
+    },
+  },
+  required: ['ok'],
+  additionalProperties: false,
+};
+
+/**
+ * Prompt Hook response interface
+ */
+export interface PromptHookResponse {
+  ok: boolean;
+  reason?: string;
+}
 
 /**
  * Hook definition with matcher
@@ -78,6 +120,7 @@ export interface HookDefinition {
  */
 export enum HookType {
   Command = 'command',
+  Prompt = 'prompt',
 }
 
 /**
@@ -85,6 +128,11 @@ export enum HookType {
  */
 export function getHookKey(hook: HookConfig): string {
   const name = hook.name ?? '';
+  if (hook.type === 'prompt') {
+    return name
+      ? `${name}:${hook.prompt.slice(0, 50)}`
+      : hook.prompt.slice(0, 50);
+  }
   return name ? `${name}:${hook.command}` : hook.command;
 }
 

@@ -15,6 +15,13 @@ export { HookAggregator } from './hookAggregator.js';
 export { HookPlanner } from './hookPlanner.js';
 export { HookEventHandler } from './hookEventHandler.js';
 
+// Export prompt hook components
+export { PromptHookRunner, isPromptHookConfig } from './execPromptHook.js';
+export {
+  substituteArguments,
+  validatePromptHookResponse,
+} from './hookHelpers.js';
+
 // Export interfaces and enums
 export type { HookRegistryEntry } from './hookRegistry.js';
 export { HooksConfigSource as ConfigSource } from './types.js';

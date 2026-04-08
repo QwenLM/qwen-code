@@ -39,9 +39,9 @@ export class HookSystem {
   private readonly hookEventHandler: HookEventHandler;
 
   constructor(config: Config) {
-    // Initialize components
+    // Initialize components - pass config to HookRunner for prompt hook support
     this.hookRegistry = new HookRegistry(config);
-    this.hookRunner = new HookRunner();
+    this.hookRunner = new HookRunner(config);
     this.hookAggregator = new HookAggregator();
     this.hookPlanner = new HookPlanner(this.hookRegistry);
     this.hookEventHandler = new HookEventHandler(

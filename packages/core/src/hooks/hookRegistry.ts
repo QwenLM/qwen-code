@@ -126,7 +126,16 @@ export class HookRegistry {
   private getHookName(
     entry: HookRegistryEntry | { config: HookConfig },
   ): string {
-    return entry.config.name || entry.config.command || 'unknown-command';
+    if (entry.config.name) {
+      return entry.config.name;
+    }
+    if (entry.config.type === 'command') {
+      return entry.config.command || 'unknown-command';
+    }
+    if (entry.config.type === 'prompt') {
+      return entry.config.prompt?.slice(0, 30) || 'unknown-prompt';
+    }
+    return 'unknown-hook';
   }
 
   /**
@@ -302,18 +311,39 @@ please review the project settings (.qwen/settings.json) and remove them.`;
     eventName: HookEventName,
     source: HooksConfigSource,
   ): boolean {
-    if (!config.type || !['command', 'plugin'].includes(config.type)) {
+    // Validate hook type
+    if (
+      !config.type ||
+      !['command', 'prompt', 'plugin'].includes(config.type)
+    ) {
       debugLogger.warn(
         `Invalid hook ${eventName} from ${source} type: ${config.type}`,
       );
       return false;
     }
 
+    // Validate command hook specific fields
     if (config.type === 'command' && !config.command) {
       debugLogger.warn(
         `Command hook ${eventName} from ${source} missing command field`,
       );
       return false;
+    }
+
+    // Validate prompt hook specific fields
+    if (config.type === 'prompt') {
+      if (!config.prompt) {
+        debugLogger.warn(
+          `Prompt hook ${eventName} from ${source} missing prompt field`,
+        );
+        return false;
+      }
+      if (typeof config.prompt !== 'string') {
+        debugLogger.warn(
+          `Prompt hook ${eventName} from ${source} has invalid prompt field type`,
+        );
+        return false;
+      }
     }
 
     return true;

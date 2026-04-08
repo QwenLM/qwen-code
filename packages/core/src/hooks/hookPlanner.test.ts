@@ -7,7 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
 import { HookPlanner } from './hookPlanner.js';
-import { HookEventName, HookType, HooksConfigSource } from './types.js';
+import { HookEventName, HooksConfigSource } from './types.js';
 
 describe('HookPlanner', () => {
   let mockRegistry: HookRegistry;
@@ -31,7 +31,7 @@ describe('HookPlanner', () => {
 
     it('should return null when no hooks match context', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: 'bash',
@@ -49,7 +49,7 @@ describe('HookPlanner', () => {
     it('should create plan with matching hooks', () => {
       const entry: HookRegistryEntry = {
         config: {
-          type: HookType.Command,
+          type: 'command',
           command: 'echo test',
           name: 'test-hook',
         },
@@ -69,7 +69,7 @@ describe('HookPlanner', () => {
 
     it('should set sequential to true when any hook has sequential=true', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         sequential: true,
@@ -83,7 +83,7 @@ describe('HookPlanner', () => {
     });
 
     it('should deduplicate hooks with same config', () => {
-      const config = { type: HookType.Command, command: 'echo test' };
+      const config = { type: 'command' as const, command: 'echo test' };
       const entry1: HookRegistryEntry = {
         config,
         source: HooksConfigSource.Project,
@@ -110,7 +110,7 @@ describe('HookPlanner', () => {
   describe('matchesContext', () => {
     it('should match all when no matcher', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         enabled: true,
@@ -126,7 +126,7 @@ describe('HookPlanner', () => {
 
     it('should match all when no context', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: 'bash',
@@ -141,7 +141,7 @@ describe('HookPlanner', () => {
 
     it('should match empty string as wildcard', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: '',
@@ -158,7 +158,7 @@ describe('HookPlanner', () => {
 
     it('should match asterisk as wildcard', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: '*',
@@ -175,7 +175,7 @@ describe('HookPlanner', () => {
 
     it('should match tool name with exact string', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: 'bash',
@@ -192,7 +192,7 @@ describe('HookPlanner', () => {
 
     it('should not match tool name with different exact string', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: 'bash',
@@ -209,7 +209,7 @@ describe('HookPlanner', () => {
 
     it('should match tool name with regex', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: '^bash.*',
@@ -226,7 +226,7 @@ describe('HookPlanner', () => {
 
     it('should match tool name with regex wildcard', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: '.*',
@@ -243,7 +243,7 @@ describe('HookPlanner', () => {
 
     it('should match trigger with exact string', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreCompact,
         matcher: 'auto',
@@ -260,7 +260,7 @@ describe('HookPlanner', () => {
 
     it('should not match trigger with different string', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreCompact,
         matcher: 'auto',
@@ -277,7 +277,7 @@ describe('HookPlanner', () => {
 
     it('should match when context has both toolName and trigger (prefers toolName)', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: 'bash',
@@ -295,7 +295,7 @@ describe('HookPlanner', () => {
 
     it('should match with trimmed matcher', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: '  bash  ',
@@ -312,7 +312,7 @@ describe('HookPlanner', () => {
 
     it('should fallback to exact match when regex is invalid', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: '[invalid(regex', // Invalid regex
@@ -330,7 +330,7 @@ describe('HookPlanner', () => {
 
     it('should match using fallback exact match when regex is invalid', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: '[invalid(regex', // Invalid regex
@@ -348,7 +348,7 @@ describe('HookPlanner', () => {
 
     it('should handle complex invalid regex gracefully', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.PreToolUse,
         matcher: '(unclosed',
@@ -365,7 +365,7 @@ describe('HookPlanner', () => {
 
     it('should match notification type with exact string', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.Notification,
         matcher: 'permission_prompt',
@@ -382,7 +382,7 @@ describe('HookPlanner', () => {
 
     it('should not match notification type with different string', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.Notification,
         matcher: 'permission_prompt',
@@ -399,7 +399,7 @@ describe('HookPlanner', () => {
 
     it('should match idle_prompt notification type', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.Notification,
         matcher: 'idle_prompt',
@@ -416,7 +416,7 @@ describe('HookPlanner', () => {
 
     it('should match auth_success notification type', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.Notification,
         matcher: 'auth_success',
@@ -433,7 +433,7 @@ describe('HookPlanner', () => {
 
     it('should match elicitation_dialog notification type', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.Notification,
         matcher: 'elicitation_dialog',
@@ -450,7 +450,7 @@ describe('HookPlanner', () => {
 
     it('should match all notification types when matcher is wildcard', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.Notification,
         matcher: '*',
@@ -467,7 +467,7 @@ describe('HookPlanner', () => {
 
     it('should match all notification types when matcher is empty', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.Notification,
         matcher: '',
@@ -484,7 +484,7 @@ describe('HookPlanner', () => {
 
     it('should match all notification types when no matcher provided', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.Notification,
         enabled: true,
@@ -500,7 +500,7 @@ describe('HookPlanner', () => {
 
     it('should match all notification types when no context provided', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.Notification,
         matcher: 'permission_prompt',
@@ -515,7 +515,7 @@ describe('HookPlanner', () => {
 
     it('should match agent type with exact string for SubagentStart', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStart,
         matcher: 'code-reviewer',
@@ -532,7 +532,7 @@ describe('HookPlanner', () => {
 
     it('should not match agent type with different string for SubagentStart', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStart,
         matcher: 'code-reviewer',
@@ -549,7 +549,7 @@ describe('HookPlanner', () => {
 
     it('should match agent type with regex for SubagentStart', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStart,
         matcher: '^code-.*',
@@ -566,7 +566,7 @@ describe('HookPlanner', () => {
 
     it('should match agent type with wildcard for SubagentStart', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStart,
         matcher: '*',
@@ -583,7 +583,7 @@ describe('HookPlanner', () => {
 
     it('should match all agent types when no context for SubagentStart', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStart,
         matcher: 'code-reviewer',
@@ -598,7 +598,7 @@ describe('HookPlanner', () => {
 
     it('should match all agent types when no matcher for SubagentStart', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStart,
         enabled: true,
@@ -614,7 +614,7 @@ describe('HookPlanner', () => {
 
     it('should match agent type with exact string for SubagentStop', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStop,
         matcher: 'qwen-tester',
@@ -631,7 +631,7 @@ describe('HookPlanner', () => {
 
     it('should not match agent type with different string for SubagentStop', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStop,
         matcher: 'qwen-tester',
@@ -648,7 +648,7 @@ describe('HookPlanner', () => {
 
     it('should match agent type with regex for SubagentStop', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStop,
         matcher: '.*tester$',
@@ -665,7 +665,7 @@ describe('HookPlanner', () => {
 
     it('should fallback to exact match when regex is invalid for SubagentStart', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStart,
         matcher: '[invalid(regex',
@@ -682,7 +682,7 @@ describe('HookPlanner', () => {
 
     it('should match using fallback exact match when regex is invalid for SubagentStart', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStart,
         matcher: '[invalid(regex',
@@ -699,7 +699,7 @@ describe('HookPlanner', () => {
 
     it('should match regex wildcard .* for SubagentStop', () => {
       const entry: HookRegistryEntry = {
-        config: { type: HookType.Command, command: 'echo test' },
+        config: { type: 'command', command: 'echo test' },
         source: HooksConfigSource.Project,
         eventName: HookEventName.SubagentStop,
         matcher: '.*',
