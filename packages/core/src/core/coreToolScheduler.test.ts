@@ -3485,6 +3485,45 @@ describe('CoreToolScheduler IDE interaction', () => {
     expect(completedCalls[0].status).toBe('cancelled');
   });
 
+  it('should fall back to CLI confirmation when opening the IDE diff fails', async () => {
+    const { mockConfig } = createIdeMockConfig({
+      ideMode: true,
+    });
+
+    mockIdeClient.openDiff.mockRejectedValue(new Error('IDE disconnected'));
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'ide-open-fail-1',
+      name: 'mockModifiableTool',
+      args: { param: 'value' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-ide-open-fail-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    expect(awaitingCall.status).toBe('awaiting_approval');
+    expect(mockIdeClient.openDiff).toHaveBeenCalled();
+    expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+  });
+
   it('should not call openDiff when IDE mode is disabled', async () => {
     const { mockConfig } = createIdeMockConfig({
       ideMode: false,

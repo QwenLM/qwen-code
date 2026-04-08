@@ -1219,45 +1219,54 @@ export class CoreToolScheduler {
     if (confirmationDetails.type !== 'edit' || !this.config.getIdeMode()) {
       return;
     }
-    const ideClient = await IdeClient.getInstance();
-    if (!ideClient.isDiffingEnabled()) return;
 
-    const resolution = await ideClient.openDiff(
-      confirmationDetails.filePath,
-      confirmationDetails.newContent,
-    );
+    try {
+      const ideClient = await IdeClient.getInstance();
+      if (!ideClient.isDiffingEnabled()) return;
 
-    // Guard: skip if the tool was already handled (e.g. by CLI
-    // confirmation).  Without this check, resolveDiffFromCli
-    // triggers this handler AND the CLI's onConfirm, causing a
-    // race where ProceedOnce overwrites ProceedAlways.
-    const still = this.toolCalls.find(
-      (c) => c.request.callId === callId && c.status === 'awaiting_approval',
-    );
-    if (!still) return;
-
-    if (resolution.status === 'accepted') {
-      // When content is unchanged, skip the inline modify path so that
-      // the original tool params (e.g. partial old_string for edit tool)
-      // are preserved. Mitigate the multi-edit-on-same-file issue (#2702)
-      // for the common accept-without-edit case.
-      const userEdited =
-        resolution.content != null &&
-        resolution.content !== confirmationDetails.newContent;
-      this.handleConfirmationResponse(
-        callId,
-        confirmationDetails.onConfirm,
-        ToolConfirmationOutcome.ProceedOnce,
-        signal,
-        userEdited ? { newContent: resolution.content } : undefined,
+      const resolution = await ideClient.openDiff(
+        confirmationDetails.filePath,
+        confirmationDetails.newContent,
       );
-    } else {
-      this.handleConfirmationResponse(
-        callId,
-        confirmationDetails.onConfirm,
-        ToolConfirmationOutcome.Cancel,
-        signal,
+
+      // Guard: skip if the tool was already handled (e.g. by CLI
+      // confirmation).  Without this check, resolveDiffFromCli
+      // triggers this handler AND the CLI's onConfirm, causing a
+      // race where ProceedOnce overwrites ProceedAlways.
+      const still = this.toolCalls.find(
+        (c) => c.request.callId === callId && c.status === 'awaiting_approval',
       );
+      if (!still) return;
+
+      if (resolution.status === 'accepted') {
+        // When content is unchanged, skip the inline modify path so that
+        // the original tool params (e.g. partial old_string for edit tool)
+        // are preserved. Mitigate the multi-edit-on-same-file issue (#2702)
+        // for the common accept-without-edit case.
+        const userEdited =
+          resolution.content != null &&
+          resolution.content !== confirmationDetails.newContent;
+        await this.handleConfirmationResponse(
+          callId,
+          confirmationDetails.onConfirm,
+          ToolConfirmationOutcome.ProceedOnce,
+          signal,
+          userEdited ? { newContent: resolution.content } : undefined,
+        );
+      } else {
+        await this.handleConfirmationResponse(
+          callId,
+          confirmationDetails.onConfirm,
+          ToolConfirmationOutcome.Cancel,
+          signal,
+        );
+      }
+    } catch (error) {
+      if (!signal.aborted) {
+        debugLogger.warn(
+          `IDE diff open failed for ${callId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
   }
 
