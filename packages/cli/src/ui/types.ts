@@ -185,6 +185,7 @@ export type HistoryItemQuit = HistoryItemBase & {
 export type HistoryItemToolGroup = HistoryItemBase & {
   type: 'tool_group';
   tools: IndividualToolCallDisplay[];
+  isUserInitiated?: boolean;
 };
 
 export type HistoryItemUserShell = HistoryItemBase & {

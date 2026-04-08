@@ -12,10 +12,21 @@ import type {
   BaseInfo,
 } from './types.js';
 
-const CHANNEL_VERSION = '0.1.0';
+// iLink Bot API protocol version we are compatible with.
+// Used both in the request body (base_info.channel_version) and in the
+// iLink-App-ClientVersion header (encoded as 0x00MMNNPP).
+const ILINK_PROTOCOL_VERSION = '2.1.3';
+
+function buildClientVersion(version: string): number {
+  const parts = version.split('.').map((p) => parseInt(p, 10));
+  const major = parts[0] ?? 0;
+  const minor = parts[1] ?? 0;
+  const patch = parts[2] ?? 0;
+  return ((major & 0xff) << 16) | ((minor & 0xff) << 8) | (patch & 0xff);
+}
 
 function baseInfo(): BaseInfo {
-  return { channel_version: CHANNEL_VERSION };
+  return { channel_version: ILINK_PROTOCOL_VERSION };
 }
 
 function randomUin(): string {
@@ -28,6 +39,10 @@ function buildHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'X-WECHAT-UIN': randomUin(),
+    'iLink-App-Id': 'bot',
+    'iLink-App-ClientVersion': String(
+      buildClientVersion(ILINK_PROTOCOL_VERSION),
+    ),
   };
   if (token) {
     headers['AuthorizationType'] = 'ilink_bot_token';
