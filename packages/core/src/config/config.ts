@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* eslint-disable import/no-internal-modules */
-
 // Node built-ins
 import type { EventEmitter } from 'node:events';
 import * as path from 'node:path';
