@@ -371,6 +371,8 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  /** Minutes of inactivity before clearing retained thinking blocks. */
+  thinkingIdleThresholdMinutes?: number;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
@@ -559,6 +561,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly thinkingIdleThresholdMs: number;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
   private readonly overrideExtensions?: string[];
@@ -685,6 +688,8 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.thinkingIdleThresholdMs =
+      (params.thinkingIdleThresholdMinutes ?? 5) * 60 * 1000;
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
@@ -1329,6 +1334,10 @@ export class Config {
 
   getMaxSessionTurns(): number {
     return this.maxSessionTurns;
+  }
+
+  getThinkingIdleThresholdMs(): number {
+    return this.thinkingIdleThresholdMs;
   }
 
   getSessionTokenLimit(): number {
