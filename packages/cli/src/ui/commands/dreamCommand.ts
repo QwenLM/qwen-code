@@ -4,7 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { runManagedAutoMemoryDream } from '@qwen-code/qwen-code-core';
+import {
+  getAutoMemoryRoot,
+  getProjectHash,
+  QWEN_DIR,
+  buildConsolidationTaskPrompt,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
@@ -25,19 +30,16 @@ export const dreamCommand: SlashCommand = {
       };
     }
 
-    const result = await runManagedAutoMemoryDream(
-      config.getProjectRoot(),
-      new Date(),
-      config,
-    );
+    const projectRoot = config.getProjectRoot();
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const projectHash = getProjectHash(projectRoot);
+    const transcriptDir = `${QWEN_DIR}/tmp/${projectHash}/chats`;
+
+    const prompt = buildConsolidationTaskPrompt(memoryRoot, transcriptDir);
+
     return {
-      type: 'message',
-      messageType: 'info',
-      content: result.systemMessage
-        ? `${result.systemMessage}\n${t('Deduplicated entries: {{count}}', {
-            count: String(result.dedupedEntries),
-          })}`
-        : t('Managed auto-memory dream found nothing to improve.'),
+      type: 'submit_prompt',
+      content: prompt,
     };
   },
 };

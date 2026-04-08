@@ -32,7 +32,7 @@ function getTranscriptDir(projectRoot: string): string {
   return `${QWEN_DIR}/tmp/${projectHash}/chats`;
 }
 
-function buildConsolidationTaskPrompt(
+export function buildConsolidationTaskPrompt(
   memoryRoot: string,
   transcriptDir: string,
 ): string {
