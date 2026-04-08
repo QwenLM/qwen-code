@@ -582,6 +582,25 @@ export class GeminiClient {
         this.getChat().stripThoughtsFromHistoryKeepRecent(1);
         debugLogger.debug('Stripped old thinking blocks (keeping last 1 turn)');
       }
+
+      // Idle cleanup: clear old tool results when idle > threshold.
+      // Runs only on user-initiated messages (not tool result submissions)
+      // so that model latency during a tool-call loop doesn't count as
+      // user idle time.
+      const mcResult = microcompactHistory(
+        this.getChat().getHistory(),
+        this.lastApiCompletionTimestamp,
+        this.config.getClearContextOnIdle(),
+      );
+      if (mcResult.meta) {
+        this.getChat().setHistory(mcResult.history);
+        const m = mcResult.meta;
+        debugLogger.debug(
+          `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+            `cleared ${m.toolsCleared} tool results (~${m.tokensSaved} tokens), ` +
+            `kept last ${m.toolsKept}`,
+        );
+      }
     }
     if (messageType !== SendMessageType.Retry) {
       this.sessionTurnCount++;
@@ -599,23 +618,6 @@ export class GeminiClient {
     const boundedTurns = Math.min(turns, MAX_TURNS);
     if (!boundedTurns) {
       return new Turn(this.getChat(), prompt_id);
-    }
-
-    // Idle cleanup: clear old tool results when idle > threshold.
-    // Runs before full compression so it can shed tokens cheaply first.
-    const mcResult = microcompactHistory(
-      this.getChat().getHistory(),
-      this.lastApiCompletionTimestamp,
-      this.config.getClearContextOnIdle(),
-    );
-    if (mcResult.meta) {
-      this.getChat().setHistory(mcResult.history);
-      const m = mcResult.meta;
-      debugLogger.debug(
-        `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
-          `cleared ${m.toolsCleared} tool results (~${m.tokensSaved} tokens), ` +
-          `kept last ${m.toolsKept}`,
-      );
     }
 
     const compressed = await this.tryCompressChat(prompt_id, false, signal);
