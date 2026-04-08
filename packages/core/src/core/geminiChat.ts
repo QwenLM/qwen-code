@@ -16,13 +16,14 @@ import type {
   Tool,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { createUserContent } from '@google/genai';
+import { createUserContent, FinishReason } from '@google/genai';
 import { retryWithBackoff } from '../utils/retry.js';
 import { getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
 import type { Config } from '../config/config.js';
+import { ESCALATED_MAX_TOKENS } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -355,6 +356,17 @@ export class GeminiChat {
           cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
         const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
 
+        // Max output tokens escalation: when no user/env override is set,
+        // the capped default (8K) is used. If the model hits MAX_TOKENS,
+        // retry once with escalated limit (64K).
+        let maxTokensEscalated = false;
+        const hasUserMaxTokensOverride =
+          (cgConfig?.samplingParams?.max_tokens !== undefined &&
+            cgConfig?.samplingParams?.max_tokens !== null) ||
+          !!process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+
+        let lastFinishReason: string | undefined;
+
         for (
           let attempt = 0;
           attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
@@ -376,7 +388,10 @@ export class GeminiChat {
               prompt_id,
             );
 
+            lastFinishReason = undefined;
             for await (const chunk of stream) {
+              const fr = chunk.candidates?.[0]?.finishReason;
+              if (fr) lastFinishReason = fr;
               yield { type: StreamEventType.CHUNK, value: chunk };
             }
 
@@ -478,6 +493,49 @@ export class GeminiChat {
               }
             }
             break;
+          }
+        }
+
+        // Max output tokens escalation: if the retry loop succeeded with
+        // the capped default (8K) but hit MAX_TOKENS, retry once at 64K.
+        // Placed outside the retry loop so that any errors from the
+        // escalated stream propagate directly (not caught by retry logic).
+        if (
+          lastError === null &&
+          lastFinishReason === FinishReason.MAX_TOKENS &&
+          !maxTokensEscalated &&
+          !hasUserMaxTokensOverride
+        ) {
+          maxTokensEscalated = true;
+          debugLogger.info(
+            `Output truncated at capped default. Escalating to ${ESCALATED_MAX_TOKENS} tokens.`,
+          );
+          // Remove partial model response from history
+          // (processStreamResponse already pushed it)
+          if (
+            self.history.length > 0 &&
+            self.history[self.history.length - 1].role === 'model'
+          ) {
+            self.history.pop();
+          }
+          // Signal UI to discard partial output
+          yield { type: StreamEventType.RETRY };
+          // Retry with escalated max_tokens
+          const escalatedParams: SendMessageParameters = {
+            ...params,
+            config: {
+              ...params.config,
+              maxOutputTokens: ESCALATED_MAX_TOKENS,
+            },
+          };
+          const escalatedStream = await self.makeApiCallAndProcessStream(
+            model,
+            requestContents,
+            escalatedParams,
+            prompt_id,
+          );
+          for await (const chunk of escalatedStream) {
+            yield { type: StreamEventType.CHUNK, value: chunk };
           }
         }
 
