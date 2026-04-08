@@ -122,9 +122,6 @@ function getCommonAttributes(config: Config): LogAttributes {
 
 export { getCommonAttributes };
 
-// Re-export for consumers that import from this module.
-export { isInternalPromptId } from '../utils/internalPromptIds.js';
-
 export function logStartSession(
   config: Config,
   event: StartSessionEvent,
