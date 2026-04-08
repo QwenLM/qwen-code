@@ -28,7 +28,7 @@ export const copyCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: 'No output in history',
+        content: t('No output in history'),
       };
     }
     // Extract text from the parts
@@ -44,7 +44,7 @@ export const copyCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'info',
-          content: 'Last output copied to the clipboard',
+          content: t('Last output copied to the clipboard'),
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -53,14 +53,14 @@ export const copyCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'error',
-          content: `Failed to copy to the clipboard. ${message}`,
+          content: t('Failed to copy to the clipboard. {{error}}', { error: message }),
         };
       }
     } else {
       return {
         type: 'message',
         messageType: 'info',
-        content: 'Last AI output contains no text to copy.',
+        content: t('Last AI output contains no text to copy.'),
       };
     }
   },

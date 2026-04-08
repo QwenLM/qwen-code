@@ -29,7 +29,7 @@ async function restoreAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Could not determine the .qwen directory path.',
+      content: t('Could not determine the .qwen directory path.'),
     };
   }
 
@@ -44,7 +44,7 @@ async function restoreAction(
         return {
           type: 'message',
           messageType: 'info',
-          content: 'No restorable tool calls found.',
+          content: t('No restorable tool calls found.'),
         };
       }
       const truncatedFiles = jsonFiles.map((file) => {
@@ -59,7 +59,7 @@ async function restoreAction(
       return {
         type: 'message',
         messageType: 'info',
-        content: `Available tool calls to restore:\n\n${fileList}`,
+        content: t('Available tool calls to restore:') + '\n\n' + fileList,
       };
     }
 
@@ -69,7 +69,7 @@ async function restoreAction(
       return {
         type: 'message',
         messageType: 'error',
-        content: `File not found: ${selectedFile}`,
+        content: t('File not found: {{file}}', { file: selectedFile }),
       };
     }
 
@@ -83,7 +83,7 @@ async function restoreAction(
         return {
           type: 'message',
           messageType: 'error',
-          content: 'loadHistory function is not available.',
+          content: t('loadHistory function is not available.'),
         };
       }
       loadHistory(toolCallData.history);
@@ -98,7 +98,7 @@ async function restoreAction(
       addItem(
         {
           type: 'info',
-          text: 'Restored project to the state before the tool call.',
+          text: t('Restored project to the state before the tool call.'),
         },
         Date.now(),
       );
@@ -113,7 +113,9 @@ async function restoreAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: `Could not read restorable tool calls. This is the error: ${error}`,
+      content: t('Could not read restorable tool calls. This is the error: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
 }

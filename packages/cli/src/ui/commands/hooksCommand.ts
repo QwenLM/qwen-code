@@ -92,15 +92,15 @@ const listCommand: SlashCommand = {
       hooksByEvent.get(eventName)!.push(hook);
     }
 
-    let output = `**Configured Hooks (${allHooks.length} total)**\n\n`;
+    let output = t('Configured Hooks ({{count}} total)', { count: allHooks.length.toString() }) + '\n\n';
 
     for (const [eventName, hooks] of hooksByEvent) {
       output += `### ${eventName}\n`;
       for (const hook of hooks) {
-        const name = hook.config.name || hook.config.command || 'unnamed';
+        const name = hook.config.name || hook.config.command || t('unnamed');
         const source = formatHookSource(hook.source);
         const status = formatHookStatus(hook.enabled);
-        const matcher = hook.matcher ? ` (matcher: ${hook.matcher})` : '';
+        const matcher = hook.matcher ? t(' (matcher: {{matcher}})', { matcher: hook.matcher }) : '';
         output += `- **${name}** [${source}] ${status}${matcher}\n`;
       }
       output += '\n';

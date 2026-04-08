@@ -37,7 +37,7 @@ async function exportMarkdownAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Configuration not available.',
+      content: t('Configuration not available.'),
     };
   }
 
@@ -46,7 +46,7 @@ async function exportMarkdownAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Could not determine current working directory.',
+      content: t('Could not determine current working directory.'),
     };
   }
 
@@ -60,7 +60,7 @@ async function exportMarkdownAction(
       return {
         type: 'message',
         messageType: 'error',
-        content: 'No active session found to export.',
+        content: t('No active session found to export.'),
       };
     }
 
@@ -86,13 +86,15 @@ async function exportMarkdownAction(
     return {
       type: 'message',
       messageType: 'info',
-      content: `Session exported to markdown: ${filename}`,
+      content: t('Session exported to markdown: {{filename}}', { filename }),
     };
   } catch (error) {
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
+      content: t('Failed to export session: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
 }
@@ -110,7 +112,7 @@ async function exportHtmlAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Configuration not available.',
+      content: t('Configuration not available.'),
     };
   }
 
@@ -119,7 +121,7 @@ async function exportHtmlAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Could not determine current working directory.',
+      content: t('Could not determine current working directory.'),
     };
   }
 
@@ -133,7 +135,7 @@ async function exportHtmlAction(
       return {
         type: 'message',
         messageType: 'error',
-        content: 'No active session found to export.',
+        content: t('No active session found to export.'),
       };
     }
 
@@ -159,13 +161,15 @@ async function exportHtmlAction(
     return {
       type: 'message',
       messageType: 'info',
-      content: `Session exported to HTML: ${filename}`,
+      content: t('Session exported to HTML: {{filename}}', { filename }),
     };
   } catch (error) {
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
+      content: t('Failed to export session: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
 }
@@ -183,7 +187,7 @@ async function exportJsonAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Configuration not available.',
+      content: t('Configuration not available.'),
     };
   }
 
@@ -192,7 +196,7 @@ async function exportJsonAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Could not determine current working directory.',
+      content: t('Could not determine current working directory.'),
     };
   }
 
@@ -206,7 +210,7 @@ async function exportJsonAction(
       return {
         type: 'message',
         messageType: 'error',
-        content: 'No active session found to export.',
+        content: t('No active session found to export.'),
       };
     }
 
@@ -232,13 +236,15 @@ async function exportJsonAction(
     return {
       type: 'message',
       messageType: 'info',
-      content: `Session exported to JSON: ${filename}`,
+      content: t('Session exported to JSON: {{filename}}', { filename }),
     };
   } catch (error) {
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
+      content: t('Failed to export session: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
 }
@@ -256,7 +262,7 @@ async function exportJsonlAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Configuration not available.',
+      content: t('Configuration not available.'),
     };
   }
 
@@ -265,7 +271,7 @@ async function exportJsonlAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Could not determine current working directory.',
+      content: t('Could not determine current working directory.'),
     };
   }
 
@@ -279,7 +285,7 @@ async function exportJsonlAction(
       return {
         type: 'message',
         messageType: 'error',
-        content: 'No active session found to export.',
+        content: t('No active session found to export.'),
       };
     }
 
@@ -305,13 +311,15 @@ async function exportJsonlAction(
     return {
       type: 'message',
       messageType: 'info',
-      content: `Session exported to JSONL: ${filename}`,
+      content: t('Session exported to JSONL: {{filename}}', { filename }),
     };
   } catch (error) {
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
+      content: t('Failed to export session: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
 }

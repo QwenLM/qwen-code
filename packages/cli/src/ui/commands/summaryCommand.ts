@@ -247,7 +247,7 @@ export const summaryCommand: SlashCommand = {
       emitInteractivePending('generating');
       const markdownSummary = await generateSummaryMarkdown(history);
       if (abortSignal?.aborted) {
-        throw new DOMException('Summary generation cancelled.', 'AbortError');
+        throw new DOMException(t('Summary generation cancelled.'), 'AbortError');
       }
       emitInteractivePending('saving');
       const { filePathForDisplay } = await saveSummaryToDisk(markdownSummary);

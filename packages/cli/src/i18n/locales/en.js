@@ -2013,4 +2013,108 @@ export default {
     'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Press Ctrl+O to show full tool output',
+
+  // ============================================================================
+  // Commands - Arena
+  // ============================================================================
+  'Arena usage: /arena start --models model1,model2 <task>':
+    'Arena usage: /arena start --models model1,model2 <task>',
+  Options: 'Options',
+  'Models to compete (required, at least 2)':
+    'Models to compete (required, at least 2)',
+  'Format: authType:modelId or just modelId':
+    'Format: authType:modelId or just modelId',
+  Examples: 'Examples',
+  'Arena requires at least 2 models. Use --models model1,model2 to specify.':
+    'Arena requires at least 2 models. Use --models model1,model2 to specify.',
+  'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.':
+    'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.',
+  'Arena is not supported in non-interactive mode. Use interactive mode to stop an Arena session.':
+    'Arena is not supported in non-interactive mode. Use interactive mode to stop an Arena session.',
+  'An Arena session exists. Use /arena stop or /arena select to end it before starting a new one.':
+    'An Arena session exists. Use /arena stop or /arena select to end it before starting a new one.',
+  'No running Arena session found.': 'No running Arena session found.',
+  'Arena is not supported in non-interactive mode.':
+    'Arena is not supported in non-interactive mode.',
+  'No Arena session found. Start one with /arena start.':
+    'No Arena session found. Start one with /arena start.',
+  'No arena session found. Start one with /arena start.':
+    'No arena session found. Start one with /arena start.',
+  'Arena session is still running. Wait for it to complete or use /arena stop first.':
+    'Arena session is still running. Wait for it to complete or use /arena stop first.',
+  'Discard all Arena results and clean up worktrees?':
+    'Discard all Arena results and clean up worktrees?',
+  'Arena results discarded. All worktrees cleaned up.':
+    'Arena results discarded. All worktrees cleaned up.',
+  'No successful agent results to select from. All agents failed or were cancelled.':
+    'No successful agent results to select from. All agents failed or were cancelled.',
+  'Use /arena stop to end the session.': 'Use /arena stop to end the session.',
+  'No idle agent found matching "{{arg}}"':
+    'No idle agent found matching "{{arg}}"',
+  'Failed to apply changes from {{label}}: {{error}}':
+    'Failed to apply changes from {{label}}: {{error}}',
+  'Applied changes from {{label}} to workspace. Arena session complete.':
+    'Applied changes from {{label}} to workspace. Arena session complete.',
+
+  // ============================================================================
+  // Commands - Copy
+  // ============================================================================
+  'No output in history': 'No output in history',
+  'Last output copied to the clipboard': 'Last output copied to the clipboard',
+  'Failed to copy to the clipboard. {{error}}':
+    'Failed to copy to the clipboard. {{error}}',
+  'Last AI output contains no text to copy.':
+    'Last AI output contains no text to copy.',
+
+  // ============================================================================
+  // Commands - Compress
+  // ============================================================================
+  'Compressing context...': 'Compressing context...',
+  'Context compressed ({{originalTokens}} -> {{newTokens}}).':
+    'Context compressed ({{originalTokens}} -> {{newTokens}}).',
+
+  // ============================================================================
+  // Commands - Export
+  // ============================================================================
+  'Could not determine current working directory.':
+    'Could not determine current working directory.',
+  'No active session found to export.': 'No active session found to export.',
+  'Session exported to markdown: {{filename}}':
+    'Session exported to markdown: {{filename}}',
+  'Session exported to HTML: {{filename}}':
+    'Session exported to HTML: {{filename}}',
+  'Session exported to JSON: {{filename}}':
+    'Session exported to JSON: {{filename}}',
+  'Session exported to JSONL: {{filename}}':
+    'Session exported to JSONL: {{filename}}',
+  'Failed to export session: {{error}}':
+    'Failed to export session: {{error}}',
+
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Configured Hooks ({{count}} total)':
+    'Configured Hooks ({{count}} total)',
+  'unnamed': 'unnamed',
+  ' (matcher: {{matcher}})': ' (matcher: {{matcher}})',
+
+  // ============================================================================
+  // Commands - Restore
+  // ============================================================================
+  'Could not determine the .qwen directory path.':
+    'Could not determine the .qwen directory path.',
+  'No restorable tool calls found.': 'No restorable tool calls found.',
+  'Available tool calls to restore:': 'Available tool calls to restore:',
+  'File not found: {{file}}': 'File not found: {{file}}',
+  'loadHistory function is not available.':
+    'loadHistory function is not available.',
+  'Restored project to the state before the tool call.':
+    'Restored project to the state before the tool call.',
+  'Could not read restorable tool calls. This is the error: {{error}}':
+    'Could not read restorable tool calls. This is the error: {{error}}',
+
+  // ============================================================================
+  // Commands - Summary
+  // ============================================================================
+  'Summary generation cancelled.': 'Summary generation cancelled.',
 };

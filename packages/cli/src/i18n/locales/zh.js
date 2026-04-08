@@ -575,6 +575,7 @@ export default {
   '(user)': '（用户）',
   '[not set]': '［未设置］',
   '[value stored in keychain]': '［值存储在钥匙串中］',
+  'Value:': '值：',
   'Manage extension settings.': '管理扩展设置。',
   'You need to specify a command (set or list).':
     '您需要指定命令（set 或 list）。',
@@ -1007,6 +1008,7 @@ export default {
   Type: '类型',
   Parameters: '参数',
   'No tool selected': '未选择工具',
+  'No server selected': '未选择服务器',
   Annotations: '注解',
   Title: '标题',
   'Read Only': '只读',
@@ -1817,4 +1819,106 @@ export default {
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     '详细模式下显示完整工具输出和思考过程（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
+
+  // ============================================================================
+  // Commands - Arena
+  // ============================================================================
+  'Arena usage: /arena start --models model1,model2 <task>':
+    '用法：/arena start --models model1,model2 <任务>',
+  Options: '选项',
+  'Models to compete (required, at least 2)': '要竞争模型（必填，至少2个）',
+  'Format: authType:modelId or just modelId': '格式：authType:modelId 或仅 modelId',
+  Examples: '示例',
+  'Arena requires at least 2 models. Use --models model1,model2 to specify.':
+    'Arena 至少需要2个模型。使用 --models model1,model2 指定。',
+  'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.':
+    'Arena 不支持非交互模式。请使用交互模式启动 Arena 会话。',
+  'Arena is not supported in non-interactive mode. Use interactive mode to stop an Arena session.':
+    'Arena 不支持非交互模式。请使用交互模式停止 Arena 会话。',
+  'An Arena session exists. Use /arena stop or /arena select to end it before starting a new one.':
+    'Arena 会话已存在。请使用 /arena stop 或 /arena select 结束后再开始新会话。',
+  'No running Arena session found.': '未找到正在运行的 Arena 会话。',
+  'Arena is not supported in non-interactive mode.':
+    'Arena 不支持非交互模式。',
+  'No Arena session found. Start one with /arena start.':
+    '未找到 Arena 会话。请使用 /arena start 开始。',
+  'No arena session found. Start one with /arena start.':
+    '未找到 Arena 会话。请使用 /arena start 开始。',
+  'Arena session is still running. Wait for it to complete or use /arena stop first.':
+    'Arena 会话仍在运行。请等待完成或使用 /arena stop 停止。',
+  'Discard all Arena results and clean up worktrees?':
+    '确定要放弃所有 Arena 结果并清理 worktrees 吗？',
+  'Arena results discarded. All worktrees cleaned up.':
+    'Arena 结果已放弃。所有 worktrees 已清理。',
+  'No successful agent results to select from. All agents failed or were cancelled.':
+    '没有成功的智能体结果可供选择。所有智能体都失败了或被取消。',
+  'Use /arena stop to end the session.': '使用 /arena stop 结束会话。',
+  'No idle agent found matching "{{arg}}"':
+    '未找到匹配 "{{arg}}" 的空闲智能体',
+  'Failed to apply changes from {{label}}: {{error}}':
+    '从 {{label}} 应用更改失败：{{error}}',
+  'Applied changes from {{label}} to workspace. Arena session complete.':
+    '已将 {{label}} 的更改应用到工作区。Arena 会话完成。',
+
+  // ============================================================================
+  // Commands - Copy
+  // ============================================================================
+  'No output in history': '历史记录中没有输出',
+  'Last output copied to the clipboard': '最后输出已复制到剪贴板',
+  'Failed to copy to the clipboard. {{error}}':
+    '复制到剪贴板失败：{{error}}',
+  'Last AI output contains no text to copy.':
+    '最后的 AI 输出没有可复制的文本。',
+
+  // ============================================================================
+  // Commands - Compress
+  // ============================================================================
+  'Compressing context...': '正在压缩上下文...',
+  'Context compressed ({{originalTokens}} -> {{newTokens}}).':
+    '上下文已压缩（{{originalTokens}} -> {{newTokens}}）。',
+
+  // ============================================================================
+  // Commands - Export
+  // ============================================================================
+  'Could not determine current working directory.':
+    '无法确定当前工作目录。',
+  'No active session found to export.': '没有找到可导出的活动会话。',
+  'Session exported to markdown: {{filename}}':
+    '会话已导出为 markdown：{{filename}}',
+  'Session exported to HTML: {{filename}}':
+    '会话已导出为 HTML：{{filename}}',
+  'Session exported to JSON: {{filename}}':
+    '会话已导出为 JSON：{{filename}}',
+  'Session exported to JSONL: {{filename}}':
+    '会话已导出为 JSONL：{{filename}}',
+  'Failed to export session: {{error}}':
+    '导出会话失败：{{error}}',
+
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Configured Hooks ({{count}} total)':
+    '已配置的 Hook（共 {{count}} 个）',
+  'unnamed': '未命名',
+  ' (matcher: {{matcher}})': '（匹配器：{{matcher}}）',
+
+  // ============================================================================
+  // Commands - Restore
+  // ============================================================================
+  'Could not determine the .qwen directory path.':
+    '无法确定 .qwen 目录路径。',
+  'No restorable tool calls found.': '没有找到可恢复的工具调用。',
+  'Available tool calls to restore:': '可恢复的工具调用：',
+  'File not found: {{file}}': '文件未找到：{{file}}',
+  'loadHistory function is not available.':
+    'loadHistory 函数不可用。',
+  'Restored project to the state before the tool call.':
+    '已恢复项目到工具调用之前的状态。',
+  'Could not read restorable tool calls. This is the error: {{error}}':
+    '无法读取可恢复的工具调用。错误：{{error}}',
+
+  // ============================================================================
+  // Commands - Summary
+  // ============================================================================
+  'Summary generation cancelled.': '摘要生成已取消。',
 };
