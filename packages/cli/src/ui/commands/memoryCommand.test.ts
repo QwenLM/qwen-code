@@ -28,6 +28,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...original,
+    Storage: {
+      ...original.Storage,
+      getGlobalQwenDir: vi.fn(() => '/home/user/.qwen'),
+    },
     getErrorMessage: vi.fn((error: unknown) => {
       if (error instanceof Error) return error.message;
       return String(error);
