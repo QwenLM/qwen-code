@@ -6,6 +6,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { exec, type ChildProcess } from 'child_process';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -70,6 +71,8 @@ interface StatusLineConfig {
   command: string;
   padding?: number;
 }
+
+const debugLog = createDebugLogger('STATUS_LINE');
 
 function getStatusLineConfig(
   settings: ReturnType<typeof useSettings>,
@@ -297,7 +300,11 @@ export function useStatusLine(): {
     // Pass structured JSON context via stdin.
     // Guard against EPIPE if the child exits before we finish writing.
     if (child.stdin) {
-      child.stdin.on('error', () => {});
+      child.stdin.on('error', (err) => {
+        if ((err as NodeJS.ErrnoException).code !== 'EPIPE') {
+          debugLog.error('statusline stdin error:', err.message);
+        }
+      });
       child.stdin.write(JSON.stringify(input));
       child.stdin.end();
     }
