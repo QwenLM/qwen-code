@@ -101,7 +101,9 @@ export function saveCacheSafeParams(
  * Get the current cache-safe params, or null if not yet captured.
  */
 export function getCacheSafeParams(): CacheSafeParams | null {
-  return currentCacheSafeParams;
+  return currentCacheSafeParams
+    ? structuredClone(currentCacheSafeParams)
+    : null;
 }
 
 /**
@@ -145,7 +147,13 @@ export function createForkedChat(
   // so sharing is safe and avoids a redundant deep clone.
   return new GeminiChat(
     config,
-    { ...params.generationConfig }, // shallow copy to prevent mutation of the cached snapshot
+    {
+      ...params.generationConfig,
+      thinkingConfig: {
+        ...params.generationConfig.thinkingConfig,
+        includeThoughts: false,
+      },
+    },
     [...history], // shallow copy — entries are read-only
     undefined, // no chatRecordingService
     undefined, // no telemetryService
@@ -226,7 +234,8 @@ export async function runForkedQuery(
   for await (const event of stream) {
     if (event.type !== StreamEventType.CHUNK) continue;
     const response = event.value;
-    // Extract text from candidates (skip thinking/reasoning parts)
+    // Filter out thinking/reasoning parts as a defensive measure,
+    // even though includeThoughts: false should suppress them.
     const allParts = response.candidates?.[0]?.content?.parts ?? [];
     const text = allParts
       .filter((p) => !('thought' in p && p.thought))

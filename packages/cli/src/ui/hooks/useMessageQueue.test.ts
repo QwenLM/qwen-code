@@ -296,4 +296,28 @@ describe('useMessageQueue', () => {
     expect(popped).toBeNull();
     expect(result.current.messageQueue).toEqual([]);
   });
+
+  it('should drain all messages from queue as an array', () => {
+    const { result } = renderHook(() =>
+      useMessageQueue({
+        isConfigInitialized: true,
+        streamingState: StreamingState.Responding,
+        submitQuery: mockSubmitQuery,
+      }),
+    );
+
+    act(() => {
+      result.current.addMessage('Message 1');
+      result.current.addMessage('Message 2');
+    });
+
+    let drained: string[] = [];
+    act(() => {
+      drained = result.current.drainQueue();
+    });
+
+    expect(drained).toEqual(['Message 1', 'Message 2']);
+    expect(result.current.messageQueue).toEqual([]);
+    expect(result.current.drainQueue()).toEqual([]);
+  });
 });

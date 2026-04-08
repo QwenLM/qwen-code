@@ -53,6 +53,8 @@ import {
   IDLE_SPECULATION,
   ApprovalMode,
   type PermissionMode,
+  ToolConfirmationOutcome,
+  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -124,10 +126,13 @@ import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.j
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+// [CUSTOM] Dual output confirmation bridge
+import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -726,6 +731,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    pendingToolCalls, // [CUSTOM] Exposed for dual-output confirmation bridge
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -782,6 +788,7 @@ export const AppContainer = (props: AppContainerProps) => {
     addMessage,
     clearQueue,
     getQueuedMessagesText,
+    drainQueue,
     popAllMessages,
   } = useMessageQueue({
     isConfigInitialized,
@@ -789,29 +796,112 @@ export const AppContainer = (props: AppContainerProps) => {
     submitQuery,
   });
 
-  // Bridge message queue to mid-turn drain via ref.
-  // Sync ref on every render so the drain callback always reads latest state.
-  const messageQueueRef = useRef(messageQueue);
-  messageQueueRef.current = messageQueue;
-  midTurnDrainRef.current = () => {
-    const queue = messageQueueRef.current;
-    if (queue.length === 0) return [];
-    messageQueueRef.current = [];
-    clearQueue();
-    return [...queue];
-  };
+  // Connect remote input watcher to submitQuery for bidirectional sync.
+  // When an external process writes a command to the input-file,
+  // the watcher calls submitQuery as if the user typed it in the TUI.
+  const remoteInput = useRemoteInput();
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setSubmitFn((text: string) => submitQuery(text));
+  }, [remoteInput, submitQuery]);
+
+  // Notify remote input watcher when TUI becomes idle so it can
+  // retry queued commands that were deferred while TUI was busy.
+  useEffect(() => {
+    if (!remoteInput) return;
+    if (streamingState === StreamingState.Idle) {
+      remoteInput.notifyIdle();
+    }
+  }, [remoteInput, streamingState]);
+
+  // [CUSTOM] Dual output confirmation bridge — connects tool approval events
+  // between the TUI and external consumers via --json-file / --input-file.
+  const dualOutput = useDualOutput();
+  const confirmRequestMap = useRef(new Map<string, string>()); // requestId → callId
+  const confirmCallIdMap = useRef(new Map<string, string>()); // callId → requestId
+  const confirmEmitted = useRef(new Set<string>());
+
+  // Emit control_request when tools enter awaiting_approval
+  useEffect(() => {
+    if (!dualOutput || !dualOutput.isConnected) return;
+    for (const tc of pendingToolCalls) {
+      if (
+        tc.status === 'awaiting_approval' &&
+        !confirmEmitted.current.has(tc.request.callId)
+      ) {
+        const requestId = crypto.randomUUID();
+        confirmRequestMap.current.set(requestId, tc.request.callId);
+        confirmCallIdMap.current.set(tc.request.callId, requestId);
+        confirmEmitted.current.add(tc.request.callId);
+        dualOutput.emitControlRequest(
+          requestId,
+          tc.request.name,
+          tc.request.callId,
+          tc.request.args,
+          null,
+        );
+      }
+    }
+    // Detect tools that left awaiting_approval (TUI native resolution)
+    for (const [callId, requestId] of confirmCallIdMap.current) {
+      const tc = pendingToolCalls.find((t) => t.request.callId === callId);
+      if (
+        tc &&
+        tc.status !== 'awaiting_approval' &&
+        confirmEmitted.current.has(callId)
+      ) {
+        const allowed = tc.status !== 'cancelled' && tc.status !== 'error';
+        dualOutput.emitControlResponse(requestId, allowed);
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      }
+    }
+  }, [dualOutput, pendingToolCalls]);
+
+  // Register confirmation handler for external responses via --input-file
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setConfirmationHandler(
+      (requestId: string, allowed: boolean) => {
+        const callId = confirmRequestMap.current.get(requestId);
+        if (!callId) return;
+        const tc = pendingToolCalls.find(
+          (t) =>
+            t.request.callId === callId && t.status === 'awaiting_approval',
+        );
+        if (!tc) return;
+        const waitingTc = tc as WaitingToolCall;
+        if (!waitingTc.confirmationDetails?.onConfirm) return;
+        void waitingTc.confirmationDetails.onConfirm(
+          allowed
+            ? ToolConfirmationOutcome.ProceedOnce
+            : ToolConfirmationOutcome.Cancel,
+        );
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      },
+    );
+
+    return () => {
+      remoteInput.setConfirmationHandler(() => {});
+    };
+  }, [remoteInput, pendingToolCalls]);
+
+  // [CUSTOM] Emit session_start event to dual output channel
+  useEffect(() => {
+    if (!dualOutput) return;
+    dualOutput.emitSystemMessage('session_start', {
+      session_id: sessionStats.sessionId,
+      cwd: process.cwd(),
+    });
+  }, [dualOutput, sessionStats.sessionId]);
 
   // Bridge message queue to mid-turn drain via ref.
-  // Sync ref on every render so the drain callback always reads latest state.
-  const messageQueueRef = useRef(messageQueue);
-  messageQueueRef.current = messageQueue;
-  midTurnDrainRef.current = () => {
-    const queue = messageQueueRef.current;
-    if (queue.length === 0) return [];
-    messageQueueRef.current = [];
-    clearQueue();
-    return [...queue];
-  };
+  // drainQueue is a stable callback from useMessageQueue that atomically
+  // clears both the synchronous ref and React state.
+  midTurnDrainRef.current = drainQueue;
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
