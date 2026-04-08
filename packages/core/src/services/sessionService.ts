@@ -8,12 +8,14 @@ import { Storage } from '../config/storage.js';
 import { getProjectHash } from '../utils/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
+  SessionTitleRecordPayload,
   UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -36,12 +38,22 @@ export interface SessionListItem {
   mtime: number;
   /** First user prompt text (truncated for display) */
   prompt: string;
+  /** Custom title set by user or derived during fork (highest display priority) */
+  customTitle?: string;
   /** Git branch at session start, if available */
   gitBranch?: string;
   /** Full path to the session file */
   filePath: string;
   /** Number of messages in the session (unique message UUIDs) */
   messageCount: number;
+}
+
+/**
+ * Options for forking a session.
+ */
+export interface ForkSessionOptions {
+  /** Custom title for the forked session. If not provided, derived from first prompt. */
+  customTitle?: string;
 }
 
 /**
@@ -128,10 +140,12 @@ const MAX_PROMPT_SCAN_LINES = 10;
 export class SessionService {
   private readonly storage: Storage;
   private readonly projectHash: string;
+  private readonly cwd: string;
 
   constructor(cwd: string) {
     this.storage = new Storage(cwd);
     this.projectHash = getProjectHash(cwd);
+    this.cwd = cwd;
   }
 
   private getChatsDir(): string {
@@ -166,6 +180,44 @@ export class SessionService {
       if (prompt) return prompt;
     }
     return '';
+  }
+
+  /**
+   * Extracts the custom title from a session file by scanning for session_title
+   * system records. Returns the last title found (most recent takes priority).
+   */
+  private async extractCustomTitle(
+    filePath: string,
+  ): Promise<string | undefined> {
+    let customTitle: string | undefined;
+    try {
+      const fileStream = fs.createReadStream(filePath);
+      const rl = readline.createInterface({
+        input: fileStream,
+        crlfDelay: Infinity,
+      });
+
+      for await (const line of rl) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const record = JSON.parse(trimmed) as ChatRecord;
+          if (record.type === 'system' && record.subtype === 'session_title') {
+            const payload = record.systemPayload as
+              | SessionTitleRecordPayload
+              | undefined;
+            if (payload?.customTitle) {
+              customTitle = payload.customTitle;
+            }
+          }
+        } catch {
+          continue;
+        }
+      }
+    } catch {
+      // Ignore read errors
+    }
+    return customTitle;
   }
 
   /**
@@ -288,8 +340,11 @@ export class SessionService {
       const recordProjectHash = getProjectHash(firstRecord.cwd);
       if (recordProjectHash !== this.projectHash) continue;
 
-      // Count messages for this session
-      const messageCount = await this.countSessionMessages(filePath);
+      // Count messages and extract custom title in parallel
+      const [messageCount, customTitle] = await Promise.all([
+        this.countSessionMessages(filePath),
+        this.extractCustomTitle(filePath),
+      ]);
 
       const prompt = this.extractFirstPromptFromRecords(records);
 
@@ -299,6 +354,7 @@ export class SessionService {
         startTime: firstRecord.timestamp,
         mtime: file.mtime,
         prompt,
+        customTitle,
         gitBranch: firstRecord.gitBranch,
         filePath,
         messageCount,
@@ -452,8 +508,15 @@ export class SessionService {
       return;
     }
 
+    // Filter out metadata-only records (e.g., session_title) that are not part
+    // of the conversation tree. These records have parentUuid: null and would
+    // break reconstructHistory which walks backwards from the last record.
+    const conversationRecords = records.filter(
+      (r) => r.subtype !== 'session_title',
+    );
+
     // Reconstruct linear history
-    const messages = this.reconstructHistory(records);
+    const messages = this.reconstructHistory(conversationRecords);
     if (messages.length === 0) {
       return;
     }
@@ -542,6 +605,199 @@ export class SessionService {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Saves a custom title for a session by appending a session_title system record.
+   *
+   * @param sessionId The session ID to set the title for
+   * @param title The custom title to save
+   * @param source The source of the title ('user' for manual rename, 'fork' for auto-derived)
+   */
+  async saveSessionTitle(
+    sessionId: string,
+    title: string,
+    source: 'user' | 'fork' = 'user',
+  ): Promise<void> {
+    const chatsDir = this.getChatsDir();
+    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+
+    const titleRecord: ChatRecord = {
+      uuid: crypto.randomUUID(),
+      parentUuid: null,
+      sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'system',
+      subtype: 'session_title',
+      cwd: this.cwd,
+      version: process.env['CLI_VERSION'] || '0.0.0',
+      systemPayload: {
+        customTitle: title,
+        source,
+      } as SessionTitleRecordPayload,
+    };
+
+    await jsonl.writeLine(filePath, titleRecord);
+  }
+
+  /**
+   * Generates a unique fork name by checking for collisions with existing session titles.
+   * If "baseName (Branch)" already exists, tries "baseName (Branch 2)", etc.
+   *
+   * @param baseName The base name to derive the fork name from
+   * @returns A unique fork name like "baseName (Branch)" or "baseName (Branch 2)"
+   */
+  async getUniqueForkName(baseName: string): Promise<string> {
+    const candidateName = `${baseName} (Branch)`;
+
+    // Single listSessions call, reused for both exact and prefix matching
+    const allSessions = await this.listSessions({ size: 200 });
+    const sessionsWithTitles = allSessions.items.filter(
+      (item) => !!item.customTitle,
+    );
+
+    const existingWithExactName = sessionsWithTitles.filter(
+      (item) => item.customTitle === candidateName,
+    );
+    if (existingWithExactName.length === 0) {
+      return candidateName;
+    }
+
+    // Name collision — find a unique numbered suffix
+    const existingForks = sessionsWithTitles.filter((item) =>
+      item.customTitle!.startsWith(`${baseName} (Branch`),
+    );
+
+    const usedNumbers = new Set<number>([1]); // " (Branch)" = 1
+    const escapedBase = baseName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const forkNumberPattern = new RegExp(
+      `^${escapedBase} \\(Branch(?: (\\d+))?\\)$`,
+    );
+
+    for (const session of existingForks) {
+      const match = session.customTitle?.match(forkNumberPattern);
+      if (match) {
+        if (match[1]) {
+          usedNumbers.add(parseInt(match[1], 10));
+        } else {
+          usedNumbers.add(1);
+        }
+      }
+    }
+
+    let nextNumber = 2;
+    while (usedNumbers.has(nextNumber)) {
+      nextNumber++;
+    }
+
+    return `${baseName} (Branch ${nextNumber})`;
+  }
+
+  /**
+   * Derives a single-line title from the first user message in a list of records.
+   * Collapses whitespace so multiline first messages don't break display.
+   */
+  private deriveFirstPromptTitle(records: ChatRecord[]): string {
+    for (const record of records) {
+      if (record.type !== 'user') continue;
+      // Extract raw text directly instead of using extractPromptText
+      // (which truncates at 200 chars with "..." — double truncation)
+      const parts = record.message?.parts;
+      if (!parts) continue;
+      for (const part of parts as Part[]) {
+        if ('text' in part) {
+          const raw = (part as { text: string }).text;
+          const collapsed = raw.replace(/\s+/g, ' ').trim();
+          if (collapsed) {
+            return collapsed.slice(0, 100);
+          }
+        }
+      }
+    }
+    return 'Branched conversation';
+  }
+
+  /**
+   * Forks an existing session to create a new independent session.
+   *
+   * Copies all records from the original session into a new JSONL file with a
+   * new sessionId while preserving conversation history and metadata. Adds
+   * forkedFrom traceability to each record, rebuilds the parentUuid chain,
+   * derives a title, and handles naming collisions with "(Branch N)" suffixes.
+   *
+   * @param originalSessionId The session ID to fork
+   * @param options Optional fork configuration (custom title, etc.)
+   * @returns Fork result with new session ID, title, and file path, or undefined if not found
+   */
+  async forkSession(
+    originalSessionId: string,
+    options?: ForkSessionOptions,
+  ): Promise<
+    { sessionId: string; filePath: string; title: string } | undefined
+  > {
+    const chatsDir = this.getChatsDir();
+    const originalFilePath = path.join(chatsDir, `${originalSessionId}.jsonl`);
+
+    // Read all records from the original session
+    const records = await this.readAllRecords(originalFilePath);
+    if (records.length === 0) {
+      return undefined;
+    }
+
+    // Verify the session belongs to the current project
+    const recordProjectHash = getProjectHash(records[0].cwd);
+    if (recordProjectHash !== this.projectHash) {
+      return undefined;
+    }
+
+    // Generate a new session ID for the fork
+    const newSessionId = crypto.randomUUID();
+    const newFilePath = path.join(chatsDir, `${newSessionId}.jsonl`);
+
+    // Filter to only conversation messages (exclude system metadata like titles)
+    const conversationRecords = records.filter(
+      (record) =>
+        record.type === 'user' ||
+        record.type === 'assistant' ||
+        record.type === 'tool_result' ||
+        (record.type === 'system' && record.subtype !== 'session_title'),
+    );
+
+    if (conversationRecords.length === 0) {
+      return undefined;
+    }
+
+    // Build forked entries with new sessionId, rebuilt parentUuid chain, and forkedFrom traceability
+    let parentUuid: string | null = null;
+    const forkedRecords: ChatRecord[] = [];
+
+    for (const record of conversationRecords) {
+      const forkedRecord: ChatRecord = {
+        ...record,
+        sessionId: newSessionId,
+        parentUuid,
+        forkedFrom: {
+          sessionId: originalSessionId,
+          messageUuid: record.uuid,
+        },
+      };
+      forkedRecords.push(forkedRecord);
+      parentUuid = record.uuid;
+    }
+
+    jsonl.write(newFilePath, forkedRecords);
+
+    // Derive and save the title with collision-aware naming
+    const baseName =
+      options?.customTitle || this.deriveFirstPromptTitle(records);
+    const effectiveTitle = await this.getUniqueForkName(baseName);
+    await this.saveSessionTitle(newSessionId, effectiveTitle, 'fork');
+
+    return {
+      sessionId: newSessionId,
+      filePath: newFilePath,
+      title: effectiveTitle,
+    };
   }
 }
 

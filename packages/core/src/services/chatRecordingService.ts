@@ -57,7 +57,8 @@ export interface ChatRecord {
     | 'chat_compression'
     | 'slash_command'
     | 'ui_telemetry'
-    | 'at_command';
+    | 'at_command'
+    | 'session_title';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -97,7 +98,19 @@ export interface ChatRecord {
     | ChatCompressionRecordPayload
     | SlashCommandRecordPayload
     | UiTelemetryRecordPayload
-    | AtCommandRecordPayload;
+    | AtCommandRecordPayload
+    | SessionTitleRecordPayload;
+
+  /**
+   * Traceability info for forked (branched) sessions.
+   * Present only on records that were copied from another session via fork.
+   */
+  forkedFrom?: {
+    /** Original session ID this record was forked from */
+    sessionId: string;
+    /** UUID of the original message in the source session */
+    messageUuid: string;
+  };
 }
 
 /**
@@ -146,6 +159,17 @@ export interface AtCommandRecordPayload {
  */
 export interface UiTelemetryRecordPayload {
   uiEvent: UiEvent;
+}
+
+/**
+ * Stored payload for session title metadata.
+ * Appended as a system record to store custom or derived session titles.
+ */
+export interface SessionTitleRecordPayload {
+  /** Custom title set by user or derived during fork */
+  customTitle: string;
+  /** Source of the title */
+  source: 'user' | 'fork';
 }
 
 /**

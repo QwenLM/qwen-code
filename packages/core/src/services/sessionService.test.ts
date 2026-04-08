@@ -62,6 +62,8 @@ describe('SessionService', () => {
     // Mock jsonl-utils
     vi.mocked(jsonl.read).mockResolvedValue([]);
     vi.mocked(jsonl.readLines).mockResolvedValue([]);
+    vi.mocked(jsonl.write).mockImplementation(() => {});
+    vi.mocked(jsonl.writeLine).mockResolvedValue();
   });
 
   afterEach(() => {
@@ -628,6 +630,195 @@ describe('SessionService', () => {
       const exists = await sessionService.sessionExists(sessionIdA);
 
       expect(exists).toBe(false);
+    });
+  });
+
+  describe('forkSession', () => {
+    it('should fork an existing session with a new sessionId and forkedFrom traceability', async () => {
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const result = await sessionService.forkSession(sessionIdB);
+
+      expect(result).toBeDefined();
+      expect(result!.sessionId).not.toBe(sessionIdB);
+      expect(result!.sessionId).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
+      expect(result!.filePath).toContain(result!.sessionId);
+
+      // Verify jsonl.write was called with records having new sessionId and forkedFrom
+      expect(jsonl.write).toHaveBeenCalledTimes(1);
+      const writeCall = vi.mocked(jsonl.write).mock.calls[0];
+      const writtenRecords = writeCall[1] as ChatRecord[];
+      expect(writtenRecords).toHaveLength(2);
+      expect(writtenRecords[0].sessionId).toBe(result!.sessionId);
+      expect(writtenRecords[1].sessionId).toBe(result!.sessionId);
+
+      // forkedFrom traceability
+      expect(writtenRecords[0].forkedFrom).toEqual({
+        sessionId: sessionIdB,
+        messageUuid: 'b1',
+      });
+      expect(writtenRecords[1].forkedFrom).toEqual({
+        sessionId: sessionIdB,
+        messageUuid: 'b2',
+      });
+
+      // parentUuid chain rebuilt
+      expect(writtenRecords[0].parentUuid).toBeNull();
+      expect(writtenRecords[1].parentUuid).toBe('b1');
+
+      // Original content preserved
+      expect(writtenRecords[0].message).toEqual(recordB1.message);
+    });
+
+    it('should derive title from first user prompt with (Branch) suffix', async () => {
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const result = await sessionService.forkSession(sessionIdB);
+
+      expect(result).toBeDefined();
+      // Title should be derived from first prompt + " (Branch)"
+      expect(result!.title).toBe('hi session b (Branch)');
+
+      // Should save title via jsonl.writeLine
+      expect(jsonl.writeLine).toHaveBeenCalled();
+    });
+
+    it('should use custom title when provided', async () => {
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const result = await sessionService.forkSession(sessionIdB, {
+        customTitle: 'My Experiment',
+      });
+
+      expect(result).toBeDefined();
+      expect(result!.title).toBe('My Experiment (Branch)');
+    });
+
+    it('should return undefined when session file is empty', async () => {
+      vi.mocked(jsonl.read).mockResolvedValue([]);
+
+      const result = await sessionService.forkSession('nonexistent');
+
+      expect(result).toBeUndefined();
+    });
+
+    it('should return undefined for session from different project', async () => {
+      const differentProjectRecord: ChatRecord = {
+        ...recordA1,
+        cwd: '/different/project',
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([differentProjectRecord]);
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      const result = await sessionService.forkSession(sessionIdA);
+
+      expect(result).toBeUndefined();
+      expect(jsonl.write).not.toHaveBeenCalled();
+    });
+
+    it('should produce a session that loadSession can correctly reconstruct', async () => {
+      // Capture what forkSession writes
+      const writtenData: unknown[][] = [];
+      vi.mocked(jsonl.write).mockImplementation((_path, data) => {
+        writtenData.push(data as unknown[]);
+      });
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const result = await sessionService.forkSession(sessionIdB);
+      expect(result).toBeDefined();
+
+      // Now mock jsonl.read to return the forked records PLUS the appended title record
+      // (simulating what the file looks like after forkSession writes + saveSessionTitle appends)
+      const forkedRecords = writtenData[0] as ChatRecord[];
+      const titleRecord: ChatRecord = {
+        uuid: 'title-uuid',
+        parentUuid: null,
+        sessionId: result!.sessionId,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'system',
+        subtype: 'session_title',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        systemPayload: {
+          customTitle: result!.title,
+          source: 'fork' as const,
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([...forkedRecords, titleRecord]);
+
+      const loaded = await sessionService.loadSession(result!.sessionId);
+
+      // Must reconstruct the full conversation, NOT just the title record
+      expect(loaded).toBeDefined();
+      expect(loaded!.conversation.messages).toHaveLength(2);
+      expect(loaded!.conversation.messages[0].uuid).toBe('b1');
+      expect(loaded!.conversation.messages[1].uuid).toBe('b2');
+    });
+
+    it('should filter out session_title system records from forked data', async () => {
+      const titleRecord: ChatRecord = {
+        uuid: 'title1',
+        parentUuid: 'b2',
+        sessionId: sessionIdB,
+        timestamp: '2024-01-02T03:00:00Z',
+        type: 'system',
+        subtype: 'session_title',
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        systemPayload: {
+          customTitle: 'Old Title',
+          source: 'user' as const,
+        },
+      };
+      vi.mocked(jsonl.read).mockResolvedValue([
+        recordB1,
+        recordB2,
+        titleRecord,
+      ]);
+
+      const result = await sessionService.forkSession(sessionIdB);
+
+      expect(result).toBeDefined();
+      const writeCall = vi.mocked(jsonl.write).mock.calls[0];
+      const writtenRecords = writeCall[1] as ChatRecord[];
+      // Should only have 2 records (title record filtered out)
+      expect(writtenRecords).toHaveLength(2);
+      expect(writtenRecords.every((r) => r.subtype !== 'session_title')).toBe(
+        true,
+      );
+    });
+  });
+
+  describe('saveSessionTitle', () => {
+    it('should append a session_title system record via writeLine', async () => {
+      await sessionService.saveSessionTitle(sessionIdA, 'My Title', 'user');
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('session_title');
+      expect(record.sessionId).toBe(sessionIdA);
+      expect(
+        (record.systemPayload as { customTitle: string }).customTitle,
+      ).toBe('My Title');
+      expect((record.systemPayload as { source: string }).source).toBe('user');
+    });
+  });
+
+  describe('getUniqueForkName', () => {
+    it('should return "baseName (Branch)" when no collision', async () => {
+      // listSessions returns empty — no collisions
+      readdirSyncSpy.mockReturnValue([]);
+
+      const name = await sessionService.getUniqueForkName('My Session');
+
+      expect(name).toBe('My Session (Branch)');
     });
   });
 
