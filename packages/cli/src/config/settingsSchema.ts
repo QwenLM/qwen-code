@@ -518,7 +518,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Follow-up Suggestions',
         category: 'UI',
         requiresRestart: false,
-        default: true,
+        default: false,
         description:
           'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
         showInDialog: true,

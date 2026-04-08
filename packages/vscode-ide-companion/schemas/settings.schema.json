@@ -183,7 +183,7 @@
         "enableFollowupSuggestions": {
           "description": "Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "enableCacheSharing": {
           "description": "Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).",
