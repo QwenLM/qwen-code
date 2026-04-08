@@ -423,11 +423,23 @@ function findEnvFile(settings: Settings, startDir: string): string | null {
   const canUseEnvFile = (filePath: string): boolean =>
     isTrusted !== false || userLevelPaths.has(path.normalize(filePath));
 
+  // When QWEN_CONFIG_DIR overrides the default, skip legacy ~/.qwen/.env
+  // during walk-up so the fallback correctly picks up globalQwenDir/.env.
+  const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
+  const hasCustomConfigDir = path.normalize(globalQwenDir) !== legacyQwenDir;
+
   let currentDir = path.resolve(startDir);
   while (true) {
     // Prefer gemini-specific .env under QWEN_DIR
     const geminiEnvPath = path.join(currentDir, QWEN_DIR, '.env');
-    if (fs.existsSync(geminiEnvPath) && canUseEnvFile(geminiEnvPath)) {
+    const isLegacyHome =
+      hasCustomConfigDir &&
+      path.normalize(path.join(currentDir, QWEN_DIR)) === legacyQwenDir;
+    if (
+      !isLegacyHome &&
+      fs.existsSync(geminiEnvPath) &&
+      canUseEnvFile(geminiEnvPath)
+    ) {
       return geminiEnvPath;
     }
 
