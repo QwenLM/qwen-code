@@ -1818,14 +1818,13 @@ export default {
     '详细模式下显示完整工具输出和思考过程（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
 
-  'Switch to plan mode or execute the current plan':
-    '切换到计划模式或执行当前计划',
-  'Exited plan mode. The agent will now execute the plan.':
-    '退出计划模式。智能体现在将执行计划。',
+  'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
+  'Exited plan mode. Previous approval mode restored.':
+    '已退出计划模式，已恢复之前的审批模式。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
     '启用计划模式。智能体将只分析和规划，而不执行工具。',
-  'Already in plan mode. Use "/plan execute" to execute the plan.':
-    '已处于计划模式。使用 "/plan execute" 执行计划。',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    '已处于计划模式。使用 "/plan exit" 退出计划模式。',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
     '未处于计划模式。请先使用 "/plan" 进入计划模式。',
 };

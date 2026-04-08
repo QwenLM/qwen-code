@@ -17,7 +17,7 @@ import { ApprovalMode } from '@qwen-code/qwen-code-core';
 export const planCommand: SlashCommand = {
   name: 'plan',
   get description() {
-    return t('Switch to plan mode or execute the current plan');
+    return t('Switch to plan mode or exit plan mode');
   },
   kind: CommandKind.BUILT_IN,
   action: async (
@@ -36,7 +36,7 @@ export const planCommand: SlashCommand = {
     const trimmedArgs = args.trim();
     const currentMode = config.getApprovalMode();
 
-    if (trimmedArgs === 'execute') {
+    if (trimmedArgs === 'exit') {
       if (currentMode !== ApprovalMode.PLAN) {
         return {
           type: 'message',
@@ -56,7 +56,7 @@ export const planCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: t('Exited plan mode. The agent will now execute the plan.'),
+        content: t('Exited plan mode. Previous approval mode restored.'),
       };
     }
 
@@ -98,9 +98,7 @@ export const planCommand: SlashCommand = {
     return {
       type: 'message',
       messageType: 'info',
-      content: t(
-        'Already in plan mode. Use "/plan execute" to execute the plan.',
-      ),
+      content: t('Already in plan mode. Use "/plan exit" to exit plan mode.'),
     };
   },
 };

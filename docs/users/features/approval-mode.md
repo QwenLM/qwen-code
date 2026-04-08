@@ -47,10 +47,10 @@ The `/plan` command provides a quick shortcut for entering and exiting Plan Mode
 ```bash
 /plan                          # Enter plan mode
 /plan refactor the auth module # Enter plan mode and start planning
-/plan execute                  # Exit plan mode, restore previous mode
+/plan exit                     # Exit plan mode, restore previous mode
 ```
 
-When you exit Plan Mode with `/plan execute`, your previous approval mode is automatically restored (e.g., if you were in Auto-Edit before entering Plan Mode, you'll return to Auto-Edit).
+When you exit Plan Mode with `/plan exit`, your previous approval mode is automatically restored (e.g., if you were in Auto-Edit before entering Plan Mode, you'll return to Auto-Edit).
 
 **Start a new session in Plan Mode**
 

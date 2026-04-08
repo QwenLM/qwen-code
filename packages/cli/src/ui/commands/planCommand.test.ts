@@ -74,7 +74,7 @@ describe('planCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Already in plan mode. Use "/plan execute" to execute the plan.',
+      content: 'Already in plan mode. Use "/plan exit" to exit plan mode.',
     });
   });
 
@@ -96,7 +96,7 @@ describe('planCommand', () => {
     });
   });
 
-  it('should exit plan mode when execute argument is passed', async () => {
+  it('should exit plan mode when exit argument is passed', async () => {
     if (!planCommand.action) {
       throw new Error('The plan command must have an action.');
     }
@@ -105,7 +105,7 @@ describe('planCommand', () => {
       ApprovalMode.PLAN,
     );
 
-    const result = await planCommand.action(mockContext, 'execute');
+    const result = await planCommand.action(mockContext, 'exit');
 
     expect(mockContext.services.config?.setApprovalMode).toHaveBeenCalledWith(
       ApprovalMode.DEFAULT,
@@ -113,7 +113,7 @@ describe('planCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Exited plan mode. The agent will now execute the plan.',
+      content: 'Exited plan mode. Previous approval mode restored.',
     });
   });
 
@@ -129,7 +129,7 @@ describe('planCommand', () => {
       ApprovalMode.AUTO_EDIT,
     );
 
-    const result = await planCommand.action(mockContext, 'execute');
+    const result = await planCommand.action(mockContext, 'exit');
 
     expect(mockContext.services.config?.setApprovalMode).toHaveBeenCalledWith(
       ApprovalMode.AUTO_EDIT,
@@ -137,7 +137,7 @@ describe('planCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Exited plan mode. The agent will now execute the plan.',
+      content: 'Exited plan mode. Previous approval mode restored.',
     });
   });
 
@@ -147,7 +147,7 @@ describe('planCommand', () => {
     }
 
     // Default mock returns ApprovalMode.DEFAULT (not PLAN)
-    const result = await planCommand.action(mockContext, 'execute');
+    const result = await planCommand.action(mockContext, 'exit');
 
     expect(mockContext.services.config?.setApprovalMode).not.toHaveBeenCalled();
     expect(result).toEqual({
