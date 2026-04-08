@@ -741,21 +741,37 @@ export class GeminiChat {
 
     // Stream validation logic: A stream is considered successful if:
     // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
-    // 2. There's a finish reason AND we have non-empty response text
+    // 2. There's a finish reason AND we have non-empty response content (text or thought), OR
+    // 3. There's no finish reason BUT we have substantial content — the stream was
+    //    likely cut off by a transient network issue. We accept the partial response
+    //    with a warning rather than discarding it and retrying (which causes worse UX).
     //
     // We throw an error only when there's no tool call AND:
-    // - No finish reason, OR
-    // - Empty response text (e.g., only thoughts with no actual content)
-    if (!hasToolCall && (!hasFinishReason || !contentText)) {
-      if (!hasFinishReason) {
+    // - No finish reason AND no content at all (truly empty / broken stream), OR
+    // - Has finish reason but no content (empty response from model)
+    //
+    // Note: Thoughts-only responses are valid for models that use thinking modes.
+    // These models may send only reasoning content without explicit text output.
+    const hasAnyContent = contentText || thoughtText;
+    if (!hasToolCall) {
+      if (!hasFinishReason && !hasAnyContent) {
+        // Truly empty stream with no finish reason — broken connection or empty response.
         throw new InvalidStreamError(
           'Model stream ended without a finish reason.',
           'NO_FINISH_REASON',
         );
-      } else {
+      } else if (hasFinishReason && !hasAnyContent) {
+        // Model explicitly finished but produced no usable content.
         throw new InvalidStreamError(
           'Model stream ended with empty response text.',
           'NO_RESPONSE_TEXT',
+        );
+      } else if (!hasFinishReason && hasAnyContent) {
+        // Stream delivered content but was cut off without a finish reason.
+        // Accept the partial response to avoid discarding useful content.
+        debugLogger.warn(
+          'Stream ended without a finish reason but has content. ' +
+            'Accepting partial response to preserve user-visible output.',
         );
       }
     }
