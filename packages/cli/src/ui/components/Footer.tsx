@@ -52,8 +52,11 @@ export const Footer: React.FC = () => {
   const contextWindowSize =
     config.getContentGeneratorConfig()?.contextWindowSize;
 
+  // Hide "? for shortcuts" when a custom status line is active (it already
+  // occupies the top row, so the hint is redundant). Matches upstream behavior.
+  const suppressHint = !!statusLineText;
+
   // Left bottom row: high-priority messages > approval mode > hint.
-  // Matches upstream layout where status line and hints coexist vertically.
   const leftBottomContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
@@ -67,7 +70,7 @@ export const Footer: React.FC = () => {
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-  ) : (
+  ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );
 
@@ -117,11 +120,13 @@ export const Footer: React.FC = () => {
     >
       {/* Left column — status line on top, hints/mode on bottom */}
       <Box flexDirection="column" flexShrink={isNarrow ? 0 : 1}>
-        {statusLineText && (
-          <Text dimColor wrap="truncate">
-            {statusLineText}
-          </Text>
-        )}
+        {statusLineText &&
+          !uiState.ctrlCPressedOnce &&
+          !uiState.ctrlDPressedOnce && (
+            <Text dimColor wrap="truncate">
+              {statusLineText}
+            </Text>
+          )}
         <Text wrap="truncate">{leftBottomContent}</Text>
       </Box>
 
