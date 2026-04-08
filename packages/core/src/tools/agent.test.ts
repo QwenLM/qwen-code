@@ -1561,20 +1561,20 @@ describe('AgentTool', () => {
         .map((call) => call[1])
         .filter(
           (delay): delay is number =>
-            typeof delay === 'number' && delay >= 1000,
+            typeof delay === 'number' && delay >= 5000,
         );
 
       // Should have 3 retry delays (for 3 retry attempts)
       expect(retryDelays.length).toBe(3);
 
-      // Delays should be approximately 1000ms, 2000ms, 4000ms (before jitter)
-      // With jitter (0-25%), ranges are: [1000,1250], [2000,2500], [4000,5000]
-      expect(retryDelays[0]).toBeGreaterThanOrEqual(1000);
-      expect(retryDelays[0]).toBeLessThanOrEqual(1250);
-      expect(retryDelays[1]).toBeGreaterThanOrEqual(2000);
-      expect(retryDelays[1]).toBeLessThanOrEqual(2500);
-      expect(retryDelays[2]).toBeGreaterThanOrEqual(4000);
-      expect(retryDelays[2]).toBeLessThanOrEqual(5000);
+      // Delays should be approximately 5000ms, 10000ms, 20000ms (before jitter)
+      // With jitter (0-25%), ranges are: [5000,6250], [10000,12500], [20000,25000]
+      expect(retryDelays[0]).toBeGreaterThanOrEqual(5000);
+      expect(retryDelays[0]).toBeLessThanOrEqual(6250);
+      expect(retryDelays[1]).toBeGreaterThanOrEqual(10000);
+      expect(retryDelays[1]).toBeLessThanOrEqual(12500);
+      expect(retryDelays[2]).toBeGreaterThanOrEqual(20000);
+      expect(retryDelays[2]).toBeLessThanOrEqual(25000);
 
       setTimeoutSpy.mockRestore();
     });

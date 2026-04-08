@@ -70,10 +70,20 @@ const debugLogger = createDebugLogger('AGENT');
 const SUBAGENT_STREAM_RETRY_CONFIG = {
   /** Maximum number of retry attempts (on top of the initial attempt). */
   maxRetries: 3,
-  /** Base delay in milliseconds; doubles each retry. */
-  baseDelayMs: 1000,
+  /**
+   * Base delay in milliseconds; doubles each retry.
+   *
+   * Set to 5 s (not 1 s) because production traces show DashScope
+   * NO_FINISH_REASON storms lasting 2–3 minutes under high concurrency.
+   * Short backoffs (1–2 s) just pile more requests onto an already degraded
+   * endpoint. A 5 s base gives the provider meaningful breathing room while
+   * each subagent still completes within ~40 s total retry budget.
+   *
+   * Progression: 5 s → 10 s → 20 s  (+ 0–25 % jitter each)
+   */
+  baseDelayMs: 5000,
   /** Ceiling for the exponential delay (before jitter is added). */
-  maxDelayMs: 8000,
+  maxDelayMs: 30000,
 } as const;
 
 /**

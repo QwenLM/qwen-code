@@ -72,7 +72,16 @@ const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
 // retries) so they do not consume each other's retry budgets.
 const INVALID_STREAM_RETRY_CONFIG = {
   maxRetries: 2,
-  initialDelayMs: 2000,
+  /**
+   * Initial delay in milliseconds; multiplied by (retryCount) for linear
+   * back-off: 3 s → 6 s.
+   *
+   * Raised from 2 s after production traces showed DashScope
+   * NO_FINISH_REASON bursts lasting 2–3 minutes under /review fan-out.
+   * An extra second per internal retry gives the outer subagent-level retry
+   * a better chance of landing in a recovery window.
+   */
+  initialDelayMs: 3000,
 };
 
 /**
