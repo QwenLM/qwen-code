@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type {
   Config,
@@ -621,14 +621,14 @@ describe('CoreToolScheduler', () => {
       const completedCall = completedCalls[0];
       expect(completedCall.status).toBe('error');
 
-      if (completedCall.status === 'error') {
-        const errorMessage = completedCall.response.error?.message;
-        expect(errorMessage).toBe(
-          'Qwen Code requires permission to use write_file, but that permission was declined.',
-        );
-        // Should NOT contain "not found in registry"
-        expect(errorMessage).not.toContain('not found in registry');
-      }
+      const errorMessage = (
+        completedCall as Extract<typeof completedCall, { status: 'error' }>
+      ).response.error?.message;
+      expect(errorMessage).toBe(
+        'Qwen Code requires permission to use write_file, but that permission was declined.',
+      );
+      // Should NOT contain "not found in registry"
+      expect(errorMessage).not.toContain('not found in registry');
     });
 
     it('should return "not found" message for truly missing tools (not excluded)', async () => {
@@ -709,13 +709,13 @@ describe('CoreToolScheduler', () => {
       const completedCall = completedCalls[0];
       expect(completedCall.status).toBe('error');
 
-      if (completedCall.status === 'error') {
-        const errorMessage = completedCall.response.error?.message;
-        // Should contain "not found in registry"
-        expect(errorMessage).toContain('not found in registry');
-        // Should NOT contain permission message
-        expect(errorMessage).not.toContain('requires permission');
-      }
+      const errorMessage = (
+        completedCall as Extract<typeof completedCall, { status: 'error' }>
+      ).response.error?.message;
+      // Should contain "not found in registry"
+      expect(errorMessage).toContain('not found in registry');
+      // Should NOT contain permission message
+      expect(errorMessage).not.toContain('requires permission');
     });
   });
 });
@@ -1271,9 +1271,10 @@ describe('CoreToolScheduler YOLO mode', () => {
     expect(completedCalls).toHaveLength(1);
     const completedCall = completedCalls[0];
     expect(completedCall.status).toBe('success');
-    if (completedCall.status === 'success') {
-      expect(completedCall.response.resultDisplay).toBe('Tool executed');
-    }
+    expect(
+      (completedCall as Extract<typeof completedCall, { status: 'success' }>)
+        .response.resultDisplay,
+    ).toBe('Tool executed');
   });
 });
 
@@ -1879,13 +1880,13 @@ describe('CoreToolScheduler truncated output protection', () => {
     const completedCall = completedCalls[0];
     expect(completedCall.status).toBe('error');
 
-    if (completedCall.status === 'error') {
-      const errorMessage = completedCall.response.error?.message;
-      expect(errorMessage).toContain('truncated due to max_tokens limit');
-      expect(errorMessage).toContain(
-        'rejected to prevent writing truncated content',
-      );
-    }
+    const errorMessage = (
+      completedCall as Extract<typeof completedCall, { status: 'error' }>
+    ).response.error?.message;
+    expect(errorMessage).toContain('truncated due to max_tokens limit');
+    expect(errorMessage).toContain(
+      'rejected to prevent writing truncated content',
+    );
   });
 
   it('should allow Kind.Edit tool calls when wasOutputTruncated is false', async () => {
@@ -2434,11 +2435,14 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('success');
-    if (completedCalls[0].status === 'success') {
-      expect(completedCalls[0].response.resultDisplay).toContain(
-        'User has provided the following answers',
-      );
-    }
+    expect(
+      (
+        completedCalls[0] as Extract<
+          (typeof completedCalls)[0],
+          { status: 'success' }
+        >
+      ).response.resultDisplay,
+    ).toContain('User has provided the following answers');
   });
 
   it('should block non-ask_user_question tools that need confirmation in plan mode', async () => {
@@ -2473,11 +2477,14 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     const completedCalls = onAllToolCallsComplete.mock
       .calls[0][0] as ToolCall[];
     expect(completedCalls[0].status).toBe('error');
-    if (completedCalls[0].status === 'error') {
-      expect(completedCalls[0].response.resultDisplay).toBe(
-        'Plan mode blocked a non-read-only tool call.',
-      );
-    }
+    expect(
+      (
+        completedCalls[0] as Extract<
+          (typeof completedCalls)[0],
+          { status: 'error' }
+        >
+      ).response.resultDisplay,
+    ).toBe('Plan mode blocked a non-read-only tool call.');
   });
 
   it('should allow info confirmation tools in plan mode after approval', async () => {
@@ -2991,7 +2998,20 @@ describe('Fire hook functions integration', () => {
     });
   });
 
-  describe('Concurrent agent tool execution', () => {
+  describe('Concurrent tool execution', () => {
+    // Ensure tests are deterministic regardless of environment.
+    const origEnv = process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    beforeEach(() => {
+      delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    });
+    afterEach(() => {
+      if (origEnv !== undefined) {
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = origEnv;
+      } else {
+        delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      }
+    });
+
     function createScheduler(
       tools: Map<string, MockTool>,
       onAllToolCallsComplete: Mock,
@@ -3119,7 +3139,7 @@ describe('Fire hook functions integration', () => {
       expect(startIndices.every((i) => i < firstEnd)).toBe(true);
     });
 
-    it('should run agent tools concurrently while other tools run sequentially', async () => {
+    it('should run concurrency-safe tools in parallel and unsafe tools sequentially', async () => {
       const executionLog: string[] = [];
 
       const agentTool = new MockTool({
@@ -3138,10 +3158,11 @@ describe('Fire hook functions integration', () => {
 
       const readTool = new MockTool({
         name: 'read_file',
+        kind: Kind.Read,
         execute: async (params) => {
           const id = (params as { id: string }).id;
           executionLog.push(`read:start:${id}`);
-          await new Promise((r) => setTimeout(r, 20));
+          await new Promise((r) => setTimeout(r, 50));
           executionLog.push(`read:end:${id}`);
           return {
             llmContent: `Read ${id} done`,
@@ -3163,6 +3184,8 @@ describe('Fire hook functions integration', () => {
       );
 
       const abortController = new AbortController();
+      // All 4 calls are concurrency-safe (read_file=Kind.Read, agent=Agent name)
+      // so they form one parallel batch and all run concurrently.
       const requests = [
         {
           callId: '1',
@@ -3202,20 +3225,226 @@ describe('Fire hook functions integration', () => {
       expect(completedCalls).toHaveLength(4);
       expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
 
-      // Non-agent tools should execute sequentially: read:1 finishes before read:2 starts
-      const read1End = executionLog.indexOf('read:end:1');
-      const read2Start = executionLog.indexOf('read:start:2');
-      expect(read1End).toBeLessThan(read2Start);
-
-      // Agent tools should execute concurrently: both start before either ends
-      const agentAStart = executionLog.indexOf('agent:start:A');
-      const agentBStart = executionLog.indexOf('agent:start:B');
-      const firstAgentEnd = Math.min(
+      // All 4 tools are concurrency-safe → they should all start
+      // before any of them finishes (parallel execution).
+      const allStarts = [
+        executionLog.indexOf('read:start:1'),
+        executionLog.indexOf('agent:start:A'),
+        executionLog.indexOf('read:start:2'),
+        executionLog.indexOf('agent:start:B'),
+      ];
+      const firstEnd = Math.min(
+        executionLog.indexOf('read:end:1'),
         executionLog.indexOf('agent:end:A'),
+        executionLog.indexOf('read:end:2'),
         executionLog.indexOf('agent:end:B'),
       );
-      expect(agentAStart).toBeLessThan(firstAgentEnd);
-      expect(agentBStart).toBeLessThan(firstAgentEnd);
+      // Ensure all entries exist before comparing ordering
+      for (const start of allStarts) {
+        expect(start).not.toBe(-1);
+      }
+      expect(firstEnd).not.toBe(-1);
+      for (const start of allStarts) {
+        expect(start).toBeLessThan(firstEnd);
+      }
+    });
+
+    it('should partition mixed safe/unsafe tools into correct batches', async () => {
+      const executionLog: string[] = [];
+
+      const readTool = new MockTool({
+        name: 'read_file',
+        kind: Kind.Read,
+        execute: async (params) => {
+          const id = (params as { id: string }).id;
+          executionLog.push(`read:start:${id}`);
+          await new Promise((r) => setTimeout(r, 50));
+          executionLog.push(`read:end:${id}`);
+          return {
+            llmContent: `Read ${id} done`,
+            returnDisplay: `Read ${id} done`,
+          };
+        },
+      });
+
+      const editTool = new MockTool({
+        name: 'edit',
+        kind: Kind.Edit,
+        execute: async (params) => {
+          const id = (params as { id: string }).id;
+          executionLog.push(`edit:start:${id}`);
+          await new Promise((r) => setTimeout(r, 20));
+          executionLog.push(`edit:end:${id}`);
+          return {
+            llmContent: `Edit ${id} done`,
+            returnDisplay: `Edit ${id} done`,
+          };
+        },
+      });
+
+      const tools = new Map<string, MockTool>([
+        ['read_file', readTool],
+        ['edit', editTool],
+      ]);
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+      const scheduler = createScheduler(
+        tools,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+      );
+
+      // [Read₁, Read₂, Edit, Read₃]
+      // Expected batches: [Read₁,Read₂](parallel) → [Edit](seq) → [Read₃](seq)
+      const requests = [
+        {
+          callId: '1',
+          name: 'read_file',
+          args: { id: '1' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '2',
+          name: 'read_file',
+          args: { id: '2' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '3',
+          name: 'edit',
+          args: { id: 'E' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '4',
+          name: 'read_file',
+          args: { id: '3' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ];
+
+      await scheduler.schedule(requests, new AbortController().signal);
+
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls).toHaveLength(4);
+      expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
+
+      // Batch 1: Read₁ and Read₂ run in parallel (both start before either ends)
+      const read1Start = executionLog.indexOf('read:start:1');
+      const read2Start = executionLog.indexOf('read:start:2');
+      const firstReadEnd = Math.min(
+        executionLog.indexOf('read:end:1'),
+        executionLog.indexOf('read:end:2'),
+      );
+      expect(read1Start).not.toBe(-1);
+      expect(read2Start).not.toBe(-1);
+      expect(firstReadEnd).not.toBe(-1);
+      expect(read1Start).toBeLessThan(firstReadEnd);
+      expect(read2Start).toBeLessThan(firstReadEnd);
+
+      // Batch 2: Edit starts after both reads complete
+      const lastReadEnd = Math.max(
+        executionLog.indexOf('read:end:1'),
+        executionLog.indexOf('read:end:2'),
+      );
+      const editStart = executionLog.indexOf('edit:start:E');
+      expect(editStart).not.toBe(-1);
+      expect(editStart).toBeGreaterThan(lastReadEnd);
+
+      // Batch 3: Read₃ starts after Edit completes
+      const editEnd = executionLog.indexOf('edit:end:E');
+      const read3Start = executionLog.indexOf('read:start:3');
+      expect(editEnd).not.toBe(-1);
+      expect(read3Start).not.toBe(-1);
+      expect(read3Start).toBeGreaterThan(editEnd);
+    });
+
+    it('should run read-only shell commands concurrently and non-read-only sequentially', async () => {
+      const executionLog: string[] = [];
+
+      const shellTool = new MockTool({
+        name: 'run_shell_command',
+        kind: Kind.Execute,
+        execute: async (params) => {
+          const cmd = (params as { command: string }).command;
+          executionLog.push(`shell:start:${cmd}`);
+          await new Promise((r) => setTimeout(r, 50));
+          executionLog.push(`shell:end:${cmd}`);
+          return {
+            llmContent: `Shell ${cmd} done`,
+            returnDisplay: `Shell ${cmd} done`,
+          };
+        },
+      });
+
+      const tools = new Map<string, MockTool>([
+        ['run_shell_command', shellTool],
+      ]);
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+      const scheduler = createScheduler(
+        tools,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+      );
+
+      // "git log" and "ls" are read-only → concurrent
+      // "npm install" is not read-only → sequential, breaks the batch
+      const requests = [
+        {
+          callId: '1',
+          name: 'run_shell_command',
+          args: { command: 'git log' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '2',
+          name: 'run_shell_command',
+          args: { command: 'ls' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '3',
+          name: 'run_shell_command',
+          args: { command: 'npm install' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ];
+
+      await scheduler.schedule(requests, new AbortController().signal);
+
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+
+      // "git log" and "ls" should start concurrently (both before either ends)
+      const gitStart = executionLog.indexOf('shell:start:git log');
+      const lsStart = executionLog.indexOf('shell:start:ls');
+      const firstReadOnlyEnd = Math.min(
+        executionLog.indexOf('shell:end:git log'),
+        executionLog.indexOf('shell:end:ls'),
+      );
+      expect(gitStart).not.toBe(-1);
+      expect(lsStart).not.toBe(-1);
+      expect(firstReadOnlyEnd).not.toBe(-1);
+      expect(gitStart).toBeLessThan(firstReadOnlyEnd);
+      expect(lsStart).toBeLessThan(firstReadOnlyEnd);
+
+      // "npm install" should start after both read-only commands complete
+      const lastReadOnlyEnd = Math.max(
+        executionLog.indexOf('shell:end:git log'),
+        executionLog.indexOf('shell:end:ls'),
+      );
+      const npmStart = executionLog.indexOf('shell:start:npm install');
+      expect(npmStart).not.toBe(-1);
+      expect(npmStart).toBeGreaterThan(lastReadOnlyEnd);
     });
   });
 });

@@ -72,7 +72,10 @@ export interface FollowupControllerActions {
   /** Set suggestion text (with delayed show). Null clears immediately. */
   setSuggestion: (text: string | null) => void;
   /** Accept the current suggestion and invoke onAccept callback */
-  accept: (method?: 'tab' | 'enter' | 'right') => void;
+  accept: (
+    method?: 'tab' | 'enter' | 'right',
+    options?: { skipOnAccept?: boolean },
+  ) => void;
   /** Dismiss/clear suggestion */
   dismiss: () => void;
   /** Hard-clear all state and timers */
@@ -135,7 +138,10 @@ export function createFollowupController(
     }, SUGGESTION_DELAY_MS);
   };
 
-  const accept = (method?: 'tab' | 'enter' | 'right'): void => {
+  const accept = (
+    method?: 'tab' | 'enter' | 'right',
+    options?: { skipOnAccept?: boolean },
+  ): void => {
     if (accepting) {
       return;
     }
@@ -170,7 +176,9 @@ export function createFollowupController(
 
     queueMicrotask(() => {
       try {
-        getOnAccept?.()?.(text);
+        if (!options?.skipOnAccept) {
+          getOnAccept?.()?.(text);
+        }
       } catch (error: unknown) {
         // eslint-disable-next-line no-console
         console.error('[followup] onAccept callback threw:', error);

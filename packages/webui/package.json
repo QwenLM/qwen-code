@@ -1,6 +1,6 @@
 {
-  "name": "@qwen-code/webui",
-  "version": "0.14.0",
+  "name": "@alife/dataworks-qwen-code-webui",
+  "version": "0.14.1",
   "description": "Shared UI components for Qwen Code packages",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -33,6 +33,7 @@
     "**/*.css"
   ],
   "publishConfig": {
+    "registry": "https://registry.anpm.alibaba-inc.com",
     "access": "public"
   },
   "scripts": {
@@ -61,7 +62,7 @@
   },
   "devDependencies": {
     "@chromatic-com/storybook": "^5.0.0",
-    "@qwen-code/qwen-code-core": "npm:@alife/dataworks-qwen-code-core@0.13.2-dataworks.7",
+    "@qwen-code/qwen-code-core": "npm:@alife/dataworks-qwen-code-core@*",
     "@storybook/addon-a11y": "^10.1.11",
     "@storybook/addon-docs": "^10.1.11",
     "@storybook/addon-onboarding": "^10.1.11",

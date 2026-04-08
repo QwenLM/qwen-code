@@ -5,6 +5,7 @@
  */
 
 import { Box, Text } from 'ink';
+import { t } from '../../i18n/index.js';
 
 const MAX_DISPLAYED_QUEUED_MESSAGES = 3;
 
@@ -42,6 +43,11 @@ export const QueuedMessageDisplay = ({
           </Text>
         </Box>
       )}
+      <Box paddingLeft={2}>
+        <Text dimColor italic>
+          {t('Press ↑ to edit queued messages')}
+        </Text>
+      </Box>
     </Box>
   );
 };

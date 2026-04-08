@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code-core",
-  "version": "0.14.0-dataworks.1",
+  "version": "0.14.1",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",

@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code-web-templates",
-  "version": "0.13.2-dataworks.6",
+  "version": "0.14.1",
   "description": "Web templates bundled as embeddable JS/CSS strings",
   "repository": {
     "type": "git",

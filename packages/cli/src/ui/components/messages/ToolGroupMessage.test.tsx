@@ -10,13 +10,15 @@ import { Text } from 'ink';
 import type React from 'react';
 import { ToolGroupMessage } from './ToolGroupMessage.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
-import { ToolCallStatus } from '../../types.js';
+import { ToolCallStatus, StreamingState } from '../../types.js';
 import type {
   Config,
   ToolCallConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import { TOOL_STATUS } from '../../constants.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
+import { StreamingContext } from '../../contexts/StreamingContext.js';
+import { VerboseModeProvider } from '../../contexts/VerboseModeContext.js';
 
 // Mock child components to isolate ToolGroupMessage behavior
 vi.mock('./ToolMessage.js', () => ({
@@ -87,11 +89,25 @@ describe('<ToolGroupMessage />', () => {
     isFocused: true,
   };
 
-  // Helper to wrap component with required providers
-  const renderWithProviders = (component: React.ReactElement) =>
+  // Helper to wrap component with required providers.
+  //
+  // NOTE: dataworks fork adds a compact rendering path to ToolGroupMessage
+  // (`showCompact = !verboseMode && !hasConfirmingTool && !isEmbeddedShellFocused
+  // && !isUserInitiated`). The Golden Snapshots / Border Color Logic / Height
+  // Calculation suites below are written to validate the *verbose* (bordered,
+  // multi-line) layout, so we explicitly force `verboseMode: true` here.
+  // Compact-mode rendering has its own dedicated suite further down.
+  const renderWithProviders = (
+    component: React.ReactElement,
+    { verboseMode = true }: { verboseMode?: boolean } = {},
+  ) =>
     render(
       <ConfigContext.Provider value={mockConfig}>
-        {component}
+        <StreamingContext.Provider value={StreamingState.Idle}>
+          <VerboseModeProvider value={{ verboseMode, frozenSnapshot: null }}>
+            {component}
+          </VerboseModeProvider>
+        </StreamingContext.Provider>
       </ConfigContext.Provider>,
     );
 
@@ -321,6 +337,51 @@ describe('<ToolGroupMessage />', () => {
         />,
       );
       expect(lastFrame()).toMatchSnapshot();
+    });
+  });
+
+  describe('Compact Mode (dataworks fork)', () => {
+    it('uses CompactToolGroupDisplay when verboseMode is false', () => {
+      const toolCalls = [
+        createToolCall({
+          callId: 'tool-1',
+          name: 'first-tool',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'tool-2',
+          name: 'second-tool',
+          status: ToolCallStatus.Executing,
+        }),
+      ];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage {...baseProps} toolCalls={toolCalls} />,
+        { verboseMode: false },
+      );
+      // Compact path delegates to CompactToolGroupDisplay, which only shows
+      // the "active" tool (Executing > Confirming > last). It must NOT render
+      // the verbose-mode bordered MockTool layout, and it must include the
+      // Ctrl+O hint line.
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('second-tool');
+      expect(frame).toContain('使用 ctrl+o 可查看详细工具调用结果');
+      expect(frame).not.toContain('MockTool[');
+      expect(frame).toMatchSnapshot();
+    });
+
+    it('falls back to verbose layout when isUserInitiated is true', () => {
+      const toolCalls = [createToolCall({ name: 'shell-cmd' })];
+      const { lastFrame } = renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          isUserInitiated={true}
+        />,
+        { verboseMode: false },
+      );
+      // isUserInitiated short-circuits the compact branch, so the
+      // bordered MockTool layout from the verbose path should appear.
+      expect(lastFrame()).toContain('MockTool[tool-123]');
     });
   });
 

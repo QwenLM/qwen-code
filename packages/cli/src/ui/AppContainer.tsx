@@ -53,6 +53,8 @@ import {
   IDLE_SPECULATION,
   ApprovalMode,
   type PermissionMode,
+  ToolConfirmationOutcome,
+  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -124,10 +126,13 @@ import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.j
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+// [CUSTOM] Dual output confirmation bridge
+import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -726,6 +731,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    pendingToolCalls, // [CUSTOM] Exposed for dual-output confirmation bridge
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -777,12 +783,125 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
-    useMessageQueue({
-      isConfigInitialized,
-      streamingState,
-      submitQuery,
+  const {
+    messageQueue,
+    addMessage,
+    clearQueue,
+    getQueuedMessagesText,
+    drainQueue,
+    popAllMessages,
+  } = useMessageQueue({
+    isConfigInitialized,
+    streamingState,
+    submitQuery,
+  });
+
+  // Connect remote input watcher to submitQuery for bidirectional sync.
+  // When an external process writes a command to the input-file,
+  // the watcher calls submitQuery as if the user typed it in the TUI.
+  const remoteInput = useRemoteInput();
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setSubmitFn((text: string) => submitQuery(text));
+  }, [remoteInput, submitQuery]);
+
+  // Notify remote input watcher when TUI becomes idle so it can
+  // retry queued commands that were deferred while TUI was busy.
+  useEffect(() => {
+    if (!remoteInput) return;
+    if (streamingState === StreamingState.Idle) {
+      remoteInput.notifyIdle();
+    }
+  }, [remoteInput, streamingState]);
+
+  // [CUSTOM] Dual output confirmation bridge — connects tool approval events
+  // between the TUI and external consumers via --json-file / --input-file.
+  const dualOutput = useDualOutput();
+  const confirmRequestMap = useRef(new Map<string, string>()); // requestId → callId
+  const confirmCallIdMap = useRef(new Map<string, string>()); // callId → requestId
+  const confirmEmitted = useRef(new Set<string>());
+
+  // Emit control_request when tools enter awaiting_approval
+  useEffect(() => {
+    if (!dualOutput || !dualOutput.isConnected) return;
+    for (const tc of pendingToolCalls) {
+      if (
+        tc.status === 'awaiting_approval' &&
+        !confirmEmitted.current.has(tc.request.callId)
+      ) {
+        const requestId = crypto.randomUUID();
+        confirmRequestMap.current.set(requestId, tc.request.callId);
+        confirmCallIdMap.current.set(tc.request.callId, requestId);
+        confirmEmitted.current.add(tc.request.callId);
+        dualOutput.emitControlRequest(
+          requestId,
+          tc.request.name,
+          tc.request.callId,
+          tc.request.args,
+          null,
+        );
+      }
+    }
+    // Detect tools that left awaiting_approval (TUI native resolution)
+    for (const [callId, requestId] of confirmCallIdMap.current) {
+      const tc = pendingToolCalls.find((t) => t.request.callId === callId);
+      if (
+        tc &&
+        tc.status !== 'awaiting_approval' &&
+        confirmEmitted.current.has(callId)
+      ) {
+        const allowed = tc.status !== 'cancelled' && tc.status !== 'error';
+        dualOutput.emitControlResponse(requestId, allowed);
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      }
+    }
+  }, [dualOutput, pendingToolCalls]);
+
+  // Register confirmation handler for external responses via --input-file
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setConfirmationHandler(
+      (requestId: string, allowed: boolean) => {
+        const callId = confirmRequestMap.current.get(requestId);
+        if (!callId) return;
+        const tc = pendingToolCalls.find(
+          (t) =>
+            t.request.callId === callId && t.status === 'awaiting_approval',
+        );
+        if (!tc) return;
+        const waitingTc = tc as WaitingToolCall;
+        if (!waitingTc.confirmationDetails?.onConfirm) return;
+        void waitingTc.confirmationDetails.onConfirm(
+          allowed
+            ? ToolConfirmationOutcome.ProceedOnce
+            : ToolConfirmationOutcome.Cancel,
+        );
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      },
+    );
+
+    return () => {
+      remoteInput.setConfirmationHandler(() => {});
+    };
+  }, [remoteInput, pendingToolCalls]);
+
+  // [CUSTOM] Emit session_start event to dual output channel
+  useEffect(() => {
+    if (!dualOutput) return;
+    dualOutput.emitSystemMessage('session_start', {
+      session_id: sessionStats.sessionId,
+      cwd: process.cwd(),
     });
+  }, [dualOutput, sessionStats.sessionId]);
+
+  // Bridge message queue to mid-turn drain via ref.
+  // drainQueue is a stable callback from useMessageQueue that atomically
+  // clears both the synchronous ref and React state.
+  midTurnDrainRef.current = drainQueue;
 
   // Bridge message queue to mid-turn drain via ref.
   // Sync ref on every render so the drain callback always reads latest state.
@@ -1019,8 +1138,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Auto-clear frozen snapshot when streaming ends so the live view
   // is restored without requiring a second Ctrl+O press.
+  // Clear frozen snapshot when streaming ends OR when entering confirmation
+  // state. During WaitingForConfirmation, the user needs to see the latest
+  // pending items (including the confirmation message) rather than a stale snapshot.
   useEffect(() => {
-    if (streamingState === StreamingState.Idle) {
+    if (
+      streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.WaitingForConfirmation
+    ) {
       setFrozenSnapshot(null);
     }
   }, [streamingState]);
@@ -1258,9 +1383,9 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
   const shouldShowIdePrompt = Boolean(
     currentIDE &&
-    !config.getIdeMode() &&
-    !settings.merged.ide?.hasSeenNudge &&
-    !idePromptAnswered,
+      !config.getIdeMode() &&
+      !settings.merged.ide?.hasSeenNudge &&
+      !idePromptAnswered,
   );
 
   // Command migration nudge
@@ -1274,7 +1399,7 @@ export const AppContainer = (props: AppContainerProps) => {
     useState<boolean>(false);
 
   const [verboseMode, setVerboseMode] = useState<boolean>(
-    settings.merged.ui?.verboseMode ?? false,
+    settings.merged.ui?.verboseMode ?? true,
   );
 
   const [frozenSnapshot, setFrozenSnapshot] = useState<
@@ -1659,13 +1784,10 @@ export const AppContainer = (props: AppContainerProps) => {
         const newValue = !verboseMode;
         setVerboseMode(newValue);
         settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
-
-        // Gap 1: retroactive toggle — force <Static> to remount with new verboseMode
         refreshStatic();
-
-        // Gap 2: viewport freeze — entering verbose mode during streaming captures
-        // a snapshot of pending items so the user can read without jitter.
-        if (newValue && streamingState !== StreamingState.Idle) {
+        // Only freeze during the actual responding phase. WaitingForConfirmation
+        // must keep focus so the user can approve/cancel tool confirmation UI.
+        if (streamingState === StreamingState.Responding) {
           setFrozenSnapshot([...pendingHistoryItems]);
         } else {
           setFrozenSnapshot(null);
@@ -2061,6 +2183,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
+      popAllQueuedMessages: popAllMessages,
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
@@ -2118,6 +2241,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       retryLastPrompt,
       handleClearScreen,
+      popAllMessages,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       // Subagent dialogs
@@ -2143,6 +2267,11 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
+  const verboseModeValue = useMemo(
+    () => ({ verboseMode, frozenSnapshot }),
+    [verboseMode, frozenSnapshot],
+  );
+
   return (
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
@@ -2153,7 +2282,7 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <VerboseModeProvider value={{ verboseMode, frozenSnapshot }}>
+            <VerboseModeProvider value={verboseModeValue}>
               <ShellFocusContext.Provider value={isFocused}>
                 <App />
               </ShellFocusContext.Provider>
