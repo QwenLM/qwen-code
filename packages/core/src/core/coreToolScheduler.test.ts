@@ -3524,6 +3524,77 @@ describe('CoreToolScheduler IDE interaction', () => {
     expect(onAllToolCallsComplete).not.toHaveBeenCalled();
   });
 
+  it('should not swallow confirmation handling errors after IDE diff opens', async () => {
+    const { mockConfig } = createIdeMockConfig({
+      ideMode: true,
+    });
+
+    mockIdeClient.openDiff.mockResolvedValue({
+      status: 'rejected',
+    });
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'ide-confirmation-error-1',
+      name: 'mockModifiableTool',
+      args: { param: 'value' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-ide-confirmation-error-1',
+    };
+    const confirmationDetails = {
+      type: 'edit',
+      title: 'Confirm Mock Tool',
+      fileName: 'test.txt',
+      filePath: 'test.txt',
+      fileDiff: 'diff',
+      originalContent: 'originalContent',
+      newContent: 'newContent',
+      onConfirm: vi.fn(),
+    } satisfies ToolCallConfirmationDetails;
+    const confirmationError = new Error('confirmation handling failed');
+
+    (
+      scheduler as unknown as {
+        toolCalls: WaitingToolCall[];
+      }
+    ).toolCalls = [
+      {
+        status: 'awaiting_approval',
+        request,
+        tool: {} as never,
+        invocation: {} as never,
+        confirmationDetails,
+      },
+    ];
+
+    vi.spyOn(scheduler, 'handleConfirmationResponse').mockRejectedValue(
+      confirmationError,
+    );
+
+    await expect(
+      (
+        scheduler as unknown as {
+          openIdeDiffIfEnabled: (
+            confirmationDetails: ToolCallConfirmationDetails,
+            callId: string,
+            signal: AbortSignal,
+          ) => Promise<void>;
+        }
+      ).openIdeDiffIfEnabled(
+        confirmationDetails,
+        request.callId,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('confirmation handling failed');
+  });
+
   it('should not call openDiff when IDE mode is disabled', async () => {
     const { mockConfig } = createIdeMockConfig({
       ideMode: false,
