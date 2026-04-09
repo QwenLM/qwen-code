@@ -110,8 +110,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     }
 
     // Apply output token limits using parent class logic
-    // Uses conservative default (min of model limit and DEFAULT_OUTPUT_TOKEN_LIMIT)
-    // to preserve input quota when user hasn't explicitly configured max_tokens
+    // Uses capped default (min of model limit and CAPPED_DEFAULT_MAX_TOKENS=8K)
+    // Requests hitting the cap get one clean retry at 64K (geminiChat.ts)
     const requestWithTokenLimits = this.applyOutputTokenLimit(request);
 
     const extraBody = this.contentGeneratorConfig.extra_body;
@@ -150,9 +150,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   override getDefaultGenerationConfig(): GenerateContentConfig {
-    return {
-      temperature: 0.3,
-    };
+    return {};
   }
 
   /**

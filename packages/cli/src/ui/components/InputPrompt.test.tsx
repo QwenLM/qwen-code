@@ -211,6 +211,75 @@ describe('InputPrompt', () => {
 
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  describe('prompt suggestions', () => {
+    it('accepts the visible prompt suggestion on tab when the buffer is empty', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} promptSuggestion="commit this" />,
+      );
+      await wait(350);
+
+      stdin.write('\t');
+      await wait();
+
+      expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+      unmount();
+    });
+
+    it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} promptSuggestion="commit this" />,
+      );
+      await wait(350);
+
+      stdin.write('\r');
+      await wait();
+
+      expect(props.onSubmit).toHaveBeenCalledWith('commit this');
+      // Enter path must NOT call buffer.insert — it passes text directly to
+      // handleSubmitAndClear. Calling insert would re-fill the buffer after
+      // it was already cleared (the microtask race bug).
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('fills the prompt suggestion on right arrow without submitting', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} promptSuggestion="commit this" />,
+      );
+      await wait(350);
+
+      stdin.write('\u001B[C'); // right arrow
+      await wait();
+
+      expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+      expect(props.onSubmit).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('does not accept a prompt suggestion while command completion is active', async () => {
+      mockCommandCompletion.showSuggestions = true;
+      mockCommandCompletion.suggestions = [
+        {
+          value: '/clear',
+          label: '/clear',
+          description: 'Clear screen',
+        },
+      ] as UseCommandCompletionReturn['suggestions'];
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} promptSuggestion="commit this" />,
+      );
+      await wait(350);
+
+      stdin.write('\t');
+      await wait();
+
+      expect(mockBuffer.insert).not.toHaveBeenCalledWith('commit this');
+      expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalled();
+      unmount();
+    });
+  });
+
   it('should call shellHistory.getPreviousCommand on up arrow in shell mode', async () => {
     props.shellModeActive = true;
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
@@ -784,7 +853,6 @@ describe('InputPrompt', () => {
       // Verify useCompletion was called with correct signature
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -813,7 +881,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -842,7 +909,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -871,7 +937,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -900,7 +965,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -930,7 +994,6 @@ describe('InputPrompt', () => {
       // Verify useCompletion was called with the buffer
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -959,7 +1022,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -989,7 +1051,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1019,7 +1080,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1049,7 +1109,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1079,7 +1138,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1111,7 +1169,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1141,7 +1198,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1173,7 +1229,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1233,6 +1288,23 @@ describe('InputPrompt', () => {
 
       expect(props.vimHandleInput).toHaveBeenCalled();
       expect(mockBuffer.handleInput).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('should toggle shortcuts when vim passes through ? on an empty prompt', async () => {
+      props.vimHandleInput = vi.fn().mockReturnValue(false);
+      props.onToggleShortcuts = vi.fn();
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('?');
+      await wait();
+
+      expect(props.vimHandleInput).toHaveBeenCalled();
+      expect(props.onToggleShortcuts).toHaveBeenCalled();
       unmount();
     });
   });
@@ -2332,36 +2404,6 @@ describe('InputPrompt', () => {
         largeContent,
       );
       expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
-
-      unmount();
-    });
-
-    it('should delete entire placeholder on backspace', async () => {
-      const placeholderText = '[Pasted Content 1001 chars]';
-      mockBuffer.text = placeholderText;
-      mockBuffer.lines = [placeholderText];
-      mockBuffer.cursor = [0, placeholderText.length];
-
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} />,
-      );
-      await wait();
-
-      // First set up a placeholder via paste
-      const largeContent = 'x'.repeat(1001);
-      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
-      await wait();
-
-      // Press backspace to delete the placeholder
-      stdin.write('\x7f'); // backspace character
-      await wait();
-
-      // Verify replaceRangeByOffset was called to delete entire placeholder
-      expect(mockBuffer.replaceRangeByOffset).toHaveBeenCalledWith(
-        0,
-        placeholderText.length,
-        '',
-      );
 
       unmount();
     });

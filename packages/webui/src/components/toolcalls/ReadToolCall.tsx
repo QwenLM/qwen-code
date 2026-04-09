@@ -19,6 +19,7 @@ import type {
   BaseToolCallProps,
   ToolCallContainerProps,
 } from './shared/index.js';
+import { getToolDisplayLabel } from './labelUtils.js';
 
 /**
  * Simple container for Read tool calls
@@ -65,7 +66,7 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
   isFirst,
   isLast,
 }) => {
-  const { content, locations, toolCallId } = toolCall;
+  const { kind, title, content, locations, toolCallId } = toolCall;
   const platform = usePlatform();
   const openedDiffsRef = useRef<Map<string, string>>(new Map());
   const [isExpanded, setIsExpanded] = useState(false);
@@ -136,13 +137,14 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
 
   // Compute container status based on toolCall.status
   const containerStatus = mapToolStatusToContainerStatus(toolCall.status);
+  const displayLabel = getToolDisplayLabel({ kind, title });
 
   // Error case: show error from content
   if (errors.length > 0) {
     const path = locations?.[0]?.path || '';
     return (
       <ReadToolCallContainer
-        label="Read"
+        label={displayLabel}
         className="read-tool-call-error"
         status="error"
         toolCallId={toolCallId}
@@ -170,7 +172,7 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
       textOutputs.length > 0 ? textOutputs.join('\n') : 'Read operation failed';
     return (
       <ReadToolCallContainer
-        label="Read"
+        label={displayLabel}
         className="read-tool-call-error"
         status="error"
         toolCallId={toolCallId}
@@ -196,7 +198,7 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
     const path = diffs[0]?.path || locations?.[0]?.path || '';
     return (
       <ReadToolCallContainer
-        label="Read"
+        label={displayLabel}
         className="read-tool-call-success"
         status={containerStatus}
         toolCallId={toolCallId}
@@ -226,7 +228,7 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
 
     return (
       <ReadToolCallContainer
-        label="Read"
+        label={displayLabel}
         className="read-tool-call-success"
         status={containerStatus}
         toolCallId={toolCallId}
@@ -293,7 +295,7 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
 
     return (
       <ReadToolCallContainer
-        label="Read"
+        label={displayLabel}
         className="read-tool-call-success"
         status={containerStatus}
         toolCallId={toolCallId}

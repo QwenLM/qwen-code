@@ -1,5 +1,6 @@
 export default {
   commands: 'Commands',
+  'followup-suggestions': 'Followup Suggestions',
   'sub-agents': 'SubAgents',
   arena: 'Agent Arena',
   skills: 'Skills',

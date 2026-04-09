@@ -11,6 +11,13 @@ export type TokenLimitType = 'input' | 'output';
 export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
 export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
 
+// Capped default for slot-reservation optimization. 99% of outputs are under 5K
+// tokens, so 32K defaults over-reserve 4-6× slot capacity. With the cap
+// enabled, <1% of requests hit the limit; those get one clean retry at 64K
+// (see geminiChat.ts max_output_tokens escalation).
+export const CAPPED_DEFAULT_MAX_TOKENS: TokenCount = 8_000;
+export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;
+
 /**
  * Accurate numeric limits:
  * - power-of-two approximations (128K -> 131072, 256K -> 262144, etc.)
@@ -104,7 +111,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // Commercial API models (1,000,000 context)
   [/^qwen3-coder-plus/, LIMITS['1m']],
   [/^qwen3-coder-flash/, LIMITS['1m']],
-  [/^qwen3\.5-plus/, LIMITS['1m']],
+  [/^qwen3\.\d/, LIMITS['1m']],
   [/^qwen-plus-latest$/, LIMITS['1m']],
   [/^qwen-flash-latest$/, LIMITS['1m']],
   [/^coder-model$/, LIMITS['1m']],
@@ -164,10 +171,9 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
   // Alibaba / Qwen
-  [/^qwen3\.5/, LIMITS['64k']],
+  [/^qwen3\.\d/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
-  [/^qwen3-max/, LIMITS['64k']],
-  [/^qwen/, LIMITS['8k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
+  [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
 
   // DeepSeek
   [/^deepseek-reasoner/, LIMITS['64k']],

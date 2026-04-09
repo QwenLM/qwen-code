@@ -33,7 +33,23 @@ export class BundledSkillLoader implements ICommandLoader {
     }
 
     try {
-      const skills = await skillManager.listSkills({ level: 'bundled' });
+      const allSkills = await skillManager.listSkills({ level: 'bundled' });
+
+      // Hide skills whose allowedTools require cron when cron is disabled
+      const cronEnabled = this.config?.isCronEnabled() ?? false;
+      const skills = allSkills.filter((skill) => {
+        if (
+          !cronEnabled &&
+          skill.allowedTools?.some((t) => t.startsWith('cron_'))
+        ) {
+          debugLogger.debug(
+            `Hiding skill "${skill.name}" because cron is not enabled`,
+          );
+          return false;
+        }
+        return true;
+      });
+
       debugLogger.debug(
         `Loaded ${skills.length} bundled skill(s) as slash commands`,
       );

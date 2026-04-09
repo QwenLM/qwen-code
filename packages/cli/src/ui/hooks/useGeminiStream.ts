@@ -9,6 +9,7 @@ import type {
   Config,
   EditorType,
   GeminiClient,
+  RetryInfo,
   ServerGeminiChatCompressedEvent,
   ServerGeminiContentEvent as ContentEvent,
   ServerGeminiFinishedEvent,
@@ -172,6 +173,7 @@ export const useGeminiStream = (
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
+  midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -272,6 +274,7 @@ export const useGeminiStream = (
    */
   const clearRetryCountdown = useCallback(() => {
     stopRetryCountdownTimer();
+    skipRetryDelayRef.current = null;
     setPendingRetryErrorItem(null);
     setPendingRetryCountdownItem(null);
   }, [
@@ -280,14 +283,14 @@ export const useGeminiStream = (
     stopRetryCountdownTimer,
   ]);
 
+  // Holds the skipDelay callback from the current rate-limit RetryInfo.
+  // Managed symmetrically: set in startRetryCountdown, cleared in clearRetryCountdown.
+  const skipRetryDelayRef = useRef<(() => void) | null>(null);
+
   const startRetryCountdown = useCallback(
-    (retryInfo: {
-      message?: string;
-      attempt: number;
-      maxRetries: number;
-      delayMs: number;
-    }) => {
+    (retryInfo: RetryInfo) => {
       stopRetryCountdownTimer();
+      skipRetryDelayRef.current = retryInfo.skipDelay;
       const startTime = Date.now();
       const { message, attempt, maxRetries, delayMs } = retryInfo;
       const retryReasonText =
@@ -1101,6 +1104,11 @@ export const useGeminiStream = (
             break;
           case ServerGeminiEventType.HookSystemMessage:
             // Display system message from Stop hooks with "Stop says:" prefix
+            // First commit any pending AI response to ensure correct ordering
+            if (pendingHistoryItemRef.current) {
+              addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+              setPendingHistoryItem(null);
+            }
             addItem(
               {
                 type: 'stop_hook_system_message',
@@ -1388,6 +1396,15 @@ export const useGeminiStream = (
    * when the user presses Ctrl+Y (bound to Command.RETRY_LAST in keyBindings.ts).
    */
   const retryLastPrompt = useCallback(async () => {
+    // During a rate-limit retry countdown, skip the delay so the generator
+    // retries immediately — no abort/re-submit needed.
+    if (skipRetryDelayRef.current) {
+      skipRetryDelayRef.current();
+      skipRetryDelayRef.current = null;
+      clearRetryCountdown();
+      return;
+    }
+
     if (
       streamingState === StreamingState.Responding ||
       streamingState === StreamingState.WaitingForConfirmation
@@ -1558,6 +1575,23 @@ export const useGeminiStream = (
         return;
       }
 
+      // Mid-turn queue drain: inject queued user messages alongside tool
+      // results so the model sees them in the next API call.
+      // Skip if the turn was cancelled — messages stay in queue for next turn.
+      const drained =
+        turnCancelledRef.current || abortControllerRef.current?.signal.aborted
+          ? []
+          : (midTurnDrainRef?.current?.() ?? []);
+      if (drained.length > 0) {
+        for (const msg of drained) {
+          responsesToSend.push({
+            text: `\n[User message received during tool execution]: ${msg}`,
+          });
+          // Record in UI history so the transcript stays complete.
+          addItem({ type: MessageType.USER, text: msg }, Date.now());
+        }
+      }
+
       submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
     },
     [
@@ -1568,6 +1602,8 @@ export const useGeminiStream = (
       performMemoryRefresh,
       modelSwitchedFromQuotaError,
       config,
+      midTurnDrainRef,
+      addItem,
     ],
   );
 

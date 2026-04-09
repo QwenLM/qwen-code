@@ -91,10 +91,6 @@ export class QwenAgentManager {
   private connectionHandler: QwenConnectionHandler;
   private sessionUpdateHandler: QwenSessionUpdateHandler;
   private currentWorkingDir: string = process.cwd();
-  /** Last CLI entry path used for connecting, needed for auto-reconnect. */
-  private lastCliEntryPath: string | null = null;
-  /** Callback invoked when auto-reconnect fails and user action is needed. */
-  onAutoReconnectFailed: (errorMessage: string) => void = () => {};
   // When loading a past session via ACP, the CLI replays history through
   // session/update notifications. We set this flag to route message chunks
   // (user/assistant) as discrete chat messages instead of live streaming.
@@ -299,66 +295,14 @@ export class QwenAgentManager {
       }
     };
 
-    // Auto-reconnect on unexpected subprocess exit
     this.connection.onDisconnected = (
       code: number | null,
       signal: string | null,
     ) => {
-      // Skip reconnection for intentional disconnects or clean exits
-      if (this.connection.wasIntentionalDisconnect) {
-        console.log(
-          '[QwenAgentManager] Intentional disconnect, skipping auto-reconnect.',
-        );
-        return;
-      }
-      if (code === 0 && signal === null) {
-        console.log(
-          '[QwenAgentManager] Clean exit (code 0), skipping auto-reconnect.',
-        );
-        return;
-      }
-
-      // Limit auto-reconnect to 1 attempt
-      if (this.connection.currentAutoReconnectAttempts >= 1) {
-        console.warn(
-          '[QwenAgentManager] Auto-reconnect limit reached. User action required.',
-        );
-        this.onAutoReconnectFailed(
-          `Qwen ACP process exited unexpectedly (exit code: ${code}, signal: ${signal}). Automatic reconnection failed.`,
-        );
-        return;
-      }
-
       console.log(
-        `[QwenAgentManager] Unexpected subprocess exit (code: ${code}, signal: ${signal}). Attempting auto-reconnect...`,
+        `[QwenAgentManager] Process disconnected (code: ${code}, signal: ${signal})`,
       );
-      this.connection.incrementAutoReconnectAttempts();
-
-      if (!this.lastCliEntryPath) {
-        console.error(
-          '[QwenAgentManager] Cannot auto-reconnect: no CLI entry path stored.',
-        );
-        this.onAutoReconnectFailed(
-          `Qwen ACP process exited unexpectedly (exit code: ${code}, signal: ${signal}). Cannot reconnect automatically.`,
-        );
-        return;
-      }
-
-      // Attempt reconnection asynchronously
-      this.connectionHandler
-        .connect(this.connection, this.currentWorkingDir, this.lastCliEntryPath)
-        .then(() => {
-          console.log('[QwenAgentManager] Auto-reconnect succeeded.');
-          // Reset counter on success so future crashes can also auto-reconnect
-          this.connection.resetAutoReconnectAttempts();
-        })
-        .catch((err) => {
-          const errorMsg = getErrorMessage(err);
-          console.error('[QwenAgentManager] Auto-reconnect failed:', errorMsg);
-          this.onAutoReconnectFailed(
-            `Qwen ACP process exited unexpectedly (exit code: ${code}, signal: ${signal}). Reconnection failed: ${errorMsg}`,
-          );
-        });
+      this.callbacks.onDisconnected?.(code, signal);
     };
   }
 
@@ -374,7 +318,6 @@ export class QwenAgentManager {
     options?: AgentConnectOptions,
   ): Promise<QwenConnectionResult> {
     this.currentWorkingDir = workingDir;
-    this.lastCliEntryPath = cliEntryPath;
     const res = await this.connectionHandler.connect(
       this.connection,
       workingDir,
@@ -412,6 +355,23 @@ export class QwenAgentManager {
       });
     }
     return res;
+  }
+
+  /**
+   * Reconnect after unexpected disconnect.
+   * Re-spawns the ACP process and creates a new session.
+   */
+  async reconnect(
+    cliEntryPath: string,
+    options?: AgentConnectOptions,
+  ): Promise<QwenConnectionResult> {
+    console.log('[QwenAgentManager] Attempting reconnection...');
+    try {
+      this.connection.disconnect();
+    } catch (_e) {
+      // Already disconnected
+    }
+    return this.connect(this.currentWorkingDir, cliEntryPath, options);
   }
 
   /**
@@ -1476,6 +1436,15 @@ export class QwenAgentManager {
   onAvailableModels(callback: (models: ModelInfo[]) => void): void {
     this.callbacks.onAvailableModels = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
+   * Register callback for unexpected process disconnection
+   */
+  onDisconnected(
+    callback: (code: number | null, signal: string | null) => void,
+  ): void {
+    this.callbacks.onDisconnected = callback;
   }
 
   /**

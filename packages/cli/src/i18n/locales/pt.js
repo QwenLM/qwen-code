@@ -91,6 +91,7 @@ export default {
   'CLI Version': 'Versão da CLI',
   'Git Commit': 'Commit do Git',
   Model: 'Modelo',
+  'Fast Model': 'Modelo Rápido',
   Sandbox: 'Sandbox',
   'OS Platform': 'Plataforma do SO',
   'OS Arch': 'Arquitetura do SO',
@@ -604,6 +605,10 @@ export default {
   'Loading hooks...': 'Carregando hooks...',
   'Error loading hooks:': 'Erro ao carregar hooks:',
   'Press Escape to close': 'Pressione Escape para fechar',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Pressione Escape, Ctrl+C ou Ctrl+D para cancelar',
+  'Press Space, Enter, or Escape to dismiss':
+    'Pressione Espaço, Enter ou Escape para dispensar',
   'No hook selected': 'Nenhum hook selecionado',
   // Hooks - List Step
   'No hook events found.': 'Nenhum evento de hook encontrado.',
@@ -992,6 +997,8 @@ export default {
   // Commands - Model
   // ============================================================================
   'Switch the model for this session': 'Trocar o modelo para esta sessão',
+  'Set fast model for background tasks':
+    'Definir modelo rápido para tarefas em segundo plano',
   'Content generator configuration not available.':
     'Configuração do gerador de conteúdo não disponível.',
   'Authentication type not available.': 'Tipo de autenticação não disponível.',
@@ -1183,6 +1190,8 @@ export default {
   'Always allow for this user': 'Sempre permitir para este usuário',
   'Always allow {{action}} for this user':
     'Sempre permitir {{action}} para este usuário',
+  'Yes, restore previous mode ({{mode}})':
+    'Sim, restaurar modo anterior ({{mode}})',
   'Yes, and auto-accept edits': 'Sim, e aceitar edições automaticamente',
   'Yes, and manually approve edits': 'Sim, e aprovar edições manualmente',
   'No, keep planning (esc)': 'Não, continuar planejando (esc)',
@@ -1339,8 +1348,8 @@ export default {
   unknown: 'desconhecido',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Falha ao trocar o modelo para '{{modelId}}'.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — modelo híbrido eficiente com desempenho líder em programação',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — modelo híbrido eficiente com desempenho líder em programação',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'O modelo Qwen Vision mais recente do Alibaba Cloud ModelStudio (versão: qwen3-vl-plus-2025-09-23)',
 
@@ -1951,4 +1960,20 @@ export default {
     'Modo raw não disponível. Execute em um terminal interativo.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
+  verbose: 'detalhado',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Mostrar saída completa da ferramenta e raciocínio no modo detalhado (alternar com Ctrl+O).',
+  'Press Ctrl+O to show full tool output':
+    'Pressione Ctrl+O para exibir a saída completa da ferramenta',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
 };

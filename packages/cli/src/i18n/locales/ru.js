@@ -99,6 +99,7 @@ export default {
   'CLI Version': 'Версия CLI',
   'Git Commit': 'Git-коммит',
   Model: 'Модель',
+  'Fast Model': 'Быстрая модель',
   Sandbox: 'Песочница',
   'OS Platform': 'Платформа ОС',
   'OS Arch': 'Архитектура ОС',
@@ -610,6 +611,10 @@ export default {
   'Loading hooks...': 'Загрузка хуков...',
   'Error loading hooks:': 'Ошибка загрузки хуков:',
   'Press Escape to close': 'Нажмите Escape для закрытия',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Нажмите Escape, Ctrl+C или Ctrl+D для отмены',
+  'Press Space, Enter, or Escape to dismiss':
+    'Нажмите Пробел, Enter или Escape для закрытия',
   'No hook selected': 'Хук не выбран',
   // Hooks - List Step
   'No hook events found.': 'События хуков не найдены.',
@@ -993,6 +998,8 @@ export default {
   // Команды - Модель
   // ============================================================================
   'Switch the model for this session': 'Переключение модели для этой сессии',
+  'Set fast model for background tasks':
+    'Установить быструю модель для фоновых задач',
   'Content generator configuration not available.':
     'Конфигурация генератора содержимого недоступна.',
   'Authentication type not available.': 'Тип авторизации недоступен.',
@@ -1107,6 +1114,8 @@ export default {
   'Always allow for this user': 'Всегда разрешать для этого пользователя',
   'Always allow {{action}} for this user':
     'Всегда разрешать {{action}} для этого пользователя',
+  'Yes, restore previous mode ({{mode}})':
+    'Да, восстановить предыдущий режим ({{mode}})',
   'Yes, and auto-accept edits': 'Да, и автоматически принимать правки',
   'Yes, and manually approve edits': 'Да, и вручную подтверждать правки',
   'No, keep planning (esc)': 'Нет, продолжить планирование (esc)',
@@ -1262,8 +1271,8 @@ export default {
   unknown: 'неизвестно',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Не удалось переключиться на модель '{{modelId}}'.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — эффективная гибридная модель с лидирующей производительностью в программировании',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — эффективная гибридная модель с лидирующей производительностью в программировании',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Последняя модель Qwen Vision от Alibaba Cloud ModelStudio (версия: qwen3-vl-plus-2025-09-23)',
 
@@ -1958,4 +1967,20 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
+  verbose: 'подробный',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Показывать полный вывод инструментов и процесс рассуждений в подробном режиме (переключить с помощью Ctrl+O).',
+  'Press Ctrl+O to show full tool output':
+    'Нажмите Ctrl+O для показа полного вывода инструментов',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
 };

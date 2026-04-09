@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isSupportedImageMimeType } from '@qwen-code/qwen-code-core/src/utils/request-tokenizer/supportedImageFormats.js';
-
 // ---------- Types ----------
 
 export interface ImageAttachment {
@@ -59,6 +57,31 @@ export function unescapePath(filePath: string): string {
     new RegExp(`\\\\([${SHELL_SPECIAL_CHARS.source.slice(1, -1)}])`, 'g'),
     '$1',
   );
+}
+
+// ---------- Supported image MIME types ----------
+// Inlined from @qwen-code/qwen-code-core to avoid pulling Node.js-only modules
+// into the browser webview bundle (esbuild marks core as external, but deep
+// sub-path imports like core/src/utils/... bypass the external filter and cause
+// "Dynamic require is not supported" at runtime).
+
+const SUPPORTED_IMAGE_MIME_TYPES: readonly string[] = [
+  'image/bmp',
+  'image/jpeg',
+  'image/jpg',
+  'image/png',
+  'image/tiff',
+  'image/webp',
+  'image/heic',
+];
+
+/**
+ * Check whether a MIME type is supported for pasted-image processing.
+ * @param mimeType - The MIME type string to validate
+ * @returns `true` when the type is in the supported list
+ */
+function isSupportedImageMimeType(mimeType: string): boolean {
+  return SUPPORTED_IMAGE_MIME_TYPES.includes(mimeType);
 }
 
 // ---------- Image format detection ----------

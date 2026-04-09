@@ -38,6 +38,7 @@ describe('getAboutSystemInfoFields', () => {
       'OS',
       'Auth',
       'Model',
+      'Fast Model',
       'Session ID',
       'Sandbox',
       'Proxy',

@@ -71,10 +71,20 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
   /**
    * Create new session
    */
-  const handleNewQwenSession = useCallback(() => {
-    vscode.postMessage({ type: 'openNewChatTab', data: {} });
-    setShowSessionSelector(false);
-  }, [vscode]);
+  const handleNewQwenSession = useCallback(
+    (modelId?: string | null) => {
+      const trimmedModelId =
+        typeof modelId === 'string' && modelId.trim().length > 0
+          ? modelId.trim()
+          : undefined;
+      vscode.postMessage({
+        type: 'openNewChatTab',
+        data: trimmedModelId ? { modelId: trimmedModelId } : {},
+      });
+      setShowSessionSelector(false);
+    },
+    [vscode],
+  );
 
   /**
    * Switch session

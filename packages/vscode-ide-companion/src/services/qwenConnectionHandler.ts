@@ -85,7 +85,30 @@ export class QwenConnectionHandler {
       );
     }
 
-    await connection.connectWithRetry(cliEntryPath!, workingDir, extraArgs);
+    // Retry loop for connection.connect() to handle transient spawn failures
+    // (e.g., SIGTERM during the 1-second startup grace period)
+    const maxConnectAttempts = 3;
+    for (let attempt = 1; attempt <= maxConnectAttempts; attempt++) {
+      try {
+        console.log(
+          `[QwenAgentManager] Connecting to ACP process (attempt ${attempt}/${maxConnectAttempts})...`,
+        );
+        await connection.connect(cliEntryPath!, workingDir, extraArgs);
+        console.log('[QwenAgentManager] ACP process connected successfully');
+        break;
+      } catch (connectError) {
+        console.error(
+          `[QwenAgentManager] Connect attempt ${attempt} failed:`,
+          getErrorMessage(connectError),
+        );
+        if (attempt === maxConnectAttempts) {
+          throw connectError;
+        }
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 4000);
+        console.log(`[QwenAgentManager] Retrying connect in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
 
     // Try to restore existing session or create new session
     // Note: Auto-restore on connect is disabled to avoid surprising loads
