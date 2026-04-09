@@ -10,16 +10,28 @@ const {
   mockCreateImagePathResolver,
   mockGetGlobalTempDir,
   mockGetPanel,
+  mockMessageHandlerInstances,
   mockOnDidChangeActiveTextEditor,
   mockOnDidChangeTextEditorSelection,
+  mockQwenAgentManagerInstances,
 } = vi.hoisted(() => ({
   mockCreateImagePathResolver: vi.fn(),
   mockGetGlobalTempDir: vi.fn(() => '/global-temp'),
   mockGetPanel: vi.fn<() => { webview: { postMessage: unknown } } | null>(
     () => null,
   ),
+  mockMessageHandlerInstances: [] as Array<{
+    permissionHandler?: (message: {
+      type: string;
+      data: { optionId?: string };
+    }) => void;
+  }>,
   mockOnDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
   mockOnDidChangeTextEditorSelection: vi.fn(() => ({ dispose: vi.fn() })),
+  mockQwenAgentManagerInstances: [] as Array<{
+    permissionRequestCallback?: (request: unknown) => Promise<string>;
+    cancelCurrentPrompt: ReturnType<typeof vi.fn>;
+  }>,
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
@@ -68,10 +80,19 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onEndTurn = vi.fn();
     onToolCall = vi.fn();
     onPlan = vi.fn();
-    onPermissionRequest = vi.fn();
+    onPermissionRequest = vi.fn(
+      (callback: (request: unknown) => Promise<string>) => {
+        this.permissionRequestCallback = callback;
+      },
+    );
     onAskUserQuestion = vi.fn();
     onDisconnected = vi.fn();
+    permissionRequestCallback?: (request: unknown) => Promise<string>;
+    cancelCurrentPrompt = vi.fn();
     disconnect = vi.fn();
+    constructor() {
+      mockQwenAgentManagerInstances.push(this);
+    }
   },
 }));
 
@@ -107,9 +128,24 @@ vi.mock('./MessageHandler.js', () => ({
       _conversationStore: unknown,
       _currentConversationId: string | null,
       _sendToWebView: (message: unknown) => void,
-    ) {}
+    ) {
+      mockMessageHandlerInstances.push(this);
+    }
     setLoginHandler = vi.fn();
-    setPermissionHandler = vi.fn();
+    permissionHandler?: (message: {
+      type: string;
+      data: { optionId?: string };
+    }) => void;
+    setPermissionHandler = vi.fn(
+      (
+        handler: (message: {
+          type: string;
+          data: { optionId?: string };
+        }) => void,
+      ) => {
+        this.permissionHandler = handler;
+      },
+    );
     setAskUserQuestionHandler = vi.fn();
     setCurrentConversationId = vi.fn();
     getCurrentConversationId = vi.fn(() => null);
@@ -146,6 +182,8 @@ import {
 describe('WebViewProvider.attachToView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mockMessageHandlerInstances.length = 0;
+    mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
     mockCreateImagePathResolver.mockReturnValue((paths: string[]) =>
       paths.map((entry) => ({
@@ -301,6 +339,84 @@ describe('WebViewProvider.attachToView', () => {
       },
     });
     expect(panelPostMessage).not.toHaveBeenCalled();
+  });
+
+  it('marks rejected switch_mode permission requests as failed without cancelling the session', async () => {
+    const postMessage = vi.fn();
+    const webview = {
+      options: undefined as unknown,
+      html: '',
+      postMessage,
+      asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+        toString: () => `webview:${uri.fsPath}`,
+      })),
+      onDidReceiveMessage: vi.fn(() => ({ dispose: vi.fn() })),
+    };
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await provider.attachToView(
+      {
+        webview,
+        visible: true,
+        onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+        onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+      } as never,
+      'qwen-code.chatView.sidebar',
+    );
+
+    const agentManager = mockQwenAgentManagerInstances.at(-1);
+    const messageHandler = mockMessageHandlerInstances.at(-1);
+
+    expect(agentManager?.permissionRequestCallback).toBeTypeOf('function');
+
+    const permissionPromise = agentManager?.permissionRequestCallback?.({
+      options: [
+        {
+          optionId: 'proceed_once',
+          name: 'Yes',
+          kind: 'allow_once',
+        },
+        {
+          optionId: 'cancel',
+          name: 'No, keep planning (esc)',
+          kind: 'reject_once',
+        },
+      ],
+      toolCall: {
+        toolCallId: 'tool-call-1',
+        title: 'Would you like to proceed?',
+        kind: 'switch_mode',
+        status: 'pending',
+      },
+    });
+
+    expect(messageHandler?.permissionHandler).toBeTypeOf('function');
+
+    messageHandler?.permissionHandler?.({
+      type: 'permissionResponse',
+      data: { optionId: 'cancel' },
+    });
+
+    await expect(permissionPromise).resolves.toBe('cancel');
+    expect(agentManager?.cancelCurrentPrompt).not.toHaveBeenCalled();
+    expect(postMessage).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'streamEnd',
+      }),
+    );
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'toolCall',
+      data: expect.objectContaining({
+        type: 'tool_call_update',
+        toolCallId: 'tool-call-1',
+        kind: 'switch_mode',
+        status: 'failed',
+      }),
+    });
   });
 });
 

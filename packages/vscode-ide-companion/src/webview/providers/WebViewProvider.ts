@@ -317,22 +317,26 @@ export class WebViewProvider {
             // Always close open qwen-diff editors after any permission decision
             void vscode.commands.executeCommand('qwen.diff.closeAll');
 
-            if (isCancel && !isSwitchMode) {
-              // Fire and forget — cancel generation and update UI
+            if (isCancel) {
+              // Fire and forget — for normal tool calls, cancel generation and
+              // end the stream; for switch_mode, keep the session alive but
+              // still mark the permission tool call as failed in the UI.
               void (async () => {
-                try {
-                  await this.agentManager.cancelCurrentPrompt();
-                } catch (err) {
-                  console.warn(
-                    '[WebViewProvider] cancelCurrentPrompt error:',
-                    err,
-                  );
-                }
+                if (!isSwitchMode) {
+                  try {
+                    await this.agentManager.cancelCurrentPrompt();
+                  } catch (err) {
+                    console.warn(
+                      '[WebViewProvider] cancelCurrentPrompt error:',
+                      err,
+                    );
+                  }
 
-                this.sendMessageToWebView({
-                  type: 'streamEnd',
-                  data: { timestamp: Date.now(), reason: 'user_cancelled' },
-                });
+                  this.sendMessageToWebView({
+                    type: 'streamEnd',
+                    data: { timestamp: Date.now(), reason: 'user_cancelled' },
+                  });
+                }
 
                 // Synthesize a failed tool_call_update to match CLI UX
                 try {
