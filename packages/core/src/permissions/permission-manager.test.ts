@@ -228,6 +228,24 @@ describe('matchesCommandPattern', () => {
       expect(matchesCommandPattern('npm run *', 'npm run build')).toBe(true);
     });
 
+    it('matches commands with leading env var assignments', async () => {
+      expect(
+        matchesCommandPattern(
+          'python3 *',
+          'PYTHONPATH=/tmp/lib python3 -c "print(1)"',
+        ),
+      ).toBe(true);
+    });
+
+    it('matches commands containing embedded newlines (dotAll)', async () => {
+      expect(
+        matchesCommandPattern(
+          'python3 *',
+          'python3 -c "\nimport sys\nprint(sys.version)\n"',
+        ),
+      ).toBe(true);
+    });
+
     it('space-star requires word boundary (ls * does not match lsof)', async () => {
       expect(matchesCommandPattern('ls *', 'ls -la')).toBe(true);
       expect(matchesCommandPattern('ls *', 'lsof')).toBe(false);

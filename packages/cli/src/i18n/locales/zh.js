@@ -1170,6 +1170,7 @@ export default {
   'Always allow {{action}} in this project': '在本项目中总是允许{{action}}',
   'Always allow for this user': '对该用户总是允许',
   'Always allow {{action}} for this user': '对该用户总是允许{{action}}',
+  'Yes, restore previous mode ({{mode}})': '是，恢复之前的模式 ({{mode}})',
   'Yes, and auto-accept edits': '是，并自动接受编辑',
   'Yes, and manually approve edits': '是，并手动批准编辑',
   'No, keep planning (esc)': '否，继续规划 (esc)',
@@ -1828,4 +1829,6 @@ export default {
     '已处于计划模式。使用 "/plan exit" 退出计划模式。',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
     '未处于计划模式。请先使用 "/plan" 进入计划模式。',
+
+  "Set up Qwen Code's status line UI": '配置 Qwen Code 的状态栏',
 };

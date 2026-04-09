@@ -133,6 +133,11 @@
           "type": "string",
           "default": "Qwen Dark"
         },
+        "statusLine": {
+          "description": "Custom status line display configuration.",
+          "type": "object",
+          "additionalProperties": true
+        },
         "customThemes": {
           "description": "Custom theme definitions.",
           "type": "object",

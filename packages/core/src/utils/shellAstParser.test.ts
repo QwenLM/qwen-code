@@ -4,14 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import path from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   initParser,
   isShellCommandReadOnlyAST,
   extractCommandRules,
   _resetParser,
-  _resolveWasmPathForTesting,
   _setParserFailedForTesting,
 } from './shellAstParser.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
@@ -22,79 +20,6 @@ beforeAll(async () => {
 
 afterAll(() => {
   _resetParser();
-});
-
-describe('WASM path resolution', () => {
-  it('resolveWasmPathForModule: computes correct path when resolvePath returns real CLI path', () => {
-    const symlinkedCliPath = path.join('/usr', 'bin', 'qwen');
-    const realCliPath = path.join(
-      '/opt',
-      'homebrew',
-      'lib',
-      'node_modules',
-      '@qwen-code',
-      'qwen-code',
-      'dist',
-      'cli.js',
-    );
-
-    const result = _resolveWasmPathForTesting(
-      'tree-sitter.wasm',
-      symlinkedCliPath,
-      () => realCliPath,
-    );
-
-    expect(result).toBe(
-      path.join(
-        '/opt',
-        'homebrew',
-        'lib',
-        'node_modules',
-        '@qwen-code',
-        'qwen-code',
-        'dist',
-        'vendor',
-        'tree-sitter',
-        'tree-sitter.wasm',
-      ),
-    );
-    expect(result).not.toContain(path.join('/usr', 'bin', 'vendor'));
-  });
-
-  it('resolveWasmPathForModule: correctly resolves path when realpathSync returns symlink target in same dir as vendor', () => {
-    // Simulate: /usr/bin/qwen (symlink) → /usr/lib/node_modules/.../cli.js (real)
-    // Vendor files live next to cli.js (levelsUp = 0 for bundle case)
-    const symlinkedCliPath = path.join('/usr', 'bin', 'qwen');
-    const realCliPath = path.join(
-      '/usr',
-      'lib',
-      'node_modules',
-      '@qwen-code',
-      'qwen-code',
-      'cli.js',
-    );
-
-    const result = _resolveWasmPathForTesting(
-      'tree-sitter.wasm',
-      symlinkedCliPath,
-      () => realCliPath,
-    );
-
-    expect(result).toBe(
-      path.join(
-        '/usr',
-        'lib',
-        'node_modules',
-        '@qwen-code',
-        'qwen-code',
-        'vendor',
-        'tree-sitter',
-        'tree-sitter.wasm',
-      ),
-    );
-    // Must NOT use the symlink dir (/usr/bin/vendor/...)
-    expect(result).not.toContain(path.join('/usr', 'bin', 'vendor'));
-  });
 });
 
 // =========================================================================

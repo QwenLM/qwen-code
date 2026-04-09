@@ -172,6 +172,11 @@ export function toPermissionOptions(
     case 'plan':
       return [
         {
+          optionId: ToolConfirmationOutcome.RestorePrevious,
+          name: `Yes, restore previous mode (${confirmation.prePlanMode ?? 'default'})`,
+          kind: 'allow_once',
+        },
+        {
           optionId: ToolConfirmationOutcome.ProceedAlways,
           name: 'Yes, and auto-accept edits',
           kind: 'allow_always',

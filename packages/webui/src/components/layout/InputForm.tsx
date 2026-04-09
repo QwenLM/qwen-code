@@ -304,8 +304,8 @@ export const InputForm: FC<InputFormProps> = ({
     : '';
 
   return (
-    <div className="p-1 px-4 pb-4 absolute bottom-0 left-0 right-0 bg-gradient-to-b from-transparent to-[var(--app-primary-background)]">
-      <div className="block">
+    <div className="p-1 px-4 pb-4 absolute bottom-0 left-0 right-0 bg-gradient-to-b from-transparent to-[var(--app-primary-background)] pointer-events-none">
+      <div className="block pointer-events-auto">
         <form className="composer-form" onSubmit={onSubmit}>
           {/* Inner background layer */}
           <div className="composer-overlay" />

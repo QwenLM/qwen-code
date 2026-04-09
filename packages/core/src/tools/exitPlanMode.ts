@@ -87,12 +87,18 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolPlanConfirmationDetails> {
+    const prePlanMode = this.config.getPrePlanMode();
     const details: ToolPlanConfirmationDetails = {
       type: 'plan',
       title: 'Would you like to proceed?',
       plan: this.params.plan,
+      prePlanMode,
       onConfirm: async (outcome: ToolConfirmationOutcome) => {
         switch (outcome) {
+          case ToolConfirmationOutcome.RestorePrevious:
+            this.wasApproved = true;
+            this.setApprovalModeSafely(prePlanMode);
+            break;
           case ToolConfirmationOutcome.ProceedAlways:
             this.wasApproved = true;
             this.setApprovalModeSafely(ApprovalMode.AUTO_EDIT);

@@ -156,3 +156,24 @@ tmux kill-session -t test
 For testing MCP tool behavior end-to-end, read `references/mcp-testing.md`. It
 covers the setup gotchas (config location, git repo requirement) and includes
 a reusable zero-dependency test server template in `scripts/mcp-test-server.js`.
+
+## Token Usage Stats
+
+Use `scripts/token-stats.py` to summarize token usage across recent API logs:
+
+```bash
+python3 .qwen/skills/e2e-testing/scripts/token-stats.py 20  # last 20 requests
+```
+
+Shows input, cached, and output tokens per request with cache hit rates. Useful
+for verifying prompt caching behavior or investigating unexpected token counts.
+
+## Tips
+
+- Use interactive (tmux) mode when the bug involves permission prompts, slash
+  commands, or keyboard interactions. Headless mode has no TUI — these don't
+  exist there.
+- Use interactive (tmux) mode for hang-related issues. Headless mode produces
+  no output when the process stalls, giving you nothing to work with.
+- Use `--approval-mode default` when testing permission rules. `yolo` bypasses
+  rule evaluation entirely — it can't test whether a rule matches.

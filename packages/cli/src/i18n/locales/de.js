@@ -1184,6 +1184,8 @@ export default {
   'Always allow for this user': 'Für diesen Benutzer immer erlauben',
   'Always allow {{action}} for this user':
     '{{action}} für diesen Benutzer immer erlauben',
+  'Yes, restore previous mode ({{mode}})':
+    'Ja, vorherigen Modus wiederherstellen ({{mode}})',
   'Yes, and auto-accept edits': 'Ja, und Änderungen automatisch akzeptieren',
   'Yes, and manually approve edits': 'Ja, und Änderungen manuell genehmigen',
   'No, keep planning (esc)': 'Nein, weiter planen (Esc)',
@@ -1986,4 +1988,6 @@ export default {
     'Already in plan mode. Use "/plan exit" to exit plan mode.',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
     'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };
