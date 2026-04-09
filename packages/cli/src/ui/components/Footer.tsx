@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { useEffect, useState } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
@@ -16,13 +17,43 @@ import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  getManagedAutoMemoryDreamTaskRegistry,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
+
+/**
+ * Subscribes to the dream task registry and returns true while any dream task
+ * for the current project is in 'pending' or 'running' state.
+ */
+function useDreamRunning(projectRoot: string): boolean {
+  const [running, setRunning] = useState(false);
+
+  useEffect(() => {
+    const registry = getManagedAutoMemoryDreamTaskRegistry();
+
+    function check() {
+      const tasks = registry.list(projectRoot);
+      setRunning(tasks.some((t) => t.status === 'pending' || t.status === 'running'));
+    }
+
+    check();
+    return registry.subscribe((task) => {
+      if (task.projectRoot === projectRoot) {
+        check();
+      }
+    });
+  }, [projectRoot]);
+
+  return running;
+}
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
+  const dreamRunning = useDreamRunning(config.getProjectRoot());
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -77,6 +108,12 @@ export const Footer: React.FC = () => {
     rightItems.push({
       key: 'debug',
       node: <Text color={theme.status.warning}>Debug Mode</Text>,
+    });
+  }
+  if (dreamRunning) {
+    rightItems.push({
+      key: 'dream',
+      node: <Text color={theme.text.secondary}>✦ dreaming</Text>,
     });
   }
   if (promptTokenCount > 0 && contextWindowSize) {
