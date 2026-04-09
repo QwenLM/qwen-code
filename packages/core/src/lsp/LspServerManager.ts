@@ -388,8 +388,8 @@ export class LspServerManager {
     handle.error = undefined;
     handle.warmedUp = false;
     handle.stopRequested = false;
-    handle.cachedDiagnostics?.clear();
-    handle.pendingDiagnostics?.clear();
+    handle.cachedDiagnostics.clear();
+    handle.pendingDiagnostics.clear();
   }
 
   private buildProcessEnv(

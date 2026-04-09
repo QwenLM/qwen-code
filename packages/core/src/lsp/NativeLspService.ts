@@ -1066,6 +1066,7 @@ export class NativeLspService {
         );
 
         // Force-refresh the document: send didClose + didOpen to trigger fresh analysis
+        handle.cachedDiagnostics.delete(uri);
         const openedForServer = this.openedDocuments.get(name);
         if (openedForServer?.has(uri)) {
           openedForServer.delete(uri);
@@ -1092,6 +1093,7 @@ export class NativeLspService {
               },
             });
             await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS * 5);
+            openedForServer.add(uri);
           } catch (err) {
             debugLogger.warn(`Failed to refresh document:`, err);
             openedForServer.add(uri);
@@ -1111,7 +1113,7 @@ export class NativeLspService {
                 allDiagnostics.push(normalized2);
               }
             }
-            return allDiagnostics;
+            continue;
           }
         }
         // Await push diagnostics via pub/sub (Promise.race with 5s timeout)
@@ -1193,9 +1195,13 @@ export class NativeLspService {
         debugLogger.warn(`LSP workspace/diagnostic failed for ${name}:`, error);
 
         if (handle.cachedDiagnostics) {
-          const workspaceRootUri = pathToFileURL(this.workspaceRoot).toString();
+          const workspaceRootUris = this.workspaceContext
+            .getDirectories()
+            .map((dir) => pathToFileURL(dir).toString());
           for (const [uri, diagnostics] of handle.cachedDiagnostics) {
-            if (!uri.startsWith(workspaceRootUri)) continue;
+            if (!workspaceRootUris.some((rootUri) => uri.startsWith(rootUri))) {
+              continue;
+            }
             if (results.length >= limit) break;
             if (diagnostics && diagnostics.length > 0) {
               const normalizedDiagnostics = [];
