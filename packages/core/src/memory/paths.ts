@@ -103,6 +103,16 @@ export function getAutoMemoryRoot(projectRoot: string): string {
 }
 
 /**
+ * Returns the project-level state directory that holds auxiliary files
+ * (meta.json, extract-cursor.json, consolidation.lock) for the given project.
+ * This is the parent of getAutoMemoryRoot(), so memory/ stays clean:
+ * only MEMORY.md and topic files live inside it.
+ */
+export function getAutoMemoryProjectStateDir(projectRoot: string): string {
+  return path.dirname(getAutoMemoryRoot(projectRoot));
+}
+
+/**
  * Returns true if the given absolute path is inside the auto-memory root for
  * the given project.  The path is normalized to prevent path-traversal tricks.
  */
@@ -118,14 +128,14 @@ export function getAutoMemoryIndexPath(projectRoot: string): string {
 
 export function getAutoMemoryMetadataPath(projectRoot: string): string {
   return path.join(
-    getAutoMemoryRoot(projectRoot),
+    getAutoMemoryProjectStateDir(projectRoot),
     AUTO_MEMORY_METADATA_FILENAME,
   );
 }
 
 export function getAutoMemoryExtractCursorPath(projectRoot: string): string {
   return path.join(
-    getAutoMemoryRoot(projectRoot),
+    getAutoMemoryProjectStateDir(projectRoot),
     AUTO_MEMORY_EXTRACT_CURSOR_FILENAME,
   );
 }
@@ -134,7 +144,7 @@ export function getAutoMemoryConsolidationLockPath(
   projectRoot: string,
 ): string {
   return path.join(
-    getAutoMemoryRoot(projectRoot),
+    getAutoMemoryProjectStateDir(projectRoot),
     AUTO_MEMORY_CONSOLIDATION_LOCK_FILENAME,
   );
 }

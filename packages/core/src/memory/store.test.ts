@@ -50,13 +50,13 @@ describe('auto-memory storage scaffold', () => {
       path.join(projectRoot, '.qwen', 'memory', 'MEMORY.md'),
     );
     expect(getAutoMemoryMetadataPath(projectRoot)).toBe(
-      path.join(projectRoot, '.qwen', 'memory', 'meta.json'),
+      path.join(projectRoot, '.qwen', 'meta.json'),
     );
     expect(getAutoMemoryExtractCursorPath(projectRoot)).toBe(
-      path.join(projectRoot, '.qwen', 'memory', 'extract-cursor.json'),
+      path.join(projectRoot, '.qwen', 'extract-cursor.json'),
     );
     expect(getAutoMemoryConsolidationLockPath(projectRoot)).toBe(
-      path.join(projectRoot, '.qwen', 'memory', 'consolidation.lock'),
+      path.join(projectRoot, '.qwen', 'consolidation.lock'),
     );
     expect(getAutoMemoryTopicPath(projectRoot, 'feedback')).toBe(
       path.join(projectRoot, '.qwen', 'memory', 'feedback.md'),
