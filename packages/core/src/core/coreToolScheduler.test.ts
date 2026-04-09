@@ -1788,6 +1788,196 @@ describe('CoreToolScheduler request queueing', () => {
     // Verify approval mode was changed
     expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
   });
+
+  it('auto-approves safe shell command when vibe mode is enabled', async () => {
+    const getConfirmationDetails = vi.fn().mockResolvedValue({
+      type: 'exec' as const,
+      title: 'Confirm shell',
+      command: 'npm run dev',
+      rootCommand: 'npm',
+      onConfirm: async () => {},
+    });
+
+    const shellTool = new MockTool({
+      name: 'run_shell_command',
+      getDefaultPermission: () => Promise.resolve('ask'),
+      getConfirmationDetails,
+      execute: async () => ({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      }),
+    });
+
+    const mockToolRegistry = {
+      getTool: () => shellTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => shellTool,
+      getToolByDisplayName: () => shellTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getVibeMode: () => true,
+      getTargetDir: () => '/workspace/project',
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'run_shell_command',
+          args: { command: 'npm run dev' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+      const completed = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as
+        | ToolCall[]
+        | undefined;
+      expect(completed?.[0]?.status).toBe('success');
+    });
+
+    expect(getConfirmationDetails).not.toHaveBeenCalled();
+  });
+
+  it('keeps manual approval for dangerous shell command in vibe mode', async () => {
+    const shellTool = new MockTool({
+      name: 'run_shell_command',
+      getDefaultPermission: () => Promise.resolve('ask'),
+      getConfirmationDetails: () =>
+        Promise.resolve({
+          type: 'exec',
+          title: 'Confirm shell',
+          command: 'sudo npm run dev',
+          rootCommand: 'sudo',
+          onConfirm: async () => {},
+        }),
+    });
+
+    const mockToolRegistry = {
+      getTool: () => shellTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => shellTool,
+      getToolByDisplayName: () => shellTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getVibeMode: () => true,
+      getTargetDir: () => '/workspace/project',
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      isInteractive: () => true,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'run_shell_command',
+          args: { command: 'sudo npm run dev' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-1',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const awaiting = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .some((c) => c.status === 'awaiting_approval');
+
+    expect(awaiting).toBe(true);
+    expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+  });
 });
 
 describe('CoreToolScheduler truncated output protection', () => {
