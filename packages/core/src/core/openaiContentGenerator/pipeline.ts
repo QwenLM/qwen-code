@@ -331,11 +331,14 @@ export class ContentGenerationPipeline {
       baseRequest.stream_options = { include_usage: true };
     }
 
-    // Add tools if present
-    if (request.config?.tools) {
-      baseRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
+    // Add tools if present — omit empty array to avoid API validation errors
+    if (request.config?.tools && request.config.tools.length > 0) {
+      const tools = await this.converter.convertGeminiToolsToOpenAI(
         request.config.tools,
       );
+      if (tools.length > 0) {
+        baseRequest.tools = tools;
+      }
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)

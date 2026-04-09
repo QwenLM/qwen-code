@@ -189,9 +189,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const { system, messages } =
       this.converter.convertGeminiRequestToAnthropic(request);
 
-    const tools = request.config?.tools
-      ? await this.converter.convertGeminiToolsToAnthropic(request.config.tools)
-      : undefined;
+    const tools =
+      request.config?.tools && request.config.tools.length > 0
+        ? await this.converter.convertGeminiToolsToAnthropic(
+            request.config.tools,
+          )
+        : undefined;
 
     const sampling = this.buildSamplingParameters(request);
     const thinking = this.buildThinkingConfig(request);

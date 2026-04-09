@@ -301,10 +301,13 @@ export class LoggingContentGenerator implements ContentGenerator {
       messages,
     };
 
-    if (request.config?.tools) {
-      openaiRequest.tools = await converter.convertGeminiToolsToOpenAI(
+    if (request.config?.tools && request.config.tools.length > 0) {
+      const tools = await converter.convertGeminiToolsToOpenAI(
         request.config.tools,
       );
+      if (tools.length > 0) {
+        openaiRequest.tools = tools;
+      }
     }
 
     if (request.config?.temperature !== undefined) {
