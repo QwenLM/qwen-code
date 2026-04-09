@@ -88,18 +88,33 @@ export function getMemoryBaseDir(): string {
   return path.join(os.homedir(), QWEN_DIR);
 }
 
-export function getAutoMemoryRoot(projectRoot: string): string {
-  if (process.env['QWEN_CODE_MEMORY_LOCAL'] === '1') {
-    return path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
-  }
+// Memoize by projectRoot — findCanonicalGitRoot() walks the file system (existsSync
+// per directory) and is called from hot-path code such as schedulers and scanners.
+const _autoMemoryRootCache = new Map<string, string>();
 
-  const canonicalRoot = findCanonicalGitRoot(projectRoot) ?? path.resolve(projectRoot);
-  return path.join(
-    getMemoryBaseDir(),
-    'projects',
-    sanitizeCwd(canonicalRoot),
-    AUTO_MEMORY_DIRNAME,
-  );
+export function getAutoMemoryRoot(projectRoot: string): string {
+  const cached = _autoMemoryRootCache.get(projectRoot);
+  if (cached !== undefined) return cached;
+
+  let result: string;
+  if (process.env['QWEN_CODE_MEMORY_LOCAL'] === '1') {
+    result = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
+  } else {
+    const canonicalRoot = findCanonicalGitRoot(projectRoot) ?? path.resolve(projectRoot);
+    result = path.join(
+      getMemoryBaseDir(),
+      'projects',
+      sanitizeCwd(canonicalRoot),
+      AUTO_MEMORY_DIRNAME,
+    );
+  }
+  _autoMemoryRootCache.set(projectRoot, result);
+  return result;
+}
+
+/** Clear the memoization cache (for tests that change environment or git layout). */
+export function clearAutoMemoryRootCache(): void {
+  _autoMemoryRootCache.clear();
 }
 
 /**

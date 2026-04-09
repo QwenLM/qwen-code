@@ -5,7 +5,9 @@
  */
 
 import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import type { Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import {
   BackgroundTaskDrainer,
   type DrainBackgroundTasksOptions,
@@ -25,7 +27,23 @@ import type { AutoMemoryMetadata } from './types.js';
 
 export const DEFAULT_AUTO_DREAM_MIN_HOURS = 24;
 export const DEFAULT_AUTO_DREAM_MIN_SESSIONS = 5;
-const DREAM_LOCK_STALE_MS = 2 * 60 * 60 * 1000;
+/** Maximum age before a lock is reclaimed even if the PID appears live (PID-reuse guard). */
+const DREAM_LOCK_STALE_MS = 60 * 60 * 1000; // 1 hour (same as CC)
+/** Minimum interval between session-count filesystem scans when time-gate is open. */
+const SESSION_SCAN_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes (same as CC)
+
+/**
+ * Returns true if the given process ID is currently alive.
+ * Uses kill(pid, 0) — no signal sent, just existence check.
+ */
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export interface ScheduleManagedAutoMemoryDreamParams {
   projectRoot: string;
@@ -76,24 +94,86 @@ function hoursSince(lastDreamAt: string | undefined, now: Date): number | null {
   return (now.getTime() - timestamp) / (1000 * 60 * 60);
 }
 
-async function lockExists(projectRoot: string): Promise<boolean> {
+/** Pattern matching session JSONL files: <uuid>.jsonl */
+const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
+
+/**
+ * Returns session IDs whose transcript files have mtime after sinceMs.
+ * Mirrors Claude Code’s listSessionsTouchedSince approach: ground truth from
+ * the filesystem, immune to meta.json corruption or loss.
+ * Caller should exclude the current session (its mtime is always recent).
+ */
+async function listSessionsTouchedSince(
+  projectRoot: string,
+  sinceMs: number,
+  excludeSessionId: string,
+): Promise<string[]> {
+  const chatsDir = path.join(new Storage(projectRoot).getProjectDir(), 'chats');
+  let names: string[];
   try {
-    const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
-    const stats = await fs.stat(lockPath);
-    const ageMs = Date.now() - stats.mtimeMs;
-    if (ageMs > DREAM_LOCK_STALE_MS) {
-      await fs.rm(lockPath, { force: true });
-      return false;
-    }
-    return true;
+    names = await fs.readdir(chatsDir);
   } catch {
+    return [];
+  }
+  const results: string[] = [];
+  await Promise.all(
+    names.map(async (name) => {
+      if (!SESSION_FILE_PATTERN.test(name)) return;
+      const sessionId = name.slice(0, -'.jsonl'.length);
+      if (sessionId === excludeSessionId) return;
+      try {
+        const stats = await fs.stat(path.join(chatsDir, name));
+        if (stats.mtimeMs > sinceMs) {
+          results.push(sessionId);
+        }
+      } catch {
+        // Skip files we cannot stat
+      }
+    }),
+  );
+  return results;
+}
+
+async function lockExists(projectRoot: string): Promise<boolean> {
+  const lockPath = getAutoMemoryConsolidationLockPath(projectRoot);
+  let mtimeMs: number;
+  let holderPid: number | undefined;
+  try {
+    const [stats, content] = await Promise.all([
+      fs.stat(lockPath),
+      fs.readFile(lockPath, 'utf-8').catch(() => ''),
+    ]);
+    mtimeMs = stats.mtimeMs;
+    const parsed = parseInt(content.trim(), 10);
+    holderPid = Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+  } catch {
+    return false; // ENOENT — no lock
+  }
+
+  const ageMs = Date.now() - mtimeMs;
+
+  // Within stale threshold: check if the holder PID is still alive.
+  if (ageMs <= DREAM_LOCK_STALE_MS) {
+    if (holderPid !== undefined && isProcessRunning(holderPid)) {
+      return true; // live holder
+    }
+    // Dead PID or unparseable body — reclaim the stale lock immediately.
+    await fs.rm(lockPath, { force: true });
     return false;
   }
+
+  // Past stale threshold regardless of PID (PID-reuse guard).
+  await fs.rm(lockPath, { force: true });
+  return false;
 }
 
 async function acquireDreamLock(projectRoot: string): Promise<void> {
-  const handle = await fs.open(getAutoMemoryConsolidationLockPath(projectRoot), 'wx');
-  await handle.close();
+  // Write our PID so lockExists() can detect whether we're still alive.
+  await fs.writeFile(
+    getAutoMemoryConsolidationLockPath(projectRoot),
+    String(process.pid),
+    { flag: 'wx' }, // exclusive create — throws EEXIST if already locked
+  );
 }
 
 async function releaseDreamLock(projectRoot: string): Promise<void> {
@@ -102,10 +182,27 @@ async function releaseDreamLock(projectRoot: string): Promise<void> {
   });
 }
 
+/** Function type for scanning session files by mtime. Injected for testing. */
+export type SessionScannerFn = (
+  projectRoot: string,
+  sinceMs: number,
+  excludeSessionId: string,
+) => Promise<string[]>;
+
 export class ManagedAutoMemoryDreamRuntime {
   readonly registry = new BackgroundTaskRegistry();
   readonly drainer = new BackgroundTaskDrainer();
   readonly scheduler = new BackgroundTaskScheduler(this.registry, this.drainer);
+
+  constructor(
+    private readonly sessionScanner: SessionScannerFn = listSessionsTouchedSince,
+  ) {}
+  /**
+   * Timestamp (ms) of the last session-count filesystem scan per project root.
+   * When the time-gate passes but session-count doesn't, we'd otherwise re-scan
+   * every turn. Throttle to SESSION_SCAN_INTERVAL_MS (10 min).
+   */
+  private lastSessionScanAt = new Map<string, number>();
 
   async schedule(
     params: ScheduleManagedAutoMemoryDreamParams,
@@ -132,12 +229,6 @@ export class ManagedAutoMemoryDreamRuntime {
       };
     }
 
-    const recentSessionIds = new Set(metadata.recentSessionIdsSinceDream ?? []);
-    recentSessionIds.add(params.sessionId);
-    metadata.recentSessionIdsSinceDream = [...recentSessionIds];
-    metadata.updatedAt = now.toISOString();
-    await writeDreamMetadata(params.projectRoot, metadata);
-
     const elapsedHours = hoursSince(metadata.lastDreamAt, now);
     if (elapsedHours !== null && elapsedHours < minHoursBetweenDreams) {
       return {
@@ -146,7 +237,26 @@ export class ManagedAutoMemoryDreamRuntime {
       };
     }
 
-    if (recentSessionIds.size < minSessionsBetweenDreams) {
+    // Scan throttle: when the time-gate passes but the session-gate hasn't, we'd
+    // re-scan the session set on every turn. Throttle to SESSION_SCAN_INTERVAL_MS.
+    const lastScan = this.lastSessionScanAt.get(params.projectRoot) ?? 0;
+    const sinceScanMs = now.getTime() - lastScan;
+    if (sinceScanMs < SESSION_SCAN_INTERVAL_MS) {
+      return {
+        status: 'skipped',
+        skippedReason: 'min_sessions',
+      };
+    }
+    this.lastSessionScanAt.set(params.projectRoot, now.getTime());
+
+    // Scan session files by mtime (filesystem ground truth, immune to meta.json loss).
+    const lastDreamMs = metadata.lastDreamAt ? Date.parse(metadata.lastDreamAt) : 0;
+    const sessionIds = await this.sessionScanner(
+      params.projectRoot,
+      lastDreamMs,
+      params.sessionId,
+    );
+    if (sessionIds.length < minSessionsBetweenDreams) {
       return {
         status: 'skipped',
         skippedReason: 'min_sessions',
@@ -167,7 +277,7 @@ export class ManagedAutoMemoryDreamRuntime {
       sessionId: params.sessionId,
       dedupeKey: `managed-auto-memory-dream:${params.projectRoot}`,
       metadata: {
-        sessionCount: recentSessionIds.size,
+        sessionCount: sessionIds.length,
       },
       run: async () => {
         try {
@@ -191,7 +301,6 @@ export class ManagedAutoMemoryDreamRuntime {
           const nextMetadata = await readDreamMetadata(params.projectRoot);
           nextMetadata.lastDreamAt = now.toISOString();
           nextMetadata.lastDreamSessionId = params.sessionId;
-          nextMetadata.recentSessionIdsSinceDream = [];
           nextMetadata.updatedAt = now.toISOString();
           await writeDreamMetadata(params.projectRoot, nextMetadata);
 
@@ -254,6 +363,8 @@ export async function drainManagedAutoMemoryDreamTasks(
   return defaultManagedAutoMemoryDreamRuntime.drain(options);
 }
 
-export function createManagedAutoMemoryDreamRuntimeForTests(): ManagedAutoMemoryDreamRuntime {
-  return new ManagedAutoMemoryDreamRuntime();
+export function createManagedAutoMemoryDreamRuntimeForTests(
+  sessionScanner?: SessionScannerFn,
+): ManagedAutoMemoryDreamRuntime {
+  return new ManagedAutoMemoryDreamRuntime(sessionScanner);
 }

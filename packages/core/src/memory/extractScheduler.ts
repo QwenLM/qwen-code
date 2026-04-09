@@ -23,6 +23,7 @@ import {
   isExtractRunning,
   markExtractRunning,
 } from './state.js';
+import { isAutoMemPath } from './paths.js';
 
 export interface ScheduleAutoMemoryExtractParams {
   projectRoot: string;
@@ -52,16 +53,35 @@ function buildSkippedExtractResult(
   };
 }
 
-function partIsSaveMemoryCall(part: Part): boolean {
-  return (
-    (part.functionCall?.name === 'save_memory') ||
-    (part.functionResponse?.name === 'save_memory')
-  );
+/**
+ * Returns true if the part is a write-tool call targeting a file path inside
+ * the auto-memory directory. Covers both `save_memory` (legacy tool) and any
+ * direct write_file/edit tool calls the main agent may have issued.
+ */
+function partWritesToMemory(part: Part, projectRoot: string): boolean {
+  // save_memory tool call/response
+  if (
+    part.functionCall?.name === 'save_memory' ||
+    part.functionResponse?.name === 'save_memory'
+  ) {
+    return true;
+  }
+  // Direct write_file or edit tool calls to a memory path
+  const writeToolNames = new Set(['write_file', 'edit', 'replace', 'create_file']);
+  const name = part.functionCall?.name;
+  if (name && writeToolNames.has(name)) {
+    const args = part.functionCall?.args as Record<string, unknown> | undefined;
+    const filePath = args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
+    if (typeof filePath === 'string' && isAutoMemPath(filePath, projectRoot)) {
+      return true;
+    }
+  }
+  return false;
 }
 
-function historySliceUsesMemoryTool(history: Content[]): boolean {
+function historySliceUsesMemoryTool(history: Content[], projectRoot: string): boolean {
   return history.some((message) =>
-    (message.parts ?? []).some(partIsSaveMemoryCall),
+    (message.parts ?? []).some((part) => partWritesToMemory(part, projectRoot)),
   );
 }
 
@@ -75,7 +95,7 @@ export class ManagedAutoMemoryExtractRuntime {
   async schedule(
     params: ScheduleAutoMemoryExtractParams,
   ): Promise<AutoMemoryExtractResult> {
-    if (historySliceUsesMemoryTool(params.history)) {
+    if (historySliceUsesMemoryTool(params.history, params.projectRoot)) {
       const task = this.registry.register({
         taskType: 'managed-auto-memory-extraction',
         title: 'Managed auto-memory extraction',
