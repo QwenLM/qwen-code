@@ -87,18 +87,98 @@ fi
 
 mkdir -p "${PACKAGE_DIR}"
 
-# 发布模式：daily（日常）自动追加 -beta.TIMESTAMP；production（线上）保持 x.y.z
-# 通过环境变量 RELEASE_MODE 控制，默认为 daily
-RELEASE_MODE="${RELEASE_MODE:-daily}"
+# ============================================================================
+# 发布模式判断
+# ============================================================================
+#
+# 判断逻辑（优先级从高到低）：
+#   1. RELEASE_MODE 环境变量显式指定（最高优先级，用户手动覆盖）
+#   2. DEF 平台 def_publish_env 参数：
+#      - daily  → 预发环境（版本号添加 -beta.TIMESTAMP）
+#      - prod/production → 线上环境（保持 x.y.z）
+#   3. DEF 平台 BUILD_GIT_BRANCH 分支名：
+#      - daily/xxx → 预发环境
+#      - main/master/release/xxx → 线上环境
+#   4. 默认：预发环境（保守策略，确保线上不会被误发 beta 包）
+#
+# 相关环境变量：
+#   - RELEASE_MODE: 用户手动指定（daily / production）
+#   - BUILD_ARGV_STR: DEF 平台构建参数字符串，如 "--def_publish_env=daily"
+#   - BUILD_GIT_BRANCH: DEF 平台构建分支名
+#   - BUILD_ENV: DEF 平台构建环境标识
+#   - BUILD_DEST: DEF 平台构建产物目标路径
+# ============================================================================
 
+echo ""
+echo "====== DEF 平台构建信息 ======"
+echo "BUILD_ARGV_STR:    ${BUILD_ARGV_STR:-"(未设置)"}"
+echo "BUILD_GIT_BRANCH:  ${BUILD_GIT_BRANCH:-"(未设置)"}"
+echo "BUILD_ENV:         ${BUILD_ENV:-"(未设置)"}"
+echo "BUILD_DEST:        ${BUILD_DEST:-"(未设置)"}"
+echo "RELEASE_MODE:      ${RELEASE_MODE:-"(未设置)"}"
+echo ""
+
+# 解析 DEF 平台构建参数（从 BUILD_ARGV_STR 中提取 --key=value 格式的值）
+get_build_arg_value() {
+  local build_argv_str="${1}"
+  local key="${2}"
+  if [ -z "${build_argv_str}" ] || [ -z "${key}" ]; then
+    return
+  fi
+  # 匹配 --key=value 或 -key=value 格式
+  echo "${build_argv_str}" | grep -oE "(^|[[:space:]])-?-${key}=[^[:space:]]+" | sed 's/.*=//'
+}
+
+DEF_PUBLISH_ENV="$(get_build_arg_value "${BUILD_ARGV_STR:-}" 'def_publish_env')"
+DEF_PUBLISH_TYPE="$(get_build_arg_value "${BUILD_ARGV_STR:-}" 'def_publish_type')"
+DEF_PUBLISH_VERSION="$(get_build_arg_value "${BUILD_ARGV_STR:-}" 'def_publish_version')"
+
+echo "解析后的 DEF 参数:"
+echo "def_publish_env:    ${DEF_PUBLISH_ENV:-"(未设置)"}"
+echo "def_publish_type:   ${DEF_PUBLISH_TYPE:-"(未设置)"}"
+echo "def_publish_version: ${DEF_PUBLISH_VERSION:-"(未设置)"}"
+echo ""
+
+# 判断发布模式
+RELEASE_MODE_REASON=""
+if [ -n "${RELEASE_MODE:-}" ]; then
+  # 用户显式指定 RELEASE_MODE，优先使用
+  RELEASE_MODE_REASON="RELEASE_MODE 环境变量手动指定"
+elif [ "${DEF_PUBLISH_ENV}" = "daily" ]; then
+  # DEF 平台明确指定 daily 环境
+  RELEASE_MODE="daily"
+  RELEASE_MODE_REASON="def_publish_env=daily（DEF 平台预发环境）"
+elif [ -n "${BUILD_GIT_BRANCH:-}" ] && [[ "${BUILD_GIT_BRANCH}" =~ ^daily/ ]]; then
+  # 分支名以 daily/ 开头（DEF 平台预发分支命名规范）
+  RELEASE_MODE="daily"
+  RELEASE_MODE_REASON="BUILD_GIT_BRANCH=${BUILD_GIT_BRANCH}（daily/ 分支，预发环境）"
+elif [ "${DEF_PUBLISH_ENV}" = "prod" ] || [ "${DEF_PUBLISH_ENV}" = "production" ]; then
+  # DEF 平台明确指定线上环境
+  RELEASE_MODE="production"
+  RELEASE_MODE_REASON="def_publish_env=${DEF_PUBLISH_ENV}（DEF 平台线上环境）"
+elif [ -n "${BUILD_GIT_BRANCH:-}" ] && [[ "${BUILD_GIT_BRANCH}" =~ ^(main|master|release/) ]]; then
+  # main/master/release/ 分支视为线上环境
+  RELEASE_MODE="production"
+  RELEASE_MODE_REASON="BUILD_GIT_BRANCH=${BUILD_GIT_BRANCH}（线上分支）"
+else
+  # 默认预发环境（保守策略）
+  RELEASE_MODE="daily"
+  RELEASE_MODE_REASON="默认值（未检测到线上环境标识，使用预发环境）"
+fi
+
+echo "====== 发布模式判断结果 ======"
 if [ "${RELEASE_MODE}" = "production" ]; then
-  echo "🚀 发布模式: production（保持 x.y.z 版本号）"
   BETA_TIMESTAMP=""
+  echo "🚀 发布模式: production（线上环境）"
+  echo "   版本号格式: x.y.z（不带 beta 标签）"
 else
   # 生成唯一时间戳，格式：YYYYMMDDHHmm，固定使用北京时间
   BETA_TIMESTAMP="$(TZ='Asia/Shanghai' date '+%Y%m%d%H%M')"
-  echo "🏷  发布模式: daily（版本时间戳: ${BETA_TIMESTAMP}）"
+  echo "🏷  发布模式: daily（预发环境）"
+  echo "   版本号格式: x.y.z-beta.${BETA_TIMESTAMP}"
 fi
+echo "   判断依据: ${RELEASE_MODE_REASON}"
+echo ""
 
 copied_count=0
 
