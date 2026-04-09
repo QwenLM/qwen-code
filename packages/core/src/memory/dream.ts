@@ -206,3 +206,17 @@ async function updateDreamMetadataResult(
     // Best-effort metadata bump.
   }
 }
+
+/**
+ * Record that the user manually ran /dream. Called from the CLI command's
+ * onComplete callback after the main agent turn finishes writing memory files.
+ * Writes lastDreamAt (and resets recentSessionIdsSinceDream) so that
+ * /memory status reflects the correct "last dream" time.
+ */
+export async function writeDreamManualRunToMetadata(
+  projectRoot: string,
+  sessionId: string,
+  now = new Date(),
+): Promise<void> {
+  return updateDreamMetadataResult(projectRoot, now, []);
+}

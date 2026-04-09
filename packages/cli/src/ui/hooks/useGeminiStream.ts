@@ -197,6 +197,7 @@ export const useGeminiStream = (
     null,
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
+  const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const {
     startNewPrompt,
     getPromptCount,
@@ -523,6 +524,8 @@ export const useGeminiStream = (
             }
             case 'submit_prompt': {
               localQueryToSendToGemini = slashCommandResult.content;
+              submitPromptOnCompleteRef.current =
+                slashCommandResult.onComplete ?? null;
 
               return {
                 queryToSend: localQueryToSendToGemini,
@@ -1256,6 +1259,14 @@ export const useGeminiStream = (
           if (loopDetectedRef.current) {
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
+          }
+
+          // If the turn was initiated by a submit_prompt with an onComplete
+          // callback (e.g. /dream recording lastDreamAt), fire it now.
+          const onComplete = submitPromptOnCompleteRef.current;
+          if (onComplete) {
+            submitPromptOnCompleteRef.current = null;
+            void onComplete();
           }
 
           // After the turn completes, wire up notifications for any background

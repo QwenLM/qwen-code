@@ -537,6 +537,8 @@ export interface ConsoleMessageItem {
 export interface SubmitPromptResult {
   type: 'submit_prompt';
   content: PartListUnion;
+  /** Optional callback invoked after the agent turn completes successfully. */
+  onComplete?: () => Promise<void>;
 }
 
 /**

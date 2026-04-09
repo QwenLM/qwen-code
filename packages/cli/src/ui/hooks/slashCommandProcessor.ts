@@ -568,6 +568,7 @@ export const useSlashCommandProcessor = (
                   return {
                     type: 'submit_prompt',
                     content: result.content,
+                    onComplete: result.onComplete,
                   };
                 case 'confirm_shell_commands': {
                   const { outcome, approvedCommands } = await new Promise<{

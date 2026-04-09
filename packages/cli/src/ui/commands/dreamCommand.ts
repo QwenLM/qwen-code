@@ -9,6 +9,7 @@ import {
   getProjectHash,
   QWEN_DIR,
   buildConsolidationTaskPrompt,
+  writeDreamManualRunToMetadata,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type { SlashCommand } from './types.js';
@@ -40,6 +41,12 @@ export const dreamCommand: SlashCommand = {
     return {
       type: 'submit_prompt',
       content: prompt,
+      onComplete: async () => {
+        await writeDreamManualRunToMetadata(
+          projectRoot,
+          config.getSessionId(),
+        );
+      },
     };
   },
 };
