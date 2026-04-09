@@ -61,6 +61,7 @@ Commands for managing AI tools and models.
 | `/mcp`           | List configured MCP servers and tools             | `/mcp`, `/mcp desc`                           |
 | `/tools`         | Display currently available tool list             | `/tools`, `/tools desc`                       |
 | `/skills`        | List and run available skills                     | `/skills`, `/skills <name>`                   |
+| `/plan`          | Switch to plan mode or exit plan mode             | `/plan`, `/plan <task>`, `/plan exit`         |
 | `/approval-mode` | Change approval mode for tool usage               | `/approval-mode <mode (auto-edit)> --project` |
 | →`plan`          | Analysis only, no execution                       | Secure review                                 |
 | →`default`       | Require approval for edits                        | Daily use                                     |
@@ -71,7 +72,19 @@ Commands for managing AI tools and models.
 | `/extensions`    | List all active extensions in current session     | `/extensions`                                 |
 | `/memory`        | Manage AI's instruction context                   | `/memory add Important Info`                  |
 
-### 1.5 Side Question (`/btw`)
+### 1.5 Built-in Skills
+
+These commands invoke bundled skills that provide specialized workflows.
+
+| Command      | Description                                                         | Usage Examples                                    |
+| ------------ | ------------------------------------------------------------------- | ------------------------------------------------- |
+| `/review`    | Review code changes with 5 parallel agents + deterministic analysis | `/review`, `/review 123`, `/review 123 --comment` |
+| `/loop`      | Run a prompt on a recurring schedule                                | `/loop 5m check the build`                        |
+| `/qc-helper` | Answer questions about Qwen Code usage and configuration            | `/qc-helper how do I configure MCP?`              |
+
+See [Code Review](./code-review.md) for full `/review` documentation.
+
+### 1.6 Side Question (`/btw`)
 
 The `/btw` command allows you to ask quick side questions without interrupting or affecting the main conversation flow.
 
@@ -139,7 +152,7 @@ The `/btw` command allows you to ask quick side questions without interrupting o
 >
 > Use `/btw` when you need a quick answer without derailing your main task. It's especially useful for clarifying concepts, checking facts, or getting quick explanations while staying focused on your primary workflow.
 
-### 1.6 Information, Settings, and Help
+### 1.7 Information, Settings, and Help
 
 Commands for obtaining information and performing system settings.
 
@@ -154,7 +167,7 @@ Commands for obtaining information and performing system settings.
 | `/copy`     | Copy last output content to clipboard           | `/copy`                          |
 | `/quit`     | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
 
-### 1.7 Common Shortcuts
+### 1.8 Common Shortcuts
 
 | Shortcut           | Function                | Note                   |
 | ------------------ | ----------------------- | ---------------------- |
@@ -164,7 +177,7 @@ Commands for obtaining information and performing system settings.
 | `Ctrl/cmd+Z`       | Undo input              | Text editing           |
 | `Ctrl/cmd+Shift+Z` | Redo input              | Text editing           |
 
-### 1.8 CLI Auth Subcommands
+### 1.9 CLI Auth Subcommands
 
 In addition to the in-session `/auth` slash command, Qwen Code provides standalone CLI subcommands for managing authentication directly from the terminal:
 

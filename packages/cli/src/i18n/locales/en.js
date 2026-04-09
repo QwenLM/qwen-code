@@ -1236,6 +1236,8 @@ export default {
   'Always allow for this user': 'Always allow for this user',
   'Always allow {{action}} for this user':
     'Always allow {{action}} for this user',
+  'Yes, restore previous mode ({{mode}})':
+    'Yes, restore previous mode ({{mode}})',
   'Yes, and auto-accept edits': 'Yes, and auto-accept edits',
   'Yes, and manually approve edits': 'Yes, and manually approve edits',
   'No, keep planning (esc)': 'No, keep planning (esc)',
@@ -2008,4 +2010,22 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
+  verbose: 'verbose',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
+  'Press Ctrl+O to show full tool output':
+    'Press Ctrl+O to show full tool output',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

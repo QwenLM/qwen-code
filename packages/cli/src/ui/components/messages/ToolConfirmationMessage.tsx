@@ -303,6 +303,13 @@ export const ToolConfirmationMessage: React.FC<
 
     question = planProps.title;
     options.push({
+      key: 'restore-previous',
+      label: t('Yes, restore previous mode ({{mode}})', {
+        mode: planProps.prePlanMode ?? 'default',
+      }),
+      value: ToolConfirmationOutcome.RestorePrevious,
+    });
+    options.push({
       key: 'proceed-always',
       label: t('Yes, and auto-accept edits'),
       value: ToolConfirmationOutcome.ProceedAlways,
