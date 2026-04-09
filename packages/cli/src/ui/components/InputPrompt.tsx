@@ -719,6 +719,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // because ACCEPT_SUGGESTION also matches Enter which must fall through to SUBMIT.
       if (
         key.name === 'tab' &&
+        !key.paste &&
         buffer.text.length === 0 &&
         !completion.showSuggestions &&
         !reverseSearchActive &&
@@ -757,7 +758,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
         }
 
-        if (keyMatchers[Command.ACCEPT_SUGGESTION](key)) {
+        if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
           if (completion.suggestions.length > 0) {
             const targetIndex =
               completion.activeSuggestionIndex === -1

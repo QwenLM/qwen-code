@@ -78,7 +78,8 @@ export function TextInput({
       if (!buffer || !isActive) return;
 
       // Tab completion: delegate to caller instead of inserting a tab character
-      if (key.name === 'tab') {
+      // During paste, let tab through as literal content (e.g. Excel tab-separated data)
+      if (key.name === 'tab' && !key.paste) {
         onTab?.();
         return;
       }
