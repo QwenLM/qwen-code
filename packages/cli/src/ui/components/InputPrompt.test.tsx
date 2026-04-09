@@ -2679,6 +2679,35 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('should prepend queued messages before existing input text', async () => {
+      const mockPopAll = vi.fn(() => 'queued msg');
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued msg'],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAll,
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      // Set existing text in buffer
+      props.buffer.text = 'existing input';
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(props.buffer.setText).toHaveBeenCalledWith(
+        'queued msg\nexisting input',
+      );
+      unmount();
+    });
+
     it('should navigate history on Up arrow when queue is empty', async () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
