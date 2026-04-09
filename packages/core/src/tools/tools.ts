@@ -667,6 +667,8 @@ export interface ToolPlanConfirmationDetails {
   /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
   hideAlwaysAllow?: boolean;
   plan: string;
+  /** The approval mode that was active before entering plan mode (for display in the UI). */
+  prePlanMode?: string;
   onConfirm: (
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,
@@ -711,6 +713,8 @@ export enum ToolConfirmationOutcome {
   /** Persist the permission rule to the user settings (user scope). */
   ProceedAlwaysUser = 'proceed_always_user',
   ModifyWithEditor = 'modify_with_editor',
+  /** Restore the approval mode that was active before entering plan mode. */
+  RestorePrevious = 'restore_previous',
   Cancel = 'cancel',
 }
 
