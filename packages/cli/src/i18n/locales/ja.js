@@ -1463,7 +1463,7 @@ export default {
   verbose: '詳細',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     '詳細モードで完全なツール出力と思考を表示します（Ctrl+O で切り替え）。',
-  'Press Ctrl+O to toggle verbose mode': 'Ctrl+O で詳細モードを切り替え',
+  'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
 
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',

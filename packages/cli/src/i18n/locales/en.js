@@ -2011,7 +2011,8 @@ export default {
   verbose: 'verbose',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
-  'Press Ctrl+O to toggle verbose mode': 'Press Ctrl+O to toggle verbose mode',
+  'Press Ctrl+O to show full tool output':
+    'Press Ctrl+O to show full tool output',
 
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',

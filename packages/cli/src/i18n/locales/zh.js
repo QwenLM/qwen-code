@@ -1816,7 +1816,7 @@ export default {
   verbose: '详细',
   'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
     '详细模式下显示完整工具输出和思考过程（Ctrl+O 切换）。',
-  'Press Ctrl+O to toggle verbose mode': '按 Ctrl+O 切换详细模式',
+  'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
 
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
   'Exited plan mode. Previous approval mode restored.':
