@@ -99,10 +99,11 @@ Subagents are configured using Markdown files with YAML frontmatter. This format
 name: agent-name
 description: Brief description of when and how to use this agent
 model: inherit # Optional: inherit or model-id
-tools:
-	- tool1
-	- tool2
-	- tool3 # Optional
+tools:         # Optional: allowlist of tools
+  - tool1
+  - tool2
+disallowedTools: # Optional: blocklist of tools
+  - tool3
 ---
 
 System prompt content goes here.
@@ -117,6 +118,55 @@ Use the optional `model` frontmatter field to control which model a subagent use
 - Omit the field: Same as `inherit`
 - `glm-5`: Use that model ID with the main conversation's auth type
 - `openai:gpt-4o`: Use a different provider (resolves credentials from env vars)
+
+#### Tool Configuration
+
+Use `tools` and `disallowedTools` to control which tools a subagent can access.
+
+**`tools` (allowlist):** When specified, the subagent can only use the listed tools. When omitted, the subagent inherits all available tools from the parent session.
+
+```
+---
+name: reader
+description: Read-only agent for code exploration
+tools:
+  - read_file
+  - grep_search
+  - glob
+  - list_directory
+---
+```
+
+**`disallowedTools` (blocklist):** When specified, the listed tools are removed from the subagent's tool pool. This is useful when you want "everything except X" without listing every permitted tool.
+
+```
+---
+name: safe-worker
+description: Agent that cannot modify files
+disallowedTools:
+  - write_file
+  - edit
+  - run_shell_command
+---
+```
+
+If both `tools` and `disallowedTools` are set, the allowlist is applied first, then the blocklist removes from that set.
+
+**MCP tools** follow the same rules. If a subagent has no `tools` list, it inherits all MCP tools from the parent session. If a subagent has an explicit `tools` list, it only gets MCP tools that are explicitly named in that list.
+
+The `disallowedTools` field supports MCP server-level patterns:
+
+- `mcp__server__tool_name` — blocks a specific MCP tool
+- `mcp__server` — blocks all tools from that MCP server
+
+```
+---
+name: no-slack
+description: Agent without Slack access
+disallowedTools:
+  - mcp__slack
+---
+```
 
 #### Example Usage
 
@@ -500,7 +550,7 @@ Always follow these standards:
 
 ## Security Considerations
 
-- **Tool Restrictions**: Subagents only have access to their configured tools
+- **Tool Restrictions**: Use `tools` to limit which tools a subagent can access, or `disallowedTools` to block specific tools while inheriting everything else
 - **Sandboxing**: All tool execution follows the same security model as direct tool use
 - **Audit Trail**: All Subagents actions are logged and visible in real-time
 - **Access Control**: Project and user-level separation provides appropriate boundaries
