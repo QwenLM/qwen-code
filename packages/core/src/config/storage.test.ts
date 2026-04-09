@@ -377,6 +377,23 @@ describe('Storage – QWEN_HOME env var', () => {
     );
   });
 
+  it('expands tilde (~) in QWEN_HOME', () => {
+    process.env['QWEN_HOME'] = '~/custom-qwen';
+    const expected = path.join(os.homedir(), 'custom-qwen');
+    expect(Storage.getGlobalQwenDir()).toBe(expected);
+  });
+
+  it('expands Windows-style tilde in QWEN_HOME', () => {
+    process.env['QWEN_HOME'] = '~\\custom-qwen';
+    const expected = path.join(os.homedir(), 'custom-qwen');
+    expect(Storage.getGlobalQwenDir()).toBe(expected);
+  });
+
+  it('handles bare tilde (~) as home directory in QWEN_HOME', () => {
+    process.env['QWEN_HOME'] = '~';
+    expect(Storage.getGlobalQwenDir()).toBe(os.homedir());
+  });
+
   it('QWEN_HOME and QWEN_RUNTIME_DIR are independent', () => {
     const configDir = path.resolve('/tmp/config');
     const runtimeDir = path.resolve('/tmp/runtime');

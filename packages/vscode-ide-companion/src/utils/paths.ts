@@ -8,6 +8,32 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 
 /**
+ * Expands tilde and resolves relative paths to absolute.
+ * Mirrors Storage.resolvePath() in packages/core.
+ */
+function resolvePath(dir: string): string {
+  let resolved = dir;
+  if (
+    resolved === '~' ||
+    resolved.startsWith('~/') ||
+    resolved.startsWith('~\\')
+  ) {
+    const relativeSegments =
+      resolved === '~'
+        ? []
+        : resolved
+            .slice(2)
+            .split(/[/\\]+/)
+            .filter(Boolean);
+    resolved = path.join(os.homedir(), ...relativeSegments);
+  }
+  if (!path.isAbsolute(resolved)) {
+    resolved = path.resolve(resolved);
+  }
+  return resolved;
+}
+
+/**
  * Returns the global Qwen home directory (config, credentials, etc.).
  *
  * Priority: QWEN_HOME env var > ~/.qwen
@@ -15,7 +41,7 @@ import * as os from 'node:os';
 export function getGlobalQwenDir(): string {
   const envDir = process.env['QWEN_HOME'];
   if (envDir) {
-    return path.isAbsolute(envDir) ? envDir : path.resolve(envDir);
+    return resolvePath(envDir);
   }
   const homeDir = os.homedir();
   return homeDir
@@ -35,7 +61,7 @@ export function getGlobalQwenDir(): string {
 export function getRuntimeBaseDir(): string {
   const runtimeDir = process.env['QWEN_RUNTIME_DIR'];
   if (runtimeDir) {
-    return path.isAbsolute(runtimeDir) ? runtimeDir : path.resolve(runtimeDir);
+    return resolvePath(runtimeDir);
   }
   return getGlobalQwenDir();
 }

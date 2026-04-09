@@ -37,14 +37,10 @@ export class Storage {
     this.targetDir = targetDir;
   }
 
-  private static resolveRuntimeBaseDir(
-    dir: string | null | undefined,
-    cwd?: string,
-  ): string | null {
-    if (!dir) {
-      return null;
-    }
-
+  /**
+   * Expands tilde and resolves relative paths to absolute.
+   */
+  private static resolvePath(dir: string, cwd?: string): string {
     let resolved = dir;
     if (
       resolved === '~' ||
@@ -64,6 +60,16 @@ export class Storage {
       resolved = cwd ? path.resolve(cwd, resolved) : path.resolve(resolved);
     }
     return resolved;
+  }
+
+  private static resolveRuntimeBaseDir(
+    dir: string | null | undefined,
+    cwd?: string,
+  ): string | null {
+    if (!dir) {
+      return null;
+    }
+    return Storage.resolvePath(dir, cwd);
   }
 
   /**
@@ -120,7 +126,7 @@ export class Storage {
   static getGlobalQwenDir(): string {
     const envDir = process.env['QWEN_HOME'];
     if (envDir) {
-      return path.isAbsolute(envDir) ? envDir : path.resolve(envDir);
+      return Storage.resolvePath(envDir);
     }
     const homeDir = os.homedir();
     if (!homeDir) {
