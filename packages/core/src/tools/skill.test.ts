@@ -11,6 +11,7 @@ import type { ToolResultDisplay } from './tools.js';
 import type { Config } from '../config/config.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig } from '../skills/types.js';
+import type { ToolResult } from './tools.js';
 import { partToString } from '../utils/partUtils.js';
 
 // Type for accessing protected methods in tests
@@ -430,6 +431,71 @@ describe('SkillTool', () => {
       expect(result.returnDisplay).toBe(
         'Specialized skill for reviewing code quality',
       );
+    });
+  });
+
+  describe('modelOverride propagation', () => {
+    it('should propagate model from skill config to ToolResult', async () => {
+      const skillWithModel: SkillConfig = {
+        ...mockSkills[0],
+        model: 'qwen-max',
+      };
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        skillWithModel,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result = (await invocation.execute()) as unknown as ToolResult;
+
+      expect(result.modelOverride).toBe('qwen-max');
+    });
+
+    it('should set modelOverride to undefined when skill has no model', async () => {
+      const skillWithoutModel: SkillConfig = {
+        ...mockSkills[0],
+        // model is undefined (omitted)
+      };
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        skillWithoutModel,
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result = (await invocation.execute()) as unknown as ToolResult;
+
+      // modelOverride should be present (via `in` check) but undefined,
+      // signaling "clear any prior override"
+      expect('modelOverride' in result).toBe(true);
+      expect(result.modelOverride).toBeUndefined();
+    });
+
+    it('should not include modelOverride when skill is not found', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'non-existent' });
+      const result = (await invocation.execute()) as unknown as ToolResult;
+
+      // No modelOverride field — prior override should persist
+      expect('modelOverride' in result).toBe(false);
+    });
+
+    it('should not include modelOverride when skill load throws', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockRejectedValue(
+        new Error('load error'),
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result = (await invocation.execute()) as unknown as ToolResult;
+
+      // No modelOverride field — prior override should persist
+      expect('modelOverride' in result).toBe(false);
     });
   });
 });

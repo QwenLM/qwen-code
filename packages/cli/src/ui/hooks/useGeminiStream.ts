@@ -1202,7 +1202,11 @@ export const useGeminiStream = (
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
-        modelOverrideRef.current = undefined;
+        // Clear model override for new user turns, but preserve it on retry
+        // so the same skill-selected model is used again.
+        if (submitType !== SendMessageType.Retry) {
+          modelOverrideRef.current = undefined;
+        }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
         // Clear both countdown-based errors AND static errors (those without
