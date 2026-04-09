@@ -429,6 +429,15 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      statusLine: {
+        type: 'object',
+        label: 'Status Line',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as { type: 'command'; command: string } | undefined,
+        description: 'Custom status line display configuration.',
+        showInDialog: false,
+      },
       customThemes: {
         type: 'object',
         label: 'Custom Themes',
