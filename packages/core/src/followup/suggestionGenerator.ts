@@ -24,13 +24,20 @@ import { ApiResponseEvent } from '../telemetry/types.js';
  */
 export const SUGGESTION_PROMPT = `[SUGGESTION MODE: Suggest what the user might naturally type next.]
 
-FIRST: Look at the user's recent messages and original request.
+FIRST: Read the LAST FEW LINES of the assistant's most recent message -- that's where
+next-step hints, tips, and actionable suggestions usually appear. Then check the user's
+recent messages and original request.
 
 Your job is to predict what THEY would type - not what you think they should do.
 
 THE TEST: Would they think "I was just about to type that"?
 
+PRIORITY: If the assistant's last message contains a tip or hint like "Tip: type X to ..."
+or "type X to ...", extract X as the suggestion. These are explicit next-step hints.
+
 EXAMPLES:
+Assistant says "Tip: type post comments to publish findings" → "post comments"
+Assistant says "type /review to start" → "/review"
 User asked "fix the bug and run tests", bug is fixed → "run the tests"
 After code written → "try it out"
 Model offers options → suggest the one the user would likely pick, based on conversation

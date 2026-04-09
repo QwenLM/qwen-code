@@ -36,7 +36,10 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   // Ensure table fits within terminal width
   const totalWidth = columnWidths.reduce((sum, width) => sum + width + 1, 1);
   const fixedWidth = columnWidths.length + 1;
-  const scaleFactor = totalWidth > contentWidth ? (contentWidth - fixedWidth) / (totalWidth - fixedWidth) : 1;
+  const scaleFactor =
+    totalWidth > contentWidth
+      ? (contentWidth - fixedWidth) / (totalWidth - fixedWidth)
+      : 1;
   const adjustedWidths = columnWidths.map((width) =>
     Math.floor(width * scaleFactor),
   );
