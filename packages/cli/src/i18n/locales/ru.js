@@ -1114,6 +1114,8 @@ export default {
   'Always allow for this user': 'Всегда разрешать для этого пользователя',
   'Always allow {{action}} for this user':
     'Всегда разрешать {{action}} для этого пользователя',
+  'Yes, restore previous mode ({{mode}})':
+    'Да, восстановить предыдущий режим ({{mode}})',
   'Yes, and auto-accept edits': 'Да, и автоматически принимать правки',
   'Yes, and manually approve edits': 'Да, и вручную подтверждать правки',
   'No, keep planning (esc)': 'Нет, продолжить планирование (esc)',
@@ -1965,4 +1967,22 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
+  verbose: 'подробный',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    'Показывать полный вывод инструментов и процесс рассуждений в подробном режиме (переключить с помощью Ctrl+O).',
+  'Press Ctrl+O to show full tool output':
+    'Нажмите Ctrl+O для показа полного вывода инструментов',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

@@ -6,6 +6,7 @@
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
 
@@ -371,6 +372,8 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  /** Minutes of inactivity before clearing retained thinking blocks. */
+  thinkingIdleThresholdMinutes?: number;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
@@ -530,6 +533,7 @@ export class Config {
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private approvalMode: ApprovalMode;
+  private prePlanMode?: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
@@ -558,6 +562,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly thinkingIdleThresholdMs: number;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
   private readonly overrideExtensions?: string[];
@@ -684,6 +689,8 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.thinkingIdleThresholdMs =
+      (params.thinkingIdleThresholdMinutes ?? 5) * 60 * 1000;
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
@@ -1330,6 +1337,10 @@ export class Config {
     return this.maxSessionTurns;
   }
 
+  getThinkingIdleThresholdMs(): number {
+    return this.thinkingIdleThresholdMs;
+  }
+
   getSessionTokenLimit(): number {
     return this.sessionTokenLimit;
   }
@@ -1635,6 +1646,14 @@ export class Config {
     return this.approvalMode;
   }
 
+  /**
+   * Returns the approval mode that was active before entering plan mode.
+   * Falls back to DEFAULT if no pre-plan mode was recorded.
+   */
+  getPrePlanMode(): ApprovalMode {
+    return this.prePlanMode ?? ApprovalMode.DEFAULT;
+  }
+
   setApprovalMode(mode: ApprovalMode): void {
     if (
       !this.isTrustedFolder() &&
@@ -1645,7 +1664,53 @@ export class Config {
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
+    // Track the mode before entering plan mode so it can be restored later
+    if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
+      this.prePlanMode = this.approvalMode;
+    } else if (
+      mode !== ApprovalMode.PLAN &&
+      this.approvalMode === ApprovalMode.PLAN
+    ) {
+      this.prePlanMode = undefined;
+    }
     this.approvalMode = mode;
+  }
+
+  /**
+   * Returns the file path for this session's plan file.
+   */
+  getPlanFilePath(): string {
+    return Storage.getPlanFilePath(this.sessionId);
+  }
+
+  /**
+   * Saves a plan to disk for the current session.
+   */
+  savePlan(plan: string): void {
+    const filePath = this.getPlanFilePath();
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, plan, 'utf-8');
+  }
+
+  /**
+   * Loads the plan for the current session, or returns undefined if none exists.
+   */
+  loadPlan(): string | undefined {
+    const filePath = this.getPlanFilePath();
+    try {
+      return fs.readFileSync(filePath, 'utf-8');
+    } catch (error: unknown) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   getInputFormat(): 'text' | 'stream-json' {

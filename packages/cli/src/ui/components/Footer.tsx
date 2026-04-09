@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,9 +13,11 @@ import { AutoAcceptIndicator } from './AutoAcceptIndicator.js';
 import { ShellModeIndicator } from './ShellModeIndicator.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
+import { useStatusLine } from '../hooks/useStatusLine.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
+import { useVerboseMode } from '../contexts/VerboseModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
@@ -23,6 +25,8 @@ export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
+  const { text: statusLineText } = useStatusLine();
+  const { verboseMode } = useVerboseMode();
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -48,8 +52,12 @@ export const Footer: React.FC = () => {
   const contextWindowSize =
     config.getContentGeneratorConfig()?.contextWindowSize;
 
-  // Left section should show exactly ONE thing at any time, in priority order.
-  const leftContent = uiState.ctrlCPressedOnce ? (
+  // Hide "? for shortcuts" when a custom status line is active (it already
+  // occupies the top row, so the hint is redundant). Matches upstream behavior.
+  const suppressHint = !!statusLineText;
+
+  // Left bottom row: high-priority messages > approval mode > hint.
+  const leftBottomContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
@@ -62,7 +70,7 @@ export const Footer: React.FC = () => {
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-  ) : (
+  ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );
 
@@ -93,25 +101,37 @@ export const Footer: React.FC = () => {
       ),
     });
   }
+  if (verboseMode) {
+    rightItems.push({
+      key: 'verbose',
+      node: <Text color={theme.text.accent}>{t('verbose')}</Text>,
+    });
+  }
+
+  // Layout matches upstream: left column has status line (top) + hints/mode
+  // (bottom), right section has indicators. Status line and hints coexist.
   return (
     <Box
-      justifyContent="space-between"
+      flexDirection={isNarrow ? 'column' : 'row'}
+      justifyContent={isNarrow ? 'flex-start' : 'space-between'}
       width="100%"
-      flexDirection="row"
-      alignItems="center"
+      paddingX={2}
+      gap={isNarrow ? 0 : 1}
     >
-      {/* Left Section: Exactly one status line (exit prompts / mode indicator / default hint) */}
-      <Box
-        marginLeft={2}
-        justifyContent="flex-start"
-        flexDirection={isNarrow ? 'column' : 'row'}
-        alignItems={isNarrow ? 'flex-start' : 'center'}
-      >
-        {leftContent}
+      {/* Left column — status line on top, hints/mode on bottom */}
+      <Box flexDirection="column" flexShrink={isNarrow ? 0 : 1}>
+        {statusLineText &&
+          !uiState.ctrlCPressedOnce &&
+          !uiState.ctrlDPressedOnce && (
+            <Text dimColor wrap="truncate">
+              {statusLineText}
+            </Text>
+          )}
+        <Text wrap="truncate">{leftBottomContent}</Text>
       </Box>
 
-      {/* Right Section: Sandbox Info, Debug Mode, Context Usage, and Console Summary */}
-      <Box alignItems="center" justifyContent="flex-end" marginRight={2}>
+      {/* Right Section — never compressed */}
+      <Box flexShrink={0} gap={1}>
         {rightItems.map(({ key, node }, index) => (
           <Box key={key} alignItems="center">
             {index > 0 && <Text color={theme.text.secondary}> | </Text>}

@@ -349,7 +349,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // When a tool result arrives for the tool that had a pending
         // confirmation, clear the stale prompt. This handles the case where
         // the IDE diff-tab accept resolved the tool via CoreToolScheduler's
-        // ideConfirmation.then path, which bypasses the UI's onConfirm wrapper.
+        // IDE confirmation handler, which bypasses the UI's onConfirm wrapper.
         const clearPending =
           pendingConfirmationCallId === event.callId
             ? { pendingConfirmation: undefined }
