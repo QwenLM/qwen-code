@@ -514,6 +514,26 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       }
 
+      // Helper: pop all queued messages into the input buffer,
+      // preserving cursor position relative to existing text.
+      const popQueueIntoInput = (): boolean => {
+        const popped = uiActions.popAllQueuedMessages();
+        if (!popped) return false;
+        const currentText = buffer.text;
+        if (currentText) {
+          const currentCursorOffset = logicalPosToOffset(
+            buffer.lines,
+            buffer.cursor[0],
+            buffer.cursor[1],
+          );
+          buffer.setText(`${popped}\n${currentText}`);
+          buffer.moveToOffset(popped.length + 1 + currentCursorOffset);
+        } else {
+          buffer.setText(popped);
+        }
+        return true;
+      };
+
       // Reset ESC count and hide prompt on any non-ESC key
       if (key.name !== 'escape') {
         if (escPressCount > 0 || showEscapePrompt) {
@@ -594,6 +614,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           setExpandedSuggestionIndex(-1);
           resetEscapeState();
           return true;
+        }
+
+        // Pop queued messages into input on ESC (before double-ESC clear)
+        if (!isAttachmentMode && uiState.messageQueue.length > 0) {
+          if (popQueueIntoInput()) {
+            resetEscapeState();
+            return true;
+          }
+          // returned false (queue already cleared) — fall through
         }
 
         // Handle double ESC for clearing input
@@ -837,14 +866,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           (buffer.allVisualLines.length === 1 ||
             (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
         ) {
-          const popped = uiActions.popAllQueuedMessages();
-          if (popped) {
-            const currentText = buffer.text;
-            const newText = currentText ? `${popped}\n${currentText}` : popped;
-            buffer.setText(newText);
-            return true;
-          }
-          // popped is null (queue already cleared) — fall through to history
+          if (popQueueIntoInput()) return true;
+          // returned false (queue already cleared) — fall through to history
         }
 
         if (keyMatchers[Command.HISTORY_UP](key)) {

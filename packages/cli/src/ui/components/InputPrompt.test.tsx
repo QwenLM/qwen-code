@@ -2705,6 +2705,35 @@ describe('InputPrompt', () => {
       expect(props.buffer.setText).toHaveBeenCalledWith(
         'queued msg\nexisting input',
       );
+      // Cursor should be positioned at start of existing text
+      expect(props.buffer.moveToOffset).toHaveBeenCalledWith(
+        'queued msg'.length + 1, // popped length + newline
+      );
+      unmount();
+    });
+
+    it('should pop queued messages on ESC when queue is non-empty', async () => {
+      const mockPopAll = vi.fn(() => 'queued msg');
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued msg'],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAll,
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B'); // ESC
+      await wait();
+
+      expect(mockPopAll).toHaveBeenCalled();
+      expect(props.buffer.setText).toHaveBeenCalledWith('queued msg');
       unmount();
     });
 
