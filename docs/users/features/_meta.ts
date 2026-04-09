@@ -1,5 +1,6 @@
 export default {
   commands: 'Commands',
+  'code-review': 'Code Review',
   'followup-suggestions': 'Followup Suggestions',
   'sub-agents': 'SubAgents',
   arena: 'Agent Arena',
