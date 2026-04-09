@@ -87,6 +87,7 @@ describe('AgentTool', () => {
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+      getTeamManager: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
 
     changeListeners = [];
