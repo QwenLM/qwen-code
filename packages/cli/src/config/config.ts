@@ -116,6 +116,7 @@ export interface CliArgs {
   systemPrompt: string | undefined;
   appendSystemPrompt: string | undefined;
   yolo: boolean | undefined;
+  vibe: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
   checkpointing: boolean | undefined;
@@ -317,6 +318,12 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'boolean',
           description:
             'Automatically accept all actions (aka YOLO mode, see https://www.youtube.com/watch?v=xvFZjo5PgG0 for more details)?',
+          default: false,
+        })
+        .option('vibe', {
+          type: 'boolean',
+          description:
+            'Enable Vibe mode: auto-approve only safe project-scoped development shell commands for this session.',
           default: false,
         })
         .option('approval-mode', {
@@ -794,6 +801,14 @@ export async function loadCliConfig(
     approvalMode = ApprovalMode.DEFAULT;
   }
 
+  let vibeMode = argv.vibe ?? false;
+  if (!trustedFolder && vibeMode) {
+    writeStderrLine(
+      'Vibe mode overridden to "off" because the current folder is not trusted.',
+    );
+    vibeMode = false;
+  }
+
   let telemetrySettings;
   try {
     telemetrySettings = await resolveTelemetrySettings({
@@ -1062,6 +1077,7 @@ export async function loadCliConfig(
       ? Array.from(excludedMcpServers)
       : undefined,
     approvalMode,
+    vibeMode,
     accessibility: {
       ...settings.ui?.accessibility,
       screenReader,

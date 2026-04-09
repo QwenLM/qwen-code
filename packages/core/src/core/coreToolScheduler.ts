@@ -65,6 +65,7 @@ import * as Diff from 'diff';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
+import { shouldAutoApproveShellInVibeMode } from './vibeModeApproval.js';
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
@@ -905,7 +906,20 @@ export class CoreToolScheduler {
             reqInfo.name === ToolNames.ASK_USER_QUESTION;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
-          if (approvalMode === ApprovalMode.YOLO && !isAskUserQuestionTool) {
+          const shouldAutoApproveViaVibe =
+            this.config.getVibeMode?.() === true &&
+            approvalMode !== ApprovalMode.PLAN &&
+            !isAskUserQuestionTool &&
+            shouldAutoApproveShellInVibeMode(
+              reqInfo.name,
+              reqInfo.args,
+              this.config.getTargetDir?.() ?? '',
+            );
+
+          if (
+            (approvalMode === ApprovalMode.YOLO && !isAskUserQuestionTool) ||
+            shouldAutoApproveViaVibe
+          ) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,

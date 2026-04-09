@@ -351,6 +351,7 @@ export interface ConfigParameters {
   userMemory?: string;
   geminiMdFileCount?: number;
   approvalMode?: ApprovalMode;
+  vibeMode?: boolean;
   contextFileName?: string | string[];
   accessibility?: AccessibilitySettings;
   telemetry?: TelemetrySettings;
@@ -532,6 +533,7 @@ export class Config {
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private approvalMode: ApprovalMode;
+  private vibeMode: boolean;
   private prePlanMode?: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
@@ -657,6 +659,7 @@ export class Config {
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
+    this.vibeMode = params.vibeMode ?? false;
     this.accessibility = params.accessibility ?? {};
     this.telemetrySettings = {
       enabled: params.telemetry?.enabled ?? false,
@@ -1645,6 +1648,10 @@ export class Config {
     return this.approvalMode;
   }
 
+  getVibeMode(): boolean {
+    return this.vibeMode;
+  }
+
   /**
    * Returns the approval mode that was active before entering plan mode.
    * Falls back to DEFAULT if no pre-plan mode was recorded.
@@ -1673,6 +1680,13 @@ export class Config {
       this.prePlanMode = undefined;
     }
     this.approvalMode = mode;
+  }
+
+  setVibeMode(enabled: boolean): void {
+    if (enabled && !this.isTrustedFolder()) {
+      throw new Error('Cannot enable vibe mode in an untrusted folder.');
+    }
+    this.vibeMode = enabled;
   }
 
   /**

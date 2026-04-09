@@ -61,6 +61,11 @@ export const Footer: React.FC = () => {
     <Text color={theme.text.secondary}>-- INSERT --</Text>
   ) : uiState.shellModeActive ? (
     <ShellModeIndicator />
+  ) : config.getVibeMode?.() ? (
+    <Text color={theme.status.warning}>
+      {t('vibe mode')}
+      <Text color={theme.text.secondary}> {t('(safe auto-approve on)')}</Text>
+    </Text>
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
