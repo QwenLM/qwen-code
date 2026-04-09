@@ -16,7 +16,7 @@ import {
 } from '../config/settings.js';
 import { promisify } from 'node:util';
 import type { Config, SandboxConfig } from '@qwen-code/qwen-code-core';
-import { FatalSandboxError } from '@qwen-code/qwen-code-core';
+import { FatalSandboxError, Storage } from '@qwen-code/qwen-code-core';
 import { randomBytes } from 'node:crypto';
 import { writeStderrLine } from './stdioHelpers.js';
 
@@ -219,6 +219,8 @@ export async function start_sandbox(
       `HOME_DIR=${fs.realpathSync(os.homedir())}`,
       '-D',
       `CACHE_DIR=${fs.realpathSync(execSync(`getconf DARWIN_USER_CACHE_DIR`).toString().trim())}`,
+      '-D',
+      `QWEN_DIR=${path.resolve(Storage.getGlobalQwenDir())}`,
     ];
 
     // Add included directories from the workspace context
