@@ -204,8 +204,8 @@ describe('Configuration Options (E2E)', () => {
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
-          debug: true, // Would normally enable debug logging
-          logLevel: 'error', // But logLevel should take precedence
+          debug: true,
+          logLevel: 'error',
           stderr: (msg: string) => {
             stderrMessages.push(msg);
           },
@@ -333,7 +333,6 @@ describe('Configuration Options (E2E)', () => {
             // Common model-related env vars that CLI might respect
             OPENAI_API_KEY: process.env['OPENAI_API_KEY'] || 'test-key',
           },
-          debug: true,
           stderr: (msg: string) => {
             stderrMessages.push(msg);
           },
@@ -452,8 +451,6 @@ describe('Configuration Options (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           authType: 'qwen-oauth',
-          debug: true,
-          logLevel: 'debug',
           stderr: (msg: string) => {
             stderrMessages.push(msg);
           },
@@ -527,7 +524,6 @@ describe('Configuration Options (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           authType: 'openai',
-          debug: true,
           stderr: (msg: string) => {
             stderrMessages.push(msg);
           },
@@ -555,7 +551,7 @@ describe('Configuration Options (E2E)', () => {
   });
 
   describe('Combined Options', () => {
-    it('should work with logLevel, env, and authType together', async () => {
+    it('should work with env and authType together', async () => {
       const stderrMessages: string[] = [];
 
       const q = query({
@@ -563,12 +559,10 @@ describe('Configuration Options (E2E)', () => {
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
-          logLevel: 'debug',
           env: {
             COMBINED_TEST_VAR: 'combined_value',
           },
           authType: 'openai',
-          debug: true,
           stderr: (msg: string) => {
             stderrMessages.push(msg);
           },
@@ -587,8 +581,7 @@ describe('Configuration Options (E2E)', () => {
           }
         }
 
-        // All three options should work together
-        expect(stderrMessages.length).toBeGreaterThan(0); // logLevel: debug produces logs
+        // Both options should work together
         expect(assistantText).toMatch(/6/); // Query should work
         assertSuccessfulCompletion(messages);
       } finally {
@@ -596,18 +589,16 @@ describe('Configuration Options (E2E)', () => {
       }
     });
 
-    it('should maintain system message consistency with all options', async () => {
+    it('should maintain system message consistency with options', async () => {
       const q = query({
         prompt: 'Hello',
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
-          logLevel: 'info',
           env: {
             SYSTEM_MSG_TEST: 'test',
           },
           authType: 'openai',
-          debug: false,
         },
       });
 

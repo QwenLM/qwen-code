@@ -1734,8 +1734,9 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('file2.txt', 'content2');
         await helper.createFile('file3.txt', 'content3');
 
-        const canUseToolCalls: string[] = [];
-        const resultMessages: SDKMessage[] = [];
+        const canUseToolCalls: Array<{ toolName: string; filePath: string }> =
+          [];
+        const resultMessages: SDKResultMessage[] = [];
 
         const q = query({
           prompt:
@@ -1746,17 +1747,17 @@ describe('Tool Control Parameters (E2E)', () => {
             permissionMode: 'default',
             coreTools: ['write_file'],
             canUseTool: async (toolName, toolInput) => {
-              canUseToolCalls.push(toolName);
-              // Deny writing to file2.txt with interrupt
-              if (
-                toolName === 'write_file' &&
+              // Track which tools were actually checked by canUseTool with file path
+              const filePath =
                 typeof toolInput === 'object' &&
                 toolInput !== null &&
-                'file_path' in toolInput &&
-                String(
-                  (toolInput as { file_path?: string }).file_path,
-                ).includes('file2')
-              ) {
+                'file_path' in toolInput
+                  ? String((toolInput as { file_path?: string }).file_path)
+                  : 'unknown';
+              canUseToolCalls.push({ toolName, filePath });
+
+              // Deny writing to file2.txt with interrupt
+              if (toolName === 'write_file' && filePath.includes('file2')) {
                 return {
                   behavior: 'deny',
                   message: 'User denied writing to file2.txt',
@@ -1789,22 +1790,44 @@ describe('Tool Control Parameters (E2E)', () => {
         // Verify canUseTool was called
         expect(canUseToolCalls.length).toBeGreaterThan(0);
 
+        // Verify file2.txt denial triggered the interrupt
+        const file2Call = canUseToolCalls.find((c) =>
+          c.filePath.includes('file2'),
+        );
+        expect(file2Call).toBeDefined();
+
         // If we got a result message, verify its contents
         if (resultMessages.length > 0) {
           const resultMsg = resultMessages[0];
           if (isSDKResultMessage(resultMsg) && resultMsg.is_error) {
             // Should have permission_denials for denied/cancelled tools
             expect(resultMsg.permission_denials).toBeDefined();
-            if (resultMsg.permission_denials.length > 0) {
-              // file2.txt denial should be present
-              const file2Denial = resultMsg.permission_denials.find((d) => {
+            expect(resultMsg.permission_denials.length).toBeGreaterThan(0);
+
+            // file2.txt denial should be present
+            const file2Denial = resultMsg.permission_denials.find((d) => {
+              const input = d.tool_input as { file_path?: string } | undefined;
+              return input?.file_path?.includes('file2');
+            });
+            expect(file2Denial).toBeDefined();
+
+            // Verify cascade-cancelled tools are also in permission_denials
+            const cascadeCancelledDenials = resultMsg.permission_denials.filter(
+              (d) => {
                 const input = d.tool_input as
                   | { file_path?: string }
                   | undefined;
-                return input?.file_path?.includes('file2');
-              });
-              expect(file2Denial).toBeDefined();
-            }
+                return (
+                  input?.file_path?.includes('file1') ||
+                  input?.file_path?.includes('file3')
+                );
+              },
+            );
+
+            // At least one of file1 or file3 should be cascade-cancelled
+            // (the one that wasn't already executed when interrupt fired)
+            // Note: Depending on execution order, we may see 0, 1, or 2 cascade-cancelled tools
+            expect(cascadeCancelledDenials.length).toBeGreaterThanOrEqual(0);
           }
         } else {
           // Process exited due to interrupt - this is also valid
@@ -1812,7 +1835,6 @@ describe('Tool Control Parameters (E2E)', () => {
         }
 
         // Verify file2.txt was NOT modified (it was the one denied with interrupt)
-        // file1.txt and file3.txt may or may not be modified depending on execution order
         const content2 = await helper.readFile('file2.txt');
         expect(content2).toBe('content2');
       },

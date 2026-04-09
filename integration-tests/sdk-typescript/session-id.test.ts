@@ -47,7 +47,6 @@ describe('Session ID Support (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           sessionId: customSessionId,
-          debug: false,
         },
       });
 
@@ -77,7 +76,6 @@ describe('Session ID Support (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           sessionId: customSessionId,
-          debug: false,
         },
       });
 
@@ -120,6 +118,7 @@ describe('Session ID Support (E2E)', () => {
       try {
         for await (const _message of q) {
           // Consume all messages
+          console.log(_message);
         }
 
         // Verify that CLI was spawned with --session-id argument
@@ -144,7 +143,6 @@ describe('Session ID Support (E2E)', () => {
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
-          debug: false,
         },
       });
 
@@ -181,7 +179,6 @@ describe('Session ID Support (E2E)', () => {
           cwd: testDir,
           sessionId: customSessionId,
           resume: resumeSessionId,
-          debug: false,
         },
       });
 
@@ -297,7 +294,6 @@ describe('Session ID Support (E2E)', () => {
             ...SHARED_TEST_OPTIONS,
             cwd: testDir,
             sessionId: uuid,
-            debug: false,
           },
         });
 
@@ -351,7 +347,6 @@ describe('Session ID Support (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           sessionId: customSessionId,
-          debug: false,
         },
       });
 
@@ -505,7 +500,6 @@ describe('Session ID Support (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           sessionId: customSessionId,
-          debug: false,
         },
       });
 
@@ -536,7 +530,6 @@ describe('Session ID Support (E2E)', () => {
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
-          debug: false,
         },
       });
 
@@ -545,7 +538,6 @@ describe('Session ID Support (E2E)', () => {
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
-          debug: false,
         },
       });
 

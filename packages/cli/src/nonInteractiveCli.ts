@@ -383,6 +383,48 @@ export async function runNonInteractive(
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
             }
+
+            // Check for interrupt immediately after each tool execution
+            // If INTERRUPTED, stop processing remaining tools in the batch
+            if (toolResponse.errorType === ToolErrorType.INTERRUPTED) {
+              // For remaining unprocessed tools, create INTERRUPTED error responses
+              const remainingTools = toolCallRequests.slice(
+                toolCallRequests.indexOf(requestInfo) + 1,
+              );
+              for (const remainingTool of remainingTools) {
+                const interruptedResponse: ToolCallResponseInfo = {
+                  callId: remainingTool.callId,
+                  responseParts: [
+                    {
+                      functionResponse: {
+                        id: remainingTool.callId,
+                        name: remainingTool.name,
+                        response: {
+                          output:
+                            toolResponse.error?.message ||
+                            'Request interrupted by user for tool use',
+                        },
+                      },
+                    },
+                  ],
+                  resultDisplay:
+                    toolResponse.error?.message ||
+                    'Request interrupted by user for tool use',
+                  error:
+                    toolResponse.error ||
+                    new Error('Request interrupted by user for tool use'),
+                  errorType: ToolErrorType.INTERRUPTED,
+                };
+                toolResponses.push({
+                  request: remainingTool,
+                  response: interruptedResponse,
+                });
+                if (interruptedResponse.responseParts) {
+                  toolResponseParts.push(...interruptedResponse.responseParts);
+                }
+              }
+              break;
+            }
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
 

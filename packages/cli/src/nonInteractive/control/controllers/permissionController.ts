@@ -450,7 +450,7 @@ export class PermissionController extends BaseController {
         );
       } else {
         // Extract cancel message and interrupt flag from response if available
-        const cancelMessage =
+        const sdkMessage =
           typeof payload['message'] === 'string'
             ? payload['message']
             : undefined;
@@ -459,8 +459,11 @@ export class PermissionController extends BaseController {
         // Build payload with cancelMessage and interrupt flag
         const confirmPayload: { cancelMessage?: string; interrupt?: boolean } =
           {};
-        if (cancelMessage) {
-          confirmPayload.cancelMessage = cancelMessage;
+        if (sdkMessage) {
+          confirmPayload.cancelMessage = `[PermissionDenied] ${sdkMessage}`;
+        } else {
+          confirmPayload.cancelMessage =
+            '[PermissionDenied] User did not allow tool call';
         }
         if (interrupt) {
           confirmPayload.interrupt = true;
@@ -468,7 +471,7 @@ export class PermissionController extends BaseController {
 
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
-          Object.keys(confirmPayload).length > 0 ? confirmPayload : undefined,
+          confirmPayload,
         );
       }
     } catch (error) {
@@ -483,20 +486,24 @@ export class PermissionController extends BaseController {
 
       // On error, pass error message as cancel message
       // Only pass payload for exec and mcp types that support it
+      // Note: infrastructure errors do NOT have [PermissionDenied] prefix,
+      // so they will be treated as regular cancellations, not permission denials
       const confirmationType = toolCall.confirmationDetails.type;
+      const errorPayload = {
+        cancelMessage: `Error: ${errorMessage}`,
+      };
       if (['edit', 'exec', 'mcp'].includes(confirmationType)) {
         const execOrMcpDetails = toolCall.confirmationDetails as
           | ToolExecuteConfirmationDetails
           | ToolMcpConfirmationDetails;
-        await execOrMcpDetails.onConfirm(ToolConfirmationOutcome.Cancel, {
-          cancelMessage: `Error: ${errorMessage}`,
-        });
+        await execOrMcpDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+          errorPayload,
+        );
       } else {
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
-          {
-            cancelMessage: `Error: ${errorMessage}`,
-          },
+          errorPayload,
         );
       }
     } finally {

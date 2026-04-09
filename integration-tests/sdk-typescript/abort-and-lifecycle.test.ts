@@ -492,7 +492,6 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
-          debug: true,
           stderr: (msg: string) => {
             stderrMessages.push(msg);
           },
