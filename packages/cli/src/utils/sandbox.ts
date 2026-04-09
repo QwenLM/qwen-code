@@ -221,6 +221,8 @@ export async function start_sandbox(
       `CACHE_DIR=${fs.realpathSync(execSync(`getconf DARWIN_USER_CACHE_DIR`).toString().trim())}`,
       '-D',
       `QWEN_DIR=${path.resolve(Storage.getGlobalQwenDir())}`,
+      '-D',
+      `RUNTIME_DIR=${path.resolve(Storage.getRuntimeBaseDir())}`,
     ];
 
     // Add included directories from the workspace context
