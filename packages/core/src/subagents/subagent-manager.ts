@@ -34,6 +34,7 @@ import type {
   AgentHooks,
 } from '../agents/runtime/agent-events.js';
 import type { Config } from '../config/config.js';
+import { APPROVAL_MODES } from '../config/config.js';
 import {
   type AuthType,
   type ContentGenerator,
@@ -594,6 +595,13 @@ export class SubagentManager {
       frontmatter['color'] = config.color;
     }
 
+    if (
+      config.approvalMode &&
+      APPROVAL_MODES.includes(config.approvalMode as never)
+    ) {
+      frontmatter['approvalMode'] = config.approvalMode;
+    }
+
     // Serialize to YAML
     const yamlContent = stringifyYaml(frontmatter, {
       lineWidth: 0, // Disable line wrapping
@@ -1024,6 +1032,28 @@ function parseSubagentContent(
       | Record<string, unknown>
       | undefined;
     const color = frontmatter['color'] as string | undefined;
+    const approvalModeRaw = frontmatter['approvalMode'];
+    if (
+      approvalModeRaw !== undefined &&
+      approvalModeRaw !== null &&
+      typeof approvalModeRaw !== 'string'
+    ) {
+      throw new Error(
+        `Invalid "approvalMode" value: expected a string, got ${typeof approvalModeRaw}. Valid values: ${APPROVAL_MODES.join(', ')}`,
+      );
+    }
+    const approvalMode =
+      typeof approvalModeRaw === 'string' && approvalModeRaw !== ''
+        ? approvalModeRaw
+        : undefined;
+    if (
+      approvalMode !== undefined &&
+      !APPROVAL_MODES.includes(approvalMode as never)
+    ) {
+      throw new Error(
+        `Invalid "approvalMode" value "${approvalMode}". Valid values: ${APPROVAL_MODES.join(', ')}`,
+      );
+    }
     const model =
       modelRaw != null && modelRaw !== ''
         ? String(modelRaw)
@@ -1035,6 +1065,7 @@ function parseSubagentContent(
       name,
       description,
       tools,
+      approvalMode,
       systemPrompt: systemPrompt.trim(),
       filePath,
       model,
