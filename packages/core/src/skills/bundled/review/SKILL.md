@@ -439,7 +439,7 @@ If there are **no confirmed findings**:
 gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
   -f commit_id="{commit_sha}" \
   -f event="APPROVE" \
-  -f body="No issues found. LGTM! ✅"
+  -f body="No issues found. LGTM! ✅ _— YOUR_MODEL_ID via Qwen Code /review_"
 ```
 
 Clean up the JSON file in Step 11.
