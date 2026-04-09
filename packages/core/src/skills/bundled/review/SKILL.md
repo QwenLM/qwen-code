@@ -402,7 +402,7 @@ Use the **pre-autofix HEAD commit SHA** captured in Step 1. If not captured, fal
 
 **Before posting**, check for existing Qwen Code review comments: `gh api repos/{owner}/{repo}/pulls/{pr_number}/comments --jq '.[] | select(.body | test("via Qwen Code /review")) | .id'`. If found, inform the user and let them decide whether to proceed.
 
-⚠️ **Findings go in the `comments` array, NOT in `body`.** The `body` field is for the review summary (usually empty). Do NOT put findings in `body` — that creates a summary comment instead of inline comments.
+⚠️ **Findings that can be mapped to a diff line → go in `comments` array (with `line` field). Findings that CANNOT be mapped to a specific diff line → go in `body` field.** Every entry in the `comments` array MUST have a valid `line` number. Do NOT put a comment in the `comments` array without a `line` — it creates an orphaned comment with no code reference.
 
 **Build the review JSON** with `write_file` to create `/tmp/qwen-review-{target}-review.json`. Every high-confidence Critical/Suggestion finding that can be mapped to a diff line MUST be an entry in the `comments` array:
 
