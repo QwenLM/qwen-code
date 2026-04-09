@@ -225,6 +225,19 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('does not accept the prompt suggestion on shift+tab', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} promptSuggestion="commit this" />,
+      );
+      await wait(350);
+
+      stdin.write('\x1b[Z'); // shift+tab
+      await wait();
+
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
