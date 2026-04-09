@@ -1886,6 +1886,14 @@ export default {
   'Ready to submit your answers?': 'Bereit, Ihre Antworten zu senden?',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
     '↑/↓: Navigieren | ←/→: Tabs wechseln | Enter: Auswählen',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: Navigieren | ←/→: Tabs wechseln | Space: Umschalten | Enter: Bestätigen | Esc: Abbrechen',
+  '↑/↓: Navigate | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: Navigieren | Space: Umschalten | Enter: Bestätigen | Esc: Abbrechen',
+  '↑/↓: Navigate | Enter: Toggle | Ctrl+Enter: Confirm | Esc: Cancel':
+    '↑/↓: Navigieren | Enter: Umschalten | Strg+Enter: Bestätigen | Esc: Abbrechen',
+  'Enter: Save answer | ↑/↓: Navigate | Esc: Cancel':
+    'Enter: Antwort speichern | ↑/↓: Navigieren | Esc: Abbrechen',
   '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
     '↑/↓: Navigieren | ←/→: Tabs wechseln | Space/Enter: Umschalten | Esc: Abbrechen',
   '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':

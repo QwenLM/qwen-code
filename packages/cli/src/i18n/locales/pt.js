@@ -1878,6 +1878,14 @@ export default {
   'Ready to submit your answers?': 'Pronto para enviar suas respostas?',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
     '↑/↓: Navegar | ←/→: Alternar abas | Enter: Selecionar',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: Navegar | ←/→: Alternar abas | Space: Alternar | Enter: Confirmar | Esc: Cancelar',
+  '↑/↓: Navigate | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: Navegar | Space: Alternar | Enter: Confirmar | Esc: Cancelar',
+  '↑/↓: Navigate | Enter: Toggle | Ctrl+Enter: Confirm | Esc: Cancel':
+    '↑/↓: Navegar | Enter: Alternar | Ctrl+Enter: Confirmar | Esc: Cancelar',
+  'Enter: Save answer | ↑/↓: Navigate | Esc: Cancel':
+    'Enter: Salvar resposta | ↑/↓: Navegar | Esc: Cancelar',
   '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
     '↑/↓: Navegar | ←/→: Alternar abas | Space/Enter: Alternar | Esc: Cancelar',
   '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':

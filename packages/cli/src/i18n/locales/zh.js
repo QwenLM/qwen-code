@@ -1739,6 +1739,14 @@ export default {
   'Ready to submit your answers?': '准备好提交您的答案了吗？',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
     '↑/↓: 导航 | ←/→: 切换标签页 | Enter: 选择',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: 导航 | ←/→: 切换标签页 | Space: 切换 | Enter: 确认 | Esc: 取消',
+  '↑/↓: Navigate | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: 导航 | Space: 切换 | Enter: 确认 | Esc: 取消',
+  '↑/↓: Navigate | Enter: Toggle | Ctrl+Enter: Confirm | Esc: Cancel':
+    '↑/↓: 导航 | Enter: 切换 | Ctrl+Enter: 确认 | Esc: 取消',
+  'Enter: Save answer | ↑/↓: Navigate | Esc: Cancel':
+    'Enter: 保存答案 | ↑/↓: 导航 | Esc: 取消',
   '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
     '↑/↓: 导航 | ←/→: 切换标签页 | Space/Enter: 切换 | Esc: 取消',
   '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':

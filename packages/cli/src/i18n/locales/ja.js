@@ -1382,6 +1382,14 @@ export default {
   'Ready to submit your answers?': '回答を送信しますか？',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
     '↑/↓: ナビゲート | ←/→: タブ切り替え | Enter: 選択',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: ナビゲート | ←/→: タブ切り替え | Space: 切り替え | Enter: 確認 | Esc: キャンセル',
+  '↑/↓: Navigate | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: ナビゲート | Space: 切り替え | Enter: 確認 | Esc: キャンセル',
+  '↑/↓: Navigate | Enter: Toggle | Ctrl+Enter: Confirm | Esc: Cancel':
+    '↑/↓: ナビゲート | Enter: 切り替え | Ctrl+Enter: 確認 | Esc: キャンセル',
+  'Enter: Save answer | ↑/↓: Navigate | Esc: Cancel':
+    'Enter: 回答を保存 | ↑/↓: ナビゲート | Esc: キャンセル',
   '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
     '↑/↓: ナビゲート | ←/→: タブ切り替え | Space/Enter: 切り替え | Esc: キャンセル',
   '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':

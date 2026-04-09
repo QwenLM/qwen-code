@@ -1886,6 +1886,14 @@ export default {
   'Ready to submit your answers?': 'Готовы отправить свои ответы?',
   '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
     '↑/↓: Навигация | ←/→: Переключение вкладок | Enter: Выбор',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: Навигация | ←/→: Переключение вкладок | Space: Переключить | Enter: Подтвердить | Esc: Отмена',
+  '↑/↓: Navigate | Space: Toggle | Enter: Confirm | Esc: Cancel':
+    '↑/↓: Навигация | Space: Переключить | Enter: Подтвердить | Esc: Отмена',
+  '↑/↓: Navigate | Enter: Toggle | Ctrl+Enter: Confirm | Esc: Cancel':
+    '↑/↓: Навигация | Enter: Переключить | Ctrl+Enter: Подтвердить | Esc: Отмена',
+  'Enter: Save answer | ↑/↓: Navigate | Esc: Cancel':
+    'Enter: Сохранить ответ | ↑/↓: Навигация | Esc: Отмена',
   '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
     '↑/↓: Навигация | ←/→: Переключение вкладок | Space/Enter: Переключить | Esc: Отмена',
   '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':

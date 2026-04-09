@@ -216,6 +216,74 @@ describe('<AskUserQuestionDialog />', () => {
       expect(lastFrame()).toContain('[✓]');
       unmount();
     });
+
+    it('switches help text and uses text input keys for custom multi-select input', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails({
+        questions: [createSingleQuestion({ multiSelect: true })],
+      });
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      stdin.write('4');
+      await wait();
+
+      const focusedOutput = lastFrame();
+      expect(focusedOutput).toContain('Enter: Toggle');
+      expect(focusedOutput).toContain('Ctrl+Enter: Confirm');
+      expect(focusedOutput).not.toContain('Space: Insert space');
+      expect(focusedOutput).not.toContain('Space: Toggle');
+
+      stdin.write('foo bar');
+      await wait();
+
+      expect(lastFrame()).toContain('foo bar');
+      expect(lastFrame()).toContain('[✓]');
+
+      stdin.write('\r');
+      await wait();
+
+      expect(lastFrame()).toContain('[ ]');
+      expect(onConfirm).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('keeps left and right available for text editing while custom input is focused', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails({
+        questions: [
+          createSingleQuestion({ header: 'Q1', multiSelect: true }),
+          createSingleQuestion({ header: 'Q2', multiSelect: true }),
+        ],
+      });
+
+      const { stdin, lastFrame, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      stdin.write('4');
+      await wait();
+      stdin.write('abc');
+      await wait();
+      stdin.write('\u001B[C');
+      await wait();
+
+      const output = lastFrame();
+      expect(output).toContain('▸ Q1');
+      expect(output).toContain('abc');
+      expect(output).not.toContain('←/→: Switch tabs');
+      unmount();
+    });
   });
 
   describe('multiple questions', () => {
