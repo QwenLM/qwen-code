@@ -1713,6 +1713,8 @@ export default {
   'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
   'Run /context detail for per-item breakdown.':
     '运行 /context detail 查看详细分解。',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    '显示上下文窗口使用情况分解。输入 "/context detail" 查看详细分解。',
   'body loaded': '内容已加载',
   memory: '记忆',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
