@@ -17,6 +17,7 @@ import { SchemaValidator } from '../utils/schemaValidator.js';
 import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { PermissionDecision } from '../permissions/types.js';
 
 const debugLogger = createDebugLogger('RIPGREP');
 
@@ -56,6 +57,25 @@ class GrepToolInvocation extends BaseToolInvocation<
     super(params);
   }
 
+  /**
+   * Returns 'ask' for paths outside the workspace, so that external grep
+   * searches require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (!this.params.path) {
+      return 'allow'; // Default workspace directory
+    }
+    const workspaceContext = this.config.getWorkspaceContext();
+    const resolvedPath = path.resolve(
+      this.config.getTargetDir(),
+      this.params.path,
+    );
+    if (workspaceContext.isPathWithinWorkspace(resolvedPath)) {
+      return 'allow';
+    }
+    return 'ask';
+  }
+
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
       // Determine which paths to search
@@ -67,7 +87,7 @@ class GrepToolInvocation extends BaseToolInvocation<
         const searchDirAbs = resolveAndValidatePath(
           this.config,
           this.params.path,
-          { allowFiles: true },
+          { allowFiles: true, allowExternalPaths: true },
         );
         searchPaths.push(searchDirAbs);
         searchDirDisplay = this.params.path;
@@ -364,7 +384,10 @@ export class RipGrepTool extends BaseDeclarativeTool<
     // Only validate path if one is provided
     if (params.path) {
       try {
-        resolveAndValidatePath(this.config, params.path, { allowFiles: true });
+        resolveAndValidatePath(this.config, params.path, {
+          allowFiles: true,
+          allowExternalPaths: true,
+        });
       } catch (error) {
         return getErrorMessage(error);
       }

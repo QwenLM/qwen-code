@@ -147,6 +147,15 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         };
       }
 
+      // Persist the approved plan to disk
+      try {
+        this.config.savePlan(plan);
+      } catch (error) {
+        debugLogger.warn(
+          `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+
       const llmMessage = `User has approved your plan. You can now start coding. Start with updating your todo list if applicable.`;
       const displayMessage = 'User approved the plan.';
 

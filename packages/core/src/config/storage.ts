@@ -18,6 +18,7 @@ const TMP_DIR_NAME = 'tmp';
 const BIN_DIR_NAME = 'bin';
 const PROJECT_DIR_NAME = 'projects';
 const IDE_DIR_NAME = 'ide';
+const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
 
@@ -173,6 +174,14 @@ export class Storage {
 
   static getGlobalIdeDir(): string {
     return path.join(Storage.getRuntimeBaseDir(), IDE_DIR_NAME);
+  }
+
+  static getPlansDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), PLANS_DIR_NAME);
+  }
+
+  static getPlanFilePath(sessionId: string): string {
+    return path.join(Storage.getPlansDir(), `${sessionId}.md`);
   }
 
   static getGlobalBinDir(): string {

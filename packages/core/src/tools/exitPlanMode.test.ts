@@ -18,9 +18,11 @@ describe('ExitPlanModeTool', () => {
     approvalMode = ApprovalMode.PLAN;
     mockConfig = {
       getApprovalMode: vi.fn(() => approvalMode),
+      getPrePlanMode: vi.fn(() => ApprovalMode.DEFAULT),
       setApprovalMode: vi.fn((mode: ApprovalMode) => {
         approvalMode = mode;
       }),
+      savePlan: vi.fn(),
     } as unknown as Config;
 
     tool = new ExitPlanModeTool(mockConfig);
@@ -147,6 +149,9 @@ describe('ExitPlanModeTool', () => {
         ApprovalMode.DEFAULT,
       );
       expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+
+      // Plan should be saved to disk
+      expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
     });
 
     it('should request confirmation with plan details', async () => {
@@ -171,6 +176,29 @@ describe('ExitPlanModeTool', () => {
         ApprovalMode.AUTO_EDIT,
       );
       expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
+    });
+
+    it('should set DEFAULT mode on ProceedOnce regardless of pre-plan mode', async () => {
+      // Even if pre-plan mode was AUTO_EDIT, ProceedOnce ("manually approve
+      // edits") should always set DEFAULT to match the option label semantics.
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const params: ExitPlanModeParams = { plan: 'Restore test' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(signal);
+
+      if (confirmation) {
+        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.DEFAULT,
+      );
+      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
     });
 
     it('should remain in plan mode when confirmation is rejected', async () => {
@@ -199,6 +227,9 @@ describe('ExitPlanModeTool', () => {
         ApprovalMode.PLAN,
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
+
+      // Plan should NOT be saved when rejected
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
     });
 
     it('should have correct description', () => {
