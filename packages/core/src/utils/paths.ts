@@ -245,6 +245,15 @@ export function isSubpaths(parentPath: string[], childPath: string): boolean {
   return parentPath.some((p) => isSubpath(p, childPath));
 }
 
+export function normalizePathForComparison(p: string): string {
+  const normalized = path.normalize(p);
+  // Windows and macOS (default) have case-insensitive file systems
+  // Linux is case-sensitive
+  return os.platform() === 'win32' || os.platform() === 'darwin'
+    ? normalized.toLowerCase()
+    : normalized;
+}
+
 /**
  * Resolves a path with tilde (~) expansion and relative path resolution.
  * Handles tilde expansion for home directory and resolves relative paths

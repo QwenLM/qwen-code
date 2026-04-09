@@ -12,6 +12,7 @@ import {
   getErrorMessage,
   isWithinRoot,
   ideContextStore,
+  normalizePathForComparison,
 } from '@qwen-code/qwen-code-core';
 import type { Settings } from './settings.js';
 import stripJsonComments from 'strip-json-comments';
@@ -101,8 +102,11 @@ export class LoadedTrustedFolders {
       }
     }
 
+    const normalizedLocation = normalizePathForComparison(location);
+
     for (const untrustedPath of untrustedPaths) {
-      if (path.normalize(location) === path.normalize(untrustedPath)) {
+      const normalizedUntrustedPath = normalizePathForComparison(untrustedPath);
+      if (normalizedLocation === normalizedUntrustedPath) {
         return false;
       }
     }

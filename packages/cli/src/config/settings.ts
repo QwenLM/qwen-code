@@ -15,6 +15,7 @@ import {
   getErrorMessage,
   Storage,
   createDebugLogger,
+  normalizePathForComparison,
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
@@ -559,12 +560,22 @@ export function loadSettings(
     // This is okay. The path might not exist yet, and that's a valid state.
   }
 
-  // We expect homedir to always exist and be resolvable.
-  const realHomeDir = fs.realpathSync(resolvedHomeDir);
+  let realHomeDir = resolvedHomeDir;
+  try {
+    // We expect homedir to always exist and be resolvable, but guard against edge cases
+    realHomeDir = fs.realpathSync(resolvedHomeDir);
+  } catch (_e) {
+    // Fallback to resolved path if realpath fails
+    realHomeDir = resolvedHomeDir;
+  }
 
   const workspaceSettingsPath = new Storage(
     workspaceDir,
   ).getWorkspaceSettingsPath();
+
+  const isWorkspaceSameAsHome =
+    normalizePathForComparison(realWorkspaceDir) ===
+    normalizePathForComparison(realHomeDir);
 
   const loadAndMigrate = (
     filePath: string,
@@ -666,7 +677,7 @@ export function loadSettings(
     settings: {} as Settings,
     rawJson: undefined,
   };
-  if (realWorkspaceDir !== realHomeDir) {
+  if (!isWorkspaceSameAsHome) {
     workspaceResult = loadAndMigrate(
       workspaceSettingsPath,
       SettingScope.Workspace,

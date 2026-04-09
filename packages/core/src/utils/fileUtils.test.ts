@@ -19,6 +19,7 @@ import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import type osActual from 'node:os';
 import mime from 'mime/lite';
 
 import {
@@ -34,6 +35,15 @@ import {
 } from './fileUtils.js';
 import type { Config } from '../config/config.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
+
+vi.mock('node:os', async (importOriginal) => {
+  const actualOs = await importOriginal<typeof osActual>();
+  return {
+    ...actualOs,
+    homedir: vi.fn(() => '/mock/home/user'),
+    platform: vi.fn(() => 'linux'),
+  };
+});
 
 vi.mock('mime/lite', () => ({
   default: { getType: vi.fn() },
@@ -147,6 +157,35 @@ describe('fileUtils', () => {
       const pathToCheckSuper = path.resolve('/project/root');
       const rootSuper = path.resolve('/project/root/sub');
       expect(isWithinRoot(pathToCheckSuper, rootSuper)).toBe(false);
+    });
+
+    it('should handle case-insensitive comparison on Windows', () => {
+      vi.spyOn(os, 'platform').mockReturnValue('win32');
+
+      const root = 'C:\\Project\\Root';
+      expect(isWithinRoot('C:\\PROJECT\\ROOT\\file.txt', root)).toBe(true);
+      expect(isWithinRoot('c:\\project\\root\\subdir\\file.txt', root)).toBe(
+        true,
+      );
+      expect(isWithinRoot('C:\\PROJECT\\ROOT', root)).toBe(true);
+      expect(isWithinRoot('C:\\Project\\Other', root)).toBe(false);
+    });
+
+    it('should handle case-insensitive root comparison on Windows', () => {
+      vi.spyOn(os, 'platform').mockReturnValue('win32');
+
+      const root = 'c:\\project\\root';
+      expect(isWithinRoot('C:\\PROJECT\\ROOT\\file.txt', root)).toBe(true);
+      expect(isWithinRoot('C:\\Project\\Root', root)).toBe(true);
+    });
+
+    it('should remain case-sensitive on POSIX systems', () => {
+      vi.spyOn(os, 'platform').mockReturnValue('linux');
+
+      const root = '/project/root';
+      expect(isWithinRoot('/project/root/file.txt', root)).toBe(true);
+      expect(isWithinRoot('/PROJECT/ROOT/file.txt', root)).toBe(false);
+      expect(isWithinRoot('/project/ROOT', root)).toBe(false);
     });
   });
 
