@@ -35,11 +35,32 @@ const argv = yargs(hideBin(process.argv)).option('q', {
 
 let qwenSandbox = process.env.QWEN_SANDBOX;
 
+// Expand tilde and resolve relative paths (mirrors Storage.resolvePath in core).
+function resolvePath(dir) {
+  let resolved = dir;
+  if (
+    resolved === '~' ||
+    resolved.startsWith('~/') ||
+    resolved.startsWith('~\\')
+  ) {
+    const segments =
+      resolved === '~'
+        ? []
+        : resolved
+            .slice(2)
+            .split(/[/\\]+/)
+            .filter(Boolean);
+    resolved = path.join(os.homedir(), ...segments);
+  }
+  if (!path.isAbsolute(resolved)) {
+    resolved = path.resolve(resolved);
+  }
+  return resolved;
+}
+
 if (!qwenSandbox) {
   const configDir = process.env.QWEN_HOME
-    ? path.isAbsolute(process.env.QWEN_HOME)
-      ? process.env.QWEN_HOME
-      : path.resolve(process.env.QWEN_HOME)
+    ? resolvePath(process.env.QWEN_HOME)
     : join(os.homedir(), '.qwen');
   const userSettingsFile = join(configDir, 'settings.json');
   if (existsSync(userSettingsFile)) {

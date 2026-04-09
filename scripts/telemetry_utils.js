@@ -34,16 +34,39 @@ function getProjectHash(projectRoot) {
 
 const projectHash = getProjectHash(projectRoot);
 
+// Expand tilde and resolve relative paths (mirrors Storage.resolvePath in core).
+function resolvePath(dir) {
+  let resolved = dir;
+  if (
+    resolved === '~' ||
+    resolved.startsWith('~/') ||
+    resolved.startsWith('~\\')
+  ) {
+    const segments =
+      resolved === '~'
+        ? []
+        : resolved
+            .slice(2)
+            .split(/[/\\]+/)
+            .filter(Boolean);
+    resolved = path.join(os.homedir(), ...segments);
+  }
+  if (!path.isAbsolute(resolved)) {
+    resolved = path.resolve(resolved);
+  }
+  return resolved;
+}
+
 // Runtime base directory for ephemeral data (tmp, otel, etc.)
 // Priority: QWEN_RUNTIME_DIR > QWEN_HOME > ~/.qwen
 function getRuntimeBaseDir() {
   const runtimeDir = process.env.QWEN_RUNTIME_DIR;
   if (runtimeDir) {
-    return path.isAbsolute(runtimeDir) ? runtimeDir : path.resolve(runtimeDir);
+    return resolvePath(runtimeDir);
   }
   const homeEnv = process.env.QWEN_HOME;
   if (homeEnv) {
-    return path.isAbsolute(homeEnv) ? homeEnv : path.resolve(homeEnv);
+    return resolvePath(homeEnv);
   }
   return path.join(os.homedir(), '.qwen');
 }

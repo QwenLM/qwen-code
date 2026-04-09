@@ -538,10 +538,25 @@ export class ExtensionManager {
    */
   async refreshCache(): Promise<void> {
     this.extensionCache = new Map<string, Extension>();
-    const extensions = await this.loadExtensionsFromDir(os.homedir());
-    extensions.forEach((extension) => {
-      this.extensionCache!.set(extension.name, extension);
-    });
+    const userExtensionsDir = ExtensionStorage.getUserExtensionsDir();
+
+    let subdirs: string[];
+    try {
+      subdirs = fs.readdirSync(userExtensionsDir);
+    } catch {
+      return;
+    }
+
+    for (const subdir of subdirs) {
+      const extensionDir = path.join(userExtensionsDir, subdir);
+      const extension = await this.loadExtension({
+        extensionDir,
+        workspaceDir: this.workspaceDir,
+      });
+      if (extension != null) {
+        this.extensionCache!.set(extension.name, extension);
+      }
+    }
   }
 
   getLoadedExtensions(): Extension[] {

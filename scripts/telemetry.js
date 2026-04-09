@@ -13,10 +13,33 @@ import { existsSync, readFileSync } from 'node:fs';
 
 const projectRoot = join(import.meta.dirname, '..');
 
+// Expand tilde and resolve relative paths (mirrors Storage.resolvePath in core).
+function resolvePath(dir) {
+  let resolved = dir;
+  if (
+    resolved === '~' ||
+    resolved.startsWith('~/') ||
+    resolved.startsWith('~\\')
+  ) {
+    const segments =
+      resolved === '~'
+        ? []
+        : resolved
+            .slice(2)
+            .split(/[/\\]+/)
+            .filter(Boolean);
+    const home =
+      process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '';
+    resolved = path.join(home, ...segments);
+  }
+  if (!path.isAbsolute(resolved)) {
+    resolved = path.resolve(resolved);
+  }
+  return resolved;
+}
+
 const USER_SETTINGS_DIR = process.env.QWEN_HOME
-  ? path.isAbsolute(process.env.QWEN_HOME)
-    ? process.env.QWEN_HOME
-    : path.resolve(process.env.QWEN_HOME)
+  ? resolvePath(process.env.QWEN_HOME)
   : join(
       process.env.HOME || process.env.USERPROFILE || process.env.HOMEPATH || '',
       '.qwen',
