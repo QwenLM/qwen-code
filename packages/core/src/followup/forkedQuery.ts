@@ -6,11 +6,15 @@
  * Forked Query Infrastructure
  *
  * Enables cache-aware secondary LLM calls that share the main conversation's
- * prompt prefix (systemInstruction + tools + history) for cache hits.
+ * prompt prefix (systemInstruction + history) for cache hits.
  *
  * DashScope already enables cache_control via X-DashScope-CacheControl header.
  * By constructing the forked GeminiChat with identical generationConfig and
  * history prefix, the fork automatically benefits from prefix caching.
+ *
+ * Note: `runForkedQuery` overrides `tools: []` at the per-request level so the
+ * model cannot produce function calls. `createForkedChat` retains the full
+ * generationConfig (including tools) for callers like speculation that need them.
  */
 
 import type {
@@ -20,6 +24,12 @@ import type {
 } from '@google/genai';
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
+
+/** Per-request config that strips tools so the model never produces function calls. */
+const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
+  GenerateContentConfig,
+  'tools'
+>;
 
 /**
  * Snapshot of the main conversation's cache-critical parameters.
@@ -111,9 +121,13 @@ export function clearCacheSafeParams(): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Create an isolated GeminiChat that shares the same cache prefix as the main
- * conversation. The fork uses identical generationConfig (systemInstruction +
- * tools) and history, so DashScope's cache_control mechanism produces cache hits.
+ * Create an isolated GeminiChat that shares the main conversation's
+ * generationConfig (including systemInstruction, tools, and history).
+ *
+ * The full config is retained so that callers like `runSpeculativeLoop`
+ * can execute tool calls during speculation. For pure-text callers like
+ * `runForkedQuery`, tools are stripped at the per-request level via
+ * `NO_TOOLS` — see {@link runForkedQuery}.
  *
  * The fork does NOT have chatRecordingService or telemetryService to avoid
  * polluting the main session's recordings and token counts.
@@ -165,7 +179,7 @@ function extractUsage(
 
 /**
  * Run a forked query using a GeminiChat that shares the main conversation's
- * cache prefix. This is a single-turn request (no tool execution loop).
+ * cache prefix. This is a single-turn, tool-free request (no function calls).
  *
  * @param config - App config
  * @param userMessage - The user message to send (e.g., SUGGESTION_PROMPT)
@@ -191,8 +205,10 @@ export async function runForkedQuery(
   const model = options?.model ?? params.model;
   const chat = createForkedChat(config, params);
 
-  // Build per-request config overrides for JSON schema if needed
-  const requestConfig: GenerateContentConfig = {};
+  // Build per-request config overrides.
+  // NO_TOOLS prevents the model from producing function calls — forked
+  // queries are pure text completion and must not appear in tool-call UI.
+  const requestConfig: GenerateContentConfig = { ...NO_TOOLS };
   if (options?.abortSignal) {
     requestConfig.abortSignal = options.abortSignal;
   }
@@ -205,7 +221,7 @@ export async function runForkedQuery(
     model,
     {
       message: [{ text: userMessage }],
-      config: Object.keys(requestConfig).length > 0 ? requestConfig : undefined,
+      config: requestConfig,
     },
     'forked_query',
   );

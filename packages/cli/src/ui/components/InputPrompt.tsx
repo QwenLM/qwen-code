@@ -168,15 +168,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     }
   }, []);
 
-  const [dirs, setDirs] = useState<readonly string[]>(
-    config.getWorkspaceContext().getDirectories(),
-  );
-  const dirsChanged = config.getWorkspaceContext().getDirectories();
-  useEffect(() => {
-    if (dirs.length !== dirsChanged.length) {
-      setDirs(dirsChanged);
-    }
-  }, [dirs.length, dirsChanged]);
   const [reverseSearchActive, setReverseSearchActive] = useState(false);
   const [commandSearchActive, setCommandSearchActive] = useState(false);
   const [textBeforeReverseSearch, setTextBeforeReverseSearch] = useState('');
@@ -190,7 +181,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const completion = useCommandCompletion(
     buffer,
-    dirs,
     config.getTargetDir(),
     slashCommands,
     commandContext,
@@ -910,7 +900,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           followup.state.suggestion
         ) {
           const text = followup.state.suggestion;
-          followup.accept('enter');
+          // Skip onAccept (buffer.insert) — we pass the text directly to
+          // handleSubmitAndClear which clears the buffer synchronously.
+          // Without skipOnAccept the microtask in accept() would re-insert
+          // the suggestion into the buffer after it was already cleared.
+          followup.accept('enter', { skipOnAccept: true });
           handleSubmitAndClear(text);
           return true;
         }
