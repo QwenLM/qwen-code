@@ -2737,6 +2737,34 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('should fall through to history when pop returns null (race condition)', async () => {
+      // Simulate: React state says queue is non-empty, but queueRef was
+      // already drained by another pop/drain — popAllQueuedMessages returns null.
+      const mockPopAll = vi.fn(() => null);
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['stale msg'],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAll,
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockPopAll).toHaveBeenCalled();
+      expect(props.buffer.setText).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
     it('should navigate history on Up arrow when queue is empty', async () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} />,
