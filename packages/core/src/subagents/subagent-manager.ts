@@ -582,6 +582,10 @@ export class SubagentManager {
       frontmatter['tools'] = config.tools;
     }
 
+    if (config.disallowedTools && config.disallowedTools.length > 0) {
+      frontmatter['disallowedTools'] = config.disallowedTools;
+    }
+
     if (config.model && config.model !== 'inherit') {
       frontmatter['model'] = config.model;
     }
@@ -722,10 +726,22 @@ export class SubagentManager {
     };
 
     let toolConfig: ToolConfig | undefined;
-    if (config.tools && config.tools.length > 0) {
-      const toolNames = this.transformToToolNames(config.tools);
+    if (
+      (config.tools && config.tools.length > 0) ||
+      (config.disallowedTools && config.disallowedTools.length > 0)
+    ) {
+      const toolNames = config.tools
+        ? this.transformToToolNames(config.tools)
+        : ['*'];
       toolConfig = {
         tools: toolNames,
+        ...(config.disallowedTools && config.disallowedTools.length > 0
+          ? {
+              disallowedTools: this.transformToToolNames(
+                config.disallowedTools,
+              ),
+            }
+          : {}),
       };
     }
 
@@ -1016,6 +1032,16 @@ function parseSubagentContent(
 
     // Extract optional fields
     const tools = frontmatter['tools'] as string[] | undefined;
+    const disallowedToolsRaw = frontmatter['disallowedTools'];
+    const disallowedTools: string[] | undefined = Array.isArray(
+      disallowedToolsRaw,
+    )
+      ? disallowedToolsRaw.filter(
+          (item): item is string => typeof item === 'string',
+        )
+      : typeof disallowedToolsRaw === 'string'
+        ? [disallowedToolsRaw]
+        : undefined;
     const modelRaw = frontmatter['model'];
     const legacyModelConfig = frontmatter['modelConfig'] as
       | Record<string, unknown>
@@ -1035,6 +1061,7 @@ function parseSubagentContent(
       name,
       description,
       tools,
+      disallowedTools,
       systemPrompt: systemPrompt.trim(),
       filePath,
       model,
