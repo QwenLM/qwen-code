@@ -551,7 +551,7 @@ export class Config {
   private gitService: GitService | undefined = undefined;
   private sessionService: SessionService | undefined = undefined;
   private chatRecordingService: ChatRecordingService | undefined = undefined;
-  private readonly checkpointing: boolean;
+  private checkpointing: boolean;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
   private readonly bugCommand: BugCommandSettings | undefined;
@@ -1782,9 +1782,18 @@ export class Config {
     return this.fileFiltering.enableFuzzySearch;
   }
 
+  setFileFilteringEnableFuzzySearch(enabled: boolean): void {
+    this.fileFiltering.enableFuzzySearch = enabled;
+  }
+
   getFileFilteringRespectGitIgnore(): boolean {
     return this.fileFiltering.respectGitIgnore;
   }
+
+  setFileFilteringRespectGitIgnore(enabled: boolean): void {
+    this.fileFiltering.respectGitIgnore = enabled;
+  }
+
   getFileFilteringRespectQwenIgnore(): boolean {
     return this.fileFiltering.respectQwenIgnore;
   }
@@ -1813,6 +1822,10 @@ export class Config {
 
   getCheckpointingEnabled(): boolean {
     return this.checkpointing;
+  }
+
+  setCheckpointingEnabled(enabled: boolean): void {
+    this.checkpointing = enabled;
   }
 
   getProxy(): string | undefined {

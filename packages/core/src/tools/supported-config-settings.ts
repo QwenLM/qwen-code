@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { APPROVAL_MODES } from '../config/config.js';
 
 /**
  * Descriptor for a setting that the ConfigTool is allowed to read/write.
@@ -13,33 +14,56 @@ import type { Config } from '../config/config.js';
 export interface ConfigSettingDescriptor {
   /** Human-readable description shown to the LLM. */
   description: string;
-  /** Value type currently supported by the descriptor API. */
-  type: 'string';
+  /** Value type for this setting. */
+  type: 'string' | 'boolean' | 'number';
   /** Whether the Agent may write this setting. */
   writable: boolean;
+  /** Where this setting is stored. */
+  source: 'global' | 'project';
+  /** Fixed list of valid values (optional). Checked before write. */
+  options?: readonly string[];
+  /** Dynamic options generator (optional). Called when options is not set. */
+  getOptions?: (config: Config) => string[];
+  /** Async validation called before writing. Return null on success, error message on failure. */
+  validateOnWrite?: (
+    config: Config,
+    value: string | boolean | number,
+  ) => Promise<string | null>;
   /** Read the current value from Config. */
-  read: (config: Config) => string;
+  read: (config: Config) => string | boolean | number;
   /** Write a new value. Returns null on success, error message on failure. */
-  write: (config: Config, value: string) => Promise<string | null>;
+  write: (
+    config: Config,
+    value: string | boolean | number,
+  ) => Promise<string | null>;
 }
 
 /**
  * Curated allowlist of settings the Agent can access via ConfigTool.
- * Phase 1: model only. Extend by adding entries here.
+ * Extend by adding entries here.
  */
 export const SUPPORTED_CONFIG_SETTINGS: Record<
   string,
   ConfigSettingDescriptor
 > = {
+  // ── Model ──────────────────────────────────────────────────────────
   model: {
     description:
       'The active LLM model ID. GET returns the current model and available options. SET switches the model for this session.',
     type: 'string',
     writable: true,
+    source: 'project',
+    getOptions: (config) => {
+      try {
+        return config.getAvailableModels().map((m) => m.id);
+      } catch {
+        return [];
+      }
+    },
     read: (config) => config.getModel(),
     write: async (config, value) => {
       try {
-        await config.setModel(value, {
+        await config.setModel(String(value), {
           reason: 'agent-config-tool',
           context: 'ConfigTool SET',
         });
@@ -48,6 +72,107 @@ export const SUPPORTED_CONFIG_SETTINGS: Record<
         return e instanceof Error ? e.message : 'Failed to set model';
       }
     },
+  },
+
+  // ── Approval Mode ──────────────────────────────────────────────────
+  approvalMode: {
+    description:
+      'The approval mode for tool calls. Controls how much user confirmation is required.',
+    type: 'string',
+    writable: true,
+    source: 'project',
+    options: APPROVAL_MODES,
+    read: (config) => config.getApprovalMode(),
+    write: async (config, value) => {
+      try {
+        config.setApprovalMode(
+          String(value) as ReturnType<Config['getApprovalMode']>,
+        );
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e.message : 'Failed to set approvalMode';
+      }
+    },
+  },
+
+  // ── Checkpointing ─────────────────────────────────────────────────
+  checkpointing: {
+    description: 'Whether file checkpointing (code rewind) is enabled.',
+    type: 'boolean',
+    writable: true,
+    source: 'global',
+    read: (config) => config.getCheckpointingEnabled(),
+    write: async (config, value) => {
+      try {
+        config.setCheckpointingEnabled(value as boolean);
+        return null;
+      } catch (e) {
+        return e instanceof Error ? e.message : 'Failed to set checkpointing';
+      }
+    },
+  },
+
+  // ── File Filtering ────────────────────────────────────────────────
+  respectGitIgnore: {
+    description: 'Whether to respect .gitignore rules when discovering files.',
+    type: 'boolean',
+    writable: true,
+    source: 'project',
+    read: (config) => config.getFileFilteringRespectGitIgnore(),
+    write: async (config, value) => {
+      try {
+        config.setFileFilteringRespectGitIgnore(value as boolean);
+        return null;
+      } catch (e) {
+        return e instanceof Error
+          ? e.message
+          : 'Failed to set respectGitIgnore';
+      }
+    },
+  },
+  enableFuzzySearch: {
+    description: 'Whether fuzzy file search is enabled.',
+    type: 'boolean',
+    writable: true,
+    source: 'project',
+    read: (config) => config.getFileFilteringEnableFuzzySearch(),
+    write: async (config, value) => {
+      try {
+        config.setFileFilteringEnableFuzzySearch(value as boolean);
+        return null;
+      } catch (e) {
+        return e instanceof Error
+          ? e.message
+          : 'Failed to set enableFuzzySearch';
+      }
+    },
+  },
+
+  // ── Read-only Settings ────────────────────────────────────────────
+  debugMode: {
+    description: 'Whether debug mode is enabled (read-only).',
+    type: 'boolean',
+    writable: false,
+    source: 'global',
+    read: (config) => config.getDebugMode(),
+    write: async () => 'debugMode is read-only',
+  },
+  targetDir: {
+    description: 'The project root directory (read-only).',
+    type: 'string',
+    writable: false,
+    source: 'project',
+    read: (config) => config.getTargetDir(),
+    write: async () => 'targetDir is read-only',
+  },
+  outputFormat: {
+    description:
+      'The output format for the current session: text, json, or stream-json (read-only).',
+    type: 'string',
+    writable: false,
+    source: 'global',
+    read: (config) => config.getOutputFormat(),
+    write: async () => 'outputFormat is read-only',
   },
 };
 
@@ -65,4 +190,20 @@ export function getDescriptor(
 
 export function getAllKeys(): string[] {
   return Object.keys(SUPPORTED_CONFIG_SETTINGS);
+}
+
+/**
+ * Get valid options for a setting (from static options or dynamic getOptions).
+ */
+export function getOptionsForSetting(
+  key: string,
+  config?: Config,
+): string[] | undefined {
+  const descriptor = Object.hasOwn(SUPPORTED_CONFIG_SETTINGS, key)
+    ? SUPPORTED_CONFIG_SETTINGS[key]
+    : undefined;
+  if (!descriptor) return undefined;
+  if (descriptor.options) return [...descriptor.options];
+  if (descriptor.getOptions && config) return descriptor.getOptions(config);
+  return undefined;
 }

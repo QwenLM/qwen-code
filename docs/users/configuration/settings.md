@@ -483,6 +483,51 @@ Here is an example of a `settings.json` file with the nested structure, new as o
 }
 ```
 
+## AI-Assisted Configuration (ConfigTool)
+
+Qwen Code includes a built-in `ConfigTool` that allows the AI agent to read and modify certain configuration settings on your behalf during a conversation. Instead of manually editing `settings.json`, you can simply ask the AI to make changes.
+
+### How It Works
+
+- **Reading settings**: You can ask the AI questions like "what model am I using?" and it will read the current value directly.
+- **Changing settings**: You can say things like "switch to qwen-max" and the AI will propose the change. **You will always be asked to confirm before any setting is modified.**
+
+### Supported Settings
+
+The ConfigTool can only access a curated allowlist of settings. Currently supported:
+
+| Setting             | Description                                           | Read | Write                   |
+| ------------------- | ----------------------------------------------------- | ---- | ----------------------- |
+| `model`             | The active LLM model ID for this session              | Yes  | Yes (with confirmation) |
+| `approvalMode`      | Tool call approval mode (plan/default/auto-edit/yolo) | Yes  | Yes (with confirmation) |
+| `checkpointing`     | Whether file checkpointing (code rewind) is enabled   | Yes  | Yes (with confirmation) |
+| `respectGitIgnore`  | Whether to respect .gitignore when discovering files  | Yes  | Yes (with confirmation) |
+| `enableFuzzySearch` | Whether fuzzy file search is enabled                  | Yes  | Yes (with confirmation) |
+| `debugMode`         | Whether debug mode is enabled                         | Yes  | No (read-only)          |
+| `targetDir`         | The project root directory                            | Yes  | No (read-only)          |
+| `outputFormat`      | The output format (text/json/stream-json)             | Yes  | No (read-only)          |
+
+> [!note]
+>
+> Additional settings will be added in future releases. The allowlist ensures the AI agent cannot access or modify arbitrary configuration.
+
+### Examples
+
+```
+You: What model am I using?
+AI:  [reads config] You're currently using qwen3-coder-plus.
+
+You: Switch to qwen-max.
+AI:  [proposes config change] → Confirmation: Change model from 'qwen3-coder-plus' to 'qwen-max'
+     → You approve → Model switched successfully.
+```
+
+### Security
+
+- Only allowlisted settings can be accessed — the AI cannot read or write arbitrary keys
+- All write operations require your explicit confirmation
+- The confirmation dialog shows both the current and proposed values
+
 ## Shell History
 
 The CLI keeps a history of shell commands you run. To avoid conflicts between different projects, this history is stored in a project-specific directory within your user's home folder.
