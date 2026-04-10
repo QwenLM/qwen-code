@@ -111,6 +111,8 @@ export interface SendMessageOptions {
     iterationCount: number;
     reasons: string[];
   };
+  /** Display text for notification messages (persisted for session resume). */
+  notificationDisplayText?: string;
 }
 
 export class GeminiClient {
@@ -549,6 +551,12 @@ export class GeminiClient {
         const requestArray = Array.isArray(request) ? request : [request];
         request = [...requestArray, { text: additionalContext }];
       }
+    }
+
+    if (messageType === SendMessageType.Notification) {
+      this.config
+        .getChatRecordingService()
+        ?.recordNotification(request, options?.notificationDisplayText);
     }
 
     if (

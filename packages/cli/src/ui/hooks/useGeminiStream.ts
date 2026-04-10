@@ -1178,6 +1178,7 @@ export const useGeminiStream = (
       query: PartListUnion,
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
+      metadata?: { notificationDisplayText?: string },
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
@@ -1314,7 +1315,10 @@ export const useGeminiStream = (
             finalQueryToSend,
             abortSignal,
             prompt_id!,
-            { type: submitType },
+            {
+              type: submitType,
+              notificationDisplayText: metadata?.notificationDisplayText,
+            },
           );
 
           const processingStatus = await processGeminiStreamEvents(
@@ -1816,7 +1820,9 @@ export const useGeminiStream = (
         { type: 'notification' as const, text: item.displayText },
         Date.now(),
       );
-      submitQuery(item.modelText, SendMessageType.Notification);
+      submitQuery(item.modelText, SendMessageType.Notification, undefined, {
+        notificationDisplayText: item.displayText,
+      });
     }
   }, [streamingState, submitQuery, notificationTrigger, addItem]);
 

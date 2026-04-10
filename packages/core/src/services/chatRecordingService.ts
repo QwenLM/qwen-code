@@ -57,7 +57,8 @@ export interface ChatRecord {
     | 'chat_compression'
     | 'slash_command'
     | 'ui_telemetry'
-    | 'at_command';
+    | 'at_command'
+    | 'notification';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -97,7 +98,12 @@ export interface ChatRecord {
     | ChatCompressionRecordPayload
     | SlashCommandRecordPayload
     | UiTelemetryRecordPayload
-    | AtCommandRecordPayload;
+    | AtCommandRecordPayload
+    | NotificationRecordPayload;
+}
+
+export interface NotificationRecordPayload {
+  displayText: string;
 }
 
 /**
@@ -291,6 +297,27 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
+    }
+  }
+
+  /**
+   * Records a background agent notification.
+   * Stored as a user-role message (so the API history includes it on resume)
+   * with subtype 'notification' (so the UI can restore it as an info item).
+   */
+  recordNotification(message: PartListUnion, displayText?: string): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('user'),
+        subtype: 'notification',
+        message: createUserContent(message),
+        systemPayload: displayText
+          ? ({ displayText } as NotificationRecordPayload)
+          : undefined,
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving notification:', error);
     }
   }
 

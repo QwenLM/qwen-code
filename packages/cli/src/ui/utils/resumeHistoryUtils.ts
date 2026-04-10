@@ -256,6 +256,18 @@ function convertToHistoryItems(
     }
     switch (record.type) {
       case 'user': {
+        // Restore notification items (background agent completions)
+        if (record.subtype === 'notification') {
+          const payload = record.systemPayload as
+            | { displayText?: string }
+            | undefined;
+          const text =
+            payload?.displayText ||
+            extractTextFromParts(record.message?.parts as Part[]) ||
+            'Background agent completed';
+          items.push({ type: 'notification', text });
+          break;
+        }
         if (pendingAtCommands.length > 0) {
           // Flush any pending tool group before user message
           if (currentToolGroup.length > 0) {
