@@ -164,7 +164,7 @@ export function getShellConfiguration(): ShellConfiguration {
 export const isWindows = () => os.platform() === 'win32';
 
 /**
- * 检测当前是否运行在 MSYS2 环境中
+ * Detects if currently running in an MSYS2 environment.
  * @returns true if running under MSYS2 (UCRT64, CLANG64, MSYS, etc.)
  */
 export function isRunningInMSYS2(): boolean {
@@ -175,7 +175,7 @@ export function isRunningInMSYS2(): boolean {
 }
 
 /**
- * 检测当前是否运行在 Git Bash 环境中
+ * Detects if currently running in a Git Bash environment.
  * @returns true if running under Git Bash (MINGW64, MINGW32, etc.)
  */
 export function isRunningInGitBash(): boolean {
