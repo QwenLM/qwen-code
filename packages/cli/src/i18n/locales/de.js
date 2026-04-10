@@ -1970,9 +1970,9 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
-  verbose: 'ausführlich',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    'Vollständige Tool-Ausgabe und Denkprozess im ausführlichen Modus anzeigen (mit Strg+O umschalten).',
+  compact: 'kompakt',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Strg+O umschalten).',
   'Press Ctrl+O to show full tool output':
     'Strg+O für vollständige Tool-Ausgabe drücken',
 

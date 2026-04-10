@@ -1960,9 +1960,9 @@ export default {
     'Modo raw não disponível. Execute em um terminal interativo.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
-  verbose: 'detalhado',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    'Mostrar saída completa da ferramenta e raciocínio no modo detalhado (alternar com Ctrl+O).',
+  compact: 'compacto',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Ocultar saída da ferramenta e raciocínio para uma visualização mais limpa (alternar com Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Pressione Ctrl+O para exibir a saída completa da ferramenta',
 

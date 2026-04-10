@@ -220,10 +220,10 @@
           "type": "number",
           "default": 0
         },
-        "verboseMode": {
-          "description": "Show full tool output and thinking in verbose mode (toggle with Ctrl+O).",
+        "compactMode": {
+          "description": "Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).",
           "type": "boolean",
-          "default": true
+          "default": false
         }
       }
     },
