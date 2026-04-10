@@ -43,7 +43,11 @@ export async function detectTerminalBackground(
     const timeoutMs = options?.timeoutMs ?? 300;
 
     // Try OSC 11 first (only when both stdin and stdout are TTYs).
-    if (stdin.isTTY && stdout.isTTY) {
+    // Skip on Windows unless running in Windows Terminal (WT_SESSION),
+    // because legacy cmd.exe / PowerShell without VT processing renders
+    // the escape sequence as visible garbage.
+    const isWinLegacy = process.platform === 'win32' && !env['WT_SESSION'];
+    if (stdin.isTTY && stdout.isTTY && !isWinLegacy) {
       const osc11Result = await queryOSC11(stdin, stdout, timeoutMs);
       if (osc11Result !== undefined) {
         return osc11Result;
@@ -151,13 +155,11 @@ async function queryOSC11(
  * X11 rgb: format allows 1–4 hex digits per channel; the max value
  * for N digits is (16^N - 1), e.g. 1-digit → 0xF, 4-digit → 0xFFFF.
  *
- * Per the X11 spec all three channels use the same precision, so we
- * derive maxVal from rHex.length. If a malformed response has mixed
- * lengths we use the longest channel to avoid division overflow.
+ * Per the X11 spec (and enforced by the {1,4} regex) all three channels
+ * use the same precision, so we derive maxVal from rHex.length alone.
  */
 function isLightBackground(rHex: string, gHex: string, bHex: string): boolean {
-  const hexLen = Math.max(rHex.length, gHex.length, bHex.length);
-  const maxVal = (1 << (4 * hexLen)) - 1;
+  const maxVal = (1 << (4 * rHex.length)) - 1;
   const r = parseInt(rHex, 16);
   const g = parseInt(gHex, 16);
   const b = parseInt(bHex, 16);

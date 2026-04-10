@@ -38,7 +38,8 @@ import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import { detectTerminalBackground } from './ui/themes/detect-terminal-theme.js';
-import { themeManager } from './ui/themes/theme-manager.js';
+import { themeManager, DEFAULT_THEME } from './ui/themes/theme-manager.js';
+import { QwenLight } from './ui/themes/qwen-light.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
 import {
@@ -249,7 +250,7 @@ export async function main() {
     // theme via /theme this branch is skipped entirely.
     const background = await detectTerminalBackground({ timeoutMs: 300 });
     themeManager.setActiveTheme(
-      background === 'light' ? 'Qwen Light' : 'Qwen Dark',
+      background === 'light' ? QwenLight.name : DEFAULT_THEME.name,
     );
   }
 

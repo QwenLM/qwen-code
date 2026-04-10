@@ -173,6 +173,33 @@ describe('detectTerminalBackground', () => {
       expect(result).toBe('light');
     });
 
+    it('handles chunked OSC 11 response', async () => {
+      const stdin = createMockStdin();
+      const stdout = createMockStdout();
+
+      // Simulate response arriving in two chunks
+      stdout.on('data', (chunk: Buffer) => {
+        if (chunk.toString().includes('\x1b]11;?')) {
+          setTimeout(() => {
+            const pt = stdin as unknown as PassThrough;
+            pt.push(Buffer.from('\x1b]11;rgb:ffff/ff'));
+            // Second chunk arrives 10ms later
+            setTimeout(() => {
+              pt.push(Buffer.from('ff/ffff\x07'));
+            }, 10);
+          }, 20);
+        }
+      });
+
+      const result = await detectTerminalBackground({
+        stdin,
+        stdout,
+        timeoutMs: 500,
+      });
+
+      expect(result).toBe('light');
+    });
+
     it('handles mid-luminance boundary (just above 0.5 = light)', async () => {
       const stdin = createMockStdin();
       const stdout = createMockStdout();
@@ -350,6 +377,50 @@ describe('detectTerminalBackground', () => {
       });
 
       expect(result).toBe('dark');
+    });
+  });
+
+  describe('Windows legacy console', () => {
+    it('skips OSC 11 on Windows without WT_SESSION', async () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+
+      const stdin = createMockStdin();
+      const stdout = createMockStdout();
+
+      const result = await detectTerminalBackground({
+        stdin,
+        stdout,
+        env: { COLORFGBG: '0;7' }, // no WT_SESSION
+      });
+
+      // Should skip OSC 11 and use COLORFGBG
+      expect(result).toBe('light');
+      expect(stdin.setRawMode).not.toHaveBeenCalled();
+
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
+    });
+
+    it('allows OSC 11 on Windows Terminal (WT_SESSION set)', async () => {
+      const originalPlatform = process.platform;
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+
+      const stdin = createMockStdin();
+      const stdout = createMockStdout();
+      simulateOSC11Response(stdin, stdout, '0000', '0000', '0000');
+
+      const result = await detectTerminalBackground({
+        stdin,
+        stdout,
+        timeoutMs: 500,
+        env: { WT_SESSION: 'some-guid' },
+      });
+
+      expect(result).toBe('dark');
+      // setRawMode should have been called (OSC 11 was attempted)
+      expect(stdin.setRawMode).toHaveBeenCalledWith(true);
+
+      Object.defineProperty(process, 'platform', { value: originalPlatform });
     });
   });
 
