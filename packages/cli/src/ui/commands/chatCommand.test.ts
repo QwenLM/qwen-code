@@ -4,10 +4,27 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { chatCommand } from './chatCommand.js';
 import { parseSlashCommand } from '../../utils/commands.js';
 import type { CommandContext } from './types.js';
+
+// Helper to create mock CommandContext without type errors
+function createMockContext(
+  overrides: Partial<CommandContext> = {},
+): CommandContext {
+  return {
+    services: {
+      config: {
+        getSessionId: () => 'current-session-id-12345',
+        getTargetDir: () => '/test/project/dir',
+      },
+    },
+    ui: {},
+    executionMode: 'non_interactive',
+    ...overrides,
+  } as CommandContext;
+}
 
 // Mock the chat index functions
 vi.mock('@qwen-code/qwen-code-core', () => ({
@@ -18,6 +35,10 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     'test-session-1': 'test-session-id-1',
     'test-session-2': 'test-session-id-2',
   }),
+  SessionService: vi.fn().mockImplementation(() => ({
+    loadSession: vi.fn().mockResolvedValue({ messages: [] }),
+    removeSession: vi.fn().mockResolvedValue(true),
+  })),
 }));
 
 describe('chatCommand', () => {
@@ -73,15 +94,7 @@ describe('chatCommand', () => {
   });
 
   describe('save subcommand', () => {
-    const mockContext: CommandContext = {
-      services: {
-        config: {
-          getSessionId: () => 'current-session-id-12345',
-        } as any,
-      } as any,
-      ui: {} as any,
-      executionMode: 'non_interactive',
-    };
+    const mockContext = createMockContext();
 
     it('should return error when no name provided', async () => {
       const saveCommand = chatCommand.subCommands?.find(
@@ -111,11 +124,13 @@ describe('chatCommand', () => {
   });
 
   describe('list subcommand', () => {
+    const mockContext = createMockContext();
+
     it('should list all saved sessions', async () => {
       const listCommand = chatCommand.subCommands?.find(
         (cmd) => cmd.name === 'list',
       );
-      const result = await listCommand?.action!(undefined as any, '');
+      const result = await listCommand?.action!(mockContext, '');
 
       expect(result).toEqual({
         type: 'message',
@@ -126,11 +141,13 @@ describe('chatCommand', () => {
   });
 
   describe('resume subcommand', () => {
+    const mockContext = createMockContext();
+
     it('should return error when no name provided', async () => {
       const resumeCommand = chatCommand.subCommands?.find(
         (cmd) => cmd.name === 'resume',
       );
-      const result = await resumeCommand?.action!(undefined as any, '');
+      const result = await resumeCommand?.action!(mockContext, '');
 
       expect(result).toEqual({
         type: 'message',
@@ -139,29 +156,31 @@ describe('chatCommand', () => {
       });
     });
 
-    it('should find session by name', async () => {
+    it('should resume session by name and return dialog action', async () => {
       const resumeCommand = chatCommand.subCommands?.find(
         (cmd) => cmd.name === 'resume',
       );
       const result = await resumeCommand?.action!(
-        undefined as any,
+        mockContext,
         'test-session-1',
       );
 
       expect(result).toEqual({
-        type: 'message',
-        messageType: 'info',
-        content: expect.stringContaining('Found session'),
+        type: 'dialog',
+        dialog: 'resume',
+        params: { sessionId: 'test-session-id-12345' },
       });
     });
   });
 
   describe('delete subcommand', () => {
+    const mockContext = createMockContext();
+
     it('should return error when no name provided', async () => {
       const deleteCommand = chatCommand.subCommands?.find(
         (cmd) => cmd.name === 'delete',
       );
-      const result = await deleteCommand?.action!(undefined as any, '');
+      const result = await deleteCommand?.action!(mockContext, '');
 
       expect(result).toEqual({
         type: 'message',
@@ -175,7 +194,7 @@ describe('chatCommand', () => {
         (cmd) => cmd.name === 'delete',
       );
       const result = await deleteCommand?.action!(
-        undefined as any,
+        mockContext,
         'test-session-1',
       );
 
@@ -183,6 +202,31 @@ describe('chatCommand', () => {
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('deleted'),
+      });
+    });
+
+    it('should warn when session file not found but removed from index', async () => {
+      const { SessionService } = await import('@qwen-code/qwen-code-core');
+      vi.mocked(SessionService).mockImplementationOnce(
+        () =>
+          ({
+            loadSession: vi.fn().mockResolvedValue({ messages: [] }),
+            removeSession: vi.fn().mockResolvedValue(false),
+          }) as unknown as typeof SessionService,
+      );
+
+      const deleteCommand = chatCommand.subCommands?.find(
+        (cmd) => cmd.name === 'delete',
+      );
+      const result = await deleteCommand?.action!(
+        mockContext,
+        'test-session-1',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('removed from index'),
       });
     });
   });

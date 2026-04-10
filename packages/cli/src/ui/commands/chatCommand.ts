@@ -37,7 +37,7 @@ export const chatCommand: SlashCommand = {
         args: string,
       ): Promise<SlashCommandActionReturn | void> => {
         const name = args.trim();
-        
+
         if (!name) {
           return {
             type: 'message',
@@ -56,9 +56,10 @@ export const chatCommand: SlashCommand = {
         }
 
         const sessionId = config.getSessionId();
-        
+        const projectDir = config.getTargetDir();
+
         try {
-          await saveSessionToIndex(name, sessionId);
+          await saveSessionToIndex(projectDir, name, sessionId);
           return {
             type: 'message',
             messageType: 'info',
@@ -84,11 +85,23 @@ export const chatCommand: SlashCommand = {
         return t('List all saved session names.');
       },
       kind: CommandKind.BUILT_IN,
-      action: async (): Promise<SlashCommandActionReturn | void> => {
+      action: async (
+        context: CommandContext,
+      ): Promise<SlashCommandActionReturn | void> => {
         try {
-          const sessions = await listNamedSessions();
+          const config = context.services.config;
+          if (!config) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: t('Config not loaded.'),
+            };
+          }
+
+          const projectDir = config.getTargetDir();
+          const sessions = await listNamedSessions(projectDir);
           const names = Object.keys(sessions);
-          
+
           if (names.length === 0) {
             return {
               type: 'message',
@@ -107,7 +120,9 @@ export const chatCommand: SlashCommand = {
           return {
             type: 'message',
             messageType: 'info',
-            content: t('Saved sessions:\n\n{{sessions}}', { sessions: content }),
+            content: t('Saved sessions:\n\n{{sessions}}', {
+              sessions: content,
+            }),
           };
         } catch (error) {
           return {
@@ -141,7 +156,17 @@ export const chatCommand: SlashCommand = {
         }
 
         try {
-          const sessionId = await getSessionIdByName(name);
+          const config = context.services.config;
+          if (!config) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: t('Config not loaded.'),
+            };
+          }
+
+          const projectDir = config.getTargetDir();
+          const sessionId = await getSessionIdByName(projectDir, name);
 
           if (!sessionId) {
             return {
@@ -152,18 +177,24 @@ export const chatCommand: SlashCommand = {
           }
 
           // Verify session data exists
-          const config = context.services.config;
-          if (!config) {
+          const sessionService = new SessionService(projectDir);
+
+          let sessionData;
+          try {
+            sessionData = await sessionService.loadSession(sessionId);
+          } catch (error) {
             return {
               type: 'message',
               messageType: 'error',
-              content: t('Config not loaded.'),
+              content: t(
+                'Failed to load session data for "{{name}}": {{error}}',
+                {
+                  name,
+                  error: error instanceof Error ? error.message : String(error),
+                },
+              ),
             };
           }
-
-          const cwd = config.getTargetDir();
-          const sessionService = new SessionService(cwd);
-          const sessionData = await sessionService.loadSession(sessionId);
 
           if (!sessionData) {
             return {
@@ -204,7 +235,7 @@ export const chatCommand: SlashCommand = {
         args: string,
       ): Promise<SlashCommandActionReturn | void> => {
         const name = args.trim();
-        
+
         if (!name) {
           return {
             type: 'message',
@@ -214,13 +245,53 @@ export const chatCommand: SlashCommand = {
         }
 
         try {
-          const deleted = await deleteSessionFromIndex(name);
-          
-          if (!deleted) {
+          const config = context.services.config;
+          if (!config) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: t('Config not loaded.'),
+            };
+          }
+
+          const projectDir = config.getTargetDir();
+
+          // First, get the session ID from the index
+          const sessionId = await getSessionIdByName(projectDir, name);
+
+          if (!sessionId) {
             return {
               type: 'message',
               messageType: 'error',
               content: t('Session "{{name}}" not found.', { name }),
+            };
+          }
+
+          // Delete the actual session file (may not exist if manually deleted)
+          const sessionService = new SessionService(projectDir);
+          const sessionDeleted = await sessionService.removeSession(sessionId);
+
+          // Always remove from the index
+          const indexDeleted = await deleteSessionFromIndex(projectDir, name);
+
+          if (!indexDeleted) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: t('Failed to delete session "{{name}}" from index.', {
+                name,
+              }),
+            };
+          }
+
+          if (!sessionDeleted) {
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: t(
+                'Session "{{name}}" removed from index. Session file was not found or already deleted.',
+                { name },
+              ),
             };
           }
 
