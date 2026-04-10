@@ -17,7 +17,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from '@google/genai';
-import { retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 import { getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
@@ -589,6 +589,12 @@ export class GeminiChat {
         return false;
       },
       authType: this.config.getContentGeneratorConfig()?.authType,
+      persistentMode: isUnattendedMode(),
+      heartbeatFn: (info) => {
+        process.stderr.write(
+          `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+        );
+      },
     });
 
     return this.processStreamResponse(model, streamResponse);
