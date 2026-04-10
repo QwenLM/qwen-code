@@ -698,18 +698,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -725,17 +734,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -763,18 +768,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -790,17 +804,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -828,18 +838,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -855,17 +874,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -893,18 +908,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -920,17 +944,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -958,18 +978,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -985,17 +1014,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -1023,18 +1048,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -1050,17 +1084,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -1088,18 +1118,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -1115,17 +1154,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -1153,18 +1188,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -1180,17 +1224,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -1218,18 +1258,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -1245,17 +1294,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -1283,18 +1328,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -1310,17 +1364,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -1348,18 +1398,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -1375,17 +1434,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
@@ -1413,18 +1468,27 @@
                 "description": "The list of hook configurations to execute.",
                 "type": "array",
                 "items": {
-                  "description": "A hook configuration entry that defines a command to execute.",
+                  "description": "A hook configuration entry. Can be either a command hook or a prompt hook.",
                   "type": "object",
                   "properties": {
                     "type": {
                       "description": "The type of hook.",
                       "type": "string",
                       "enum": [
-                        "command"
+                        "command",
+                        "prompt"
                       ]
                     },
                     "command": {
-                      "description": "The command to execute when the hook is triggered.",
+                      "description": "The command to execute when the hook is triggered. Required for command hooks.",
+                      "type": "string"
+                    },
+                    "prompt": {
+                      "description": "The LLM prompt template for evaluating the hook condition. Supports $ARGUMENTS placeholder. Required for prompt hooks.",
+                      "type": "string"
+                    },
+                    "model": {
+                      "description": "Optional model name for prompt hooks. Defaults to fast model.",
                       "type": "string"
                     },
                     "name": {
@@ -1440,17 +1504,13 @@
                       "type": "number"
                     },
                     "env": {
-                      "description": "Environment variables to set when executing the hook command.",
+                      "description": "Environment variables to set when executing the hook command. Only for command hooks.",
                       "type": "object",
                       "additionalProperties": {
                         "type": "string"
                       }
                     }
-                  },
-                  "required": [
-                    "type",
-                    "command"
-                  ]
+                  }
                 }
               }
             },
