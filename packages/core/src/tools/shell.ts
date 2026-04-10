@@ -24,6 +24,8 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { truncateToolOutput } from '../utils/truncation.js';
+import { CommitAttributionService } from '../services/commitAttribution.js';
+import { buildGitNotesCommand } from '../services/attributionTrailer.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
@@ -447,6 +449,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       }
 
+      // After a successful git commit, attach AI attribution as git notes
+      await this.attachCommitAttribution(strippedCommand, result, cwd);
+
       // Truncate large output and save full content to a temp file.
       if (typeof llmContent === 'string') {
         const truncatedResult = await truncateToolOutput(
@@ -481,6 +486,102 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (fs.existsSync(tempFilePath)) {
         fs.unlinkSync(tempFilePath);
       }
+    }
+  }
+
+  /**
+   * After a successful git commit, attach per-file AI attribution metadata
+   * as git notes. This keeps the commit message clean while enabling
+   * compliance audits and AI contribution tracking.
+   *
+   * Respects the gitCoAuthor setting: if the user disables co-author,
+   * attribution notes are also skipped.
+   */
+  private async attachCommitAttribution(
+    command: string,
+    result: { exitCode: number | null; aborted?: boolean },
+    cwd: string,
+  ): Promise<void> {
+    // Only act on git commit commands
+    const gitCommitPattern = /\bgit\s+commit\b/;
+    if (!gitCommitPattern.test(command)) {
+      return;
+    }
+
+    const attributionService = CommitAttributionService.getInstance();
+    if (!attributionService.hasAttributions()) {
+      return;
+    }
+
+    // If the commit failed or was aborted, clear stale attribution data
+    // so it doesn't leak into the next successful commit.
+    if (result.exitCode !== 0 || result.aborted) {
+      attributionService.clearAttributions();
+      return;
+    }
+
+    // Respect the gitCoAuthor toggle — if the user opted out of AI
+    // attribution in commit messages, skip notes as well.
+    const gitCoAuthorSettings = this.config.getGitCoAuthor();
+    if (!gitCoAuthorSettings.enabled) {
+      attributionService.clearAttributions();
+      return;
+    }
+
+    try {
+      const generatorName = gitCoAuthorSettings.name ?? 'Qwen-Coder';
+      const baseDir = this.config.getTargetDir();
+      const note = attributionService.generateNotePayload(
+        generatorName,
+        baseDir,
+      );
+      const notesCommand = buildGitNotesCommand(note);
+
+      if (!notesCommand) {
+        debugLogger.warn(
+          'AI attribution note too large, skipping git notes attachment',
+        );
+        return; // finally block still runs for cleanup
+      }
+
+      // Use a short timeout to avoid blocking the user if git notes stalls
+      const notesAbort = new AbortController();
+      const notesTimeout = setTimeout(() => notesAbort.abort(), 5000);
+      let notesExitCode: number | null = null;
+      let notesOutput = '';
+      try {
+        const handle = await ShellExecutionService.execute(
+          notesCommand,
+          cwd,
+          () => {},
+          notesAbort.signal,
+          false,
+          {},
+        );
+        const notesResult = await handle.result;
+        notesExitCode = notesResult.exitCode;
+        notesOutput = notesResult.output;
+      } finally {
+        clearTimeout(notesTimeout);
+      }
+
+      if (notesExitCode !== 0) {
+        debugLogger.warn(
+          `git notes exited with code ${notesExitCode}: ${notesOutput}`,
+        );
+      } else {
+        debugLogger.debug(
+          `Attached AI attribution note: ${note.summary.totalFilesTouched} file(s), +${note.summary.totalAiCharsAdded}/-${note.summary.totalAiCharsRemoved} chars`,
+        );
+      }
+    } catch (err) {
+      // Non-fatal: attribution failure should not block the commit
+      debugLogger.warn(
+        `Failed to attach AI attribution note: ${getErrorMessage(err)}`,
+      );
+    } finally {
+      // Always clear attributions after a commit attempt
+      attributionService.clearAttributions();
     }
   }
 
