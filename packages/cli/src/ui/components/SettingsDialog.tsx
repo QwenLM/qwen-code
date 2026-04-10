@@ -567,6 +567,12 @@ export function SettingsDialog({
             }
             return;
           }
+          if (currentItem?.value === 'fastModel') {
+            if (name === 'return') {
+              onSelect('fastModel', selectedScope);
+            }
+            return;
+          }
           if (
             currentItem?.type === 'number' ||
             currentItem?.type === 'string'
@@ -574,6 +580,16 @@ export function SettingsDialog({
             startEditing(currentItem.value);
           } else {
             currentItem?.toggle();
+          }
+        } else if (name === 'right') {
+          // Right arrow opens sub-dialog settings (like a sub-menu)
+          const currentItem = items[activeSettingIndex];
+          if (
+            currentItem?.value === 'ui.theme' ||
+            currentItem?.value === 'general.preferredEditor' ||
+            currentItem?.value === 'fastModel'
+          ) {
+            onSelect(currentItem.value, selectedScope);
           }
         } else if (/^[0-9]$/.test(key.sequence || '') && !editingKey) {
           const currentItem = items[activeSettingIndex];
@@ -786,6 +802,12 @@ export function SettingsDialog({
                 displayValue = editBuffer;
               }
             } else if (item.type === 'number' || item.type === 'string') {
+              // Settings that open a sub-dialog on Enter
+              const isSubDialogSetting =
+                item.value === 'ui.theme' ||
+                item.value === 'general.preferredEditor' ||
+                item.value === 'fastModel';
+
               // For numbers/strings, get the actual current value from pending settings
               const path = item.value.split('.');
               const currentValue = getNestedValue(pendingSettings, path);
@@ -812,6 +834,11 @@ export function SettingsDialog({
 
               if (isDifferentFromDefault || isModified) {
                 displayValue += '*';
+              }
+
+              // Append ▸ for sub-dialog settings to hint Enter opens a picker
+              if (isSubDialogSetting) {
+                displayValue = displayValue ? displayValue + ' ▸' : '▸';
               }
             } else {
               // For booleans and other types, use existing logic
