@@ -19,6 +19,7 @@ import { getAutoMemoryMetadataPath } from './paths.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
+import { logMemoryForget, MemoryForgetEvent } from '../telemetry/index.js';
 
 export interface AutoMemoryForgetMatch {
   topic: AutoMemoryType;
@@ -330,5 +331,15 @@ export async function forgetManagedAutoMemoryEntries(
     selection.matches,
     now,
   );
+  if (options.config) {
+    logMemoryForget(
+      options.config,
+      new MemoryForgetEvent({
+        removed_entries_count: result.removedEntries.length,
+        touched_topics: result.touchedTopics,
+        selection_strategy: selection.strategy,
+      }),
+    );
+  }
   return { ...result, query: trimmedQuery };
 }

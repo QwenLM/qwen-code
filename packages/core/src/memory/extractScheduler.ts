@@ -24,6 +24,7 @@ import {
   markExtractRunning,
 } from './state.js';
 import { isAutoMemPath } from './paths.js';
+import { logMemoryExtract, MemoryExtractEvent } from '../telemetry/index.js';
 
 export interface ScheduleAutoMemoryExtractParams {
   projectRoot: string;
@@ -59,11 +60,17 @@ function buildSkippedExtractResult(
  */
 function partWritesToMemory(part: Part, projectRoot: string): boolean {
   // Direct write_file or edit tool calls to a memory path
-  const writeToolNames = new Set(['write_file', 'edit', 'replace', 'create_file']);
+  const writeToolNames = new Set([
+    'write_file',
+    'edit',
+    'replace',
+    'create_file',
+  ]);
   const name = part.functionCall?.name;
   if (name && writeToolNames.has(name)) {
     const args = part.functionCall?.args as Record<string, unknown> | undefined;
-    const filePath = args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
+    const filePath =
+      args?.['file_path'] ?? args?.['path'] ?? args?.['target_file'];
     if (typeof filePath === 'string' && isAutoMemPath(filePath, projectRoot)) {
       return true;
     }
@@ -71,7 +78,10 @@ function partWritesToMemory(part: Part, projectRoot: string): boolean {
   return false;
 }
 
-function historySliceUsesMemoryTool(history: Content[], projectRoot: string): boolean {
+function historySliceUsesMemoryTool(
+  history: Content[],
+  projectRoot: string,
+): boolean {
   return history.some((message) =>
     (message.parts ?? []).some((part) => partWritesToMemory(part, projectRoot)),
   );
@@ -191,8 +201,10 @@ export class ManagedAutoMemoryExtractRuntime {
       },
     });
 
+    const t0 = Date.now();
     try {
       const result = await runAutoMemoryExtract(params);
+      const durationMs = Date.now() - t0;
       this.registry.update(taskId, {
         status: result.skippedReason ? 'skipped' : 'completed',
         progressText:
@@ -207,12 +219,37 @@ export class ManagedAutoMemoryExtractRuntime {
           skippedReason: result.skippedReason,
         },
       });
+      if (params.config) {
+        logMemoryExtract(
+          params.config,
+          new MemoryExtractEvent({
+            trigger: 'auto',
+            status: 'completed',
+            patches_count: result.patches.length,
+            touched_topics: result.touchedTopics,
+            duration_ms: durationMs,
+          }),
+        );
+      }
       return result;
     } catch (error) {
+      const durationMs = Date.now() - t0;
       this.registry.update(taskId, {
         status: 'failed',
         error: error instanceof Error ? error.message : String(error),
       });
+      if (params.config) {
+        logMemoryExtract(
+          params.config,
+          new MemoryExtractEvent({
+            trigger: 'auto',
+            status: 'failed',
+            patches_count: 0,
+            touched_topics: [],
+            duration_ms: durationMs,
+          }),
+        );
+      }
       throw error;
     } finally {
       this.currentTaskIdByProject.delete(params.projectRoot);

@@ -52,6 +52,11 @@ export {
   logArenaSessionStarted,
   logArenaAgentCompleted,
   logArenaSessionEnded,
+  logMemoryExtract,
+  logMemoryDream,
+  logMemoryRecall,
+  logMemoryForget,
+  logMemoryRemember,
 } from './loggers.js';
 export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
 export {
@@ -78,6 +83,11 @@ export {
   makeArenaSessionStartedEvent,
   makeArenaAgentCompletedEvent,
   makeArenaSessionEndedEvent,
+  MemoryExtractEvent,
+  MemoryDreamEvent,
+  MemoryRecallEvent,
+  MemoryForgetEvent,
+  MemoryRememberEvent,
 } from './types.js';
 export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
 export type {
@@ -117,6 +127,12 @@ export {
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
+  // Auto-Memory metrics functions
+  recordMemoryExtractMetrics,
+  recordMemoryDreamMetrics,
+  recordMemoryRecallMetrics,
+  recordMemoryForgetMetrics,
+  recordMemoryRememberMetrics,
   // Performance monitoring types
   PerformanceMetricType,
   MemoryMetricType,

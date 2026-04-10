@@ -53,3 +53,10 @@ export const EVENT_STARTUP_PERFORMANCE = 'qwen-code.startup.performance';
 export const EVENT_MEMORY_USAGE = 'qwen-code.memory.usage';
 export const EVENT_PERFORMANCE_BASELINE = 'qwen-code.performance.baseline';
 export const EVENT_PERFORMANCE_REGRESSION = 'qwen-code.performance.regression';
+
+// Managed Auto-Memory Events
+export const EVENT_MEMORY_EXTRACT = 'qwen-code.memory.extract';
+export const EVENT_MEMORY_DREAM = 'qwen-code.memory.dream';
+export const EVENT_MEMORY_RECALL = 'qwen-code.memory.recall';
+export const EVENT_MEMORY_FORGET = 'qwen-code.memory.forget';
+export const EVENT_MEMORY_REMEMBER = 'qwen-code.memory.remember';

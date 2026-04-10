@@ -1135,3 +1135,124 @@ export class SpeculationEvent implements BaseTelemetryEvent {
     this.had_pipelined_suggestion = params.had_pipelined_suggestion;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Managed Auto-Memory Events
+// ---------------------------------------------------------------------------
+
+export class MemoryExtractEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.extract';
+  'event.timestamp': string;
+  /** 'auto' = triggered by session turn; 'manual' = user-initiated */
+  trigger: 'auto' | 'manual';
+  status: 'completed' | 'skipped' | 'failed';
+  skipped_reason?: 'already_running' | 'queued' | 'memory_tool';
+  patches_count: number;
+  touched_topics: string;
+  duration_ms: number;
+
+  constructor(params: {
+    trigger: 'auto' | 'manual';
+    status: 'completed' | 'skipped' | 'failed';
+    skipped_reason?: 'already_running' | 'queued' | 'memory_tool';
+    patches_count: number;
+    touched_topics: string[];
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.extract';
+    this['event.timestamp'] = new Date().toISOString();
+    this.trigger = params.trigger;
+    this.status = params.status;
+    this.skipped_reason = params.skipped_reason;
+    this.patches_count = params.patches_count;
+    this.touched_topics = params.touched_topics.join(',');
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryDreamEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.dream';
+  'event.timestamp': string;
+  /** 'auto' = scheduler-triggered; 'manual' = user ran /dream */
+  trigger: 'auto' | 'manual';
+  status: 'updated' | 'noop' | 'failed';
+  deduped_entries: number;
+  touched_topics_count: number;
+  touched_topics: string;
+  duration_ms: number;
+
+  constructor(params: {
+    trigger: 'auto' | 'manual';
+    status: 'updated' | 'noop' | 'failed';
+    deduped_entries: number;
+    touched_topics: string[];
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.dream';
+    this['event.timestamp'] = new Date().toISOString();
+    this.trigger = params.trigger;
+    this.status = params.status;
+    this.deduped_entries = params.deduped_entries;
+    this.touched_topics_count = params.touched_topics.length;
+    this.touched_topics = params.touched_topics.join(',');
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryRecallEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.recall';
+  'event.timestamp': string;
+  query_length: number;
+  docs_scanned: number;
+  docs_selected: number;
+  strategy: 'none' | 'heuristic' | 'model';
+  duration_ms: number;
+
+  constructor(params: {
+    query_length: number;
+    docs_scanned: number;
+    docs_selected: number;
+    strategy: 'none' | 'heuristic' | 'model';
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.recall';
+    this['event.timestamp'] = new Date().toISOString();
+    this.query_length = params.query_length;
+    this.docs_scanned = params.docs_scanned;
+    this.docs_selected = params.docs_selected;
+    this.strategy = params.strategy;
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryForgetEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.forget';
+  'event.timestamp': string;
+  removed_entries_count: number;
+  touched_topics: string;
+  selection_strategy: 'none' | 'heuristic' | 'model';
+
+  constructor(params: {
+    removed_entries_count: number;
+    touched_topics: string[];
+    selection_strategy: 'none' | 'heuristic' | 'model';
+  }) {
+    this['event.name'] = 'qwen-code.memory.forget';
+    this['event.timestamp'] = new Date().toISOString();
+    this.removed_entries_count = params.removed_entries_count;
+    this.touched_topics = params.touched_topics.join(',');
+    this.selection_strategy = params.selection_strategy;
+  }
+}
+
+export class MemoryRememberEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.remember';
+  'event.timestamp': string;
+  topic: string;
+
+  constructor(params: { topic: string }) {
+    this['event.name'] = 'qwen-code.memory.remember';
+    this['event.timestamp'] = new Date().toISOString();
+    this.topic = params.topic;
+  }
+}

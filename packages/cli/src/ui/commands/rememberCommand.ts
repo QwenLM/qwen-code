@@ -4,9 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { getAutoMemoryRoot } from '@qwen-code/qwen-code-core';
+import { getAutoMemoryRoot ,
+  logMemoryRemember,
+  MemoryRememberEvent,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
-import type { CommandContext, SlashCommand, SlashCommandActionReturn } from './types.js';
+import type {
+  CommandContext,
+  SlashCommand,
+  SlashCommandActionReturn,
+} from './types.js';
 import { CommandKind } from './types.js';
 
 export const rememberCommand: SlashCommand = {
@@ -37,6 +44,12 @@ export const rememberCommand: SlashCommand = {
         ? getAutoMemoryRoot(config.getProjectRoot())
         : undefined;
       const dirHint = memoryDir ? ` Save it to \`${memoryDir}\`.` : '';
+      if (config) {
+        logMemoryRemember(
+          config,
+          new MemoryRememberEvent({ topic: 'managed' }),
+        );
+      }
       return {
         type: 'submit_prompt',
         content: `Please save the following to your memory system.${dirHint} Choose the most appropriate memory type (user, feedback, project, or reference) based on the content:\n\n${fact}`,
@@ -44,6 +57,9 @@ export const rememberCommand: SlashCommand = {
     }
 
     // Legacy mode: save_memory tool is registered and handles the write.
+    if (config) {
+      logMemoryRemember(config, new MemoryRememberEvent({ topic: 'legacy' }));
+    }
     return {
       type: 'tool',
       toolName: 'save_memory',

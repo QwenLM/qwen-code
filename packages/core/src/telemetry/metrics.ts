@@ -44,6 +44,16 @@ const REGRESSION_DETECTION = `${SERVICE_NAME}.performance.regression`;
 const REGRESSION_PERCENTAGE_CHANGE = `${SERVICE_NAME}.performance.regression.percentage_change`;
 const BASELINE_COMPARISON = `${SERVICE_NAME}.performance.baseline.comparison`;
 
+// Auto-Memory Metrics
+const MEMORY_EXTRACT_COUNT = `${SERVICE_NAME}.memory.extract.count`;
+const MEMORY_EXTRACT_DURATION = `${SERVICE_NAME}.memory.extract.duration`;
+const MEMORY_DREAM_COUNT = `${SERVICE_NAME}.memory.dream.count`;
+const MEMORY_DREAM_DURATION = `${SERVICE_NAME}.memory.dream.duration`;
+const MEMORY_RECALL_COUNT = `${SERVICE_NAME}.memory.recall.count`;
+const MEMORY_RECALL_DURATION = `${SERVICE_NAME}.memory.recall.duration`;
+const MEMORY_FORGET_COUNT = `${SERVICE_NAME}.memory.forget.count`;
+const MEMORY_REMEMBER_COUNT = `${SERVICE_NAME}.memory.remember.count`;
+
 const baseMetricDefinition = {
   getCommonAttributes: (config: Config): Attributes => ({
     'session.id': config.getSessionId(),
@@ -361,6 +371,16 @@ let arenaAgentDurationHistogram: Histogram | undefined;
 let arenaAgentTokensCounter: Counter | undefined;
 let arenaResultSelectedCounter: Counter | undefined;
 
+// Auto-Memory Metrics
+let memoryExtractCounter: Counter | undefined;
+let memoryExtractDurationHistogram: Histogram | undefined;
+let memoryDreamCounter: Counter | undefined;
+let memoryDreamDurationHistogram: Histogram | undefined;
+let memoryRecallCounter: Counter | undefined;
+let memoryRecallDurationHistogram: Histogram | undefined;
+let memoryForgetCounter: Counter | undefined;
+let memoryRememberCounter: Counter | undefined;
+
 let isMetricsInitialized = false;
 let isPerformanceMonitoringEnabled = false;
 
@@ -428,6 +448,51 @@ export function initializeMetrics(config: Config): void {
 
   // Increment session counter after all metrics are initialized
   sessionCounter?.add(1, baseMetricDefinition.getCommonAttributes(config));
+
+  // Auto-Memory metrics
+  memoryExtractCounter = meter.createCounter(MEMORY_EXTRACT_COUNT, {
+    description:
+      'Counts auto-memory extraction runs, tagged by trigger and status.',
+    valueType: ValueType.INT,
+  });
+  memoryExtractDurationHistogram = meter.createHistogram(
+    MEMORY_EXTRACT_DURATION,
+    {
+      description: 'Duration of auto-memory extraction in milliseconds.',
+      unit: 'ms',
+      valueType: ValueType.INT,
+    },
+  );
+  memoryDreamCounter = meter.createCounter(MEMORY_DREAM_COUNT, {
+    description:
+      'Counts auto-memory dream (consolidation) runs, tagged by trigger and status.',
+    valueType: ValueType.INT,
+  });
+  memoryDreamDurationHistogram = meter.createHistogram(MEMORY_DREAM_DURATION, {
+    description: 'Duration of auto-memory dream runs in milliseconds.',
+    unit: 'ms',
+    valueType: ValueType.INT,
+  });
+  memoryRecallCounter = meter.createCounter(MEMORY_RECALL_COUNT, {
+    description: 'Counts auto-memory recall operations, tagged by strategy.',
+    valueType: ValueType.INT,
+  });
+  memoryRecallDurationHistogram = meter.createHistogram(
+    MEMORY_RECALL_DURATION,
+    {
+      description: 'Duration of auto-memory recall operations in milliseconds.',
+      unit: 'ms',
+      valueType: ValueType.INT,
+    },
+  );
+  memoryForgetCounter = meter.createCounter(MEMORY_FORGET_COUNT, {
+    description: 'Counts auto-memory forget operations.',
+    valueType: ValueType.INT,
+  });
+  memoryRememberCounter = meter.createCounter(MEMORY_REMEMBER_COUNT, {
+    description: 'Counts /remember command invocations.',
+    valueType: ValueType.INT,
+  });
 
   // Initialize performance monitoring metrics if enabled
   initializePerformanceMonitoring(config);
@@ -875,4 +940,88 @@ export function recordArenaSessionEndedMetrics(
       model_id: winnerModelId,
     });
   }
+}
+
+// ─── Auto-Memory Metric Recording Functions ─────────────────────────────────
+
+export function recordMemoryExtractMetrics(
+  config: Config,
+  durationMs: number,
+  attrs: {
+    trigger: 'auto' | 'manual';
+    status: 'completed' | 'skipped' | 'failed';
+    patches_count: number;
+  },
+): void {
+  if (!isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  memoryExtractCounter?.add(1, {
+    ...common,
+    trigger: attrs.trigger,
+    status: attrs.status,
+  });
+  memoryExtractDurationHistogram?.record(durationMs, {
+    ...common,
+    trigger: attrs.trigger,
+    status: attrs.status,
+  });
+}
+
+export function recordMemoryDreamMetrics(
+  config: Config,
+  durationMs: number,
+  attrs: {
+    trigger: 'auto' | 'manual';
+    status: 'updated' | 'noop' | 'failed';
+    deduped_entries: number;
+  },
+): void {
+  if (!isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  memoryDreamCounter?.add(1, {
+    ...common,
+    trigger: attrs.trigger,
+    status: attrs.status,
+  });
+  memoryDreamDurationHistogram?.record(durationMs, {
+    ...common,
+    trigger: attrs.trigger,
+    status: attrs.status,
+  });
+}
+
+export function recordMemoryRecallMetrics(
+  config: Config,
+  durationMs: number,
+  attrs: { strategy: 'none' | 'heuristic' | 'model'; docs_selected: number },
+): void {
+  if (!isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  memoryRecallCounter?.add(1, { ...common, strategy: attrs.strategy });
+  memoryRecallDurationHistogram?.record(durationMs, {
+    ...common,
+    strategy: attrs.strategy,
+  });
+}
+
+export function recordMemoryForgetMetrics(
+  config: Config,
+  attrs: { removed_entries_count: number },
+): void {
+  if (!isMetricsInitialized) return;
+  memoryForgetCounter?.add(1, {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    removed_entries_count: attrs.removed_entries_count,
+  });
+}
+
+export function recordMemoryRememberMetrics(
+  config: Config,
+  attrs: { mode: 'managed' | 'legacy' },
+): void {
+  if (!isMetricsInitialized) return;
+  memoryRememberCounter?.add(1, {
+    ...baseMetricDefinition.getCommonAttributes(config),
+    mode: attrs.mode,
+  });
 }

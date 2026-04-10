@@ -13,6 +13,7 @@ import {
 } from './scan.js';
 import { memoryAge, memoryFreshnessText } from './memoryAge.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
+import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
 
 const MAX_RELEVANT_DOCS = 5;
 const MAX_DOC_BODY_CHARS = 1_200;
@@ -159,6 +160,7 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   query: string,
   options: ResolveRelevantAutoMemoryPromptOptions = {},
 ): Promise<RelevantAutoMemoryPromptResult> {
+  const t0 = Date.now();
   const docs = filterExcludedAutoMemoryDocuments(
     await scanAutoMemoryTopicDocuments(projectRoot),
     options.excludedFilePaths,
@@ -166,6 +168,18 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   const limit = options.limit ?? MAX_RELEVANT_DOCS;
 
   if (query.trim().length === 0 || docs.length === 0 || limit <= 0) {
+    if (options.config) {
+      logMemoryRecall(
+        options.config,
+        new MemoryRecallEvent({
+          query_length: query.length,
+          docs_scanned: docs.length,
+          docs_selected: 0,
+          strategy: 'none',
+          duration_ms: Date.now() - t0,
+        }),
+      );
+    }
     return {
       prompt: '',
       selectedDocs: [],
@@ -182,10 +196,22 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
         limit,
         options.recentTools ?? [],
       );
+      const strategy: RelevantAutoMemoryPromptResult['strategy'] =
+        selectedDocs.length > 0 ? 'model' : 'none';
+      logMemoryRecall(
+        options.config,
+        new MemoryRecallEvent({
+          query_length: query.length,
+          docs_scanned: docs.length,
+          docs_selected: selectedDocs.length,
+          strategy,
+          duration_ms: Date.now() - t0,
+        }),
+      );
       return {
         prompt: buildRelevantAutoMemoryPrompt(selectedDocs),
         selectedDocs,
-        strategy: selectedDocs.length > 0 ? 'model' : 'none',
+        strategy,
       };
     } catch (error) {
       debugLogger.warn(
@@ -196,10 +222,24 @@ export async function resolveRelevantAutoMemoryPromptForQuery(
   }
 
   const selectedDocs = selectRelevantAutoMemoryDocuments(query, docs, limit);
+  const strategy: RelevantAutoMemoryPromptResult['strategy'] =
+    selectedDocs.length > 0 ? 'heuristic' : 'none';
+  if (options.config) {
+    logMemoryRecall(
+      options.config,
+      new MemoryRecallEvent({
+        query_length: query.length,
+        docs_scanned: docs.length,
+        docs_selected: selectedDocs.length,
+        strategy,
+        duration_ms: Date.now() - t0,
+      }),
+    );
+  }
   return {
     prompt: buildRelevantAutoMemoryPrompt(selectedDocs),
     selectedDocs,
-    strategy: selectedDocs.length > 0 ? 'heuristic' : 'none',
+    strategy,
   };
 }
 
