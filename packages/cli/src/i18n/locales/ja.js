@@ -743,9 +743,10 @@ export default {
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
-  'Switch the model for this session': 'このセッションのモデルを切り替え',
-  'Set fast model for background tasks':
-    'バックグラウンドタスク用の高速モデルを設定',
+  'Switch the model for this session (--fast for suggestion model)':
+    'このセッションのモデルを切り替え（--fast で提案モデルを設定）',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'プロンプト提案と投機的実行用の軽量モデルを設定',
   'Content generator configuration not available.':
     'コンテンツジェネレーター設定が利用できません',
   'Authentication type not available.': '認証タイプが利用できません',
@@ -1462,9 +1463,9 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
-  verbose: '詳細',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    '詳細モードで完全なツール出力と思考を表示します（Ctrl+O で切り替え）。',
+  compact: 'コンパクト',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'コンパクトモードでツール出力と思考を非表示にします（Ctrl+O で切り替え）。',
   'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
 
   'Switch to plan mode or exit plan mode':
@@ -1477,4 +1478,6 @@ export default {
     'Already in plan mode. Use "/plan exit" to exit plan mode.',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
     'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

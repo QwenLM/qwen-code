@@ -997,9 +997,10 @@ export default {
   // ============================================================================
   // Команды - Модель
   // ============================================================================
-  'Switch the model for this session': 'Переключение модели для этой сессии',
-  'Set fast model for background tasks':
-    'Установить быструю модель для фоновых задач',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Переключение модели для этой сессии (--fast для модели подсказок)',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Установить облегчённую модель для подсказок и спекулятивного выполнения',
   'Content generator configuration not available.':
     'Конфигурация генератора содержимого недоступна.',
   'Authentication type not available.': 'Тип авторизации недоступен.',
@@ -1967,9 +1968,9 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
-  verbose: 'подробный',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    'Показывать полный вывод инструментов и процесс рассуждений в подробном режиме (переключить с помощью Ctrl+O).',
+  compact: 'компактный',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Скрывать вывод инструментов и процесс рассуждений для более чистого вида (переключить с помощью Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Нажмите Ctrl+O для показа полного вывода инструментов',
 
@@ -1983,4 +1984,6 @@ export default {
     'Already in plan mode. Use "/plan exit" to exit plan mode.',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
     'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

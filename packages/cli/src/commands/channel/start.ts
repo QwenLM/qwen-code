@@ -183,7 +183,16 @@ async function startSingle(name: string): Promise<void> {
   const channel = createChannel(name, config, bridge, { router });
   channels.set(name, channel);
   registerToolCallDispatch(bridge, router, channels);
-  await channel.connect();
+
+  try {
+    await channel.connect();
+  } catch (err) {
+    writeStderrLine(
+      `Error: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    bridge.stop();
+    process.exit(1);
+  }
 
   writeServiceInfo([name]);
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
