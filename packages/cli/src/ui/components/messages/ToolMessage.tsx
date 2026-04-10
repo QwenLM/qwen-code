@@ -9,8 +9,12 @@ import { Box, Text } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
+import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { AnsiOutputText } from '../AnsiOutput.js';
-import { SlicingMaxSizedBox } from '../shared/SlicingMaxSizedBox.js';
+import {
+  SlicingMaxSizedBox,
+  MAXIMUM_RESULT_DISPLAY_CHARACTERS,
+} from '../shared/SlicingMaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
   TodoResultDisplay,
@@ -196,15 +200,39 @@ const SubagentExecutionRenderer: React.FC<{
 );
 
 /**
- * Component to render string results as plain text with height limiting.
- * Markdown rendering is intentionally disabled for tool outputs because
- * MarkdownDisplay does not respect availableTerminalHeight properly.
+ * Component to render string results (markdown or plain text).
+ *
+ * When renderAsMarkdown is true, uses MarkdownDisplay for formatted output.
+ * When false, uses SlicingMaxSizedBox for pre-render slicing to prevent
+ * Ink from laying out massive invisible content that causes flickering.
  */
 const StringResultRenderer: React.FC<{
   data: string;
+  renderAsMarkdown: boolean;
   availableHeight: number;
   childWidth: number;
-}> = ({ data, availableHeight, childWidth }) => (
+}> = ({ data, renderAsMarkdown, availableHeight, childWidth }) => {
+  if (renderAsMarkdown) {
+    // Truncate oversized data for the markdown path as well, since
+    // MarkdownDisplay has no pre-render slicing of its own.
+    const markdownData =
+      data.length > MAXIMUM_RESULT_DISPLAY_CHARACTERS
+        ? '...' + data.slice(-MAXIMUM_RESULT_DISPLAY_CHARACTERS)
+        : data;
+
+    return (
+      <Box flexDirection="column">
+        <MarkdownDisplay
+          text={markdownData}
+          isPending={false}
+          availableTerminalHeight={availableHeight}
+          contentWidth={childWidth}
+        />
+      </Box>
+    );
+  }
+
+  return (
     <SlicingMaxSizedBox
       data={data}
       maxLines={availableHeight}
@@ -220,6 +248,7 @@ const StringResultRenderer: React.FC<{
       )}
     </SlicingMaxSizedBox>
   );
+};
 
 /**
  * Component to render diff results
@@ -261,6 +290,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   availableTerminalHeight,
   contentWidth,
   emphasis = 'medium',
+  renderOutputAsMarkdown = true,
   activeShellPtyId,
   embeddedShellFocused,
   ptyId,
@@ -322,6 +352,12 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
       )
     : MAX_TOOL_OUTPUT_LINES;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
+
+  // When availableTerminalHeight is known, use plain text with SlicingMaxSizedBox
+  // for anti-flicker. Markdown rendering is used only when no terminal height
+  // constraint is provided (e.g., static area items without height info).
+  const effectiveRenderAsMarkdown =
+    renderOutputAsMarkdown && availableTerminalHeight === undefined;
 
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
@@ -390,6 +426,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
             {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
                 data={effectiveDisplayRenderer.data}
+                renderAsMarkdown={effectiveRenderAsMarkdown}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
               />

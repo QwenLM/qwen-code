@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -84,9 +84,18 @@ export const SlicingMaxSizedBox: React.FC<SlicingMaxSizedBoxProps> = ({
     return { truncatedData: text, hiddenLineCount: hidden };
   }, [data, maxLines, overflowDirection]);
 
+  // When pre-slicing is active, disable MaxSizedBox's independent height
+  // truncation to prevent double-counting hidden lines. Pre-sliced text may
+  // contain lines that soft-wrap into multiple visual rows; if MaxSizedBox
+  // also truncates, its hiddenLinesCount would be added to our
+  // additionalHiddenLinesCount, mixing logical and visual line counts.
+  // With maxHeight=undefined, MaxSizedBox handles width only and renders the
+  // indicator from additionalHiddenLinesCount alone.
+  const effectiveMaxHeight = hiddenLineCount > 0 ? undefined : maxHeight;
+
   return (
     <MaxSizedBox
-      maxHeight={maxHeight}
+      maxHeight={effectiveMaxHeight}
       maxWidth={maxWidth}
       overflowDirection={overflowDirection}
       additionalHiddenLinesCount={hiddenLineCount}
