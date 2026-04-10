@@ -565,6 +565,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // ── Background (async) execution path ──────────────────────
+      // TODO: support background agents in headless mode — needs a
+      // notification drain loop in nonInteractiveCli.ts (see .claude/todos/background-agent-headless-mode.md)
+      if (this.params.run_in_background && !this.config.isInteractive()) {
+        return {
+          llmContent:
+            'Background agents are not supported in non-interactive mode. Retry without run_in_background.',
+          returnDisplay: {
+            type: 'task_execution' as const,
+            subagentName: this.params.subagent_type,
+            taskDescription: this.params.description,
+            taskPrompt: this.params.prompt,
+            status: 'failed' as const,
+            terminateReason:
+              'Background agents are not supported in non-interactive mode',
+          },
+        };
+      }
+
       if (this.params.run_in_background) {
         // Create an independent AbortController — background agents
         // survive ESC cancellation of the parent's current turn.
