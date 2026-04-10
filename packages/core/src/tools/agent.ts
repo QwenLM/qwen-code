@@ -5,6 +5,7 @@
  */
 
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import { InvalidStreamError } from '../core/geminiChat.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
   ToolResult,
@@ -44,6 +45,46 @@ export interface AgentParams {
 }
 
 const debugLogger = createDebugLogger('AGENT');
+
+// ---------------------------------------------------------------------------
+// Subagent-level retry configuration for transient stream errors
+// ---------------------------------------------------------------------------
+//
+// WHY THIS EXISTS:
+// GeminiChat already retries InvalidStreamError up to 2 times internally
+// (see INVALID_STREAM_RETRY_CONFIG in geminiChat.ts). However, commands like
+// /review fan out many subagents concurrently against the same DashScope
+// endpoint. Under high fan-out, the probability that at least one subagent
+// exhausts all internal retries rises sharply (P(any fail) = 1 − (1−p)^N
+// where p is the single-agent failure probability and N is the concurrency).
+//
+// This additional retry layer wraps the entire subagent execution so that a
+// transient stream glitch — after GeminiChat's internal budget is spent —
+// does not permanently fail the subagent and cascade into a partial /review
+// result. Only InvalidStreamError (NO_FINISH_REASON, NO_RESPONSE_TEXT)
+// triggers these retries; all other errors propagate immediately.
+//
+// Backoff: exponential with 0–25% additive jitter, inspired by claude-code's
+// withRetry.ts pattern (prevents thundering-herd on shared endpoints).
+// ---------------------------------------------------------------------------
+const SUBAGENT_STREAM_RETRY_CONFIG = {
+  /** Maximum number of retry attempts (on top of the initial attempt). */
+  maxRetries: 3,
+  /**
+   * Base delay in milliseconds; doubles each retry.
+   *
+   * Set to 5 s (not 1 s) because production traces show DashScope
+   * NO_FINISH_REASON storms lasting 2–3 minutes under high concurrency.
+   * Short backoffs (1–2 s) just pile more requests onto an already degraded
+   * endpoint. A 5 s base gives the provider meaningful breathing room while
+   * each subagent still completes within ~40 s total retry budget.
+   *
+   * Progression: 5 s → 10 s → 20 s  (+ 0–25 % jitter each)
+   */
+  baseDelayMs: 5000,
+  /** Ceiling for the exponential delay (before jitter is added). */
+  maxDelayMs: 30000,
+} as const;
 
 /**
  * Agent tool that enables primary agents to delegate tasks to specialized agents.
@@ -557,8 +598,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
       }
 
-      // Execute the subagent (blocking)
-      await subagent.execute(contextState, signal);
+      // Execute the subagent (blocking) with retry for transient stream errors.
+      //
+      // GeminiChat retries InvalidStreamError 2× internally, but under high
+      // concurrency (/review spawns many subagents) the probability that ALL
+      // internal retries fail rises. This outer retry provides an additional
+      // safety net — it re-invokes subagent.execute(), which creates a fresh
+      // chat session, while the event listeners on `this.eventEmitter` are
+      // already wired up and will handle START/ERROR/FINISH events from each
+      // attempt naturally (START resets display to 'running').
+      await this.executeSubagentWithRetry(subagent, contextState, signal);
 
       // Fire SubagentStop hook after execution and handle block decisions
       if (hookSystem && !signal?.aborted) {
@@ -659,18 +708,142 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      debugLogger.error(`[AgentTool] Error running subagent: ${errorMessage}`);
+
+      // Distinguish transient stream errors (retries exhausted) from other
+      // failures so that debug logs clearly indicate whether the retry budget
+      // was consumed. The actual retry count is attached by
+      // executeSubagentWithRetry() for accurate reporting.
+      const isStreamError = error instanceof InvalidStreamError;
+      const actualRetries = isStreamError
+        ? ((error as InvalidStreamError & { retriesAttempted?: number })
+            .retriesAttempted ?? 0)
+        : 0;
+      const retryNote = isStreamError
+        ? ` (after ${actualRetries} ${actualRetries === 1 ? 'retry' : 'retries'})`
+        : '';
+      debugLogger.error(
+        `[AgentTool] Error running subagent${retryNote}: ${errorMessage}`,
+      );
 
       const errorDisplay: AgentResultDisplay = {
         ...this.currentDisplay!,
         status: 'failed',
-        terminateReason: `Failed to run subagent: ${errorMessage}`,
+        terminateReason: `Failed to run subagent${retryNote}: ${errorMessage}`,
       };
 
       return {
-        llmContent: `Failed to run subagent: ${errorMessage}`,
+        llmContent: `Failed to run subagent${retryNote}: ${errorMessage}`,
         returnDisplay: errorDisplay,
       };
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Subagent execution with retry for transient InvalidStreamError
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Wraps `subagent.execute()` with retry logic for transient stream errors.
+   *
+   * Only `InvalidStreamError` (NO_FINISH_REASON, NO_RESPONSE_TEXT) triggers a
+   * retry. All other errors — configuration, abort, permission, etc. — are
+   * immediately re-thrown.
+   *
+   * Each retry re-invokes `subagent.execute()`, which internally creates a
+   * fresh chat session and abort controller. The event listeners already set
+   * up on `this.eventEmitter` receive START/FINISH events from each attempt,
+   * keeping the display in sync.
+   *
+   * Backoff: exponential with 0–25% additive jitter.
+   *   delay = min(baseDelayMs × 2^(attempt−1), maxDelayMs) + random(0, 25%)
+   *
+   * @param subagent - The headless subagent instance to execute.
+   * @param contextState - Task context passed to each execution attempt.
+   * @param signal - Optional abort signal; checked before each retry.
+   */
+  private async executeSubagentWithRetry(
+    subagent: {
+      execute: (ctx: ContextState, sig?: AbortSignal) => Promise<void>;
+    },
+    contextState: ContextState,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const { maxRetries, baseDelayMs, maxDelayMs } =
+      SUBAGENT_STREAM_RETRY_CONFIG;
+
+    let lastError: InvalidStreamError | undefined;
+    let retriesAttempted = 0;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      // --- Pre-retry wait (skipped for the initial attempt) ----------------
+      if (attempt > 0) {
+        retriesAttempted = attempt;
+
+        if (signal?.aborted) {
+          throw lastError!;
+        }
+
+        // Exponential backoff capped at maxDelayMs
+        const exponentialDelay = Math.min(
+          baseDelayMs * Math.pow(2, attempt - 1),
+          maxDelayMs,
+        );
+        // Additive jitter: 0–25% of the computed delay to prevent
+        // thundering-herd when many subagents retry against the same endpoint
+        const jitter = Math.random() * 0.25 * exponentialDelay;
+        const totalDelayMs = Math.round(exponentialDelay + jitter);
+
+        debugLogger.warn(
+          `[AgentTool] Transient stream error (${lastError!.type}), ` +
+            `retry ${attempt}/${maxRetries} in ${totalDelayMs}ms`,
+        );
+
+        // Clear stale tool-call records from the failed attempt so the UI
+        // does not show zombie entries from the previous execution run.
+        this.currentToolCalls = [];
+
+        // Abort-aware sleep: resolves early if the signal fires during the
+        // backoff window, so the user does not wait the full delay after
+        // cancelling.
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, totalDelayMs);
+          if (signal) {
+            const onAbort = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+          }
+        });
+
+        // Re-check abort after sleeping — the user may have cancelled while
+        // we were waiting.
+        if (signal?.aborted) {
+          throw lastError!;
+        }
+      }
+
+      // --- Execute attempt --------------------------------------------------
+      try {
+        await subagent.execute(contextState, signal);
+        return; // Success — exit the retry loop
+      } catch (error) {
+        if (error instanceof InvalidStreamError) {
+          // Transient stream error — eligible for retry
+          lastError = error;
+          continue;
+        }
+        // Non-transient error — propagate immediately without consuming
+        // retry budget (e.g. abort, config error, permission denied).
+        throw error;
+      }
+    }
+
+    // All retry attempts exhausted — attach the actual attempt count so the
+    // outer catch block can produce an accurate error message.
+    (
+      lastError as InvalidStreamError & { retriesAttempted?: number }
+    ).retriesAttempted = retriesAttempted;
+    throw lastError!;
   }
 }

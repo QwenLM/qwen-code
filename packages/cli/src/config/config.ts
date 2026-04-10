@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-/* eslint-disable import/no-internal-modules */
-
 import {
   ApprovalMode,
   AuthType,

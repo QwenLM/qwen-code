@@ -903,6 +903,18 @@ export const AppContainer = (props: AppContainerProps) => {
   // clears both the synchronous ref and React state.
   midTurnDrainRef.current = drainQueue;
 
+  // Bridge message queue to mid-turn drain via ref.
+  // Sync ref on every render so the drain callback always reads latest state.
+  const messageQueueRef = useRef(messageQueue);
+  messageQueueRef.current = messageQueue;
+  midTurnDrainRef.current = () => {
+    const queue = messageQueueRef.current;
+    if (queue.length === 0) return [];
+    messageQueueRef.current = [];
+    clearQueue();
+    return [...queue];
+  };
+
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
     (submittedValue: string) => {
@@ -1371,9 +1383,9 @@ export const AppContainer = (props: AppContainerProps) => {
   }, []);
   const shouldShowIdePrompt = Boolean(
     currentIDE &&
-    !config.getIdeMode() &&
-    !settings.merged.ide?.hasSeenNudge &&
-    !idePromptAnswered,
+      !config.getIdeMode() &&
+      !settings.merged.ide?.hasSeenNudge &&
+      !idePromptAnswered,
   );
 
   // Command migration nudge
