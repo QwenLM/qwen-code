@@ -55,6 +55,15 @@ export class SubagentValidator {
       warnings.push(...toolsValidation.warnings);
     }
 
+    // Validate disallowedTools if specified
+    if (config.disallowedTools) {
+      const disallowedValidation = this.validateTools(config.disallowedTools);
+      if (!disallowedValidation.isValid) {
+        errors.push(...disallowedValidation.errors);
+      }
+      warnings.push(...disallowedValidation.warnings);
+    }
+
     // Validate model selector if specified
     if (config.model) {
       const modelValidation = this.validateModel(config.model);
