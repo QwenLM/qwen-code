@@ -725,6 +725,56 @@ describe('retryWithBackoff - persistent mode', () => {
     await assertionPromise;
   });
 
+  it('should respect shouldRetryOnError even in persistent mode', async () => {
+    // Caller explicitly says "don't retry 429" — persistent mode must obey
+    const fn = vi.fn(async () => {
+      const error: HttpError = new Error('Rate limited');
+      error.status = 429;
+      throw error;
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      persistentMode: true,
+      shouldRetryOnError: () => false, // force fast-fail
+    });
+
+    // eslint-disable-next-line vitest/valid-expect
+    const assertionPromise = expect(promise).rejects.toThrow('Rate limited');
+    await vi.runAllTimersAsync();
+    await assertionPromise;
+
+    // Should fail on first attempt — shouldRetryOnError trumps persistent mode
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not infinite-loop when heartbeatIntervalMs is 0', async () => {
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 2) {
+        const error: HttpError = new Error('Rate limited');
+        error.status = 429;
+        throw error;
+      }
+      return 'success';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      persistentMode: true,
+      heartbeatIntervalMs: 0, // Would cause infinite loop without Math.max(1, ...)
+    });
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toBe('success');
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
   it('should not affect normal mode behavior when persistentMode is false', async () => {
     const fn = vi.fn(async () => {
       const error: HttpError = new Error('Rate limited');
