@@ -946,6 +946,8 @@ export const App: React.FC = () => {
           sessionManagement.handleSwitchSession(sessionId);
           sessionManagement.setSessionSearchQuery('');
         }}
+        onRenameSession={sessionManagement.handleRenameSession}
+        onDeleteSession={sessionManagement.handleDeleteSession}
         onClose={() => sessionManagement.setShowSessionSelector(false)}
         hasMore={sessionManagement.hasMore}
         isLoading={sessionManagement.isLoading}

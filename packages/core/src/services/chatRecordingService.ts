@@ -57,7 +57,8 @@ export interface ChatRecord {
     | 'chat_compression'
     | 'slash_command'
     | 'ui_telemetry'
-    | 'at_command';
+    | 'at_command'
+    | 'custom_title';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -97,7 +98,8 @@ export interface ChatRecord {
     | ChatCompressionRecordPayload
     | SlashCommandRecordPayload
     | UiTelemetryRecordPayload
-    | AtCommandRecordPayload;
+    | AtCommandRecordPayload
+    | CustomTitleRecordPayload;
 }
 
 /**
@@ -139,6 +141,14 @@ export interface AtCommandRecordPayload {
   message?: string;
   /** Raw user-entered @-command query (optional for legacy records). */
   userText?: string;
+}
+
+/**
+ * Stored payload for custom title set via /rename.
+ */
+export interface CustomTitleRecordPayload {
+  /** The custom title for the session */
+  customTitle: string;
 }
 
 /**
@@ -433,6 +443,25 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving ui telemetry record:', error);
+    }
+  }
+
+  /**
+   * Records a custom title for the session (set via /rename).
+   * Appended as a system record so it persists with the session data.
+   */
+  recordCustomTitle(customTitle: string): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'custom_title',
+        systemPayload: { customTitle },
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving custom title record:', error);
     }
   }
 

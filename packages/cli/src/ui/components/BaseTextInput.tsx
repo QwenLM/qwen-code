@@ -69,6 +69,9 @@ export interface BaseTextInputProps {
   prefix?: React.ReactNode;
   /** Border color for the input box. */
   borderColor?: string;
+  /** Label overlaid on the top border (right-aligned). */
+  /** Label rendered on the top border line (right-aligned). Plain string for width calculation. */
+  topRightLabel?: string;
   /** Whether keyboard handling is active. Defaults to true. */
   isActive?: boolean;
   /**
@@ -129,6 +132,7 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
   placeholder,
   prefix,
   borderColor,
+  topRightLabel,
   isActive = true,
   renderLine = defaultRenderLine,
 }) => {
@@ -240,47 +244,61 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
     <Text color={theme.text.accent}>{'> '}</Text>
   );
 
-  return (
-    <Box
-      borderStyle="single"
-      borderTop={true}
-      borderBottom={true}
-      borderLeft={false}
-      borderRight={false}
-      borderColor={resolvedBorderColor}
-    >
-      {resolvedPrefix}
-      <Box flexGrow={1} flexDirection="column">
-        {buffer.text.length === 0 && placeholder ? (
-          showCursor ? (
-            <Text>
-              {chalk.inverse(placeholder.slice(0, 1))}
-              <Text color={theme.text.secondary}>{placeholder.slice(1)}</Text>
-            </Text>
-          ) : (
-            <Text color={theme.text.secondary}>{placeholder}</Text>
-          )
-        ) : (
-          linesToRender.map((lineText, idx) => {
-            const absoluteVisualIndex = scrollVisualRow + idx;
-            const isOnCursorLine = absoluteVisualIndex === cursorVisualRow;
+  const columns = process.stdout.columns || 80;
+  // Build the top border line: ─────── label ──
+  // Label takes: 1 space + text + 1 space + 2 trailing dashes = label.length + 4
+  const labelWidth = topRightLabel ? topRightLabel.length + 4 : 0;
+  const dashCount = Math.max(1, columns - labelWidth);
+  const topBorderLine = topRightLabel
+    ? `${'─'.repeat(dashCount)} ${topRightLabel} ${'─'.repeat(2)}`
+    : '─'.repeat(columns);
 
-            return (
-              <Box key={idx} height={1}>
-                {renderLine({
-                  lineText,
-                  isOnCursorLine,
-                  cursorCol: cursorVisualCol,
-                  showCursor,
-                  visualLineIndex: idx,
-                  absoluteVisualIndex,
-                  buffer,
-                  scrollVisualRow,
-                })}
-              </Box>
-            );
-          })
-        )}
+  return (
+    <Box flexDirection="column">
+      <Text color={resolvedBorderColor} wrap="truncate-end">
+        {topBorderLine}
+      </Text>
+      <Box
+        borderStyle="single"
+        borderTop={false}
+        borderBottom={true}
+        borderLeft={false}
+        borderRight={false}
+        borderColor={resolvedBorderColor}
+      >
+        {resolvedPrefix}
+        <Box flexGrow={1} flexDirection="column">
+          {buffer.text.length === 0 && placeholder ? (
+            showCursor ? (
+              <Text>
+                {chalk.inverse(placeholder.slice(0, 1))}
+                <Text color={theme.text.secondary}>{placeholder.slice(1)}</Text>
+              </Text>
+            ) : (
+              <Text color={theme.text.secondary}>{placeholder}</Text>
+            )
+          ) : (
+            linesToRender.map((lineText, idx) => {
+              const absoluteVisualIndex = scrollVisualRow + idx;
+              const isOnCursorLine = absoluteVisualIndex === cursorVisualRow;
+
+              return (
+                <Box key={idx} height={1}>
+                  {renderLine({
+                    lineText,
+                    isOnCursorLine,
+                    cursorCol: cursorVisualCol,
+                    showCursor,
+                    visualLineIndex: idx,
+                    absoluteVisualIndex,
+                    buffer,
+                    scrollVisualRow,
+                  })}
+                </Box>
+              );
+            })
+          )}
+        </Box>
       </Box>
     </Box>
   );

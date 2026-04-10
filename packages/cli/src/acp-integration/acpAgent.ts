@@ -273,7 +273,7 @@ class QwenAgent implements Agent {
     const sessions: SessionInfo[] = result.items.map((item) => ({
       cwd: item.cwd,
       sessionId: item.sessionId,
-      title: item.prompt || '(session)',
+      title: item.customTitle || item.prompt || '(session)',
       updatedAt: new Date(item.mtime).toISOString(),
     }));
 
@@ -368,9 +368,58 @@ class QwenAgent implements Agent {
 
   async extMethod(
     method: string,
-    _params: Record<string, unknown>,
+    params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
-    throw RequestError.methodNotFound(method);
+    const cwd = (params['cwd'] as string) || process.cwd();
+    const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
+
+    switch (method) {
+      case 'deleteSession': {
+        const sessionId = params['sessionId'] as string;
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const success = await runWithAcpRuntimeOutputDir(
+          this.settings,
+          cwd,
+          async () => {
+            const sessionService = new SessionService(cwd);
+            return sessionService.removeSession(sessionId);
+          },
+        );
+        return { success };
+      }
+      case 'renameSession': {
+        const sessionId = params['sessionId'] as string;
+        const title = params['title'] as string;
+        if (!sessionId || !SESSION_ID_RE.test(sessionId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (!title || typeof title !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing title',
+          );
+        }
+        const success = await runWithAcpRuntimeOutputDir(
+          this.settings,
+          cwd,
+          async () => {
+            const sessionService = new SessionService(cwd);
+            return sessionService.renameSession(sessionId, title);
+          },
+        );
+        return { success };
+      }
+      default:
+        throw RequestError.methodNotFound(method);
+    }
   }
 
   // --- private helpers ---

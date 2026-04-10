@@ -941,6 +941,35 @@ export const useWebViewMessages = ({
           break;
         }
 
+        case 'sessionDeleted': {
+          const deletedId = message.data?.sessionId as string;
+          if (deletedId) {
+            handlers.sessionManagement.setQwenSessions(
+              (prev: Array<Record<string, unknown>>) =>
+                prev.filter(
+                  (s) => s.sessionId !== deletedId && s.id !== deletedId,
+                ),
+            );
+          }
+          break;
+        }
+
+        case 'sessionRenamed': {
+          const renamedId = message.data?.sessionId as string;
+          const newTitle = message.data?.title as string;
+          if (renamedId && newTitle) {
+            handlers.sessionManagement.setQwenSessions(
+              (prev: Array<Record<string, unknown>>) =>
+                prev.map((s) =>
+                  s.sessionId === renamedId || s.id === renamedId
+                    ? { ...s, title: newTitle, name: newTitle }
+                    : s,
+                ),
+            );
+          }
+          break;
+        }
+
         case 'activeEditorChanged': {
           const fileName = message.data?.fileName as string | null;
           const filePath = message.data?.filePath as string | null;

@@ -8,6 +8,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
+import * as crypto from 'crypto';
 import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
 
 export interface QwenMessage {
@@ -36,6 +37,7 @@ export interface QwenSession {
   filePath?: string;
   messageCount?: number;
   firstUserText?: string;
+  customTitle?: string;
   cwd?: string;
 }
 
@@ -181,6 +183,10 @@ export class QwenSessionReader {
    * Get session title (based on first user message)
    */
   getSessionTitle(session: QwenSession): string {
+    // Prefer custom title set via /rename
+    if (session.customTitle) {
+      return session.customTitle;
+    }
     // Prefer cached prompt text to avoid loading messages for JSONL sessions
     if (session.firstUserText) {
       return (
@@ -225,6 +231,7 @@ export class QwenSessionReader {
       let sessionId: string | undefined;
       let startTime: string | undefined;
       let firstUserText: string | undefined;
+      let customTitle: string | undefined;
       let cwd: string | undefined;
 
       for await (const line of rl) {
@@ -271,6 +278,19 @@ export class QwenSessionReader {
             firstUserText = text;
           }
         }
+
+        // Extract custom title from system records (last one wins)
+        if (
+          type === 'system' &&
+          obj.subtype === 'custom_title' &&
+          typeof obj.systemPayload === 'object' &&
+          obj.systemPayload !== null
+        ) {
+          const payload = obj.systemPayload as Record<string, unknown>;
+          if (typeof payload.customTitle === 'string') {
+            customTitle = payload.customTitle;
+          }
+        }
       }
 
       // Ensure stream is closed
@@ -293,6 +313,7 @@ export class QwenSessionReader {
         filePath,
         messageCount: seenUuids.size,
         firstUserText,
+        customTitle,
         cwd,
       };
     } catch (error) {
@@ -332,21 +353,107 @@ export class QwenSessionReader {
   }
 
   /**
+   * Reads the UUID of the last record in a JSONL file via tail-read.
+   */
+  private readLastRecordUuid(filePath: string): string | null {
+    try {
+      const TAIL_SIZE = 64 * 1024;
+      const stats = fs.statSync(filePath);
+      const readStart = Math.max(0, stats.size - TAIL_SIZE);
+      const readLength = Math.min(stats.size, TAIL_SIZE);
+
+      const fd = fs.openSync(filePath, 'r');
+      let buffer: Buffer;
+      try {
+        buffer = Buffer.alloc(readLength);
+        fs.readSync(fd, buffer, 0, readLength, readStart);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      const lines = buffer.toString('utf-8').split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const trimmed = lines[i].trim();
+        if (!trimmed) {
+          continue;
+        }
+        try {
+          const record = JSON.parse(trimmed);
+          if (record.uuid) {
+            return record.uuid;
+          }
+        } catch {
+          continue;
+        }
+      }
+      return null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Delete session file
    */
-  async deleteSession(
-    sessionId: string,
-    _workingDir: string,
-  ): Promise<boolean> {
+  async deleteSession(sessionId: string, workingDir: string): Promise<boolean> {
     try {
-      const session = await this.getSession(sessionId, _workingDir);
-      if (session && session.filePath) {
-        fs.unlinkSync(session.filePath);
-        return true;
+      const session = await this.getSession(sessionId, workingDir);
+      if (!session || !session.filePath) {
+        return false;
       }
-      return false;
+      // Verify the session belongs to the current project
+      const expectedHash = getProjectHash(workingDir);
+      if (session.projectHash && session.projectHash !== expectedHash) {
+        return false;
+      }
+      fs.unlinkSync(session.filePath);
+      return true;
     } catch (error) {
       console.error('[QwenSessionReader] Failed to delete session:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Rename session by appending a custom_title system record to the JSONL file.
+   */
+  async renameSession(
+    sessionId: string,
+    title: string,
+    workingDir: string,
+  ): Promise<boolean> {
+    try {
+      const session = await this.getSession(sessionId, workingDir);
+      console.log('[QwenSessionReader] Renaming session:', sessionId, title);
+      if (!session || !session.filePath) {
+        return false;
+      }
+      // Verify the session belongs to the current project
+      const expectedHash = getProjectHash(workingDir);
+      if (session.projectHash && session.projectHash !== expectedHash) {
+        return false;
+      }
+
+      // Read the last record's UUID so the custom_title record is properly
+      // chained into the parent history (reconstructHistory walks from tail).
+      const lastUuid = this.readLastRecordUuid(session.filePath);
+
+      const record = JSON.stringify({
+        uuid: crypto.randomUUID(),
+        parentUuid: lastUuid,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'custom_title',
+        cwd: session.cwd || workingDir,
+        version: 'vscode',
+        systemPayload: { customTitle: title },
+      });
+
+      fs.appendFileSync(session.filePath, record + '\n');
+      return true;
+    } catch (error) {
+      console.error('[QwenSessionReader] Failed to rename session:', error);
       return false;
     }
   }

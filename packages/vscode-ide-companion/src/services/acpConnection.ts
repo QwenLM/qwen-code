@@ -532,6 +532,38 @@ export class AcpConnection {
     }
   }
 
+  async deleteSession(sessionId: string): Promise<{ success: boolean }> {
+    const conn = this.ensureConnection();
+    try {
+      const result = await conn.extMethod('deleteSession', {
+        sessionId,
+        cwd: this.workingDir,
+      });
+      return result as { success: boolean };
+    } catch (error) {
+      console.error('[ACP] Failed to delete session:', error);
+      throw error;
+    }
+  }
+
+  async renameSession(
+    sessionId: string,
+    title: string,
+  ): Promise<{ success: boolean }> {
+    const conn = this.ensureConnection();
+    try {
+      const result = await conn.extMethod('renameSession', {
+        sessionId,
+        title,
+        cwd: this.workingDir,
+      });
+      return result as { success: boolean };
+    } catch (error) {
+      console.error('[ACP] Failed to rename session:', error);
+      throw error;
+    }
+  }
+
   async switchSession(sessionId: string): Promise<void> {
     console.log('[ACP] Switching to session:', sessionId);
     this.sessionId = sessionId;

@@ -18,6 +18,7 @@ export interface UseResumeCommandOptions {
   config: Config | null;
   historyManager: Pick<UseHistoryManagerReturn, 'clearItems' | 'loadHistory'>;
   startNewSession: (sessionId: string) => void;
+  setSessionName?: (name: string | null) => void;
   remount?: () => void;
 }
 
@@ -41,7 +42,8 @@ export function useResumeCommand(
     setIsResumeDialogOpen(false);
   }, []);
 
-  const { config, historyManager, startNewSession, remount } = options ?? {};
+  const { config, historyManager, startNewSession, setSessionName, remount } =
+    options ?? {};
 
   const handleResume = useCallback(
     async (sessionId: string) => {
@@ -62,6 +64,10 @@ export function useResumeCommand(
 
       // Start new session in UI context.
       startNewSession(sessionId);
+
+      // Restore session name tag from custom title.
+      const customTitle = sessionService.getSessionTitle(sessionId);
+      setSessionName?.(customTitle ?? null);
 
       // Reset UI history.
       const uiHistoryItems = buildResumedHistoryItems(sessionData, config);
@@ -88,7 +94,14 @@ export function useResumeCommand(
       // Refresh terminal UI.
       remount?.();
     },
-    [closeResumeDialog, config, historyManager, startNewSession, remount],
+    [
+      closeResumeDialog,
+      config,
+      historyManager,
+      startNewSession,
+      setSessionName,
+      remount,
+    ],
   );
 
   return {

@@ -8,7 +8,7 @@
  */
 
 import type { FC } from 'react';
-import { Fragment } from 'react';
+import { Fragment, useState, useRef, useEffect } from 'react';
 import {
   getTimeAgo,
   groupSessionsByDate,
@@ -31,6 +31,10 @@ export interface SessionSelectorProps {
   onSearchChange: (query: string) => void;
   /** Callback when a session is selected */
   onSelectSession: (sessionId: string) => void;
+  /** Callback when a session is renamed */
+  onRenameSession?: (sessionId: string, newTitle: string) => void;
+  /** Callback when a session is deleted */
+  onDeleteSession?: (sessionId: string) => void;
   /** Callback when selector should close */
   onClose: () => void;
   /** Whether there are more sessions to load */
@@ -71,11 +75,37 @@ export const SessionSelector: FC<SessionSelectorProps> = ({
   searchQuery,
   onSearchChange,
   onSelectSession,
+  onRenameSession,
+  onDeleteSession,
   onClose,
   hasMore = false,
   isLoading = false,
   onLoadMore,
 }) => {
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(
+    null,
+  );
+  const [renameValue, setRenameValue] = useState('');
+  const [originalRenameValue, setOriginalRenameValue] = useState('');
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (renamingSessionId && renameInputRef.current) {
+      renameInputRef.current.focus();
+      renameInputRef.current.select();
+    }
+  }, [renamingSessionId]);
+
+  const handleRenameSubmit = (sessionId: string) => {
+    const trimmed = renameValue.trim();
+    if (trimmed && trimmed !== originalRenameValue && onRenameSession) {
+      onRenameSession(sessionId, trimmed);
+    }
+    setRenamingSessionId(null);
+    setRenameValue('');
+    setOriginalRenameValue('');
+  };
   if (!visible) {
     return null;
   }
@@ -155,27 +185,119 @@ export const SessionSelector: FC<SessionSelectorProps> = ({
                       '';
                     const isActive = sessionId === currentSessionId;
 
+                    if (renamingSessionId === sessionId) {
+                      return (
+                        <div
+                          key={sessionId}
+                          className="session-item flex items-center py-1.5 px-2 rounded-md"
+                        >
+                          <input
+                            ref={renameInputRef}
+                            type="text"
+                            maxLength={200}
+                            className="flex-1 bg-[var(--vscode-input-background,var(--app-input-background))] text-[var(--vscode-input-foreground,var(--app-primary-foreground))] border-2 border-[var(--vscode-focusBorder)] rounded px-2 py-1 text-[var(--vscode-chat-font-size,13px)] font-[var(--vscode-chat-font-family)] outline-none min-w-0 shadow-[0_0_0_1px_var(--vscode-focusBorder)]"
+                            value={renameValue}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === 'Enter') {
+                                handleRenameSubmit(sessionId);
+                              } else if (e.key === 'Escape') {
+                                setRenamingSessionId(null);
+                                setRenameValue('');
+                              }
+                            }}
+                            onBlur={() => handleRenameSubmit(sessionId)}
+                          />
+                        </div>
+                      );
+                    }
+
                     return (
-                      <button
+                      <div
                         key={sessionId}
-                        type="button"
-                        className={`session-item flex items-center justify-between py-1.5 px-2 bg-transparent border-none rounded-md cursor-pointer text-left w-full text-[var(--vscode-chat-font-size,13px)] font-[var(--vscode-chat-font-family)] text-[var(--app-primary-foreground)] transition-colors duration-100 hover:bg-[var(--app-list-hover-background)] ${
+                        className={`session-item group flex items-center justify-between py-1.5 px-2 rounded-md cursor-pointer transition-colors duration-100 hover:bg-[var(--app-list-hover-background)] ${
                           isActive
                             ? 'active bg-[var(--app-list-active-background)] text-[var(--app-list-active-foreground)] font-[600]'
-                            : ''
+                            : 'text-[var(--app-primary-foreground)]'
                         }`}
                         onClick={() => {
                           onSelectSession(sessionId);
                           onClose();
                         }}
                       >
-                        <span className="session-item-title flex-1 overflow-hidden text-ellipsis whitespace-nowrap min-w-0">
+                        <span className="session-item-title flex-1 overflow-hidden text-ellipsis whitespace-nowrap min-w-0 text-[var(--vscode-chat-font-size,13px)] font-[var(--vscode-chat-font-family)]">
                           {title}
                         </span>
-                        <span className="session-item-time opacity-60 text-[0.9em] flex-shrink-0 ml-3">
-                          {getTimeAgo(lastUpdated)}
+                        <span className="flex items-center gap-1 flex-shrink-0 ml-2">
+                          {(onRenameSession || onDeleteSession) && (
+                            <span
+                              className={`items-center gap-0.5 ${confirmDeleteId === sessionId ? 'flex' : 'hidden group-hover:flex'}`}
+                            >
+                              {onRenameSession && (
+                                <button
+                                  type="button"
+                                  className="p-0.5 bg-transparent border-none cursor-pointer opacity-50 hover:opacity-100 text-[var(--app-primary-foreground)] rounded"
+                                  title="Rename"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setRenamingSessionId(sessionId);
+                                    setRenameValue(title);
+                                    setOriginalRenameValue(title);
+                                  }}
+                                >
+                                  <svg
+                                    width="14"
+                                    height="14"
+                                    viewBox="0 0 16 16"
+                                    fill="currentColor"
+                                  >
+                                    <path d="M13.23 1h-1.46L3.52 9.25l-.16.22L1 13.59 2.41 15l4.12-2.36.22-.16L15 4.23V2.77L13.23 1zM2.41 13.59l1.51-3 1.45 1.45-2.96 1.55zm3.83-2.06L4.47 9.76l8-8 1.77 1.77-8 8z" />
+                                  </svg>
+                                </button>
+                              )}
+                              {onDeleteSession &&
+                                !isActive &&
+                                (confirmDeleteId === sessionId ? (
+                                  <button
+                                    type="button"
+                                    className="px-1.5 py-0.5 bg-[var(--vscode-inputValidation-errorBackground,#5a1d1d)] border border-[var(--vscode-inputValidation-errorBorder,#be1100)] cursor-pointer text-[var(--vscode-errorForeground,#f48771)] rounded text-[11px] leading-tight"
+                                    title="Click to confirm delete"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setConfirmDeleteId(null);
+                                      onDeleteSession(sessionId);
+                                    }}
+                                    onBlur={() => setConfirmDeleteId(null)}
+                                  >
+                                    Delete?
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="p-0.5 bg-transparent border-none cursor-pointer opacity-50 hover:opacity-100 text-[var(--app-primary-foreground)] rounded"
+                                    title="Delete"
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setConfirmDeleteId(sessionId);
+                                    }}
+                                  >
+                                    <svg
+                                      width="14"
+                                      height="14"
+                                      viewBox="0 0 16 16"
+                                      fill="currentColor"
+                                    >
+                                      <path d="M10 3h3v1h-1v9l-1 1H5l-1-1V4H3V3h3V2a1 1 0 0 1 1-1h2a1 1 0 0 1 1 1v1zM9 2H7v1h2V2zM5 4v9h6V4H5zm2 2h1v5H7V6zm3 0h-1v5h1V6z" />
+                                    </svg>
+                                  </button>
+                                ))}
+                            </span>
+                          )}
+                          <span className="session-item-time opacity-60 text-[0.9em]">
+                            {getTimeAgo(lastUpdated)}
+                          </span>
                         </span>
-                      </button>
+                      </div>
                     );
                   })}
                 </div>

@@ -8,12 +8,14 @@ import { Storage } from '../config/storage.js';
 import { getProjectHash } from '../utils/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
+  CustomTitleRecordPayload,
   UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
@@ -42,6 +44,8 @@ export interface SessionListItem {
   filePath: string;
   /** Number of messages in the session (unique message UUIDs) */
   messageCount: number;
+  /** Custom title set via /rename, if any */
+  customTitle?: string;
 }
 
 /**
@@ -113,6 +117,8 @@ const MAX_FILES_TO_PROCESS = 10000;
 const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
+/** Maximum bytes to read from the tail of a session file to find custom title. */
+const TAIL_READ_SIZE = 64 * 1024;
 
 /**
  * Service for managing chat sessions.
@@ -136,6 +142,99 @@ export class SessionService {
 
   private getChatsDir(): string {
     return path.join(this.storage.getProjectDir(), 'chats');
+  }
+
+  /**
+   * Reads custom title from the tail of a session JSONL file.
+   * Scans the last TAIL_READ_SIZE bytes for a custom_title system record.
+   * Returns the last custom title found (most recent wins).
+   */
+  private readCustomTitleFromFile(filePath: string): string | undefined {
+    try {
+      const stats = fs.statSync(filePath);
+      const fileSize = stats.size;
+      const readStart = Math.max(0, fileSize - TAIL_READ_SIZE);
+      const readLength = Math.min(fileSize, TAIL_READ_SIZE);
+
+      const fd = fs.openSync(filePath, 'r');
+      let buffer: Buffer;
+      try {
+        buffer = Buffer.alloc(readLength);
+        fs.readSync(fd, buffer, 0, readLength, readStart);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      const tail = buffer.toString('utf-8');
+      const lines = tail.split('\n');
+
+      let customTitle: string | undefined;
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const record = JSON.parse(trimmed) as ChatRecord;
+          if (record.type === 'system' && record.subtype === 'custom_title') {
+            const payload = record.systemPayload as
+              | CustomTitleRecordPayload
+              | undefined;
+            if (payload?.customTitle) {
+              customTitle = payload.customTitle;
+            }
+          }
+        } catch {
+          // Ignore malformed lines (including partial first line from tail read)
+          continue;
+        }
+      }
+
+      return customTitle;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Reads the UUID of the last record in a session JSONL file.
+   * Uses a tail-read strategy for efficiency.
+   */
+  private readLastRecordUuid(filePath: string): string | null {
+    try {
+      const stats = fs.statSync(filePath);
+      const fileSize = stats.size;
+      const readStart = Math.max(0, fileSize - TAIL_READ_SIZE);
+      const readLength = Math.min(fileSize, TAIL_READ_SIZE);
+
+      const fd = fs.openSync(filePath, 'r');
+      let buffer: Buffer;
+      try {
+        buffer = Buffer.alloc(readLength);
+        fs.readSync(fd, buffer, 0, readLength, readStart);
+      } finally {
+        fs.closeSync(fd);
+      }
+
+      const tail = buffer.toString('utf-8');
+      const lines = tail.split('\n');
+
+      // Walk backwards to find the last valid record
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const trimmed = lines[i].trim();
+        if (!trimmed) continue;
+        try {
+          const record = JSON.parse(trimmed) as ChatRecord;
+          if (record.uuid) {
+            return record.uuid;
+          }
+        } catch {
+          continue;
+        }
+      }
+
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -302,6 +401,7 @@ export class SessionService {
         gitBranch: firstRecord.gitBranch,
         filePath,
         messageCount,
+        customTitle: this.readCustomTitleFromFile(filePath),
       });
     }
 
@@ -483,6 +583,9 @@ export class SessionService {
    * @returns true if removed, false if not found
    */
   async removeSession(sessionId: string): Promise<boolean> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return false;
+    }
     const chatsDir = this.getChatsDir();
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
@@ -509,6 +612,103 @@ export class SessionService {
   }
 
   /**
+   * Renames a session by appending a custom_title system record to its JSONL file.
+   *
+   * @param sessionId The session ID to rename
+   * @param title The new custom title
+   * @returns true if renamed successfully, false if session not found
+   */
+  async renameSession(sessionId: string, title: string): Promise<boolean> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return false;
+    }
+    const chatsDir = this.getChatsDir();
+    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+
+    try {
+      // Verify the file exists and belongs to this project
+      const records = await jsonl.readLines<ChatRecord>(filePath, 1);
+      if (records.length === 0) {
+        return false;
+      }
+
+      const recordProjectHash = getProjectHash(records[0].cwd);
+      if (recordProjectHash !== this.projectHash) {
+        return false;
+      }
+
+      // Read the last record's UUID so the custom_title record is properly
+      // chained into the parent history.  reconstructHistory() walks from the
+      // tail record upward via parentUuid; a null parentUuid would sever the
+      // chain and cause the session to appear empty on next load.
+      const lastUuid = this.readLastRecordUuid(filePath);
+
+      // Append a custom_title system record
+      const titleRecord: ChatRecord = {
+        uuid: randomUUID(),
+        parentUuid: lastUuid,
+        sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'custom_title',
+        cwd: records[0].cwd,
+        version: records[0].version,
+        systemPayload: { customTitle: title },
+      };
+      jsonl.writeLineSync(filePath, titleRecord);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Gets the custom title for a session by reading from its JSONL file.
+   *
+   * @param sessionId The session ID to look up
+   * @returns The custom title, or undefined if none set
+   */
+  getSessionTitle(sessionId: string): string | undefined {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return undefined;
+    }
+    const chatsDir = this.getChatsDir();
+    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+    return this.readCustomTitleFromFile(filePath);
+  }
+
+  /**
+   * Finds sessions by custom title.
+   * Returns all matching sessions ordered by most recent first.
+   *
+   * @param title The custom title to search for (case-insensitive exact match)
+   * @returns Array of matching session list items
+   */
+  async findSessionsByTitle(title: string): Promise<SessionListItem[]> {
+    const normalizedTitle = title.toLowerCase().trim();
+    const matches: SessionListItem[] = [];
+
+    // Paginate through all sessions to avoid missing older ones
+    let cursor: number | undefined;
+    let hasMore = true;
+    while (hasMore) {
+      const result = await this.listSessions({ size: 50, cursor });
+      for (const item of result.items) {
+        if (item.customTitle?.toLowerCase().trim() === normalizedTitle) {
+          matches.push(item);
+        }
+      }
+      hasMore = result.hasMore;
+      cursor = result.nextCursor;
+    }
+
+    return matches;
+  }
+
+  /**
    * Loads the most recent session for the current project.
    * Combines listSessions and loadSession for convenience.
    *
@@ -529,6 +729,9 @@ export class SessionService {
    * @returns true if session exists and belongs to current project
    */
   async sessionExists(sessionId: string): Promise<boolean> {
+    if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
+      return false;
+    }
     const chatsDir = this.getChatsDir();
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
 
