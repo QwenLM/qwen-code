@@ -1,14 +1,15 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
 /**
- * API Preconnect - 预热 API 连接以减少首次调用的 TCP+TLS 握手延迟
+ * API Preconnect - Warm API connections to reduce TCP+TLS handshake latency
  *
- * 原理：在启动早期发起一个 fire-and-forget HEAD 请求，预热 TCP+TLS 连接。
- * 后续真正的 API 调用复用该连接，节省 100-200ms。
+ * Principle: Fire a fire-and-forget HEAD request early in startup to warm
+ * the TCP+TLS connection. Subsequent actual API calls reuse this connection,
+ * saving 100-200ms.
  */
 
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
@@ -18,7 +19,7 @@ const debugLogger = createDebugLogger('PRECONNECT');
 let preconnectFired = false;
 
 /**
- * 默认的 API 基础 URL（按 AuthType 分类）
+ * Default API base URLs by AuthType
  */
 const DEFAULT_BASE_URLS: Record<string, string> = {
   openai: 'https://api.openai.com',
@@ -29,12 +30,12 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
 };
 
 /**
- * 检查是否应该跳过 preconnect
+ * Check if preconnect should be skipped
  */
 function shouldSkipPreconnect(settings: { baseUrl?: string }): boolean {
-  // 1. 检查 proxy 环境变量
-  // 注意：如果设置了 NO_PROXY 且目标 URL 在其中，则不需要跳过
-  // 但简化处理：只要有 proxy 配置就跳过
+  // 1. Check proxy environment variables
+  // Note: If NO_PROXY is set and target URL is in it, we don't need to skip
+  // But for simplicity: skip if any proxy config is present
   if (
     process.env['HTTPS_PROXY'] ||
     process.env['https_proxy'] ||
@@ -45,13 +46,13 @@ function shouldSkipPreconnect(settings: { baseUrl?: string }): boolean {
     return true;
   }
 
-  // 2. 检查自定义 CA 证书（可能使用企业 TLS 检查）
+  // 2. Check custom CA certificate (may use enterprise TLS inspection)
   if (process.env['NODE_EXTRA_CA_CERTS']) {
     debugLogger.debug('Skipping preconnect: custom CA certificate configured');
     return true;
   }
 
-  // 3. 用户显式配置了自定义 baseUrl（可能使用 mTLS 或私有部署）
+  // 3. User explicitly configured custom baseUrl (may use mTLS or private deployment)
   if (settings.baseUrl && !isDefaultBaseUrl(settings.baseUrl)) {
     debugLogger.debug(
       'Skipping preconnect: custom baseUrl (may use mTLS or private deployment)',
@@ -63,15 +64,15 @@ function shouldSkipPreconnect(settings: { baseUrl?: string }): boolean {
 }
 
 /**
- * 检查是否在 sandbox 模式下运行
- * sandbox 模式下 preconnect 无效，因为进程会重启
+ * Check if running in sandbox mode
+ * In sandbox mode, preconnect is ineffective because the process will restart
  */
 function isInSandboxMode(): boolean {
   return process.env['SANDBOX'] !== undefined;
 }
 
 /**
- * 检查是否为默认 baseUrl
+ * Check if baseUrl is a default URL
  */
 function isDefaultBaseUrl(baseUrl: string): boolean {
   const normalized = baseUrl.toLowerCase().replace(/\/+$/, '');
@@ -81,7 +82,7 @@ function isDefaultBaseUrl(baseUrl: string): boolean {
 }
 
 /**
- * 环境变量到 AuthType 的映射
+ * Environment variable to AuthType mapping
  */
 const ENV_BASE_URL_MAP: Record<string, string> = {
   OPENAI_BASE_URL: 'openai',
@@ -90,7 +91,7 @@ const ENV_BASE_URL_MAP: Record<string, string> = {
 };
 
 /**
- * 根据 authType 获取对应的环境变量 baseUrl
+ * Get environment variable baseUrl for the given authType
  */
 function getEnvBaseUrlForAuthType(
   authType: string | undefined,
@@ -99,7 +100,7 @@ function getEnvBaseUrlForAuthType(
     return undefined;
   }
 
-  // 根据 authType 查找对应的环境变量
+  // Lookup the corresponding environment variable based on authType
   for (const [envVar, mappedAuthType] of Object.entries(ENV_BASE_URL_MAP)) {
     if (mappedAuthType === authType) {
       return process.env[envVar];
@@ -110,35 +111,35 @@ function getEnvBaseUrlForAuthType(
 }
 
 /**
- * 获取预连接的目标 URL
- * 优先级：settingsBaseUrl > 环境变量 > 默认值
+ * Get the target URL for preconnect
+ * Priority: settingsBaseUrl > environment variable > default value
  *
- * 如果设置了自定义 baseUrl（非默认 URL），返回 undefined 表示应该跳过 preconnect
+ * If custom baseUrl is set (non-default URL), return undefined to skip preconnect
  */
 function getPreconnectTargetUrl(
   authType: string | undefined,
   settingsBaseUrl: string | undefined,
 ): string | undefined {
-  // 1. 从 settings 获取
+  // 1. Get from settings
   if (settingsBaseUrl) {
-    // 如果是默认 URL，直接使用；否则应该跳过
+    // If it's a default URL, use it; otherwise skip
     if (isDefaultBaseUrl(settingsBaseUrl)) {
       return settingsBaseUrl;
     }
     return undefined;
   }
 
-  // 2. 从环境变量获取（根据 authType 查找对应的环境变量）
+  // 2. Get from environment variable (lookup based on authType)
   const envBaseUrl = getEnvBaseUrlForAuthType(authType);
   if (envBaseUrl) {
-    // 如果是默认 URL，直接使用；否则应该跳过
+    // If it's a default URL, use it; otherwise skip
     if (isDefaultBaseUrl(envBaseUrl)) {
       return envBaseUrl;
     }
     return undefined;
   }
 
-  // 3. 使用默认值
+  // 3. Use default value
   if (authType && DEFAULT_BASE_URLS[authType]) {
     return DEFAULT_BASE_URLS[authType];
   }
@@ -147,11 +148,11 @@ function getPreconnectTargetUrl(
 }
 
 /**
- * 执行 API 预连接
- * 使用 HEAD 请求建立 TCP+TLS 连接，不发送实际请求体
+ * Execute API preconnect
+ * Use HEAD request to establish TCP+TLS connection without sending actual request body
  *
- * @param authType - 认证类型（openai, qwen-oauth, anthropic 等）
- * @param options - 配置选项
+ * @param authType - Authentication type (openai, qwen-oauth, anthropic, etc.)
+ * @param options - Configuration options
  */
 export function preconnectApi(
   authType: string | undefined,
@@ -164,19 +165,19 @@ export function preconnectApi(
   }
   preconnectFired = true;
 
-  // 检查是否禁用
+  // Check if disabled
   if (process.env['QWEN_CODE_DISABLE_PRECONNECT'] === '1') {
     debugLogger.debug('Preconnect disabled by environment variable');
     return;
   }
 
-  // 检查是否在 sandbox 模式下（进程会重启，preconnect 无效）
+  // Check if in sandbox mode (process will restart, preconnect is ineffective)
   if (isInSandboxMode()) {
     debugLogger.debug('Skipping preconnect: sandbox mode detected');
     return;
   }
 
-  // 检查跳过条件
+  // Check skip conditions
   if (
     shouldSkipPreconnect({
       baseUrl: options.settingsBaseUrl,
@@ -194,15 +195,15 @@ export function preconnectApi(
 
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
 
-  // 使用 AbortSignal.timeout 防止长时间阻塞
+  // Use AbortSignal.timeout to prevent long blocking
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 10_000);
 
-  // 发起 HEAD 请求预热连接（fire-and-forget）
+  // Fire HEAD request to warm connection (fire-and-forget)
   fetch(targetUrl, {
     method: 'HEAD',
     signal: controller.signal,
-    // 不发送任何认证信息
+    // Don't send any authentication info
     headers: {
       'User-Agent': 'QwenCode-Preconnect/1.0',
     },
@@ -213,13 +214,13 @@ export function preconnectApi(
     })
     .catch((error) => {
       clearTimeout(timeoutId);
-      // 预连接失败不影响主流程
+      // Preconnect failure doesn't affect main flow
       debugLogger.debug(`Preconnect failed (ignored): ${error}`);
     });
 }
 
 /**
- * 重置 preconnect 状态（仅用于测试）
+ * Reset preconnect state (for testing only)
  */
 export function resetPreconnectState(): void {
   preconnectFired = false;

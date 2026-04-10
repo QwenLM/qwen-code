@@ -1,30 +1,31 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
 /**
- * Early Input Capture - 在 REPL 初始化期间捕获用户输入
+ * Early Input Capture - Capture user input during REPL initialization
  *
- * 原理：在 CLI 入口处最早启动 raw mode 监听 stdin，REPL 就绪后注入缓冲内容。
- * 解决启动期间用户输入丢失的问题。
+ * Principle: Start raw mode stdin listening at the earliest CLI entry point,
+ * then inject buffered content when REPL is ready. Solves the problem of
+ * user input being lost during startup.
  */
 
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('EARLY_INPUT');
 
-/** 最大缓冲区大小 (64KB) */
+/** Maximum buffer size (64KB) */
 const MAX_BUFFER_SIZE = 64 * 1024;
 
 /**
- * 输入缓冲区
+ * Input buffer
  */
 interface InputBuffer {
-  /** 原始字节数据 */
+  /** Raw byte data */
   rawBytes: Buffer;
-  /** 是否已完成捕获 */
+  /** Whether capture is complete */
   captured: boolean;
 }
 
@@ -37,13 +38,13 @@ let captureHandler: ((data: Buffer) => void) | null = null;
 let isCapturing = false;
 
 /**
- * 检查是否为终端响应序列
- * 终端响应通常以特定的前缀开头
+ * Check if this is a terminal response sequence
+ * Terminal responses typically start with specific prefixes
  *
- * 注意：用户输入的功能键序列应该保留：
- * - ESC [ A/B/C/D - 方向键
- * - ESC O P/Q/R/S - F1-F4 (SS3 序列)
- * - ESC [ 1;5A - Ctrl+上箭头等修饰键
+ * Note: User input function key sequences should be preserved:
+ * - ESC [ A/B/C/D - Arrow keys
+ * - ESC O P/Q/R/S - F1-F4 (SS3 sequences)
+ * - ESC [ 1;5A - Ctrl+arrow and other modified keys
  */
 function isTerminalResponse(data: Buffer, startIdx: number): boolean {
   if (startIdx >= data.length || data[startIdx] !== 0x1b) {
@@ -57,9 +58,9 @@ function isTerminalResponse(data: Buffer, startIdx: number): boolean {
 
   const nextByte = data[nextIdx];
 
-  // 检查 ESC 后面直接跟的特殊字符
+  // Check for special characters directly after ESC
   // P = 0x50 (DCS), _ = 0x5F (APC), ^ = 0x5E (PM), ] = 0x5D (OSC)
-  // 注意：O = 0x4F 是 SS3 序列，用于功能键，应该保留
+  // Note: O = 0x4F is SS3 sequence for function keys, should be preserved
   if (
     nextByte === 0x50 || // P (DCS)
     nextByte === 0x5f || // _ (APC)
@@ -69,16 +70,16 @@ function isTerminalResponse(data: Buffer, startIdx: number): boolean {
     return true;
   }
 
-  // 检查 CSI 序列中的终端响应
+  // Check for terminal responses in CSI sequences
   // ESC [ ? ... (DEC private mode response)
   // ESC [ > ... (DA2 response)
   if (nextByte === 0x5b) {
-    // CSI 序列，检查第三个字符
+    // CSI sequence, check third character
     const thirdIdx = startIdx + 2;
     if (thirdIdx < data.length) {
       const thirdByte = data[thirdIdx];
       if (thirdByte === 0x3f || thirdByte === 0x3e) {
-        // ESC [ ? 或 ESC [ > - 这是终端响应
+        // ESC [ ? or ESC [ > - this is a terminal response
         return true;
       }
     }
@@ -88,8 +89,8 @@ function isTerminalResponse(data: Buffer, startIdx: number): boolean {
 }
 
 /**
- * 跳过终端响应序列
- * 返回跳过后的索引位置
+ * Skip terminal response sequence
+ * Returns the index position after skipping
  */
 function skipTerminalResponse(data: Buffer, startIdx: number): number {
   if (startIdx >= data.length || data[startIdx] !== 0x1b) {
@@ -103,11 +104,11 @@ function skipTerminalResponse(data: Buffer, startIdx: number): number {
 
   const nextByte = data[nextIdx];
 
-  // OSC 序列: ESC ] ... BEL 或 ESC ] ... ST
+  // OSC sequence: ESC ] ... BEL or ESC ] ... ST
   if (nextByte === 0x5d) {
     let i = startIdx + 2;
     while (i < data.length) {
-      // BEL (0x07) 或 ST (ESC \)
+      // BEL (0x07) or ST (ESC \)
       if (data[i] === 0x07) {
         return i + 1;
       }
@@ -119,7 +120,7 @@ function skipTerminalResponse(data: Buffer, startIdx: number): number {
     return data.length;
   }
 
-  // DCS/APC/PM 序列: ESC P/_/^ ... ST
+  // DCS/APC/PM sequences: ESC P/_/^ ... ST
   if (nextByte === 0x50 || nextByte === 0x5f || nextByte === 0x5e) {
     let i = startIdx + 2;
     while (i < data.length) {
@@ -132,12 +133,12 @@ function skipTerminalResponse(data: Buffer, startIdx: number): number {
     return data.length;
   }
 
-  // CSI 序列: ESC [ ... (0x40-0x7E 结束)
+  // CSI sequence: ESC [ ... (ends with 0x40-0x7E)
   if (nextByte === 0x5b) {
     let i = startIdx + 2;
     while (i < data.length) {
       const byte = data[i];
-      // CSI 序列以 0x40-0x7E 结束
+      // CSI sequences end with 0x40-0x7E
       if (byte >= 0x40 && byte <= 0x7e) {
         return i + 1;
       }
@@ -150,25 +151,25 @@ function skipTerminalResponse(data: Buffer, startIdx: number): number {
 }
 
 /**
- * 过滤终端响应序列（如 Kitty 协议响应、设备属性响应等）
- * 保留用户输入（包括方向键等功能键）
+ * Filter terminal response sequences (like Kitty protocol responses, device attributes, etc.)
+ * Preserve user input (including function keys like arrow keys)
  */
 function filterTerminalResponses(data: Buffer): Buffer {
   const result: number[] = [];
   let i = 0;
 
   while (i < data.length) {
-    // 检测 ESC 序列
+    // Detect ESC sequences
     if (data[i] === 0x1b) {
-      // 检查是否为终端响应（需要过滤掉）
+      // Check if this is a terminal response (should be filtered out)
       if (isTerminalResponse(data, i)) {
-        // 跳过终端响应序列
+        // Skip the terminal response sequence
         i = skipTerminalResponse(data, i);
         continue;
       }
-      // 用户输入的功能键（如方向键 ESC [A），保留
+      // User input function keys (like arrow keys ESC [A), preserve
     }
-    // 保留当前字节
+    // Preserve current byte
     result.push(data[i]);
     i++;
   }
@@ -177,15 +178,15 @@ function filterTerminalResponses(data: Buffer): Buffer {
 }
 
 /**
- * 开始早期输入捕获
- * 在 gemini.tsx 设置 raw mode 之后立即调用
+ * Start early input capture
+ * Call immediately after setting raw mode in gemini.tsx
  */
 export function startEarlyInputCapture(): void {
   if (isCapturing || !process.stdin.isTTY) {
     return;
   }
 
-  // 检查是否禁用
+  // Check if disabled
   if (process.env['QWEN_CODE_DISABLE_EARLY_CAPTURE'] === '1') {
     debugLogger.debug('Early input capture disabled by environment variable');
     return;
@@ -204,16 +205,16 @@ export function startEarlyInputCapture(): void {
       return;
     }
 
-    // 检查缓冲区大小限制
+    // Check buffer size limit
     if (inputBuffer.rawBytes.length >= MAX_BUFFER_SIZE) {
       debugLogger.debug('Buffer size limit reached, stopping capture');
       return;
     }
 
-    // 过滤掉终端响应序列（如 Kitty 协议响应）
+    // Filter out terminal response sequences (like Kitty protocol responses)
     const filtered = filterTerminalResponses(data);
     if (filtered.length > 0) {
-      // 限制缓冲区大小
+      // Limit buffer size
       const newLength = inputBuffer.rawBytes.length + filtered.length;
       if (newLength > MAX_BUFFER_SIZE) {
         const truncated = filtered.subarray(
@@ -235,8 +236,8 @@ export function startEarlyInputCapture(): void {
 }
 
 /**
- * 停止早期输入捕获
- * 在 KeypressProvider 挂载前调用
+ * Stop early input capture
+ * Call before KeypressProvider mounts
  */
 export function stopEarlyInputCapture(): void {
   if (!isCapturing || !captureHandler) {
@@ -254,8 +255,8 @@ export function stopEarlyInputCapture(): void {
 }
 
 /**
- * 获取并清除捕获的输入
- * 供 KeypressContext 使用
+ * Get and clear captured input
+ * For use by KeypressContext
  */
 export function getAndClearCapturedInput(): Buffer {
   const buffer = Buffer.from(inputBuffer.rawBytes);
@@ -267,14 +268,14 @@ export function getAndClearCapturedInput(): Buffer {
 }
 
 /**
- * 检查是否有捕获的输入
+ * Check if there is captured input
  */
 export function hasCapturedInput(): boolean {
   return inputBuffer.rawBytes.length > 0;
 }
 
 /**
- * 重置捕获状态（仅用于测试）
+ * Reset capture state (for testing only)
  */
 export function resetCaptureState(): void {
   if (captureHandler) {
