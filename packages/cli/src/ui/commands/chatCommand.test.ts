@@ -4,10 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { chatCommand } from './chatCommand.js';
 import { parseSlashCommand } from '../../utils/commands.js';
 import type { CommandContext } from './types.js';
+import {
+  saveSessionToIndex,
+  deleteSessionFromIndex,
+  getSessionIdByName,
+  listNamedSessions,
+} from '@qwen-code/qwen-code-core';
 
 // Helper to create mock CommandContext without type errors
 function createMockContext(
@@ -42,6 +48,10 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 }));
 
 describe('chatCommand', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   describe('command structure', () => {
     it('should have correct name', () => {
       expect(chatCommand.name).toBe('chat');
@@ -115,6 +125,11 @@ describe('chatCommand', () => {
       );
       const result = await saveCommand?.action!(mockContext, 'my-test-session');
 
+      expect(saveSessionToIndex).toHaveBeenCalledWith(
+        '/test/project/dir',
+        'my-test-session',
+        'current-session-id-12345',
+      );
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
@@ -132,6 +147,7 @@ describe('chatCommand', () => {
       );
       const result = await listCommand?.action!(mockContext, '');
 
+      expect(listNamedSessions).toHaveBeenCalledWith('/test/project/dir');
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
@@ -165,6 +181,10 @@ describe('chatCommand', () => {
         'test-session-1',
       );
 
+      expect(getSessionIdByName).toHaveBeenCalledWith(
+        '/test/project/dir',
+        'test-session-1',
+      );
       expect(result).toEqual({
         type: 'dialog',
         dialog: 'resume',
@@ -198,6 +218,14 @@ describe('chatCommand', () => {
         'test-session-1',
       );
 
+      expect(getSessionIdByName).toHaveBeenCalledWith(
+        '/test/project/dir',
+        'test-session-1',
+      );
+      expect(deleteSessionFromIndex).toHaveBeenCalledWith(
+        '/test/project/dir',
+        'test-session-1',
+      );
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',

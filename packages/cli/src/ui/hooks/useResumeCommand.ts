@@ -91,7 +91,8 @@ export function useResumeCommand(
     (sessionId?: string) => {
       if (sessionId) {
         // If sessionId is provided, directly resume that session
-        handleResume(sessionId);
+        // Errors are handled within handleResume itself
+        void handleResume(sessionId);
       } else {
         setIsResumeDialogOpen(true);
       }

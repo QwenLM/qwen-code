@@ -9,9 +9,13 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 // Mock project directory
-const mockProjectDir = vi.hoisted(() => ({
-  path: path.join(process.env['TEMP'] || '/tmp', 'mock-project-test'),
-}));
+const mockProjectDir = vi.hoisted(() => {
+  const tempDir = process.env['TEMP'] || '/tmp';
+  const pathSep = process.platform === 'win32' ? '\\' : '/';
+  return {
+    path: `${tempDir}${pathSep}mock-project-test`,
+  };
+});
 
 import {
   saveSessionToIndex,
@@ -164,8 +168,9 @@ describe('chatIndex', () => {
       await fs.mkdir(qwenDir, { recursive: true });
       await fs.writeFile(indexPath, 'invalid json', 'utf-8');
 
-      // JSON.parse will throw SyntaxError
-      await expect(readChatIndex(mockProjectDir.path)).rejects.toThrow();
+      // Should return empty object for corrupted JSON (SyntaxError)
+      const index = await readChatIndex(mockProjectDir.path);
+      expect(index).toEqual({});
     });
   });
 });

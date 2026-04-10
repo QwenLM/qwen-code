@@ -7,6 +7,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { QWEN_DIR } from '../config/storage.js';
+import crypto from 'node:crypto';
 
 /**
  * 会话索引数据结构
@@ -36,10 +37,32 @@ async function ensureQwenDir(projectDir: string): Promise<void> {
 }
 
 /**
+ * 原子写入文件（使用临时文件 + rename）
+ * @param filePath 目标文件路径
+ * @param content 文件内容
+ */
+async function atomicWrite(filePath: string, content: string): Promise<void> {
+  const dir = path.dirname(filePath);
+  const tempFile = path.join(dir, `.tmp-${crypto.randomUUID()}`);
+  try {
+    await fs.writeFile(tempFile, content, 'utf-8');
+    await fs.rename(tempFile, filePath);
+  } catch (error) {
+    // 清理临时文件
+    try {
+      await fs.unlink(tempFile);
+    } catch {
+      // 忽略清理错误
+    }
+    throw error;
+  }
+}
+
+/**
  * 读取索引文件
  * @param projectDir 项目目录路径
  * @returns 索引对象，如果文件不存在则返回空对象
- * @throws 如果是真正的错误(非 ENOENT)，则抛出异常
+ * @throws 如果是真正的错误(非 ENOENT、非 SyntaxError)，则抛出异常
  */
 export async function readChatIndex(projectDir: string): Promise<ChatIndex> {
   try {
@@ -47,7 +70,16 @@ export async function readChatIndex(projectDir: string): Promise<ChatIndex> {
     return JSON.parse(content) as ChatIndex;
   } catch (error) {
     // 文件不存在是正常情况，返回空索引
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'ENOENT'
+    ) {
+      return {};
+    }
+    // JSON 解析错误，返回空索引（文件可能损坏）
+    if (error instanceof SyntaxError) {
       return {};
     }
     // 其他错误(权限问题、I/O 错误等)应该抛出
@@ -71,11 +103,7 @@ export async function saveSessionToIndex(
   const index = await readChatIndex(projectDir);
   index[name] = sessionId;
 
-  await fs.writeFile(
-    getIndexPath(projectDir),
-    JSON.stringify(index, null, 2),
-    'utf-8',
-  );
+  await atomicWrite(getIndexPath(projectDir), JSON.stringify(index, null, 2));
 }
 
 /**
@@ -95,11 +123,7 @@ export async function deleteSessionFromIndex(
   }
 
   delete index[name];
-  await fs.writeFile(
-    getIndexPath(projectDir),
-    JSON.stringify(index, null, 2),
-    'utf-8',
-  );
+  await atomicWrite(getIndexPath(projectDir), JSON.stringify(index, null, 2));
   return true;
 }
 
