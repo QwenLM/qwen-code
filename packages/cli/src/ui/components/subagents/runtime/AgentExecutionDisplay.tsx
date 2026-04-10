@@ -72,6 +72,58 @@ const getStatusText = (status: AgentResultDisplay['status']) => {
 const MAX_TOOL_CALLS = 5;
 const MAX_TASK_PROMPT_LINES = 5;
 
+// Fixed overhead lines in default/verbose mode:
+// header(1) + "Task Detail:" label(1) + "Tools:" label(1) + gaps(3) + footer(1)
+const EXPANDED_FIXED_OVERHEAD = 7;
+// Minimum height to allow default mode (below this, auto-downgrade to compact)
+const MIN_HEIGHT_FOR_DEFAULT = 5;
+// Minimum height to allow verbose mode (below this, auto-downgrade to default)
+const MIN_HEIGHT_FOR_VERBOSE = 15;
+// Each tool call renders ~2 lines (name + result)
+const LINES_PER_TOOL_CALL = 2;
+
+/**
+ * Computes how many task prompt lines and tool calls to render based on
+ * available height. This prevents Ink from laying out content that far
+ * exceeds the visible terminal area, which causes flickering.
+ */
+function computeContentBudget(availableHeight: number | undefined): {
+  maxTaskPromptLines: number;
+  maxToolCalls: number;
+} {
+  if (
+    availableHeight === undefined ||
+    !Number.isFinite(availableHeight) ||
+    availableHeight < 0
+  ) {
+    return {
+      maxTaskPromptLines: MAX_TASK_PROMPT_LINES,
+      maxToolCalls: MAX_TOOL_CALLS,
+    };
+  }
+
+  const budget = Math.max(0, availableHeight - EXPANDED_FIXED_OVERHEAD);
+
+  // Allocate minimum 2 lines for task prompt, rest for tool calls
+  const minPromptLines = Math.min(2, budget);
+  const remaining = budget - minPromptLines;
+
+  // Cap tool calls before computing usedByTools so leftover is accurate
+  const maxToolCalls = Math.min(
+    Math.max(1, Math.floor(remaining / LINES_PER_TOOL_CALL)),
+    MAX_TOOL_CALLS,
+  );
+  const usedByTools = maxToolCalls * LINES_PER_TOOL_CALL;
+
+  // Give leftover lines back to task prompt
+  const maxTaskPromptLines = Math.min(
+    Math.max(1, minPromptLines + Math.max(0, remaining - usedByTools)),
+    MAX_TASK_PROMPT_LINES,
+  );
+
+  return { maxTaskPromptLines, maxToolCalls };
+}
+
 /**
  * Component to display subagent execution progress and results.
  * This is now a pure component that renders the provided SubagentExecutionResultDisplay data.
@@ -87,6 +139,32 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
 }) => {
   const [displayMode, setDisplayMode] = React.useState<DisplayMode>('compact');
 
+  // Auto-downgrade display mode when available height is critically low.
+  // This prevents expanding into a mode that causes severe flickering.
+  const effectiveDisplayMode = useMemo(() => {
+    if (
+      availableHeight !== undefined &&
+      availableHeight < MIN_HEIGHT_FOR_DEFAULT
+    ) {
+      return 'compact';
+    }
+    if (
+      availableHeight !== undefined &&
+      availableHeight < MIN_HEIGHT_FOR_VERBOSE &&
+      displayMode === 'verbose'
+    ) {
+      return 'default';
+    }
+    return displayMode;
+  }, [availableHeight, displayMode]);
+
+  // Compute content budget based on available height to prevent Ink from
+  // laying out content that far exceeds the visible terminal area.
+  const { maxTaskPromptLines, maxToolCalls } = useMemo(
+    () => computeContentBudget(availableHeight),
+    [availableHeight],
+  );
+
   const agentColor = useMemo(() => {
     const colorOption = COLOR_OPTIONS.find(
       (option) => option.name === data.subagentColor,
@@ -98,11 +176,11 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
     // This component only listens to keyboard shortcut events when the subagent is running
     if (data.status !== 'running') return '';
 
-    if (displayMode === 'default') {
+    if (effectiveDisplayMode === 'default') {
       const hasMoreLines =
-        data.taskPrompt.split('\n').length > MAX_TASK_PROMPT_LINES;
+        data.taskPrompt.split('\n').length > maxTaskPromptLines;
       const hasMoreToolCalls =
-        data.toolCalls && data.toolCalls.length > MAX_TOOL_CALLS;
+        data.toolCalls && data.toolCalls.length > maxToolCalls;
 
       if (hasMoreToolCalls || hasMoreLines) {
         return 'Press ctrl+e to show less, ctrl+f to show more.';
@@ -110,14 +188,17 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
       return 'Press ctrl+e to show less.';
     }
 
-    if (displayMode === 'verbose') {
+    if (effectiveDisplayMode === 'verbose') {
       return 'Press ctrl+f to show less.';
     }
 
     return '';
-  }, [displayMode, data]);
+  }, [effectiveDisplayMode, data, maxTaskPromptLines, maxToolCalls]);
 
-  // Handle keyboard shortcuts to control display mode
+  // Handle keyboard shortcuts to control display mode.
+  // Only active for running sub-agents without pending confirmations to:
+  // 1. Prevent completed sub-agents from re-rendering on toggle (helps long sessions)
+  // 2. Avoid keyboard conflicts with confirmation prompts
   useKeypress(
     (key) => {
       if (key.ctrl && key.name === 'e') {
@@ -132,10 +213,10 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
         );
       }
     },
-    { isActive: true },
+    { isActive: data.status === 'running' && !data.pendingConfirmation },
   );
 
-  if (displayMode === 'compact') {
+  if (effectiveDisplayMode === 'compact') {
     return (
       <Box flexDirection="column">
         {/* Header: Agent name and status */}
@@ -232,7 +313,8 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
       {/* Task description */}
       <TaskPromptSection
         taskPrompt={data.taskPrompt}
-        displayMode={displayMode}
+        displayMode={effectiveDisplayMode}
+        maxLines={maxTaskPromptLines}
       />
 
       {/* Progress section for running tasks */}
@@ -242,7 +324,8 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
           <Box flexDirection="column">
             <ToolCallsList
               toolCalls={data.toolCalls}
-              displayMode={displayMode}
+              displayMode={effectiveDisplayMode}
+              maxCalls={maxToolCalls}
             />
           </Box>
         )}
@@ -272,7 +355,11 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
       {(data.status === 'completed' ||
         data.status === 'failed' ||
         data.status === 'cancelled') && (
-        <ResultsSection data={data} displayMode={displayMode} />
+        <ResultsSection
+          data={data}
+          displayMode={effectiveDisplayMode}
+          maxCalls={maxToolCalls}
+        />
       )}
 
       {/* Footer with keyboard shortcuts */}
@@ -291,11 +378,12 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
 const TaskPromptSection: React.FC<{
   taskPrompt: string;
   displayMode: DisplayMode;
-}> = ({ taskPrompt, displayMode }) => {
+  maxLines: number;
+}> = ({ taskPrompt, displayMode, maxLines }) => {
   const lines = taskPrompt.split('\n');
-  const shouldTruncate = lines.length > 10;
-  const showFull = displayMode === 'verbose';
-  const displayLines = showFull ? lines : lines.slice(0, MAX_TASK_PROMPT_LINES);
+  const effectiveMax = displayMode === 'verbose' ? lines.length : maxLines;
+  const shouldTruncate = lines.length > effectiveMax;
+  const displayLines = lines.slice(0, effectiveMax);
 
   return (
     <Box flexDirection="column" gap={1}>
@@ -304,13 +392,13 @@ const TaskPromptSection: React.FC<{
         {shouldTruncate && displayMode === 'default' && (
           <Text color={theme.text.secondary}>
             {' '}
-            Showing the first {MAX_TASK_PROMPT_LINES} lines.
+            Showing the first {effectiveMax} lines.
           </Text>
         )}
       </Box>
       <Box paddingLeft={1}>
         <Text wrap="wrap">
-          {displayLines.join('\n') + (shouldTruncate && !showFull ? '...' : '')}
+          {displayLines.join('\n') + (shouldTruncate ? '...' : '')}
         </Text>
       </Box>
     </Box>
@@ -345,11 +433,12 @@ const StatusIndicator: React.FC<{
 const ToolCallsList: React.FC<{
   toolCalls: AgentResultDisplay['toolCalls'];
   displayMode: DisplayMode;
-}> = ({ toolCalls, displayMode }) => {
+  maxCalls: number;
+}> = ({ toolCalls, displayMode, maxCalls }) => {
   const calls = toolCalls || [];
-  const shouldTruncate = calls.length > MAX_TOOL_CALLS;
-  const showAll = displayMode === 'verbose';
-  const displayCalls = showAll ? calls : calls.slice(-MAX_TOOL_CALLS); // Show last 5
+  const effectiveMax = displayMode === 'verbose' ? calls.length : maxCalls;
+  const shouldTruncate = calls.length > effectiveMax;
+  const displayCalls = calls.slice(-effectiveMax);
 
   // Reverse the order to show most recent first
   const reversedDisplayCalls = [...displayCalls].reverse();
@@ -361,7 +450,7 @@ const ToolCallsList: React.FC<{
         {shouldTruncate && displayMode === 'default' && (
           <Text color={theme.text.secondary}>
             {' '}
-            Showing the last {MAX_TOOL_CALLS} of {calls.length} tools.
+            Showing the last {effectiveMax} of {calls.length} tools.
           </Text>
         )}
       </Box>
@@ -527,11 +616,16 @@ const ToolUsageStats: React.FC<{
 const ResultsSection: React.FC<{
   data: AgentResultDisplay;
   displayMode: DisplayMode;
-}> = ({ data, displayMode }) => (
+  maxCalls: number;
+}> = ({ data, displayMode, maxCalls }) => (
   <Box flexDirection="column" gap={1}>
     {/* Tool calls section - clean list format */}
     {data.toolCalls && data.toolCalls.length > 0 && (
-      <ToolCallsList toolCalls={data.toolCalls} displayMode={displayMode} />
+      <ToolCallsList
+        toolCalls={data.toolCalls}
+        displayMode={displayMode}
+        maxCalls={maxCalls}
+      />
     )}
 
     {/* Execution Summary section - hide when cancelled */}
