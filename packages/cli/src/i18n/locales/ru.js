@@ -997,7 +997,8 @@ export default {
   // ============================================================================
   // Команды - Модель
   // ============================================================================
-  'Switch the model for this session': 'Переключение модели для этой сессии',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Переключение модели для этой сессии (--fast для модели подсказок)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Установить облегчённую модель для подсказок и спекулятивного выполнения',
   'Content generator configuration not available.':

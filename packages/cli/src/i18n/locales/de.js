@@ -989,7 +989,8 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': 'Modell für diese Sitzung wechseln',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Modell für diese Sitzung wechseln (--fast für Vorschlagsmodell)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Leichteres Modell für Eingabevorschläge und spekulative Ausführung festlegen',
   'Content generator configuration not available.':

@@ -743,7 +743,8 @@ export default {
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
-  'Switch the model for this session': 'このセッションのモデルを切り替え',
+  'Switch the model for this session (--fast for suggestion model)':
+    'このセッションのモデルを切り替え（--fast で提案モデルを設定）',
   'Set a lighter model for prompt suggestions and speculative execution':
     'プロンプト提案と投機的実行用の軽量モデルを設定',
   'Content generator configuration not available.':
