@@ -71,7 +71,7 @@ import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
-import { VerboseModeProvider } from './contexts/VerboseModeContext.js';
+import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -287,7 +287,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
-
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
   const originalTitleRef = useRef(
@@ -777,24 +776,22 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
-    useMessageQueue({
-      isConfigInitialized,
-      streamingState,
-      submitQuery,
-    });
+  const {
+    messageQueue,
+    addMessage,
+    clearQueue,
+    getQueuedMessagesText,
+    drainQueue,
+  } = useMessageQueue({
+    isConfigInitialized,
+    streamingState,
+    submitQuery,
+  });
 
   // Bridge message queue to mid-turn drain via ref.
-  // Sync ref on every render so the drain callback always reads latest state.
-  const messageQueueRef = useRef(messageQueue);
-  messageQueueRef.current = messageQueue;
-  midTurnDrainRef.current = () => {
-    const queue = messageQueueRef.current;
-    if (queue.length === 0) return [];
-    messageQueueRef.current = [];
-    clearQueue();
-    return [...queue];
-  };
+  // drainQueue reads from the synchronous queueRef inside useMessageQueue,
+  // so it always sees the latest state even between renders.
+  midTurnDrainRef.current = drainQueue;
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
@@ -1265,8 +1262,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
-  const [verboseMode, setVerboseMode] = useState<boolean>(
-    settings.merged.ui?.verboseMode ?? true,
+  const [compactMode, setCompactMode] = useState<boolean>(
+    settings.merged.ui?.compactMode ?? false,
   );
   const [frozenSnapshot, setFrozenSnapshot] = useState<
     HistoryItemWithoutId[] | null
@@ -1684,10 +1681,10 @@ export const AppContainer = (props: AppContainerProps) => {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);
         }
-      } else if (keyMatchers[Command.TOGGLE_VERBOSE_MODE](key)) {
-        const newValue = !verboseMode;
-        setVerboseMode(newValue);
-        void settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
+      } else if (keyMatchers[Command.TOGGLE_COMPACT_MODE](key)) {
+        const newValue = !compactMode;
+        setCompactMode(newValue);
+        void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
         // Only freeze during the actual responding phase. WaitingForConfirmation
         // must keep focus so the user can approve/cancel tool confirmation UI.
@@ -1729,8 +1726,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // debugKeystrokeLogging is read at call time, so no stale closure risk.
       settings,
       isAuthenticating,
-      verboseMode,
-      setVerboseMode,
+      compactMode,
+      setCompactMode,
       setFrozenSnapshot,
       pendingHistoryItems,
       refreshStatic,
@@ -2157,9 +2154,9 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
-  const verboseModeValue = useMemo(
-    () => ({ verboseMode, frozenSnapshot }),
-    [verboseMode, frozenSnapshot],
+  const compactModeValue = useMemo(
+    () => ({ compactMode, frozenSnapshot }),
+    [compactMode, frozenSnapshot],
   );
 
   return (
@@ -2172,11 +2169,11 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <VerboseModeProvider value={verboseModeValue}>
+            <CompactModeProvider value={compactModeValue}>
               <ShellFocusContext.Provider value={isFocused}>
                 <App />
               </ShellFocusContext.Provider>
-            </VerboseModeProvider>
+            </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>

@@ -518,7 +518,7 @@ export class MemoryTool
         );
         const scope = scopeMatch
           ? (scopeMatch[1].toLowerCase() as 'global' | 'project')
-          : 'global';
+          : originalParams.scope || 'global';
 
         // Strip out the scope directive and instruction lines, keep only the actual memory content
         const contentWithoutScope = modifiedProposedContent.replace(
