@@ -16,6 +16,7 @@ import {
   deleteSessionFromIndex,
   getSessionIdByName,
   listNamedSessions,
+  SessionService,
 } from '@qwen-code/qwen-code-core';
 
 export const chatCommand: SlashCommand = {
@@ -130,7 +131,7 @@ export const chatCommand: SlashCommand = {
         args: string,
       ): Promise<SlashCommandActionReturn | void> => {
         const name = args.trim();
-        
+
         if (!name) {
           return {
             type: 'message',
@@ -141,7 +142,7 @@ export const chatCommand: SlashCommand = {
 
         try {
           const sessionId = await getSessionIdByName(name);
-          
+
           if (!sessionId) {
             return {
               type: 'message',
@@ -150,16 +151,36 @@ export const chatCommand: SlashCommand = {
             };
           }
 
-          // 返回 dialog 类型，触发恢复会话对话框
-          // 但实际上我们需要直接恢复，而不是打开选择器
-          // 这里返回 sessionId，由外部处理
+          // Verify session data exists
+          const config = context.services.config;
+          if (!config) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: t('Config not loaded.'),
+            };
+          }
+
+          const cwd = config.getTargetDir();
+          const sessionService = new SessionService(cwd);
+          const sessionData = await sessionService.loadSession(sessionId);
+
+          if (!sessionData) {
+            return {
+              type: 'message',
+              messageType: 'error',
+              content: t(
+                'Session data for "{{name}}" could not be loaded. The session file may have been deleted.',
+                { name },
+              ),
+            };
+          }
+
+          // Return dialog action with sessionId to directly resume
           return {
-            type: 'message',
-            messageType: 'info',
-            content: t(
-              'Found session "{{name}}" with ID: {{sessionId}}\nUse /resume to select it, or restart with: qwen --session-id {{sessionId}}',
-              { name, sessionId },
-            ),
+            type: 'dialog',
+            dialog: 'resume',
+            params: { sessionId },
           };
         } catch (error) {
           return {

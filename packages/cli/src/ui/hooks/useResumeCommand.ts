@@ -23,7 +23,7 @@ export interface UseResumeCommandOptions {
 
 export interface UseResumeCommandResult {
   isResumeDialogOpen: boolean;
-  openResumeDialog: () => void;
+  openResumeDialog: (sessionId?: string) => void;
   closeResumeDialog: () => void;
   handleResume: (sessionId: string) => void;
 }
@@ -33,15 +33,11 @@ export function useResumeCommand(
 ): UseResumeCommandResult {
   const [isResumeDialogOpen, setIsResumeDialogOpen] = useState(false);
 
-  const openResumeDialog = useCallback(() => {
-    setIsResumeDialogOpen(true);
-  }, []);
+  const { config, historyManager, startNewSession, remount } = options ?? {};
 
   const closeResumeDialog = useCallback(() => {
     setIsResumeDialogOpen(false);
   }, []);
-
-  const { config, historyManager, startNewSession, remount } = options ?? {};
 
   const handleResume = useCallback(
     async (sessionId: string) => {
@@ -89,6 +85,18 @@ export function useResumeCommand(
       remount?.();
     },
     [closeResumeDialog, config, historyManager, startNewSession, remount],
+  );
+
+  const openResumeDialog = useCallback(
+    (sessionId?: string) => {
+      if (sessionId) {
+        // If sessionId is provided, directly resume that session
+        handleResume(sessionId);
+      } else {
+        setIsResumeDialogOpen(true);
+      }
+    },
+    [handleResume],
   );
 
   return {

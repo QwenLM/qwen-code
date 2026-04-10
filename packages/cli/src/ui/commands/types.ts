@@ -167,6 +167,11 @@ export interface OpenDialogActionReturn {
     | 'extensions_manage'
     | 'hooks'
     | 'mcp';
+
+  /** Optional parameter for certain dialogs (e.g., sessionId for 'resume') */
+  params?: {
+    sessionId?: string;
+  };
 }
 
 /**

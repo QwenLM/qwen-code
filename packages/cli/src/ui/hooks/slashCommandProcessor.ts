@@ -78,7 +78,7 @@ interface SlashCommandProcessorActions {
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
-  openResumeDialog: () => void;
+  openResumeDialog: (sessionId?: string) => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
   dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
@@ -541,7 +541,7 @@ export const useSlashCommandProcessor = (
                       actions.openApprovalModeDialog();
                       return { type: 'handled' };
                     case 'resume':
-                      actions.openResumeDialog();
+                      actions.openResumeDialog(result.params?.sessionId);
                       return { type: 'handled' };
                     case 'extensions_manage':
                       actions.openExtensionsManagerDialog();
