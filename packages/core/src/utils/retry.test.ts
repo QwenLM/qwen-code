@@ -796,6 +796,119 @@ describe('retryWithBackoff - persistent mode', () => {
   });
 });
 
+describe('retryWithBackoff - Retry-After handling in persistent mode', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setSimulate429(false);
+    console.warn = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  // Helper: create a 429 error with Retry-After header
+  function make429WithRetryAfter(seconds: number): HttpError {
+    const error: HttpError & { response: { headers: Record<string, string> } } =
+      Object.assign(new Error('Rate limited'), {
+        status: 429,
+        response: { headers: { 'retry-after': String(seconds) } },
+      });
+    return error;
+  }
+
+  it('should respect Retry-After and NOT cap at maxBackoff', async () => {
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 1) {
+        throw make429WithRetryAfter(600); // server says wait 10 minutes
+      }
+      return 'success';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 100,
+      persistentMode: true,
+      persistentMaxBackoffMs: 5000, // 5 seconds — Retry-After must NOT be capped to this
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // The first retry delay should be ~600s (600000ms), not 5s (5000ms)
+    const delays = setTimeoutSpy.mock.calls.map((call) => call[1] as number);
+    const firstRetryDelay = delays[0];
+    expect(firstRetryDelay).toBeGreaterThan(5000); // NOT capped at maxBackoff
+    expect(firstRetryDelay).toBeLessThanOrEqual(600 * 1000); // respects server value
+  });
+
+  it('should cap Retry-After at persistentCapMs', async () => {
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 1) {
+        throw make429WithRetryAfter(100); // server says wait 100s
+      }
+      return 'success';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 100,
+      persistentMode: true,
+      persistentCapMs: 50_000, // absolute cap 50s — less than Retry-After
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // Delay should be capped at persistentCapMs (50s), not the full 100s
+    const delays = setTimeoutSpy.mock.calls.map((call) => call[1] as number);
+    const firstRetryDelay = delays[0];
+    expect(firstRetryDelay).toBeLessThanOrEqual(50_000 + 1);
+  });
+
+  it('should NOT add jitter to Retry-After delays', async () => {
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    // Run multiple times to check for jitter variance
+    const observedDelays: number[] = [];
+
+    for (let run = 0; run < 5; run++) {
+      setTimeoutSpy.mockClear();
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts <= 1) {
+          throw make429WithRetryAfter(10); // 10 seconds
+        }
+        return 'success';
+      });
+
+      const promise = retryWithBackoff(fn, {
+        maxAttempts: 3,
+        initialDelayMs: 100,
+        persistentMode: true,
+      });
+
+      await vi.runAllTimersAsync();
+      await promise;
+
+      const delays = setTimeoutSpy.mock.calls.map((call) => call[1] as number);
+      observedDelays.push(delays[0]);
+    }
+
+    // All delays should be exactly 10000ms — no jitter
+    for (const d of observedDelays) {
+      expect(d).toBe(10_000);
+    }
+  });
+});
+
 describe('getErrorStatus', () => {
   it('should extract status from error.status (OpenAI/Anthropic/Gemini style)', () => {
     expect(getErrorStatus({ status: 429 })).toBe(429);
