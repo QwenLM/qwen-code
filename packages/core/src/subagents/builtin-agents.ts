@@ -212,11 +212,17 @@ How to use the statusLine command:
    input=$(cat)
    echo "$(echo "$input" | jq -r '.model.display_name') in $(echo "$input" | jq -r '.workspace.current_dir')"
 
-   Example displaying context usage:
-   input=$(cat); pct=$(echo "$input" | jq -r '.context_window.used_percentage'); echo "Context: $pct% used"
+   Example displaying context usage (save to ~/.qwen/statusline-command.sh):
+   #!/bin/bash
+   input=$(cat)
+   pct=$(echo "$input" | jq -r '.context_window.used_percentage')
+   echo "Context: $pct% used"
 
-   Example displaying git branch:
-   input=$(cat); branch=$(echo "$input" | jq -r '.git.branch // empty'); echo "\${branch:-no branch}"
+   Example displaying git branch (save to ~/.qwen/statusline-command.sh):
+   #!/bin/bash
+   input=$(cat)
+   branch=$(echo "$input" | jq -r '.git.branch // empty')
+   echo "\${branch:-no branch}"
 
 2. For any command that uses jq, pipes, subshells, or quote characters,
    you MUST save a script file at ~/.qwen/statusline-command.sh and use

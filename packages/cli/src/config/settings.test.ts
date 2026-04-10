@@ -1667,44 +1667,147 @@ describe('Settings Loading and Merging', () => {
         "Expected ',' or '}' after property value in JSON at position 10",
       );
 
-      // Return true for settings files but false for .orig backup files and
-      // .corrupted files so recovery rename path is hit.
+      // No .orig backup available
       (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
         const pathStr = String(p);
-        if (pathStr.endsWith('.orig') || pathStr.endsWith('.corrupted'))
-          return false;
+        if (pathStr.endsWith('.orig')) return false;
         return true;
       });
 
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
           if (p === USER_SETTINGS_PATH) {
-            // Simulate JSON.parse throwing for user settings
             vi.spyOn(JSON, 'parse').mockImplementationOnce(() => {
               throw userReadError;
             });
             return invalidJsonContent;
           }
-          return '{}'; // Default for other reads
+          return '{}';
         },
       );
-
-      // Mock renameSync to avoid actual file operations
-      const mockRenameSync = vi
-        .spyOn(fs, 'renameSync')
-        .mockImplementation(() => {});
 
       // Should NOT throw — corrupted settings degrade gracefully
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
-      // Verify the corrupted file was renamed
-      expect(mockRenameSync).toHaveBeenCalledWith(
-        USER_SETTINGS_PATH,
-        `${USER_SETTINGS_PATH}.corrupted`,
+      // Verify the corrupted file was renamed with timestamp suffix
+      const renameCalls = (fs.renameSync as Mock).mock.calls;
+      const corruptedRename = renameCalls.find(
+        (call: unknown[]) =>
+          call[0] === USER_SETTINGS_PATH &&
+          String(call[1]).includes('.corrupted.'),
+      );
+      expect(corruptedRename).toBeDefined();
+
+      // Verify migrationWarnings contains recovery message
+      const warnings = getSettingsWarnings(result);
+      expect(warnings.some((w) => w.includes('invalid JSON'))).toBe(true);
+      expect(warnings.some((w) => w.includes('renamed'))).toBe(true);
+
+      vi.restoreAllMocks();
+    });
+
+    it('should recover from .orig backup when settings.json is corrupted', () => {
+      const invalidJsonContent = 'invalid json';
+      const validBackupContent = JSON.stringify({
+        $version: SETTINGS_VERSION,
+        model: { id: 'backup-model' },
+      });
+
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
+          if (p === `${USER_SETTINGS_PATH}.orig`) return validBackupContent;
+          return '{}';
+        },
       );
 
-      mockRenameSync.mockRestore();
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(result).toBeDefined();
+
+      // Verify the backup was written back to the original path
+      const writeCalls = (fs.writeFileSync as Mock).mock.calls;
+      const restoreWrite = writeCalls.find(
+        (call: unknown[]) =>
+          call[0] === USER_SETTINGS_PATH && call[1] === validBackupContent,
+      );
+      expect(restoreWrite).toBeDefined();
+
+      // Verify migrationWarnings informs user about recovery
+      const warnings = getSettingsWarnings(result);
+      expect(warnings.some((w) => w.includes('recovered from backup'))).toBe(
+        true,
+      );
+
+      vi.restoreAllMocks();
+    });
+
+    it('should degrade gracefully when both settings.json and backup are corrupted', () => {
+      const invalidJsonContent = 'invalid json';
+      const invalidBackupContent = 'also invalid';
+
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+        const pathStr = String(p);
+        if (
+          pathStr === USER_SETTINGS_PATH ||
+          pathStr === `${USER_SETTINGS_PATH}.orig`
+        )
+          return true;
+        return false;
+      });
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
+          if (p === `${USER_SETTINGS_PATH}.orig`) return invalidBackupContent;
+          return '{}';
+        },
+      );
+
+      // Should NOT throw — falls through to rename-and-degrade
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(result).toBeDefined();
+
+      // Verify the corrupted file was renamed
+      const renameCalls = (fs.renameSync as Mock).mock.calls;
+      expect(
+        renameCalls.some(
+          (call: unknown[]) =>
+            call[0] === USER_SETTINGS_PATH &&
+            String(call[1]).includes('.corrupted.'),
+        ),
+      ).toBe(true);
+
+      vi.restoreAllMocks();
+    });
+
+    it('should start with empty settings when rename of corrupted file fails', () => {
+      const invalidJsonContent = 'invalid json';
+
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+        const pathStr = String(p);
+        if (pathStr.endsWith('.orig')) return false;
+        return true;
+      });
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return invalidJsonContent;
+          return '{}';
+        },
+      );
+
+      // Simulate rename failure (e.g., permission denied)
+      (fs.renameSync as Mock).mockImplementation(() => {
+        throw new Error('EACCES: permission denied');
+      });
+
+      // Should still NOT throw — proceeds with empty settings
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(result).toBeDefined();
+
       vi.restoreAllMocks();
     });
 
