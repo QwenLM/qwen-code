@@ -74,12 +74,12 @@
       "wrap-ansi": "7.0.0"
     },
     "baseline-browser-mapping": "^2.9.19",
-    "@qwen-code/channel-base": "npm:@alife/dataworks-qwen-code-channel-base@*",
-    "@qwen-code/channel-telegram": "npm:@alife/dataworks-qwen-code-channel-telegram@*",
-    "@qwen-code/channel-weixin": "npm:@alife/dataworks-qwen-code-channel-weixin@*",
-    "@qwen-code/channel-dingtalk": "npm:@alife/dataworks-qwen-code-channel-dingtalk@*",
-    "@qwen-code/qwen-code-core": "npm:@alife/dataworks-qwen-code-core@*",
-    "@qwen-code/web-templates": "npm:@alife/dataworks-qwen-code-web-templates@*"
+    "@qwen-code/channel-base": "file:packages/channels/base",
+    "@qwen-code/channel-telegram": "file:packages/channels/telegram",
+    "@qwen-code/channel-weixin": "file:packages/channels/weixin",
+    "@qwen-code/channel-dingtalk": "file:packages/channels/dingtalk",
+    "@qwen-code/qwen-code-core": "file:packages/core",
+    "@qwen-code/web-templates": "file:packages/web-templates"
   },
   "bin": {
     "qwen": "dist/cli.js"

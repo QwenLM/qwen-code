@@ -25,7 +25,7 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "npm:@alife/dataworks-qwen-code-channel-base@*",
+    "@qwen-code/channel-base": "file:../base",
     "dingtalk-stream-sdk-nodejs": "^2.0.4"
   },
   "devDependencies": {
