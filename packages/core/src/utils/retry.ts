@@ -241,18 +241,21 @@ export async function retryWithBackoff<T>(
           errorStatus === 429 ? getRetryAfterDelayMs(error) : 0;
 
         if (retryAfterMs > 0) {
+          // Retry-After is a server-specified wait — respect it, only cap at
+          // the absolute limit (capMs/6h), NOT at maxBackoff (5min).
           delayMs = Math.min(retryAfterMs, capMs);
         } else {
+          // Exponential backoff — cap at maxBackoff (5min) then absolute cap
           delayMs = Math.min(
             initialDelayMs * Math.pow(2, persistentAttempt - 1),
-            maxBackoff, // Cap single retry at 5 min
+            maxBackoff,
           );
-          delayMs = Math.min(delayMs, capMs); // Absolute cap at 6 hours
-        }
+          delayMs = Math.min(delayMs, capMs);
 
-        // Add jitter (±25%), then re-apply both caps so delay never exceeds limits
-        delayMs += delayMs * 0.25 * (Math.random() * 2 - 1);
-        delayMs = Math.min(Math.max(0, delayMs), maxBackoff, capMs);
+          // Add jitter (±25%), then re-apply caps so delay never exceeds limits
+          delayMs += delayMs * 0.25 * (Math.random() * 2 - 1);
+          delayMs = Math.min(Math.max(0, delayMs), maxBackoff, capMs);
+        }
 
         const reportedAttempt = persistentAttempt;
         debugLogger.warn(
