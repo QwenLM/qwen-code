@@ -1402,6 +1402,8 @@ export class Config {
         await this.toolRegistry.stop();
       }
 
+      this.backgroundTaskRegistry.abortAll();
+
       await this.cleanupArenaRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort

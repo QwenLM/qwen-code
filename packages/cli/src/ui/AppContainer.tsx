@@ -355,11 +355,6 @@ export const AppContainer = (props: AppContainerProps) => {
       const ideClient = await IdeClient.getInstance();
       await ideClient.disconnect();
     });
-
-    // Abort all running background agents on session exit
-    registerCleanup(() => {
-      config.getBackgroundTaskRegistry().abortAll();
-    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
 
