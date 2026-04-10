@@ -58,7 +58,11 @@ export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
 
   for (const rawLine of body.split('\n')) {
     const trimmed = rawLine.trim();
-    if (!trimmed || trimmed === '_No entries yet._' || trimmed.startsWith('# ')) {
+    if (
+      !trimmed ||
+      trimmed === '_No entries yet._' ||
+      trimmed.startsWith('# ')
+    ) {
       continue;
     }
 
@@ -78,6 +82,8 @@ export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
             case 'how to apply':
             case 'how_to_apply':
               current.howToApply = value;
+              break;
+            default:
               break;
           }
         }
@@ -100,6 +106,8 @@ export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
           case 'how to apply':
           case 'how_to_apply':
             current.howToApply = value;
+            break;
+          default:
             break;
         }
       }

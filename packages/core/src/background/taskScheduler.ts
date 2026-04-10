@@ -4,12 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
+import type {
   BackgroundTaskRegistry,
-  type BackgroundTaskStatus,
-  type BackgroundTaskState,
+  BackgroundTaskStatus,
+  BackgroundTaskState,
 } from './taskRegistry.js';
-import { BackgroundTaskDrainer } from './taskDrainer.js';
+import type { BackgroundTaskDrainer } from './taskDrainer.js';
 
 export interface ScheduleBackgroundTaskParams {
   taskType: string;
@@ -60,7 +60,9 @@ export class BackgroundTaskScheduler {
         });
         return {
           taskId: skipped.id,
-          promise: Promise.resolve(this.registry.get(skipped.id) as BackgroundTaskState),
+          promise: Promise.resolve(
+            this.registry.get(skipped.id) as BackgroundTaskState,
+          ),
         };
       }
     }
@@ -82,7 +84,9 @@ export class BackgroundTaskScheduler {
       task.id,
       (async () => {
         try {
-          const result = await params.run(this.registry.get(task.id) as BackgroundTaskState);
+          const result = await params.run(
+            this.registry.get(task.id) as BackgroundTaskState,
+          );
           const finalTask = this.registry.update(task.id, {
             status: result?.status ?? 'completed',
             progressText: result?.progressText,
