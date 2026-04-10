@@ -65,14 +65,19 @@ export function parseAutoMemoryTopicDocument(
 async function listMarkdownFiles(root: string): Promise<string[]> {
   try {
     const entries = await fs.readdir(root, { recursive: true });
-    return entries
-      .filter(
-        (entry): entry is string =>
-          typeof entry === 'string' &&
-          entry.endsWith('.md') &&
-          path.basename(entry) !== AUTO_MEMORY_INDEX_FILENAME,
-      )
-      .sort();
+    return (
+      entries
+        .filter(
+          (entry): entry is string =>
+            typeof entry === 'string' &&
+            entry.endsWith('.md') &&
+            path.basename(entry) !== AUTO_MEMORY_INDEX_FILENAME,
+        )
+        // Normalize to forward slashes so relative paths are valid URL segments
+        // on all platforms (Windows readdir returns backslash-separated paths).
+        .map((entry) => entry.replaceAll('\\', '/'))
+        .sort()
+    );
   } catch (error) {
     const nodeError = error as NodeJS.ErrnoException;
     if (nodeError.code === 'ENOENT') {
@@ -106,6 +111,8 @@ export async function scanAutoMemoryTopicDocuments(
   return docs
     .filter((doc): doc is ScannedAutoMemoryDocument => doc !== null)
     .filter((doc) => AUTO_MEMORY_TYPES.includes(doc.type))
-    .sort((a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename))
+    .sort(
+      (a, b) => b.mtimeMs - a.mtimeMs || a.filename.localeCompare(b.filename),
+    )
     .slice(0, MAX_SCANNED_MEMORY_FILES);
 }
