@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use globset::GlobSet;
-use ignore::gitignore::GitignoreBuilder;
 use ignore::WalkBuilder;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
@@ -76,30 +75,6 @@ impl FileSearch {
     /// Load .qwenignore patterns and build a GlobSet
     fn load_qwenignore(&self) -> Option<GlobSet> {
         self.load_ignore_file_as_globset(".qwenignore")
-    }
-
-    /// Load .gitignore patterns using GitignoreBuilder for proper negation support
-    fn load_gitignore(&self) -> Option<ignore::gitignore::Gitignore> {
-        let gitignore_path = PathBuf::from(&self.project_root).join(".gitignore");
-        if !gitignore_path.exists() {
-            return None;
-        }
-
-        let mut builder = GitignoreBuilder::new(&self.project_root);
-        
-        // Add patterns from .gitignore
-        if let Some(e) = builder.add(&gitignore_path) {
-            eprintln!("Warning: Failed to load .gitignore: {}", e);
-            return None;
-        }
-
-        match builder.build() {
-            Ok(gitignore) => Some(gitignore),
-            Err(e) => {
-                eprintln!("Warning: Failed to build gitignore: {}", e);
-                None
-            }
-        }
     }
 
     /// Load an ignore file and build a GlobSet (for qwenignore)
