@@ -598,8 +598,18 @@ async function plistBuddyCommand(command: string): Promise<boolean> {
 async function enableOptionAsMetaForProfile(
   profileName: string,
 ): Promise<boolean> {
-  // Escape single quotes in profile name for PlistBuddy key path syntax
-  const escaped = profileName.replace(/'/g, "\\'");
+  // Reject profile names with control characters that could break PlistBuddy
+  const hasControlChars = [...profileName].some(
+    (ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f,
+  );
+  if (hasControlChars) {
+    debugLogger.warn(
+      `Skipping profile with control characters: ${profileName}`,
+    );
+    return false;
+  }
+  // Escape backslashes first, then single quotes for PlistBuddy key path syntax
+  const escaped = profileName.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
   // Try Add first (in case the key doesn't exist), then Set as fallback
   const addOk = await plistBuddyCommand(
     `Add :'Window Settings':'${escaped}':useOptionAsMetaKey bool true`,
