@@ -88,10 +88,11 @@ async function queryOSC11(
       stdin.removeListener('data', onData);
       stdin.removeListener('error', onAbort);
       stdin.removeListener('end', onAbort);
-      // Restore stdin to paused (non-flowing) mode — .on('data') switched it
-      // to flowing, and leaving it flowing could cause data loss before ink
-      // attaches its own listeners.
-      stdin.pause();
+      // Note: do NOT call stdin.pause() here.  Removing all 'data' listeners
+      // already switches the stream back to paused mode (Node.js Readable
+      // contract).  An explicit pause() would leave the stream in a state
+      // that interferes with the later Kitty protocol detection, causing its
+      // query responses ("[?0u", "[?62c") to leak into the input buffer.
       try {
         stdin.setRawMode(wasRaw ?? false);
       } catch {
