@@ -33,6 +33,8 @@ function createMockContext(
 }
 
 // Mock the chat index functions
+// Note: i18n is not mocked, so t() returns the key itself.
+// Tests assert on i18n keys rather than translated strings.
 vi.mock('@qwen-code/qwen-code-core', () => ({
   saveSessionToIndex: vi.fn().mockResolvedValue(undefined),
   deleteSessionFromIndex: vi.fn().mockResolvedValue(true),

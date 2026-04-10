@@ -20,7 +20,9 @@ import {
 } from '@qwen-code/qwen-code-core';
 
 /**
- * Validates a session name
+ * Validates a session name format (not existence).
+ * Note: This only checks the format of the name (allowed characters, length).
+ * Session existence is validated separately by getSessionIdByName().
  * @param name The session name to validate
  * @returns validation key for i18n, or true if valid
  */
@@ -295,7 +297,10 @@ export const chatCommand: SlashCommand = {
           if (!context.overwriteConfirmed) {
             return {
               type: 'confirm_action',
-              prompt: `Are you sure you want to delete session "${name}"? This action cannot be undone.`,
+              prompt: t(
+                'Are you sure you want to delete session "{{name}}"? This action cannot be undone.',
+                { name },
+              ),
               originalInvocation: {
                 raw: context.invocation?.raw || `/chat delete ${name}`,
               },

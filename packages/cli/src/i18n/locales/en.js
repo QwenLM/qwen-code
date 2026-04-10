@@ -2040,4 +2040,6 @@ export default {
     'Invalid session name. Use only letters, numbers, hyphens, underscores, and dots.',
   'chat.session_name_too_long':
     'Session name is too long. Maximum 128 characters.',
+  'Are you sure you want to delete session "{{name}}"? This action cannot be undone.':
+    'Are you sure you want to delete session "{{name}}"? This action cannot be undone.',
 };

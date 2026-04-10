@@ -1840,4 +1840,6 @@ export default {
   'chat.invalid_session_name':
     '无效的会话名称。只能使用字母、数字、连字符、下划线和点。',
   'chat.session_name_too_long': '会话名称太长。最多 128 个字符。',
+  'Are you sure you want to delete session "{{name}}"? This action cannot be undone.':
+    '确定要删除会话"{{name}}"吗？此操作无法撤销。',
 };
