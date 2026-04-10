@@ -10,7 +10,6 @@ import type {
   SlashCommandActionReturn,
 } from './types.js';
 import { CommandKind } from './types.js';
-import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
 import {
   saveSessionToIndex,

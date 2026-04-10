@@ -10,7 +10,7 @@ import fs from 'node:fs/promises';
 // Mock os.homedir to avoid writing to real home directory
 // Must use vi.hoisted because vi.mock is hoisted to the top
 const { mockHomeDir } = vi.hoisted(() => ({
-  mockHomeDir: require('path').join(process.env.TEMP || '/tmp', 'mock-home-test'),
+  mockHomeDir: require('path').join(process.env['TEMP'] || '/tmp', 'mock-home-test'),
 }));
 
 vi.mock('node:os', () => ({
