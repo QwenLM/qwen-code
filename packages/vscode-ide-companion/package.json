@@ -209,6 +209,7 @@
     "@typescript-eslint/parser": "^8.31.1",
     "autoprefixer": "^10.4.22",
     "esbuild": "^0.25.3",
+    "esbuild-plugin-wasm": "^1.1.0",
     "eslint": "^9.25.1",
     "eslint-plugin-react-hooks": "^5.2.0",
     "npm-run-all2": "^8.0.2",
