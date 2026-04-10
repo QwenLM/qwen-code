@@ -1,12 +1,21 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2025 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
 
 import process from 'node:process';
 
-/** Dark ANSI color indices (standard 0-15 palette). */
+/**
+ * Dark ANSI color indices (standard 0-15 palette).
+ *
+ * Indices 0-6 and 8 are classified as dark backgrounds following the
+ * convention used by vim and other tools.  Indices 3 (yellow/brown) and
+ * 6 (cyan) are borderline — their actual brightness depends on the
+ * terminal's palette — but standard VGA/xterm defaults render them dark
+ * enough to warrant dark-theme text.  7 (white/light-gray) and 9-15
+ * (bright variants) are classified as light.
+ */
 const DARK_BG_INDICES = new Set([0, 1, 2, 3, 4, 5, 6, 8]);
 
 export interface DetectOptions {
@@ -73,6 +82,10 @@ async function queryOSC11(
       settled = true;
       clearTimeout(timer);
       stdin.removeListener('data', onData);
+      // Restore stdin to paused (non-flowing) mode — .on('data') switched it
+      // to flowing, and leaving it flowing could cause data loss before ink
+      // attaches its own listeners.
+      stdin.pause();
       try {
         stdin.setRawMode(wasRaw ?? false);
       } catch {
@@ -121,9 +134,14 @@ async function queryOSC11(
  * Determines if the background is light from hex color components.
  * X11 rgb: format allows 1–4 hex digits per channel; the max value
  * for N digits is (16^N - 1), e.g. 1-digit → 0xF, 4-digit → 0xFFFF.
+ *
+ * Per the X11 spec all three channels use the same precision, so we
+ * derive maxVal from rHex.length. If a malformed response has mixed
+ * lengths we use the longest channel to avoid division overflow.
  */
 function isLightBackground(rHex: string, gHex: string, bHex: string): boolean {
-  const maxVal = (1 << (4 * rHex.length)) - 1;
+  const hexLen = Math.max(rHex.length, gHex.length, bHex.length);
+  const maxVal = (1 << (4 * hexLen)) - 1;
   const r = parseInt(rHex, 16);
   const g = parseInt(gHex, 16);
   const b = parseInt(bHex, 16);

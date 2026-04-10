@@ -244,6 +244,9 @@ export async function main() {
     }
   } else {
     // No explicit theme configured — auto-detect terminal background.
+    // Most terminals respond to OSC 11 within ~50ms; the 300ms timeout
+    // covers high-latency scenarios (e.g. SSH).  Once the user sets a
+    // theme via /theme this branch is skipped entirely.
     const background = await detectTerminalBackground({ timeoutMs: 300 });
     themeManager.setActiveTheme(
       background === 'light' ? 'Qwen Light' : 'Qwen Dark',
