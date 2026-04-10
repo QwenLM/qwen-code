@@ -71,7 +71,7 @@ function approvalModeToPermissionMode(mode: ApprovalMode): PermissionMode {
  * - Otherwise, the agent definition's mode applies if set
  * - Default fallback is auto-edit (sub-agents need autonomy)
  */
-function resolveSubagentApprovalMode(
+export function resolveSubagentApprovalMode(
   parentApprovalMode: ApprovalMode,
   agentApprovalMode?: string,
   isTrustedFolder?: boolean,

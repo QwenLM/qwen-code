@@ -5,11 +5,15 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { AgentTool, type AgentParams } from './agent.js';
+import {
+  AgentTool,
+  type AgentParams,
+  resolveSubagentApprovalMode,
+} from './agent.js';
 import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from './tools.js';
 import { ToolConfirmationOutcome } from './tools.js';
-import type { Config } from '../config/config.js';
+import { type Config, ApprovalMode } from '../config/config.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
@@ -1304,5 +1308,82 @@ describe('AgentTool', () => {
       // The onConfirm callback should have cleared pendingConfirmation
       expect(snapshots.some((s) => !s.hasPendingConfirmation)).toBe(true);
     });
+  });
+});
+
+describe('resolveSubagentApprovalMode', () => {
+  it('should return yolo when parent is yolo, regardless of agent config', () => {
+    expect(resolveSubagentApprovalMode(ApprovalMode.YOLO, 'plan', true)).toBe(
+      PermissionMode.Yolo,
+    );
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.YOLO, undefined, false),
+    ).toBe(PermissionMode.Yolo);
+  });
+
+  it('should return auto-edit when parent is auto-edit, regardless of agent config', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.AUTO_EDIT, 'plan', true),
+    ).toBe(PermissionMode.AutoEdit);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.AUTO_EDIT, 'default', false),
+    ).toBe(PermissionMode.AutoEdit);
+  });
+
+  it('should respect agent-declared mode when parent is default and folder is trusted', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'plan', true),
+    ).toBe(PermissionMode.Plan);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'auto-edit', true),
+    ).toBe(PermissionMode.AutoEdit);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'yolo', true),
+    ).toBe(PermissionMode.Yolo);
+  });
+
+  it('should block privileged agent-declared modes in untrusted folders', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'auto-edit', false),
+    ).toBe(PermissionMode.Default);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'yolo', false),
+    ).toBe(PermissionMode.Default);
+  });
+
+  it('should allow non-privileged agent-declared modes in untrusted folders', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'plan', false),
+    ).toBe(PermissionMode.Plan);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'default', false),
+    ).toBe(PermissionMode.Default);
+  });
+
+  it('should default to plan when parent is plan and no agent config', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.PLAN, undefined, true),
+    ).toBe(PermissionMode.Plan);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.PLAN, undefined, false),
+    ).toBe(PermissionMode.Plan);
+  });
+
+  it('should allow agent-declared mode to override plan parent', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.PLAN, 'auto-edit', true),
+    ).toBe(PermissionMode.AutoEdit);
+  });
+
+  it('should default to auto-edit when parent is default and folder is trusted', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, undefined, true),
+    ).toBe(PermissionMode.AutoEdit);
+  });
+
+  it('should default to parent mode when parent is default and folder is untrusted', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, undefined, false),
+    ).toBe(PermissionMode.Default);
   });
 });
