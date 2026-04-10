@@ -56,21 +56,21 @@ Commands specifically for controlling interface and output language.
 
 Commands for managing AI tools and models.
 
-| Command          | Description                                       | Usage Examples                                |
-| ---------------- | ------------------------------------------------- | --------------------------------------------- |
-| `/mcp`           | List configured MCP servers and tools             | `/mcp`, `/mcp desc`                           |
-| `/tools`         | Display currently available tool list             | `/tools`, `/tools desc`                       |
-| `/skills`        | List and run available skills                     | `/skills`, `/skills <name>`                   |
-| `/plan`          | Switch to plan mode or exit plan mode             | `/plan`, `/plan <task>`, `/plan exit`         |
-| `/approval-mode` | Change approval mode for tool usage               | `/approval-mode <mode (auto-edit)> --project` |
-| →`plan`          | Analysis only, no execution                       | Secure review                                 |
-| →`default`       | Require approval for edits                        | Daily use                                     |
-| →`auto-edit`     | Automatically approve edits                       | Trusted environment                           |
-| →`yolo`          | Automatically approve all                         | Quick prototyping                             |
-| `/model`         | Switch model used in current session              | `/model`                                      |
-| `/model --fast`  | Set or select the fast model for background tasks | `/model --fast qwen3.5-flash`                 |
-| `/extensions`    | List all active extensions in current session     | `/extensions`                                 |
-| `/memory`        | Manage AI's instruction context                   | `/memory add Important Info`                  |
+| Command          | Description                                   | Usage Examples                                |
+| ---------------- | --------------------------------------------- | --------------------------------------------- |
+| `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`                           |
+| `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                       |
+| `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                   |
+| `/plan`          | Switch to plan mode or exit plan mode         | `/plan`, `/plan <task>`, `/plan exit`         |
+| `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project` |
+| →`plan`          | Analysis only, no execution                   | Secure review                                 |
+| →`default`       | Require approval for edits                    | Daily use                                     |
+| →`auto-edit`     | Automatically approve edits                   | Trusted environment                           |
+| →`yolo`          | Automatically approve all                     | Quick prototyping                             |
+| `/model`         | Switch model used in current session          | `/model`                                      |
+| `/model --fast`  | Set a lighter model for prompt suggestions    | `/model --fast qwen3-coder-flash`             |
+| `/extensions`    | List all active extensions in current session | `/extensions`                                 |
+| `/memory`        | Manage AI's instruction context               | `/memory add Important Info`                  |
 
 ### 1.5 Built-in Skills
 

@@ -1152,7 +1152,8 @@ export default {
   // Commands - Model
   // ============================================================================
   'Switch the model for this session': 'Switch the model for this session',
-  'Set fast model for background tasks': 'Set fast model for background tasks',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Set a lighter model for prompt suggestions and speculative execution',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',

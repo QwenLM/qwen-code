@@ -1093,7 +1093,8 @@ export default {
   // Commands - Model
   // ============================================================================
   'Switch the model for this session': '切换此会话的模型',
-  'Set fast model for background tasks': '设置后台任务的快速模型',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    '设置用于输入建议和推测执行的轻量模型',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':

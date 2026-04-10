@@ -744,8 +744,8 @@ export default {
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
   'Switch the model for this session': 'このセッションのモデルを切り替え',
-  'Set fast model for background tasks':
-    'バックグラウンドタスク用の高速モデルを設定',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'プロンプト提案と投機的実行用の軽量モデルを設定',
   'Content generator configuration not available.':
     'コンテンツジェネレーター設定が利用できません',
   'Authentication type not available.': '認証タイプが利用できません',
