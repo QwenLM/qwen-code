@@ -49,7 +49,18 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
     await fs.writeFile(tempFile, content, 'utf-8');
     await fs.rename(tempFile, filePath);
   } catch (error) {
-    // Clean up temp file
+    // Handle cross-device rename (EXDEV) - fallback to copy+delete
+    if (
+      typeof error === 'object' &&
+      error !== null &&
+      'code' in error &&
+      error.code === 'EXDEV'
+    ) {
+      await fs.writeFile(filePath, content, 'utf-8');
+      await fs.unlink(tempFile).catch(() => {});
+      return;
+    }
+    // Clean up temp file and rethrow
     try {
       await fs.unlink(tempFile);
     } catch {
@@ -80,9 +91,10 @@ export async function readChatIndex(projectDir: string): Promise<ChatIndex> {
     }
 
     // Ensure all values are strings
-    for (const [key, value] of Object.entries(parsed)) {
+    for (const [_key, value] of Object.entries(parsed)) {
       if (typeof value !== 'string') {
-        throw new Error(`Invalid entry in chat index: ${key}`);
+        // Gracefully degrade to empty index on malformed data
+        return {};
       }
     }
 

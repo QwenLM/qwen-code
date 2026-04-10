@@ -25,6 +25,50 @@ These commands help you save, restore, and summarize work progress.
 | `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
 | `/resume`   | Resume a previous conversation session                    | `/resume`                            |
 | `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
+| `/chat`     | Save, list, resume, and delete named chat sessions        | `/chat save <name>`, `/chat list`    |
+
+#### `/chat` Subcommands
+
+The `/chat` command provides session management through named aliases, stored in `<project>/.qwen/chat-index.json` (isolated per project).
+
+| Subcommand            | Description                                         | Example                      |
+| --------------------- | --------------------------------------------------- | ---------------------------- |
+| `/chat save <name>`   | Save the current session with a human-readable name | `/chat save auth-refactor`   |
+| `/chat list`          | List all saved session names and their IDs          | `/chat list`                 |
+| `/chat resume <name>` | Restore a saved session by name                     | `/chat resume auth-refactor` |
+| `/chat delete <name>` | Remove a saved session (requires confirmation)      | `/chat delete auth-refactor` |
+
+**Session Name Rules:**
+
+- Only letters, numbers, hyphens (`-`), underscores (`_`), and dots (`.`) are allowed
+- Maximum 128 characters
+- Reserved names `.` and `..` are blocked
+
+**Example Workflow:**
+
+```
+# 1. Save your current work with a meaningful name
+> /chat save feature-implementation
+
+# 2. List all saved sessions
+> /chat list
+Saved sessions:
+
+• feature-implementation (ID: abc12345...)
+• bugfix-login (ID: def67890...)
+
+# 3. Switch to another task, then resume later
+> /chat resume feature-implementation
+
+# 4. Clean up old sessions
+> /chat delete bugfix-login
+Are you sure you want to delete session "bugfix-login"? This action cannot be undone.
+# (Confirm to proceed)
+```
+
+> [!note]
+>
+> Session names are project-scoped. The same name can refer to different sessions in different projects. Session data is stored separately from the index, so deleting a session from the index also removes its data file.
 
 ### 1.2 Interface and Workspace Control
 

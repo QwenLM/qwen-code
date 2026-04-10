@@ -133,6 +133,8 @@ describe('chatCommand', () => {
         'my session', // space
         'my@session', // special char
         'my#session', // special char
+        '.', // reserved name
+        '..', // reserved name
       ];
 
       for (const invalidName of invalidNames) {

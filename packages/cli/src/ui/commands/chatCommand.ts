@@ -30,6 +30,10 @@ function validateSessionName(name: string): true | string {
   if (!name) {
     return 'chat.session_name_required';
   }
+  // Block reserved names to prevent path traversal and index corruption
+  if (name === '.' || name === '..') {
+    return 'chat.invalid_session_name';
+  }
   // Only allow letters, numbers, hyphens, underscores, and dots
   if (!/^[a-zA-Z0-9_.-]+$/.test(name)) {
     return 'chat.invalid_session_name';
