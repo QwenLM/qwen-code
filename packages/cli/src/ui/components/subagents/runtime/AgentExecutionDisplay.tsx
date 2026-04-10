@@ -75,8 +75,6 @@ const MAX_TASK_PROMPT_LINES = 5;
 // Fixed overhead lines in default/verbose mode:
 // header(1) + "Task Detail:" label(1) + "Tools:" label(1) + gaps(3) + footer(1)
 const EXPANDED_FIXED_OVERHEAD = 7;
-// Minimum height to allow default mode (below this, auto-downgrade to compact)
-const MIN_HEIGHT_FOR_DEFAULT = 5;
 // Minimum height to allow verbose mode (below this, auto-downgrade to default)
 const MIN_HEIGHT_FOR_VERBOSE = 15;
 // Each tool call renders ~2 lines (name + result)
@@ -139,15 +137,10 @@ export const AgentExecutionDisplay: React.FC<AgentExecutionDisplayProps> = ({
 }) => {
   const [displayMode, setDisplayMode] = React.useState<DisplayMode>('compact');
 
-  // Auto-downgrade display mode when available height is critically low.
-  // This prevents expanding into a mode that causes severe flickering.
+  // Auto-downgrade verbose mode when available height is too low to show full
+  // content. Default mode is NOT auto-downgraded — the content budget already
+  // limits what's shown, and the user explicitly pressed Ctrl+E to expand.
   const effectiveDisplayMode = useMemo(() => {
-    if (
-      availableHeight !== undefined &&
-      availableHeight < MIN_HEIGHT_FOR_DEFAULT
-    ) {
-      return 'compact';
-    }
     if (
       availableHeight !== undefined &&
       availableHeight < MIN_HEIGHT_FOR_VERBOSE &&

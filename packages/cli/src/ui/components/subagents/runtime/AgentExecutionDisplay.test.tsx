@@ -5,7 +5,10 @@
  */
 
 import { render } from 'ink-testing-library';
-import { AgentExecutionDisplay , computeContentBudget } from './AgentExecutionDisplay.js';
+import {
+  AgentExecutionDisplay,
+  computeContentBudget,
+} from './AgentExecutionDisplay.js';
 import type { AgentResultDisplay, Config } from '@qwen-code/qwen-code-core';
 
 // Mock useKeypress to avoid stdin issues in tests
@@ -143,7 +146,7 @@ describe('AgentExecutionDisplay height constraint', () => {
     expect(lineCount).toBeLessThanOrEqual(6);
   });
 
-  it('renders in compact mode when availableHeight is very small', () => {
+  it('renders compact mode with small availableHeight (content budget limits output)', () => {
     const data = makeAgentData();
     const { lastFrame } = render(
       <AgentExecutionDisplay
