@@ -16,7 +16,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
 } from './tools.js';
-import { type Config, ApprovalMode } from '../config/config.js';
+import type { Config } from '../config/config.js';
 import type { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
@@ -598,13 +598,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           abortController: bgAbortController,
         });
 
-        // Background agents run with YOLO approval mode to prevent
-        // deadlocks — they have no UI to show approval prompts. The
-        // user already approved the Agent tool call, which is the
-        // trust boundary.
+        // Background agents can't show interactive permission prompts
+        // (no UI). Instead of YOLO (which would auto-approve everything),
+        // we set shouldAvoidPermissionPrompts so the tool scheduler
+        // auto-denies 'ask' decisions — matching claw-code's approach.
+        // PermissionRequest hooks still run and can override the denial.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const bgConfig = Object.create(this.config) as any;
-        bgConfig.getApprovalMode = () => ApprovalMode.YOLO;
+        bgConfig.getShouldAvoidPermissionPrompts = () => true;
 
         // Create a dedicated subagent that uses the bg-specific config.
         const bgSubagent = await this.subagentManager.createAgentHeadless(

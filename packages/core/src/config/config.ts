@@ -2181,6 +2181,15 @@ export class Config {
     return this.backgroundTaskRegistry;
   }
 
+  /**
+   * Whether interactive permission prompts should be auto-denied.
+   * True for background agents that have no UI to show prompts.
+   * PermissionRequest hooks still run and can override the denial.
+   */
+  getShouldAvoidPermissionPrompts(): boolean {
+    return false;
+  }
+
   getSkillManager(): SkillManager | null {
     return this.skillManager;
   }
