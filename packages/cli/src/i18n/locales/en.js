@@ -2030,4 +2030,14 @@ export default {
     'Not in plan mode. Use "/plan" to enter plan mode first.',
 
   "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+
+  // ============================================================================
+  // Chat Session Commands
+  // ============================================================================
+  'chat.session_name_required':
+    'Please provide a name. Usage: /chat <command> <name>',
+  'chat.invalid_session_name':
+    'Invalid session name. Use only letters, numbers, hyphens, underscores, and dots.',
+  'chat.session_name_too_long':
+    'Session name is too long. Maximum 128 characters.',
 };

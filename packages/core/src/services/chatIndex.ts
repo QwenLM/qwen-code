@@ -40,6 +40,7 @@ async function ensureQwenDir(projectDir: string): Promise<void> {
  * Atomically writes to a file (using temp file + rename)
  * @param filePath Target file path
  * @param content File content
+ * @prerequisite The parent directory of filePath must exist
  */
 async function atomicWrite(filePath: string, content: string): Promise<void> {
   const dir = path.dirname(filePath);
@@ -87,6 +88,10 @@ export async function readChatIndex(projectDir: string): Promise<ChatIndex> {
 
     return parsed as ChatIndex;
   } catch (error) {
+    // JSON parse error, return empty index (file may be corrupted)
+    if (error instanceof SyntaxError) {
+      return {};
+    }
     // File doesn't exist is normal, return empty index
     if (
       typeof error === 'object' &&
@@ -94,10 +99,6 @@ export async function readChatIndex(projectDir: string): Promise<ChatIndex> {
       'code' in error &&
       error.code === 'ENOENT'
     ) {
-      return {};
-    }
-    // JSON parse error, return empty index (file may be corrupted)
-    if (error instanceof SyntaxError) {
       return {};
     }
     // Other errors (permissions, I/O) should throw

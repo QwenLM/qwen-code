@@ -115,7 +115,46 @@ describe('chatCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: expect.stringContaining('Please provide a name'),
+        content: 'chat.session_name_required',
+      });
+    });
+
+    it('should return error for invalid session name with special characters', async () => {
+      const saveCommand = chatCommand.subCommands?.find(
+        (cmd) => cmd.name === 'save',
+      );
+
+      // Test various invalid names
+      const invalidNames = [
+        'my/session', // forward slash
+        'my\\session', // backslash
+        'my session', // space
+        'my@session', // special char
+        'my#session', // special char
+      ];
+
+      for (const invalidName of invalidNames) {
+        const result = await saveCommand?.action!(mockContext, invalidName);
+        expect(result).toEqual({
+          type: 'message',
+          messageType: 'error',
+          content: 'chat.invalid_session_name',
+        });
+      }
+    });
+
+    it('should return error for session name exceeding max length', async () => {
+      const saveCommand = chatCommand.subCommands?.find(
+        (cmd) => cmd.name === 'save',
+      );
+      const longName = 'a'.repeat(129); // 129 characters
+
+      const result = await saveCommand?.action!(mockContext, longName);
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'chat.session_name_too_long',
       });
     });
 
@@ -168,7 +207,7 @@ describe('chatCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: expect.stringContaining('Please provide a name'),
+        content: 'chat.session_name_required',
       });
     });
 
@@ -205,7 +244,7 @@ describe('chatCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: expect.stringContaining('Please provide a name'),
+        content: 'chat.session_name_required',
       });
     });
 

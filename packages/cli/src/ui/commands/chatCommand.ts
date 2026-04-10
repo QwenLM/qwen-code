@@ -22,19 +22,19 @@ import {
 /**
  * Validates a session name
  * @param name The session name to validate
- * @returns true if valid, or an error message string if invalid
+ * @returns validation key for i18n, or true if valid
  */
 function validateSessionName(name: string): true | string {
   if (!name) {
-    return 'Please provide a name. Usage: /chat <command> <name>';
+    return 'chat.session_name_required';
   }
   // Only allow letters, numbers, hyphens, underscores, and dots
-  if (!/^[a-zA-Z0-9_-./]+$/.test(name)) {
-    return 'Invalid session name. Use only letters, numbers, hyphens, underscores, and dots.';
+  if (!/^[a-zA-Z0-9_.-]+$/.test(name)) {
+    return 'chat.invalid_session_name';
   }
   // Limit to 128 characters
   if (name.length > 128) {
-    return 'Session name is too long. Maximum 128 characters.';
+    return 'chat.session_name_too_long';
   }
   return true;
 }

@@ -1829,9 +1829,15 @@ export default {
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
     '启用计划模式。智能体将只分析和规划，而不执行工具。',
   'Already in plan mode. Use "/plan exit" to exit plan mode.':
-    '已处于计划模式。使用 "/plan exit" 退出计划模式。',
+    '已在计划模式中。使用 "/plan exit" 退出计划模式。',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
-    '未处于计划模式。请先使用 "/plan" 进入计划模式。',
+    '不在计划模式中。使用 "/plan" 进入计划模式。',
 
-  "Set up Qwen Code's status line UI": '配置 Qwen Code 的状态栏',
+  // ============================================================================
+  // Chat Session Commands
+  // ============================================================================
+  'chat.session_name_required': '请提供名称。用法：/chat <命令> <名称>',
+  'chat.invalid_session_name':
+    '无效的会话名称。只能使用字母、数字、连字符、下划线和点。',
+  'chat.session_name_too_long': '会话名称太长。最多 128 个字符。',
 };
