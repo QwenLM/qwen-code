@@ -501,8 +501,6 @@ describe('isUnattendedMode', () => {
   beforeEach(() => {
     process.env = { ...originalEnv };
     delete process.env['QWEN_CODE_UNATTENDED_RETRY'];
-    delete process.env['CI'];
-    delete process.env['QWEN_CODE_BG'];
   });
 
   afterAll(() => {
@@ -514,13 +512,8 @@ describe('isUnattendedMode', () => {
     expect(isUnattendedMode()).toBe(true);
   });
 
-  it('should return true when CI=true', () => {
-    process.env['CI'] = 'true';
-    expect(isUnattendedMode()).toBe(true);
-  });
-
-  it('should return true when QWEN_CODE_BG=1', () => {
-    process.env['QWEN_CODE_BG'] = '1';
+  it('should return true when QWEN_CODE_UNATTENDED_RETRY=true', () => {
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'true';
     expect(isUnattendedMode()).toBe(true);
   });
 
@@ -528,12 +521,17 @@ describe('isUnattendedMode', () => {
     expect(isUnattendedMode()).toBe(false);
   });
 
-  it('should return false for falsy env values', () => {
-    process.env['CI'] = '0';
+  it('should NOT activate on CI=true alone', () => {
+    process.env['CI'] = 'true';
     expect(isUnattendedMode()).toBe(false);
-    process.env['CI'] = 'false';
+  });
+
+  it('should return false for falsy values', () => {
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = '0';
     expect(isUnattendedMode()).toBe(false);
-    process.env['CI'] = '';
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'false';
+    expect(isUnattendedMode()).toBe(false);
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = '';
     expect(isUnattendedMode()).toBe(false);
   });
 });

@@ -323,13 +323,14 @@ When Qwen Code runs in CI/CD pipelines or as a background daemon, a brief API ou
 
 ### Activation
 
-Persistent retry mode is activated when **any** of the following environment variables is truthy (`true`, `1`, or any non-empty string other than `0` or `false`):
+Set the `QWEN_CODE_UNATTENDED_RETRY` environment variable to a truthy value (`true`, `1`, or any non-empty string other than `0` or `false`):
 
-| Variable                     | When to use                                                            |
-| ---------------------------- | ---------------------------------------------------------------------- |
-| `QWEN_CODE_UNATTENDED_RETRY` | Explicit opt-in for persistent retry                                   |
-| `CI`                         | Automatically set by most CI systems (GitHub Actions, GitLab CI, etc.) |
-| `QWEN_CODE_BG`               | When running as a background daemon or batch job                       |
+```bash
+export QWEN_CODE_UNATTENDED_RETRY=1
+```
+
+> [!important]
+> Persistent retry requires an **explicit opt-in**. `CI=true` alone does **not** activate it — silently turning a fast-fail CI job into an infinite-wait job would be dangerous. Always set `QWEN_CODE_UNATTENDED_RETRY` explicitly in your pipeline configuration.
 
 ### Examples
 
@@ -345,13 +346,9 @@ Persistent retry mode is activated when **any** of the following environment var
       --yolo > review.json
 ```
 
-> [!note]
-> GitHub Actions already sets `CI=true`, so persistent retry is active by default in Actions workflows. Setting `QWEN_CODE_UNATTENDED_RETRY` explicitly is still recommended for clarity.
-
 #### Overnight batch processing
 
 ```bash
-# Run a large-scale refactoring task overnight
 export QWEN_CODE_UNATTENDED_RETRY=1
 qwen -p "Migrate all callback-style functions to async/await in src/" --yolo
 ```
@@ -359,8 +356,8 @@ qwen -p "Migrate all callback-style functions to async/await in src/" --yolo
 #### Background daemon
 
 ```bash
-export QWEN_CODE_BG=1
-nohup qwen -p "Audit all dependencies for known CVEs" --output-format json > audit.json 2> audit.log &
+QWEN_CODE_UNATTENDED_RETRY=1 nohup qwen -p "Audit all dependencies for known CVEs" \
+  --output-format json > audit.json 2> audit.log &
 ```
 
 ### Monitoring
