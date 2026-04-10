@@ -93,27 +93,20 @@ export function TextInput({
         return;
       }
 
-      // Submit on Enter
-      if (keyMatchers[Command.SUBMIT](key) || key.name === 'return') {
-        if (allowMultiline) {
-          const [row, col] = buffer.cursor;
-          const line = buffer.lines[row];
-          const charBefore = col > 0 ? cpSlice(line, col - 1, col) : '';
-          if (charBefore === '\\') {
-            buffer.backspace();
-            buffer.newline();
-          } else {
-            handleSubmit();
-          }
-        } else {
-          handleSubmit();
-        }
+      // Multiline newline insertion (Shift+Enter etc.) — check before SUBMIT
+      // so that modified-Return keys aren't swallowed by the submit branch.
+      if (allowMultiline && keyMatchers[Command.NEWLINE](key)) {
+        buffer.newline();
         return;
       }
 
-      // Multiline newline insertion (Shift+Enter etc.)
-      if (allowMultiline && keyMatchers[Command.NEWLINE](key)) {
-        buffer.newline();
+      // Submit on Enter (plain Return). In single-line mode any Return
+      // variant submits since there is no newline concept.
+      if (
+        keyMatchers[Command.SUBMIT](key) ||
+        (!allowMultiline && key.name === 'return')
+      ) {
+        handleSubmit();
         return;
       }
 
