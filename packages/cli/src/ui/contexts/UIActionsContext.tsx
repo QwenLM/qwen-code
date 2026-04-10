@@ -94,7 +94,7 @@ export interface UIActions {
   // Hooks dialog
   closeHooksDialog: () => void;
   // Resume session dialog
-  openResumeDialog: () => void;
+  openResumeDialog: (sessionId?: string) => void;
   closeResumeDialog: () => void;
   handleResume: (sessionId: string) => void;
   // Feedback dialog
