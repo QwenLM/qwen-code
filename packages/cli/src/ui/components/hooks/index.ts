@@ -7,5 +7,7 @@
 export { HooksManagementDialog } from './HooksManagementDialog.js';
 export { HooksListStep } from './HooksListStep.js';
 export { HookDetailStep } from './HookDetailStep.js';
+export { HookConfigDetailStep } from './HookConfigDetailStep.js';
+export { HooksDisabledStep } from './HooksDisabledStep.js';
 export * from './types.js';
 export * from './constants.js';

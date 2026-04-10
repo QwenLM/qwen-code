@@ -16,24 +16,56 @@
 
 import Parser from 'web-tree-sitter';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const __filename_ = resolveModuleFilePath(fileURLToPath(import.meta.url));
+/**
+ * Load a WASM file as a Uint8Array.
+ *
+ * In bundle mode (esbuild with wasmBinaryPlugin), the `?binary` import is
+ * transformed at build-time to embed the WASM bytes inline, so `dynamicImport`
+ * succeeds and returns the bytes immediately — no external vendor files needed.
+ *
+ * In source / transpiled mode (Vitest, tsx, etc.), the `?binary` specifier is
+ * unknown to Node's module resolver and the import throws.  The catch block
+ * falls back to reading the file directly from node_modules.
+ */
+async function loadWasmBinary(
+  dynamicImport: () => Promise<unknown>,
+  fallbackSpecifier: string,
+): Promise<Uint8Array> {
+  const nativeFs =
+    (process.getBuiltinModule?.('fs') as
+      | typeof import('node:fs')
+      | undefined) ?? fs;
+  const moduleFilePath = fileURLToPath(import.meta.url);
+  const isBundleMode =
+    !moduleFilePath.includes(path.join('src', '')) &&
+    !moduleFilePath.includes(path.join('dist', 'src', ''));
 
-function resolveModuleFilePath(moduleFilePath: string): string {
   try {
-    const resolved = fs.realpathSync(moduleFilePath);
-    // Guard against test environments where `fs` is mocked and realpathSync
-    // returns undefined rather than throwing.
-    return typeof resolved === 'string' ? resolved : moduleFilePath;
+    if (isBundleMode) {
+      // Bundle mode: esbuild replaces `?binary` imports with inline Uint8Array.
+      const mod = await dynamicImport();
+      const wasmBinary = (mod as { default?: unknown }).default;
+      if (wasmBinary instanceof Uint8Array && wasmBinary.byteLength > 0) {
+        return wasmBinary;
+      }
+    }
   } catch {
-    return moduleFilePath;
+    // Fall through to node_modules lookup below.
   }
+
+  // Source / dev mode: read the file directly from node_modules.
+  const require = createRequire(import.meta.url);
+  const filePath = require.resolve(fallbackSpecifier);
+  return new Uint8Array(nativeFs.readFileSync(filePath));
 }
 
 /**
@@ -571,39 +603,8 @@ const DOCKER_COMPOSE_SUBCOMMANDS = new Set([
 let parserInstance: Parser | null = null;
 let bashLanguage: Parser.Language | null = null;
 let initPromise: Promise<void> | null = null;
-
-/**
- * Resolve the path to a WASM file inside vendor/tree-sitter/.
- * Handles three deployment scenarios:
- *   - Source (src/utils/*.ts): 2 levels up to package root
- *   - Transpiled (dist/src/utils/*.js): 3 levels up
- *   - Bundle (dist/cli.js): vendor at same level (0 levels)
- */
-function resolveWasmPath(filename: string): string {
-  return resolveWasmPathForModule(filename, __filename_);
-}
-
-function resolveWasmPathForModule(
-  filename: string,
-  moduleFilePath: string,
-  resolvePath: (moduleFilePath: string) => string = resolveModuleFilePath,
-): string {
-  const resolvedModuleFilePath = resolvePath(moduleFilePath);
-  const moduleDir = path.dirname(resolvedModuleFilePath);
-  const inSrcUtils = resolvedModuleFilePath.includes(path.join('src', 'utils'));
-  const levelsUp = !inSrcUtils
-    ? 0
-    : resolvedModuleFilePath.endsWith('.ts')
-      ? 2
-      : 3;
-  return path.join(
-    moduleDir,
-    ...Array<string>(levelsUp).fill('..'),
-    'vendor',
-    'tree-sitter',
-    filename,
-  );
-}
+/** Set to true permanently once WASM initialisation fails. */
+let parserInitFailed = false;
 
 /**
  * Initialise the tree-sitter Parser singleton.
@@ -611,19 +612,34 @@ function resolveWasmPathForModule(
  */
 export async function initParser(): Promise<void> {
   if (parserInstance) return;
+  // Once init has permanently failed, skip retrying to prevent hangs.
+  if (parserInitFailed)
+    throw new Error(
+      'tree-sitter WASM failed to initialise; using regex-based fallback',
+    );
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    const treeSitterWasm = resolveWasmPath('tree-sitter.wasm');
-    await Parser.init({
-      locateFile: () => treeSitterWasm,
-    });
-    parserInstance = new Parser();
-    bashLanguage = await Parser.Language.load(
-      resolveWasmPath('tree-sitter-bash.wasm'),
+    const treeSitterWasm = await loadWasmBinary(
+      () => import('web-tree-sitter/tree-sitter.wasm?binary' as string),
+      'web-tree-sitter/tree-sitter.wasm',
     );
+    await Parser.init({ wasmBinary: treeSitterWasm });
+    parserInstance = new Parser();
+    const bashWasm = await loadWasmBinary(
+      () =>
+        import('tree-sitter-wasms/out/tree-sitter-bash.wasm?binary' as string),
+      'tree-sitter-wasms/out/tree-sitter-bash.wasm',
+    );
+    bashLanguage = await Parser.Language.load(bashWasm);
     parserInstance.setLanguage(bashLanguage);
-  })();
+  })().catch((err: unknown) => {
+    // Mark as permanently failed so callers can use the regex fallback
+    // instead of retrying (which could cause the agent to hang).
+    parserInitFailed = true;
+    initPromise = null;
+    throw err;
+  });
 
   return initPromise;
 }
@@ -917,22 +933,35 @@ export async function isShellCommandReadOnlyAST(
 ): Promise<boolean> {
   if (typeof command !== 'string' || !command.trim()) return false;
 
-  const tree = await parseShellCommand(command);
-  const root = tree.rootNode;
-
-  // Empty program
-  if (root.namedChildCount === 0) return false;
-
-  // Evaluate every top-level statement
-  for (const stmt of root.namedChildren) {
-    if (!evaluateStatementReadOnly(stmt)) {
-      tree.delete();
-      return false;
-    }
+  // If the WASM parser is permanently unavailable (e.g. WASM file missing
+  // after a symlinked install), fall back to the regex-based checker so the
+  // agent remains functional instead of hanging or crashing.
+  if (parserInitFailed) {
+    return isShellCommandReadOnly(command);
   }
 
-  tree.delete();
-  return true;
+  try {
+    const tree = await parseShellCommand(command);
+    const root = tree.rootNode;
+
+    // Empty program
+    if (root.namedChildCount === 0) return false;
+
+    // Evaluate every top-level statement
+    for (const stmt of root.namedChildren) {
+      if (!evaluateStatementReadOnly(stmt)) {
+        tree.delete();
+        return false;
+      }
+    }
+
+    tree.delete();
+    return true;
+  } catch {
+    // Unexpected runtime failure (e.g. WASM init error on first call) –
+    // fall back to the regex-based checker rather than propagating the error.
+    return isShellCommandReadOnly(command);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,16 +1137,20 @@ export function _resetParser(): void {
   }
   bashLanguage = null;
   initPromise = null;
+  parserInitFailed = false;
 }
 
 /**
- * Internal helper exposed for tests.
+ * Force the parser into the "init failed" state. Only intended for testing
+ * fallback behaviour without actually breaking WASM loading.
  * @internal
  */
-export function _resolveWasmPathForTesting(
-  filename: string,
-  moduleFilePath: string,
-  resolvePath?: (moduleFilePath: string) => string,
-): string {
-  return resolveWasmPathForModule(filename, moduleFilePath, resolvePath);
+export function _setParserFailedForTesting(): void {
+  parserInitFailed = true;
+  initPromise = null;
+  if (parserInstance) {
+    parserInstance.delete();
+    parserInstance = null;
+  }
+  bashLanguage = null;
 }

@@ -66,6 +66,7 @@ export default {
   'CLI Version': 'CLIバージョン',
   'Git Commit': 'Gitコミット',
   Model: 'モデル',
+  'Fast Model': '高速モデル',
   Sandbox: 'サンドボックス',
   'OS Platform': 'OSプラットフォーム',
   'OS Arch': 'OSアーキテクチャ',
@@ -385,6 +386,9 @@ export default {
   'Loading hooks...': 'フックを読み込んでいます...',
   'Error loading hooks:': 'フックの読み込みエラー：',
   'Press Escape to close': 'Escape キーで閉じる',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Escape、Ctrl+C、Ctrl+D でキャンセル',
+  'Press Space, Enter, or Escape to dismiss': 'Space、Enter、Escape で閉じる',
   'No hook selected': 'フックが選択されていません',
   // Hooks - List Step
   'No hook events found.': 'フックイベントが見つかりません。',
@@ -409,6 +413,19 @@ export default {
   'No hook config selected': 'フック設定が選択されていません',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'このフックを変更または削除するには、settings.json を直接編集するか、Qwen に尋ねてください。',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'フック設定 - 無効',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'すべてのフックは現在無効です。{{count}} が実行されていません。',
+  '{{count}} configured hook': '{{count}} 個の設定されたフック',
+  '{{count}} configured hooks': '{{count}} 個の設定されたフック',
+  'When hooks are disabled:': 'フックが無効な場合：',
+  'No hook commands will execute': 'フックコマンドは実行されません',
+  'StatusLine will not be displayed': 'StatusLine は表示されません',
+  'Tool operations will proceed without hook validation':
+    'ツール操作はフック検証なしで続行されます',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'フックを再有効化するには、settings.json から "disableAllHooks" を削除するか、Qwen Code に尋ねてください。',
   // Hooks - Source
   Project: 'プロジェクト',
   User: 'ユーザー',
@@ -727,6 +744,8 @@ export default {
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
   'Switch the model for this session': 'このセッションのモデルを切り替え',
+  'Set fast model for background tasks':
+    'バックグラウンドタスク用の高速モデルを設定',
   'Content generator configuration not available.':
     'コンテンツジェネレーター設定が利用できません',
   'Authentication type not available.': '認証タイプが利用できません',
@@ -899,6 +918,8 @@ export default {
     'このプロジェクトで{{action}}を常に許可',
   'Always allow for this user': 'このユーザーに常に許可',
   'Always allow {{action}} for this user': 'このユーザーに{{action}}を常に許可',
+  'Yes, restore previous mode ({{mode}})':
+    'はい、以前のモードに戻す ({{mode}})',
   'Yes, and auto-accept edits': 'はい、編集を自動承認',
   'Yes, and manually approve edits': 'はい、編集を手動承認',
   'No, keep planning (esc)': 'いいえ、計画を続ける (Esc)',
@@ -1013,8 +1034,8 @@ export default {
   'not set': '未設定',
   none: 'なし',
   unknown: '不明',
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Alibaba Cloud ModelStudioの最新Qwen Visionモデル(バージョン: qwen3-vl-plus-2025-09-23)',
   // Dialogs - Permissions
@@ -1441,4 +1462,21 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
+  verbose: '詳細',
+  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
+    '詳細モードで完全なツール出力と思考を表示します（Ctrl+O で切り替え）。',
+  'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

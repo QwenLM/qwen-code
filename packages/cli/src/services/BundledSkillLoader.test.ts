@@ -33,6 +33,8 @@ describe('BundledSkillLoader', () => {
     };
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
+      isCronEnabled: vi.fn().mockReturnValue(false),
+      getModel: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;
   });
 
@@ -124,5 +126,135 @@ describe('BundledSkillLoader', () => {
 
     expect(commands).toHaveLength(2);
     expect(commands.map((c) => c.name)).toEqual(['review', 'deploy']);
+  });
+
+  it('should resolve {{model}} template variable in skill body', async () => {
+    const skill = makeSkill({
+      body: 'Review by {{model}} via Qwen Code',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    (mockConfig.getModel as ReturnType<typeof vi.fn>).mockReturnValue(
+      'qwen3-coder',
+    );
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [
+        {
+          text: 'YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder via Qwen Code',
+        },
+      ],
+    });
+  });
+
+  it('should use empty string for {{model}} when getModel returns undefined', async () => {
+    const skill = makeSkill({
+      body: 'Review by {{model}}',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    // getModel returns undefined (default mock behavior)
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: 'Review by ' }],
+    });
+  });
+
+  it('should resolve {{model}} when args are provided', async () => {
+    const skill = makeSkill({
+      body: 'Review by {{model}}',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    (mockConfig.getModel as ReturnType<typeof vi.fn>).mockReturnValue(
+      'qwen3-coder',
+    );
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review 123', args: '123' } } as never,
+      '123',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [
+        {
+          text: 'YOUR_MODEL_ID="qwen3-coder"\n\nReview by qwen3-coder\n\n/review 123',
+        },
+      ],
+    });
+  });
+
+  it('should use empty string for {{model}} when getModel returns empty string', async () => {
+    const skill = makeSkill({
+      body: 'Review by {{model}}',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    (mockConfig.getModel as ReturnType<typeof vi.fn>).mockReturnValue('');
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: 'Review by ' }],
+    });
+  });
+
+  it('should not modify skill body without {{model}} template', async () => {
+    const skill = makeSkill({ body: 'No template here' });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+    const result = await commands[0].action!(
+      { invocation: { raw: '/review', args: '' } } as never,
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: [{ text: 'No template here' }],
+    });
+  });
+
+  it('should hide skills with cron allowedTools when cron is disabled', async () => {
+    const skills = [
+      makeSkill({ name: 'review', description: 'Review code' }),
+      makeSkill({
+        name: 'loop',
+        description: 'Loop command',
+        allowedTools: ['cron_create', 'cron_list', 'cron_delete'],
+      }),
+    ];
+    mockSkillManager.listSkills.mockResolvedValue(skills);
+    (mockConfig.isCronEnabled as ReturnType<typeof vi.fn>).mockReturnValue(
+      false,
+    );
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].name).toBe('review');
   });
 });

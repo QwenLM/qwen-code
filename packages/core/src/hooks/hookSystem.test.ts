@@ -234,7 +234,7 @@ describe('HookSystem', () => {
   });
 
   describe('fireStopEvent', () => {
-    it('should fire stop event and return output', async () => {
+    it('should fire stop event and return AggregatedHookResult', async () => {
       const mockResult = {
         success: true,
         allOutputs: [],
@@ -256,7 +256,7 @@ describe('HookSystem', () => {
         'last message',
         undefined,
       );
-      expect(result).toBeDefined();
+      expect(result).toEqual(mockResult);
     });
 
     it('should use default parameters when not provided', async () => {
@@ -280,7 +280,7 @@ describe('HookSystem', () => {
       );
     });
 
-    it('should return undefined when no final output', async () => {
+    it('should return AggregatedHookResult even when no final output', async () => {
       const mockResult = {
         success: true,
         allOutputs: [],
@@ -294,7 +294,8 @@ describe('HookSystem', () => {
 
       const result = await hookSystem.fireStopEvent();
 
-      expect(result).toBeUndefined();
+      expect(result).toEqual(mockResult);
+      expect(result.finalOutput).toBeUndefined();
     });
   });
 

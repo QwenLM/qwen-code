@@ -23,6 +23,7 @@
     "src/commands/mcp/add.test.ts",
     "src/commands/mcp/list.test.ts",
     "src/commands/mcp/remove.test.ts",
+    "src/commands/mcp/reconnect.test.ts",
     "src/config/config.integration.test.ts",
     "src/config/config.test.ts",
     "src/config/extension.test.ts",
@@ -84,5 +85,11 @@
     "src/services/prompt-processors/shellProcessor.test.ts",
     "src/commands/extensions/examples/**"
   ],
-  "references": [{ "path": "../core" }]
+  "references": [
+    { "path": "../core" },
+    { "path": "../channels/base" },
+    { "path": "../channels/telegram" },
+    { "path": "../channels/weixin" },
+    { "path": "../channels/dingtalk" }
+  ]
 }

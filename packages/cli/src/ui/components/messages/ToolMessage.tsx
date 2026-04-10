@@ -11,7 +11,6 @@ import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
 import { AnsiOutputText } from '../AnsiOutput.js';
-import { GeminiRespondingSpinner } from '../GeminiRespondingSpinner.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
@@ -25,18 +24,19 @@ import type {
 import { AgentExecutionDisplay } from '../subagents/index.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
-import {
-  SHELL_COMMAND_NAME,
-  SHELL_NAME,
-  TOOL_STATUS,
-} from '../../constants.js';
+import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
+import { useVerboseMode } from '../../contexts/VerboseModeContext.js';
+
+import {
+  ToolStatusIndicator,
+  STATUS_INDICATOR_WIDTH,
+} from '../shared/ToolStatusIndicator.js';
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
-const STATUS_INDICATOR_WIDTH = 3;
 const MIN_LINES_SHOWN = 2; // show at least this many lines
 
 // Large threshold to ensure we don't cause performance issues for very large
@@ -173,12 +173,23 @@ const SubagentExecutionRenderer: React.FC<{
   availableHeight?: number;
   childWidth: number;
   config: Config;
-}> = ({ data, availableHeight, childWidth, config }) => (
+  isFocused?: boolean;
+  isWaitingForOtherApproval?: boolean;
+}> = ({
+  data,
+  availableHeight,
+  childWidth,
+  config,
+  isFocused,
+  isWaitingForOtherApproval,
+}) => (
   <AgentExecutionDisplay
     data={data}
     availableHeight={availableHeight}
     childWidth={childWidth}
     config={config}
+    isFocused={isFocused}
+    isWaitingForOtherApproval={isWaitingForOtherApproval}
   />
 );
 
@@ -248,6 +259,11 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   config?: Config;
+  forceShowResult?: boolean;
+  /** Whether this tool's subagent confirmation prompt should respond to keyboard input. */
+  isFocused?: boolean;
+  /** Whether another subagent's approval currently holds the focus lock, blocking this one. */
+  isWaitingForOtherApproval?: boolean;
 }
 
 export const ToolMessage: React.FC<ToolMessageProps> = ({
@@ -263,10 +279,13 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   embeddedShellFocused,
   ptyId,
   config,
+  forceShowResult,
+  isFocused,
+  isWaitingForOtherApproval,
 }) => {
   const settings = useSettings();
   const isThisShellFocused =
-    (name === SHELL_COMMAND_NAME || name === 'Shell') &&
+    (name === SHELL_COMMAND_NAME || name === SHELL_NAME) &&
     status === ToolCallStatus.Executing &&
     ptyId === activeShellPtyId &&
     embeddedShellFocused;
@@ -300,7 +319,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   }, [isThisShellFocused]);
 
   const isThisShellFocusable =
-    (name === SHELL_COMMAND_NAME || name === 'Shell') &&
+    (name === SHELL_COMMAND_NAME || name === SHELL_NAME) &&
     status === ToolCallStatus.Executing &&
     config?.getShouldUseNodePtyShell();
 
@@ -324,6 +343,11 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
+  const { verboseMode } = useVerboseMode();
+  const effectiveDisplayRenderer =
+    verboseMode || forceShowResult
+      ? displayRenderer
+      : { type: 'none' as const };
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
@@ -344,44 +368,46 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         )}
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
-      {displayRenderer.type !== 'none' && (
+      {effectiveDisplayRenderer.type !== 'none' && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%" marginTop={1}>
           <Box flexDirection="column">
-            {displayRenderer.type === 'todo' && (
-              <TodoResultRenderer data={displayRenderer.data} />
+            {effectiveDisplayRenderer.type === 'todo' && (
+              <TodoResultRenderer data={effectiveDisplayRenderer.data} />
             )}
-            {displayRenderer.type === 'plan' && (
+            {effectiveDisplayRenderer.type === 'plan' && (
               <PlanResultRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
               />
             )}
-            {displayRenderer.type === 'task' && config && (
+            {effectiveDisplayRenderer.type === 'task' && config && (
               <SubagentExecutionRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
                 config={config}
+                isFocused={isFocused}
+                isWaitingForOtherApproval={isWaitingForOtherApproval}
               />
             )}
-            {displayRenderer.type === 'diff' && (
+            {effectiveDisplayRenderer.type === 'diff' && (
               <DiffResultRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
                 settings={settings}
               />
             )}
-            {displayRenderer.type === 'ansi' && (
+            {effectiveDisplayRenderer.type === 'ansi' && (
               <AnsiOutputText
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 availableTerminalHeight={availableHeight}
               />
             )}
-            {displayRenderer.type === 'string' && (
+            {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
-                data={displayRenderer.data}
+                data={effectiveDisplayRenderer.data}
                 renderAsMarkdown={renderOutputAsMarkdown}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
@@ -397,53 +423,6 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
             focus={embeddedShellFocused}
           />
         </Box>
-      )}
-    </Box>
-  );
-};
-
-type ToolStatusIndicatorProps = {
-  status: ToolCallStatus;
-  name: string;
-};
-
-const ToolStatusIndicator: React.FC<ToolStatusIndicatorProps> = ({
-  status,
-  name,
-}) => {
-  const isShell = name === SHELL_COMMAND_NAME || name === SHELL_NAME;
-  const statusColor = isShell ? theme.ui.symbol : theme.status.warning;
-
-  return (
-    <Box minWidth={STATUS_INDICATOR_WIDTH}>
-      {status === ToolCallStatus.Pending && (
-        <Text color={theme.status.success}>{TOOL_STATUS.PENDING}</Text>
-      )}
-      {status === ToolCallStatus.Executing && (
-        <GeminiRespondingSpinner
-          spinnerType="toggle"
-          nonRespondingDisplay={TOOL_STATUS.EXECUTING}
-        />
-      )}
-      {status === ToolCallStatus.Success && (
-        <Text color={theme.status.success} aria-label={'Success:'}>
-          {TOOL_STATUS.SUCCESS}
-        </Text>
-      )}
-      {status === ToolCallStatus.Confirming && (
-        <Text color={statusColor} aria-label={'Confirming:'}>
-          {TOOL_STATUS.CONFIRMING}
-        </Text>
-      )}
-      {status === ToolCallStatus.Canceled && (
-        <Text color={statusColor} aria-label={'Canceled:'} bold>
-          {TOOL_STATUS.CANCELED}
-        </Text>
-      )}
-      {status === ToolCallStatus.Error && (
-        <Text color={theme.status.error} aria-label={'Error:'} bold>
-          {TOOL_STATUS.ERROR}
-        </Text>
       )}
     </Box>
   );

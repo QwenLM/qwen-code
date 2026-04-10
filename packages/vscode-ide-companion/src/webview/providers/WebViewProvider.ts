@@ -47,6 +47,8 @@ export class WebViewProvider {
   private authState: boolean | null = null;
   /** Cached available models for re-sending on webview ready */
   private cachedAvailableModels: ModelInfo[] | null = null;
+  /** Model to apply once a new editor-tab session is initialized */
+  private initialModelId: string | null = null;
   /** Reference to a WebviewView webview (sidebar/panel/secondary) when attached via attachToView */
   private attachedWebview: vscode.Webview | null = null;
   /**
@@ -57,6 +59,7 @@ export class WebViewProvider {
   private isViewHost = false;
   /** Guards against concurrent auth-restore / connection init */
   private initializationPromise: Promise<void> | null = null;
+  private isReconnecting = false;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -76,6 +79,8 @@ export class WebViewProvider {
         this.pendingAskUserQuestionResolve = null;
         this.pendingAskUserQuestionRequest = null;
       }
+      // Disconnect the ACP agent process to prevent orphan processes
+      this.agentManager.disconnect();
       this.disposables.forEach((d) => d.dispose());
     });
     this.messageHandler = new MessageHandler(
@@ -435,6 +440,16 @@ export class WebViewProvider {
         });
       },
     );
+
+    this.agentManager.onDisconnected((code, signal) => {
+      console.log(
+        `[WebViewProvider] Agent disconnected (code: ${code}, signal: ${signal})`,
+      );
+      // Only auto-reconnect for unexpected disconnects
+      if (this.agentInitialized && !this.isReconnecting) {
+        this.attemptAutoReconnect();
+      }
+    });
   }
 
   /**
@@ -578,6 +593,8 @@ export class WebViewProvider {
     // Clean up when the view is disposed
     webviewView.onDidDispose(() => {
       this.attachedWebview = null;
+      // Disconnect the ACP agent process to prevent orphan processes
+      this.agentManager.disconnect();
       this.disposables.forEach((d) => d.dispose());
     });
 
@@ -757,6 +774,13 @@ export class WebViewProvider {
       '[WebViewProvider] Attempting to restore auth state and connection...',
     );
     await this.attemptAuthStateRestoration();
+  }
+
+  setInitialModelId(modelId: string | null | undefined): void {
+    this.initialModelId =
+      typeof modelId === 'string' && modelId.trim().length > 0
+        ? modelId.trim()
+        : null;
   }
 
   /**
@@ -962,6 +986,53 @@ export class WebViewProvider {
   }
 
   /**
+   * Attempt to automatically reconnect after unexpected ACP process death.
+   * Uses exponential backoff with a maximum number of attempts.
+   */
+  private async attemptAutoReconnect(): Promise<void> {
+    if (this.isReconnecting) {
+      return;
+    }
+    this.isReconnecting = true;
+    this.agentInitialized = false;
+
+    const maxAttempts = 3;
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      console.log(
+        `[WebViewProvider] Auto-reconnect attempt ${attempt}/${maxAttempts}`,
+      );
+
+      const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+      await new Promise((resolve) => setTimeout(resolve, delay));
+
+      try {
+        await this.doInitializeAgentConnection();
+        console.log('[WebViewProvider] Auto-reconnect succeeded');
+        this.isReconnecting = false;
+        return;
+      } catch (error) {
+        console.error(
+          `[WebViewProvider] Auto-reconnect attempt ${attempt} failed:`,
+          error,
+        );
+      }
+    }
+
+    // All attempts exhausted
+    this.isReconnecting = false;
+    console.error('[WebViewProvider] Auto-reconnect failed after all attempts');
+
+    this.sendMessageToWebView({
+      type: 'agentConnectionError',
+      data: {
+        message:
+          'Lost connection to Qwen agent and auto-reconnect failed. Please use the refresh button to try again.',
+      },
+    });
+  }
+
+  /**
    * Refresh connection without clearing auth cache
    * Called when restoring WebView after VSCode restart
    */
@@ -1073,6 +1144,10 @@ export class WebViewProvider {
         sessionReady = true;
       }
 
+      if (sessionReady) {
+        await this.applyInitialModelSelection();
+      }
+
       await this.initializeEmptyConversation();
     } catch (_error) {
       const errorMsg = getErrorMessage(_error);
@@ -1088,6 +1163,24 @@ export class WebViewProvider {
     }
 
     return sessionReady;
+  }
+
+  private async applyInitialModelSelection(): Promise<void> {
+    if (!this.initialModelId) {
+      return;
+    }
+
+    const modelId = this.initialModelId;
+    this.initialModelId = null;
+
+    try {
+      await this.agentManager.setModelFromUi(modelId);
+    } catch (error) {
+      console.warn(
+        '[WebViewProvider] Failed to apply initial model selection:',
+        error,
+      );
+    }
   }
 
   /**

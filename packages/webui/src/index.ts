@@ -231,6 +231,12 @@ export { StopIcon } from './components/icons/StopIcon';
 // Hooks
 export { useTheme } from './hooks/useTheme';
 export { useLocalStorage } from './hooks/useLocalStorage';
+export { useFollowupSuggestions } from './hooks/useFollowupSuggestions';
+export type {
+  FollowupState,
+  UseFollowupSuggestionsOptions,
+  UseFollowupSuggestionsReturn,
+} from './hooks/useFollowupSuggestions';
 
 // Types
 export type { Theme } from './types/theme';
