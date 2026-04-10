@@ -323,7 +323,7 @@ When Qwen Code runs in CI/CD pipelines or as a background daemon, a brief API ou
 
 ### Activation
 
-Set the `QWEN_CODE_UNATTENDED_RETRY` environment variable to a truthy value (`true`, `1`, or any non-empty string other than `0` or `false`):
+Set the `QWEN_CODE_UNATTENDED_RETRY` environment variable to `true` or `1` (strict match, case-sensitive):
 
 ```bash
 export QWEN_CODE_UNATTENDED_RETRY=1

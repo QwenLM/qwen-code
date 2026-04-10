@@ -80,17 +80,8 @@ export function isTransientCapacityError(error: unknown): boolean {
  * into an infinite-wait job would be surprising and dangerous.
  */
 export function isUnattendedMode(): boolean {
-  return isEnvTruthy(process.env['QWEN_CODE_UNATTENDED_RETRY']);
-}
-
-function isEnvTruthy(val: string | undefined): boolean {
-  const normalized = val?.trim().toLowerCase();
-  return (
-    normalized !== undefined &&
-    normalized !== '' &&
-    normalized !== '0' &&
-    normalized !== 'false'
-  );
+  const val = process.env['QWEN_CODE_UNATTENDED_RETRY'];
+  return val === 'true' || val === '1';
 }
 
 /**

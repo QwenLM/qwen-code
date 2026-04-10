@@ -526,7 +526,7 @@ describe('isUnattendedMode', () => {
     expect(isUnattendedMode()).toBe(false);
   });
 
-  it('should return false for falsy values', () => {
+  it('should return false for non-matching values', () => {
     process.env['QWEN_CODE_UNATTENDED_RETRY'] = '0';
     expect(isUnattendedMode()).toBe(false);
     process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'false';
@@ -535,14 +535,13 @@ describe('isUnattendedMode', () => {
     expect(isUnattendedMode()).toBe(false);
   });
 
-  it('should handle case-insensitive and trimmed values', () => {
+  it('should use strict matching consistent with parseBooleanEnvFlag', () => {
+    // Only 'true' and '1' are accepted — matches project convention
     process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'TRUE';
-    expect(isUnattendedMode()).toBe(true);
+    expect(isUnattendedMode()).toBe(false); // strict: not 'true'
     process.env['QWEN_CODE_UNATTENDED_RETRY'] = ' 1 ';
-    expect(isUnattendedMode()).toBe(true);
-    process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'False';
-    expect(isUnattendedMode()).toBe(false);
-    process.env['QWEN_CODE_UNATTENDED_RETRY'] = ' 0 ';
+    expect(isUnattendedMode()).toBe(false); // strict: not '1'
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'yes';
     expect(isUnattendedMode()).toBe(false);
   });
 });
