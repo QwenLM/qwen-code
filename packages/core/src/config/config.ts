@@ -50,7 +50,7 @@ import { GlobTool } from '../tools/glob.js';
 import { GrepTool } from '../tools/grep.js';
 import { LSTool } from '../tools/ls.js';
 import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
-import { MemoryTool, setGeminiMdFilename } from '../tools/memoryTool.js';
+import { setGeminiMdFilename } from '../memory/const.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { RipGrepTool } from '../tools/ripGrep.js';
@@ -2215,14 +2215,6 @@ export class Config {
     await registerCoreTool(EditTool, this);
     await registerCoreTool(WriteFileTool, this);
     await registerCoreTool(ShellTool, this);
-    // When managed auto-memory is enabled, the model writes per-entry files
-    // directly (as instructed by buildManagedAutoMemoryPrompt). The legacy
-    // save_memory tool writes to a single QWEN.md file and conflicts with that
-    // model. Claude Code solves this the same way: no save_memory tool exists
-    // when the file-based memory system is active.
-    if (!this.getManagedAutoMemoryEnabled()) {
-      await registerCoreTool(MemoryTool);
-    }
     await registerCoreTool(TodoWriteTool, this);
     await registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));

@@ -16,6 +16,18 @@ import type { LoadedSettings } from '../../config/settings.js';
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  const registry = {
+    list: vi.fn(() => []),
+    subscribe: vi.fn(() => () => {}),
+  };
+  return {
+    ...actual,
+    getManagedAutoMemoryDreamTaskRegistry: vi.fn(() => registry),
+  };
+});
+
 const defaultProps = {
   model: 'gemini-pro',
 };
@@ -26,6 +38,7 @@ const createMockConfig = (overrides = {}) => ({
   getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
+  getProjectRoot: vi.fn(() => '/test/project'),
   ...overrides,
 });
 

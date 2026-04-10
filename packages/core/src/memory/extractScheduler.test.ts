@@ -133,25 +133,6 @@ describe('managed auto-memory extraction runtime', () => {
     expect(tasks.some((task) => task.metadata?.['trailing'] === true)).toBe(true);
   });
 
-  it('skips extraction when save_memory was used in the same slice', async () => {
-    const runtime = createManagedAutoMemoryExtractRuntimeForTests();
-
-    const result = await runtime.schedule({
-      projectRoot,
-      sessionId: 'session-1',
-      config: mockConfig,
-      history: [
-        {
-          role: 'model',
-          parts: [{ functionResponse: { name: 'save_memory', response: { output: 'ok' } } }],
-        },
-      ],
-    });
-
-    expect(result.skippedReason).toBe('memory_tool');
-    expect(runtime.listTasks(projectRoot)[0]?.status).toBe('skipped');
-  });
-
   it('returns already_running when extraction state is externally locked', async () => {
     markExtractRunning(projectRoot);
     const runtime = createManagedAutoMemoryExtractRuntimeForTests();

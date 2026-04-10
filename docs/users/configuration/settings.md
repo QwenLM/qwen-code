@@ -227,6 +227,15 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 >
 > **Migrating from `tools.core` / `tools.exclude` / `tools.allowed`:** These legacy settings are **deprecated** and automatically migrated to the new `permissions` format on first load. Prefer configuring `permissions.allow` / `permissions.deny` directly. Use `/permissions` to manage rules interactively.
 
+#### memory
+
+| Setting                              | Type    | Description                                                                      | Default |
+| ------------------------------------ | ------- | -------------------------------------------------------------------------------- | ------- |
+| `memory.enableManagedAutoMemory`     | boolean | Enable background extraction of memories from conversations.                     | `true`  |
+| `memory.enableManagedAutoDream`      | boolean | Enable automatic consolidation (deduplication and cleanup) of collected memories. | `true`  |
+
+See [Memory](../features/memory) for details on how auto-memory works and how to use the `/memory`, `/remember`, `/forget`, and `/dream` commands.
+
 #### permissions
 
 The permissions system provides fine-grained control over which tools can run, which require confirmation, and which are blocked.

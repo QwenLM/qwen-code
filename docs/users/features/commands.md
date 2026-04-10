@@ -68,7 +68,10 @@ Commands for managing AI tools and models.
 | →`yolo`          | Automatically approve all                     | Quick prototyping                             |
 | `/model`         | Switch model used in current session          | `/model`                                      |
 | `/extensions`    | List all active extensions in current session | `/extensions`                                 |
-| `/memory`        | Manage AI's instruction context               | `/memory add Important Info`                  |
+| `/memory`        | Open the Memory Manager dialog                | `/memory`                                     |
+| `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`            |
+| `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                             |
+| `/dream`         | Manually run auto-memory consolidation        | `/dream`                                      |
 
 ### 1.5 Information, Settings, and Help
 

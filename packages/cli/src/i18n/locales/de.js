@@ -868,6 +868,43 @@ export default {
     'Verwendung: /memory add [--global|--project] <zu merkender Text>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Versuche im Speicher {{scope}} zu speichern: "{{fact}}"',
+  'Open auto-memory folder': 'Auto-Speicher-Ordner öffnen',
+  'Auto-memory: {{status}}': 'Auto-Speicher: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Auto-Konsolidierung: {{status}} · {{lastDream}} · /dream zum Ausführen',
+  never: 'nie',
+  on: 'ein',
+  off: 'aus',
+  '❆ dreaming': '❆ konsolidiert',
+  'Remove matching entries from managed auto-memory.':
+    'Passende Einträge aus dem verwalteten Auto-Speicher entfernen.',
+  'Usage: /forget <memory text to remove>':
+    'Verwendung: /forget <zu entfernender Erinnerungstext>',
+  'No managed auto-memory entries matched: {{query}}':
+    'Keine verwalteten Auto-Speicher-Einträge gefunden: {{query}}',
+  'Show managed auto-memory status.': 'Status des verwalteten Auto-Speichers anzeigen.',
+  'Run managed auto-memory extraction for the current session.':
+    'Verwaltete Auto-Speicher-Extraktion für die aktuelle Sitzung ausführen.',
+  'Managed auto-memory root: {{root}}': 'Verwalteter Auto-Speicher-Stamm: {{root}}',
+  'Managed auto-memory topics:': 'Verwaltete Auto-Speicher-Themen:',
+  'No extraction cursor found yet.': 'Noch kein Extraktions-Cursor gefunden.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Cursor: Sitzung={{sessionId}}, Offset={{offset}}, Aktualisiert={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'Kein Chat-Client verfügbar, um Erinnerungen zu extrahieren.',
+  'Managed auto-memory extraction is already running.':
+    'Verwaltete Auto-Speicher-Extraktion läuft bereits.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Verwaltete Auto-Speicher-Extraktion hat keine neuen dauerhaften Erinnerungen gefunden.',
+  'Consolidate managed auto-memory topic files.':
+    'Verwaltete Auto-Speicher-Themendateien konsolidieren.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Auto-Speicher-Konsolidierung hat nichts zu verbessern gefunden.',
+  'Deduplicated entries: {{count}}': 'Deduplizierte Einträge: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Eine dauerhafte Erinnerung mit dem save_memory-Tool speichern.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Verwendung: /remember [--global|--project] <zu merkender Text>',
 
   // ============================================================================
   // Commands - MCP

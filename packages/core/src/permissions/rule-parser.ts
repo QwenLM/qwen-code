@@ -79,11 +79,6 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ListFilesTool: 'list_directory',
   ReadFolder: 'list_directory', // legacy display name
 
-  // Memory tool
-  save_memory: 'save_memory',
-  SaveMemory: 'save_memory',
-  SaveMemoryTool: 'save_memory',
-
   // TodoWrite tool
   todo_write: 'todo_write',
   TodoWrite: 'todo_write',

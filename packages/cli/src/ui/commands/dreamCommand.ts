@@ -42,7 +42,7 @@ export const dreamCommand: SlashCommand = {
       type: 'submit_prompt',
       content: prompt,
       onComplete: async () => {
-        await writeDreamManualRunToMetadata(
+    await writeDreamManualRunToMetadata(
           projectRoot,
           config.getSessionId(),
         );

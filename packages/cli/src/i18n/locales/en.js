@@ -930,6 +930,20 @@ export default {
     'Usage: /memory add [--global|--project] <text to remember>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Attempting to save to memory {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Open auto-memory folder',
+  'Auto-memory: {{status}}': 'Auto-memory: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Auto-dream: {{status}} · {{lastDream}} · /dream to run',
+  never: 'never',
+  on: 'on',
+  off: 'off',
+  '✦ dreaming': '✦ dreaming',
+  'Remove matching entries from managed auto-memory.':
+    'Remove matching entries from managed auto-memory.',
+  'Usage: /forget <memory text to remove>':
+    'Usage: /forget <memory text to remove>',
+  'No managed auto-memory entries matched: {{query}}':
+    'No managed auto-memory entries matched: {{query}}',
   'Show managed auto-memory status.': 'Show managed auto-memory status.',
   'Run managed auto-memory extraction for the current session.':
     'Run managed auto-memory extraction for the current session.',

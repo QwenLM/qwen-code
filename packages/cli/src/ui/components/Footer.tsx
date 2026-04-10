@@ -113,7 +113,7 @@ export const Footer: React.FC = () => {
   if (dreamRunning) {
     rightItems.push({
       key: 'dream',
-      node: <Text color={theme.text.secondary}>✦ dreaming</Text>,
+      node: <Text color={theme.text.secondary}>{t('✦ dreaming')}</Text>,
     });
   }
   if (promptTokenCount > 0 && contextWindowSize) {

@@ -55,17 +55,9 @@ function buildSkippedExtractResult(
 
 /**
  * Returns true if the part is a write-tool call targeting a file path inside
- * the auto-memory directory. Covers both `save_memory` (legacy tool) and any
- * direct write_file/edit tool calls the main agent may have issued.
+ * the auto-memory directory (write_file / edit / replace / create_file).
  */
 function partWritesToMemory(part: Part, projectRoot: string): boolean {
-  // save_memory tool call/response
-  if (
-    part.functionCall?.name === 'save_memory' ||
-    part.functionResponse?.name === 'save_memory'
-  ) {
-    return true;
-  }
   // Direct write_file or edit tool calls to a memory path
   const writeToolNames = new Set(['write_file', 'edit', 'replace', 'create_file']);
   const name = part.functionCall?.name;
@@ -109,7 +101,7 @@ export class ManagedAutoMemoryExtractRuntime {
       this.registry.update(task.id, {
         status: 'skipped',
         progressText:
-          'Skipped managed auto-memory extraction because save_memory already handled this turn.',
+          'Skipped managed auto-memory extraction: main agent wrote to memory files this turn.',
       });
       return buildSkippedExtractResult(params, 'memory_tool');
     }

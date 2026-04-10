@@ -16,7 +16,7 @@ import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { QWEN_CONFIG_DIR } from '../tools/memoryTool.js';
+import { QWEN_CONFIG_DIR } from '../memory/const.js';
 
 // Mock tool names if they are dynamically generated or complex
 vi.mock('../tools/ls', () => ({ LSTool: { Name: 'list_directory' } }));

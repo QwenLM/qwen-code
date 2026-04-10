@@ -880,6 +880,20 @@ export default {
     '用法：/memory add [--global|--project] <要记住的文本>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     '正在尝试保存到记忆 {{scope}}："{{fact}}"',
+  'Open auto-memory folder': '打开自动记忆文件夹',
+  'Auto-memory: {{status}}': '自动记忆：{{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    '自动整理：{{status}} · {{lastDream}} · /dream 立即运行',
+  never: '从未',
+  on: '开',
+  off: '关',
+  '✦ dreaming': '✦ 整理中',
+  'Remove matching entries from managed auto-memory.':
+    '从托管自动记忆中删除匹配的条目。',
+  'Usage: /forget <memory text to remove>':
+    '用法：/forget <要删除的记忆文本>',
+  'No managed auto-memory entries matched: {{query}}':
+    '没有匹配的托管自动记忆条目：{{query}}',
   'Show managed auto-memory status.': '显示托管自动记忆状态',
   'Run managed auto-memory extraction for the current session.':
     '为当前会话运行托管自动记忆提炼',

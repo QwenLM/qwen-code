@@ -9,14 +9,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import { getAutoMemoryExtractCursorPath, getAutoMemoryIndexPath } from './paths.js';
+import { getAutoMemoryExtractCursorPath } from './paths.js';
 import {
   buildTranscriptMessages,
   loadUnprocessedTranscriptSlice,
   runAutoMemoryExtract,
 } from './extract.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
-import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { resetAutoMemoryStateForTests } from './state.js';
 

@@ -873,6 +873,43 @@ export default {
     'Uso: /memory add [--global|--project] <texto para lembrar>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Tentando salvar na memória {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Abrir pasta de memória automática',
+  'Auto-memory: {{status}}': 'Memória automática: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Consolidação automática: {{status}} · {{lastDream}} · /dream para executar',
+  never: 'nunca',
+  on: 'ativado',
+  off: 'desativado',
+  '❆ dreaming': '❆ consolidando',
+  'Remove matching entries from managed auto-memory.':
+    'Remover entradas correspondentes da memória automática gerenciada.',
+  'Usage: /forget <memory text to remove>':
+    'Uso: /forget <texto de memória a remover>',
+  'No managed auto-memory entries matched: {{query}}':
+    'Nenhuma entrada de memória automática gerenciada correspondeu: {{query}}',
+  'Show managed auto-memory status.': 'Mostrar status da memória automática gerenciada.',
+  'Run managed auto-memory extraction for the current session.':
+    'Executar extração de memória automática gerenciada para a sessão atual.',
+  'Managed auto-memory root: {{root}}': 'Raiz da memória automática gerenciada: {{root}}',
+  'Managed auto-memory topics:': 'Tópicos de memória automática gerenciada:',
+  'No extraction cursor found yet.': 'Nenhum cursor de extração encontrado ainda.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Cursor: sessão={{sessionId}}, offset={{offset}}, atualizado={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'Nenhum cliente de chat disponível para extrair memória.',
+  'Managed auto-memory extraction is already running.':
+    'A extração de memória automática gerenciada já está em execução.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'A extração de memória automática gerenciada não encontrou novas memórias duráveis.',
+  'Consolidate managed auto-memory topic files.':
+    'Consolidar arquivos de tópicos de memória automática gerenciada.',
+  'Managed auto-memory dream found nothing to improve.':
+    'A consolidação de memória automática não encontrou nada para melhorar.',
+  'Deduplicated entries: {{count}}': 'Entradas desduplicadas: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Salvar uma memória durável usando a ferramenta save_memory.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Uso: /remember [--global|--project] <texto a lembrar>',
 
   // ============================================================================
   // Commands - MCP

@@ -14,6 +14,7 @@ import {
   getAllGeminiMdFilenames,
   QWEN_DIR,
   getAutoMemoryRoot,
+  getAutoMemoryProjectStateDir,
 } from '@qwen-code/qwen-code-core';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
@@ -142,6 +143,11 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
     [config],
   );
 
+  const memoryStatePath = useMemo(
+    () => getAutoMemoryProjectStateDir(config.getProjectRoot()),
+    [config],
+  );
+
   const items = useMemo<DialogItem[]>(
     () => [
       {
@@ -174,7 +180,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
 
     async function loadMeta() {
       try {
-        const metadataPath = path.join(managedMemoryPath, 'meta.json');
+        const metadataPath = path.join(memoryStatePath, 'meta.json');
         const content = await fs.readFile(metadataPath, 'utf-8');
         const parsed = JSON.parse(content) as { lastDreamAt?: string };
         if (!cancelled && parsed.lastDreamAt) {
@@ -192,7 +198,7 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
     return () => {
       cancelled = true;
     };
-  }, [managedMemoryPath]);
+  }, [memoryStatePath]);
 
   const dreamStatusText = useMemo(() => {
     if (lastDreamAt !== null) return formatRelativeTime(lastDreamAt);
@@ -363,7 +369,10 @@ export function MemoryDialog({ onClose }: MemoryDialogProps) {
           }
         >
           {focusedSection === 'autoDream' ? '› ' : '  '}
-          {`Auto-dream: ${autoDreamOn ? 'on' : 'off'} · ${dreamStatusText} · /dream to run`}
+          {t('Auto-dream: {{status}} · {{lastDream}} · /dream to run', {
+            status: autoDreamOn ? t('on') : t('off'),
+            lastDream: dreamStatusText,
+          })}
         </Text>
       </Box>
 
