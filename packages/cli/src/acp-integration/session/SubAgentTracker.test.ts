@@ -488,6 +488,9 @@ describe('SubAgentTracker', () => {
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(
           ToolConfirmationOutcome.ProceedOnce,
+          {
+            answers: undefined,
+          },
         );
       });
     });
@@ -528,8 +531,139 @@ describe('SubAgentTracker', () => {
       eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
-        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          {
+            answers: undefined,
+          },
+        );
       });
+    });
+
+    it('should forward answers payload from ACP permission responses', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: {
+          outcome: 'selected',
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+        },
+        answers: {
+          answer: 'yes',
+        },
+      });
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const confirmationDetails = {
+        type: 'ask_user_question',
+        title: 'Question',
+        questions: [
+          {
+            question: 'Continue?',
+            header: 'Question',
+            options: [],
+            multiSelect: false,
+          },
+        ],
+      } as unknown as AgentApprovalRequestEvent['confirmationDetails'];
+      const event = createApprovalEvent({
+        name: 'ask_user_question',
+        callId: 'call-ask',
+        confirmationDetails,
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+          {
+            answers: {
+              answer: 'yes',
+            },
+          },
+        );
+      });
+    });
+
+    it('should use filePath over fileName for diff content path', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-path-test',
+        description: 'Editing file',
+        confirmationDetails: createEditConfirmation({
+          fileName: 'test.ts',
+          filePath: '/workspace/src/test.ts',
+          originalContent: 'old content',
+          newContent: 'new content',
+        }),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(requestPermissionSpy).toHaveBeenCalled();
+      });
+
+      expect(requestPermissionSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/src/test.ts',
+                oldText: 'old content',
+                newText: 'new content',
+              },
+            ],
+          }),
+        }),
+      );
+    });
+
+    it('should fall back to fileName when filePath is not available', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-fallback-test',
+        description: 'Editing file',
+        confirmationDetails: {
+          type: 'edit' as const,
+          title: 'Edit file',
+          fileName: 'fallback.ts',
+          fileDiff: '',
+          originalContent: 'old',
+          newContent: 'new',
+        } as Omit<ToolEditConfirmationDetails, 'onConfirm'>,
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(requestPermissionSpy).toHaveBeenCalled();
+      });
+
+      expect(requestPermissionSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: [
+              {
+                type: 'diff',
+                path: 'fallback.ts',
+                oldText: 'old',
+                newText: 'new',
+              },
+            ],
+          }),
+        }),
+      );
     });
   });
 

@@ -99,6 +99,7 @@ export default {
   'CLI Version': 'Версия CLI',
   'Git Commit': 'Git-коммит',
   Model: 'Модель',
+  'Fast Model': 'Быстрая модель',
   Sandbox: 'Песочница',
   'OS Platform': 'Платформа ОС',
   'OS Arch': 'Архитектура ОС',
@@ -605,6 +606,136 @@ export default {
   'List all configured hooks': 'Показать все настроенные хуки',
   'Enable a disabled hook': 'Включить отключенный хук',
   'Disable an active hook': 'Отключить активный хук',
+  // Hooks - Dialog
+  Hooks: 'Хуки',
+  'Loading hooks...': 'Загрузка хуков...',
+  'Error loading hooks:': 'Ошибка загрузки хуков:',
+  'Press Escape to close': 'Нажмите Escape для закрытия',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Нажмите Escape, Ctrl+C или Ctrl+D для отмены',
+  'Press Space, Enter, or Escape to dismiss':
+    'Нажмите Пробел, Enter или Escape для закрытия',
+  'No hook selected': 'Хук не выбран',
+  // Hooks - List Step
+  'No hook events found.': 'События хуков не найдены.',
+  '{{count}} hook configured': '{{count}} хук настроен',
+  '{{count}} hooks configured': '{{count}} хуков настроено',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
+    'Это меню только для чтения. Чтобы добавить или изменить хуки, отредактируйте settings.json напрямую или спросите Qwen Code.',
+  'Enter to select · Esc to cancel': 'Enter для выбора · Esc для отмены',
+  // Hooks - Detail Step
+  'Exit codes:': 'Коды выхода:',
+  'Configured hooks:': 'Настроенные хуки:',
+  'No hooks configured for this event.':
+    'Для этого события нет настроенных хуков.',
+  'To add hooks, edit settings.json directly or ask Qwen.':
+    'Чтобы добавить хуки, отредактируйте settings.json напрямую или спросите Qwen.',
+  'Enter to select · Esc to go back': 'Enter для выбора · Esc для возврата',
+  // Hooks - Config Detail Step
+  'Hook details': 'Детали хука',
+  'Event:': 'Событие:',
+  'Extension:': 'Расширение:',
+  'Desc:': 'Описание:',
+  'No hook config selected': 'Конфигурация хука не выбрана',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    'Чтобы изменить или удалить этот хук, отредактируйте settings.json напрямую или спросите Qwen.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Конфигурация хуков - Отключено',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'Все хуки в данный момент отключены. У вас {{count}} не выполняются.',
+  '{{count}} configured hook': '{{count}} настроенный хук',
+  '{{count}} configured hooks': '{{count}} настроенных хуков',
+  'When hooks are disabled:': 'Когда хуки отключены:',
+  'No hook commands will execute': 'Никакие команды хуков не будут выполняться',
+  'StatusLine will not be displayed': 'StatusLine не будет отображаться',
+  'Tool operations will proceed without hook validation':
+    'Операции инструментов будут выполняться без проверки хуков',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'Чтобы снова включить хуки, удалите "disableAllHooks" из settings.json или спросите Qwen Code.',
+  // Hooks - Source
+  Project: 'Проект',
+  User: 'Пользователь',
+  System: 'Система',
+  Extension: 'Расширение',
+  'Local Settings': 'Локальные настройки',
+  'User Settings': 'Пользовательские настройки',
+  'System Settings': 'Системные настройки',
+  Extensions: 'Расширения',
+  // Hooks - Status
+  '✓ Enabled': '✓ Включен',
+  '✗ Disabled': '✗ Отключен',
+  // Hooks - Event Descriptions (short)
+  'Before tool execution': 'Перед выполнением инструмента',
+  'After tool execution': 'После выполнения инструмента',
+  'After tool execution fails': 'При неудачном выполнении инструмента',
+  'When notifications are sent': 'При отправке уведомлений',
+  'When the user submits a prompt': 'Когда пользователь отправляет промпт',
+  'When a new session is started': 'При запуске новой сессии',
+  'Right before Qwen Code concludes its response':
+    'Непосредственно перед завершением ответа Qwen Code',
+  'When a subagent (Agent tool call) is started':
+    'При запуске субагента (вызов инструмента Agent)',
+  'Right before a subagent concludes its response':
+    'Непосредственно перед завершением ответа субагента',
+  'Before conversation compaction': 'Перед сжатием разговора',
+  'When a session is ending': 'При завершении сессии',
+  'When a permission dialog is displayed': 'При отображении диалога разрешений',
+  // Hooks - Event Descriptions (detailed)
+  'Input to command is JSON of tool call arguments.':
+    'Ввод в команду — это JSON аргументов вызова инструмента.',
+  'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
+    'Ввод в команду — это JSON с полями "inputs" (аргументы вызова инструмента) и "response" (ответ вызова инструмента).',
+  'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
+    'Ввод в команду — это JSON с tool_name, tool_input, tool_use_id, error, error_type, is_interrupt и is_timeout.',
+  'Input to command is JSON with notification message and type.':
+    'Ввод в команду — это JSON с сообщением уведомления и типом.',
+  'Input to command is JSON with original user prompt text.':
+    'Ввод в команду — это JSON с исходным текстом промпта пользователя.',
+  'Input to command is JSON with session start source.':
+    'Ввод в команду — это JSON с источником запуска сессии.',
+  'Input to command is JSON with session end reason.':
+    'Ввод в команду — это JSON с причиной завершения сессии.',
+  'Input to command is JSON with agent_id and agent_type.':
+    'Ввод в команду — это JSON с agent_id и agent_type.',
+  'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
+    'Ввод в команду — это JSON с agent_id, agent_type и agent_transcript_path.',
+  'Input to command is JSON with compaction details.':
+    'Ввод в команду — это JSON с деталями сжатия.',
+  'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
+    'Ввод в команду — это JSON с tool_name, tool_input и tool_use_id. Вывод — JSON с hookSpecificOutput, содержащим решение о разрешении или отказе.',
+  // Hooks - Exit Code Descriptions
+  'stdout/stderr not shown': 'stdout/stderr не отображаются',
+  'show stderr to model and continue conversation':
+    'показать stderr модели и продолжить разговор',
+  'show stderr to user only': 'показать stderr только пользователю',
+  'stdout shown in transcript mode (ctrl+o)':
+    'stdout отображается в режиме транскрипции (ctrl+o)',
+  'show stderr to model immediately': 'показать stderr модели немедленно',
+  'show stderr to user only but continue with tool call':
+    'показать stderr только пользователю, но продолжить вызов инструмента',
+  'block processing, erase original prompt, and show stderr to user only':
+    'заблокировать обработку, стереть исходный промпт и показать stderr только пользователю',
+  'stdout shown to Qwen': 'stdout показан Qwen',
+  'show stderr to user only (blocking errors ignored)':
+    'показать stderr только пользователю (блокирующие ошибки игнорируются)',
+  'command completes successfully': 'команда успешно завершена',
+  'stdout shown to subagent': 'stdout показан субагенту',
+  'show stderr to subagent and continue having it run':
+    'показать stderr субагенту и продолжить его выполнение',
+  'stdout appended as custom compact instructions':
+    'stdout добавлен как пользовательские инструкции сжатия',
+  'block compaction': 'заблокировать сжатие',
+  'show stderr to user only but continue with compaction':
+    'показать stderr только пользователю, но продолжить сжатие',
+  'use hook decision if provided':
+    'использовать решение хука, если предоставлено',
+  // Hooks - Messages
+  'Config not loaded.': 'Конфигурация не загружена.',
+  'Hooks are not enabled. Enable hooks in settings to use this feature.':
+    'Хуки не включены. Включите хуки в настройках, чтобы использовать эту функцию.',
+  'No hooks configured. Add hooks in your settings.json file.':
+    'Хуки не настроены. Добавьте хуки в файл settings.json.',
+  'Configured Hooks ({{count}} total)': 'Настроенные хуки (всего {{count}})',
 
   // ============================================================================
   // Commands - Session Export
@@ -718,7 +849,6 @@ export default {
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Режим подтверждения рабочего пространства существует и имеет приоритет. Изменение на уровне пользователя не будет иметь эффекта.',
   'Apply To': 'Применить к',
-  'User Settings': 'Настройки пользователя',
   'Workspace Settings': 'Настройки рабочего пространства',
 
   // ============================================================================
@@ -773,7 +903,6 @@ export default {
   'List configured MCP servers and tools':
     'Просмотр настроенных MCP-серверов и инструментов',
   'Restarts MCP servers.': 'Перезапустить MCP-серверы.',
-  'Config not loaded.': 'Конфигурация не загружена.',
   'Could not retrieve tool registry.':
     'Не удалось получить реестр инструментов.',
   'No MCP servers configured with OAuth authentication.':
@@ -868,7 +997,10 @@ export default {
   // ============================================================================
   // Команды - Модель
   // ============================================================================
-  'Switch the model for this session': 'Переключение модели для этой сессии',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Переключение модели для этой сессии (--fast для модели подсказок)',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Установить облегчённую модель для подсказок и спекулятивного выполнения',
   'Content generator configuration not available.':
     'Конфигурация генератора содержимого недоступна.',
   'Authentication type not available.': 'Тип авторизации недоступен.',
@@ -951,7 +1083,6 @@ export default {
   'View tools': 'Просмотреть инструменты',
   '(disabled)': '(отключен)',
   'Error:': 'Ошибка:',
-  Extension: 'Расширение',
   tool: 'инструмент',
   connected: 'подключен',
   connecting: 'подключение',
@@ -979,7 +1110,13 @@ export default {
   "Allow execution of: '{{command}}'?": "Разрешить выполнение: '{{command}}'?",
   'Yes, allow always ...': 'Да, всегда разрешать ...',
   'Always allow in this project': 'Всегда разрешать в этом проекте',
+  'Always allow {{action}} in this project':
+    'Всегда разрешать {{action}} в этом проекте',
   'Always allow for this user': 'Всегда разрешать для этого пользователя',
+  'Always allow {{action}} for this user':
+    'Всегда разрешать {{action}} для этого пользователя',
+  'Yes, restore previous mode ({{mode}})':
+    'Да, восстановить предыдущий режим ({{mode}})',
   'Yes, and auto-accept edits': 'Да, и автоматически принимать правки',
   'Yes, and manually approve edits': 'Да, и вручную подтверждать правки',
   'No, keep planning (esc)': 'Нет, продолжить планирование (esc)',
@@ -1135,8 +1272,8 @@ export default {
   unknown: 'неизвестно',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Не удалось переключиться на модель '{{modelId}}'.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — эффективная гибридная модель с лидирующей производительностью в программировании',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — эффективная гибридная модель с лидирующей производительностью в программировании',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Последняя модель Qwen Vision от Alibaba Cloud ModelStudio (версия: qwen3-vl-plus-2025-09-23)',
 
@@ -1597,8 +1734,8 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    'Вставьте ваш API-ключ Bailian Coding Plan и всё готово!',
+  "Paste your api key of ModelStudio Coding Plan and you're all set!":
+    'Вставьте ваш API-ключ ModelStudio Coding Plan и всё готово!',
   Custom: 'Пользовательский',
   'More instructions about configuring `modelProviders` manually.':
     'Дополнительные инструкции по ручной настройке `modelProviders`.',
@@ -1831,4 +1968,22 @@ export default {
     'Raw-режим недоступен. Пожалуйста, запустите в интерактивном терминале.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
+  compact: 'компактный',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Скрывать вывод инструментов и процесс рассуждений для более чистого вида (переключить с помощью Ctrl+O).',
+  'Press Ctrl+O to show full tool output':
+    'Нажмите Ctrl+O для показа полного вывода инструментов',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

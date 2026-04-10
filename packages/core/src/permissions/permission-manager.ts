@@ -14,6 +14,8 @@ import {
 import type { PathMatchContext } from './rule-parser.js';
 import { extractShellOperations } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
+import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
+import { detectCommandSubstitution } from '../utils/shell-utils.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -153,12 +155,12 @@ export class PermissionManager {
    * @param ctx - The context containing the tool name and optional command.
    * @returns A PermissionDecision indicating how to handle this tool call.
    */
-  evaluate(ctx: PermissionCheckContext): PermissionDecision {
-    const { command } = ctx;
+  async evaluate(ctx: PermissionCheckContext): Promise<PermissionDecision> {
+    const { command, toolName } = ctx;
 
     // For shell commands, split compound commands and evaluate each
     // sub-command independently, then return the most restrictive result.
-    // Priority order (most to least restrictive): deny > ask > default > allow
+    // Priority order (most to least restrictive): deny > ask > allow
     if (command !== undefined) {
       const subCommands = splitCompoundCommand(command);
       if (subCommands.length > 1) {
@@ -166,7 +168,20 @@ export class PermissionManager {
       }
     }
 
-    return this.evaluateSingle(ctx);
+    const decision = this.evaluateSingle(ctx);
+
+    // For shell commands, resolve 'default' to actual permission using AST analysis
+    // This ensures 'default' is never returned for shell commands - they always get
+    // a concrete permission (deny/ask/allow) based on the command's readonly status.
+    if (
+      decision === 'default' &&
+      toolName === 'run_shell_command' &&
+      command !== undefined
+    ) {
+      return this.resolveDefaultPermission(command);
+    }
+
+    return decision;
   }
 
   /**
@@ -295,32 +310,46 @@ export class PermissionManager {
    * Evaluate a compound command by splitting it into sub-commands,
    * evaluating each independently, and returning the most restrictive result.
    *
-   * Restriction order: deny > ask > default > allow
+   * Restriction order: deny > ask > allow
    *
-   * Example: with rules `allow: [safe-cmd *, one-cmd *]`
-   *   - "safe-cmd && one-cmd"  → both allow  → allow
-   *   - "safe-cmd && two-cmd"  → allow + default → default
-   *   - "safe-cmd && evil-cmd" (deny: [evil-cmd]) → allow + deny → deny
+   * When a sub-command returns 'default' (no rule matches), it is resolved to
+   * the actual default permission using AST analysis:
+   *   - Command substitution detected → 'deny'
+   *   - Read-only command (cd, ls, git status, etc.) → 'allow'
+   *   - Otherwise → 'ask'
+   *
+   * Example: with rules `allow: [git checkout *]`
+   *   - "cd /path && git checkout -b feature" → allow (cd) + allow (rule) → allow
+   *   - "rm /path && git checkout -b feature" → ask (rm) + allow (rule) → ask
+   *   - "evil-cmd && git checkout" (deny: [evil-cmd]) → deny + allow → deny
    */
-  private evaluateCompoundCommand(
+  private async evaluateCompoundCommand(
     ctx: PermissionCheckContext,
     subCommands: string[],
-  ): PermissionDecision {
-    const PRIORITY: Record<PermissionDecision, number> = {
+  ): Promise<PermissionDecision> {
+    // Type for resolved decisions (excludes 'default' since it's resolved)
+    type ResolvedDecision = 'allow' | 'ask' | 'deny';
+    const PRIORITY: Record<ResolvedDecision, number> = {
       deny: 3,
       ask: 2,
-      default: 1,
       allow: 0,
     };
 
-    let mostRestrictive: PermissionDecision = 'allow';
+    let mostRestrictive: ResolvedDecision = 'allow';
 
     for (const subCmd of subCommands) {
       const subCtx: PermissionCheckContext = {
         ...ctx,
         command: subCmd,
       };
-      const decision = this.evaluateSingle(subCtx);
+      const rawDecision = this.evaluateSingle(subCtx);
+
+      // Resolve 'default' to actual permission using AST analysis
+      // (same logic as ShellToolInvocation.getDefaultPermission)
+      const decision: ResolvedDecision =
+        rawDecision === 'default'
+          ? await this.resolveDefaultPermission(subCmd)
+          : (rawDecision as ResolvedDecision);
 
       if (PRIORITY[decision] > PRIORITY[mostRestrictive]) {
         mostRestrictive = decision;
@@ -335,9 +364,66 @@ export class PermissionManager {
     return mostRestrictive;
   }
 
+  /**
+   * Resolve 'default' permission to actual permission using AST analysis.
+   * This mirrors the logic in ShellToolInvocation.getDefaultPermission().
+   *
+   * @param command - The shell command to analyze.
+   * @returns 'deny' for command substitution, 'allow' for read-only, 'ask' otherwise.
+   */
+  private async resolveDefaultPermission(
+    command: string,
+  ): Promise<'allow' | 'ask' | 'deny'> {
+    // Security: command substitution ($(), ``, <(), >()) → deny
+    if (detectCommandSubstitution(command)) {
+      return 'deny';
+    }
+
+    // AST-based read-only detection
+    try {
+      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      if (isReadOnly) {
+        return 'allow';
+      }
+    } catch {
+      // AST check failed, fall back to 'ask'
+    }
+
+    return 'ask';
+  }
+
   // ---------------------------------------------------------------------------
   // Registry-level helper
   // ---------------------------------------------------------------------------
+
+  /**
+   * Core tools that are subject to the coreTools allowlist check.
+   * Tools not in this set (MCP, Skill, Agent, etc.) bypass the check.
+   */
+  private static readonly CORE_TOOLS = new Set([
+    'read_file',
+    'write_file',
+    'edit',
+    'glob',
+    'grep_search',
+    'run_shell_command',
+    'list_directory',
+    'web_fetch',
+    'web_search',
+    'todo_write',
+    'save_memory',
+    'lsp',
+    'cron_create',
+    'cron_list',
+    'cron_delete',
+  ]);
+
+  /**
+   * Check if a tool is a core tool subject to the coreTools allowlist check.
+   */
+  private isCoreTool(toolName: string): boolean {
+    return PermissionManager.CORE_TOOLS.has(toolName);
+  }
 
   /**
    * Determine whether a tool should be present in the tool registry.
@@ -346,13 +432,23 @@ export class PermissionManager {
    * (i.e. a whole-tool deny) matches.  Specifier-based deny rules such as
    * `"Bash(rm -rf *)"` do NOT remove the tool from the registry – they only
    * deny specific invocations at runtime.
+   *
+   * Non-core tools (MCP, Skill, Agent, etc.) skip the coreTools allowlist
+   * check because they are dynamically discovered or essential for system
+   * operation.
    */
-  isToolEnabled(toolName: string): boolean {
+  async isToolEnabled(toolName: string): Promise<boolean> {
     const canonicalName = resolveToolName(toolName);
 
-    // If a coreTools allowlist is active, only explicitly listed tools are
-    // registered. This mirrors the legacy `tools.core` whitelist semantic:
-    // any tool NOT in the allowlist is excluded from the registry entirely.
+    // Non-core tools bypass coreTools allowlist check
+    if (!this.isCoreTool(canonicalName)) {
+      const decision = await this.evaluate({ toolName: canonicalName });
+      return decision !== 'deny';
+    }
+
+    // Core tools: if a coreTools allowlist is active, only explicitly listed
+    // tools are registered. This mirrors the legacy `tools.core` whitelist
+    // semantic: any tool NOT in the allowlist is excluded from the registry.
     if (this.coreToolsAllowList !== null && this.coreToolsAllowList.size > 0) {
       if (!this.coreToolsAllowList.has(canonicalName)) {
         return false;
@@ -361,8 +457,45 @@ export class PermissionManager {
 
     // evaluate({ toolName }) without a command will only match rules that have
     // no specifier, which is the correct registry-level check.
-    const decision = this.evaluate({ toolName: canonicalName });
+    const decision = await this.evaluate({ toolName: canonicalName });
     return decision !== 'deny';
+  }
+
+  /**
+   * Find the first deny rule that matches the given context.
+   * Returns the raw rule string if found, or undefined if no deny rule matches.
+   *
+   * Useful for providing user-visible feedback about which rule caused a denial.
+   */
+  findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
+    const { toolName, command, filePath, domain, specifier } = ctx;
+
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: this.config.getCwd(),
+          }
+        : undefined;
+
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+    ] as const;
+
+    for (const rule of [
+      ...this.sessionRules.deny,
+      ...this.persistentRules.deny,
+    ]) {
+      if (matchesRule(rule, ...matchArgs)) {
+        return rule.raw;
+      }
+    }
+    return undefined;
   }
 
   // ---------------------------------------------------------------------------
@@ -375,7 +508,7 @@ export class PermissionManager {
    * @param command - The shell command to evaluate.
    * @returns The PermissionDecision for this command.
    */
-  isCommandAllowed(command: string): PermissionDecision {
+  async isCommandAllowed(command: string): Promise<PermissionDecision> {
     return this.evaluate({
       toolName: 'run_shell_command',
       command,
@@ -409,6 +542,15 @@ export class PermissionManager {
    */
   hasRelevantRules(ctx: PermissionCheckContext): boolean {
     const { toolName, command, filePath, domain, specifier } = ctx;
+
+    if (ctx.toolName === 'run_shell_command' && command !== undefined) {
+      const subCommands = splitCompoundCommand(command);
+      if (subCommands.length > 1) {
+        return subCommands.some((subCmd) =>
+          this.hasRelevantRules({ ...ctx, command: subCmd }),
+        );
+      }
+    }
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -460,6 +602,69 @@ export class PermissionManager {
       ) {
         return true;
       }
+    }
+
+    return false;
+  }
+
+  /**
+   * Returns true when the invocation is matched by an explicit `ask` rule.
+   *
+   * This is intentionally narrower than `evaluate(ctx) === 'ask'`. Shell
+   * commands can resolve to `ask` simply because they are non-read-only and no
+   * explicit allow/deny rule matched. That fallback should still allow users to
+   * create new allow rules, so callers must only hide "Always allow" when a
+   * real ask rule matched.
+   */
+  hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
+    const { toolName, command, filePath, domain, specifier } = ctx;
+
+    if (ctx.toolName === 'run_shell_command' && command !== undefined) {
+      const subCommands = splitCompoundCommand(command);
+      if (subCommands.length > 1) {
+        return subCommands.some((subCmd) =>
+          this.hasMatchingAskRule({ ...ctx, command: subCmd }),
+        );
+      }
+    }
+
+    const pathCtx: PathMatchContext | undefined =
+      this.config.getProjectRoot && this.config.getCwd
+        ? {
+            projectRoot: this.config.getProjectRoot(),
+            cwd: this.config.getCwd(),
+          }
+        : undefined;
+
+    const matchArgs = [
+      toolName,
+      command,
+      filePath,
+      domain,
+      pathCtx,
+      specifier,
+    ] as const;
+
+    const askRules = [...this.sessionRules.ask, ...this.persistentRules.ask];
+
+    if (askRules.some((rule) => matchesRule(rule, ...matchArgs))) {
+      return true;
+    }
+
+    if (ctx.toolName === 'run_shell_command' && ctx.command !== undefined) {
+      const cwd = pathCtx?.cwd ?? process.cwd();
+      const ops = extractShellOperations(ctx.command, cwd);
+      return ops.some((op) => {
+        const opMatchArgs = [
+          op.virtualTool,
+          undefined,
+          op.filePath,
+          op.domain,
+          pathCtx,
+          undefined,
+        ] as const;
+        return askRules.some((rule) => matchesRule(rule, ...opMatchArgs));
+      });
     }
 
     return false;

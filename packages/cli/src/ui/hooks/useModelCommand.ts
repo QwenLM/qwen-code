@@ -8,23 +8,31 @@ import { useState, useCallback } from 'react';
 
 interface UseModelCommandReturn {
   isModelDialogOpen: boolean;
-  openModelDialog: () => void;
+  isFastModelMode: boolean;
+  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
   closeModelDialog: () => void;
 }
 
 export const useModelCommand = (): UseModelCommandReturn => {
   const [isModelDialogOpen, setIsModelDialogOpen] = useState(false);
+  const [isFastModelMode, setIsFastModelMode] = useState(false);
 
-  const openModelDialog = useCallback(() => {
-    setIsModelDialogOpen(true);
-  }, []);
+  const openModelDialog = useCallback(
+    (options?: { fastModelMode?: boolean }) => {
+      setIsFastModelMode(options?.fastModelMode ?? false);
+      setIsModelDialogOpen(true);
+    },
+    [],
+  );
 
   const closeModelDialog = useCallback(() => {
     setIsModelDialogOpen(false);
+    setIsFastModelMode(false);
   }, []);
 
   return {
     isModelDialogOpen,
+    isFastModelMode,
     openModelDialog,
     closeModelDialog,
   };

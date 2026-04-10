@@ -282,11 +282,13 @@ export async function main() {
           process.exit(1);
         }
       }
-      // For stream-json mode, don't read stdin here - it should be forwarded to the sandbox
-      // and consumed by StreamJsonInputReader inside the container
+      // For stream-json and ACP modes, don't read stdin here — stdin carries
+      // protocol data (not a user prompt) and should be forwarded to the sandbox
+      // intact via stdio: 'inherit'.
       const inputFormat = argv.inputFormat as string | undefined;
+      const isAcpMode = argv.acp || argv.experimentalAcp;
       let stdinData = '';
-      if (!process.stdin.isTTY && inputFormat !== 'stream-json') {
+      if (!process.stdin.isTTY && inputFormat !== 'stream-json' && !isAcpMode) {
         stdinData = await readStdin();
       }
 
@@ -358,7 +360,6 @@ export async function main() {
       argv,
       process.cwd(),
       argv.extensions,
-      settings,
     );
 
     // Register cleanup for MCP clients as early as possible
@@ -408,7 +409,10 @@ export async function main() {
     const initializationResult = await initializeApp(config, settings);
 
     if (config.getExperimentalZedIntegration()) {
-      return runAcpAgent(config, settings, argv);
+      await runAcpAgent(config, settings, argv);
+      // Clean up child processes and force exit, matching other non-interactive modes
+      await runExitCleanup();
+      process.exit(0);
     }
 
     let input = config.getQuestion();

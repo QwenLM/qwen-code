@@ -1,0 +1,33 @@
+{
+  "name": "@qwen-code/channel-plugin-example",
+  "version": "0.14.2",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "qwen-extension.json"
+  ],
+  "bin": {
+    "qwen-channel-plugin-example-server": "dist/start-server.js"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@qwen-code/channel-base": "file:../base",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.0"
+  }
+}

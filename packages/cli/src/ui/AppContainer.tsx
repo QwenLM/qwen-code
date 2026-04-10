@@ -41,6 +41,17 @@ import {
   Storage,
   SessionEndReason,
   SessionStartSource,
+  generatePromptSuggestion,
+  logPromptSuggestion,
+  PromptSuggestionEvent,
+  logSpeculation,
+  SpeculationEvent,
+  startSpeculation,
+  acceptSpeculation,
+  abortSpeculation,
+  type SpeculationState,
+  IDLE_SPECULATION,
+  ApprovalMode,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
@@ -60,6 +71,7 @@ import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
+import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -110,6 +122,7 @@ import { useSubagentCreateDialog } from './hooks/useSubagentCreateDialog.js';
 import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
+import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import {
   requestConsentInteractive,
@@ -274,7 +287,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
-
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
   const originalTitleRef = useRef(
@@ -456,6 +468,7 @@ export const AppContainer = (props: AppContainerProps) => {
     qwenAuthState,
     handleAuthSelect,
     handleCodingPlanSubmit,
+    handleAlibabaStandardSubmit,
     openAuthDialog,
     cancelAuthentication,
   } = useAuthCommand(settings, config, historyManager.addItem, refreshStatic);
@@ -517,8 +530,12 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
 
-  const { isModelDialogOpen, openModelDialog, closeModelDialog } =
-    useModelCommand();
+  const {
+    isModelDialogOpen,
+    isFastModelMode,
+    openModelDialog,
+    closeModelDialog,
+  } = useModelCommand();
   const { activeArenaDialog, openArenaDialog, closeArenaDialog } =
     useArenaCommand();
 
@@ -552,6 +569,8 @@ export const AppContainer = (props: AppContainerProps) => {
     closeExtensionsManagerDialog,
   } = useExtensionsManagerDialog();
   const { isMcpDialogOpen, openMcpDialog, closeMcpDialog } = useMcpDialog();
+  const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
+    useHooksDialog();
 
   const slashCommandActions = useMemo(
     () => ({
@@ -578,6 +597,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openAgentsManagerDialog,
       openExtensionsManagerDialog,
       openMcpDialog,
+      openHooksDialog,
       openResumeDialog,
     }),
     [
@@ -597,6 +617,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openAgentsManagerDialog,
       openExtensionsManagerDialog,
       openMcpDialog,
+      openHooksDialog,
       openResumeDialog,
     ],
   );
@@ -691,6 +712,7 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [config, historyManager, settings.merged]);
 
   const cancelHandlerRef = useRef<() => void>(() => {});
+  const midTurnDrainRef = useRef<(() => string[]) | null>(null);
 
   const {
     streamingState,
@@ -722,6 +744,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
+    midTurnDrainRef,
   );
 
   // Track whether suggestions are visible for Tab key handling
@@ -729,7 +752,22 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const agentViewState = useAgentViewState();
 
+  // Prompt suggestion state
+  const [promptSuggestion, setPromptSuggestion] = useState<string | null>(null);
+  const prevStreamingStateRef = useRef<StreamingState>(StreamingState.Idle);
+  const speculationRef = useRef<SpeculationState>(IDLE_SPECULATION);
+  const suggestionAbortRef = useRef<AbortController | null>(null);
+
+  // Dismiss callback — clears suggestion + aborts in-flight generation/speculation
+  const dismissPromptSuggestion = useCallback(() => {
+    setPromptSuggestion(null);
+    suggestionAbortRef.current?.abort();
+    suggestionAbortRef.current = null;
+  }, []);
+
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
+  const geminiClient = config.getGeminiClient();
+
   const showAutoAcceptIndicator = useAutoAcceptIndicator({
     config,
     addItem: historyManager.addItem,
@@ -738,12 +776,22 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
-    useMessageQueue({
-      isConfigInitialized,
-      streamingState,
-      submitQuery,
-    });
+  const {
+    messageQueue,
+    addMessage,
+    clearQueue,
+    getQueuedMessagesText,
+    drainQueue,
+  } = useMessageQueue({
+    isConfigInitialized,
+    streamingState,
+    submitQuery,
+  });
+
+  // Bridge message queue to mid-turn drain via ref.
+  // drainQueue reads from the synchronous queueRef inside useMessageQueue,
+  // so it always sees the latest state even between renders.
+  midTurnDrainRef.current = drainQueue;
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
@@ -763,9 +811,136 @@ export const AppContainer = (props: AppContainerProps) => {
         void submitQuery(submittedValue);
         return;
       }
+
+      // Check if speculation has results for this submission
+      const spec = speculationRef.current;
+      if (
+        spec.status !== 'idle' &&
+        spec.suggestion === submittedValue &&
+        spec.status === 'completed'
+      ) {
+        // Accept completed speculation: inject messages and apply files
+        acceptSpeculation(spec, geminiClient)
+          .then((result) => {
+            logSpeculation(
+              config,
+              new SpeculationEvent({
+                outcome: 'accepted',
+                turns_used: spec.messages.filter((m) => m.role === 'model')
+                  .length,
+                files_written: result.filesApplied.length,
+                tool_use_count: spec.toolUseCount,
+                duration_ms: Date.now() - spec.startTime,
+                boundary_type: spec.boundary?.type,
+                had_pipelined_suggestion: !!result.nextSuggestion,
+              }),
+            );
+            // Speculation completed fully (no boundary) — render results in UI
+            {
+              const now = Date.now();
+
+              // Render each speculated message as the appropriate HistoryItem
+              for (let mi = 0; mi < result.messages.length; mi++) {
+                const msg = result.messages[mi];
+                if (msg.role === 'user' && msg.parts) {
+                  // Check if this is a tool result (functionResponse) or user text
+                  const hasText = msg.parts.some(
+                    (p) => p.text && !p.functionResponse,
+                  );
+                  if (hasText) {
+                    const text = msg.parts
+                      .map((p) => p.text ?? '')
+                      .filter(Boolean)
+                      .join('');
+                    if (text) {
+                      historyManager.addItem(
+                        { type: 'user' as const, text },
+                        now,
+                      );
+                    }
+                  }
+                  // functionResponse parts are rendered as part of the tool_group below
+                } else if (msg.role === 'model' && msg.parts) {
+                  // Extract text and tool calls separately
+                  const textParts = msg.parts
+                    .filter((p) => p.text && !p.functionCall)
+                    .map((p) => p.text!)
+                    .join('');
+                  const toolCalls = msg.parts.filter((p) => p.functionCall);
+
+                  if (textParts) {
+                    historyManager.addItem(
+                      { type: 'gemini' as const, text: textParts },
+                      now,
+                    );
+                  }
+
+                  if (toolCalls.length > 0) {
+                    // Find matching tool results from the next message
+                    const nextMsg = result.messages[mi + 1];
+                    const toolResults =
+                      nextMsg?.parts?.filter((p) => p.functionResponse) ?? [];
+
+                    const tools = toolCalls.map((tc, i) => {
+                      const name = tc.functionCall?.name ?? 'unknown';
+                      const args = tc.functionCall?.args ?? {};
+                      const resp = toolResults[i]?.functionResponse?.response;
+                      const resultText =
+                        typeof resp === 'object' && resp
+                          ? ((resp as Record<string, unknown>)['output'] ??
+                            JSON.stringify(resp))
+                          : String(resp ?? '');
+                      return {
+                        callId: `spec-${name}-${i}`,
+                        name,
+                        description:
+                          Object.entries(args)
+                            .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
+                            .join(', ') || name,
+                        resultDisplay: String(resultText).slice(0, 500),
+                        status: ToolCallStatus.Success,
+                        confirmationDetails: undefined,
+                      };
+                    });
+
+                    const toolGroupItem: HistoryItemWithoutId = {
+                      type: 'tool_group' as const,
+                      tools,
+                    };
+                    historyManager.addItem(toolGroupItem, now);
+                  }
+                }
+              }
+            }
+            if (result.nextSuggestion) {
+              setPromptSuggestion(result.nextSuggestion);
+            }
+          })
+          .catch(() => {
+            // Fallback: submit normally
+            addMessage(submittedValue);
+          });
+        speculationRef.current = IDLE_SPECULATION;
+        return;
+      }
+
+      // Abort any running speculation since we're submitting something different
+      if (spec.status === 'running') {
+        abortSpeculation(spec).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
+
       addMessage(submittedValue);
     },
-    [addMessage, agentViewState, streamingState, submitQuery],
+    [
+      addMessage,
+      agentViewState,
+      streamingState,
+      submitQuery,
+      config,
+      geminiClient,
+      historyManager,
+    ],
   );
 
   const handleArenaModelsSelected = useCallback(
@@ -785,6 +960,11 @@ export const AppContainer = (props: AppContainerProps) => {
     handleWelcomeBackSelection,
     handleWelcomeBackClose,
   } = useWelcomeBack(config, handleFinalSubmit, buffer, settings.merged);
+
+  const pendingHistoryItems = useMemo(
+    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
+    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
+  );
 
   cancelHandlerRef.current = useCallback(() => {
     const pendingHistoryItems = [
@@ -888,7 +1068,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // Initial prompt handling
   const initialPrompt = useMemo(() => config.getQuestion(), [config]);
   const initialPromptSubmitted = useRef(false);
-  const geminiClient = config.getGeminiClient();
 
   useEffect(() => {
     if (activePtyId) {
@@ -929,6 +1108,132 @@ export const AppContainer = (props: AppContainerProps) => {
     geminiClient,
   ]);
 
+  // Generate prompt suggestions when streaming completes
+  const followupSuggestionsEnabled =
+    settings.merged.ui?.enableFollowupSuggestions === true;
+
+  useEffect(() => {
+    // Clear suggestion when feature is disabled at runtime
+    if (!followupSuggestionsEnabled) {
+      suggestionAbortRef.current?.abort();
+      setPromptSuggestion(null);
+      if (speculationRef.current.status === 'running') {
+        abortSpeculation(speculationRef.current).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
+    }
+
+    // Clear suggestion and abort pending generation/speculation when a new turn starts
+    if (
+      prevStreamingStateRef.current === StreamingState.Idle &&
+      streamingState === StreamingState.Responding
+    ) {
+      suggestionAbortRef.current?.abort();
+      setPromptSuggestion(null);
+      if (speculationRef.current.status !== 'idle') {
+        abortSpeculation(speculationRef.current).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
+    }
+
+    // Only trigger when transitioning from Responding to Idle (and enabled)
+    // Skip when dialogs are active, in plan mode, elicitation pending, or last response was error
+    if (
+      followupSuggestionsEnabled &&
+      config.isInteractive() &&
+      !config.getSdkMode() &&
+      prevStreamingStateRef.current === StreamingState.Responding &&
+      streamingState === StreamingState.Idle &&
+      // Check both committed history and pending items for errors
+      // (API errors go to pendingGeminiHistoryItems, not historyManager.history)
+      historyManager.history[historyManager.history.length - 1]?.type !==
+        'error' &&
+      !pendingGeminiHistoryItems.some((item) => item.type === 'error') &&
+      !shellConfirmationRequest &&
+      !confirmationRequest &&
+      !loopDetectionConfirmationRequest &&
+      !isPermissionsDialogOpen &&
+      settingInputRequests.length === 0 &&
+      config.getApprovalMode() !== ApprovalMode.PLAN
+    ) {
+      const ac = new AbortController();
+      suggestionAbortRef.current = ac;
+
+      // Use curated history to avoid invalid/empty entries causing API errors
+      const fullHistory = geminiClient.getChat().getHistory(true);
+      const conversationHistory =
+        fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+      generatePromptSuggestion(config, conversationHistory, ac.signal, {
+        enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
+        model: settings.merged.fastModel || undefined,
+      })
+        .then((result) => {
+          if (ac.signal.aborted) return;
+          if (result.suggestion) {
+            setPromptSuggestion(result.suggestion);
+            // Start speculation if enabled (runs in background)
+            if (settings.merged.ui?.enableSpeculation) {
+              startSpeculation(config, result.suggestion, ac.signal, {
+                model: settings.merged.fastModel || undefined,
+              })
+                .then((state) => {
+                  speculationRef.current = state;
+                })
+                .catch(() => {
+                  // Speculation failure is non-blocking
+                });
+            }
+          } else if (result.filterReason) {
+            // Log suppressed suggestion for analytics
+            logPromptSuggestion(
+              config,
+              new PromptSuggestionEvent({
+                outcome: 'suppressed',
+                reason: result.filterReason,
+              }),
+            );
+          }
+        })
+        .catch(() => {
+          // Silently degrade — don't disrupt the user experience
+        });
+    }
+
+    // Only update prev ref when streamingState actually changes, so that
+    // dialog-dependency re-runs don't cause us to miss a Responding→Idle transition.
+    if (prevStreamingStateRef.current !== streamingState) {
+      prevStreamingStateRef.current = streamingState;
+    }
+
+    return () => {
+      suggestionAbortRef.current?.abort();
+      // Cleanup speculation on unmount (#21)
+      if (speculationRef.current.status !== 'idle') {
+        abortSpeculation(speculationRef.current).catch(() => {});
+        speculationRef.current = IDLE_SPECULATION;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- guards may change independently
+  }, [
+    streamingState,
+    followupSuggestionsEnabled,
+    shellConfirmationRequest,
+    confirmationRequest,
+    loopDetectionConfirmationRequest,
+    isPermissionsDialogOpen,
+    settingInputRequests,
+  ]);
+
+  // Abort speculation when promptSuggestion is cleared (new turn, feature toggle, or
+  // user-initiated dismiss via typing/paste). InputPrompt calls onPromptSuggestionDismiss
+  // on user input, which clears promptSuggestion, triggering this effect to abort speculation.
+  useEffect(() => {
+    if (!promptSuggestion && speculationRef.current.status !== 'idle') {
+      abortSpeculation(speculationRef.current).catch(() => {});
+      speculationRef.current = IDLE_SPECULATION;
+    }
+  }, [promptSuggestion]);
+
   const [idePromptAnswered, setIdePromptAnswered] = useState(false);
   const [currentIDE, setCurrentIDE] = useState<IdeInfo | null>(null);
 
@@ -957,6 +1262,13 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
+  const [compactMode, setCompactMode] = useState<boolean>(
+    settings.merged.ui?.compactMode ?? false,
+  );
+  const [frozenSnapshot, setFrozenSnapshot] = useState<
+    HistoryItemWithoutId[] | null
+  >(null);
+
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -970,6 +1282,18 @@ export const AppContainer = (props: AppContainerProps) => {
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
+
+  useEffect(() => {
+    // Clear frozen snapshot when streaming ends OR when entering confirmation
+    // state. During WaitingForConfirmation, the user needs to see the latest
+    // pending items (including the confirmation message) rather than a stale snapshot.
+    if (
+      streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.WaitingForConfirmation
+    ) {
+      setFrozenSnapshot(null);
+    }
+  }, [streamingState]);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
@@ -1191,13 +1515,19 @@ export const AppContainer = (props: AppContainerProps) => {
         return; // Dialog closed, end processing
       }
 
-      // 3. Cancel ongoing requests
+      // 3. Cancel in-flight btw side-question
+      if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+        cancelBtw();
+        return; // Btw cancelled, end processing
+      }
+
+      // 4. Cancel ongoing requests
       if (streamingState === StreamingState.Responding) {
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
       }
 
-      // 4. Clear input buffer (if has content)
+      // 5. Clear input buffer (if has content)
       if (buffer.text.length > 0) {
         buffer.setText('');
         return; // Input cleared, end processing
@@ -1213,6 +1543,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthDialogOpen,
       handleSlashCommand,
       closeAnyOpenDialog,
+      btwItem,
+      cancelBtw,
       streamingState,
       cancelOngoingRequest,
       buffer,
@@ -1244,6 +1576,11 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlCPressedOnce, setCtrlCPressedOnce, ctrlCTimerRef);
         return;
       } else if (keyMatchers[Command.EXIT](key)) {
+        // Cancel in-flight btw even when buffer has text (Ctrl+D)
+        if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+          cancelBtw();
+          return;
+        }
         if (buffer.text.length > 0) {
           return;
         }
@@ -1312,6 +1649,9 @@ export const AppContainer = (props: AppContainerProps) => {
         }
       }
 
+      // Note: Ctrl+C/D btw cancellation is handled inside handleExit
+      // (step 3), not here, because Command.QUIT/EXIT match first.
+
       let enteringConstrainHeightMode = false;
       if (!constrainHeight) {
         enteringConstrainHeightMode = true;
@@ -1341,6 +1681,18 @@ export const AppContainer = (props: AppContainerProps) => {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);
         }
+      } else if (keyMatchers[Command.TOGGLE_COMPACT_MODE](key)) {
+        const newValue = !compactMode;
+        setCompactMode(newValue);
+        void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
+        refreshStatic();
+        // Only freeze during the actual responding phase. WaitingForConfirmation
+        // must keep focus so the user can approve/cancel tool confirmation UI.
+        if (streamingState === StreamingState.Responding) {
+          setFrozenSnapshot([...pendingHistoryItems]);
+        } else {
+          setFrozenSnapshot(null);
+        }
       }
     },
     [
@@ -1369,8 +1721,16 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      settings.merged.general?.debugKeystrokeLogging,
+      // `settings` is a stable LoadedSettings instance (not recreated on render).
+      // ESLint requires it here because the callback calls settings.setValue().
+      // debugKeystrokeLogging is read at call time, so no stale closure risk.
+      settings,
       isAuthenticating,
+      compactMode,
+      setCompactMode,
+      setFrozenSnapshot,
+      pendingHistoryItems,
+      refreshStatic,
     ],
   );
 
@@ -1439,6 +1799,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isSubagentCreateDialogOpen ||
     isAgentsManagerDialogOpen ||
     isMcpDialogOpen ||
+    isHooksDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
     isExtensionsManagerDialogOpen;
@@ -1457,11 +1818,6 @@ export const AppContainer = (props: AppContainerProps) => {
     history: historyManager.history,
     sessionStats,
   });
-
-  const pendingHistoryItems = useMemo(
-    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
-    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
-  );
 
   const uiState: UIState = useMemo(
     () => ({
@@ -1482,6 +1838,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
+      isFastModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -1561,10 +1918,15 @@ export const AppContainer = (props: AppContainerProps) => {
       isExtensionsManagerDialogOpen,
       // MCP dialog
       isMcpDialogOpen,
+      // Hooks dialog
+      isHooksDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Prompt suggestion
+      promptSuggestion,
+      dismissPromptSuggestion,
     }),
     [
       isThemeDialogOpen,
@@ -1582,6 +1944,7 @@ export const AppContainer = (props: AppContainerProps) => {
       quittingMessages,
       isSettingsDialogOpen,
       isModelDialogOpen,
+      isFastModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
@@ -1662,10 +2025,15 @@ export const AppContainer = (props: AppContainerProps) => {
       isExtensionsManagerDialogOpen,
       // MCP dialog
       isMcpDialogOpen,
+      // Hooks dialog
+      isHooksDialogOpen,
       // Feedback dialog
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Prompt suggestion
+      promptSuggestion,
+      dismissPromptSuggestion,
     ],
   );
 
@@ -1681,6 +2049,7 @@ export const AppContainer = (props: AppContainerProps) => {
       onAuthError,
       cancelAuthentication,
       handleCodingPlanSubmit,
+      handleAlibabaStandardSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -1713,6 +2082,10 @@ export const AppContainer = (props: AppContainerProps) => {
       closeExtensionsManagerDialog,
       // MCP dialog
       closeMcpDialog,
+      // Hooks dialog
+      openHooksDialog,
+      // Hooks dialog
+      closeHooksDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -1734,6 +2107,7 @@ export const AppContainer = (props: AppContainerProps) => {
       onAuthError,
       cancelAuthentication,
       handleCodingPlanSubmit,
+      handleAlibabaStandardSubmit,
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
@@ -1764,6 +2138,10 @@ export const AppContainer = (props: AppContainerProps) => {
       closeExtensionsManagerDialog,
       // MCP dialog
       closeMcpDialog,
+      // Hooks dialog
+      openHooksDialog,
+      // Hooks dialog
+      closeHooksDialog,
       // Resume session dialog
       openResumeDialog,
       closeResumeDialog,
@@ -1776,6 +2154,11 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
+  const compactModeValue = useMemo(
+    () => ({ compactMode, frozenSnapshot }),
+    [compactMode, frozenSnapshot],
+  );
+
   return (
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
@@ -1786,9 +2169,11 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <ShellFocusContext.Provider value={isFocused}>
-              <App />
-            </ShellFocusContext.Provider>
+            <CompactModeProvider value={compactModeValue}>
+              <ShellFocusContext.Provider value={isFocused}>
+                <App />
+              </ShellFocusContext.Provider>
+            </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>

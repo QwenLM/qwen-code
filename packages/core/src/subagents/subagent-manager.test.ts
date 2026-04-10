@@ -13,6 +13,7 @@ import { type SubagentConfig, SubagentError } from './types.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
+import { AuthType } from '../core/contentGenerator.js';
 
 // Mock file system operations
 vi.mock('fs/promises');
@@ -39,6 +40,24 @@ vi.mock('./validation.js', () => ({
 }));
 
 vi.mock('./subagent.js');
+
+// Mock AgentHeadless for createAgentHeadless tests
+const mockAgentHeadlessCreate = vi.hoisted(() => vi.fn());
+vi.mock('../agents/runtime/agent-headless.js', () => ({
+  AgentHeadless: { create: mockAgentHeadlessCreate },
+  ContextState: class {},
+}));
+
+// Mock createContentGenerator for model override tests
+const mockCreateContentGenerator = vi.hoisted(() => vi.fn());
+vi.mock('../core/contentGenerator.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../core/contentGenerator.js')>();
+  return {
+    ...original,
+    createContentGenerator: mockCreateContentGenerator,
+  };
+});
 
 describe('SubagentManager', () => {
   let manager: SubagentManager;
@@ -83,11 +102,11 @@ describe('SubagentManager', () => {
           tools: ['read_file', 'write_file'],
         };
       }
-      if (yamlString.includes('modelConfig:')) {
+      if (yamlString.includes('model:')) {
         return {
           name: 'test-agent',
           description: 'A test subagent',
-          modelConfig: { model: 'custom-model', temp: 0.5 },
+          model: 'custom-model',
         };
       }
       if (yamlString.includes('runConfig:')) {
@@ -130,17 +149,8 @@ describe('SubagentManager', () => {
       for (const [key, value] of Object.entries(obj)) {
         if (key === 'tools' && Array.isArray(value)) {
           yaml += `tools:\n${value.map((tool) => `  - ${tool}`).join('\n')}\n`;
-        } else if (
-          key === 'modelConfig' &&
-          typeof value === 'object' &&
-          value
-        ) {
-          yaml += `modelConfig:\n`;
-          for (const [k, v] of Object.entries(
-            value as Record<string, unknown>,
-          )) {
-            yaml += `  ${k}: ${v}\n`;
-          }
+        } else if (key === 'model') {
+          yaml += `model: ${value}\n`;
         } else if (key === 'runConfig' && typeof value === 'object' && value) {
           yaml += `runConfig:\n`;
           for (const [k, v] of Object.entries(
@@ -229,13 +239,11 @@ You are a helpful assistant.
       expect(config.tools).toEqual(['read_file', 'write_file']);
     });
 
-    it('should parse content with model config', () => {
+    it('should parse content with model selector', () => {
       const markdownWithModel = `---
 name: test-agent
 description: A test subagent
-modelConfig:
-  model: custom-model
-  temp: 0.5
+model: custom-model
 ---
 
 You are a helpful assistant.
@@ -247,7 +255,33 @@ You are a helpful assistant.
         'project',
       );
 
-      expect(config.modelConfig).toEqual({ model: 'custom-model', temp: 0.5 });
+      expect(config.model).toBe('custom-model');
+    });
+
+    it('should parse legacy modelConfig frontmatter for compatibility', () => {
+      const markdownWithLegacyModel = `---
+name: test-agent
+description: A test subagent
+modelConfig:
+  model: legacy-model
+---
+
+You are a helpful assistant.
+`;
+
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-agent',
+        description: 'A test subagent',
+        modelConfig: { model: 'legacy-model' },
+      });
+
+      const config = manager.parseSubagentContent(
+        markdownWithLegacyModel,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.model).toBe('legacy-model');
     });
 
     it('should parse content with run config', () => {
@@ -419,24 +453,22 @@ You are a helpful assistant.
       expect(serialized).toContain('- write_file');
     });
 
-    it('should serialize configuration with model config', () => {
+    it('should serialize configuration with model selector', () => {
       const configWithModel: SubagentConfig = {
         ...validConfig,
-        modelConfig: { model: 'custom-model', temp: 0.5 },
+        model: 'custom-model',
       };
 
       const serialized = manager.serializeSubagent(configWithModel);
 
-      expect(serialized).toContain('modelConfig:');
       expect(serialized).toContain('model: custom-model');
-      expect(serialized).toContain('temp: 0.5');
     });
 
     it('should not include empty optional fields', () => {
       const serialized = manager.serializeSubagent(validConfig);
 
       expect(serialized).not.toContain('tools:');
-      expect(serialized).not.toContain('modelConfig:');
+      expect(serialized).not.toContain('model:');
       expect(serialized).not.toContain('runConfig:');
     });
   });
@@ -914,13 +946,14 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(5); // agent1 (project takes precedence), agent2, agent3, general-purpose (built-in), Explore (built-in)
+      expect(subagents).toHaveLength(6); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup (built-in)
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
         'agent3',
         'general-purpose',
         'Explore',
+        'statusline-setup',
       ]);
     });
 
@@ -953,6 +986,7 @@ System prompt 3`);
         'agent3',
         'Explore',
         'general-purpose',
+        'statusline-setup',
       ]);
     });
 
@@ -964,10 +998,11 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(2); // Only built-in agents remain
+      expect(subagents).toHaveLength(3); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
+        'statusline-setup',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -979,10 +1014,11 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(2); // Only built-in agents remain
+      expect(subagents).toHaveLength(3); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
+        'statusline-setup',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -1104,26 +1140,29 @@ System prompt 3`);
         ]);
       });
 
-      it('should merge custom model and run configurations', () => {
+      it('should set modelConfig.model from model selector and merge run configurations', () => {
         const configWithCustom: SubagentConfig = {
           ...validConfig,
-          modelConfig: { model: 'custom-model', temp: 0.5 },
+          model: 'custom-model',
           runConfig: { max_time_minutes: 5 },
         };
 
         const runtimeConfig = manager.convertToRuntimeConfig(configWithCustom);
 
         expect(runtimeConfig.modelConfig.model).toBe('custom-model');
-        expect(runtimeConfig.modelConfig.temp).toBe(0.5);
         expect(runtimeConfig.runConfig.max_time_minutes).toBe(5);
-        // No default values are provided anymore
-        expect(Object.keys(runtimeConfig.modelConfig)).toEqual([
-          'model',
-          'temp',
-        ]);
-        expect(Object.keys(runtimeConfig.runConfig)).toEqual([
-          'max_time_minutes',
-        ]);
+      });
+
+      it('should accept cross-provider model selectors', () => {
+        const configWithCrossProvider: SubagentConfig = {
+          ...validConfig,
+          model: 'openai:gpt-4',
+        };
+
+        const runtimeConfig = manager.convertToRuntimeConfig(
+          configWithCrossProvider,
+        );
+        expect(runtimeConfig.modelConfig.model).toBe('gpt-4');
       });
     });
 
@@ -1144,21 +1183,104 @@ System prompt 3`);
       it('should merge nested configurations', () => {
         const configWithNested: SubagentConfig = {
           ...validConfig,
-          modelConfig: { model: 'original-model', temp: 0.7 },
+          model: 'original-model',
           runConfig: { max_time_minutes: 10, max_turns: 20 },
         };
 
         const updates = {
-          modelConfig: { temp: 0.5 },
+          model: 'updated-model',
           runConfig: { max_time_minutes: 5 },
         };
 
         const merged = manager.mergeConfigurations(configWithNested, updates);
 
-        expect(merged.modelConfig!.model).toBe('original-model'); // Should keep original
-        expect(merged.modelConfig!.temp).toBe(0.5); // Should update
+        expect(merged.model).toBe('updated-model');
         expect(merged.runConfig!.max_time_minutes).toBe(5); // Should update
         expect(merged.runConfig!.max_turns).toBe(20); // Should keep original
+      });
+    });
+
+    describe('createAgentHeadless model override', () => {
+      const agentConfig: SubagentConfig = {
+        name: 'model-test-agent',
+        description: 'Test agent',
+        systemPrompt: 'You are a test agent.',
+        level: 'session' as const,
+      };
+
+      beforeEach(() => {
+        mockAgentHeadlessCreate.mockResolvedValue({
+          execute: vi.fn(),
+          getResult: vi.fn(),
+        });
+        mockCreateContentGenerator.mockResolvedValue({
+          generateContentStream: vi.fn(),
+        });
+
+        vi.spyOn(mockConfig, 'getContentGeneratorConfig').mockReturnValue({
+          model: 'parent-model',
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'parent-key',
+        });
+        vi.spyOn(mockConfig, 'getModelsConfig').mockReturnValue({
+          getResolvedModel: vi.fn().mockReturnValue(undefined),
+        } as unknown as ReturnType<Config['getModelsConfig']>);
+      });
+
+      afterEach(() => {
+        mockAgentHeadlessCreate.mockReset();
+        mockCreateContentGenerator.mockReset();
+      });
+
+      it('should create a new ContentGenerator for bare model IDs', async () => {
+        const config = { ...agentConfig, model: 'custom-model' };
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({ model: 'custom-model' }),
+          expect.anything(),
+        );
+      });
+
+      it('should create a new ContentGenerator for cross-provider selectors', async () => {
+        const config = { ...agentConfig, model: 'anthropic:claude-sonnet' };
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'claude-sonnet',
+            authType: 'anthropic',
+          }),
+          expect.anything(),
+        );
+      });
+
+      it('should NOT create a new ContentGenerator for inherit', async () => {
+        const config = { ...agentConfig, model: 'inherit' };
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it('should NOT create a new ContentGenerator when model is omitted', async () => {
+        await manager.createAgentHeadless(agentConfig, mockConfig);
+
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it('should pass the overridden Config to AgentHeadless.create', async () => {
+        const config = { ...agentConfig, model: 'custom-model' };
+        const fakeGenerator = { generateContentStream: vi.fn() };
+        mockCreateContentGenerator.mockResolvedValue(fakeGenerator);
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        const passedConfig = mockAgentHeadlessCreate.mock.calls[0][1];
+        expect(passedConfig.getContentGenerator()).toBe(fakeGenerator);
+        expect(passedConfig.getModel()).toBe('custom-model');
       });
     });
   });

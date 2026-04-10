@@ -750,7 +750,7 @@ describe('languageCommand', () => {
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
-    it('should overwrite existing file when output language setting differs', () => {
+    it('should NOT overwrite existing file even when output language setting differs', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(
         `# Output language preference: English
@@ -760,11 +760,8 @@ describe('languageCommand', () => {
 
       initializeLlmOutputLanguage('Japanese');
 
-      expect(fs.writeFileSync).toHaveBeenCalledWith(
-        expect.stringContaining('output-language.md'),
-        expect.stringContaining('Japanese'),
-        'utf-8',
-      );
+      // Should NOT overwrite - user's existing file takes precedence
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
     it('should resolve auto setting to detected system language', () => {

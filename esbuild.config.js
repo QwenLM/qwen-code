@@ -7,7 +7,8 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { writeFileSync, rmSync } from 'node:fs';
+import { writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { wasmLoader } from 'esbuild-plugin-wasm';
 
 let esbuild;
 try {
@@ -24,6 +25,35 @@ const pkg = require(path.resolve(__dirname, 'package.json'));
 
 // Clean dist directory (cross-platform)
 rmSync(path.resolve(__dirname, 'dist'), { recursive: true, force: true });
+
+/**
+ * Resolve `import X from '*.wasm?binary'` imports to an inline Uint8Array.
+ *
+ * The `?binary` suffix is a build-time hint: at bundle time (esbuild) the WASM
+ * bytes are embedded as base64 and exported as a default Uint8Array, so no
+ * external vendor files are needed at runtime.  In source / transpiled mode
+ * the dynamic import throws and the caller falls back to reading from
+ * node_modules via `require.resolve`.
+ */
+const wasmBinaryPlugin = {
+  name: 'wasm-binary',
+  setup(build) {
+    build.onResolve({ filter: /\.wasm\?binary$/ }, (args) => {
+      const specifier = args.path.replace(/\?binary$/, '');
+      const localRequire = createRequire(
+        path.resolve(args.resolveDir || __dirname, '_dummy_.js'),
+      );
+      return {
+        path: localRequire.resolve(specifier),
+        namespace: 'wasm-binary',
+      };
+    });
+    build.onLoad({ filter: /.*/, namespace: 'wasm-binary' }, (args) => {
+      const contents = readFileSync(args.path);
+      return { contents, loader: 'binary' };
+    });
+  },
+};
 
 const external = [
   '@lydell/node-pty',
@@ -62,6 +92,12 @@ esbuild
         __dirname,
         'packages/cli/src/patches/is-in-ci.ts',
       ),
+      '@qwen-code/web-templates': path.resolve(
+        __dirname,
+        'packages/web-templates/src/index.ts',
+      ),
+      // Resolve to userland punycode instead of deprecated node:punycode built-in
+      punycode: require.resolve('punycode/'),
     },
     define: {
       'process.env.CLI_VERSION': JSON.stringify(pkg.version),
@@ -69,6 +105,7 @@ esbuild
       global: 'globalThis',
     },
     loader: { '.node': 'file' },
+    plugins: [wasmBinaryPlugin, wasmLoader({ mode: 'embedded' })],
     metafile: true,
     write: true,
     keepNames: true,

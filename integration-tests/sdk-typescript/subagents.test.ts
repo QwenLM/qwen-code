@@ -131,16 +131,13 @@ describe('Subagents (E2E)', () => {
       }
     });
 
-    it('should handle subagent with custom model config', async () => {
+    it('should handle subagent with custom model selector', async () => {
       const customModelAgent: SubagentConfig = {
         name: 'custom-model-agent',
         description: 'Agent with custom model configuration',
         systemPrompt: 'You are a helpful assistant.',
         level: 'session',
-        modelConfig: {
-          temp: 0.7,
-          top_p: 0.9,
-        },
+        model: 'inherit',
       };
 
       const q = query({

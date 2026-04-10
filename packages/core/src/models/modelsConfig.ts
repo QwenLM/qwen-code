@@ -302,6 +302,17 @@ export class ModelsConfig {
   }
 
   /**
+   * Get a fully resolved provider model config for the given authType/modelId.
+   * Returns undefined for raw runtime models that are not present in the registry.
+   */
+  getResolvedModel(
+    authType: AuthType,
+    modelId: string,
+  ): ResolvedModelConfig | undefined {
+    return this.modelRegistry.getModel(authType, modelId);
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Supports both registry models and raw model IDs.
    */

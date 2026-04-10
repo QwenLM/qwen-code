@@ -6,6 +6,7 @@
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
 
@@ -41,6 +42,7 @@ import {
   type FileEncodingType,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
+import { CronScheduler } from '../services/cronScheduler.js';
 
 // Tools
 import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
@@ -63,6 +65,9 @@ import { WebFetchTool } from '../tools/web-fetch.js';
 import { WebSearchTool } from '../tools/web-search/index.js';
 import { WriteFileTool } from '../tools/write-file.js';
 import { LspTool } from '../tools/lsp.js';
+import { CronCreateTool } from '../tools/cron-create.js';
+import { CronListTool } from '../tools/cron-list.js';
+import { CronDeleteTool } from '../tools/cron-delete.js';
 import type { LspClient } from '../lsp/types.js';
 
 // Other modules
@@ -87,7 +92,7 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
-import { HookSystem } from '../hooks/index.js';
+import { HookSystem, createHookOutput } from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
@@ -108,6 +113,7 @@ import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -227,9 +233,10 @@ export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
 
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release';
+  type: 'git' | 'local' | 'link' | 'github-release' | 'npm';
   originSource?: ExtensionOriginSource;
-  releaseTag?: string; // Only present for github-release installs.
+  releaseTag?: string; // Only present for github-release and npm installs.
+  registryUrl?: string; // Only present for npm installs.
   ref?: string;
   autoUpdate?: boolean;
   allowPreRelease?: boolean;
@@ -364,8 +371,11 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  /** Minutes of inactivity before clearing retained thinking blocks. */
+  thinkingIdleThresholdMinutes?: number;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
+  cronEnabled?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
@@ -418,12 +428,15 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
-  /** Enable hook system for lifecycle events */
-  enableHooks?: boolean;
+  /**
+   * Disable all hooks (default: false, hooks enabled).
+   * Migration note: This replaces the deprecated hooksConfig.enabled setting.
+   * Users with old settings.json containing hooksConfig.enabled should migrate
+   * to use disableAllHooks instead (note: inverted logic - enabled:true → disableAllHooks:false).
+   */
+  disableAllHooks?: boolean;
   /** Hooks configuration from settings */
   hooks?: Record<string, unknown>;
-  /** Hooks config settings (enabled, disabled list) */
-  hooksConfig?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
   /**
@@ -519,12 +532,14 @@ export class Config {
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private approvalMode: ApprovalMode;
+  private prePlanMode?: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
+  private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
     respectQwenIgnore: boolean;
@@ -546,12 +561,14 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly thinkingIdleThresholdMs: number;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
   private readonly overrideExtensions?: string[];
 
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
+  private readonly cronEnabled: boolean = false;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
@@ -593,9 +610,8 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
-  private readonly enableHooks: boolean;
+  private readonly disableAllHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
-  private readonly hooksConfig?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
 
@@ -672,9 +688,12 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.thinkingIdleThresholdMs =
+      (params.thinkingIdleThresholdMinutes ?? 5) * 60 * 1000;
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
+    this.cronEnabled = params.cronEnabled ?? false;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
@@ -747,8 +766,9 @@ export class Config {
       initializeTelemetry(this);
     }
 
-    if (this.getProxy()) {
-      setGlobalDispatcher(new ProxyAgent(this.getProxy() as string));
+    const proxyUrl = this.getProxy();
+    if (proxyUrl) {
+      setGlobalDispatcher(new ProxyAgent(proxyUrl));
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -759,9 +779,8 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
-    this.enableHooks = params.enableHooks ?? false;
+    this.disableAllHooks = params.disableAllHooks ?? false;
     this.hooks = params.hooks;
-    this.hooksConfig = params.hooksConfig;
   }
 
   /**
@@ -786,7 +805,7 @@ export class Config {
     this.debugLogger.debug('Extension manager initialized');
 
     // Initialize hook system if enabled
-    if (this.enableHooks) {
+    if (!this.disableAllHooks) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
@@ -823,6 +842,7 @@ export class Config {
 
             // Execute the appropriate hook based on eventName
             let result;
+            let stopHookCount: number | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -832,13 +852,18 @@ export class Config {
                   signal,
                 );
                 break;
-              case 'Stop':
-                result = await hookSystem.fireStopEvent(
+              case 'Stop': {
+                const stopResult = await hookSystem.fireStopEvent(
                   (input['stop_hook_active'] as boolean) || false,
                   (input['last_assistant_message'] as string) || '',
                   signal,
                 );
+                result = stopResult.finalOutput
+                  ? createHookOutput('Stop', stopResult.finalOutput)
+                  : undefined;
+                stopHookCount = stopResult.allOutputs.length;
                 break;
+              }
               case 'PreToolUse': {
                 result = await hookSystem.firePreToolUseEvent(
                   (input['tool_name'] as string) || '',
@@ -926,6 +951,8 @@ export class Config {
               correlationId: request.correlationId,
               success: true,
               output: result,
+              // Include stop hook count for Stop events
+              stopHookCount,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
@@ -1072,7 +1099,7 @@ export class Config {
 
     // Fire auth_success notification hook (supports both interactive & non-interactive)
     const messageBus = this.getMessageBus();
-    const hooksEnabled = this.getEnableHooks();
+    const hooksEnabled = !this.getDisableAllHooks();
     if (hooksEnabled && messageBus) {
       fireNotificationHook(
         messageBus,
@@ -1307,6 +1334,10 @@ export class Config {
 
   getMaxSessionTurns(): number {
     return this.maxSessionTurns;
+  }
+
+  getThinkingIdleThresholdMs(): number {
+    return this.thinkingIdleThresholdMs;
   }
 
   getSessionTokenLimit(): number {
@@ -1614,6 +1645,14 @@ export class Config {
     return this.approvalMode;
   }
 
+  /**
+   * Returns the approval mode that was active before entering plan mode.
+   * Falls back to DEFAULT if no pre-plan mode was recorded.
+   */
+  getPrePlanMode(): ApprovalMode {
+    return this.prePlanMode ?? ApprovalMode.DEFAULT;
+  }
+
   setApprovalMode(mode: ApprovalMode): void {
     if (
       !this.isTrustedFolder() &&
@@ -1624,7 +1663,53 @@ export class Config {
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
+    // Track the mode before entering plan mode so it can be restored later
+    if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
+      this.prePlanMode = this.approvalMode;
+    } else if (
+      mode !== ApprovalMode.PLAN &&
+      this.approvalMode === ApprovalMode.PLAN
+    ) {
+      this.prePlanMode = undefined;
+    }
     this.approvalMode = mode;
+  }
+
+  /**
+   * Returns the file path for this session's plan file.
+   */
+  getPlanFilePath(): string {
+    return Storage.getPlanFilePath(this.sessionId);
+  }
+
+  /**
+   * Saves a plan to disk for the current session.
+   */
+  savePlan(plan: string): void {
+    const filePath = this.getPlanFilePath();
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, plan, 'utf-8');
+  }
+
+  /**
+   * Loads the plan for the current session, or returns undefined if none exists.
+   */
+  loadPlan(): string | undefined {
+    const filePath = this.getPlanFilePath();
+    try {
+      return fs.readFileSync(filePath, 'utf-8');
+    } catch (error: unknown) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   getInputFormat(): 'text' | 'stream-json' {
@@ -1675,6 +1760,19 @@ export class Config {
     return this.geminiClient;
   }
 
+  getCronScheduler(): CronScheduler {
+    if (!this.cronScheduler) {
+      this.cronScheduler = new CronScheduler();
+    }
+    return this.cronScheduler;
+  }
+
+  isCronEnabled(): boolean {
+    // Cron is experimental and opt-in: enabled via settings or env var
+    if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
+    return this.cronEnabled;
+  }
+
   getEnableRecursiveFileSearch(): boolean {
     return this.fileFiltering.enableRecursiveFileSearch;
   }
@@ -1717,7 +1815,7 @@ export class Config {
   }
 
   getProxy(): string | undefined {
-    return this.proxy;
+    return normalizeProxyUrl(this.proxy);
   }
 
   getWorkingDir(): string {
@@ -1770,10 +1868,19 @@ export class Config {
   }
 
   /**
-   * Check if hooks are enabled.
+   * Fast-path check: returns true only when hooks are enabled AND there are
+   * registered hooks for the given event name.  Callers can use this to skip
+   * expensive MessageBus round-trips when no hooks are configured.
    */
-  getEnableHooks(): boolean {
-    return this.enableHooks;
+  hasHooksForEvent(eventName: string): boolean {
+    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
+  }
+
+  /**
+   * Check if all hooks are disabled.
+   */
+  getDisableAllHooks(): boolean {
+    return this.disableAllHooks;
   }
 
   /**
@@ -1790,17 +1897,6 @@ export class Config {
    */
   setMessageBus(messageBus: MessageBus): void {
     this.messageBus = messageBus;
-  }
-
-  /**
-   * Get the list of disabled hook names.
-   * This is used by the HookRegistry to filter out disabled hooks.
-   */
-  getDisabledHooks(): string[] {
-    const hooksConfig = this.hooksConfig;
-    if (!hooksConfig) return [];
-    const disabled = hooksConfig['disabled'];
-    return Array.isArray(disabled) ? (disabled as string[]) : [];
   }
 
   /**
@@ -2111,7 +2207,7 @@ export class Config {
 
     // Helper to create & register core tools that are enabled
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const registerCoreTool = (ToolClass: any, ...args: unknown[]) => {
+    const registerCoreTool = async (ToolClass: any, ...args: unknown[]) => {
       const toolName = ToolClass?.Name as ToolName | undefined;
       const className = ToolClass?.name ?? 'UnknownTool';
 
@@ -2127,7 +2223,7 @@ export class Config {
       // PermissionManager handles both the coreTools allowlist (registry-level)
       // and deny rules (runtime-level) in a single check.
       const pmEnabled = this.permissionManager
-        ? this.permissionManager.isToolEnabled(toolName)
+        ? await this.permissionManager.isToolEnabled(toolName)
         : true; // Should never reach here after initialize(), but safe default.
 
       if (pmEnabled) {
@@ -2143,10 +2239,10 @@ export class Config {
       }
     };
 
-    registerCoreTool(AgentTool, this);
-    registerCoreTool(SkillTool, this);
-    registerCoreTool(LSTool, this);
-    registerCoreTool(ReadFileTool, this);
+    await registerCoreTool(AgentTool, this);
+    await registerCoreTool(SkillTool, this);
+    await registerCoreTool(LSTool, this);
+    await registerCoreTool(ReadFileTool, this);
 
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
@@ -2157,7 +2253,7 @@ export class Config {
         errorString = getErrorMessage(error);
       }
       if (useRipgrep) {
-        registerCoreTool(RipGrepTool, this);
+        await registerCoreTool(RipGrepTool, this);
       } else {
         // Log for telemetry
         logRipgrepFallback(
@@ -2168,30 +2264,37 @@ export class Config {
             errorString || 'ripgrep is not available',
           ),
         );
-        registerCoreTool(GrepTool, this);
+        await registerCoreTool(GrepTool, this);
       }
     } else {
-      registerCoreTool(GrepTool, this);
+      await registerCoreTool(GrepTool, this);
     }
 
-    registerCoreTool(GlobTool, this);
-    registerCoreTool(EditTool, this);
-    registerCoreTool(WriteFileTool, this);
-    registerCoreTool(ShellTool, this);
-    registerCoreTool(MemoryTool);
-    registerCoreTool(TodoWriteTool, this);
-    registerCoreTool(AskUserQuestionTool, this);
-    !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
-    registerCoreTool(WebFetchTool, this);
+    await registerCoreTool(GlobTool, this);
+    await registerCoreTool(EditTool, this);
+    await registerCoreTool(WriteFileTool, this);
+    await registerCoreTool(ShellTool, this);
+    await registerCoreTool(MemoryTool);
+    await registerCoreTool(TodoWriteTool, this);
+    await registerCoreTool(AskUserQuestionTool, this);
+    !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
+    await registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured
     // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
     // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
-      registerCoreTool(WebSearchTool, this);
+      await registerCoreTool(WebSearchTool, this);
     }
     if (this.isLspEnabled() && this.getLspClient()) {
       // Register the unified LSP tool
-      registerCoreTool(LspTool, this);
+      await registerCoreTool(LspTool, this);
+    }
+
+    // Register cron tools unless disabled
+    if (this.isCronEnabled()) {
+      await registerCoreTool(CronCreateTool, this);
+      await registerCoreTool(CronListTool, this);
+      await registerCoreTool(CronDeleteTool, this);
     }
 
     if (!options?.skipDiscovery) {

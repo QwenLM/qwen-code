@@ -1,0 +1,26 @@
+{
+  "name": "@qwen-code/channel-base",
+  "version": "0.14.2",
+  "description": "Base channel infrastructure for Qwen Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.14.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}

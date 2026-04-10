@@ -190,6 +190,8 @@ describe('AppContainer State Management', () => {
       isAuthDialogOpen: false,
       isAuthenticating: false,
       handleAuthSelect: vi.fn(),
+      handleCodingPlanSubmit: vi.fn(),
+      handleAlibabaStandardSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
     });
@@ -241,6 +243,7 @@ describe('AppContainer State Management', () => {
       addMessage: vi.fn(),
       clearQueue: vi.fn(),
       getQueuedMessagesText: vi.fn().mockReturnValue(''),
+      drainQueue: vi.fn().mockReturnValue([]),
     });
     mockedUseAutoAcceptIndicator.mockReturnValue(false);
     mockedUseGitBranchName.mockReturnValue('main');
@@ -453,6 +456,7 @@ describe('AppContainer State Management', () => {
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        drainQueue: vi.fn().mockReturnValue([]),
       });
 
       render(

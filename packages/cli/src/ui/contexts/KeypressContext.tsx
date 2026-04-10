@@ -44,6 +44,11 @@ const ESC = '\u001B';
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
 export const PASTE_MODE_SUFFIX = `${ESC}[201~`;
 export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100ms if no more input
+// Kitty sequence timeout: 200ms balances between:
+// - Too short: prematurely clear valid sequences during slow input
+// - Too long: delayed recovery from interrupted sequences (e.g., IME interruptions)
+// Based on empirical testing with IME input patterns in VS Code integrated terminal.
+export const KITTY_SEQUENCE_TIMEOUT_MS = 200;
 export const SINGLE_QUOTE = "'";
 export const DOUBLE_QUOTE = '"';
 
@@ -132,9 +137,6 @@ export function KeypressProvider({
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
-  const isDraggingRef = useRef(false);
-  const dragBufferRef = useRef('');
-  const draggingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const subscribe = useCallback(
     (handler: KeypressHandler) => {
@@ -151,13 +153,6 @@ export function KeypressProvider({
   );
 
   useEffect(() => {
-    const clearDraggingTimer = () => {
-      if (draggingTimerRef.current) {
-        clearTimeout(draggingTimerRef.current);
-        draggingTimerRef.current = null;
-      }
-    };
-
     const wasRaw = stdin.isRaw;
     if (wasRaw === false) {
       setRawMode(true);
@@ -172,11 +167,65 @@ export function KeypressProvider({
 
     let isPaste = false;
     let pasteBuffer = Buffer.alloc(0);
-    let kittySequenceBuffer = '';
+    const kittySequenceBufferRef = { current: '' };
+    let kittySequenceTimeout: NodeJS.Timeout | null = null;
     let backslashTimeout: NodeJS.Timeout | null = null;
     let waitingForEnterAfterBackslash = false;
     let rawDataBuffer = Buffer.alloc(0);
     let rawFlushTimeout: NodeJS.Timeout | null = null;
+
+    const updateKittyBuffer = (value: string) => {
+      kittySequenceBufferRef.current = value;
+    };
+
+    const clearKittyTimeout = () => {
+      if (kittySequenceTimeout) {
+        clearTimeout(kittySequenceTimeout);
+        kittySequenceTimeout = null;
+      }
+    };
+
+    const startKittyTimeout = () => {
+      clearKittyTimeout();
+      kittySequenceTimeout = setTimeout(() => {
+        if (kittySequenceBufferRef.current) {
+          // Before discarding, try to salvage any parseable sequences
+          // that may have been missed (e.g., due to chunked input).
+          while (kittySequenceBufferRef.current) {
+            const parsed = parseKittyPrefix(kittySequenceBufferRef.current);
+            if (parsed) {
+              kittySequenceBufferRef.current =
+                kittySequenceBufferRef.current.slice(parsed.length);
+              broadcast(parsed.key);
+              continue;
+            }
+            const plain = parsePlainTextPrefix(kittySequenceBufferRef.current);
+            if (plain) {
+              kittySequenceBufferRef.current =
+                kittySequenceBufferRef.current.slice(plain.length);
+              broadcast(plain.key);
+              continue;
+            }
+            break;
+          }
+          // Clear any remaining unparseable content
+          if (kittySequenceBufferRef.current) {
+            if (debugKeystrokeLogging) {
+              debugLogger.debug(
+                '[DEBUG] Kitty buffer timeout, clearing:',
+                kittySequenceBufferRef.current,
+              );
+            }
+            kittySequenceBufferRef.current = '';
+          }
+        }
+      }, KITTY_SEQUENCE_TIMEOUT_MS);
+    };
+
+    const clearKittyBufferAndTimeout = () => {
+      clearKittyTimeout();
+      kittySequenceBufferRef.current = '';
+    };
 
     const createPrintableKey = (char: string): Key => {
       const printableName =
@@ -304,14 +353,19 @@ export function KeypressProvider({
         };
       }
 
-      // 3) CSI-u form: ESC [ <code> ; <mods> (u|~)
-      // 3) CSI-u and tilde-coded functional keys: ESC [ <code> ; <mods> (u|~)
+      // 3) CSI-u form: ESC [ <code>[:<shifted>][:<base>] ; <mods>[:<event>] [; <text>] (u|~)
+      // 3) CSI-u and tilde-coded functional keys with optional kitty extensions:
+      //    Full kitty format: ESC [ code:shifted:base ; mods:event ; text u
       //    'u' terminator: Kitty CSI-u; '~' terminator: tilde-coded function keys.
-      const csiUPrefix = new RegExp(`^${ESC}\\[(\\d+)(;(\\d+))?([u~])`);
+      //    The colon-separated fields (shifted key, base key, event type, text)
+      //    are optional extensions that some terminals send.
+      const csiUPrefix = new RegExp(
+        `^${ESC}\\[(\\d+)(?::\\d+)*(?:;(\\d+)(?::\\d+)*)?(?:;\\d+)?([u~])`,
+      );
       m = buffer.match(csiUPrefix);
       if (m) {
         const keyCode = parseInt(m[1], 10);
-        let modifiers = m[3] ? parseInt(m[3], 10) : KITTY_MODIFIER_BASE;
+        let modifiers = m[2] ? parseInt(m[2], 10) : KITTY_MODIFIER_BASE;
         if (modifiers >= KITTY_MODIFIER_EVENT_TYPES_OFFSET) {
           modifiers -= KITTY_MODIFIER_EVENT_TYPES_OFFSET;
         }
@@ -320,7 +374,7 @@ export function KeypressProvider({
           (modifierBits & MODIFIER_SHIFT_BIT) === MODIFIER_SHIFT_BIT;
         const alt = (modifierBits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
         const ctrl = (modifierBits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
-        const terminator = m[4];
+        const terminator = m[3];
 
         // Tilde-coded functional keys (Delete, Insert, PageUp/Down, Home/End)
         if (terminator === '~') {
@@ -540,7 +594,16 @@ export function KeypressProvider({
       }
     };
 
+    // Matches terminal query responses (DA1, DA2, Kitty protocol query)
+    // that may arrive late from startup detection in kittyProtocolDetector.
+    // These are never valid user input.
+    // eslint-disable-next-line no-control-regex
+    const TERMINAL_RESPONSE_RE = /^\x1b\[[?>][\d;]*[uc]$/;
+
     const handleKeypress = async (_: unknown, key: Key) => {
+      if (TERMINAL_RESPONSE_RE.test(key.sequence)) {
+        return;
+      }
       if (key.sequence === FOCUS_IN || key.sequence === FOCUS_OUT) {
         return;
       }
@@ -581,26 +644,9 @@ export function KeypressProvider({
         return;
       }
 
-      if (
-        key.sequence === SINGLE_QUOTE ||
-        key.sequence === DOUBLE_QUOTE ||
-        isDraggingRef.current
-      ) {
-        isDraggingRef.current = true;
-        dragBufferRef.current += key.sequence;
-
-        clearDraggingTimer();
-        draggingTimerRef.current = setTimeout(() => {
-          isDraggingRef.current = false;
-          const seq = dragBufferRef.current;
-          dragBufferRef.current = '';
-          if (seq) {
-            broadcast({ ...key, name: '', paste: true, sequence: seq });
-          }
-        }, DRAG_COMPLETION_TIMEOUT_MS);
-
-        return;
-      }
+      // Note: We no longer treat quotes specially for drag-and-drop detection.
+      // Modern terminals use bracketed paste mode (PASTE_MODE_PREFIX) for file drops,
+      // which is handled above. This prevents input lag on quote keystrokes.
 
       if (key.name === 'return' && waitingForEnterAfterBackslash) {
         if (backslashTimeout) {
@@ -652,13 +698,13 @@ export function KeypressProvider({
         (key.ctrl && key.name === 'c') ||
         key.sequence === `${ESC}${KITTY_CTRL_C}`
       ) {
-        if (kittySequenceBuffer && debugKeystrokeLogging) {
+        if (kittySequenceBufferRef.current && debugKeystrokeLogging) {
           debugLogger.debug(
             '[DEBUG] Kitty buffer cleared on Ctrl+C:',
-            kittySequenceBuffer,
+            kittySequenceBufferRef.current,
           );
         }
-        kittySequenceBuffer = '';
+        clearKittyBufferAndTimeout();
         if (key.sequence === `${ESC}${KITTY_CTRL_C}`) {
           broadcast({
             name: 'c',
@@ -677,19 +723,20 @@ export function KeypressProvider({
 
       if (kittyProtocolEnabled) {
         if (
-          kittySequenceBuffer ||
+          kittySequenceBufferRef.current ||
           (key.sequence.startsWith(`${ESC}[`) &&
             !key.sequence.startsWith(PASTE_MODE_PREFIX) &&
             !key.sequence.startsWith(PASTE_MODE_SUFFIX) &&
             !key.sequence.startsWith(FOCUS_IN) &&
             !key.sequence.startsWith(FOCUS_OUT))
         ) {
-          kittySequenceBuffer += key.sequence;
+          updateKittyBuffer(kittySequenceBufferRef.current + key.sequence);
+          startKittyTimeout();
 
           if (debugKeystrokeLogging) {
             debugLogger.debug(
               '[DEBUG] Kitty buffer accumulating:',
-              kittySequenceBuffer,
+              kittySequenceBufferRef.current,
             );
           }
 
@@ -698,15 +745,15 @@ export function KeypressProvider({
           // prefix is incomplete or invalid, skip to the next CSI introducer
           // (ESC[) so that a following valid sequence can still be parsed.
           let bufferedInputHandled = false;
-          while (kittySequenceBuffer) {
-            const parsed = parseKittyPrefix(kittySequenceBuffer);
+          while (kittySequenceBufferRef.current) {
+            const parsed = parseKittyPrefix(kittySequenceBufferRef.current);
             if (parsed) {
               if (debugKeystrokeLogging) {
-                const parsedSequence = kittySequenceBuffer.slice(
+                const parsedSequence = kittySequenceBufferRef.current.slice(
                   0,
                   parsed.length,
                 );
-                if (kittySequenceBuffer.length > parsed.length) {
+                if (kittySequenceBufferRef.current.length > parsed.length) {
                   debugLogger.debug(
                     '[DEBUG] Kitty sequence parsed successfully (prefix):',
                     parsedSequence,
@@ -719,29 +766,45 @@ export function KeypressProvider({
                 }
               }
               // Consume the parsed prefix and broadcast it.
-              kittySequenceBuffer = kittySequenceBuffer.slice(parsed.length);
+              updateKittyBuffer(
+                kittySequenceBufferRef.current.slice(parsed.length),
+              );
+              if (!kittySequenceBufferRef.current) {
+                clearKittyTimeout();
+              }
               broadcast(parsed.key);
               bufferedInputHandled = true;
               continue;
             }
 
-            const completeUnsupportedCsiLength =
-              getCompleteCsiSequenceLength(kittySequenceBuffer);
+            const completeUnsupportedCsiLength = getCompleteCsiSequenceLength(
+              kittySequenceBufferRef.current,
+            );
             if (completeUnsupportedCsiLength) {
               if (debugKeystrokeLogging) {
                 debugLogger.debug(
                   '[DEBUG] Dropping unsupported complete CSI sequence:',
-                  kittySequenceBuffer.slice(0, completeUnsupportedCsiLength),
+                  kittySequenceBufferRef.current.slice(
+                    0,
+                    completeUnsupportedCsiLength,
+                  ),
                 );
               }
-              kittySequenceBuffer = kittySequenceBuffer.slice(
-                completeUnsupportedCsiLength,
+              updateKittyBuffer(
+                kittySequenceBufferRef.current.slice(
+                  completeUnsupportedCsiLength,
+                ),
               );
+              if (!kittySequenceBufferRef.current) {
+                clearKittyTimeout();
+              }
               bufferedInputHandled = true;
               continue;
             }
 
-            const plainTextPrefix = parsePlainTextPrefix(kittySequenceBuffer);
+            const plainTextPrefix = parsePlainTextPrefix(
+              kittySequenceBufferRef.current,
+            );
             if (plainTextPrefix) {
               if (debugKeystrokeLogging) {
                 debugLogger.debug(
@@ -749,24 +812,35 @@ export function KeypressProvider({
                   plainTextPrefix.key.sequence,
                 );
               }
-              kittySequenceBuffer = kittySequenceBuffer.slice(
-                plainTextPrefix.length,
+              updateKittyBuffer(
+                kittySequenceBufferRef.current.slice(plainTextPrefix.length),
               );
+              if (!kittySequenceBufferRef.current) {
+                clearKittyTimeout();
+              }
               broadcast(plainTextPrefix.key);
               bufferedInputHandled = true;
               continue;
             }
 
             // Look for the next potential CSI start beyond index 0
-            const nextStart = kittySequenceBuffer.indexOf(`${ESC}[`, 1);
+            const nextStart = kittySequenceBufferRef.current.indexOf(
+              `${ESC}[`,
+              1,
+            );
             if (nextStart > 0) {
               if (debugKeystrokeLogging) {
                 debugLogger.debug(
                   '[DEBUG] Skipping incomplete/invalid CSI prefix:',
-                  kittySequenceBuffer.slice(0, nextStart),
+                  kittySequenceBufferRef.current.slice(0, nextStart),
                 );
               }
-              kittySequenceBuffer = kittySequenceBuffer.slice(nextStart);
+              updateKittyBuffer(
+                kittySequenceBufferRef.current.slice(nextStart),
+              );
+              if (!kittySequenceBufferRef.current) {
+                clearKittyTimeout();
+              }
               bufferedInputHandled = true;
               continue;
             }
@@ -775,27 +849,29 @@ export function KeypressProvider({
           if (bufferedInputHandled) return;
 
           if (config?.getDebugMode() || debugKeystrokeLogging) {
-            const codes = Array.from(kittySequenceBuffer).map((ch) =>
-              ch.charCodeAt(0),
+            const codes = Array.from(kittySequenceBufferRef.current).map(
+              (ch: string) => ch.charCodeAt(0),
             );
             debugLogger.warn('Kitty sequence buffer has char codes:', codes);
           }
 
-          if (kittySequenceBuffer.length > MAX_KITTY_SEQUENCE_LENGTH) {
+          if (
+            kittySequenceBufferRef.current.length > MAX_KITTY_SEQUENCE_LENGTH
+          ) {
             if (debugKeystrokeLogging) {
               debugLogger.debug(
                 '[DEBUG] Kitty buffer overflow, clearing:',
-                kittySequenceBuffer,
+                kittySequenceBufferRef.current,
               );
             }
             if (config) {
               const event = new KittySequenceOverflowEvent(
-                kittySequenceBuffer.length,
-                kittySequenceBuffer,
+                kittySequenceBufferRef.current.length,
+                kittySequenceBufferRef.current,
               );
               logKittySequenceOverflow(config, event);
             }
-            kittySequenceBuffer = '';
+            clearKittyBufferAndTimeout();
           } else {
             return;
           }
@@ -956,6 +1032,8 @@ export function KeypressProvider({
         backslashTimeout = null;
       }
 
+      clearKittyBufferAndTimeout();
+
       if (rawFlushTimeout) {
         clearTimeout(rawFlushTimeout);
         rawFlushTimeout = null;
@@ -972,23 +1050,6 @@ export function KeypressProvider({
           sequence: pasteBuffer.toString(),
         });
         pasteBuffer = Buffer.alloc(0);
-      }
-
-      if (draggingTimerRef.current) {
-        clearTimeout(draggingTimerRef.current);
-        draggingTimerRef.current = null;
-      }
-      if (isDraggingRef.current && dragBufferRef.current) {
-        broadcast({
-          name: '',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: true,
-          sequence: dragBufferRef.current,
-        });
-        isDraggingRef.current = false;
-        dragBufferRef.current = '';
       }
     };
   }, [

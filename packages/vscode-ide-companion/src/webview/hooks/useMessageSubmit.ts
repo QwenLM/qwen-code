@@ -72,12 +72,15 @@ export const useMessageSubmit = ({
   messageHandling,
 }: UseMessageSubmitProps) => {
   const handleSubmit = useCallback(
-    (e: React.FormEvent) => {
+    (e: React.FormEvent | React.KeyboardEvent, explicitText?: string) => {
       e.preventDefault();
+
+      // Use explicit text if provided (e.g., from prompt suggestion Enter accept)
+      const textToSend = explicitText ?? inputText;
 
       if (
         !shouldSendMessage({
-          inputText,
+          inputText: textToSend,
           attachedImages,
           isStreaming,
           isWaitingForResponse,
@@ -87,7 +90,7 @@ export const useMessageSubmit = ({
       }
 
       // Handle /login command - show inline loading while extension authenticates
-      if (inputText.trim() === '/login') {
+      if (textToSend.trim() === '/login') {
         setInputText('');
         if (inputFieldRef.current) {
           // Use a zero-width space to maintain the height of the contentEditable element
@@ -121,7 +124,7 @@ export const useMessageSubmit = ({
       const fileRefPattern = /@([^\s]+)/g;
       let match;
 
-      while ((match = fileRefPattern.exec(inputText)) !== null) {
+      while ((match = fileRefPattern.exec(textToSend)) !== null) {
         const fileName = match[1];
         const filePath = fileContext.getFileReference(fileName);
 
@@ -171,7 +174,7 @@ export const useMessageSubmit = ({
       vscode.postMessage({
         type: 'sendMessage',
         data: {
-          text: inputText,
+          text: textToSend,
           context: context.length > 0 ? context : undefined,
           fileContext: fileContextForMessage,
           attachments: attachedImages.length > 0 ? attachedImages : undefined,

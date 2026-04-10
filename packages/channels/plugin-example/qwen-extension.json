@@ -1,0 +1,10 @@
+{
+  "name": "qwen-channel-plugin-example",
+  "version": "0.1.0",
+  "channels": {
+    "plugin-example": {
+      "entry": "dist/index.js",
+      "displayName": "Plugin Example Channel"
+    }
+  }
+}

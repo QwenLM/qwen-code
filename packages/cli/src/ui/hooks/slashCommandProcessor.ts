@@ -74,7 +74,7 @@ interface SlashCommandProcessorActions {
   openThemeDialog: () => void;
   openEditorDialog: () => void;
   openSettingsDialog: () => void;
-  openModelDialog: () => void;
+  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
@@ -87,6 +87,7 @@ interface SlashCommandProcessorActions {
   openAgentsManagerDialog: () => void;
   openExtensionsManagerDialog: () => void;
   openMcpDialog: () => void;
+  openHooksDialog: () => void;
 }
 
 /**
@@ -332,17 +333,24 @@ export const useSlashCommandProcessor = (
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
-      const loaders = [
-        new McpPromptLoader(config),
-        new BuiltinCommandLoader(config),
-        new BundledSkillLoader(config),
-        new FileCommandLoader(config),
-      ];
-      const commandService = await CommandService.create(
-        loaders,
-        controller.signal,
-      );
-      setCommands(commandService.getCommands());
+      try {
+        const loaders = [
+          new McpPromptLoader(config),
+          new BuiltinCommandLoader(config),
+          new BundledSkillLoader(config),
+          new FileCommandLoader(config),
+        ];
+        const commandService = await CommandService.create(
+          loaders,
+          controller.signal,
+        );
+        // Avoid overwriting newer results from a subsequent effect run
+        if (!controller.signal.aborted) {
+          setCommands(commandService.getCommands());
+        }
+      } catch (error) {
+        debugLogger.error('Failed to load slash commands:', error);
+      }
     };
 
     load();
@@ -508,6 +516,9 @@ export const useSlashCommandProcessor = (
                     case 'model':
                       actions.openModelDialog();
                       return { type: 'handled' };
+                    case 'fast-model':
+                      actions.openModelDialog({ fastModelMode: true });
+                      return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();
                       return { type: 'handled' };
@@ -522,6 +533,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'mcp':
                       actions.openMcpDialog();
+                      return { type: 'handled' };
+                    case 'hooks':
+                      actions.openHooksDialog();
                       return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();

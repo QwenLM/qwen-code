@@ -133,4 +133,53 @@ describe('QwenConnectionHandler', () => {
       expect(connectArgs[2]).not.toContain('--proxy');
     });
   });
+
+  describe('connect retry logic', () => {
+    beforeEach(() => {
+      mockGetConfiguration.mockReturnValue({
+        get: () => undefined,
+      });
+      // Speed up tests by mocking setTimeout-based delays
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+    });
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('succeeds on first attempt without retry', async () => {
+      await handler.connect(mockConnection, '/workspace', '/path/to/cli.js');
+
+      expect(mockConnection.connect).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries connect on spawn failure and succeeds on second attempt', async () => {
+      (mockConnection.connect as ReturnType<typeof vi.fn>)
+        .mockRejectedValueOnce(
+          new Error(
+            'Qwen ACP process failed to start (exit code: null, signal: SIGTERM)',
+          ),
+        )
+        .mockResolvedValueOnce(undefined);
+
+      await handler.connect(mockConnection, '/workspace', '/path/to/cli.js');
+
+      expect(mockConnection.connect).toHaveBeenCalledTimes(2);
+    });
+
+    it('throws after exhausting all connect retry attempts (3 attempts)', async () => {
+      const spawnError = new Error(
+        'Qwen ACP process failed to start (exit code: null, signal: SIGTERM)',
+      );
+      (mockConnection.connect as ReturnType<typeof vi.fn>).mockRejectedValue(
+        spawnError,
+      );
+
+      await expect(
+        handler.connect(mockConnection, '/workspace', '/path/to/cli.js'),
+      ).rejects.toThrow(spawnError);
+
+      expect(mockConnection.connect).toHaveBeenCalledTimes(3);
+    });
+  });
 });

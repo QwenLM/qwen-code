@@ -436,6 +436,146 @@ describe('RipGrepTool', () => {
     });
   });
 
+  describe('multi-directory workspace', () => {
+    it('should search across all workspace directories when no path is specified', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-second-'),
+      );
+      await fs.writeFile(
+        path.join(secondDir, 'extra.txt'),
+        'hello from second dir',
+      );
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      const multiDirGrepTool = new RipGrepTool(multiDirConfig);
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt:1:hello world${EOL}${secondDir}/extra.txt:1:hello from second dir${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'hello' };
+      const invocation = multiDirGrepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('across 2 workspace directories');
+      expect(result.llmContent).toContain('Found 2 matches');
+
+      // Verify both paths were passed to runRipgrep
+      expect(runRipgrep).toHaveBeenCalledWith(
+        expect.arrayContaining([tempRootDir, secondDir]),
+        expect.anything(),
+      );
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+
+    it('should search only specified path when path is given (ignoring multi-dir)', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-second-'),
+      );
+      await fs.writeFile(path.join(secondDir, 'other.txt'), 'other content');
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      const multiDirGrepTool = new RipGrepTool(multiDirConfig);
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileC.txt:1:another world in sub dir${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'world', path: 'sub' };
+      const invocation = multiDirGrepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('in path "sub"');
+      expect(result.llmContent).not.toContain('across');
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+
+    it('should load .qwenignore from each workspace directory', async () => {
+      const secondDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'grep-tool-second-'),
+      );
+      await fs.writeFile(path.join(secondDir, '.qwenignore'), 'ignored.txt\n');
+      await fs.writeFile(
+        path.join(tempRootDir, '.qwenignore'),
+        'other-ignored.txt\n',
+      );
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [secondDir]),
+      } as unknown as Config;
+
+      const multiDirGrepTool = new RipGrepTool(multiDirConfig);
+
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: '',
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'test' };
+      const invocation = multiDirGrepTool.build(params);
+      await invocation.execute(abortSignal);
+
+      // Verify both .qwenignore files were passed
+      const rgArgs = (runRipgrep as Mock).mock.calls[0][0] as string[];
+      const ignoreFileArgs = rgArgs.filter(
+        (a: string, i: number) => i > 0 && rgArgs[i - 1] === '--ignore-file',
+      );
+      expect(ignoreFileArgs).toContain(path.join(tempRootDir, '.qwenignore'));
+      expect(ignoreFileArgs).toContain(path.join(secondDir, '.qwenignore'));
+
+      await fs.rm(secondDir, { recursive: true, force: true });
+    });
+
+    it('should deduplicate matches from overlapping workspace directories', async () => {
+      // This tests the fix: when ripgrep receives overlapping search paths
+      // (e.g. /parent and /parent/sub), it may report the same file twice.
+      // The deduplication layer must remove duplicates.
+      const subDir = path.join(tempRootDir, 'sub');
+
+      const multiDirConfig = {
+        ...mockConfig,
+        getWorkspaceContext: () =>
+          createMockWorkspaceContext(tempRootDir, [subDir]),
+      } as unknown as Config;
+
+      const multiDirGrepTool = new RipGrepTool(multiDirConfig);
+
+      // Simulate ripgrep returning the same file:line twice (once from each search root)
+      const dupLine = `${path.join(subDir, 'fileC.txt')}:1:hello world`;
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `${dupLine}${EOL}${dupLine}${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const params: RipGrepToolParams = { pattern: 'hello' };
+      const invocation = multiDirGrepTool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      // Despite two identical lines in the raw output, only 1 match should be reported.
+      expect(result.llmContent).toContain('Found 1 match');
+    });
+  });
+
   describe('abort signal handling', () => {
     it('should handle AbortSignal during search', async () => {
       const controller = new AbortController();
@@ -450,11 +590,12 @@ describe('RipGrepTool', () => {
   });
 
   describe('error handling and edge cases', () => {
-    it('should handle workspace boundary violations', () => {
+    it('should handle workspace boundary violations', async () => {
       const params: RipGrepToolParams = { pattern: 'test', path: '../outside' };
-      expect(() => grepTool.build(params)).toThrow(
-        /Path is not within workspace/,
-      );
+      // External paths are allowed; permission is deferred to getDefaultPermission()
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
 
     it('should handle empty directories gracefully', async () => {
@@ -722,6 +863,36 @@ describe('RipGrepTool', () => {
       const params: RipGrepToolParams = { pattern: 'testPattern', path: '.' };
       const invocation = grepTool.build(params);
       expect(invocation.getDescription()).toBe("'testPattern' in path '.'");
+    });
+  });
+
+  describe('getDefaultPermission', () => {
+    it('should return allow when no path is specified', async () => {
+      const params: RipGrepToolParams = { pattern: 'hello' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return allow for paths within workspace', async () => {
+      const params: RipGrepToolParams = { pattern: 'hello', path: '.' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return allow for subdirectories within workspace', async () => {
+      const params: RipGrepToolParams = { pattern: 'hello', path: 'sub' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for paths outside workspace', async () => {
+      const params: RipGrepToolParams = { pattern: 'hello', path: '/tmp' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
   });
 });

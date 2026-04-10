@@ -96,6 +96,7 @@ export default {
   'CLI Version': 'CLI 版本',
   'Git Commit': 'Git 提交',
   Model: '模型',
+  'Fast Model': '快速模型',
   Sandbox: '沙箱',
   'OS Platform': '操作系统平台',
   'OS Arch': '操作系统架构',
@@ -632,6 +633,130 @@ export default {
   'List all configured hooks': '列出所有已配置的 Hook',
   'Enable a disabled hook': '启用已禁用的 Hook',
   'Disable an active hook': '禁用已启用的 Hook',
+  // Hooks - Dialog
+  Hooks: 'Hook',
+  'Loading hooks...': '正在加载 Hook...',
+  'Error loading hooks:': '加载 Hook 出错：',
+  'Press Escape to close': '按 Escape 关闭',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    '按 Escape、Ctrl+C 或 Ctrl+D 取消',
+  'Press Space, Enter, or Escape to dismiss': '按空格、回车或 Escape 关闭',
+  'No hook selected': '未选择 Hook',
+  // Hooks - List Step
+  'No hook events found.': '未找到 Hook 事件。',
+  '{{count}} hook configured': '{{count}} 个 Hook 已配置',
+  '{{count}} hooks configured': '{{count}} 个 Hook 已配置',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
+    '此菜单为只读。要添加或修改 Hook，请直接编辑 settings.json 或询问 Qwen Code。',
+  'Enter to select · Esc to cancel': 'Enter 选择 · Esc 取消',
+  // Hooks - Detail Step
+  'Exit codes:': '退出码：',
+  'Configured hooks:': '已配置的 Hook：',
+  'No hooks configured for this event.': '此事件未配置 Hook。',
+  'To add hooks, edit settings.json directly or ask Qwen.':
+    '要添加 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  'Enter to select · Esc to go back': 'Enter 选择 · Esc 返回',
+  // Hooks - Config Detail Step
+  'Hook details': 'Hook 详情',
+  'Event:': '事件：',
+  'Extension:': '扩展：',
+  'Desc:': '描述：',
+  'No hook config selected': '未选择 Hook 配置',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    '所有 Hook 当前已禁用。您有 {{count}} 未运行。',
+  '{{count}} configured hook': '{{count}} 个已配置的 Hook',
+  '{{count}} configured hooks': '{{count}} 个已配置的 Hook',
+  'When hooks are disabled:': '当 Hook 被禁用时：',
+  'No hook commands will execute': '不会执行任何 Hook 命令',
+  'StatusLine will not be displayed': '不会显示状态栏',
+  'Tool operations will proceed without hook validation':
+    '工具操作将在没有 Hook 验证的情况下继续',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    '要重新启用 Hook，请从 settings.json 中删除 "disableAllHooks" 或询问 Qwen Code。',
+  // Hooks - Source
+  Project: '项目',
+  User: '用户',
+  System: '系统',
+  Extension: '扩展',
+  'Local Settings': '本地设置',
+  'User Settings': '用户设置',
+  'System Settings': '系统设置',
+  Extensions: '扩展',
+  // Hooks - Status
+  '✓ Enabled': '✓ 已启用',
+  '✗ Disabled': '✗ 已禁用',
+  // Hooks - Event Descriptions (short)
+  'Before tool execution': '工具执行前',
+  'After tool execution': '工具执行后',
+  'After tool execution fails': '工具执行失败后',
+  'When notifications are sent': '发送通知时',
+  'When the user submits a prompt': '用户提交提示时',
+  'When a new session is started': '新会话开始时',
+  'Right before Qwen Code concludes its response': 'Qwen Code 结束响应之前',
+  'When a subagent (Agent tool call) is started':
+    '子智能体（Agent 工具调用）启动时',
+  'Right before a subagent concludes its response': '子智能体结束响应之前',
+  'Before conversation compaction': '对话压缩前',
+  'When a session is ending': '会话结束时',
+  'When a permission dialog is displayed': '显示权限对话框时',
+  // Hooks - Event Descriptions (detailed)
+  'Input to command is JSON of tool call arguments.':
+    '命令输入为工具调用参数的 JSON。',
+  'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
+    '命令输入为包含 "inputs"（工具调用参数）和 "response"（工具调用响应）字段的 JSON。',
+  'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
+    '命令输入为包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
+  'Input to command is JSON with notification message and type.':
+    '命令输入为包含通知消息和类型的 JSON。',
+  'Input to command is JSON with original user prompt text.':
+    '命令输入为包含原始用户提示文本的 JSON。',
+  'Input to command is JSON with session start source.':
+    '命令输入为包含会话启动来源的 JSON。',
+  'Input to command is JSON with session end reason.':
+    '命令输入为包含会话结束原因的 JSON。',
+  'Input to command is JSON with agent_id and agent_type.':
+    '命令输入为包含 agent_id 和 agent_type 的 JSON。',
+  'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
+    '命令输入为包含 agent_id、agent_type 和 agent_transcript_path 的 JSON。',
+  'Input to command is JSON with compaction details.':
+    '命令输入为包含压缩详情的 JSON。',
+  'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
+    '命令输入为包含 tool_name、tool_input 和 tool_use_id 的 JSON。输出包含 hookSpecificOutput 的 JSON，其中包含允许或拒绝的决定。',
+  // Hooks - Exit Code Descriptions
+  'stdout/stderr not shown': 'stdout/stderr 不显示',
+  'show stderr to model and continue conversation':
+    '向模型显示 stderr 并继续对话',
+  'show stderr to user only': '仅向用户显示 stderr',
+  'stdout shown in transcript mode (ctrl+o)': 'stdout 以转录模式显示 (ctrl+o)',
+  'show stderr to model immediately': '立即向模型显示 stderr',
+  'show stderr to user only but continue with tool call':
+    '仅向用户显示 stderr 但继续工具调用',
+  'block processing, erase original prompt, and show stderr to user only':
+    '阻止处理，擦除原始提示，仅向用户显示 stderr',
+  'stdout shown to Qwen': '向 Qwen 显示 stdout',
+  'show stderr to user only (blocking errors ignored)':
+    '仅向用户显示 stderr（忽略阻塞错误）',
+  'command completes successfully': '命令成功完成',
+  'stdout shown to subagent': '向子智能体显示 stdout',
+  'show stderr to subagent and continue having it run':
+    '向子智能体显示 stderr 并继续运行',
+  'stdout appended as custom compact instructions':
+    'stdout 作为自定义压缩指令追加',
+  'block compaction': '阻止压缩',
+  'show stderr to user only but continue with compaction':
+    '仅向用户显示 stderr 但继续压缩',
+  'use hook decision if provided': '如果提供则使用 Hook 决定',
+  // Hooks - Messages
+  'Config not loaded.': '配置未加载。',
+  'Hooks are not enabled. Enable hooks in settings to use this feature.':
+    'Hook 未启用。请在设置中启用 Hook 以使用此功能。',
+  'No hooks configured. Add hooks in your settings.json file.':
+    '未配置 Hook。请在 settings.json 文件中添加 Hook。',
+  'Configured Hooks ({{count}} total)': '已配置的 Hook（共 {{count}} 个）',
 
   // ============================================================================
   // Commands - Session Export
@@ -732,7 +857,6 @@ export default {
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     '工作区审批模式已存在并具有优先级。用户级别的更改将无效。',
   'Apply To': '应用于',
-  'User Settings': '用户设置',
   'Workspace Settings': '工作区设置',
 
   // ============================================================================
@@ -782,7 +906,6 @@ export default {
   'List configured MCP servers and tools': '列出已配置的 MCP 服务器和工具',
   'Restarts MCP servers.': '重启 MCP 服务器',
   'Open MCP management dialog': '打开 MCP 管理对话框',
-  'Config not loaded.': '配置未加载',
   'Could not retrieve tool registry.': '无法检索工具注册表',
   'No MCP servers configured with OAuth authentication.':
     '未配置支持 OAuth 认证的 MCP 服务器',
@@ -841,7 +964,6 @@ export default {
   'Server:': '服务器：',
   '(disabled)': '(已禁用)',
   'Error:': '错误：',
-  Extension: '扩展',
   tool: '工具',
   tools: '个工具',
   connected: '已连接',
@@ -970,7 +1092,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': '切换此会话的模型',
+  'Switch the model for this session (--fast for suggestion model)':
+    '切换此会话的模型（--fast 可设置建议模型）',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    '设置用于输入建议和推测执行的轻量模型',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1044,7 +1169,10 @@ export default {
   "Allow execution of: '{{command}}'?": "允许执行：'{{command}}'？",
   'Yes, allow always ...': '是，总是允许 ...',
   'Always allow in this project': '在本项目中总是允许',
+  'Always allow {{action}} in this project': '在本项目中总是允许{{action}}',
   'Always allow for this user': '对该用户总是允许',
+  'Always allow {{action}} for this user': '对该用户总是允许{{action}}',
+  'Yes, restore previous mode ({{mode}})': '是，恢复之前的模式 ({{mode}})',
   'Yes, and auto-accept edits': '是，并自动接受编辑',
   'Yes, and manually approve edits': '是，并手动批准编辑',
   'No, keep planning (esc)': '否，继续规划 (esc)',
@@ -1189,8 +1317,8 @@ export default {
   unknown: '未知',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "无法切换到模型 '{{modelId}}'.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — 高效混合架构，编程性能业界领先',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — 高效混合架构，编程性能业界领先',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     '来自阿里云 ModelStudio 的最新 Qwen Vision 模型（版本：qwen3-vl-plus-2025-09-23）',
 
@@ -1543,7 +1671,7 @@ export default {
   // ============================================================================
   'API-KEY': 'API-KEY',
   'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
+  "Paste your api key of ModelStudio Coding Plan and you're all set!":
     '粘贴您的百炼 Coding Plan API Key，即可完成设置！',
   Custom: '自定义',
   'More instructions about configuring `modelProviders` manually.':
@@ -1588,6 +1716,8 @@ export default {
   'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
   'Run /context detail for per-item breakdown.':
     '运行 /context detail 查看详细分解。',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    '显示上下文窗口使用情况分解。输入 "/context detail" 查看详细分解。',
   'body loaded': '内容已加载',
   memory: '记忆',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
@@ -1688,4 +1818,20 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
+  compact: '紧凑',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
+  'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
+
+  'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
+  'Exited plan mode. Previous approval mode restored.':
+    '已退出计划模式，已恢复之前的审批模式。',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    '启用计划模式。智能体将只分析和规划，而不执行工具。',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    '已处于计划模式。使用 "/plan exit" 退出计划模式。',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    '未处于计划模式。请先使用 "/plan" 进入计划模式。',
+
+  "Set up Qwen Code's status line UI": '配置 Qwen Code 的状态栏',
 };

@@ -7,7 +7,8 @@
 import type { AnyToolInvocation } from '../index.js';
 import type { Config } from '../config/config.js';
 import os from 'node:os';
-import { quote } from 'shell-quote';
+import path from 'node:path';
+import { parse, quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
@@ -38,6 +39,71 @@ export interface ShellConfiguration {
   shell: ShellType;
 }
 
+let cachedBashPath: string | undefined;
+const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * Attempts to find the Git Bash executable path on Windows.
+ * Checks common installation locations and PATH.
+ * @returns The path to bash.exe if found, or 'bash' as fallback.
+ */
+function findGitBashPath(): string {
+  // Return cached result if available
+  if (cachedBashPath) {
+    return cachedBashPath;
+  }
+
+  // Search in PATH directories
+  const pathEnv = process.env['PATH'] || '';
+  const pathDirs = pathEnv.split(path.delimiter).filter(Boolean);
+
+  for (const dir of pathDirs) {
+    const bashPath = path.join(dir, 'bash.exe');
+    try {
+      accessSync(bashPath, fsConstants.X_OK);
+      cachedBashPath = bashPath;
+      return bashPath;
+    } catch {
+      // Continue searching
+    }
+  }
+
+  // Check common Git Bash installation locations
+  const commonPaths = [
+    path.join('C:', 'Program Files', 'Git', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files', 'Git', 'usr', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files (x86)', 'Git', 'bin', 'bash.exe'),
+    path.join('C:', 'Program Files (x86)', 'Git', 'usr', 'bin', 'bash.exe'),
+    path.join(
+      process.env['ProgramFiles'] || path.join('C:', 'Program Files'),
+      'Git',
+      'bin',
+      'bash.exe',
+    ),
+    path.join(
+      process.env['ProgramFiles(x86)'] ||
+        path.join('C:', 'Program Files (x86)'),
+      'Git',
+      'bin',
+      'bash.exe',
+    ),
+  ];
+
+  for (const bashPath of commonPaths) {
+    try {
+      accessSync(bashPath, fsConstants.X_OK);
+      cachedBashPath = bashPath;
+      return bashPath;
+    } catch {
+      // Continue searching
+    }
+  }
+
+  // Fallback to 'bash' and let the system handle it
+  cachedBashPath = 'bash';
+  return 'bash';
+}
+
 /**
  * Determines the appropriate shell configuration for the current platform.
  *
@@ -60,7 +126,7 @@ export function getShellConfiguration(): ShellConfiguration {
 
     if (isGitBash) {
       return {
-        executable: 'bash',
+        executable: findGitBashPath(),
         argsPrefix: ['-c'],
         shell: 'bash',
       };
@@ -224,11 +290,8 @@ export function splitCommands(command: string): string[] {
 
 /**
  * Extracts the root command from a given shell command string.
- * This is used to identify the base command for permission checks.
- * @param command The shell command string to parse
- * @returns The root command name, or undefined if it cannot be determined
- * @example getCommandRoot("ls -la /tmp") returns "ls"
- * @example getCommandRoot("git status && npm test") returns "git"
+ * Skips leading env var assignments (VAR=value) so that
+ * `PYTHONPATH=/tmp python3 -c "..."` returns `python3`.
  */
 export function getCommandRoot(command: string): string | undefined {
   const trimmedCommand = command.trim();
@@ -236,22 +299,29 @@ export function getCommandRoot(command: string): string | undefined {
     return undefined;
   }
 
-  // This regex is designed to find the first "word" of a command,
-  // while respecting quotes. It looks for a sequence of non-whitespace
-  // characters that are not inside quotes.
-  const match = trimmedCommand.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
-  if (match) {
-    // The first element in the match array is the full match.
-    // The subsequent elements are the capture groups.
-    // We prefer a captured group because it will be unquoted.
-    const commandRoot = match[1] || match[2] || match[3];
-    if (commandRoot) {
-      // If the command is a path, return the last component.
-      return commandRoot.split(/[\\/]/).pop();
-    }
-  }
+  try {
+    const tokens = parse(trimmedCommand).filter(
+      (token): token is string => typeof token === 'string',
+    );
 
-  return undefined;
+    let idx = 0;
+    while (idx < tokens.length && ENV_ASSIGNMENT_REGEX.test(tokens[idx]!)) {
+      idx++;
+    }
+
+    const firstToken = tokens[idx];
+    return firstToken ? firstToken.split(/[\\/]/).pop() : undefined;
+  } catch {
+    const match = trimmedCommand.match(/^"([^"]+)"|^'([^']+)'|^(\S+)/);
+    if (match) {
+      const commandRoot = match[1] || match[2] || match[3];
+      if (commandRoot) {
+        return commandRoot.split(/[\\/]/).pop();
+      }
+    }
+
+    return undefined;
+  }
 }
 
 export function getCommandRoots(command: string): string[] {
@@ -670,16 +740,16 @@ export function detectCommandSubstitution(command: string): boolean {
  *   presence activates "Default Deny" mode.
  * @returns An object detailing which commands are not allowed.
  */
-export function checkCommandPermissions(
+export async function checkCommandPermissions(
   command: string,
   config: Config,
   sessionAllowlist?: Set<string>,
-): {
+): Promise<{
   allAllowed: boolean;
   disallowedCommands: string[];
   blockReason?: string;
   isHardDenial?: boolean;
-} {
+}> {
   // Disallow command substitution for security.
   if (detectCommandSubstitution(command)) {
     return {
@@ -717,7 +787,7 @@ export function checkCommandPermissions(
         if (isSessionAllowed) continue;
       }
 
-      const decision = pm.isCommandAllowed(cmd);
+      const decision = await pm.isCommandAllowed(cmd);
 
       if (decision === 'deny') {
         return {
@@ -994,12 +1064,15 @@ export function isCommandAvailable(command: string): {
   return { available: path !== null, error };
 }
 
-export function isCommandAllowed(
+export async function isCommandAllowed(
   command: string,
   config: Config,
-): { allowed: boolean; reason?: string } {
+): Promise<{ allowed: boolean; reason?: string }> {
   // By not providing a sessionAllowlist, we invoke "default allow" behavior.
-  const { allAllowed, blockReason } = checkCommandPermissions(command, config);
+  const { allAllowed, blockReason } = await checkCommandPermissions(
+    command,
+    config,
+  );
   if (allAllowed) {
     return { allowed: true };
   }

@@ -7,6 +7,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import picomatch from 'picomatch';
+import { parse } from 'shell-quote';
 
 /**
  * Normalize a filesystem path to use POSIX-style forward slashes.
@@ -405,6 +406,106 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
   }
 }
 
+/**
+ * Human-readable display names for permission rule categories.
+ * Maps display name → verb phrase for use in "Always allow [verb phrase] in this project".
+ */
+const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
+  Read: 'read files',
+  Edit: 'edit files',
+  Bash: 'run commands',
+  WebFetch: 'fetch from',
+  WebSearch: 'search the web',
+  Agent: 'use agent',
+  Skill: 'use skill',
+  SaveMemory: 'save memory',
+  TodoWrite: 'write todos',
+  Lsp: 'use LSP',
+  ExitPlanMode: 'exit plan mode',
+};
+
+/**
+ * Strip the glob suffix (e.g. `/**`) and the leading `//` from an absolute
+ * path specifier so it reads cleanly in a UI label.
+ *
+ * `//Users/mochi/.qwen/**` → `/Users/mochi/.qwen/`
+ * `/src/**`                → `src/`
+ */
+function cleanPathSpecifier(specifier: string): string {
+  let cleaned = specifier;
+  // Remove trailing glob patterns like /** or /*
+  cleaned = cleaned.replace(/\/\*\*$/, '/').replace(/\/\*$/, '/');
+  // Convert rule grammar `//absolute` → `/absolute`
+  if (cleaned.startsWith('//')) {
+    cleaned = cleaned.substring(1);
+  }
+  // Ensure trailing slash for directories
+  if (!cleaned.endsWith('/')) {
+    cleaned += '/';
+  }
+  return cleaned;
+}
+
+/**
+ * Build a human-readable label describing what a set of permission rules allow.
+ *
+ * Used in "Always Allow" UI options to give users a clear, natural-language
+ * description instead of raw rule syntax.
+ *
+ * Examples:
+ *   `["Read(//Users/mochi/.qwen/**)"]`  → `"read files in /Users/mochi/.qwen/"`
+ *   `["Bash(git *)"]`                    → `"run 'git *' commands"`
+ *   `["WebFetch(github.com)"]`            → `"fetch from github.com"`
+ *   `["Read"]`                            → `"read files"`
+ *
+ * @param rules - Array of rule strings from buildPermissionRules()
+ * @returns A human-readable description string
+ */
+export function buildHumanReadableRuleLabel(rules: string[]): string {
+  if (!rules.length) return '';
+
+  const parts: string[] = [];
+  for (const rule of rules) {
+    // Parse "DisplayName(specifier)" or bare "DisplayName"
+    const parenIdx = rule.indexOf('(');
+    if (parenIdx === -1) {
+      // Bare rule like "Read" or "Bash"
+      const verb = DISPLAY_NAME_TO_VERB[rule] ?? rule.toLowerCase();
+      parts.push(verb);
+      continue;
+    }
+
+    const displayName = rule.substring(0, parenIdx);
+    const specifier = rule.substring(parenIdx + 1, rule.length - 1); // strip parens
+    const verb = DISPLAY_NAME_TO_VERB[displayName] ?? displayName.toLowerCase();
+
+    const canonicalName = Object.entries(CANONICAL_TO_RULE_DISPLAY).find(
+      ([, v]) => v === displayName,
+    )?.[0];
+    const kind = canonicalName ? getSpecifierKind(canonicalName) : 'literal';
+
+    switch (kind) {
+      case 'path': {
+        const cleanPath = cleanPathSpecifier(specifier);
+        parts.push(`${verb} in ${cleanPath}`);
+        break;
+      }
+      case 'command':
+        parts.push(`run '${specifier}' commands`);
+        break;
+      case 'domain':
+        parts.push(`${verb} ${specifier}`);
+        break;
+      case 'literal':
+      default:
+        parts.push(`${verb} "${specifier}"`);
+        break;
+    }
+  }
+
+  return parts.join(', ');
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Shell command matching
 // ─────────────────────────────────────────────────────────────────────────────
@@ -506,6 +607,7 @@ export function matchesCommandPattern(
 ): boolean {
   // This function matches a single pattern against a single simple command.
   // Compound command splitting is handled by the caller (PermissionManager).
+  const normalizedCommand = stripLeadingVariableAssignments(command);
 
   // Special case: lone `*` matches any single command
   if (pattern === '*') {
@@ -516,7 +618,10 @@ export function matchesCommandPattern(
     // No wildcards: prefix matching (backward compat).
     // "git commit" matches "git commit" and "git commit -m test"
     // but NOT "gitcommit".
-    return command === pattern || command.startsWith(pattern + ' ');
+    return (
+      normalizedCommand === pattern ||
+      normalizedCommand.startsWith(pattern + ' ')
+    );
   }
 
   // Build regex from glob pattern with word-boundary semantics.
@@ -565,9 +670,9 @@ export function matchesCommandPattern(
   regex += '$';
 
   try {
-    return new RegExp(regex).test(command);
+    return new RegExp(regex, 's').test(normalizedCommand);
   } catch {
-    return command === pattern;
+    return normalizedCommand === pattern;
   }
 }
 
@@ -576,6 +681,44 @@ export function matchesCommandPattern(
  */
 function escapeRegex(s: string): string {
   return s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function stripLeadingVariableAssignments(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  try {
+    const tokens: string[] = [];
+
+    for (const token of parse(trimmed)) {
+      if (typeof token === 'string') {
+        tokens.push(token);
+      } else if (
+        token &&
+        typeof token === 'object' &&
+        'op' in token &&
+        typeof token.op === 'string'
+      ) {
+        tokens.push(token.op);
+      }
+    }
+
+    let firstCommandToken = 0;
+    while (
+      firstCommandToken < tokens.length &&
+      ENV_ASSIGNMENT_REGEX.test(tokens[firstCommandToken]!)
+    ) {
+      firstCommandToken++;
+    }
+
+    return tokens.slice(firstCommandToken).join(' ');
+  } catch {
+    return trimmed;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
