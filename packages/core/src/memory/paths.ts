@@ -40,7 +40,9 @@ function findCanonicalGitRoot(startPath: string): string | null {
   }
 
   try {
-    const gitContent = fs.readFileSync(path.join(gitRoot, '.git'), 'utf-8').trim();
+    const gitContent = fs
+      .readFileSync(path.join(gitRoot, '.git'), 'utf-8')
+      .trim();
     if (!gitContent.startsWith('gitdir:')) {
       return gitRoot;
     }
@@ -100,7 +102,8 @@ export function getAutoMemoryRoot(projectRoot: string): string {
   if (process.env['QWEN_CODE_MEMORY_LOCAL'] === '1') {
     result = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   } else {
-    const canonicalRoot = findCanonicalGitRoot(projectRoot) ?? path.resolve(projectRoot);
+    const canonicalRoot =
+      findCanonicalGitRoot(projectRoot) ?? path.resolve(projectRoot);
     result = path.join(
       getMemoryBaseDir(),
       'projects',
@@ -129,12 +132,22 @@ export function getAutoMemoryProjectStateDir(projectRoot: string): string {
 
 /**
  * Returns true if the given absolute path is inside the auto-memory root for
- * the given project.  The path is normalized to prevent path-traversal tricks.
+ * the given project.
+ *
+ * Uses path.relative() instead of startsWith() to correctly handle
+ * platform path-separator differences (e.g. Windows backslash vs forward
+ * slash) and to be resilient against path-traversal edge cases.
  */
-export function isAutoMemPath(absolutePath: string, projectRoot: string): boolean {
+export function isAutoMemPath(
+  absolutePath: string,
+  projectRoot: string,
+): boolean {
   const normalizedPath = path.normalize(absolutePath);
   const memRoot = path.normalize(getAutoMemoryRoot(projectRoot));
-  return normalizedPath.startsWith(memRoot + path.sep) || normalizedPath === memRoot;
+  const rel = path.relative(memRoot, normalizedPath);
+  // rel === '' means absolutePath IS memRoot itself.
+  // !rel.startsWith('..') && !path.isAbsolute(rel) means it's strictly inside.
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
 }
 
 export function getAutoMemoryIndexPath(projectRoot: string): string {
@@ -172,7 +185,10 @@ export function getAutoMemoryTopicPath(
   projectRoot: string,
   type: AutoMemoryType,
 ): string {
-  return path.join(getAutoMemoryRoot(projectRoot), getAutoMemoryTopicFilename(type));
+  return path.join(
+    getAutoMemoryRoot(projectRoot),
+    getAutoMemoryTopicFilename(type),
+  );
 }
 
 export function getAutoMemoryFilePath(
