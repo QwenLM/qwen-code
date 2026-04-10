@@ -174,16 +174,18 @@ export async function persistPermissionOutcome(
   payload?: ToolConfirmationPayload,
 ): Promise<void> {
   if (
+    outcome !== ToolConfirmationOutcome.ProceedAlways &&
     outcome !== ToolConfirmationOutcome.ProceedAlwaysProject &&
     outcome !== ToolConfirmationOutcome.ProceedAlwaysUser
   ) {
     return;
   }
 
+  // ProceedAlways (from compact mode / sub-agent confirmations) defaults to
+  // project scope so that permission is persisted and the user won't be
+  // asked again for the same tool/command pattern.
   const scope =
-    outcome === ToolConfirmationOutcome.ProceedAlwaysProject
-      ? 'project'
-      : 'user';
+    outcome === ToolConfirmationOutcome.ProceedAlwaysUser ? 'user' : 'project';
 
   // Read permissionRules from the stored confirmation details first,
   // falling back to payload for backward compatibility.
