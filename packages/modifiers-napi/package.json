@@ -24,9 +24,6 @@
     "node-gyp": "^11.2.0",
     "prebuildify": "^6.0.1"
   },
-  "os": [
-    "darwin"
-  ],
   "engines": {
     "node": ">=20.0.0"
   },
