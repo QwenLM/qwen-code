@@ -34,13 +34,20 @@ if (!existsSync(join(root, 'node_modules'))) {
 execSync('bun run generate', { stdio: 'inherit', cwd: root });
 
 // Build Rust file search module first (before core, which depends on it)
-try {
-  const fileSearchRsDir = join(root, 'packages', 'file-search-rs');
-  if (existsSync(join(fileSearchRsDir, 'Cargo.toml'))) {
+const fileSearchRsDir = join(root, 'packages', 'file-search-rs');
+let rustFileSearchIntegrated = false;
+
+if (existsSync(join(fileSearchRsDir, 'Cargo.toml'))) {
+  console.log('');
+  console.log('━'.repeat(60));
+  console.log('Building Rust file search module...');
+  console.log('━'.repeat(60));
+  try {
     execSync('npm run build', {
       stdio: 'inherit',
       cwd: fileSearchRsDir,
     });
+
     // Copy the .node file to core's dist directory
     const { readdirSync, copyFileSync, mkdirSync } = await import('node:fs');
     const { join: pathJoin } = await import('node:path');
@@ -58,17 +65,48 @@ try {
     const nodeFiles = readdirSync(fileSearchRsDir).filter((f) =>
       f.endsWith('.node'),
     );
-    for (const nodeFile of nodeFiles) {
-      const src = pathJoin(fileSearchRsDir, nodeFile);
-      const dest = pathJoin(coreDistDir, nodeFile);
-      copyFileSync(src, dest);
+    if (nodeFiles.length > 0) {
+      const { statSync } = await import('node:fs');
+      for (const nodeFile of nodeFiles) {
+        const src = pathJoin(fileSearchRsDir, nodeFile);
+        const dest = pathJoin(coreDistDir, nodeFile);
+        copyFileSync(src, dest);
+        const size = statSync(dest).size;
+        console.log(
+          `  ✓ Copied ${nodeFile} (${(size / 1024 / 1024).toFixed(1)} MB)`,
+        );
+      }
+      rustFileSearchIntegrated = true;
     }
+
+    console.log('━'.repeat(60));
+    if (rustFileSearchIntegrated) {
+      console.log(
+        '✅ Rust file search module compiled and integrated successfully.',
+      );
+    } else {
+      console.log(
+        '⚠️  Rust file search module compiled but .node file not found. Will use JavaScript fallback.',
+      );
+    }
+    console.log('━'.repeat(60));
+    console.log('');
+  } catch (e) {
+    console.log('━'.repeat(60));
+    console.log(
+      '❌ Failed to build Rust file search module. Falling back to JavaScript.',
+    );
+    console.log('━'.repeat(60));
+    console.log('');
+    console.warn('Error details:', e.message);
+    console.log('');
   }
-} catch (e) {
-  console.warn(
-    'Warning: Failed to build Rust file search module. Falling back to JavaScript implementation.\n',
-    e,
+} else {
+  console.log('');
+  console.log(
+    'ℹ️  Rust file search module not found (packages/file-search-rs/Cargo.toml missing). Using JavaScript fallback.',
   );
+  console.log('');
 }
 
 // Build in dependency order:
