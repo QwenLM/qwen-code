@@ -1,0 +1,26 @@
+[package]
+name = "qwen-file-search"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "2", features = ["async"] }
+napi-derive = "2"
+ignore = "0.4"
+walkdir = "2"
+globset = "0.4"
+skim = "0.10"
+crossbeam = "0.8"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[build-dependencies]
+napi-build = "2"
+
+[profile.release]
+lto = true
+codegen-units = 1
