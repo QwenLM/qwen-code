@@ -31,12 +31,12 @@ These commands help you save, restore, and summarize work progress.
 
 The `/chat` command provides session management through named aliases, stored in `<project>/.qwen/chat-index.json` (isolated per project).
 
-| Subcommand            | Description                                         | Example                      |
-| --------------------- | --------------------------------------------------- | ---------------------------- |
-| `/chat save <name>`   | Save the current session with a human-readable name | `/chat save auth-refactor`   |
-| `/chat list`          | List all saved session names and their IDs          | `/chat list`                 |
-| `/chat resume <name>` | Restore a saved session by name                     | `/chat resume auth-refactor` |
-| `/chat delete <name>` | Remove a saved session (requires confirmation)      | `/chat delete auth-refactor` |
+| Subcommand            | Description                                                                                | Example                      |
+| --------------------- | ------------------------------------------------------------------------------------------ | ---------------------------- |
+| `/chat save <name>`   | Save the current session with a human-readable name (requires confirmation if name exists) | `/chat save auth-refactor`   |
+| `/chat list`          | List all saved session names and their IDs                                                 | `/chat list`                 |
+| `/chat resume <name>` | Restore a saved session by name                                                            | `/chat resume auth-refactor` |
+| `/chat delete <name>` | Remove a saved session (requires confirmation)                                             | `/chat delete auth-refactor` |
 
 **Session Name Rules:**
 
@@ -49,6 +49,11 @@ The `/chat` command provides session management through named aliases, stored in
 ```
 # 1. Save your current work with a meaningful name
 > /chat save feature-implementation
+
+# If the name already exists, you'll be asked to confirm:
+> /chat save feature-implementation
+Session "feature-implementation" already exists. Do you want to overwrite it?
+# (Confirm to proceed)
 
 # 2. List all saved sessions
 > /chat list

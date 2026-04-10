@@ -2042,4 +2042,6 @@ export default {
     'Session name is too long. Maximum 128 characters.',
   'Are you sure you want to delete session "{{name}}"? This action cannot be undone.':
     'Are you sure you want to delete session "{{name}}"? This action cannot be undone.',
+  'Session "{{name}}" already exists. Do you want to overwrite it?':
+    'Session "{{name}}" already exists. Do you want to overwrite it?',
 };

@@ -1842,4 +1842,6 @@ export default {
   'chat.session_name_too_long': '会话名称太长。最多 128 个字符。',
   'Are you sure you want to delete session "{{name}}"? This action cannot be undone.':
     '确定要删除会话"{{name}}"吗？此操作无法撤销。',
+  'Session "{{name}}" already exists. Do you want to overwrite it?':
+    '会话"{{name}}"已存在。确定要覆盖吗？',
 };

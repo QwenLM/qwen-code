@@ -179,6 +179,53 @@ describe('chatCommand', () => {
         content: expect.stringContaining('Session saved as'),
       });
     });
+
+    it('should request confirmation when saving session with existing name', async () => {
+      const saveCommand = chatCommand.subCommands?.find(
+        (cmd) => cmd.name === 'save',
+      );
+
+      // Mock listNamedSessions to return an existing session with the same name
+      vi.mocked(listNamedSessions).mockResolvedValueOnce({
+        'my-test-session': 'old-session-id',
+      });
+
+      const result = await saveCommand?.action!(mockContext, 'my-test-session');
+
+      expect(result).toEqual({
+        type: 'confirm_action',
+        prompt:
+          'Session "my-test-session" already exists. Do you want to overwrite it?',
+        originalInvocation: {
+          raw: '/chat save my-test-session',
+        },
+      });
+    });
+
+    it('should save session after overwrite confirmation', async () => {
+      const confirmedContext = createMockContext({
+        overwriteConfirmed: true,
+      });
+
+      const saveCommand = chatCommand.subCommands?.find(
+        (cmd) => cmd.name === 'save',
+      );
+      const result = await saveCommand?.action!(
+        confirmedContext,
+        'my-test-session',
+      );
+
+      expect(saveSessionToIndex).toHaveBeenCalledWith(
+        '/test/project/dir',
+        'my-test-session',
+        'current-session-id-12345',
+      );
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('Session saved as'),
+      });
+    });
   });
 
   describe('list subcommand', () => {

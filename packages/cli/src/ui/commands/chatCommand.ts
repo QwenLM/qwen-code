@@ -86,6 +86,21 @@ export const chatCommand: SlashCommand = {
         const projectDir = config.getTargetDir();
 
         try {
+          // Check if session name already exists
+          const existingSessions = await listNamedSessions(projectDir);
+          if (name in existingSessions && !context.overwriteConfirmed) {
+            return {
+              type: 'confirm_action',
+              prompt: t(
+                'Session "{{name}}" already exists. Do you want to overwrite it?',
+                { name },
+              ),
+              originalInvocation: {
+                raw: context.invocation?.raw || `/chat save ${name}`,
+              },
+            };
+          }
+
           await saveSessionToIndex(projectDir, name, sessionId);
           return {
             type: 'message',
