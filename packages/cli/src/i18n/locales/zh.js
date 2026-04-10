@@ -96,6 +96,7 @@ export default {
   'CLI Version': 'CLI 版本',
   'Git Commit': 'Git 提交',
   Model: '模型',
+  'Fast Model': '快速模型',
   Sandbox: '沙箱',
   'OS Platform': '操作系统平台',
   'OS Arch': '操作系统架构',
@@ -637,6 +638,9 @@ export default {
   'Loading hooks...': '正在加载 Hook...',
   'Error loading hooks:': '加载 Hook 出错：',
   'Press Escape to close': '按 Escape 关闭',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    '按 Escape、Ctrl+C 或 Ctrl+D 取消',
+  'Press Space, Enter, or Escape to dismiss': '按空格、回车或 Escape 关闭',
   'No hook selected': '未选择 Hook',
   // Hooks - List Step
   'No hook events found.': '未找到 Hook 事件。',
@@ -660,6 +664,19 @@ export default {
   'No hook config selected': '未选择 Hook 配置',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     '要修改或删除此 Hook，请直接编辑 settings.json 或询问 Qwen。',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook 配置 - 已禁用',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    '所有 Hook 当前已禁用。您有 {{count}} 未运行。',
+  '{{count}} configured hook': '{{count}} 个已配置的 Hook',
+  '{{count}} configured hooks': '{{count}} 个已配置的 Hook',
+  'When hooks are disabled:': '当 Hook 被禁用时：',
+  'No hook commands will execute': '不会执行任何 Hook 命令',
+  'StatusLine will not be displayed': '不会显示状态栏',
+  'Tool operations will proceed without hook validation':
+    '工具操作将在没有 Hook 验证的情况下继续',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    '要重新启用 Hook，请从 settings.json 中删除 "disableAllHooks" 或询问 Qwen Code。',
   // Hooks - Source
   Project: '项目',
   User: '用户',
@@ -890,8 +907,7 @@ export default {
   '✦ dreaming': '✦ 整理中',
   'Remove matching entries from managed auto-memory.':
     '从托管自动记忆中删除匹配的条目。',
-  'Usage: /forget <memory text to remove>':
-    '用法：/forget <要删除的记忆文本>',
+  'Usage: /forget <memory text to remove>': '用法：/forget <要删除的记忆文本>',
   'No managed auto-memory entries matched: {{query}}':
     '没有匹配的托管自动记忆条目：{{query}}',
   'Show managed auto-memory status.': '显示托管自动记忆状态',
@@ -902,7 +918,8 @@ export default {
   'No extraction cursor found yet.': '尚未找到提炼游标。',
   'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
     '游标：session={{sessionId}}，offset={{offset}}，updated={{updatedAt}}',
-  'No chat client available to extract memory.': '没有可用于提炼记忆的聊天客户端。',
+  'No chat client available to extract memory.':
+    '没有可用于提炼记忆的聊天客户端。',
   'Managed auto-memory extraction is already running.':
     '托管自动记忆提炼已在运行中。',
   'Managed auto-memory extraction found no new durable memories.':
@@ -1111,6 +1128,8 @@ export default {
   // Commands - Model
   // ============================================================================
   'Switch the model for this session': '切换此会话的模型',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    '设置用于输入建议和推测执行的轻量模型',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1187,6 +1206,7 @@ export default {
   'Always allow {{action}} in this project': '在本项目中总是允许{{action}}',
   'Always allow for this user': '对该用户总是允许',
   'Always allow {{action}} for this user': '对该用户总是允许{{action}}',
+  'Yes, restore previous mode ({{mode}})': '是，恢复之前的模式 ({{mode}})',
   'Yes, and auto-accept edits': '是，并自动接受编辑',
   'Yes, and manually approve edits': '是，并手动批准编辑',
   'No, keep planning (esc)': '否，继续规划 (esc)',
@@ -1331,8 +1351,8 @@ export default {
   unknown: '未知',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "无法切换到模型 '{{modelId}}'.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — 高效混合架构，编程性能业界领先',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — 高效混合架构，编程性能业界领先',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     '来自阿里云 ModelStudio 的最新 Qwen Vision 模型（版本：qwen3-vl-plus-2025-09-23）',
 
@@ -1730,6 +1750,8 @@ export default {
   'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
   'Run /context detail for per-item breakdown.':
     '运行 /context detail 查看详细分解。',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    '显示上下文窗口使用情况分解。输入 "/context detail" 查看详细分解。',
   'body loaded': '内容已加载',
   memory: '记忆',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
@@ -1830,4 +1852,20 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
+  compact: '紧凑',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
+  'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
+
+  'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
+  'Exited plan mode. Previous approval mode restored.':
+    '已退出计划模式，已恢复之前的审批模式。',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    '启用计划模式。智能体将只分析和规划，而不执行工具。',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    '已处于计划模式。使用 "/plan exit" 退出计划模式。',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    '未处于计划模式。请先使用 "/plan" 进入计划模式。',
+
+  "Set up Qwen Code's status line UI": '配置 Qwen Code 的状态栏',
 };

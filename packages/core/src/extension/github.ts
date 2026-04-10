@@ -21,6 +21,7 @@ import {
   type ExtensionManager,
 } from './extensionManager.js';
 import type { ExtensionInstallMetadata } from '../config/config.js';
+import { checkNpmUpdate } from './npm.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 
@@ -172,6 +173,9 @@ export async function checkForExtensionUpdate(
       return ExtensionUpdateState.UPDATE_AVAILABLE;
     }
     return ExtensionUpdateState.UP_TO_DATE;
+  }
+  if (installMetadata?.type === 'npm') {
+    return checkNpmUpdate(installMetadata);
   }
   if (
     !installMetadata ||

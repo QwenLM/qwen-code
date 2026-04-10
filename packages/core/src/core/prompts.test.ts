@@ -50,6 +50,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     const prompt = getCoreSystemPrompt();
     expect(prompt).not.toContain('---\n\n'); // Separator should not be present
     expect(prompt).toContain('You are Qwen Code, an interactive CLI agent'); // Check for core content
+    expect(prompt).toContain('# Executing actions with care');
     expect(prompt).toMatchSnapshot(); // Use snapshot for base prompt structure
   });
 

@@ -34,6 +34,7 @@ Commands for adjusting interface appearance and work environment.
 | ------------ | ---------------------------------------- | ----------------------------- |
 | `/clear`     | Clear terminal screen content            | `/clear` (shortcut: `Ctrl+L`) |
 | `/context`   | Show context window usage breakdown      | `/context`                    |
+| → `detail`   | Show per-item context usage breakdown    | `/context detail`             |
 | `/theme`     | Change Qwen Code visual theme            | `/theme`                      |
 | `/vim`       | Turn input area Vim editing mode on/off  | `/vim`                        |
 | `/directory` | Manage multi-directory support workspace | `/dir add ./src,./tests`      |
@@ -61,19 +62,101 @@ Commands for managing AI tools and models.
 | `/mcp`           | List configured MCP servers and tools         | `/mcp`, `/mcp desc`                           |
 | `/tools`         | Display currently available tool list         | `/tools`, `/tools desc`                       |
 | `/skills`        | List and run available skills                 | `/skills`, `/skills <name>`                   |
+| `/plan`          | Switch to plan mode or exit plan mode         | `/plan`, `/plan <task>`, `/plan exit`         |
 | `/approval-mode` | Change approval mode for tool usage           | `/approval-mode <mode (auto-edit)> --project` |
 | →`plan`          | Analysis only, no execution                   | Secure review                                 |
 | →`default`       | Require approval for edits                    | Daily use                                     |
 | →`auto-edit`     | Automatically approve edits                   | Trusted environment                           |
 | →`yolo`          | Automatically approve all                     | Quick prototyping                             |
 | `/model`         | Switch model used in current session          | `/model`                                      |
+| `/model --fast`  | Set a lighter model for prompt suggestions    | `/model --fast qwen3-coder-flash`             |
 | `/extensions`    | List all active extensions in current session | `/extensions`                                 |
 | `/memory`        | Open the Memory Manager dialog                | `/memory`                                     |
 | `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`            |
 | `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                             |
 | `/dream`         | Manually run auto-memory consolidation        | `/dream`                                      |
 
-### 1.5 Information, Settings, and Help
+### 1.5 Built-in Skills
+
+These commands invoke bundled skills that provide specialized workflows.
+
+| Command      | Description                                                         | Usage Examples                                    |
+| ------------ | ------------------------------------------------------------------- | ------------------------------------------------- |
+| `/review`    | Review code changes with 5 parallel agents + deterministic analysis | `/review`, `/review 123`, `/review 123 --comment` |
+| `/loop`      | Run a prompt on a recurring schedule                                | `/loop 5m check the build`                        |
+| `/qc-helper` | Answer questions about Qwen Code usage and configuration            | `/qc-helper how do I configure MCP?`              |
+
+See [Code Review](./code-review.md) for full `/review` documentation.
+
+### 1.6 Side Question (`/btw`)
+
+The `/btw` command allows you to ask quick side questions without interrupting or affecting the main conversation flow.
+
+| Command                | Description                           |
+| ---------------------- | ------------------------------------- |
+| `/btw <your question>` | Ask a quick side question             |
+| `?btw <your question>` | Alternative syntax for side questions |
+
+**How It Works:**
+
+- The side question is sent as a separate API call with recent conversation context (up to the last 20 messages)
+- The response is displayed above the Composer — you can continue typing while waiting
+- The main conversation is **not blocked** — it continues independently
+- The side question response does **not** become part of the main conversation history
+- Answers are rendered with full Markdown support (code blocks, lists, tables, etc.)
+
+**Keyboard Shortcuts (Interactive Mode):**
+
+| Shortcut             | Action                                              |
+| -------------------- | --------------------------------------------------- |
+| `Escape`             | Cancel (while loading) or dismiss (after completed) |
+| `Space` or `Enter`   | Dismiss the answer (when input is empty)            |
+| `Ctrl+C` or `Ctrl+D` | Cancel an in-flight side question                   |
+
+**Example:**
+
+```
+(While the main conversation is about refactoring code)
+
+> /btw What's the difference between let and var in JavaScript?
+
+  ╭──────────────────────────────────────────╮
+  │ /btw What's the difference between let   │
+  │     and var in JavaScript?               │
+  │                                          │
+  │ + Answering...                           │
+  │ Press Escape, Ctrl+C, or Ctrl+D to cancel│
+  ╰──────────────────────────────────────────╯
+  > (Composer remains active — keep typing)
+
+(After the answer arrives)
+
+  ╭──────────────────────────────────────────╮
+  │ /btw What's the difference between let   │
+  │     and var in JavaScript?               │
+  │                                          │
+  │ `let` is block-scoped, while `var` is    │
+  │ function-scoped. `let` was introduced    │
+  │ in ES6 and doesn't hoist the same way.   │
+  │                                          │
+  │ Press Space, Enter, or Escape to dismiss │
+  ╰──────────────────────────────────────────╯
+  > (Composer still active)
+```
+
+**Supported Execution Modes:**
+
+| Mode                 | Behavior                                     |
+| -------------------- | -------------------------------------------- |
+| Interactive          | Shows above Composer with Markdown rendering |
+| Non-interactive      | Returns text result: `btw> question\nanswer` |
+| ACP (Agent Protocol) | Returns stream_messages async generator      |
+
+> [!tip]
+>
+> Use `/btw` when you need a quick answer without derailing your main task. It's especially useful for clarifying concepts, checking facts, or getting quick explanations while staying focused on your primary workflow.
+
+### 1.7 Information, Settings, and Help
 
 Commands for obtaining information and performing system settings.
 
@@ -88,7 +171,7 @@ Commands for obtaining information and performing system settings.
 | `/copy`     | Copy last output content to clipboard           | `/copy`                          |
 | `/quit`     | Exit Qwen Code immediately                      | `/quit` or `/exit`               |
 
-### 1.6 Common Shortcuts
+### 1.8 Common Shortcuts
 
 | Shortcut           | Function                | Note                   |
 | ------------------ | ----------------------- | ---------------------- |
@@ -98,7 +181,7 @@ Commands for obtaining information and performing system settings.
 | `Ctrl/cmd+Z`       | Undo input              | Text editing           |
 | `Ctrl/cmd+Shift+Z` | Redo input              | Text editing           |
 
-### 1.7 CLI Auth Subcommands
+### 1.9 CLI Auth Subcommands
 
 In addition to the in-session `/auth` slash command, Qwen Code provides standalone CLI subcommands for managing authentication directly from the terminal:
 

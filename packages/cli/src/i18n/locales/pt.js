@@ -91,6 +91,7 @@ export default {
   'CLI Version': 'Versão da CLI',
   'Git Commit': 'Commit do Git',
   Model: 'Modelo',
+  'Fast Model': 'Modelo Rápido',
   Sandbox: 'Sandbox',
   'OS Platform': 'Plataforma do SO',
   'OS Arch': 'Arquitetura do SO',
@@ -604,6 +605,10 @@ export default {
   'Loading hooks...': 'Carregando hooks...',
   'Error loading hooks:': 'Erro ao carregar hooks:',
   'Press Escape to close': 'Pressione Escape para fechar',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Pressione Escape, Ctrl+C ou Ctrl+D para cancelar',
+  'Press Space, Enter, or Escape to dismiss':
+    'Pressione Espaço, Enter ou Escape para dispensar',
   'No hook selected': 'Nenhum hook selecionado',
   // Hooks - List Step
   'No hook events found.': 'Nenhum evento de hook encontrado.',
@@ -629,6 +634,19 @@ export default {
   'No hook config selected': 'Nenhuma configuração de hook selecionada',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'Para modificar ou remover este hook, edite settings.json diretamente ou pergunte ao Qwen.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Configuração de Hook - Desativado',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'Todos os hooks estão desativados. Você tem {{count}} que não estão em execução.',
+  '{{count}} configured hook': '{{count}} hook configurado',
+  '{{count}} configured hooks': '{{count}} hooks configurados',
+  'When hooks are disabled:': 'Quando os hooks estão desativados:',
+  'No hook commands will execute': 'Nenhum comando de hook será executado',
+  'StatusLine will not be displayed': 'StatusLine não será exibido',
+  'Tool operations will proceed without hook validation':
+    'As operações de ferramentas prosseguirão sem validação de hook',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'Para reativar os hooks, remova "disableAllHooks" do settings.json ou pergunte ao Qwen Code.',
   // Hooks - Source
   Project: 'Projeto',
   User: 'Usuário',
@@ -887,12 +905,15 @@ export default {
     'Uso: /forget <texto de memória a remover>',
   'No managed auto-memory entries matched: {{query}}':
     'Nenhuma entrada de memória automática gerenciada correspondeu: {{query}}',
-  'Show managed auto-memory status.': 'Mostrar status da memória automática gerenciada.',
+  'Show managed auto-memory status.':
+    'Mostrar status da memória automática gerenciada.',
   'Run managed auto-memory extraction for the current session.':
     'Executar extração de memória automática gerenciada para a sessão atual.',
-  'Managed auto-memory root: {{root}}': 'Raiz da memória automática gerenciada: {{root}}',
+  'Managed auto-memory root: {{root}}':
+    'Raiz da memória automática gerenciada: {{root}}',
   'Managed auto-memory topics:': 'Tópicos de memória automática gerenciada:',
-  'No extraction cursor found yet.': 'Nenhum cursor de extração encontrado ainda.',
+  'No extraction cursor found yet.':
+    'Nenhum cursor de extração encontrado ainda.',
   'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
     'Cursor: sessão={{sessionId}}, offset={{offset}}, atualizado={{updatedAt}}',
   'No chat client available to extract memory.':
@@ -1016,6 +1037,8 @@ export default {
   // Commands - Model
   // ============================================================================
   'Switch the model for this session': 'Trocar o modelo para esta sessão',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Definir modelo mais leve para sugestões de prompt e execução especulativa',
   'Content generator configuration not available.':
     'Configuração do gerador de conteúdo não disponível.',
   'Authentication type not available.': 'Tipo de autenticação não disponível.',
@@ -1207,6 +1230,8 @@ export default {
   'Always allow for this user': 'Sempre permitir para este usuário',
   'Always allow {{action}} for this user':
     'Sempre permitir {{action}} para este usuário',
+  'Yes, restore previous mode ({{mode}})':
+    'Sim, restaurar modo anterior ({{mode}})',
   'Yes, and auto-accept edits': 'Sim, e aceitar edições automaticamente',
   'Yes, and manually approve edits': 'Sim, e aprovar edições manualmente',
   'No, keep planning (esc)': 'Não, continuar planejando (esc)',
@@ -1363,8 +1388,8 @@ export default {
   unknown: 'desconhecido',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Falha ao trocar o modelo para '{{modelId}}'.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — modelo híbrido eficiente com desempenho líder em programação',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — modelo híbrido eficiente com desempenho líder em programação',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'O modelo Qwen Vision mais recente do Alibaba Cloud ModelStudio (versão: qwen3-vl-plus-2025-09-23)',
 
@@ -1975,4 +2000,22 @@ export default {
     'Modo raw não disponível. Execute em um terminal interativo.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
+  compact: 'compacto',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Ocultar saída da ferramenta e raciocínio para uma visualização mais limpa (alternar com Ctrl+O).',
+  'Press Ctrl+O to show full tool output':
+    'Pressione Ctrl+O para exibir a saída completa da ferramenta',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

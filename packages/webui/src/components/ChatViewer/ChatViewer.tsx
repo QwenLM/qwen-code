@@ -150,6 +150,11 @@ function getToolCallComponent(kind: string) {
 
   switch (normalizedKind) {
     case 'read':
+    case 'read_file':
+    case 'read_many_files':
+    case 'readmanyfiles':
+    case 'list_directory':
+    case 'listfiles':
       return ReadToolCall;
     case 'write':
       return WriteToolCall;

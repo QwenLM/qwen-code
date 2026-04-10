@@ -245,7 +245,12 @@ export const DialogManager = ({
     );
   }
   if (uiState.isModelDialogOpen) {
-    return <ModelDialog onClose={uiActions.closeModelDialog} />;
+    return (
+      <ModelDialog
+        onClose={uiActions.closeModelDialog}
+        isFastModelMode={uiState.isFastModelMode}
+      />
+    );
   }
   if (uiState.activeArenaDialog === 'start') {
     return (

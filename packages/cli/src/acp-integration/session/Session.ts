@@ -112,6 +112,12 @@ export class Session implements SessionContext {
   private turn: number = 0;
   private readonly runtimeBaseDir: string;
 
+  // Cron scheduling state
+  private cronQueue: string[] = [];
+  private cronProcessing = false;
+  private cronAbortController: AbortController | null = null;
+  private cronCompletion: Promise<void> | null = null;
+
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
   private readonly toolCallEmitter: ToolCallEmitter;
@@ -155,12 +161,37 @@ export class Session implements SessionContext {
   }
 
   async cancelPendingPrompt(): Promise<void> {
-    if (!this.pendingPrompt) {
+    const hadPrompt = !!this.pendingPrompt;
+    const hadCron = !!this.cronAbortController;
+
+    if (!hadPrompt && !hadCron) {
       throw new Error('Not currently generating');
     }
 
-    this.pendingPrompt.abort();
-    this.pendingPrompt = null;
+    if (this.pendingPrompt) {
+      this.pendingPrompt.abort();
+      this.pendingPrompt = null;
+    }
+
+    // Cancel any in-progress cron execution
+    if (this.cronAbortController) {
+      this.cronAbortController.abort();
+      this.cronAbortController = null;
+      this.cronQueue = [];
+      this.cronProcessing = false;
+    }
+
+    // Stop scheduler and emit exit summary
+    const scheduler = this.config.isCronEnabled()
+      ? this.config.getCronScheduler()
+      : null;
+    if (scheduler) {
+      const summary = scheduler.getExitSummary();
+      scheduler.stop();
+      if (summary) {
+        await this.messageEmitter.emitAgentMessage(summary);
+      }
+    }
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
@@ -169,6 +200,22 @@ export class Session implements SessionContext {
     this.pendingPrompt?.abort();
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
+
+    // Abort any in-progress cron execution (user prompt takes priority)
+    if (this.cronAbortController) {
+      this.cronAbortController.abort();
+      this.cronAbortController = null;
+      this.cronQueue = [];
+      this.cronProcessing = false;
+    }
+    if (this.cronCompletion) {
+      try {
+        await this.cronCompletion;
+      } catch {
+        // Expected: cron was aborted
+      }
+      this.cronCompletion = null;
+    }
 
     // Wait for the previous prompt to finish so chat history is consistent.
     if (this.pendingPromptCompletion) {
@@ -191,7 +238,12 @@ export class Session implements SessionContext {
     });
 
     try {
-      return await this.#executePrompt(params, pendingSend);
+      const result = await this.#executePrompt(params, pendingSend);
+      this.pendingPrompt = null;
+      this.#startCronSchedulerIfNeeded();
+      // Drain any cron prompts that queued while the prompt was active
+      void this.#drainCronQueue();
+      return result;
     } finally {
       resolveCompletion();
     }
@@ -376,6 +428,169 @@ export class Session implements SessionContext {
     await this.client.sessionUpdate(params);
   }
 
+  /**
+   * Starts the cron scheduler if cron is enabled and jobs exist.
+   * The scheduler runs in the background, pushing fired prompts into
+   * `cronQueue` and triggering `#drainCronQueue`.
+   */
+  #startCronSchedulerIfNeeded(): void {
+    if (!this.config.isCronEnabled()) return;
+    const scheduler = this.config.getCronScheduler();
+    if (scheduler.size === 0) return;
+
+    scheduler.start((job: { prompt: string }) => {
+      this.cronQueue.push(job.prompt);
+      void this.#drainCronQueue();
+    });
+  }
+
+  /**
+   * Processes queued cron prompts one at a time. Uses `cronProcessing`
+   * as a mutex to prevent concurrent access to the chat.
+   */
+  async #drainCronQueue(): Promise<void> {
+    if (this.cronProcessing) return;
+    // Don't process cron while a user prompt is active — the queue will be
+    // drained after the prompt completes (see end of prompt()).
+    if (this.pendingPrompt) return;
+    this.cronProcessing = true;
+
+    let resolveCompletion!: () => void;
+    this.cronCompletion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    try {
+      while (this.cronQueue.length > 0) {
+        const prompt = this.cronQueue.shift()!;
+        await this.#executeCronPrompt(prompt);
+      }
+    } finally {
+      this.cronProcessing = false;
+      resolveCompletion();
+      this.cronCompletion = null;
+
+      // Stop scheduler if all jobs were deleted during execution
+      if (this.config.isCronEnabled()) {
+        const scheduler = this.config.getCronScheduler();
+        if (scheduler.size === 0) {
+          scheduler.stop();
+        }
+      }
+    }
+  }
+
+  /**
+   * Executes a single cron-fired prompt: echoes it as a user message with
+   * `_meta.source='cron'`, streams the model response, and handles tool calls.
+   */
+  async #executeCronPrompt(prompt: string): Promise<void> {
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      async () => {
+        const ac = new AbortController();
+        this.cronAbortController = ac;
+        const promptId =
+          this.config.getSessionId() + '########cron' + Date.now();
+
+        try {
+          // Echo the cron prompt as a user message so the client sees it
+          await this.sendUpdate({
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: prompt },
+            _meta: { source: 'cron' },
+          });
+
+          let nextMessage: Content | null = {
+            role: 'user',
+            parts: [{ text: prompt }],
+          };
+
+          while (nextMessage !== null) {
+            if (ac.signal.aborted) return;
+
+            const functionCalls: FunctionCall[] = [];
+            let usageMetadata: GenerateContentResponseUsageMetadata | null =
+              null;
+            const streamStartTime = Date.now();
+
+            const responseStream = await this.chat.sendMessageStream(
+              this.config.getModel(),
+              {
+                message: nextMessage.parts ?? [],
+                config: { abortSignal: ac.signal },
+              },
+              promptId,
+            );
+            nextMessage = null;
+
+            for await (const resp of responseStream) {
+              if (ac.signal.aborted) return;
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) continue;
+                  this.messageEmitter.emitMessage(
+                    part.text,
+                    'assistant',
+                    part.thought,
+                  );
+                }
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
+              }
+            }
+
+            if (usageMetadata) {
+              const durationMs = Date.now() - streamStartTime;
+              await this.messageEmitter.emitUsageMetadata(
+                usageMetadata,
+                '',
+                durationMs,
+              );
+            }
+
+            if (functionCalls.length > 0) {
+              const toolResponseParts: Part[] = [];
+              for (const fc of functionCalls) {
+                const response = await this.runTool(ac.signal, promptId, fc);
+                toolResponseParts.push(...response);
+              }
+              nextMessage = { role: 'user', parts: toolResponseParts };
+            }
+          }
+        } catch (error) {
+          if (ac.signal.aborted) return;
+          debugLogger.error('Error processing cron prompt:', error);
+          const msg = error instanceof Error ? error.message : String(error);
+          await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
+        } finally {
+          if (this.cronAbortController === ac) {
+            this.cronAbortController = null;
+          }
+        }
+      },
+    );
+  }
+
   async sendAvailableCommandsUpdate(): Promise<void> {
     const abortController = new AbortController();
     try {
@@ -482,6 +697,10 @@ export class Session implements SessionContext {
       case ToolConfirmationOutcome.ProceedAlways:
         newModeId = 'auto-edit';
         break;
+      case ToolConfirmationOutcome.RestorePrevious:
+        // onConfirm has already restored the mode; read the actual current mode
+        newModeId = this.config.getApprovalMode() as ApprovalModeValue;
+        break;
       case ToolConfirmationOutcome.ProceedOnce:
       default:
         newModeId = 'default';
@@ -494,27 +713,6 @@ export class Session implements SessionContext {
     };
 
     await this.sendUpdate(update);
-  }
-
-  private async resolveIdeDiffForOutcome(
-    confirmationDetails: ToolCallConfirmationDetails,
-    outcome: ToolConfirmationOutcome,
-  ): Promise<void> {
-    if (
-      confirmationDetails.type !== 'edit' ||
-      !confirmationDetails.ideConfirmation
-    ) {
-      return;
-    }
-
-    const { IdeClient } = await import('@qwen-code/qwen-code-core');
-    const ideClient = await IdeClient.getInstance();
-    const cliOutcome =
-      outcome === ToolConfirmationOutcome.Cancel ? 'rejected' : 'accepted';
-    await ideClient.resolveDiffFromCli(
-      confirmationDetails.filePath,
-      cliOutcome as 'accepted' | 'rejected',
-    );
   }
 
   private async runTool(
@@ -674,22 +872,6 @@ export class Session implements SessionContext {
       const approvalMode = this.config.getApprovalMode();
       const isPlanMode = approvalMode === ApprovalMode.PLAN;
 
-      // PLAN mode: block non-read-only tools
-      if (
-        isPlanMode &&
-        !isExitPlanModeTool &&
-        !isAskUserQuestionTool &&
-        needsConfirmation
-      ) {
-        return earlyErrorResponse(
-          new Error(
-            `Plan mode is active. The tool "${fc.name}" cannot be executed because it modifies the system. ` +
-              'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
-          ),
-          fc.name,
-        );
-      }
-
       if (finalPermission === 'deny') {
         return earlyErrorResponse(
           new Error(
@@ -702,16 +884,32 @@ export class Session implements SessionContext {
       }
 
       let didRequestPermission = false;
+      let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
       if (needsConfirmation) {
-        const confirmationDetails =
+        confirmationDetails =
           await invocation.getConfirmationDetails(abortSignal);
 
         // Centralised rule injection (for display and persistence)
         injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
 
+        if (
+          isPlanMode &&
+          !isExitPlanModeTool &&
+          !isAskUserQuestionTool &&
+          confirmationDetails.type !== 'info'
+        ) {
+          return earlyErrorResponse(
+            new Error(
+              `Plan mode is active. The tool "${fc.name}" cannot be executed because it modifies the system. ` +
+                'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
+            ),
+            fc.name,
+          );
+        }
+
         const messageBus = this.config.getMessageBus?.();
-        const hooksEnabled = this.config.getEnableHooks?.() ?? false;
+        const hooksEnabled = !this.config.getDisableAllHooks?.();
         let hookHandled = false;
 
         if (hooksEnabled && messageBus) {
@@ -731,10 +929,6 @@ export class Session implements SessionContext {
                   hookResult.updatedInput as typeof invocation.params;
               }
 
-              await this.resolveIdeDiffForOutcome(
-                confirmationDetails,
-                ToolConfirmationOutcome.ProceedOnce,
-              );
               await confirmationDetails.onConfirm(
                 ToolConfirmationOutcome.ProceedOnce,
               );
@@ -805,8 +999,6 @@ export class Session implements SessionContext {
                   .nativeEnum(ToolConfirmationOutcome)
                   .parse(output.outcome.optionId);
 
-          await this.resolveIdeDiffForOutcome(confirmationDetails, outcome);
-
           await confirmationDetails.onConfirm(outcome, {
             answers: output.answers,
           });
@@ -857,6 +1049,7 @@ export class Session implements SessionContext {
             case ToolConfirmationOutcome.ProceedAlwaysServer:
             case ToolConfirmationOutcome.ProceedAlwaysTool:
             case ToolConfirmationOutcome.ModifyWithEditor:
+            case ToolConfirmationOutcome.RestorePrevious:
               break;
             default: {
               const resultOutcome: never = outcome;

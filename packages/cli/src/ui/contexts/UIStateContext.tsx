@@ -55,6 +55,7 @@ export interface UIState {
   isSettingsDialogOpen: boolean;
   isMemoryDialogOpen: boolean;
   isModelDialogOpen: boolean;
+  isFastModelMode: boolean;
   isTrustDialogOpen: boolean;
   activeArenaDialog: ArenaDialogType;
   isPermissionsDialogOpen: boolean;
@@ -143,6 +144,10 @@ export interface UIState {
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+  // Prompt suggestion
+  promptSuggestion: string | null;
+  /** Dismiss prompt suggestion (clears state, aborts speculation) */
+  dismissPromptSuggestion: () => void;
 }
 
 export const UIStateContext = createContext<UIState | null>(null);

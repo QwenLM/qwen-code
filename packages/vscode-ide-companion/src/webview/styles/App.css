@@ -172,4 +172,7 @@ button {
 /* VSCode panel uses 100vh instead of 100% */
 .chat-container {
   height: 100vh;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
 }

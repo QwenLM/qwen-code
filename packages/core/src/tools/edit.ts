@@ -43,7 +43,6 @@ import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
-import { IdeClient } from '../ide/ide-client.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
@@ -314,16 +313,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       'Proposed',
       DEFAULT_DIFF_OPTIONS,
     );
-    const approvalMode = this.config.getApprovalMode();
-    const ideClient = await IdeClient.getInstance();
-    const ideConfirmation =
-      this.config.getIdeMode() &&
-      ideClient.isDiffingEnabled() &&
-      approvalMode !== ApprovalMode.AUTO_EDIT &&
-      approvalMode !== ApprovalMode.YOLO
-        ? ideClient.openDiff(this.params.file_path, editData.newContent)
-        : undefined;
-
     const confirmationDetails: ToolEditConfirmationDetails = {
       type: 'edit',
       title: `Confirm Edit: ${shortenPath(makeRelative(this.params.file_path, this.config.getTargetDir()))}`,
@@ -336,16 +325,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
         }
-
-        if (ideConfirmation) {
-          const result = await ideConfirmation;
-          if (result.status === 'accepted' && result.content) {
-            this.params.old_string = editData.currentContent ?? '';
-            this.params.new_string = result.content;
-          }
-        }
       },
-      ideConfirmation,
     };
     return confirmationDetails;
   }

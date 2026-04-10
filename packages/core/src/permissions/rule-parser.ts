@@ -7,6 +7,7 @@
 import path from 'node:path';
 import os from 'node:os';
 import picomatch from 'picomatch';
+import { parse } from 'shell-quote';
 
 /**
  * Normalize a filesystem path to use POSIX-style forward slashes.
@@ -601,6 +602,7 @@ export function matchesCommandPattern(
 ): boolean {
   // This function matches a single pattern against a single simple command.
   // Compound command splitting is handled by the caller (PermissionManager).
+  const normalizedCommand = stripLeadingVariableAssignments(command);
 
   // Special case: lone `*` matches any single command
   if (pattern === '*') {
@@ -611,7 +613,10 @@ export function matchesCommandPattern(
     // No wildcards: prefix matching (backward compat).
     // "git commit" matches "git commit" and "git commit -m test"
     // but NOT "gitcommit".
-    return command === pattern || command.startsWith(pattern + ' ');
+    return (
+      normalizedCommand === pattern ||
+      normalizedCommand.startsWith(pattern + ' ')
+    );
   }
 
   // Build regex from glob pattern with word-boundary semantics.
@@ -660,9 +665,9 @@ export function matchesCommandPattern(
   regex += '$';
 
   try {
-    return new RegExp(regex).test(command);
+    return new RegExp(regex, 's').test(normalizedCommand);
   } catch {
-    return command === pattern;
+    return normalizedCommand === pattern;
   }
 }
 
@@ -671,6 +676,44 @@ export function matchesCommandPattern(
  */
 function escapeRegex(s: string): string {
   return s.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
+}
+
+const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function stripLeadingVariableAssignments(command: string): string {
+  const trimmed = command.trim();
+  if (!trimmed) {
+    return trimmed;
+  }
+
+  try {
+    const tokens: string[] = [];
+
+    for (const token of parse(trimmed)) {
+      if (typeof token === 'string') {
+        tokens.push(token);
+      } else if (
+        token &&
+        typeof token === 'object' &&
+        'op' in token &&
+        typeof token.op === 'string'
+      ) {
+        tokens.push(token.op);
+      }
+    }
+
+    let firstCommandToken = 0;
+    while (
+      firstCommandToken < tokens.length &&
+      ENV_ASSIGNMENT_REGEX.test(tokens[firstCommandToken]!)
+    ) {
+      firstCommandToken++;
+    }
+
+    return tokens.slice(firstCommandToken).join(' ');
+  } catch {
+    return trimmed;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

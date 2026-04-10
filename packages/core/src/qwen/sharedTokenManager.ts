@@ -468,6 +468,7 @@ export class SharedTokenManager {
   ): Promise<QwenCredentials> {
     const startTime = Date.now();
     const lockPath = this.getLockFilePath();
+    let lockAcquired = false;
 
     try {
       // Check if we have a refresh token before attempting refresh
@@ -482,6 +483,7 @@ export class SharedTokenManager {
 
       // Acquire distributed file lock
       await this.acquireLock(lockPath);
+      lockAcquired = true;
 
       // Check if the operation is taking too long
       const lockAcquisitionTime = Date.now() - startTime;
@@ -596,8 +598,10 @@ export class SharedTokenManager {
         error,
       );
     } finally {
-      // Always release the file lock
-      await this.releaseLock(lockPath);
+      // Only release the file lock if it was successfully acquired
+      if (lockAcquired) {
+        await this.releaseLock(lockPath);
+      }
     }
   }
 

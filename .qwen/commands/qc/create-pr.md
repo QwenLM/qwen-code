@@ -31,6 +31,11 @@ Create a well-structured pull request with proper description and title.
 4. **Set up PR**
    - Create PR title and body
    - Submit PR with gh command
+   - **If a GitHub token is provided in the user's message**, use it by setting the `GH_TOKEN` environment variable:
+     ```bash
+     GH_TOKEN=<provided_token> gh pr create --title "..." --body "..."
+     ```
+   - If no token is provided, use the default `gh` authentication
 
 ## PR Template
 

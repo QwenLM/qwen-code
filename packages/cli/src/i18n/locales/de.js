@@ -79,6 +79,7 @@ export default {
   'CLI Version': 'CLI-Version',
   'Git Commit': 'Git-Commit',
   Model: 'Modell',
+  'Fast Model': 'Schnelles Modell',
   Sandbox: 'Sandbox',
   'OS Platform': 'Betriebssystem',
   'OS Arch': 'OS-Architektur',
@@ -599,6 +600,10 @@ export default {
   'Loading hooks...': 'Hooks werden geladen...',
   'Error loading hooks:': 'Fehler beim Laden der Hooks:',
   'Press Escape to close': 'Escape zum Schließen drücken',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Escape, Ctrl+C oder Ctrl+D zum Abbrechen',
+  'Press Space, Enter, or Escape to dismiss':
+    'Leertaste, Enter oder Escape zum Schließen',
   'No hook selected': 'Kein Hook ausgewählt',
   // Hooks - List Step
   'No hook events found.': 'Keine Hook-Ereignisse gefunden.',
@@ -623,6 +628,19 @@ export default {
   'No hook config selected': 'Keine Hook-Konfiguration ausgewählt',
   'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
     'Um diesen Hook zu ändern oder zu entfernen, bearbeiten Sie settings.json direkt oder fragen Sie Qwen.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook-Konfiguration - Deaktiviert',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'Alle Hooks sind derzeit deaktiviert. Sie haben {{count}} die nicht ausgeführt werden.',
+  '{{count}} configured hook': '{{count}} konfigurierter Hook',
+  '{{count}} configured hooks': '{{count}} konfigurierte Hooks',
+  'When hooks are disabled:': 'Wenn Hooks deaktiviert sind:',
+  'No hook commands will execute': 'Keine Hook-Befehle werden ausgeführt',
+  'StatusLine will not be displayed': 'StatusLine wird nicht angezeigt',
+  'Tool operations will proceed without hook validation':
+    'Tool-Operationen werden ohne Hook-Validierung fortgesetzt',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'Um Hooks wieder zu aktivieren, entfernen Sie "disableAllHooks" aus settings.json oder fragen Sie Qwen Code.',
   // Hooks - Source
   Project: 'Projekt',
   User: 'Benutzer',
@@ -882,10 +900,12 @@ export default {
     'Verwendung: /forget <zu entfernender Erinnerungstext>',
   'No managed auto-memory entries matched: {{query}}':
     'Keine verwalteten Auto-Speicher-Einträge gefunden: {{query}}',
-  'Show managed auto-memory status.': 'Status des verwalteten Auto-Speichers anzeigen.',
+  'Show managed auto-memory status.':
+    'Status des verwalteten Auto-Speichers anzeigen.',
   'Run managed auto-memory extraction for the current session.':
     'Verwaltete Auto-Speicher-Extraktion für die aktuelle Sitzung ausführen.',
-  'Managed auto-memory root: {{root}}': 'Verwalteter Auto-Speicher-Stamm: {{root}}',
+  'Managed auto-memory root: {{root}}':
+    'Verwalteter Auto-Speicher-Stamm: {{root}}',
   'Managed auto-memory topics:': 'Verwaltete Auto-Speicher-Themen:',
   'No extraction cursor found yet.': 'Noch kein Extraktions-Cursor gefunden.',
   'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
@@ -1009,6 +1029,8 @@ export default {
   // Commands - Model
   // ============================================================================
   'Switch the model for this session': 'Modell für diese Sitzung wechseln',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Leichteres Modell für Eingabevorschläge und spekulative Ausführung festlegen',
   'Content generator configuration not available.':
     'Inhaltsgenerator-Konfiguration nicht verfügbar.',
   'Authentication type not available.':
@@ -1201,6 +1223,8 @@ export default {
   'Always allow for this user': 'Für diesen Benutzer immer erlauben',
   'Always allow {{action}} for this user':
     '{{action}} für diesen Benutzer immer erlauben',
+  'Yes, restore previous mode ({{mode}})':
+    'Ja, vorherigen Modus wiederherstellen ({{mode}})',
   'Yes, and auto-accept edits': 'Ja, und Änderungen automatisch akzeptieren',
   'Yes, and manually approve edits': 'Ja, und Änderungen manuell genehmigen',
   'No, keep planning (esc)': 'Nein, weiter planen (Esc)',
@@ -1360,8 +1384,8 @@ export default {
   unknown: 'unbekannt',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Modell konnte nicht auf '{{modelId}}' umgestellt werden.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — effizientes Hybridmodell mit führender Programmierleistung',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — effizientes Hybridmodell mit führender Programmierleistung',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Das neueste Qwen Vision Modell von Alibaba Cloud ModelStudio (Version: qwen3-vl-plus-2025-09-23)',
 
@@ -1985,4 +2009,22 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
+  compact: 'kompakt',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Strg+O umschalten).',
+  'Press Ctrl+O to show full tool output':
+    'Strg+O für vollständige Tool-Ausgabe drücken',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };
