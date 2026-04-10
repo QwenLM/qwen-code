@@ -87,7 +87,7 @@ describe('auto-memory topic scanning', () => {
     const referenceDoc = docs.find((doc) => doc.type === 'reference');
 
     expect(referenceDoc?.description).toBe('External references');
-    expect(referenceDoc?.relativePath).toBe(path.join('reference', 'grafana.md'));
+    expect(referenceDoc?.relativePath).toBe('reference/grafana.md');
     expect(referenceDoc?.body).toContain('grafana.internal/d/api-latency');
   });
 });
