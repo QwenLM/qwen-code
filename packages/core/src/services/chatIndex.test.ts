@@ -9,13 +9,9 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 // Mock project directory
-const mockProjectDir = vi.hoisted(() => {
-  const tempDir = process.env['TEMP'] || '/tmp';
-  const pathSep = process.platform === 'win32' ? '\\' : '/';
-  return {
-    path: `${tempDir}${pathSep}mock-project-test`,
-  };
-});
+const mockProjectDir = vi.hoisted(() => ({
+  path: (process.env['TEMP'] || '/tmp') + '/mock-project-test',
+}));
 
 import {
   saveSessionToIndex,

@@ -19,6 +19,26 @@ import {
   SessionService,
 } from '@qwen-code/qwen-code-core';
 
+/**
+ * Validates a session name
+ * @param name The session name to validate
+ * @returns true if valid, or an error message string if invalid
+ */
+function validateSessionName(name: string): true | string {
+  if (!name) {
+    return 'Please provide a name. Usage: /chat <command> <name>';
+  }
+  // Only allow letters, numbers, hyphens, underscores, and dots
+  if (!/^[a-zA-Z0-9_-./]+$/.test(name)) {
+    return 'Invalid session name. Use only letters, numbers, hyphens, underscores, and dots.';
+  }
+  // Limit to 128 characters
+  if (name.length > 128) {
+    return 'Session name is too long. Maximum 128 characters.';
+  }
+  return true;
+}
+
 export const chatCommand: SlashCommand = {
   name: 'chat',
   get description() {
@@ -38,11 +58,12 @@ export const chatCommand: SlashCommand = {
       ): Promise<SlashCommandActionReturn | void> => {
         const name = args.trim();
 
-        if (!name) {
+        const validation = validateSessionName(name);
+        if (validation !== true) {
           return {
             type: 'message',
             messageType: 'error',
-            content: t('Please provide a name. Usage: /chat save <name>'),
+            content: t(validation),
           };
         }
 
@@ -147,11 +168,12 @@ export const chatCommand: SlashCommand = {
       ): Promise<SlashCommandActionReturn | void> => {
         const name = args.trim();
 
-        if (!name) {
+        const validation = validateSessionName(name);
+        if (validation !== true) {
           return {
             type: 'message',
             messageType: 'error',
-            content: t('Please provide a name. Usage: /chat resume <name>'),
+            content: t(validation),
           };
         }
 
@@ -236,14 +258,16 @@ export const chatCommand: SlashCommand = {
       ): Promise<SlashCommandActionReturn | void> => {
         const name = args.trim();
 
-        if (!name) {
+        const validation = validateSessionName(name);
+        if (validation !== true) {
           return {
             type: 'message',
             messageType: 'error',
-            content: t('Please provide a name. Usage: /chat delete <name>'),
+            content: t(validation),
           };
         }
 
+        // Check if session exists first
         try {
           const config = context.services.config;
           if (!config) {
@@ -267,7 +291,18 @@ export const chatCommand: SlashCommand = {
             };
           }
 
-          // Delete the actual session file (may not exist if manually deleted)
+          // Ask for confirmation before deleting
+          if (!context.overwriteConfirmed) {
+            return {
+              type: 'confirm_action',
+              prompt: `Are you sure you want to delete session "${name}"? This action cannot be undone.`,
+              originalInvocation: {
+                raw: context.invocation?.raw || `/chat delete ${name}`,
+              },
+            };
+          }
+
+          // User confirmed deletion - delete the actual session file
           const sessionService = new SessionService(projectDir);
           const sessionDeleted = await sessionService.removeSession(sessionId);
 

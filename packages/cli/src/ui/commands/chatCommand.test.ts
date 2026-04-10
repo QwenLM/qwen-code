@@ -209,12 +209,39 @@ describe('chatCommand', () => {
       });
     });
 
-    it('should delete session by name', async () => {
+    it('should request confirmation before deleting session', async () => {
       const deleteCommand = chatCommand.subCommands?.find(
         (cmd) => cmd.name === 'delete',
       );
       const result = await deleteCommand?.action!(
         mockContext,
+        'test-session-1',
+      );
+
+      expect(getSessionIdByName).toHaveBeenCalledWith(
+        '/test/project/dir',
+        'test-session-1',
+      );
+      expect(result).toEqual({
+        type: 'confirm_action',
+        prompt:
+          'Are you sure you want to delete session "test-session-1"? This action cannot be undone.',
+        originalInvocation: {
+          raw: '/chat delete test-session-1',
+        },
+      });
+    });
+
+    it('should delete session after confirmation', async () => {
+      const confirmedContext = createMockContext({
+        overwriteConfirmed: true,
+      });
+
+      const deleteCommand = chatCommand.subCommands?.find(
+        (cmd) => cmd.name === 'delete',
+      );
+      const result = await deleteCommand?.action!(
+        confirmedContext,
         'test-session-1',
       );
 
@@ -240,14 +267,18 @@ describe('chatCommand', () => {
           ({
             loadSession: vi.fn().mockResolvedValue({ messages: [] }),
             removeSession: vi.fn().mockResolvedValue(false),
-          }) as unknown as typeof SessionService,
+          }) as unknown as SessionService,
       );
+
+      const confirmedContext = createMockContext({
+        overwriteConfirmed: true,
+      });
 
       const deleteCommand = chatCommand.subCommands?.find(
         (cmd) => cmd.name === 'delete',
       );
       const result = await deleteCommand?.action!(
-        mockContext,
+        confirmedContext,
         'test-session-1',
       );
 

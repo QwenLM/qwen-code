@@ -10,17 +10,17 @@ import { QWEN_DIR } from '../config/storage.js';
 import crypto from 'node:crypto';
 
 /**
- * 会话索引数据结构
- * 存储在 <project>/.qwen/chat-index.json 中(按项目隔离)
+ * Session index data structure
+ * Stored in <project>/.qwen/chat-index.json (isolated per project)
  */
 export interface ChatIndex {
-  /** name -> sessionId 的映射 */
+  /** name -> sessionId mapping */
   [name: string]: string;
 }
 
 /**
- * 获取索引文件路径
- * @param projectDir 项目目录路径
+ * Gets the index file path
+ * @param projectDir The project directory path
  */
 function getIndexPath(projectDir: string): string {
   const qwenDir = path.join(projectDir, QWEN_DIR);
@@ -28,8 +28,8 @@ function getIndexPath(projectDir: string): string {
 }
 
 /**
- * 确保项目 .qwen 目录存在
- * @param projectDir 项目目录路径
+ * Ensures the project .qwen directory exists
+ * @param projectDir The project directory path
  */
 async function ensureQwenDir(projectDir: string): Promise<void> {
   const qwenDir = path.join(projectDir, QWEN_DIR);
@@ -37,9 +37,9 @@ async function ensureQwenDir(projectDir: string): Promise<void> {
 }
 
 /**
- * 原子写入文件（使用临时文件 + rename）
- * @param filePath 目标文件路径
- * @param content 文件内容
+ * Atomically writes to a file (using temp file + rename)
+ * @param filePath Target file path
+ * @param content File content
  */
 async function atomicWrite(filePath: string, content: string): Promise<void> {
   const dir = path.dirname(filePath);
@@ -48,28 +48,46 @@ async function atomicWrite(filePath: string, content: string): Promise<void> {
     await fs.writeFile(tempFile, content, 'utf-8');
     await fs.rename(tempFile, filePath);
   } catch (error) {
-    // 清理临时文件
+    // Clean up temp file
     try {
       await fs.unlink(tempFile);
     } catch {
-      // 忽略清理错误
+      // Ignore cleanup errors
     }
     throw error;
   }
 }
 
 /**
- * 读取索引文件
- * @param projectDir 项目目录路径
- * @returns 索引对象，如果文件不存在则返回空对象
- * @throws 如果是真正的错误(非 ENOENT、非 SyntaxError)，则抛出异常
+ * Reads the chat index file
+ * @param projectDir The project directory path
+ * @returns Index object, returns empty object if file doesn't exist
+ * @throws On real errors (permissions, I/O failures)
  */
 export async function readChatIndex(projectDir: string): Promise<ChatIndex> {
   try {
     const content = await fs.readFile(getIndexPath(projectDir), 'utf-8');
-    return JSON.parse(content) as ChatIndex;
+    const parsed = JSON.parse(content);
+
+    // Validate the parsed data
+    if (
+      typeof parsed !== 'object' ||
+      parsed === null ||
+      Array.isArray(parsed)
+    ) {
+      throw new Error('Invalid chat index format');
+    }
+
+    // Ensure all values are strings
+    for (const [key, value] of Object.entries(parsed)) {
+      if (typeof value !== 'string') {
+        throw new Error(`Invalid entry in chat index: ${key}`);
+      }
+    }
+
+    return parsed as ChatIndex;
   } catch (error) {
-    // 文件不存在是正常情况，返回空索引
+    // File doesn't exist is normal, return empty index
     if (
       typeof error === 'object' &&
       error !== null &&
@@ -78,20 +96,20 @@ export async function readChatIndex(projectDir: string): Promise<ChatIndex> {
     ) {
       return {};
     }
-    // JSON 解析错误，返回空索引（文件可能损坏）
+    // JSON parse error, return empty index (file may be corrupted)
     if (error instanceof SyntaxError) {
       return {};
     }
-    // 其他错误(权限问题、I/O 错误等)应该抛出
+    // Other errors (permissions, I/O) should throw
     throw error;
   }
 }
 
 /**
- * 保存会话到索引
- * @param projectDir 项目目录路径
- * @param name 会话名称
- * @param sessionId 会话 ID
+ * Saves a session to the index
+ * @param projectDir The project directory path
+ * @param name Session name
+ * @param sessionId Session ID
  */
 export async function saveSessionToIndex(
   projectDir: string,
@@ -107,10 +125,10 @@ export async function saveSessionToIndex(
 }
 
 /**
- * 从索引中删除会话
- * @param projectDir 项目目录路径
- * @param name 会话名称
- * @returns 是否删除成功
+ * Deletes a session from the index
+ * @param projectDir The project directory path
+ * @param name Session name
+ * @returns Whether deletion was successful
  */
 export async function deleteSessionFromIndex(
   projectDir: string,
@@ -128,10 +146,10 @@ export async function deleteSessionFromIndex(
 }
 
 /**
- * 根据名称获取会话 ID
- * @param projectDir 项目目录路径
- * @param name 会话名称
- * @returns 会话 ID，如果不存在则返回 undefined
+ * Gets a session ID by name
+ * @param projectDir The project directory path
+ * @param name Session name
+ * @returns Session ID, or undefined if not found
  */
 export async function getSessionIdByName(
   projectDir: string,
@@ -142,9 +160,9 @@ export async function getSessionIdByName(
 }
 
 /**
- * 列出所有已命名的会话
- * @param projectDir 项目目录路径
- * @returns 名称到 sessionId 的映射
+ * Lists all named sessions
+ * @param projectDir The project directory path
+ * @returns Mapping of name to sessionId
  */
 export async function listNamedSessions(
   projectDir: string,
