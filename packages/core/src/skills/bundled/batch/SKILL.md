@@ -1,6 +1,6 @@
 ---
 name: batch
-description: Execute batch operations on multiple files in parallel. Use when you need to apply the same operation to many files at once. Examples - `/batch add JSDoc comments to all .ts files under src`, `/batch convert all .js files to .ts`, `/batch fix lint errors in src/components/*.tsx`. The command will automatically discover target files, split them into chunks, and process them in parallel using worker agents.
+description: Execute batch operations on multiple files in parallel. Automatically discovers files, splits into chunks, and processes with parallel worker agents. Use `/batch` followed by operation and file pattern.
 allowedTools:
   - task
   - glob
@@ -36,8 +36,10 @@ Use the `glob` tool to discover matching files. Apply these common exclusions au
 - `dist/**`
 - `build/**`
 - `.git/**`
-- `**/*.test.ts`
-- `**/*.spec.ts`
+- `**/*.test.ts`, `**/*.test.js`
+- `**/*.spec.ts`, `**/*.spec.js`
+- `**/__tests__/**`
+- `**/test/**`, `**/tests/**`
 - `**/package-lock.json`
 - `**/yarn.lock`
 - `**/*.min.js`
@@ -56,6 +58,8 @@ Split the discovered files into chunks based on these rules:
 | 6-15        | 2           | ~7-8 each       |
 | 16-30       | 3           | ~10 each        |
 | 31-50       | 4           | ~10-12 each     |
+| 51-75       | 5           | ~10-15 each     |
+| 76-100      | 5           | ~15-20 each     |
 
 **Chunking algorithm**:
 
@@ -63,11 +67,13 @@ Split the discovered files into chunks based on these rules:
 - Maximum chunk size: 15 files (ensure reasonable work per agent)
 - Maximum parallel agents: 5 (API rate limit consideration)
 
-Example: 24 files → 3 chunks of 8 files each
+Example: 24 files → 3 chunks of ~8 files each
 
 ## Step 3: Launch Parallel Worker Agents
 
-Launch worker agents **in parallel** by invoking the Agent tool multiple times in a **SINGLE message**.
+Launch worker agents **in parallel** by invoking the `task` tool (the Agent tool) multiple times in a **SINGLE message**.
+
+**Note**: The `task` tool in allowedTools is the Agent tool used to spawn worker agents.
 
 Each worker agent should receive:
 
@@ -95,10 +101,11 @@ You are a worker agent processing a batch of files.
 
 **Instructions**:
 1. Process each file independently
-2. For each file, report either:
+2. For each file, report one of:
    - SUCCESS: [file path] - [brief description of change]
    - FAILED: [file path] - [reason for failure]
-3. If a file fails, continue with the next file - do not abort
+   - SKIPPED: [file path] - [reason for skipping]
+3. If a file fails or is skipped, continue with the next file - do not abort
 4. At the end, provide a summary of what was done
 
 **Constraints**:
@@ -249,10 +256,39 @@ For each failed file, include:
 
 ## Dry-Run Mode
 
-If the user wants to preview what will be changed without actually modifying files:
+If the user wants to preview what will be changed without actually modifying files, use the `--dry-run` flag:
 
-1. Discover and list all matching files
+1. Discover and list all matching files with counts
 2. Show the planned operation for each file
-3. Ask the user if they want to proceed with the actual changes
+3. Display the chunking strategy
+4. Ask the user if they want to proceed with the actual changes
+5. If user confirms, execute the batch operation
 
-Example: `/batch --dry-run add JSDoc comments to src/**/*.ts`
+**Example**:
+
+```
+/batch --dry-run add JSDoc comments to src/**/*.ts
+```
+
+**Expected output**:
+
+```
+### Dry-Run Preview
+
+**Operation**: Add JSDoc comments to all .ts files in src/
+
+**Files discovered**: 24 files
+
+**Chunking plan**:
+| Chunk | Files |
+|-------|-------|
+| 1     | src/utils/a.ts, b.ts, c.ts, ... (8 files) |
+| 2     | src/components/x.ts, y.ts, ... (8 files) |
+| 3     | src/services/m.ts, n.ts, ... (8 files) |
+
+**Planned operation per file**:
+- Add JSDoc comments to all exported functions
+- Preserve existing code style
+
+Proceed? (y/n)
+```
