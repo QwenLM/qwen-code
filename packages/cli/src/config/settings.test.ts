@@ -1808,6 +1808,12 @@ describe('Settings Loading and Merging', () => {
       const result = loadSettings(MOCK_WORKSPACE_DIR);
       expect(result).toBeDefined();
 
+      // Verify the warning message does NOT say "renamed" since rename failed,
+      // but instead tells user to fix the file manually.
+      const warnings = getSettingsWarnings(result);
+      expect(warnings.some((w) => w.includes('fix the JSON'))).toBe(true);
+      expect(warnings.some((w) => w.includes('renamed to'))).toBe(false);
+
       vi.restoreAllMocks();
     });
 

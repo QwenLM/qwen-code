@@ -610,16 +610,18 @@ export function loadSettings(
           // can start with empty settings rather than crashing.
           if (!rawSettings) {
             const corruptedPath = `${filePath}.corrupted.${Date.now()}`;
-            const warningMsg = `Settings file ${filePath} has invalid JSON and was renamed to ${corruptedPath}. Your settings have been reset. To recover, fix the JSON in ${corruptedPath} and rename it back.`;
-            debugLogger.warn(warningMsg);
+            let warningMsg: string;
             try {
               fs.renameSync(filePath, corruptedPath);
+              warningMsg = `Settings file ${filePath} has invalid JSON and was renamed to ${corruptedPath}. Your settings have been reset. To recover, fix the JSON in ${corruptedPath} and rename it back.`;
             } catch (renameError) {
               // If rename fails, still proceed with empty settings
               debugLogger.error(
                 `Failed to rename corrupted settings file: ${getErrorMessage(renameError)}`,
               );
+              warningMsg = `Settings file ${filePath} has invalid JSON. Your settings have been reset. Please fix the JSON in ${filePath} manually.`;
             }
+            debugLogger.warn(warningMsg);
             return {
               settings: {},
               migrationWarnings: [warningMsg],
