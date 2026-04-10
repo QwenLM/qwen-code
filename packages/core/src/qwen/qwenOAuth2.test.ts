@@ -367,6 +367,13 @@ describe('QwenOAuth2Client', () => {
     it('should successfully refresh access token', async () => {
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            resource_url: 'https://new-endpoint.com',
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',

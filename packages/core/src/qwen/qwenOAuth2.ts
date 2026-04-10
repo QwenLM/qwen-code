@@ -433,7 +433,23 @@ export class QwenOAuth2Client implements IQwenOAuth2Client {
       );
     }
 
-    const responseData = (await response.json()) as TokenRefreshResponse;
+    let responseText: string;
+    try {
+      responseText = await response.text();
+    } catch (e) {
+      responseText = '';
+    }
+
+    let responseData: TokenRefreshResponse;
+    try {
+      responseData = JSON.parse(responseText) as TokenRefreshResponse;
+    } catch {
+      await clearQwenCredentials();
+      throw new CredentialsClearRequiredError(
+        `Qwen OAuth refresh returned invalid JSON: ${responseText || '(empty response body)'}`,
+        { status: response.status, response: responseText },
+      );
+    }
 
     // Check if the response indicates success
     if (isErrorResponse(responseData)) {
