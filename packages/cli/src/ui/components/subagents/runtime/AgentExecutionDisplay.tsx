@@ -87,7 +87,7 @@ const LINES_PER_TOOL_CALL = 2;
  * available height. This prevents Ink from laying out content that far
  * exceeds the visible terminal area, which causes flickering.
  */
-function computeContentBudget(availableHeight: number | undefined): {
+export function computeContentBudget(availableHeight: number | undefined): {
   maxTaskPromptLines: number;
   maxToolCalls: number;
 } {
