@@ -81,6 +81,35 @@ function isDefaultBaseUrl(baseUrl: string): boolean {
 }
 
 /**
+ * 环境变量到 AuthType 的映射
+ */
+const ENV_BASE_URL_MAP: Record<string, string> = {
+  OPENAI_BASE_URL: 'openai',
+  ANTHROPIC_BASE_URL: 'anthropic',
+  GEMINI_BASE_URL: 'gemini',
+};
+
+/**
+ * 根据 authType 获取对应的环境变量 baseUrl
+ */
+function getEnvBaseUrlForAuthType(
+  authType: string | undefined,
+): string | undefined {
+  if (!authType) {
+    return undefined;
+  }
+
+  // 根据 authType 查找对应的环境变量
+  for (const [envVar, mappedAuthType] of Object.entries(ENV_BASE_URL_MAP)) {
+    if (mappedAuthType === authType) {
+      return process.env[envVar];
+    }
+  }
+
+  return undefined;
+}
+
+/**
  * 获取预连接的目标 URL
  * 优先级：settingsBaseUrl > 环境变量 > 默认值
  *
@@ -99,11 +128,8 @@ function getPreconnectTargetUrl(
     return undefined;
   }
 
-  // 2. 从环境变量获取
-  const envBaseUrl =
-    process.env['OPENAI_BASE_URL'] ||
-    process.env['ANTHROPIC_BASE_URL'] ||
-    process.env['GEMINI_BASE_URL'];
+  // 2. 从环境变量获取（根据 authType 查找对应的环境变量）
+  const envBaseUrl = getEnvBaseUrlForAuthType(authType);
   if (envBaseUrl) {
     // 如果是默认 URL，直接使用；否则应该跳过
     if (isDefaultBaseUrl(envBaseUrl)) {

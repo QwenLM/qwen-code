@@ -215,17 +215,6 @@ export async function main() {
   setupUnhandledRejectionHandler();
   const settings = loadSettings();
 
-  // 启动优化：预连接 API（与后续操作并行）
-  // 预估 authType（实际值在 loadCliConfig 中确定）
-  const probableAuthType =
-    process.env['QWEN_CODE_AUTH_TYPE'] ||
-    (settings.merged.security?.auth?.selectedType as string | undefined);
-  preconnectApi(probableAuthType, {
-    settingsBaseUrl: settings.merged.security?.auth?.baseUrl as
-      | string
-      | undefined,
-  });
-
   await cleanupCheckpoints();
 
   let argv = await parseArguments();
@@ -380,6 +369,19 @@ export async function main() {
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
 
+    // Startup optimization: preconnect API to warm TCP+TLS connection
+    // Only fire for flows that will make API calls
+    try {
+      const authType = config.getModelsConfig().getCurrentAuthType();
+      preconnectApi(authType, {
+        settingsBaseUrl: settings.merged.security?.auth?.baseUrl as
+          | string
+          | undefined,
+      });
+    } catch {
+      // If we can't get authType, skip preconnect - it's optional optimization
+    }
+
     // FIXME: list extensions after the config initialize
     // if (config.getListExtensions()) {
     //   console.log('Installed extensions:');
@@ -396,7 +398,7 @@ export async function main() {
       // input showing up in the output.
       process.stdin.setRawMode(true);
 
-      // 启动优化：开始早期输入捕获
+      // Startup optimization: start early input capture
       startEarlyInputCapture();
 
       // This cleanup isn't strictly needed but may help in certain situations.

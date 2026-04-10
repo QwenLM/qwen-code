@@ -114,6 +114,28 @@ describe('apiPreconnect', () => {
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
+    it('should only check OPENAI_BASE_URL for openai authType', () => {
+      process.env['OPENAI_BASE_URL'] = 'https://api.openai.com/v1';
+      process.env['ANTHROPIC_BASE_URL'] = 'https://custom.anthropic.com/v1';
+      preconnectApi('openai');
+      // Should use OPENAI_BASE_URL (which is default), ignore ANTHROPIC_BASE_URL
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.openai.com/v1',
+        expect.objectContaining({ method: 'HEAD' }),
+      );
+    });
+
+    it('should only check ANTHROPIC_BASE_URL for anthropic authType', () => {
+      process.env['ANTHROPIC_BASE_URL'] = 'https://api.anthropic.com';
+      process.env['OPENAI_BASE_URL'] = 'https://custom.openai.com/v1';
+      preconnectApi('anthropic');
+      // Should use ANTHROPIC_BASE_URL (which is default), ignore OPENAI_BASE_URL
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.anthropic.com',
+        expect.objectContaining({ method: 'HEAD' }),
+      );
+    });
+
     it('should not fire twice', () => {
       preconnectApi('qwen-oauth');
       preconnectApi('openai');

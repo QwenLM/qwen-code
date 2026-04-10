@@ -162,7 +162,7 @@ export function KeypressProvider({
       setRawMode(true);
     }
 
-    // 启动优化：停止早期输入捕获并获取已捕获的输入
+    // Startup optimization: stop early input capture and get captured input
     stopEarlyInputCapture();
     const capturedInput = getAndClearCapturedInput();
 
