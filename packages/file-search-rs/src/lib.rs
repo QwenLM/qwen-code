@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use globset::GlobSet;
-use ignore::{gitignore::GitignoreBuilder, Match, WalkBuilder};
+use ignore::gitignore::GitignoreBuilder;
+use ignore::WalkBuilder;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use parking_lot::RwLock;
@@ -208,13 +209,6 @@ impl FileSearch {
             ));
         }
 
-        // Load ignore patterns
-        let gitignore = if self.config.use_gitignore {
-            self.load_gitignore()
-        } else {
-            None
-        };
-
         let qwenignore_set = if self.config.use_qwenignore {
             self.load_qwenignore()
         } else {
@@ -223,15 +217,14 @@ impl FileSearch {
 
         let ignore_dirs_set = self.load_ignore_dirs_set();
 
-        // Build the walker WITHOUT git_ignore - we handle it manually
+        // Build the walker with parallel gitignore filtering
         let mut builder = WalkBuilder::new(&project_root);
 
         builder
-            .git_ignore(false)
-            .git_global(false)
+            .git_ignore(self.config.use_gitignore)
+            .git_global(self.config.use_gitignore)
             .hidden(false)
-            .follow_links(false)
-            .sort_by_file_name(|a, b| a.cmp(b));
+            .follow_links(false);
 
         // Add max depth if specified
         if let Some(depth) = self.config.max_depth {
@@ -274,15 +267,6 @@ impl FileSearch {
                         continue;
                     }
 
-                    // Apply gitignore filtering using Gitignore object
-                    if let Some(ref gitignore_obj) = gitignore {
-                        // Gitignore::matched_path_or_any_parents returns Match::Ignore if the path should be ignored
-                        let match_result = gitignore_obj.matched_path_or_any_parents(path, entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false));
-                        if let Match::Ignore(_) = match_result {
-                            continue;
-                        }
-                    }
-
                     // Apply ignore_dirs filtering
                     if let Some(ref ignore_set) = ignore_dirs_set {
                         let mut should_skip = false;
@@ -302,27 +286,7 @@ impl FileSearch {
 
                     // Apply qwenignore filtering
                     if let Some(ref qwen_set) = qwenignore_set {
-                        let mut should_skip = false;
-                        
-                        // Check the path itself
                         if qwen_set.is_match(&relative_str) {
-                            should_skip = true;
-                        }
-                        
-                        // Also check parent directories
-                        if !should_skip {
-                            let mut current = PathBuf::new();
-                            for component in relative.components() {
-                                current.push(component);
-                                let current_str = current.to_string_lossy();
-                                if qwen_set.is_match(current_str.as_ref()) {
-                                    should_skip = true;
-                                    break;
-                                }
-                            }
-                        }
-                        
-                        if should_skip {
                             continue;
                         }
                     }
@@ -346,18 +310,6 @@ impl FileSearch {
                 }
             }
         }
-
-        // Sort results: directories first, then alphabetically
-        files.sort_by(|a, b| {
-            let a_is_dir = a.ends_with('/');
-            let b_is_dir = b.ends_with('/');
-
-            match (a_is_dir, b_is_dir) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => a.cmp(b),
-            }
-        });
 
         // Update state
         let mut state = self.state.write();

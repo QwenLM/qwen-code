@@ -15,7 +15,7 @@ import { unescapePath } from '../paths.js';
 
 // Try to load the Rust native module
 // We use dynamic require inside a try-catch to avoid top-level await issues
- 
+
 const RustFileSearch: {
   FileSearch: new (config: {
     projectRoot: string;
@@ -34,8 +34,8 @@ const RustFileSearch: {
   };
 } | null = (() => {
   try {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, no-restricted-syntax, import/no-internal-modules
-    return require('../../../../file-search-rs/index.js') as {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, no-restricted-syntax
+    return require('../../../../../file-search-rs/index.js') as {
       FileSearch: new (config: {
         projectRoot: string;
         useGitignore: boolean;
