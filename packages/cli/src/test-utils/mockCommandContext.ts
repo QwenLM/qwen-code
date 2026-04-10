@@ -64,6 +64,7 @@ export const createMockCommandContext = (
       extensionsUpdateState: new Map(),
       setExtensionsUpdateState: vi.fn(),
       reloadCommands: vi.fn(),
+      setSessionName: vi.fn(),
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
     } as any,
     session: {

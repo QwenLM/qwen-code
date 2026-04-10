@@ -33,13 +33,18 @@ describe('renameCommand', () => {
     });
   });
 
-  it('should return error when no name is provided', async () => {
+  it('should return error when no name is provided and auto-generate fails', async () => {
     const mockConfig = {
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSessionService: vi.fn().mockReturnValue({
         renameSession: vi.fn().mockResolvedValue(true),
       }),
+      getGeminiClient: vi.fn().mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+      }),
+      getContentGenerator: vi.fn(),
+      getModel: vi.fn(),
     };
     mockContext = createMockCommandContext({
       services: { config: mockConfig as never },
@@ -50,17 +55,22 @@ describe('renameCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: 'Please provide a name. Usage: /rename <name>',
+      content: 'Could not generate a title. Usage: /rename <name>',
     });
   });
 
-  it('should return error when only whitespace is provided', async () => {
+  it('should return error when only whitespace is provided and auto-generate fails', async () => {
     const mockConfig = {
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSessionService: vi.fn().mockReturnValue({
         renameSession: vi.fn().mockResolvedValue(true),
       }),
+      getGeminiClient: vi.fn().mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+      }),
+      getContentGenerator: vi.fn(),
+      getModel: vi.fn(),
     };
     mockContext = createMockCommandContext({
       services: { config: mockConfig as never },
@@ -71,7 +81,7 @@ describe('renameCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: 'Please provide a name. Usage: /rename <name>',
+      content: 'Could not generate a title. Usage: /rename <name>',
     });
   });
 
