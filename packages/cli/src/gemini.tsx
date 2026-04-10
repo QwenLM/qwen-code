@@ -58,6 +58,8 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
+import { preconnectApi } from './utils/apiPreconnect.js';
+import { startEarlyInputCapture } from './utils/earlyInputCapture.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
@@ -212,6 +214,18 @@ export async function startInteractiveUI(
 export async function main() {
   setupUnhandledRejectionHandler();
   const settings = loadSettings();
+
+  // 启动优化：预连接 API（与后续操作并行）
+  // 预估 authType（实际值在 loadCliConfig 中确定）
+  const probableAuthType =
+    process.env['QWEN_CODE_AUTH_TYPE'] ||
+    (settings.merged.security?.auth?.selectedType as string | undefined);
+  preconnectApi(probableAuthType, {
+    settingsBaseUrl: settings.merged.security?.auth?.baseUrl as
+      | string
+      | undefined,
+  });
+
   await cleanupCheckpoints();
 
   let argv = await parseArguments();
@@ -381,6 +395,9 @@ export async function main() {
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
       process.stdin.setRawMode(true);
+
+      // 启动优化：开始早期输入捕获
+      startEarlyInputCapture();
 
       // This cleanup isn't strictly needed but may help in certain situations.
       process.on('SIGTERM', () => {

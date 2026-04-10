@@ -39,6 +39,10 @@ import {
 import { clipboardHasImage } from '../utils/clipboardUtils.js';
 
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
+import {
+  stopEarlyInputCapture,
+  getAndClearCapturedInput,
+} from '../../utils/earlyInputCapture.js';
 
 const ESC = '\u001B';
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
@@ -157,6 +161,10 @@ export function KeypressProvider({
     if (wasRaw === false) {
       setRawMode(true);
     }
+
+    // 启动优化：停止早期输入捕获并获取已捕获的输入
+    stopEarlyInputCapture();
+    const capturedInput = getAndClearCapturedInput();
 
     const keypressStream = new PassThrough();
     let usePassthrough = false;
@@ -983,6 +991,22 @@ export function KeypressProvider({
       rl = readline.createInterface({ input: stdin, escapeCodeTimeout: 0 });
       readline.emitKeypressEvents(stdin, rl);
       stdin.on('keypress', handleKeypress);
+    }
+
+    // 启动优化：如果有捕获的输入，延迟处理后重放
+    if (capturedInput.length > 0) {
+      debugLogger.debug(
+        `Replaying ${capturedInput.length} bytes of captured input`,
+      );
+      // 在下一个事件循环中处理，确保订阅者已准备好
+      setImmediate(() => {
+        if (usePassthrough) {
+          keypressStream.write(capturedInput);
+        } else {
+          // 直接触发 stdin 的 data 事件
+          stdin.emit('data', capturedInput);
+        }
+      });
     }
 
     return () => {
