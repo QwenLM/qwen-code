@@ -34,7 +34,6 @@ import type { MessageBus } from '../confirmation-bus/message-bus.js';
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 import {
   ToolConfirmationOutcome,
-  ApprovalMode,
   logToolCall,
   ToolErrorType,
   ToolCallEvent,
@@ -42,6 +41,21 @@ import {
   Kind,
   SkillTool,
 } from '../index.js';
+// Import ApprovalMode directly from its source module instead of via the
+// '../index.js' barrel. The dataworks monorepo's `npm:` alias setup
+// (packages/cli depends on @qwen-code/qwen-code-core through a `npm:` alias
+// rather than a `file:` workspace link) causes a vitest module-loading race
+// where the barrel module is evaluated before all of its re-exported members
+// are fully bound. Result: `ApprovalMode` is `undefined` when first read from
+// this file inside `_schedule()`'s permission flow. The resulting
+// "Cannot read properties of undefined (reading 'PLAN')" is caught by the
+// surrounding try/catch and turned into a tool 'error' status, which makes
+// agent-headless.test.ts fail with empty `executedTools`. Importing directly
+// from the source module bypasses the barrel entirely and resolves the
+// binding eagerly. Long-term fix: switch the cli's sibling package
+// references back to `file:` workspace links, which makes barrel re-exports
+// load in deterministic order again.
+import { ApprovalMode } from '../config/config.js';
 import type {
   FunctionResponse,
   FunctionResponsePart,

@@ -20,14 +20,22 @@ import type { Part } from '@google/genai';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
-vi.mock('node:crypto', () => ({
-  randomUUID: vi.fn(),
-  createHash: vi.fn(() => ({
-    update: vi.fn(() => ({
-      digest: vi.fn(() => 'mocked-hash'),
+vi.mock('node:crypto', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:crypto')>();
+  const mocked = {
+    ...actual,
+    randomUUID: vi.fn(),
+    createHash: vi.fn(() => ({
+      update: vi.fn(() => ({
+        digest: vi.fn(() => 'mocked-hash'),
+      })),
     })),
-  })),
-}));
+  };
+  // Preserve a default export so libraries that use
+  // `import crypto from 'crypto'` (e.g. uuid's esm-node native module)
+  // can still resolve `crypto.randomUUID` when this mock is hoisted.
+  return { ...mocked, default: mocked };
+});
 vi.mock('../utils/jsonl-utils.js');
 
 describe('ChatRecordingService', () => {

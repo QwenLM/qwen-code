@@ -65,10 +65,15 @@ const mockLogExtensionInstallEvent = vi.hoisted(() => vi.fn());
 const mockLogExtensionUninstall = vi.hoisted(() => vi.fn());
 const mockLogExtensionDisable = vi.hoisted(() => vi.fn());
 const mockLogExtensionUpdateEvent = vi.hoisted(() => vi.fn());
-vi.mock('../telemetry/loggers.js', () => ({
-  logExtensionEnable: mockLogExtensionEnable,
-  logExtensionUpdateEvent: mockLogExtensionUpdateEvent,
-}));
+vi.mock('../telemetry/loggers.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../telemetry/loggers.js')>();
+  return {
+    ...actual,
+    logExtensionEnable: mockLogExtensionEnable,
+    logExtensionUpdateEvent: mockLogExtensionUpdateEvent,
+  };
+});
 
 vi.mock('../index.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../index.js')>();
