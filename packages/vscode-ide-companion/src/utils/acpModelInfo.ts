@@ -65,17 +65,17 @@ const normalizeModelInfo = (value: unknown): ModelInfo | null => {
   const metaLimit = getContextLimitFromMeta(metaFromWire);
   const derivedLimit = knownTokenLimit(modelId || name);
 
-  // Priority: legacy numeric > meta numeric > derived from known model > explicit null > undefined.
+  // Priority: legacy numeric > meta numeric > explicit null > derived from known model > undefined.
   // An explicit `null` from the server means "limit intentionally unknown"; `undefined` means "not provided".
   const contextLimit =
     typeof legacyLimit === 'number'
       ? legacyLimit
       : typeof metaLimit === 'number'
         ? metaLimit
-        : typeof derivedLimit === 'number'
-          ? derivedLimit
-          : legacyLimit === null || metaLimit === null
-            ? null
+        : legacyLimit === null || metaLimit === null
+          ? null
+          : typeof derivedLimit === 'number'
+            ? derivedLimit
             : undefined;
 
   let mergedMeta: AcpMeta | null | undefined = metaFromWire;
