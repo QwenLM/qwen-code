@@ -310,6 +310,70 @@ echo "Recent usage trends:"
 tail -5 usage.log
 ```
 
+## Persistent Retry Mode
+
+When Qwen Code runs in CI/CD pipelines or as a background daemon, a brief API outage (rate limiting or overload) should not kill a multi-hour task. **Persistent retry mode** makes Qwen Code retry transient API errors indefinitely until the service recovers.
+
+### How it works
+
+- **Transient errors only**: HTTP 429 (Rate Limit) and 529 (Overloaded) are retried indefinitely. Other errors (400, 500, etc.) still fail normally.
+- **Exponential backoff with cap**: Retry delays grow exponentially but are capped at **5 minutes** per retry.
+- **Heartbeat keepalive**: During long waits, a status line is printed to stderr every **30 seconds** to prevent CI runners from killing the process due to inactivity.
+- **Graceful degradation**: Non-transient errors and interactive mode are completely unaffected.
+
+### Activation
+
+Persistent retry mode is activated when **any** of the following environment variables is truthy (`true`, `1`, or any non-empty string other than `0` or `false`):
+
+| Variable                     | When to use                                                            |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| `QWEN_CODE_UNATTENDED_RETRY` | Explicit opt-in for persistent retry                                   |
+| `CI`                         | Automatically set by most CI systems (GitHub Actions, GitLab CI, etc.) |
+| `QWEN_CODE_BG`               | When running as a background daemon or batch job                       |
+
+### Examples
+
+#### GitHub Actions
+
+```yaml
+- name: Automated code review
+  env:
+    QWEN_CODE_UNATTENDED_RETRY: '1'
+  run: |
+    qwen -p "Review all files in src/ for security issues" \
+      --output-format json \
+      --yolo > review.json
+```
+
+> [!note]
+> GitHub Actions already sets `CI=true`, so persistent retry is active by default in Actions workflows. Setting `QWEN_CODE_UNATTENDED_RETRY` explicitly is still recommended for clarity.
+
+#### Overnight batch processing
+
+```bash
+# Run a large-scale refactoring task overnight
+export QWEN_CODE_UNATTENDED_RETRY=1
+qwen -p "Migrate all callback-style functions to async/await in src/" --yolo
+```
+
+#### Background daemon
+
+```bash
+export QWEN_CODE_BG=1
+nohup qwen -p "Audit all dependencies for known CVEs" --output-format json > audit.json 2> audit.log &
+```
+
+### Monitoring
+
+During persistent retry, heartbeat messages are printed to **stderr**:
+
+```
+[qwen-code] Waiting for API capacity... attempt 3, retry in 45s
+[qwen-code] Waiting for API capacity... attempt 3, retry in 15s
+```
+
+These messages keep CI runners alive and let you monitor progress. They do not appear in stdout, so JSON output piped to other tools remains clean.
+
 ## Resources
 
 - [CLI Configuration](../configuration/settings#command-line-arguments) - Complete configuration guide
