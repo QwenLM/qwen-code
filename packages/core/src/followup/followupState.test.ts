@@ -294,6 +294,37 @@ describe('createFollowupController', () => {
     ctrl.cleanup();
   });
 
+  it('accept with skipOnAccept skips onAccept callback but still clears state and fires telemetry', async () => {
+    const onStateChange = vi.fn();
+    const onAccept = vi.fn();
+    const onOutcome = vi.fn();
+    const ctrl = createFollowupController({
+      onStateChange,
+      getOnAccept: () => onAccept,
+      onOutcome,
+    });
+
+    ctrl.setSuggestion('run tests');
+    vi.advanceTimersByTime(300);
+    onStateChange.mockClear();
+
+    ctrl.accept('enter', { skipOnAccept: true });
+
+    // State should be cleared
+    expect(onStateChange).toHaveBeenCalledWith(INITIAL_FOLLOWUP_STATE);
+
+    // Telemetry should still fire
+    expect(onOutcome).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: 'accepted', accept_method: 'enter' }),
+    );
+
+    // Flush microtask — onAccept should NOT be called
+    await Promise.resolve();
+    expect(onAccept).not.toHaveBeenCalled();
+
+    ctrl.cleanup();
+  });
+
   it('setSuggestion replaces a pending suggestion', () => {
     const onStateChange = vi.fn();
     const ctrl = createFollowupController({ onStateChange });

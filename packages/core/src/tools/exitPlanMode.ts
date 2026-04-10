@@ -87,12 +87,18 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     _abortSignal: AbortSignal,
   ): Promise<ToolPlanConfirmationDetails> {
+    const prePlanMode = this.config.getPrePlanMode();
     const details: ToolPlanConfirmationDetails = {
       type: 'plan',
       title: 'Would you like to proceed?',
       plan: this.params.plan,
+      prePlanMode,
       onConfirm: async (outcome: ToolConfirmationOutcome) => {
         switch (outcome) {
+          case ToolConfirmationOutcome.RestorePrevious:
+            this.wasApproved = true;
+            this.setApprovalModeSafely(prePlanMode);
+            break;
           case ToolConfirmationOutcome.ProceedAlways:
             this.wasApproved = true;
             this.setApprovalModeSafely(ApprovalMode.AUTO_EDIT);
@@ -145,6 +151,15 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
           llmContent: rejectionMessage,
           returnDisplay: rejectionMessage,
         };
+      }
+
+      // Persist the approved plan to disk
+      try {
+        this.config.savePlan(plan);
+      } catch (error) {
+        debugLogger.warn(
+          `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
 
       const llmMessage = `User has approved your plan. You can now start coding. Start with updating your todo list if applicable.`;
