@@ -1,0 +1,16 @@
+# Rust build artifacts
+/target/
+*.rs.bk
+
+# Native module binaries
+*.node
+qwen-file-search.*.node
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store

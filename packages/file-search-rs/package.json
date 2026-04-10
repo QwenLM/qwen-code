@@ -1,0 +1,23 @@
+{
+  "name": "@qwen-code/qwen-file-search-rs",
+  "version": "0.1.0",
+  "description": "Rust-accelerated file search for Qwen Code",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "napi": {
+    "name": "qwen-file-search",
+    "triples": {
+      "defaults": true
+    }
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "prepublishOnly": "napi prepublish -t npm",
+    "test": "echo \"No tests yet\""
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  }
+}

@@ -11,7 +11,8 @@
     "packages/channels/telegram",
     "packages/channels/weixin",
     "packages/channels/dingtalk",
-    "packages/channels/plugin-example"
+    "packages/channels/plugin-example",
+    "packages/file-search-rs"
   ],
   "repository": {
     "type": "git",
@@ -28,8 +29,9 @@
     "generate:settings-schema": "bun run scripts/generate-settings-schema.ts",
     "build": "node scripts/build.js",
     "build-and-start": "npm run build && npm run start",
+    "build:file-search-rs": "cd packages/file-search-rs && npm run build",
+    "build:all": "npm run build && npm run build:file-search-rs && npm run build:sandbox && npm run build:vscode",
     "build:vscode": "node scripts/build_vscode_companion.js",
-    "build:all": "npm run build && npm run build:sandbox && npm run build:vscode",
     "build:packages": "npm run build --workspaces",
     "build:sandbox": "node scripts/build_sandbox.js",
     "bundle": "bun run generate && node esbuild.config.js && node scripts/copy_bundle_assets.js",

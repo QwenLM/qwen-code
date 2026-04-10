@@ -11,7 +11,6 @@ import { loadIgnoreRules } from './ignore.js';
 import { ResultCache } from './result-cache.js';
 import { crawl } from './crawler.js';
 import type { FzfResultItem } from 'fzf';
-import { AsyncFzf } from 'fzf';
 import { unescapePath } from '../paths.js';
 
 /**
@@ -22,6 +21,47 @@ import { unescapePath } from '../paths.js';
  * for virtually all real projects while keeping peak memory well under 100 MB.
  */
 const MAX_CRAWL_FILES = 100_000;
+
+const RustFileSearch: {
+  FileSearch: new (config: {
+    projectRoot: string;
+    useGitignore: boolean;
+    useQwenignore: boolean;
+    ignoreDirs: string[];
+    enableFuzzySearch: boolean;
+    maxDepth?: number;
+  }) => {
+    initialize(): Promise<void>;
+    getAllFiles(): string[];
+    search(
+      pattern: string,
+      maxResults?: number,
+    ): Promise<Array<{ path: string }>>;
+  };
+} | null = (() => {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, no-restricted-syntax, import/no-internal-modules
+    return require('../../../../file-search-rs/index.js') as {
+      FileSearch: new (config: {
+        projectRoot: string;
+        useGitignore: boolean;
+        useQwenignore: boolean;
+        ignoreDirs: string[];
+        enableFuzzySearch: boolean;
+        maxDepth?: number;
+      }) => {
+        initialize(): Promise<void>;
+        getAllFiles(): string[];
+        search(
+          pattern: string,
+          maxResults?: number,
+        ): Promise<Array<{ path: string }>>;
+      };
+    };
+  } catch {
+    return null;
+  }
+})();
 
 export interface FileSearchOptions {
   projectRoot: string;
@@ -100,40 +140,77 @@ export interface FileSearch {
   search(pattern: string, options?: SearchOptions): Promise<string[]>;
 }
 
-class RecursiveFileSearch implements FileSearch {
-  private ignore: Ignore | undefined;
+/**
+ * Rust-accelerated file search implementation
+ * Uses native Rust code for directory crawling, gitignore filtering, and fuzzy search
+ */
+class RustAcceleratedFileSearch implements FileSearch {
+  private nativeSearch: {
+    initialize(): Promise<void>;
+    getAllFiles(): string[];
+    search(
+      pattern: string,
+      maxResults?: number,
+    ): Promise<Array<{ path: string }>>;
+  } | null = null;
   private resultCache: ResultCache | undefined;
   private allFiles: string[] = [];
-  private fzf: AsyncFzf<string[]> | undefined;
 
   constructor(private readonly options: FileSearchOptions) {}
 
   async initialize(): Promise<void> {
-    this.ignore = loadIgnoreRules(this.options);
+    // Try to use Rust implementation
+    if (RustFileSearch) {
+      try {
+        this.nativeSearch = new RustFileSearch.FileSearch({
+          projectRoot: this.options.projectRoot,
+          useGitignore: this.options.useGitignore,
+          useQwenignore: this.options.useQwenignore,
+          ignoreDirs: this.options.ignoreDirs,
+          enableFuzzySearch: this.options.enableFuzzySearch !== false,
+          maxDepth: this.options.maxDepth,
+        });
+
+        await this.nativeSearch.initialize();
+        this.allFiles = this.nativeSearch.getAllFiles();
+        this.resultCache = new ResultCache(this.allFiles);
+        return;
+      } catch (err) {
+        // If Rust implementation fails, fall back to JS
+        // eslint-disable-next-line no-console
+        console.warn(
+          'Rust file search initialization failed, falling back to JavaScript:',
+          err,
+        );
+        this.nativeSearch = null;
+      }
+    }
+
+    // Fall back to JavaScript implementation
+    const ignore = loadIgnoreRules(this.options);
     this.allFiles = await crawl({
       crawlDirectory: this.options.projectRoot,
       cwd: this.options.projectRoot,
-      ignore: this.ignore,
+      ignore,
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
       maxDepth: this.options.maxDepth,
       maxFiles: MAX_CRAWL_FILES,
     });
-    this.buildResultCache();
+    this.resultCache = new ResultCache(this.allFiles);
   }
 
   async search(
     pattern: string,
     options: SearchOptions = {},
   ): Promise<string[]> {
-    // Check if engine is properly initialized.
-    // If fuzzy search is enabled (or undefined, default true), fzf must be initialized.
-    if (
-      !this.resultCache ||
-      (!this.fzf && this.options.enableFuzzySearch !== false) ||
-      !this.ignore
-    ) {
+    if (!this.resultCache) {
       throw new Error('Engine not initialized. Call initialize() first.');
+    }
+
+    // Check if aborted before starting
+    if (options.signal?.aborted) {
+      throw new AbortError();
     }
 
     pattern = unescapePath(pattern) || '*';
@@ -143,22 +220,55 @@ class RecursiveFileSearch implements FileSearch {
       await this.resultCache!.get(pattern);
 
     if (isExactMatch) {
-      // Use the cached result.
       filteredCandidates = candidates;
     } else {
+      // Use Rust search if available and no AbortSignal
+      // (Rust can't be cancelled mid-operation)
+      if (this.nativeSearch && !options.signal) {
+        try {
+          const rustResults = await this.nativeSearch.search(
+            pattern,
+            options.maxResults,
+          );
+          filteredCandidates = rustResults.map((r) => r.path);
+          if (options.maxResults) {
+            filteredCandidates = filteredCandidates.slice(
+              0,
+              options.maxResults,
+            );
+          }
+          this.resultCache!.set(pattern, filteredCandidates);
+          return filteredCandidates;
+        } catch (err) {
+          // Re-throw AbortError
+          if (err instanceof AbortError) {
+            throw err;
+          }
+          // eslint-disable-next-line no-console
+          console.warn('Rust search failed, falling back to JS:', err);
+        }
+      }
+
+      // Fall back to JavaScript
       let shouldCache = true;
-      if (pattern.includes('*') || !this.fzf) {
+      if (pattern.includes('*') || !this.options.enableFuzzySearch) {
         filteredCandidates = await filter(candidates, pattern, options.signal);
       } else {
-        filteredCandidates = await this.fzf
-          .find(pattern)
-          .then((results: Array<FzfResultItem<string>>) =>
-            results.map((entry: FzfResultItem<string>) => entry.item),
-          )
-          .catch(() => {
-            shouldCache = false;
-            return [];
-          });
+        // Fuzzy search fallback
+        const AsyncFzf = (await import('fzf')).AsyncFzf;
+        const fzf = new AsyncFzf(candidates, {
+          fuzzy: candidates.length > 20000 ? 'v1' : 'v2',
+        });
+
+        try {
+          const results = await fzf.find(pattern);
+          filteredCandidates = results.map(
+            (entry: FzfResultItem<string>) => entry.item,
+          );
+        } catch {
+          shouldCache = false;
+          filteredCandidates = [];
+        }
       }
 
       if (shouldCache) {
@@ -166,7 +276,7 @@ class RecursiveFileSearch implements FileSearch {
       }
     }
 
-    const fileFilter = this.ignore.getFileFilter();
+    // Apply final filtering
     const results: string[] = [];
     for (const [i, candidate] of filteredCandidates.entries()) {
       if (i % 1000 === 0) {
@@ -182,24 +292,10 @@ class RecursiveFileSearch implements FileSearch {
       if (candidate === '.') {
         continue;
       }
-      if (!fileFilter(candidate)) {
-        results.push(candidate);
-      }
+      results.push(candidate);
     }
-    return results;
-  }
 
-  private buildResultCache(): void {
-    this.resultCache = new ResultCache(this.allFiles);
-    // Initialize fuzzy search if enabled (or undefined, default true).
-    if (this.options.enableFuzzySearch !== false) {
-      // The v1 algorithm is much faster since it only looks at the first
-      // occurence of the pattern. We use it for search spaces that have >20k
-      // files, because the v2 algorithm is just too slow in those cases.
-      this.fzf = new AsyncFzf(this.allFiles, {
-        fuzzy: this.allFiles.length > 20000 ? 'v1' : 'v2',
-      });
-    }
+    return results;
   }
 }
 
@@ -253,7 +349,8 @@ class DirectoryFileSearch implements FileSearch {
 export class FileSearchFactory {
   static create(options: FileSearchOptions): FileSearch {
     if (options.enableRecursiveFileSearch) {
-      return new RecursiveFileSearch(options);
+      // Use Rust-accelerated search when available
+      return new RustAcceleratedFileSearch(options);
     }
     return new DirectoryFileSearch(options);
   }

@@ -33,6 +33,44 @@ if (!existsSync(join(root, 'node_modules'))) {
 // build all workspaces/packages in dependency order
 execSync('bun run generate', { stdio: 'inherit', cwd: root });
 
+// Build Rust file search module first (before core, which depends on it)
+try {
+  const fileSearchRsDir = join(root, 'packages', 'file-search-rs');
+  if (existsSync(join(fileSearchRsDir, 'Cargo.toml'))) {
+    execSync('npm run build', {
+      stdio: 'inherit',
+      cwd: fileSearchRsDir,
+    });
+    // Copy the .node file to core's dist directory
+    const { readdirSync, copyFileSync, mkdirSync } = await import('node:fs');
+    const { join: pathJoin } = await import('node:path');
+    const coreDistDir = join(
+      root,
+      'packages',
+      'core',
+      'dist',
+      'src',
+      'utils',
+      'filesearch',
+    );
+    mkdirSync(coreDistDir, { recursive: true });
+
+    const nodeFiles = readdirSync(fileSearchRsDir).filter((f) =>
+      f.endsWith('.node'),
+    );
+    for (const nodeFile of nodeFiles) {
+      const src = pathJoin(fileSearchRsDir, nodeFile);
+      const dest = pathJoin(coreDistDir, nodeFile);
+      copyFileSync(src, dest);
+    }
+  }
+} catch (e) {
+  console.warn(
+    'Warning: Failed to build Rust file search module. Falling back to JavaScript implementation.\n',
+    e,
+  );
+}
+
 // Build in dependency order:
 // 1. test-utils (no internal dependencies)
 // 2. core (foundation package)
