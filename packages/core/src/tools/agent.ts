@@ -574,6 +574,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         registry.register({
           agentId,
           description: this.params.description,
+          subagentType: subagentConfig.name,
           status: 'running',
           startTime: Date.now(),
           abortController: bgAbortController,
@@ -629,8 +630,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Return immediately to the parent
         const launchDisplay: AgentResultDisplay = {
           ...this.currentDisplay!,
-          status: 'completed',
-          terminateReason: 'async_launched',
+          status: 'background',
         };
 
         return {

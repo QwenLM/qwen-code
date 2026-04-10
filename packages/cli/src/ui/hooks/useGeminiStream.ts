@@ -41,6 +41,8 @@ import {
   ApiCancelEvent,
   isSupportedImageMimeType,
   getUnsupportedImageFormatWarning,
+  BACKGROUND_NOTIFICATION_PREFIX,
+  BACKGROUND_NOTIFICATION_SEPARATOR,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -500,12 +502,43 @@ export const useGeminiStream = (
 
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
-        onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
-        await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
+
+        // Background agent notifications carry a prefix so the UI can
+        // render them differently from user-typed messages.
+        const isNotification = trimmedQuery.startsWith(
+          BACKGROUND_NOTIFICATION_PREFIX,
+        );
+        let displayText: string;
+        let modelText: string;
+        if (isNotification) {
+          const body = trimmedQuery.slice(
+            BACKGROUND_NOTIFICATION_PREFIX.length,
+          );
+          const sepIdx = body.indexOf(BACKGROUND_NOTIFICATION_SEPARATOR);
+          if (sepIdx !== -1) {
+            displayText = body.slice(0, sepIdx);
+            modelText = body.slice(
+              sepIdx + BACKGROUND_NOTIFICATION_SEPARATOR.length,
+            );
+          } else {
+            displayText = body;
+            modelText = body;
+          }
+        } else {
+          displayText = trimmedQuery;
+          modelText = trimmedQuery;
+        }
+
+        onDebugMessage(`Received user query (${displayText.length} chars)`);
+        // Don't log notifications as user messages — they pollute
+        // the prompt history shown when pressing up-arrow.
+        if (!isNotification) {
+          await logger?.logMessage(MessageSenderType.USER, displayText);
+        }
 
         // Handle UI-only commands first
-        const slashCommandResult = isSlashCommand(trimmedQuery)
-          ? await handleSlashCommand(trimmedQuery)
+        const slashCommandResult = isSlashCommand(displayText)
+          ? await handleSlashCommand(displayText)
           : false;
 
         if (slashCommandResult) {
@@ -542,21 +575,26 @@ export const useGeminiStream = (
           }
         }
 
-        if (shellModeActive && handleShellCommand(trimmedQuery, abortSignal)) {
+        if (shellModeActive && handleShellCommand(displayText, abortSignal)) {
           return { queryToSend: null, shouldProceed: false };
         }
 
-        localQueryToSendToGemini = trimmedQuery;
+        localQueryToSendToGemini = modelText;
 
         addItem(
-          { type: MessageType.USER, text: trimmedQuery },
+          isNotification
+            ? {
+                type: 'notification' as const,
+                text: displayText,
+              }
+            : { type: MessageType.USER, text: modelText },
           userMessageTimestamp,
         );
 
         // Handle @-commands (which might involve tool calls)
-        if (isAtCommand(trimmedQuery)) {
+        if (isAtCommand(modelText)) {
           const atCommandResult = await handleAtCommand({
-            query: trimmedQuery,
+            query: modelText,
             config,
             onDebugMessage,
             messageId: userMessageTimestamp,

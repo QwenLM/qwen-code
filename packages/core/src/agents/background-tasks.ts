@@ -16,6 +16,20 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
+/**
+ * Prefix prepended to notification messages so the UI layer can distinguish
+ * background-agent notifications from regular user input.
+ */
+export const BACKGROUND_NOTIFICATION_PREFIX = '\x00__BG_NOTIFY__\x00';
+
+/**
+ * Separator between the display summary (shown in the UI) and the full
+ * model-facing content (sent to the LLM) within a notification message.
+ */
+export const BACKGROUND_NOTIFICATION_SEPARATOR = '\x00__BG_SEP__\x00';
+
+const MAX_DESCRIPTION_LENGTH = 40;
+
 export type BackgroundAgentStatus =
   | 'running'
   | 'completed'
@@ -25,6 +39,7 @@ export type BackgroundAgentStatus =
 export interface BackgroundAgentEntry {
   agentId: string;
   description: string;
+  subagentType?: string;
   status: BackgroundAgentStatus;
   startTime: number;
   endTime?: number;
@@ -150,28 +165,48 @@ export class BackgroundTaskRegistry {
 
     const statusText =
       entry.status === 'completed'
-        ? `completed`
+        ? 'completed'
         : entry.status === 'failed'
-          ? `failed: ${entry.error || 'Unknown error'}`
-          : `was cancelled`;
+          ? `failed`
+          : 'was cancelled';
 
-    const summary = `Agent "${entry.description}" ${statusText}`;
+    // Build the label: "Explore: list ts files..." (truncated)
+    // Strip the subagent type prefix if the description already starts with it
+    // to avoid duplication like "Explore: Explore: list ts files".
+    let rawDesc = entry.description;
+    if (
+      entry.subagentType &&
+      rawDesc.toLowerCase().startsWith(entry.subagentType.toLowerCase() + ':')
+    ) {
+      rawDesc = rawDesc.slice(entry.subagentType.length + 1).trimStart();
+    }
+    const desc =
+      rawDesc.length > MAX_DESCRIPTION_LENGTH
+        ? rawDesc.slice(0, MAX_DESCRIPTION_LENGTH) + '...'
+        : rawDesc;
+    const label = entry.subagentType ? `${entry.subagentType}: ${desc}` : desc;
 
-    const resultSection = entry.result
-      ? `\n  <result>${entry.result}</result>`
-      : '';
-    const errorSection = entry.error ? `\n  <error>${entry.error}</error>` : '';
+    // Short display line shown in the UI
+    const displayLine = `Background agent "${label}" ${statusText}.`;
 
-    const xml = `<task-notification>
-  <agent_id>${entry.agentId}</agent_id>
-  <status>${entry.status}</status>
-  <summary>${summary}</summary>${resultSection}${errorSection}
-</task-notification>`;
-
-    const message = `A background agent completed a task:\n${xml}`;
+    // Full model-facing text (includes result/error for the LLM to act on)
+    const modelLines: string[] = [
+      `Background agent "${entry.description}" (${entry.agentId}) ${statusText}.`,
+    ];
+    if (entry.result) {
+      modelLines.push('', entry.result);
+    }
+    if (entry.error) {
+      modelLines.push('', `Error: ${entry.error}`);
+    }
 
     try {
-      this.notificationCallback(message);
+      this.notificationCallback(
+        BACKGROUND_NOTIFICATION_PREFIX +
+          displayLine +
+          BACKGROUND_NOTIFICATION_SEPARATOR +
+          modelLines.join('\n'),
+      );
     } catch (error) {
       debugLogger.error('Failed to emit background notification:', error);
     }

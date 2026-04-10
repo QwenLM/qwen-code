@@ -488,7 +488,7 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
