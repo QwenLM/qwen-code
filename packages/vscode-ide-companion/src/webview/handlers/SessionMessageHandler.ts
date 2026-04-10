@@ -15,6 +15,7 @@ import {
 } from '../utils/imageHandler.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import { isLocalFreshSessionCommand } from '../utils/localSlashCommands.js';
 
 /**
  * Session message handler
@@ -302,6 +303,11 @@ export class SessionMessageHandler extends BaseMessageHandler {
     const hasAttachments = (attachments?.length ?? 0) > 0;
     if (!trimmedText && !hasAttachments) {
       console.warn('[SessionMessageHandler] Ignoring empty message');
+      return;
+    }
+
+    if (isLocalFreshSessionCommand(trimmedText)) {
+      await this.handleNewQwenSession();
       return;
     }
 
