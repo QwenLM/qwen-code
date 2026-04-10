@@ -16,6 +16,7 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -37,6 +38,7 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -58,6 +60,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -79,6 +82,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 │   Auto-connect to IDE                                                                     false* │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -100,6 +104,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -121,6 +126,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -142,6 +148,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -163,6 +170,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -184,6 +192,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 │   Auto-connect to IDE                                                                      false │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
@@ -205,6 +214,7 @@ exports[`SettingsDialog > Snapshot Tests > should render with various boolean se
 │   Auto-connect to IDE                                                                      true* │
 │ ▼                                                                                                │
 │                                                                                                  │
+│ Approval mode for tool usage. Controls how tools are approved before execution.                  │
 │ (Use Enter to select, Tab to configure scope)                                                    │
 │                                                                                                  │
 ╰──────────────────────────────────────────────────────────────────────────────────────────────────╯"
