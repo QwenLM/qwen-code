@@ -671,7 +671,7 @@ describe('EditTool', () => {
       expect(result.returnDisplay).toMatch(/No changes to apply/);
     });
 
-    it('should return EDIT_NO_CHANGE error if replacement results in identical content', async () => {
+    it('should be replaced because oldString and initialContent support fuzzy matching.', async () => {
       // This can happen if the literal string replacement with `replaceAll` results in no change.
       const initialContent = 'line 1\nline  2\nline 3'; // Note the double space
       fs.writeFileSync(filePath, initialContent, 'utf8');
@@ -683,14 +683,12 @@ describe('EditTool', () => {
       };
 
       const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
+      await invocation.execute(new AbortController().signal);
 
-      expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_OCCURRENCE_FOUND);
-      expect(result.returnDisplay).toMatch(
-        /Failed to edit, could not find the string to replace./,
+      // Ensure the file changes
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(
+        'line 1\nnew line 2\nline 3',
       );
-      // Ensure the file was not actually changed
-      expect(fs.readFileSync(filePath, 'utf8')).toBe(initialContent);
     });
   });
 
