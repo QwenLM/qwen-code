@@ -10,6 +10,7 @@ import type { HistoryItemWithoutId } from '../types.js';
 interface CompactModeContextType {
   compactMode: boolean;
   frozenSnapshot: HistoryItemWithoutId[] | null;
+  setCompactMode?: (value: boolean) => void;
 }
 
 const CompactModeContext = createContext<CompactModeContextType>({

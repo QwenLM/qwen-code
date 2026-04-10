@@ -1686,13 +1686,11 @@ export const AppContainer = (props: AppContainerProps) => {
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
-        // Only freeze during the actual responding phase. WaitingForConfirmation
-        // must keep focus so the user can approve/cancel tool confirmation UI.
-        if (streamingState === StreamingState.Responding) {
-          setFrozenSnapshot([...pendingHistoryItems]);
-        } else {
-          setFrozenSnapshot(null);
-        }
+        // Unlike Claude Code (where compact is default and Ctrl+O temporarily
+        // expands a single tool), qwen-code treats the toggle as a persistent
+        // preference change. No snapshot freezing in either direction — the
+        // user always sees live output after switching.
+        setFrozenSnapshot(null);
       }
     },
     [
@@ -1729,7 +1727,6 @@ export const AppContainer = (props: AppContainerProps) => {
       compactMode,
       setCompactMode,
       setFrozenSnapshot,
-      pendingHistoryItems,
       refreshStatic,
     ],
   );
@@ -2155,8 +2152,8 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const compactModeValue = useMemo(
-    () => ({ compactMode, frozenSnapshot }),
-    [compactMode, frozenSnapshot],
+    () => ({ compactMode, frozenSnapshot, setCompactMode }),
+    [compactMode, frozenSnapshot, setCompactMode],
   );
 
   return (

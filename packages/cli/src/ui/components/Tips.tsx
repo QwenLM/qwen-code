@@ -26,6 +26,7 @@ const startupTips: Tip[] = [
     text: 'Try /insight to generate personalized insights from your chat history.',
     weight: 3,
   },
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
 ];
 
 function tipText(tip: Tip): string {

@@ -14,6 +14,7 @@ import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { StreamingState } from '../types.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -59,8 +60,16 @@ export const MainContent = () => {
       </Static>
       <OverflowProvider>
         <Box flexDirection="column">
-          {(frozenSnapshot ?? pendingHistoryItems).map((item, i) => {
-            const isFrozen = frozenSnapshot !== null;
+          {/* Never use frozenSnapshot when waiting for user confirmation —
+              tool approvals must always remain visible and interactive. */}
+          {(frozenSnapshot &&
+          uiState.streamingState !== StreamingState.WaitingForConfirmation
+            ? frozenSnapshot
+            : pendingHistoryItems
+          ).map((item, i) => {
+            const isFrozen =
+              frozenSnapshot !== null &&
+              uiState.streamingState !== StreamingState.WaitingForConfirmation;
             return (
               <HistoryItemDisplay
                 key={i}

@@ -59,6 +59,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
+  'to toggle compact mode': 'to toggle compact mode',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -1556,6 +1557,8 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -2013,6 +2016,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
   compact: 'compact',
+  'compact mode: on (Ctrl+O off)': 'compact mode: on (Ctrl+O off)',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
   'Press Ctrl+O to show full tool output':

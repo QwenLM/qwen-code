@@ -88,6 +88,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
+  'to toggle compact mode': 'переключить компактный режим',
 
   // ============================================================================
   // Поля системной информации
@@ -1706,6 +1707,8 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Нажмите Ctrl+O для переключения компактного режима — скрыть вывод инструментов и рассуждения.',
 
   // ============================================================================
   // Custom API Key Configuration
@@ -1969,6 +1972,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
   compact: 'компактный',
+  'compact mode: on (Ctrl+O off)': 'компактный режим: вкл (Ctrl+O выкл)',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'Скрывать вывод инструментов и процесс рассуждений для более чистого вида (переключить с помощью Ctrl+O).',
   'Press Ctrl+O to show full tool output':
