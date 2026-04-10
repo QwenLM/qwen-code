@@ -78,6 +78,7 @@ import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
+import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -492,6 +493,7 @@ export class Config {
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
+  private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -2171,6 +2173,10 @@ export class Config {
 
   getSubagentManager(): SubagentManager {
     return this.subagentManager;
+  }
+
+  getBackgroundTaskRegistry(): BackgroundTaskRegistry {
+    return this.backgroundTaskRegistry;
   }
 
   getSkillManager(): SkillManager | null {

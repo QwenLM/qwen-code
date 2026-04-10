@@ -16,7 +16,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
 } from './tools.js';
-import type { Config } from '../config/config.js';
+import { type Config, ApprovalMode } from '../config/config.js';
 import type { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
@@ -41,6 +41,7 @@ export interface AgentParams {
   description: string;
   prompt: string;
   subagent_type: string;
+  run_in_background?: boolean;
 }
 
 const debugLogger = createDebugLogger('AGENT');
@@ -74,6 +75,11 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         subagent_type: {
           type: 'string',
           description: 'The type of specialized agent to use for this task',
+        },
+        run_in_background: {
+          type: 'boolean',
+          description:
+            'Set to true to run this agent in the background. You will be notified when it completes.',
         },
       },
       required: ['description', 'prompt', 'subagent_type'],
@@ -163,6 +169,7 @@ Usage notes:
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
+- You can optionally set \`run_in_background: true\` to run the agent in the background. You will be notified when it completes. Use this when you have genuinely independent work to do in parallel and don't need the agent's results before you can proceed.
 
 Example usage:
 
@@ -557,7 +564,82 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
       }
 
-      // Execute the subagent (blocking)
+      // ── Background (async) execution path ──────────────────────
+      if (this.params.run_in_background) {
+        // Create an independent AbortController — background agents
+        // survive ESC cancellation of the parent's current turn.
+        const bgAbortController = new AbortController();
+
+        const registry = this.config.getBackgroundTaskRegistry();
+        registry.register({
+          agentId,
+          description: this.params.description,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: bgAbortController,
+        });
+
+        // Background agents run with YOLO approval mode to prevent
+        // deadlocks — they have no UI to show approval prompts. The
+        // user already approved the Agent tool call, which is the
+        // trust boundary.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const bgConfig = Object.create(this.config) as any;
+        bgConfig.getApprovalMode = () => ApprovalMode.YOLO;
+
+        // Create a dedicated subagent that uses the bg-specific config.
+        const bgSubagent = await this.subagentManager.createAgentHeadless(
+          subagentConfig,
+          bgConfig as Config,
+        );
+
+        // Fire-and-forget: start the subagent without blocking the parent.
+        void (async () => {
+          try {
+            await bgSubagent.execute(contextState, bgAbortController.signal);
+
+            // Fire SubagentStop hook in the background
+            if (hookSystem && !bgAbortController.signal.aborted) {
+              try {
+                await hookSystem.fireSubagentStopEvent(
+                  agentId,
+                  agentType,
+                  this.config.getTranscriptPath(),
+                  bgSubagent.getFinalText(),
+                  false,
+                  PermissionMode.Default,
+                );
+              } catch (hookError) {
+                debugLogger.warn(
+                  `[Agent] Background SubagentStop hook failed: ${hookError}`,
+                );
+              }
+            }
+
+            registry.complete(agentId, bgSubagent.getFinalText());
+          } catch (error) {
+            const errorMsg =
+              error instanceof Error ? error.message : String(error);
+            debugLogger.error(`[Agent] Background agent failed: ${errorMsg}`);
+
+            registry.fail(agentId, errorMsg);
+          }
+        })();
+
+        // Return immediately to the parent
+        const launchDisplay: AgentResultDisplay = {
+          ...this.currentDisplay!,
+          status: 'completed',
+          terminateReason: 'async_launched',
+        };
+
+        return {
+          llmContent: `Background agent launched: "${this.params.description}" (ID: ${agentId}). You will be notified when it completes.`,
+          returnDisplay: launchDisplay,
+        };
+      }
+
+      // ── Foreground (blocking) execution path ──────────────────
       await subagent.execute(contextState, signal);
 
       // Fire SubagentStop hook after execution and handle block decisions
