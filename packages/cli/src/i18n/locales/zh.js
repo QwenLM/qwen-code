@@ -599,8 +599,8 @@ export default {
   'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
     '您当前环境不支持 IDE 集成。要使用此功能，请在以下支持的 IDE 之一中运行 Qwen Code：VS Code 或 VS Code 分支版本。',
   'Set up GitHub Actions': '设置 GitHub Actions',
-  'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)':
-    '配置终端按键绑定以支持多行输入（VS Code、Cursor、Windsurf、Trae）',
+  'Configure terminal keybindings for multiline input (Shift+Enter)':
+    '配置终端按键绑定以支持多行输入（Shift+Enter）',
   'Please restart your terminal for the changes to take effect.':
     '请重启终端以使更改生效。',
   'Failed to configure terminal: {{error}}': '配置终端失败：{{error}}',
@@ -624,8 +624,12 @@ export default {
   '{{terminalName}} keybindings already configured.':
     '{{terminalName}} 按键绑定已配置。',
   'Failed to configure {{terminalName}}.': '配置 {{terminalName}} 失败。',
-  'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
-    '您的终端已配置为支持多行输入（Shift+Enter 和 Ctrl+Enter）的最佳体验。',
+  'Shift+Enter is natively supported in {{termName}}. No configuration needed.':
+    '{{termName}} 原生支持 Shift+Enter，无需配置。',
+  'Terminal "{{termName}}" is not supported by automatic setup.':
+    '终端 "{{termName}}" 不支持自动配置。',
+  'Terminal "{{terminal}}" is not supported yet.':
+    '终端 "{{terminal}}" 暂不支持。',
   // ============================================================================
   // Commands - Hooks
   // ============================================================================
@@ -781,10 +785,6 @@ export default {
   'Resume a previous session': '恢复先前会话',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
     '恢复某次工具调用。这将把对话与文件历史重置到提出该工具调用建议时的状态',
-  'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
-    '无法检测终端类型。支持的终端：VS Code、Cursor、Windsurf 和 Trae。',
-  'Terminal "{{terminal}}" is not supported yet.':
-    '终端 "{{terminal}}" 尚未支持。',
 
   // ============================================================================
   // Commands - Language

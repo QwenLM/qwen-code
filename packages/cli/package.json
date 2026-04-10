@@ -44,6 +44,7 @@
     "@qwen-code/channel-telegram": "file:../channels/telegram",
     "@qwen-code/channel-weixin": "file:../channels/weixin",
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
+    "@qwen-code/modifiers-napi": "file:../modifiers-napi",
     "@qwen-code/qwen-code-core": "file:../core",
     "@qwen-code/web-templates": "file:../web-templates",
     "@types/update-notifier": "^6.0.8",

@@ -633,8 +633,8 @@ export default {
   'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.':
     'IDE integration is not supported in your current environment. To use this feature, run Qwen Code in one of these supported IDEs: VS Code or VS Code forks.',
   'Set up GitHub Actions': 'Set up GitHub Actions',
-  'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)':
-    'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)',
+  'Configure terminal keybindings for multiline input (Shift+Enter)':
+    'Configure terminal keybindings for multiline input (Shift+Enter)',
   'Please restart your terminal for the changes to take effect.':
     'Please restart your terminal for the changes to take effect.',
   'Failed to configure terminal: {{error}}':
@@ -660,8 +660,56 @@ export default {
     '{{terminalName}} keybindings already configured.',
   'Failed to configure {{terminalName}}.':
     'Failed to configure {{terminalName}}.',
-  'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
-    'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).',
+  'Shift+Enter is natively supported in {{termName}}. No configuration needed.':
+    'Shift+Enter is natively supported in {{termName}}. No configuration needed.',
+  'Cannot install keybindings from a remote {{terminalName}} session.':
+    'Cannot install keybindings from a remote {{terminalName}} session.',
+  '{{terminalName}} keybindings must be installed on your local machine, not the remote server.':
+    '{{terminalName}} keybindings must be installed on your local machine, not the remote server.',
+  'To install the Shift+Enter keybinding:':
+    'To install the Shift+Enter keybinding:',
+  '1. Open {{terminalName}} on your local machine (not connected to remote)':
+    '1. Open {{terminalName}} on your local machine (not connected to remote)',
+  '2. Open the Command Palette (Cmd/Ctrl+Shift+P) → "Preferences: Open Keyboard Shortcuts (JSON)"':
+    '2. Open the Command Palette (Cmd/Ctrl+Shift+P) → "Preferences: Open Keyboard Shortcuts (JSON)"',
+  '3. Add this keybinding (the file must be a JSON array):':
+    '3. Add this keybinding (the file must be a JSON array):',
+  'Terminal "{{termName}}" is not supported by automatic setup.':
+    'Terminal "{{termName}}" is not supported by automatic setup.',
+  'You can still use backslash (\\) + Enter to add newlines, or Ctrl+Enter / Ctrl+J.':
+    'You can still use backslash (\\) + Enter to add newlines, or Ctrl+Enter / Ctrl+J.',
+  'Supported terminals:': 'Supported terminals:',
+  '  IDE: VS Code, Cursor, Windsurf, Trae, Zed':
+    '  IDE: VS Code, Cursor, Windsurf, Trae, Zed',
+  '  Terminal: Alacritty, Apple Terminal':
+    '  Terminal: Alacritty, Apple Terminal',
+  '  Native support: iTerm2, WezTerm, Ghostty, Kitty, Warp':
+    '  Native support: iTerm2, WezTerm, Ghostty, Kitty, Warp',
+  'No valid config path found for Alacritty.':
+    'No valid config path found for Alacritty.',
+  'Found existing Alacritty Shift+Enter key binding. Remove it to continue.':
+    'Found existing Alacritty Shift+Enter key binding. Remove it to continue.',
+  'Added Shift+Enter and Ctrl+Enter keybindings to Alacritty.':
+    'Added Shift+Enter and Ctrl+Enter keybindings to Alacritty.',
+  'Failed to configure Alacritty.': 'Failed to configure Alacritty.',
+  'Found existing Zed Shift+Enter key binding. Remove it to continue.':
+    'Found existing Zed Shift+Enter key binding. Remove it to continue.',
+  'Added Shift+Enter keybinding to Zed.':
+    'Added Shift+Enter keybinding to Zed.',
+  'Failed to configure Zed.': 'Failed to configure Zed.',
+  'Failed to read default Terminal.app profile.':
+    'Failed to read default Terminal.app profile.',
+  'Failed to enable Option as Meta Key for Terminal.app profile: {{profile}}':
+    'Failed to enable Option as Meta Key for Terminal.app profile: {{profile}}',
+  'Configured Terminal.app:': 'Configured Terminal.app:',
+  '- Enabled "Use Option as Meta Key"': '- Enabled "Use Option as Meta Key"',
+  'Option+Enter will now insert a newline.':
+    'Option+Enter will now insert a newline.',
+  'Shift+Enter also works via native modifier detection (no restart needed).':
+    'Shift+Enter also works via native modifier detection (no restart needed).',
+  'Failed to configure Terminal.app.': 'Failed to configure Terminal.app.',
+  'Terminal "{{terminal}}" is not supported yet.':
+    'Terminal "{{terminal}}" is not supported yet.',
   // ============================================================================
   // Commands - Hooks
   // ============================================================================
@@ -822,10 +870,6 @@ export default {
   'Resume a previous session': 'Resume a previous session',
   'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
     'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested',
-  'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
-    'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.',
-  'Terminal "{{terminal}}" is not supported yet.':
-    'Terminal "{{terminal}}" is not supported yet.',
 
   // ============================================================================
   // Commands - Language

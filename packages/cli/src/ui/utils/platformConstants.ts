@@ -56,9 +56,12 @@ export const MODIFIER_CTRL_BIT = 4;
 export const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 
 /**
- * VS Code terminal integration constants
+ * VS Code terminal integration constants.
+ * ESC + CR (\u001b\r) is sent when Shift+Enter or Ctrl+Enter is pressed.
+ * The ESC prefix causes the keypress parser to set meta=true,
+ * which triggers the newline insertion path.
  */
-export const VSCODE_SHIFT_ENTER_SEQUENCE = '\\\r\n';
+export const VSCODE_SHIFT_ENTER_SEQUENCE = '\u001b\r';
 
 /**
  * Backslash + Enter detection window in milliseconds.

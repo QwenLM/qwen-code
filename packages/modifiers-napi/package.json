@@ -1,0 +1,38 @@
+{
+  "name": "@qwen-code/modifiers-napi",
+  "version": "0.14.1",
+  "description": "Native macOS modifier key detection for terminal input handling",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "build/",
+    "src/",
+    "binding.gyp"
+  ],
+  "scripts": {
+    "install": "node scripts/install.js",
+    "prebuild": "prebuildify --napi --strip",
+    "build": "node-gyp rebuild"
+  },
+  "dependencies": {
+    "node-addon-api": "^8.3.1",
+    "node-gyp-build": "^4.8.4"
+  },
+  "devDependencies": {
+    "node-gyp": "^11.2.0",
+    "prebuildify": "^6.0.1"
+  },
+  "os": [
+    "darwin"
+  ],
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/modifiers-napi"
+  }
+}

@@ -37,6 +37,7 @@ import {
   MODIFIER_CTRL_BIT,
 } from '../utils/platformConstants.js';
 import { clipboardHasImage } from '../utils/clipboardUtils.js';
+import { prewarmModifiers, isModifierPressed } from '../utils/modifiers.js';
 
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
 
@@ -156,6 +157,15 @@ export function KeypressProvider({
     const wasRaw = stdin.isRaw;
     if (wasRaw === false) {
       setRawMode(true);
+    }
+
+    // Pre-warm native modifier detection for Apple Terminal
+    // (has internal guard, safe to call multiple times)
+    const isAppleTerminal =
+      process.platform === 'darwin' &&
+      process.env['TERM_PROGRAM'] === 'Apple_Terminal';
+    if (isAppleTerminal && !kittyProtocolEnabled) {
+      prewarmModifiers();
     }
 
     const keypressStream = new PassThrough();
@@ -853,6 +863,17 @@ export function KeypressProvider({
 
       if (key.name === 'return' && key.sequence === `${ESC}\r`) {
         key.meta = true;
+      }
+      // Apple Terminal doesn't support CSI-u or custom Shift+Enter keybindings,
+      // so we use native macOS modifier detection to check if Shift is held
+      if (
+        key.name === 'return' &&
+        !key.shift &&
+        !key.kittyProtocol &&
+        isAppleTerminal &&
+        isModifierPressed('shift')
+      ) {
+        key.shift = true;
       }
       broadcast({ ...key, paste: isPaste });
     };

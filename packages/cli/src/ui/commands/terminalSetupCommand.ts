@@ -12,14 +12,17 @@ import { t } from '../../i18n/index.js';
 /**
  * Command to configure terminal keybindings for multiline input support.
  *
- * This command automatically detects and configures VS Code, Cursor, and Windsurf
+ * This command automatically detects and configures terminals
  * to support Shift+Enter and Ctrl+Enter for multiline input.
+ *
+ * Supported: VS Code, Cursor, Windsurf, Trae, Alacritty, Zed, Apple Terminal
+ * Native support (no setup needed): iTerm2, WezTerm, Ghostty, Kitty, Warp
  */
 export const terminalSetupCommand: SlashCommand = {
   name: 'terminal-setup',
   get description() {
     return t(
-      'Configure terminal keybindings for multiline input (VS Code, Cursor, Windsurf, Trae)',
+      'Configure terminal keybindings for multiline input (Shift+Enter)',
     );
   },
   kind: CommandKind.BUILT_IN,

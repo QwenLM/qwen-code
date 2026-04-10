@@ -182,6 +182,7 @@ const distPackageJson = {
     '@teddyzhu/clipboard-linux-arm64-gnu': '0.0.5',
     '@teddyzhu/clipboard-win32-x64-msvc': '0.0.5',
     '@teddyzhu/clipboard-win32-arm64-msvc': '0.0.5',
+    '@qwen-code/modifiers-napi': rootPackageJson.version,
   },
   engines: rootPackageJson.engines,
 };
