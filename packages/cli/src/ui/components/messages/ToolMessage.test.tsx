@@ -12,7 +12,7 @@ import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
-import { VerboseModeProvider } from '../../contexts/VerboseModeContext.js';
+import { CompactModeProvider } from '../../contexts/CompactModeContext.js';
 import type {
   AnsiOutput,
   AnsiOutputDisplay,
@@ -102,21 +102,21 @@ const mockSettings: LoadedSettings = {
   },
 } as LoadedSettings;
 
-// Helper to render with context (verbose=true by default to show tool output)
+// Helper to render with context (compactMode=false by default to show tool output)
 const renderWithContext = (
   ui: React.ReactElement,
   streamingState: StreamingState,
-  verboseMode = true,
+  compactMode = false,
 ) => {
   const contextValue: StreamingState = streamingState;
   return render(
-    <VerboseModeProvider value={{ verboseMode, frozenSnapshot: null }}>
+    <CompactModeProvider value={{ compactMode, frozenSnapshot: null }}>
       <SettingsContext.Provider value={mockSettings}>
         <StreamingContext.Provider value={contextValue}>
           {ui}
         </StreamingContext.Provider>
       </SettingsContext.Provider>
-    </VerboseModeProvider>,
+    </CompactModeProvider>,
   );
 };
 
@@ -147,11 +147,11 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('MockMarkdown:Test result');
   });
 
-  it('hides result output in compact mode (verboseMode=false)', () => {
+  it('hides result output in compact mode (compactMode=true)', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} />,
       StreamingState.Idle,
-      false, // compact mode
+      true, // compact mode
     );
     const output = lastFrame();
     expect(output).toContain('✓'); // status indicator still visible
