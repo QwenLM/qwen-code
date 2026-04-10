@@ -27,6 +27,7 @@ const createMockConfig = (overrides = {}) => ({
   getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
+  getTargetDir: vi.fn(() => '/test/current/dir'),
   ...overrides,
 });
 
@@ -90,7 +91,32 @@ describe('<Footer />', () => {
 
   it('does not display the working directory or branch name', () => {
     const { lastFrame } = renderWithWidth(120, createMockUIState());
-    expect(lastFrame()).not.toMatch(/\(.*\*\)/);
+    expect(lastFrame()).toMatch(/📁/);
+    expect(lastFrame()).not.toMatch(/⎇/);
+  });
+
+  it('displays the current directory name', () => {
+    const { lastFrame } = renderWithWidth(120, createMockUIState());
+    // Width 120 >= 100, so full path is shown
+    expect(lastFrame()).toMatch(/📁 \/test\/current\/dir/);
+  });
+
+  it('displays short directory name on narrow terminal', () => {
+    const { lastFrame } = renderWithWidth(80, createMockUIState());
+    // Width 80 < 100, so only directory name is shown
+    expect(lastFrame()).toMatch(/📁 dir/);
+  });
+
+  it('displays the git branch when available', () => {
+    const uiState = createMockUIState({ branchName: 'main' });
+    const { lastFrame } = renderWithWidth(120, uiState);
+    expect(lastFrame()).toMatch(/⎇ main/);
+  });
+
+  it('does not display git branch when not available', () => {
+    const uiState = createMockUIState({ branchName: undefined });
+    const { lastFrame } = renderWithWidth(120, uiState);
+    expect(lastFrame()).not.toMatch(/⎇/);
   });
 
   it('displays the context percentage', () => {

@@ -6,6 +6,7 @@
 
 import type React from 'react';
 import { Box, Text } from 'ink';
+import path from 'path';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
@@ -35,6 +36,15 @@ export const Footer: React.FC = () => {
 
   const { columns: terminalWidth } = useTerminalSize();
   const isNarrow = isNarrowWidth(terminalWidth);
+
+  // Get current directory and git branch
+  const currentDir = config.getTargetDir();
+  const branchName = uiState.branchName;
+
+  // Format directory path for display - show full path when space allows
+  // Threshold: 100 columns is enough for most paths
+  const showFullPath = terminalWidth >= 100;
+  const displayDir = showFullPath ? currentDir : path.basename(currentDir);
 
   // Determine sandbox info from environment
   const sandboxEnv = process.env['SANDBOX'];
@@ -75,6 +85,20 @@ export const Footer: React.FC = () => {
   );
 
   const rightItems: Array<{ key: string; node: React.ReactNode }> = [];
+
+  // Current directory and git branch - added first so they appear before context usage
+  rightItems.push({
+    key: 'path',
+    node: <Text color={theme.text.secondary}>📁 {displayDir}</Text>,
+  });
+
+  if (branchName) {
+    rightItems.push({
+      key: 'branch',
+      node: <Text color={theme.text.accent}>⎇ {branchName}</Text>,
+    });
+  }
+
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',
