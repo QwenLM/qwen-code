@@ -21,11 +21,13 @@ export const modelCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   completion: async (_context, partialArg) => {
-    if ('--fast'.startsWith(partialArg)) {
+    if (partialArg && '--fast'.startsWith(partialArg)) {
       return [
         {
           value: '--fast',
-          description: t('Set fast model for background tasks'),
+          description: t(
+            'Set a lighter model for prompt suggestions and speculative execution',
+          ),
         },
       ];
     }

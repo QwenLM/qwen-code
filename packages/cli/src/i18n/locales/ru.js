@@ -998,8 +998,8 @@ export default {
   // Команды - Модель
   // ============================================================================
   'Switch the model for this session': 'Переключение модели для этой сессии',
-  'Set fast model for background tasks':
-    'Установить быструю модель для фоновых задач',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Установить облегчённую модель для подсказок и спекулятивного выполнения',
   'Content generator configuration not available.':
     'Конфигурация генератора содержимого недоступна.',
   'Authentication type not available.': 'Тип авторизации недоступен.',

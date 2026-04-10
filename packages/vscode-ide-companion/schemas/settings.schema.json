@@ -260,7 +260,7 @@
       "additionalProperties": true
     },
     "fastModel": {
-      "description": "Model for background tasks (suggestion generation, speculation). Leave empty to use the main model. A smaller/faster model (e.g., qwen3.5-flash) reduces latency and cost.",
+      "description": "Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.",
       "type": "string",
       "default": ""
     },

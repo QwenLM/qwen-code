@@ -204,9 +204,9 @@ The `extra_body` field allows you to add custom parameters to the request body s
 
 #### fastModel
 
-| Setting     | Type   | Description                                                                                                                                                                                                                                           | Default |
-| ----------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `fastModel` | string | Model for background tasks ([suggestion generation](../features/followup-suggestions), speculation). Leave empty to use the main model. A smaller/faster model (e.g., `qwen3.5-flash`) reduces latency and cost. Can also be set via `/model --fast`. | `""`    |
+| Setting     | Type   | Description                                                                                                                                                                                                                                                      | Default |
+| ----------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `fastModel` | string | Model used for generating [prompt suggestions](../features/followup-suggestions) and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., `qwen3-coder-flash`) reduces latency and cost. Can also be set via `/model --fast`. | `""`    |
 
 #### context
 
