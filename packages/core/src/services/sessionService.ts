@@ -690,7 +690,7 @@ export function getResumePromptTokenCount(
         | ChatCompressionRecordPayload
         | undefined;
       if (payload?.info) {
-        return payload.info.newTokenCount;
+        return fallback ?? payload.info.newTokenCount;
       }
     }
 
