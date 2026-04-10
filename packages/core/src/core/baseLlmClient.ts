@@ -118,6 +118,7 @@ export class BaseLlmClient {
       const result = await retryWithBackoff(apiCall, {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
         persistentMode: isUnattendedMode(),
+        signal: abortSignal,
         heartbeatFn: (info) => {
           process.stderr.write(
             `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,

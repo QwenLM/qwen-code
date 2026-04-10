@@ -84,7 +84,13 @@ export function isUnattendedMode(): boolean {
 }
 
 function isEnvTruthy(val: string | undefined): boolean {
-  return val !== undefined && val !== '' && val !== '0' && val !== 'false';
+  const normalized = val?.trim().toLowerCase();
+  return (
+    normalized !== undefined &&
+    normalized !== '' &&
+    normalized !== '0' &&
+    normalized !== 'false'
+  );
 }
 
 /**
@@ -117,7 +123,7 @@ async function sleepWithHeartbeat(
       throw new Error('Retry aborted by signal');
     }
 
-    const chunk = Math.min(remaining, ctx.heartbeatInterval);
+    const chunk = Math.max(1, Math.min(remaining, ctx.heartbeatInterval));
     await delay(chunk);
     remaining -= chunk;
 
@@ -210,13 +216,16 @@ export async function retryWithBackoff<T>(
         );
       }
 
-      // Determine if this error qualifies for persistent retry
+      // Determine if this error qualifies for persistent retry.
+      // Persistent mode still respects shouldRetryOnError — callers can force
+      // fast-fail even for transient errors if they explicitly return false.
       const isTransient = isTransientCapacityError(error);
-      const shouldPersist = persistent && isTransient;
+      const callerAllowsRetry = shouldRetryOnError(error as Error);
+      const shouldPersist = persistent && isTransient && callerAllowsRetry;
 
       // Check if we've exhausted retries or shouldn't retry
       if (!shouldPersist) {
-        if (attempt >= maxAttempts || !shouldRetryOnError(error as Error)) {
+        if (attempt >= maxAttempts || !callerAllowsRetry) {
           throw error;
         }
       }
@@ -241,9 +250,9 @@ export async function retryWithBackoff<T>(
           delayMs = Math.min(delayMs, capMs); // Absolute cap at 6 hours
         }
 
-        // Add jitter (±25%)
+        // Add jitter (±25%), then re-apply both caps so delay never exceeds limits
         delayMs += delayMs * 0.25 * (Math.random() * 2 - 1);
-        delayMs = Math.max(0, delayMs);
+        delayMs = Math.min(Math.max(0, delayMs), maxBackoff, capMs);
 
         const reportedAttempt = persistentAttempt;
         debugLogger.warn(

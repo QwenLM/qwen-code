@@ -534,6 +534,17 @@ describe('isUnattendedMode', () => {
     process.env['QWEN_CODE_UNATTENDED_RETRY'] = '';
     expect(isUnattendedMode()).toBe(false);
   });
+
+  it('should handle case-insensitive and trimmed values', () => {
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'TRUE';
+    expect(isUnattendedMode()).toBe(true);
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = ' 1 ';
+    expect(isUnattendedMode()).toBe(true);
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'False';
+    expect(isUnattendedMode()).toBe(false);
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = ' 0 ';
+    expect(isUnattendedMode()).toBe(false);
+  });
 });
 
 describe('retryWithBackoff - persistent mode', () => {
@@ -646,10 +657,10 @@ describe('retryWithBackoff - persistent mode', () => {
     await vi.runAllTimersAsync();
     await promise;
 
-    // Check that no single delay exceeds the cap (with 25% jitter)
+    // Jitter is re-capped, so no delay should exceed the cap itself
     const delays = setTimeoutSpy.mock.calls.map((call) => call[1] as number);
     for (const d of delays) {
-      expect(d).toBeLessThanOrEqual(5000 * 1.25 + 1); // cap + max jitter + rounding
+      expect(d).toBeLessThanOrEqual(5000 + 1); // cap + rounding tolerance
     }
   });
 
