@@ -100,6 +100,8 @@ export enum SendMessageType {
   Hook = 'hook',
   /** Cron-fired prompt. Behaves like UserQuery but skips UserPromptSubmit hook. */
   Cron = 'cron',
+  /** Background agent notification. Display item is added by the drain loop. */
+  Notification = 'notification',
 }
 
 export interface SendMessageOptions {

@@ -798,19 +798,6 @@ export const AppContainer = (props: AppContainerProps) => {
   // so it always sees the latest state even between renders.
   midTurnDrainRef.current = drainQueue;
 
-  // Bridge background agent notifications to the message queue.
-  // When a background agent completes, its notification is injected as a
-  // queued message so it's submitted to the model between turns.
-  useEffect(() => {
-    const registry = config.getBackgroundTaskRegistry();
-    registry.setNotificationCallback((message: string) => {
-      addMessage(message);
-    });
-    return () => {
-      registry.setNotificationCallback(() => {});
-    };
-  }, [config, addMessage]);
-
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
     (submittedValue: string) => {

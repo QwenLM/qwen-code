@@ -16,18 +16,6 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
-/**
- * Prefix prepended to notification messages so the UI layer can distinguish
- * background-agent notifications from regular user input.
- */
-export const BACKGROUND_NOTIFICATION_PREFIX = '\x00__BG_NOTIFY__\x00';
-
-/**
- * Separator between the display summary (shown in the UI) and the full
- * model-facing content (sent to the LLM) within a notification message.
- */
-export const BACKGROUND_NOTIFICATION_SEPARATOR = '\x00__BG_SEP__\x00';
-
 const MAX_DESCRIPTION_LENGTH = 40;
 
 export type BackgroundAgentStatus =
@@ -49,7 +37,10 @@ export interface BackgroundAgentEntry {
   name?: string;
 }
 
-export type BackgroundNotificationCallback = (message: string) => void;
+export type BackgroundNotificationCallback = (
+  displayText: string,
+  modelText: string,
+) => void;
 
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, BackgroundAgentEntry>();
@@ -201,12 +192,7 @@ export class BackgroundTaskRegistry {
     }
 
     try {
-      this.notificationCallback(
-        BACKGROUND_NOTIFICATION_PREFIX +
-          displayLine +
-          BACKGROUND_NOTIFICATION_SEPARATOR +
-          modelLines.join('\n'),
-      );
+      this.notificationCallback(displayLine, modelLines.join('\n'));
     } catch (error) {
       debugLogger.error('Failed to emit background notification:', error);
     }

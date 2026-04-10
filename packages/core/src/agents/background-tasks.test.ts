@@ -5,11 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import {
-  BackgroundTaskRegistry,
-  BACKGROUND_NOTIFICATION_PREFIX,
-  BACKGROUND_NOTIFICATION_SEPARATOR,
-} from './background-tasks.js';
+import { BackgroundTaskRegistry } from './background-tasks.js';
 
 describe('BackgroundTaskRegistry', () => {
   let registry: BackgroundTaskRegistry;
@@ -50,21 +46,13 @@ describe('BackgroundTaskRegistry', () => {
     expect(entry.result).toBe('The result text');
     expect(entry.endTime).toBeDefined();
     expect(callback).toHaveBeenCalledOnce();
-    const msg = callback.mock.calls[0][0] as string;
-    expect(msg.startsWith(BACKGROUND_NOTIFICATION_PREFIX)).toBe(true);
-    const body = msg.slice(BACKGROUND_NOTIFICATION_PREFIX.length);
-    // Display part (before separator) should be a short summary
-    const sepIdx = body.indexOf(BACKGROUND_NOTIFICATION_SEPARATOR);
-    expect(sepIdx).toBeGreaterThan(0);
-    const displayPart = body.slice(0, sepIdx);
-    const modelPart = body.slice(
-      sepIdx + BACKGROUND_NOTIFICATION_SEPARATOR.length,
-    );
-    expect(displayPart).toContain('completed');
-    expect(displayPart).toContain('test agent');
-    expect(displayPart).not.toContain('The result text');
-    // Model part should include the result for the LLM
-    expect(modelPart).toContain('The result text');
+    const [displayText, modelText] = callback.mock.calls[0] as [string, string];
+    // Display text: short summary without the full result
+    expect(displayText).toContain('completed');
+    expect(displayText).toContain('test agent');
+    expect(displayText).not.toContain('The result text');
+    // Model text: full details including result for the LLM
+    expect(modelText).toContain('The result text');
   });
 
   it('fails a background agent and sends notification', () => {
@@ -85,7 +73,8 @@ describe('BackgroundTaskRegistry', () => {
     expect(entry.status).toBe('failed');
     expect(entry.error).toBe('Something went wrong');
     expect(callback).toHaveBeenCalledOnce();
-    expect(callback.mock.calls[0][0]).toContain('failed');
+    const [displayText] = callback.mock.calls[0] as [string, string];
+    expect(displayText).toContain('failed');
   });
 
   it('cancels a running background agent', () => {
