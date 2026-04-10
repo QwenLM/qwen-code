@@ -172,7 +172,11 @@ const PlanResultRenderer: React.FC<{
 );
 
 /**
- * Component to render subagent execution results
+ * Component to render subagent execution results.
+ * Wraps AgentExecutionDisplay in a fixed-height Box to stabilize terminal
+ * output height during frequent sub-agent updates. Without this, each tool
+ * call update causes the rendered height to fluctuate, triggering Ink's
+ * known bordered-box re-rendering issues (flickering/tearing).
  */
 const SubagentExecutionRenderer: React.FC<{
   data: AgentResultDisplay;
@@ -189,14 +193,16 @@ const SubagentExecutionRenderer: React.FC<{
   isFocused,
   isWaitingForOtherApproval,
 }) => (
-  <AgentExecutionDisplay
-    data={data}
-    availableHeight={availableHeight}
-    childWidth={childWidth}
-    config={config}
-    isFocused={isFocused}
-    isWaitingForOtherApproval={isWaitingForOtherApproval}
-  />
+  <Box flexDirection="column" height={availableHeight} overflow="hidden">
+    <AgentExecutionDisplay
+      data={data}
+      availableHeight={availableHeight}
+      childWidth={childWidth}
+      config={config}
+      isFocused={isFocused}
+      isWaitingForOtherApproval={isWaitingForOtherApproval}
+    />
+  </Box>
 );
 
 /**
