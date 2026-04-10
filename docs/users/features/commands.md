@@ -34,6 +34,7 @@ Commands for adjusting interface appearance and work environment.
 | ------------ | ---------------------------------------- | ----------------------------- |
 | `/clear`     | Clear terminal screen content            | `/clear` (shortcut: `Ctrl+L`) |
 | `/context`   | Show context window usage breakdown      | `/context`                    |
+| → `detail`   | Show per-item context usage breakdown    | `/context detail`             |
 | `/theme`     | Change Qwen Code visual theme            | `/theme`                      |
 | `/vim`       | Turn input area Vim editing mode on/off  | `/vim`                        |
 | `/directory` | Manage multi-directory support workspace | `/dir add ./src,./tests`      |
