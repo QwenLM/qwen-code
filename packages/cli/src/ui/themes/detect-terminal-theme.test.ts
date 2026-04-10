@@ -220,6 +220,58 @@ describe('detectTerminalBackground', () => {
       expect(result).toBe('light');
     });
 
+    it('tolerates setRawMode throwing during cleanup', async () => {
+      const stdin = createMockStdin();
+      const stdout = createMockStdout();
+      let callCount = 0;
+      stdin.setRawMode = vi.fn(() => {
+        callCount++;
+        // First call (enter raw mode) succeeds; second call (restore) throws
+        if (callCount > 1) {
+          throw new Error('stdin destroyed');
+        }
+      }) as unknown as typeof stdin.setRawMode;
+      simulateOSC11Response(stdin, stdout, 'ffff', 'ffff', 'ffff');
+
+      const result = await detectTerminalBackground({
+        stdin,
+        stdout,
+        timeoutMs: 500,
+      });
+
+      // Should still return the detected result despite cleanup error
+      expect(result).toBe('light');
+    });
+
+    it('handles cleanup called multiple times (settled guard)', async () => {
+      const stdin = createMockStdin();
+      const stdout = createMockStdout();
+
+      // Simulate both a fast response AND a subsequent 'end' on stdin,
+      // which would trigger cleanup twice (onData + onAbort).
+      // We use 'end' instead of 'error' because once cleanup removes the
+      // error listener, an unhandled 'error' event would throw.
+      stdout.on('data', (chunk: Buffer) => {
+        if (chunk.toString().includes('\x1b]11;?')) {
+          setTimeout(() => {
+            const pt = stdin as unknown as PassThrough;
+            pt.push(Buffer.from('\x1b]11;rgb:ffff/ffff/ffff\x07'));
+            // 'end' arrives right after data — second cleanup path
+            setTimeout(() => pt.emit('end'), 5);
+          }, 20);
+        }
+      });
+
+      const result = await detectTerminalBackground({
+        stdin,
+        stdout,
+        timeoutMs: 500,
+      });
+
+      // Should resolve from the first (data) path, not crash from the second
+      expect(result).toBe('light');
+    });
+
     it('OSC 11 takes priority over COLORFGBG', async () => {
       const stdin = createMockStdin();
       const stdout = createMockStdout();
