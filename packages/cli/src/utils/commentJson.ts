@@ -37,6 +37,23 @@ export function updateSettingsFilePreservingFormat(
   const updatedStructure = applyUpdates(parsed, updates);
   const updatedContent = stringify(updatedStructure, null, 2);
 
+  // Validate that the output is parseable before writing to disk.
+  // This prevents corrupted settings files that would block startup.
+  // Use comment-json's parse since the output may contain preserved comments.
+  try {
+    parse(updatedContent);
+  } catch (validationError) {
+    writeStderrLine(
+      'Error: Refusing to write settings file — the result would not be valid JSON.',
+    );
+    writeStderrLine(
+      validationError instanceof Error
+        ? validationError.message
+        : String(validationError),
+    );
+    return;
+  }
+
   fs.writeFileSync(filePath, updatedContent, 'utf-8');
 }
 

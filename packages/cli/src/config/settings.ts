@@ -572,8 +572,58 @@ export function loadSettings(
   ): { settings: Settings; rawJson?: string; migrationWarnings?: string[] } => {
     try {
       if (fs.existsSync(filePath)) {
-        const content = fs.readFileSync(filePath, 'utf-8');
-        const rawSettings: unknown = JSON.parse(stripJsonComments(content));
+        let content = fs.readFileSync(filePath, 'utf-8');
+        let rawSettings: unknown;
+
+        try {
+          rawSettings = JSON.parse(stripJsonComments(content));
+        } catch (parseError: unknown) {
+          // JSON parse failed — try to recover from .orig backup
+          const backupPath = `${filePath}.orig`;
+          if (fs.existsSync(backupPath)) {
+            debugLogger.warn(
+              `Settings file ${filePath} has invalid JSON (${getErrorMessage(parseError)}). Attempting recovery from backup ${backupPath}.`,
+            );
+            try {
+              const backupContent = fs.readFileSync(backupPath, 'utf-8');
+              const backupSettings = JSON.parse(
+                stripJsonComments(backupContent),
+              );
+              // Backup is valid — restore it
+              fs.writeFileSync(filePath, backupContent, 'utf-8');
+              content = backupContent;
+              rawSettings = backupSettings;
+              debugLogger.warn(
+                `Successfully recovered ${filePath} from backup.`,
+              );
+            } catch (_backupError) {
+              // Backup is also invalid — fall through to rename-and-degrade
+              debugLogger.warn(
+                `Backup file ${backupPath} is also invalid. Falling back to empty settings.`,
+              );
+            }
+          }
+
+          // No valid backup available — rename the corrupted file so the app
+          // can start with empty settings rather than crashing.
+          if (!rawSettings) {
+            const corruptedPath = `${filePath}.corrupted`;
+            const warningMsg = `Settings file ${filePath} has invalid JSON and was renamed to ${corruptedPath}. Your settings have been reset. To recover, fix the JSON in ${corruptedPath} and rename it back.`;
+            debugLogger.warn(warningMsg);
+            try {
+              fs.renameSync(filePath, corruptedPath);
+            } catch (_renameError) {
+              // If rename fails, still proceed with empty settings
+              debugLogger.error(
+                `Failed to rename corrupted settings file: ${getErrorMessage(_renameError)}`,
+              );
+            }
+            return {
+              settings: {},
+              migrationWarnings: [warningMsg],
+            };
+          }
+        }
 
         if (
           typeof rawSettings !== 'object' ||

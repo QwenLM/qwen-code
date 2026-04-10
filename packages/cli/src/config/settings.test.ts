@@ -56,7 +56,7 @@ import {
   SETTINGS_VERSION_KEY,
 } from './settings.js';
 import { needsMigration } from './migration/index.js';
-import { FatalConfigError, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { QWEN_DIR } from '@qwen-code/qwen-code-core';
 
 const MOCK_WORKSPACE_DIR = '/mock/workspace';
 // Use the (mocked) SETTINGS_DIRECTORY_NAME for consistency
@@ -1661,15 +1661,20 @@ describe('Settings Loading and Merging', () => {
       ]);
     });
 
-    it('should handle JSON parsing errors gracefully', () => {
-      (mockFsExistsSync as Mock).mockReturnValue(true); // Both files "exist"
+    it('should handle JSON parsing errors gracefully by renaming corrupted file', () => {
       const invalidJsonContent = 'invalid json';
       const userReadError = new SyntaxError(
         "Expected ',' or '}' after property value in JSON at position 10",
       );
-      const workspaceReadError = new SyntaxError(
-        'Unexpected token i in JSON at position 0',
-      );
+
+      // Return true for settings files but false for .orig backup files and
+      // .corrupted files so recovery rename path is hit.
+      (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) => {
+        const pathStr = String(p);
+        if (pathStr.endsWith('.orig') || pathStr.endsWith('.corrupted'))
+          return false;
+        return true;
+      });
 
       (fs.readFileSync as Mock).mockImplementation(
         (p: fs.PathOrFileDescriptor) => {
@@ -1678,38 +1683,29 @@ describe('Settings Loading and Merging', () => {
             vi.spyOn(JSON, 'parse').mockImplementationOnce(() => {
               throw userReadError;
             });
-            return invalidJsonContent; // Content that would cause JSON.parse to throw
-          }
-          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
-            // Simulate JSON.parse throwing for workspace settings
-            vi.spyOn(JSON, 'parse').mockImplementationOnce(() => {
-              throw workspaceReadError;
-            });
             return invalidJsonContent;
           }
           return '{}'; // Default for other reads
         },
       );
 
-      try {
-        loadSettings(MOCK_WORKSPACE_DIR);
-        throw new Error('loadSettings should have thrown a FatalConfigError');
-      } catch (e) {
-        expect(e).toBeInstanceOf(FatalConfigError);
-        const error = e as FatalConfigError;
-        expect(error.message).toContain(
-          `Error in ${USER_SETTINGS_PATH}: ${userReadError.message}`,
-        );
-        expect(error.message).toContain(
-          `Error in ${MOCK_WORKSPACE_SETTINGS_PATH}: ${workspaceReadError.message}`,
-        );
-        expect(error.message).toContain(
-          'Please fix the configuration file(s) and try again.',
-        );
-      }
+      // Mock renameSync to avoid actual file operations
+      const mockRenameSync = vi
+        .spyOn(fs, 'renameSync')
+        .mockImplementation(() => {});
 
-      // Restore JSON.parse mock if it was spied on specifically for this test
-      vi.restoreAllMocks(); // Or more targeted restore if needed
+      // Should NOT throw — corrupted settings degrade gracefully
+      const result = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(result).toBeDefined();
+
+      // Verify the corrupted file was renamed
+      expect(mockRenameSync).toHaveBeenCalledWith(
+        USER_SETTINGS_PATH,
+        `${USER_SETTINGS_PATH}.corrupted`,
+      );
+
+      mockRenameSync.mockRestore();
+      vi.restoreAllMocks();
     });
 
     it('should resolve environment variables in user settings', () => {
