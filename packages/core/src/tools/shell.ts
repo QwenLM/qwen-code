@@ -518,13 +518,13 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     if (result.exitCode !== 0 || result.aborted) {
-      attributionService.clearAttributions();
+      attributionService.clearAttributions(false);
       return;
     }
 
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
     if (!gitCoAuthorSettings.enabled) {
-      attributionService.clearAttributions();
+      attributionService.clearAttributions(false);
       return;
     }
 
@@ -613,8 +613,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
 
     try {
-      // Get changed file names
-      const nameOutput = await runGit('diff --name-only HEAD~1 HEAD');
+      // Get changed file names.
+      // For the initial commit (no parent), use --root to diff against empty tree.
+      const hasParent = (await runGit('rev-parse --verify HEAD~1')).length > 0;
+      const diffRef = hasParent ? 'HEAD~1 HEAD' : '--root HEAD';
+      const nameOutput = await runGit(`diff --name-only ${diffRef}`);
       const files = nameOutput
         .split('\n')
         .map((f) => f.trim())
@@ -622,7 +625,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (files.length === 0) return empty;
 
       // Get deleted files
-      const statusOutput = await runGit('diff --name-status HEAD~1 HEAD');
+      const statusOutput = await runGit(`diff --name-status ${diffRef}`);
       const deletedFiles = new Set<string>();
       for (const line of statusOutput.split('\n')) {
         if (line.startsWith('D\t')) {
@@ -631,7 +634,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
 
       // Get diff sizes from stat output
-      const statOutput = await runGit('diff --stat HEAD~1 HEAD');
+      const statOutput = await runGit(`diff --stat ${diffRef}`);
       const diffSizes = this.parseDiffStat(statOutput);
 
       return { files, diffSizes, deletedFiles };

@@ -262,10 +262,17 @@ export class CommitAttributionService {
     return this.surface;
   }
 
-  clearAttributions(): void {
-    this.promptCountAtLastCommit = this.promptCount;
-    this.permissionPromptCountAtLastCommit = this.permissionPromptCount;
-    this.escapeCountAtLastCommit = this.escapeCount;
+  /**
+   * Clear file attribution data. Called after commit (success or failure).
+   * @param commitSucceeded If true, also updates the "at last commit"
+   *   counters so getPromptsSinceLastCommit() resets to 0.
+   */
+  clearAttributions(commitSucceeded: boolean = true): void {
+    if (commitSucceeded) {
+      this.promptCountAtLastCommit = this.promptCount;
+      this.permissionPromptCountAtLastCommit = this.permissionPromptCount;
+      this.escapeCountAtLastCommit = this.escapeCount;
+    }
     this.fileAttributions.clear();
     this.sessionBaselines.clear();
   }

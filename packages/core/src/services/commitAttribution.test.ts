@@ -145,15 +145,27 @@ describe('CommitAttributionService', () => {
       expect(service.getPromptsSinceLastCommit()).toBe(3);
     });
 
-    it('should reset prompts-since-commit counter on clearAttributions', () => {
+    it('should reset prompts-since-commit counter on successful clear', () => {
       const service = CommitAttributionService.getInstance();
       service.incrementPromptCount();
       service.incrementPromptCount();
-      service.clearAttributions();
+      service.clearAttributions(true);
 
-      // Total still 2, but since-last-commit is 0
       expect(service.getPromptCount()).toBe(2);
       expect(service.getPromptsSinceLastCommit()).toBe(0);
+    });
+
+    it('should NOT reset prompts-since-commit on failed clear', () => {
+      const service = CommitAttributionService.getInstance();
+      service.incrementPromptCount();
+      service.incrementPromptCount();
+      service.recordEdit('/project/f.ts', null, 'x');
+      service.clearAttributions(false);
+
+      // File data cleared, but prompt counter preserved
+      expect(service.hasAttributions()).toBe(false);
+      expect(service.getPromptCount()).toBe(2);
+      expect(service.getPromptsSinceLastCommit()).toBe(2);
     });
   });
 

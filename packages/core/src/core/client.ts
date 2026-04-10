@@ -590,9 +590,11 @@ export class GeminiClient {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
 
-      // Track prompt count for commit attribution and persist snapshot
+      // Track prompt count for commit attribution (skip cron — not user-initiated)
       const attributionService = CommitAttributionService.getInstance();
-      attributionService.incrementPromptCount();
+      if (messageType !== SendMessageType.Cron) {
+        attributionService.incrementPromptCount();
+      }
 
       // record user message for session management
       this.config.getChatRecordingService()?.recordUserMessage(request);
