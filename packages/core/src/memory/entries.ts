@@ -69,7 +69,7 @@ export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
     // Indented nested field — legacy format: `  - Why: ...` or `  Why: ...`
     if (current) {
       const indentedMatch = rawLine.match(
-        /^\s{2,}(?:[-*]\s+)?(Why|How to apply|How_to_apply):\s*(.+)$/i,
+        /^[\t ]{2,}(?:[-*][\t ]+)?(Why|How to apply|How_to_apply):[\t ]*(\S.*)$/i,
       );
       if (indentedMatch) {
         const [, rawKey, rawValue] = indentedMatch;
@@ -93,7 +93,7 @@ export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
 
     // Top-level named field — new format: `Why: ...` or `**How to apply**: ...`
     const topLevelMatch = trimmed.match(
-      /^(?:\*\*)?(Why|How to apply|How_to_apply)(?:\*\*)?:\s*(.+)$/i,
+      /^(?:\*\*)?(Why|How to apply|How_to_apply)(?:\*\*)?:[ \t]*(\S.*)$/i,
     );
     if (topLevelMatch) {
       const [, rawKey, rawValue] = topLevelMatch;
@@ -125,10 +125,14 @@ export function parseAutoMemoryEntries(body: string): ManagedAutoMemoryEntry[] {
       continue;
     }
 
-    // Plain text — new per-entry format: first non-special line is the summary
-    if (!current) {
-      current = { summary: normalizeText(trimmed) };
+    // Plain text — new per-entry format: each plain-text line starts a new
+    // entry. If a current entry is already open, close it first so that
+    // multi-entry bodies produced by renderAutoMemoryBody can round-trip
+    // correctly through parse→rewrite without losing later entries.
+    if (current) {
+      entries.push(current);
     }
+    current = { summary: normalizeText(trimmed) };
   }
 
   if (current) {
@@ -147,7 +151,11 @@ export function renderAutoMemoryBody(
   }
 
   const lines: string[] = [];
-  for (const entry of entries) {
+  for (let i = 0; i < entries.length; i++) {
+    if (i > 0) {
+      lines.push('');
+    }
+    const entry = entries[i];
     lines.push(normalizeText(entry.summary));
     if (entry.why) {
       lines.push('', `Why: ${normalizeText(entry.why)}`);

@@ -25,7 +25,7 @@ import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { isSubpaths, isSubpath } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
-import { isAutoMemPath, getMemoryBaseDir } from '../memory/paths.js';
+import { isAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
 
 /**
@@ -95,9 +95,10 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     const userExtensionsDir = Storage.getUserExtensionsDir();
     const osTempDir = os.tmpdir();
 
-    // Auto-allow reads of any file under the global memory base dir — models
-    // legitimately read their own memory files without needing user approval.
-    const memoryBaseDir = getMemoryBaseDir();
+    // Auto-allow reads of files within the managed auto-memory root for this
+    // project only — using the narrower isAutoMemPath check instead of the
+    // broad getMemoryBaseDir() to avoid exposing sensitive ~/.qwen files such
+    // as settings.json or OAuth credentials.
     if (
       workspaceContext.isPathWithinWorkspace(filePath) ||
       isSubpath(projectTempDir, filePath) ||
@@ -105,7 +106,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       isSubpath(osTempDir, filePath) ||
       isSubpaths(userSkillsDirs, filePath) ||
       isSubpath(userExtensionsDir, filePath) ||
-      isSubpath(memoryBaseDir, filePath)
+      isAutoMemPath(filePath, this.config.getTargetDir())
     ) {
       return 'allow';
     }

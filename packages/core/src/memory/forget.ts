@@ -10,7 +10,9 @@ import type { Config } from '../config/config.js';
 import { runSideQuery } from '../auxiliary/sideQuery.js';
 import {
   buildAutoMemoryEntrySearchText,
+  getAutoMemoryBodyHeading,
   parseAutoMemoryEntries,
+  renderAutoMemoryBody,
 } from './entries.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
 import { getAutoMemoryMetadataPath } from './paths.js';
@@ -70,9 +72,13 @@ async function listIndexedForgetCandidates(
 
   for (const doc of docs) {
     const entries = parseAutoMemoryEntries(doc.body);
-    for (const entry of entries) {
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
       candidates.push({
-        id: doc.relativePath,
+        // Use a stable per-entry ID so the model can target individual entries
+        // in multi-entry files without accidentally removing siblings.
+        id:
+          entries.length === 1 ? doc.relativePath : `${doc.relativePath}:${i}`,
         topic: doc.type,
         summary: entry.summary,
         filePath: doc.filePath,
@@ -232,11 +238,56 @@ export async function forgetManagedAutoMemoryMatches(
   const removedEntries: AutoMemoryForgetMatch[] = [];
   const touchedTopics = new Set<AutoMemoryType>();
 
+  // Group matches by file so we can do per-entry removal rather than
+  // blindly deleting entire files (which would destroy unrelated entries in
+  // legacy multi-entry files).
+  const matchesByFile = new Map<string, AutoMemoryForgetMatch[]>();
   for (const match of matches) {
+    const existing = matchesByFile.get(match.filePath) ?? [];
+    existing.push(match);
+    matchesByFile.set(match.filePath, existing);
+  }
+
+  for (const [filePath, fileMatches] of matchesByFile) {
     try {
-      await fs.unlink(match.filePath);
-      removedEntries.push(match);
-      touchedTopics.add(match.topic);
+      const rawContent = await fs.readFile(filePath, 'utf-8');
+      const fmMatch = rawContent.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
+
+      if (!fmMatch) {
+        // No frontmatter — delete the whole file.
+        await fs.unlink(filePath);
+        removedEntries.push(...fileMatches);
+        for (const m of fileMatches) touchedTopics.add(m.topic);
+        continue;
+      }
+
+      const [, frontmatter, rawBody] = fmMatch;
+      const allEntries = parseAutoMemoryEntries(rawBody.trim());
+      const matchedSummaries = new Set(
+        fileMatches.map((m) => m.summary.toLowerCase()),
+      );
+      const kept = allEntries.filter(
+        (e) => !matchedSummaries.has(e.summary.toLowerCase()),
+      );
+
+      if (kept.length === 0) {
+        await fs.unlink(filePath);
+      } else {
+        const heading = getAutoMemoryBodyHeading(rawBody);
+        const newBody = renderAutoMemoryBody(heading, kept);
+        await fs.writeFile(
+          filePath,
+          `---\n${frontmatter}\n---\n\n${newBody}\n`,
+          'utf-8',
+        );
+      }
+
+      // Record the entries that were actually removed (by summary match count).
+      const removedCount = allEntries.length - kept.length;
+      removedEntries.push(...fileMatches.slice(0, removedCount));
+      for (const m of fileMatches.slice(0, removedCount)) {
+        touchedTopics.add(m.topic);
+      }
     } catch {
       // File may have already been removed; continue.
     }
