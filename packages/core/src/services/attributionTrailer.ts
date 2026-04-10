@@ -17,11 +17,10 @@ import type { CommitAttributionNote } from './commitAttribution.js';
 const GIT_NOTES_REF = 'refs/notes/ai-attribution';
 
 /** Maximum byte length for the -m argument to avoid shell ARG_MAX limits. */
-const MAX_NOTE_BYTES = 128 * 1024; // 128 KB – well within Linux's typical 2 MB
+const MAX_NOTE_BYTES = 128 * 1024; // 128 KB
 
 /**
  * Escape a string for safe use inside single quotes in a shell command.
- * Replaces each ' with the sequence '\'' (end quote, escaped quote, start quote).
  */
 function shellEscapeSingleQuote(s: string): string {
   return s.replace(/'/g, "'\\''");
@@ -51,18 +50,23 @@ export function buildGitNotesCommand(
 export function formatAttributionSummary(note: CommitAttributionNote): string {
   const lines: string[] = [];
   lines.push(
-    `AI Attribution: ${note.summary.totalFilesTouched} file(s) touched`,
+    `AI Attribution: ${note.summary.aiPercent}% AI, ${note.summary.totalFilesTouched} file(s)`,
   );
   lines.push(
-    `  Chars added: ${note.summary.totalAiCharsAdded}, removed: ${note.summary.totalAiCharsRemoved}`,
+    `  AI chars: ${note.summary.aiChars}, Human chars: ${note.summary.humanChars}`,
   );
 
   for (const [filePath, data] of Object.entries(note.files)) {
     const shortPath =
       filePath.length > 60 ? '...' + filePath.slice(-57) : filePath;
-    const created = data.aiCreated ? ' [created]' : '';
     lines.push(
-      `  ${shortPath}: +${data.aiCharsAdded}/-${data.aiCharsRemoved}${created}`,
+      `  ${shortPath}: ${data.percent}% AI (+${data.aiChars}/${data.humanChars}h)`,
+    );
+  }
+
+  if (note.excludedGenerated.length > 0) {
+    lines.push(
+      `  Excluded generated: ${note.excludedGenerated.length} file(s)`,
     );
   }
 

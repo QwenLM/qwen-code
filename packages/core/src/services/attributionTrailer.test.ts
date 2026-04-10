@@ -16,25 +16,16 @@ const sampleNote: CommitAttributionNote = {
   version: 1,
   generator: 'Qwen-Coder',
   files: {
-    'src/main.ts': {
-      aiCharsAdded: 150,
-      aiCharsRemoved: 30,
-      aiCreated: true,
-      aiContributionPercent: 100,
-    },
-    'src/utils.ts': {
-      aiCharsAdded: 45,
-      aiCharsRemoved: 20,
-      aiCreated: false,
-      aiContributionPercent: 100,
-    },
+    'src/main.ts': { aiChars: 150, humanChars: 50, percent: 75 },
+    'src/utils.ts': { aiChars: 0, humanChars: 200, percent: 0 },
   },
   summary: {
-    totalAiCharsAdded: 195,
-    totalAiCharsRemoved: 50,
+    aiPercent: 38,
+    aiChars: 150,
+    humanChars: 250,
     totalFilesTouched: 2,
-    overallAiPercent: 100,
   },
+  excludedGenerated: ['package-lock.json'],
 };
 
 describe('attributionTrailer', () => {
@@ -49,61 +40,46 @@ describe('attributionTrailer', () => {
       expect(cmd).toContain('"Qwen-Coder"');
     });
 
-    it('should not include cd prefix (cwd handled by executor)', () => {
-      const cmd = buildGitNotesCommand(sampleNote);
-      expect(cmd).not.toBeNull();
-      expect(cmd!).not.toContain('cd ');
-      expect(cmd!.startsWith('git notes')).toBe(true);
+    it('should not include cd prefix', () => {
+      const cmd = buildGitNotesCommand(sampleNote)!;
+      expect(cmd).not.toContain('cd ');
+      expect(cmd.startsWith('git notes')).toBe(true);
     });
 
-    it('should produce valid JSON in the note message', () => {
+    it('should produce valid JSON in the note', () => {
       const cmd = buildGitNotesCommand(sampleNote)!;
-      // Extract the JSON from between the single quotes after -m
       const match = cmd.match(/-m '(.+)' HEAD/);
       expect(match).toBeTruthy();
-      // The JSON may have escaped single quotes, unescape them
       const jsonStr = match![1].replace(/'\\''/g, "'");
       const parsed = JSON.parse(jsonStr);
       expect(parsed.version).toBe(1);
-      expect(parsed.generator).toBe('Qwen-Coder');
+      expect(parsed.summary.aiPercent).toBe(38);
+      expect(parsed.files['src/main.ts'].percent).toBe(75);
     });
 
     it('should return null when note exceeds size limit', () => {
       const hugeNote: CommitAttributionNote = {
         ...sampleNote,
         files: {},
+        excludedGenerated: [],
       };
-      // Create a note with enough files to exceed 128KB
       for (let i = 0; i < 2000; i++) {
         hugeNote.files[
           `src/very/long/path/to/some/deeply/nested/file_${i}.ts`
-        ] = {
-          aiCharsAdded: 999999,
-          aiCharsRemoved: 999999,
-          aiCreated: true,
-          aiContributionPercent: 100,
-        };
+        ] = { aiChars: 999999, humanChars: 999999, percent: 50 };
       }
-      const cmd = buildGitNotesCommand(hugeNote);
-      expect(cmd).toBeNull();
+      expect(buildGitNotesCommand(hugeNote)).toBeNull();
     });
 
     it('should properly escape single quotes in JSON', () => {
       const noteWithQuotes: CommitAttributionNote = {
         ...sampleNote,
         files: {
-          "it's-a-file.ts": {
-            aiCharsAdded: 10,
-            aiCharsRemoved: 5,
-            aiCreated: false,
-            aiContributionPercent: 100,
-          },
+          "it's-a-file.ts": { aiChars: 10, humanChars: 5, percent: 67 },
         },
       };
       const cmd = buildGitNotesCommand(noteWithQuotes);
       expect(cmd).not.toBeNull();
-      // Should not have unescaped single quotes that break the shell command
-      // The pattern '...'\''...' is the correct shell escaping for single quotes
       expect(cmd).toContain("'\\''");
     });
   });
@@ -111,11 +87,13 @@ describe('attributionTrailer', () => {
   describe('formatAttributionSummary', () => {
     it('should format a human-readable summary', () => {
       const summary = formatAttributionSummary(sampleNote);
-      expect(summary).toContain('2 file(s) touched');
-      expect(summary).toContain('Chars added: 195');
-      expect(summary).toContain('removed: 50');
+      expect(summary).toContain('38% AI');
+      expect(summary).toContain('2 file(s)');
+      expect(summary).toContain('AI chars: 150');
+      expect(summary).toContain('Human chars: 250');
       expect(summary).toContain('src/main.ts');
-      expect(summary).toContain('[created]');
+      expect(summary).toContain('75% AI');
+      expect(summary).toContain('Excluded generated: 1 file(s)');
     });
   });
 

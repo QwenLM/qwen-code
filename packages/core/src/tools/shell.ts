@@ -24,7 +24,10 @@ import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { truncateToolOutput } from '../utils/truncation.js';
-import { CommitAttributionService } from '../services/commitAttribution.js';
+import {
+  CommitAttributionService,
+  type StagedFileInfo,
+} from '../services/commitAttribution.js';
 import { buildGitNotesCommand } from '../services/attributionTrailer.js';
 import type {
   ShellExecutionConfig,
@@ -491,8 +494,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * After a successful git commit, attach per-file AI attribution metadata
-   * as git notes. This keeps the commit message clean while enabling
-   * compliance audits and AI contribution tracking.
+   * as git notes. Analyzes staged files via `git diff` to calculate real
+   * AI vs human contribution percentages.
    *
    * Respects the gitCoAuthor setting: if the user disables co-author,
    * attribution notes are also skipped.
@@ -502,7 +505,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
     result: { exitCode: number | null; aborted?: boolean },
     cwd: string,
   ): Promise<void> {
-    // Only act on git commit commands
     const gitCommitPattern = /\bgit\s+commit\b/;
     if (!gitCommitPattern.test(command)) {
       return;
@@ -513,15 +515,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       return;
     }
 
-    // If the commit failed or was aborted, clear stale attribution data
-    // so it doesn't leak into the next successful commit.
     if (result.exitCode !== 0 || result.aborted) {
       attributionService.clearAttributions();
       return;
     }
 
-    // Respect the gitCoAuthor toggle — if the user opted out of AI
-    // attribution in commit messages, skip notes as well.
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
     if (!gitCoAuthorSettings.enabled) {
       attributionService.clearAttributions();
@@ -529,11 +527,16 @@ export class ShellToolInvocation extends BaseToolInvocation<
     }
 
     try {
+      // Analyze the just-committed files by diffing HEAD against its parent.
+      // The commit already happened, so we diff HEAD~1..HEAD instead of --cached.
+      const stagedInfo = await this.getCommittedFileInfo(cwd);
+
       const generatorName = gitCoAuthorSettings.name ?? 'Qwen-Coder';
       const baseDir = this.config.getTargetDir();
       const note = attributionService.generateNotePayload(
-        generatorName,
+        stagedInfo,
         baseDir,
+        generatorName,
       );
       const notesCommand = buildGitNotesCommand(note);
 
@@ -571,18 +574,94 @@ export class ShellToolInvocation extends BaseToolInvocation<
         );
       } else {
         debugLogger.debug(
-          `Attached AI attribution note: ${note.summary.totalFilesTouched} file(s), +${note.summary.totalAiCharsAdded}/-${note.summary.totalAiCharsRemoved} chars`,
+          `Attached AI attribution note: ${note.summary.aiPercent}% AI, ${note.summary.totalFilesTouched} file(s)`,
         );
       }
     } catch (err) {
-      // Non-fatal: attribution failure should not block the commit
       debugLogger.warn(
         `Failed to attach AI attribution note: ${getErrorMessage(err)}`,
       );
     } finally {
-      // Always clear attributions after a commit attempt
       attributionService.clearAttributions();
     }
+  }
+
+  /**
+   * Get information about files in the most recent commit by diffing
+   * HEAD against its parent (HEAD~1). Falls back to empty info on error.
+   */
+  private async getCommittedFileInfo(cwd: string): Promise<StagedFileInfo> {
+    const empty: StagedFileInfo = {
+      files: [],
+      diffSizes: new Map(),
+      deletedFiles: new Set(),
+    };
+
+    const runGit = async (args: string): Promise<string> => {
+      const handle = await ShellExecutionService.execute(
+        `git ${args}`,
+        cwd,
+        () => {},
+        AbortSignal.timeout(5000),
+        false,
+        {},
+      );
+      const r = await handle.result;
+      return r.exitCode === 0 ? r.output : '';
+    };
+
+    try {
+      // Get changed file names
+      const nameOutput = await runGit('diff --name-only HEAD~1 HEAD');
+      const files = nameOutput
+        .split('\n')
+        .map((f) => f.trim())
+        .filter(Boolean);
+      if (files.length === 0) return empty;
+
+      // Get deleted files
+      const statusOutput = await runGit('diff --name-status HEAD~1 HEAD');
+      const deletedFiles = new Set<string>();
+      for (const line of statusOutput.split('\n')) {
+        if (line.startsWith('D\t')) {
+          deletedFiles.add(line.slice(2).trim());
+        }
+      }
+
+      // Get diff sizes from stat output
+      const statOutput = await runGit('diff --stat HEAD~1 HEAD');
+      const diffSizes = this.parseDiffStat(statOutput);
+
+      return { files, diffSizes, deletedFiles };
+    } catch {
+      return empty;
+    }
+  }
+
+  /**
+   * Parse `git diff --stat` output to extract per-file change sizes.
+   * Estimates character count as (insertions + deletions) * 40 chars/line.
+   */
+  private parseDiffStat(statOutput: string): Map<string, number> {
+    const sizes = new Map<string, number>();
+    const lines = statOutput.split('\n').filter(Boolean);
+
+    for (const line of lines) {
+      // Skip summary line ("N files changed, X insertions(+), Y deletions(-)")
+      if (line.includes('file changed') || line.includes('files changed')) {
+        continue;
+      }
+      // Format: " path/to/file | 5 ++---"
+      const match = line.match(/^\s*(.+?)\s+\|\s+(\d+)/);
+      if (match) {
+        const filePath = match[1]!.trim();
+        const changes = parseInt(match[2]!, 10);
+        // Approximate chars: lines changed * avg 40 chars/line
+        sizes.set(filePath, changes * 40);
+      }
+    }
+
+    return sizes;
   }
 
   private addCoAuthorToGitCommit(command: string): string {
