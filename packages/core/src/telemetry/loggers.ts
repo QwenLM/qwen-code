@@ -50,8 +50,6 @@ import {
   EVENT_MEMORY_EXTRACT,
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
-  EVENT_MEMORY_FORGET,
-  EVENT_MEMORY_REMEMBER,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -71,8 +69,6 @@ import {
   recordMemoryExtractMetrics,
   recordMemoryDreamMetrics,
   recordMemoryRecallMetrics,
-  recordMemoryForgetMetrics,
-  recordMemoryRememberMetrics,
 } from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
@@ -119,8 +115,6 @@ import type {
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
-  MemoryForgetEvent,
-  MemoryRememberEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
@@ -1257,53 +1251,5 @@ export function logMemoryRecall(
   recordMemoryRecallMetrics(config, event.duration_ms, {
     strategy: event.strategy,
     docs_selected: event.docs_selected,
-  });
-}
-
-export function logMemoryForget(
-  config: Config,
-  event: MemoryForgetEvent,
-): void {
-  if (!isTelemetrySdkInitialized()) return;
-
-  const attributes: LogAttributes = {
-    ...getCommonAttributes(config),
-    'event.name': EVENT_MEMORY_FORGET,
-    'event.timestamp': event['event.timestamp'],
-    removed_entries_count: event.removed_entries_count,
-    touched_topics: event.touched_topics,
-    selection_strategy: event.selection_strategy,
-  };
-
-  const logger = logs.getLogger(SERVICE_NAME);
-  logger.emit({
-    body: `Memory forget: removed ${event.removed_entries_count} entr${event.removed_entries_count === 1 ? 'y' : 'ies'}. Strategy: ${event.selection_strategy}.`,
-    attributes,
-  });
-  recordMemoryForgetMetrics(config, {
-    removed_entries_count: event.removed_entries_count,
-  });
-}
-
-export function logMemoryRemember(
-  config: Config,
-  event: MemoryRememberEvent,
-): void {
-  if (!isTelemetrySdkInitialized()) return;
-
-  const attributes: LogAttributes = {
-    ...getCommonAttributes(config),
-    'event.name': EVENT_MEMORY_REMEMBER,
-    'event.timestamp': event['event.timestamp'],
-    topic: event.topic,
-  };
-
-  const logger = logs.getLogger(SERVICE_NAME);
-  logger.emit({
-    body: `Memory remember: topic=${event.topic}.`,
-    attributes,
-  });
-  recordMemoryRememberMetrics(config, {
-    mode: event.topic as 'managed' | 'legacy',
   });
 }

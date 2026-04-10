@@ -1224,35 +1224,3 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
     this.duration_ms = params.duration_ms;
   }
 }
-
-export class MemoryForgetEvent implements BaseTelemetryEvent {
-  'event.name': 'qwen-code.memory.forget';
-  'event.timestamp': string;
-  removed_entries_count: number;
-  touched_topics: string;
-  selection_strategy: 'none' | 'heuristic' | 'model';
-
-  constructor(params: {
-    removed_entries_count: number;
-    touched_topics: string[];
-    selection_strategy: 'none' | 'heuristic' | 'model';
-  }) {
-    this['event.name'] = 'qwen-code.memory.forget';
-    this['event.timestamp'] = new Date().toISOString();
-    this.removed_entries_count = params.removed_entries_count;
-    this.touched_topics = params.touched_topics.join(',');
-    this.selection_strategy = params.selection_strategy;
-  }
-}
-
-export class MemoryRememberEvent implements BaseTelemetryEvent {
-  'event.name': 'qwen-code.memory.remember';
-  'event.timestamp': string;
-  topic: string;
-
-  constructor(params: { topic: string }) {
-    this['event.name'] = 'qwen-code.memory.remember';
-    this['event.timestamp'] = new Date().toISOString();
-    this.topic = params.topic;
-  }
-}

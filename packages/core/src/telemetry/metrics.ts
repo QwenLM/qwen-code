@@ -51,8 +51,6 @@ const MEMORY_DREAM_COUNT = `${SERVICE_NAME}.memory.dream.count`;
 const MEMORY_DREAM_DURATION = `${SERVICE_NAME}.memory.dream.duration`;
 const MEMORY_RECALL_COUNT = `${SERVICE_NAME}.memory.recall.count`;
 const MEMORY_RECALL_DURATION = `${SERVICE_NAME}.memory.recall.duration`;
-const MEMORY_FORGET_COUNT = `${SERVICE_NAME}.memory.forget.count`;
-const MEMORY_REMEMBER_COUNT = `${SERVICE_NAME}.memory.remember.count`;
 
 const baseMetricDefinition = {
   getCommonAttributes: (config: Config): Attributes => ({
@@ -378,8 +376,6 @@ let memoryDreamCounter: Counter | undefined;
 let memoryDreamDurationHistogram: Histogram | undefined;
 let memoryRecallCounter: Counter | undefined;
 let memoryRecallDurationHistogram: Histogram | undefined;
-let memoryForgetCounter: Counter | undefined;
-let memoryRememberCounter: Counter | undefined;
 
 let isMetricsInitialized = false;
 let isPerformanceMonitoringEnabled = false;
@@ -485,15 +481,6 @@ export function initializeMetrics(config: Config): void {
       valueType: ValueType.INT,
     },
   );
-  memoryForgetCounter = meter.createCounter(MEMORY_FORGET_COUNT, {
-    description: 'Counts auto-memory forget operations.',
-    valueType: ValueType.INT,
-  });
-  memoryRememberCounter = meter.createCounter(MEMORY_REMEMBER_COUNT, {
-    description: 'Counts /remember command invocations.',
-    valueType: ValueType.INT,
-  });
-
   // Initialize performance monitoring metrics if enabled
   initializePerformanceMonitoring(config);
 
@@ -1001,27 +988,5 @@ export function recordMemoryRecallMetrics(
   memoryRecallDurationHistogram?.record(durationMs, {
     ...common,
     strategy: attrs.strategy,
-  });
-}
-
-export function recordMemoryForgetMetrics(
-  config: Config,
-  attrs: { removed_entries_count: number },
-): void {
-  if (!isMetricsInitialized) return;
-  memoryForgetCounter?.add(1, {
-    ...baseMetricDefinition.getCommonAttributes(config),
-    removed_entries_count: attrs.removed_entries_count,
-  });
-}
-
-export function recordMemoryRememberMetrics(
-  config: Config,
-  attrs: { mode: 'managed' | 'legacy' },
-): void {
-  if (!isMetricsInitialized) return;
-  memoryRememberCounter?.add(1, {
-    ...baseMetricDefinition.getCommonAttributes(config),
-    mode: attrs.mode,
   });
 }
