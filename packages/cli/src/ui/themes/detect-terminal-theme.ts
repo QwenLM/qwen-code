@@ -36,26 +36,30 @@ export interface DetectOptions {
 export async function detectTerminalBackground(
   options?: DetectOptions,
 ): Promise<'dark' | 'light'> {
-  const stdin = options?.stdin ?? process.stdin;
-  const stdout = options?.stdout ?? process.stdout;
-  const env = options?.env ?? process.env;
-  const timeoutMs = options?.timeoutMs ?? 300;
+  try {
+    const stdin = options?.stdin ?? process.stdin;
+    const stdout = options?.stdout ?? process.stdout;
+    const env = options?.env ?? process.env;
+    const timeoutMs = options?.timeoutMs ?? 300;
 
-  // Try OSC 11 first (only when both stdin and stdout are TTYs).
-  if (stdin.isTTY && stdout.isTTY) {
-    const osc11Result = await queryOSC11(stdin, stdout, timeoutMs);
-    if (osc11Result !== undefined) {
-      return osc11Result;
+    // Try OSC 11 first (only when both stdin and stdout are TTYs).
+    if (stdin.isTTY && stdout.isTTY) {
+      const osc11Result = await queryOSC11(stdin, stdout, timeoutMs);
+      if (osc11Result !== undefined) {
+        return osc11Result;
+      }
     }
-  }
 
-  // Fallback: COLORFGBG environment variable.
-  const colorfgbg = env['COLORFGBG'];
-  if (colorfgbg) {
-    const result = parseColorFGBG(colorfgbg);
-    if (result !== undefined) {
-      return result;
+    // Fallback: COLORFGBG environment variable.
+    const colorfgbg = env['COLORFGBG'];
+    if (colorfgbg) {
+      const result = parseColorFGBG(colorfgbg);
+      if (result !== undefined) {
+        return result;
+      }
     }
+  } catch {
+    // Best-effort detection — never crash the process.
   }
 
   // Default: dark (preserves current QwenDark default).
@@ -82,6 +86,8 @@ async function queryOSC11(
       settled = true;
       clearTimeout(timer);
       stdin.removeListener('data', onData);
+      stdin.removeListener('error', onAbort);
+      stdin.removeListener('end', onAbort);
       // Restore stdin to paused (non-flowing) mode — .on('data') switched it
       // to flowing, and leaving it flowing could cause data loss before ink
       // attaches its own listeners.
@@ -93,10 +99,17 @@ async function queryOSC11(
       }
     };
 
+    const onAbort = () => {
+      cleanup();
+      resolve(undefined);
+    };
+
     const timer = setTimeout(() => {
       cleanup();
       resolve(undefined);
     }, timeoutMs);
+    // Don't let this timer keep the process alive (e.g. on early Ctrl+C).
+    timer.unref?.();
 
     const onData = (data: Buffer) => {
       accumulated += data.toString();
@@ -104,7 +117,7 @@ async function queryOSC11(
       // Response: \x1b]11;rgb:RRRR/GGGG/BBBB\x07  (or \x1b\\ as ST)
       const match = accumulated.match(
         // eslint-disable-next-line no-control-regex
-        /\x1b\]11;rgb:([0-9a-fA-F]+)\/([0-9a-fA-F]+)\/([0-9a-fA-F]+)/,
+        /\x1b\]11;rgb:([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})/,
       );
       if (match) {
         cleanup();
@@ -124,6 +137,8 @@ async function queryOSC11(
     }
 
     stdin.on('data', onData);
+    stdin.on('error', onAbort);
+    stdin.on('end', onAbort);
 
     // Send OSC 11 query: "\x1b]11;?\x07"
     stdout.write('\x1b]11;?\x07');

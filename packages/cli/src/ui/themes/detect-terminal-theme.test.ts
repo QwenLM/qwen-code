@@ -56,12 +56,13 @@ function simulateOSC11Response(
 ) {
   stdout.on('data', (chunk: Buffer) => {
     if (chunk.toString().includes('\x1b]11;?')) {
-      // Reply after a tiny delay to simulate real terminal round-trip.
+      // Reply after a short delay to simulate real terminal round-trip.
+      // Use 20ms (not lower) to avoid flakiness on loaded CI runners.
       setTimeout(() => {
         (stdin as unknown as PassThrough).push(
           Buffer.from(`\x1b]11;rgb:${r}/${g}/${b}\x07`),
         );
-      }, 5);
+      }, 20);
     }
   });
 }
@@ -235,6 +236,55 @@ describe('detectTerminalBackground', () => {
       expect(result).toBe('light');
     });
 
+    it('falls back on stdin error', async () => {
+      const stdin = createMockStdin();
+      const stdout = createMockStdout();
+
+      // Emit error shortly after query is sent
+      stdout.on('data', (chunk: Buffer) => {
+        if (chunk.toString().includes('\x1b]11;?')) {
+          setTimeout(() => {
+            (stdin as unknown as PassThrough).emit(
+              'error',
+              new Error('read error'),
+            );
+          }, 20);
+        }
+      });
+
+      const result = await detectTerminalBackground({
+        stdin,
+        stdout,
+        timeoutMs: 500,
+        env: {},
+      });
+
+      expect(result).toBe('dark');
+    });
+
+    it('falls back on stdin end', async () => {
+      const stdin = createMockStdin();
+      const stdout = createMockStdout();
+
+      stdout.on('data', (chunk: Buffer) => {
+        if (chunk.toString().includes('\x1b]11;?')) {
+          setTimeout(() => {
+            (stdin as unknown as PassThrough).emit('end');
+          }, 20);
+        }
+      });
+
+      const result = await detectTerminalBackground({
+        stdin,
+        stdout,
+        timeoutMs: 500,
+        env: { COLORFGBG: '0;7' },
+      });
+
+      // Falls through OSC 11 (end) → COLORFGBG → light
+      expect(result).toBe('light');
+    });
+
     it('falls back when terminal does not respond (timeout)', async () => {
       const stdin = createMockStdin();
       const stdout = createMockStdout();
@@ -323,6 +373,23 @@ describe('detectTerminalBackground', () => {
       const result = await detectTerminalBackground({
         stdin,
         stdout,
+        env: {},
+      });
+
+      expect(result).toBe('dark');
+    });
+
+    it('returns dark when an unexpected error is thrown', async () => {
+      // Pass a completely broken stdin that throws on property access
+      const brokenStdin = {
+        get isTTY(): boolean {
+          throw new Error('broken');
+        },
+      } as unknown as NodeJS.ReadStream & { fd: 0 };
+
+      const result = await detectTerminalBackground({
+        stdin: brokenStdin,
+        stdout: createMockStdout(),
         env: {},
       });
 
