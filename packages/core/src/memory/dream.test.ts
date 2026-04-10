@@ -42,8 +42,14 @@ describe('managed auto-memory dream', () => {
   });
 
   it('deduplicates repeated bullet entries in topic files', async () => {
-    const firstPath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse.md'));
-    const duplicatePath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse-duplicate.md'));
+    const firstPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('user', 'terse.md'),
+    );
+    const duplicatePath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('user', 'terse-duplicate.md'),
+    );
     await fs.mkdir(path.dirname(firstPath), { recursive: true });
     await fs.writeFile(
       firstPath,
@@ -73,7 +79,10 @@ describe('managed auto-memory dream', () => {
     );
 
     const result = await runManagedAutoMemoryDream(projectRoot);
-    const index = await fs.readFile(getAutoMemoryIndexPath(projectRoot), 'utf-8');
+    const index = await fs.readFile(
+      getAutoMemoryIndexPath(projectRoot),
+      'utf-8',
+    );
     const docs = await scanAutoMemoryTopicDocuments(projectRoot);
     const userDocs = docs.filter((doc) => doc.type === 'user');
 
@@ -84,9 +93,15 @@ describe('managed auto-memory dream', () => {
     expect(index).toContain('(user/');
   });
 
-  it('preserves Claude-style why/apply metadata when deduplicating entries', async () => {
-    const firstPath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse.md'));
-    const duplicatePath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse-context.md'));
+  it('preserves why/apply metadata when deduplicating entries', async () => {
+    const firstPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('user', 'terse.md'),
+    );
+    const duplicatePath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('user', 'terse-context.md'),
+    );
     await fs.mkdir(path.dirname(firstPath), { recursive: true });
     await fs.writeFile(
       firstPath,
@@ -126,11 +141,16 @@ describe('managed auto-memory dream', () => {
 
     expect(content.match(/User prefers terse responses\./g)).toHaveLength(1);
     expect(content).toContain('Why: They repeatedly ask for concise replies.');
-    expect(content).toContain('How to apply: Lead with a short answer before details.');
+    expect(content).toContain(
+      'How to apply: Lead with a short answer before details.',
+    );
   });
 
   it('leaves empty placeholder documents unchanged', async () => {
-    const projectPath = getAutoMemoryFilePath(projectRoot, path.join('project', 'empty.md'));
+    const projectPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('project', 'empty.md'),
+    );
     await fs.mkdir(path.dirname(projectPath), { recursive: true });
     await fs.writeFile(
       projectPath,
@@ -153,8 +173,14 @@ describe('managed auto-memory dream', () => {
   });
 
   it('falls back to mechanical dedupe when config is provided', async () => {
-    const firstPath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse.md'));
-    const duplicatePath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse-again.md'));
+    const firstPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('user', 'terse.md'),
+    );
+    const duplicatePath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('user', 'terse-again.md'),
+    );
     await fs.mkdir(path.dirname(firstPath), { recursive: true });
 
     await fs.writeFile(
@@ -204,8 +230,14 @@ describe('managed auto-memory dream', () => {
       new Error('agent failed'),
     );
 
-    const firstPath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse.md'));
-    const duplicatePath = getAutoMemoryFilePath(projectRoot, path.join('user', 'terse-failover.md'));
+    const firstPath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('user', 'terse.md'),
+    );
+    const duplicatePath = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('user', 'terse-failover.md'),
+    );
     await fs.mkdir(path.dirname(firstPath), { recursive: true });
 
     await fs.writeFile(

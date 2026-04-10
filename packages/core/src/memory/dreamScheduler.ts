@@ -67,8 +67,13 @@ export interface ManagedAutoMemoryDreamScheduleResult {
   promise?: Promise<BackgroundTaskState>;
 }
 
-async function readDreamMetadata(projectRoot: string): Promise<AutoMemoryMetadata> {
-  const content = await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf-8');
+async function readDreamMetadata(
+  projectRoot: string,
+): Promise<AutoMemoryMetadata> {
+  const content = await fs.readFile(
+    getAutoMemoryMetadataPath(projectRoot),
+    'utf-8',
+  );
   return JSON.parse(content) as AutoMemoryMetadata;
 }
 
@@ -99,8 +104,7 @@ const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 
 /**
  * Returns session IDs whose transcript files have mtime after sinceMs.
- * Mirrors Claude Code’s listSessionsTouchedSince approach: ground truth from
- * the filesystem, immune to meta.json corruption or loss.
+ * Uses filesystem mtime as ground truth, immune to meta.json corruption or loss.
  * Caller should exclude the current session (its mtime is always recent).
  */
 async function listSessionsTouchedSince(
@@ -250,7 +254,9 @@ export class ManagedAutoMemoryDreamRuntime {
     this.lastSessionScanAt.set(params.projectRoot, now.getTime());
 
     // Scan session files by mtime (filesystem ground truth, immune to meta.json loss).
-    const lastDreamMs = metadata.lastDreamAt ? Date.parse(metadata.lastDreamAt) : 0;
+    const lastDreamMs = metadata.lastDreamAt
+      ? Date.parse(metadata.lastDreamAt)
+      : 0;
     const sessionIds = await this.sessionScanner(
       params.projectRoot,
       lastDreamMs,
@@ -285,7 +291,8 @@ export class ManagedAutoMemoryDreamRuntime {
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
             return {
-              progressText: 'Skipped managed auto-memory dream because consolidation lock already exists.',
+              progressText:
+                'Skipped managed auto-memory dream because consolidation lock already exists.',
               metadata: { skippedReason: 'locked' },
             };
           }
@@ -345,7 +352,8 @@ export class ManagedAutoMemoryDreamRuntime {
   }
 }
 
-const defaultManagedAutoMemoryDreamRuntime = new ManagedAutoMemoryDreamRuntime();
+const defaultManagedAutoMemoryDreamRuntime =
+  new ManagedAutoMemoryDreamRuntime();
 
 export async function scheduleManagedAutoMemoryDream(
   params: ScheduleManagedAutoMemoryDreamParams,

@@ -36,7 +36,10 @@ describe('managed auto-memory lifecycle integration', () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-lifecycle-int-'));
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
-    await ensureAutoMemoryScaffold(projectRoot, new Date('2026-04-01T00:00:00.000Z'));
+    await ensureAutoMemoryScaffold(
+      projectRoot,
+      new Date('2026-04-01T00:00:00.000Z'),
+    );
     mockConfig = {
       getSessionId: () => 'session-1',
       getModel: () => 'qwen3-coder-plus',
@@ -97,12 +100,14 @@ describe('managed auto-memory lifecycle integration', () => {
     });
   });
 
-  it('supports a Claude-style durable memory lifecycle across extraction, recall, and dream', async () => {
+  it('supports a durable memory lifecycle across extraction, recall, and dream', async () => {
     const firstExtraction = scheduleManagedAutoMemoryExtract({
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
-      history: [{ role: 'user', parts: [{ text: 'I prefer terse responses.' }] }],
+      history: [
+        { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+      ],
     });
 
     const queuedExtraction = await scheduleManagedAutoMemoryExtract({
@@ -128,7 +133,9 @@ describe('managed auto-memory lifecycle integration', () => {
     const firstResult = await firstExtraction;
     expect(firstResult.touchedTopics).toEqual(['user']);
 
-    const drained = await drainManagedAutoMemoryExtractTasks({ timeoutMs: 1_000 });
+    const drained = await drainManagedAutoMemoryExtractTasks({
+      timeoutMs: 1_000,
+    });
     expect(drained).toBe(true);
 
     const projectPath = getAutoMemoryFilePath(
@@ -192,7 +199,9 @@ describe('managed auto-memory lifecycle integration', () => {
     const referenceDoc = docs.find((doc) => doc.type === 'reference');
 
     expect(userDoc?.body).toContain('I prefer terse responses.');
-    expect(userDoc?.body).toContain('Why: User repeatedly asks for concise replies.');
+    expect(userDoc?.body).toContain(
+      'Why: User repeatedly asks for concise replies.',
+    );
     expect(referenceDoc?.body).toContain('grafana.example/d/api-latency');
     expect(projectDoc?.body).toContain('This is temporary for this task.');
     expect(indexContent).toContain('user/');

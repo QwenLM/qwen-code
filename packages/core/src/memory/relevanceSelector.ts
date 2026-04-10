@@ -10,9 +10,7 @@ import { runSideQuery } from '../auxiliary/sideQuery.js';
 import type { ScannedAutoMemoryDocument } from './scan.js';
 
 /**
- * System prompt for the selector side-query.  Mirrors Claude Code's
- * SELECT_MEMORIES_SYSTEM_PROMPT — including the recentTools instruction —
- * so selection behaviour stays consistent.
+ * System prompt for the selector side-query.
  */
 const SELECT_MEMORIES_SYSTEM_PROMPT = `You are selecting memories that will be useful to an AI coding assistant as it processes a user's query. You will be given the user's query and a list of available memory files with their filenames and descriptions.
 
@@ -40,8 +38,7 @@ interface RecallSelectorResponse {
 /**
  * Format memory headers as a text manifest: one line per file with
  * [type] relativePath (ISO-timestamp): description.
- * Mirrors Claude Code's formatMemoryManifest — selector sees only
- * the header (type, path, age, description), not the body content.
+ * Selector sees only the header (type, path, age, description), not the body content.
  */
 function formatMemoryManifest(docs: ScannedAutoMemoryDocument[]): string {
   return docs

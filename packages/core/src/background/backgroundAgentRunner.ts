@@ -86,8 +86,7 @@ export class BackgroundAgentRunner {
     registry = new BackgroundTaskRegistry(),
     drainer = new BackgroundTaskDrainer(),
     scheduler = new BackgroundTaskScheduler(registry, drainer),
-    private readonly createAgentHeadless: CreateAgentHeadlessFn =
-      AgentHeadless.create,
+    private readonly createAgentHeadless: CreateAgentHeadlessFn = AgentHeadless.create,
   ) {
     this.registry = registry;
     this.drainer = drainer;
@@ -118,15 +117,20 @@ export class BackgroundAgentRunner {
       },
       run: async (task) => {
         const emitter = new AgentEventEmitter();
-        this.bindTaskEvents(task.id, emitter, usage, filesTouched, (nextRound) => {
-          roundCount = Math.max(roundCount, nextRound);
-        });
+        this.bindTaskEvents(
+          task.id,
+          emitter,
+          usage,
+          filesTouched,
+          (nextRound) => {
+            roundCount = Math.max(roundCount, nextRound);
+          },
+        );
 
         // Background agents must never block on permission prompts — there is
         // no user present to answer them. Wrap the config to force YOLO mode
         // so any tool call that would return 'ask' is auto-approved instead of
-        // hanging the process indefinitely. This mirrors Claude Code's
-        // shouldAvoidPermissionPrompts: true pattern in createSubagentContext().
+        // hanging the process indefinitely.
         // Safety boundary: toolConfig.tools already restricts the model to the
         // declared tool set; prompt instructions constrain intended paths.
         const backgroundConfig = createBackgroundConfig(request.runtimeContext);
@@ -150,7 +154,9 @@ export class BackgroundAgentRunner {
           terminateReason === AgentTerminateMode.ERROR ||
           terminateReason === AgentTerminateMode.TIMEOUT
         ) {
-          throw new Error(`Background agent terminated with ${terminateReason}`);
+          throw new Error(
+            `Background agent terminated with ${terminateReason}`,
+          );
         }
 
         if (terminateReason === AgentTerminateMode.CANCELLED) {
@@ -262,7 +268,9 @@ export class BackgroundAgentRunner {
           ? (usage as BackgroundAgentResult['usage'])
           : undefined,
       roundCount: typeof roundCount === 'number' ? roundCount : undefined,
-      filesTouched: Array.isArray(filesTouched) ? (filesTouched as string[]) : [],
+      filesTouched: Array.isArray(filesTouched)
+        ? (filesTouched as string[])
+        : [],
       error: finalTask.error,
     };
   }
@@ -292,7 +300,9 @@ function extractFilePathsFromArgs(args: Record<string, unknown>): string[] {
     }
 
     if (value && typeof value === 'object') {
-      for (const [nextKey, nextValue] of Object.entries(value as Record<string, unknown>)) {
+      for (const [nextKey, nextValue] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
         visit(nextValue, nextKey);
       }
     }

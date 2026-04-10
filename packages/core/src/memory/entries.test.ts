@@ -5,13 +5,10 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import {
-  parseAutoMemoryEntries,
-  renderAutoMemoryBody,
-} from './entries.js';
+import { parseAutoMemoryEntries, renderAutoMemoryBody } from './entries.js';
 
 describe('managed auto-memory entries', () => {
-  it('parses and renders Claude-style why/apply fields', () => {
+  it('parses and renders why/apply fields', () => {
     const body = [
       '# User Memory',
       '',

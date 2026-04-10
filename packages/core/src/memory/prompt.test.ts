@@ -12,7 +12,7 @@ import {
 } from './prompt.js';
 
 describe('managed auto-memory prompt helpers', () => {
-  it('builds the Claude-style memory mechanics prompt even when MEMORY.md is empty', () => {
+  it('builds the memory mechanics prompt even when MEMORY.md is empty', () => {
     const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
 
     expect(prompt).toContain('# auto memory');
@@ -65,7 +65,9 @@ describe('managed auto-memory prompt helpers', () => {
       oversizedIndex,
     );
 
-    expect(result).toContain('WARNING: MEMORY.md is 250 lines (limit: 200). Only part of it was loaded.');
+    expect(result).toContain(
+      'WARNING: MEMORY.md is 250 lines (limit: 200). Only part of it was loaded.',
+    );
     expect(result.split('\n').length).toBeLessThan(400);
   });
 });
