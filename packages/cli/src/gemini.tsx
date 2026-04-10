@@ -37,6 +37,7 @@ import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
+import { detectTerminalBackground } from './ui/themes/detect-terminal-theme.js';
 import { themeManager } from './ui/themes/theme-manager.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
@@ -241,6 +242,12 @@ export async function main() {
         `Warning: Theme "${settings.merged.ui?.theme}" not found.`,
       );
     }
+  } else {
+    // No explicit theme configured — auto-detect terminal background.
+    const background = await detectTerminalBackground({ timeoutMs: 300 });
+    themeManager.setActiveTheme(
+      background === 'light' ? 'Qwen Light' : 'Qwen Dark',
+    );
   }
 
   // hop into sandbox if we are outside and sandboxing is enabled
