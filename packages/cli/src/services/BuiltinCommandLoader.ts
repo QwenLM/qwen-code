@@ -14,6 +14,7 @@ import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
 import { authCommand } from '../ui/commands/authCommand.js';
 import { btwCommand } from '../ui/commands/btwCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
+import { chatCommand } from '../ui/commands/chatCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
@@ -88,6 +89,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       authCommand,
       btwCommand,
       bugCommand,
+      chatCommand,
       clearCommand,
       compressCommand,
       contextCommand,
