@@ -24,8 +24,11 @@ const sampleNote: CommitAttributionNote = {
     aiChars: 150,
     humanChars: 250,
     totalFilesTouched: 2,
+    surfaces: ['cli'],
   },
+  surfaceBreakdown: { cli: { aiChars: 150, percent: 38 } },
   excludedGenerated: ['package-lock.json'],
+  promptCount: 3,
 };
 
 describe('attributionTrailer', () => {

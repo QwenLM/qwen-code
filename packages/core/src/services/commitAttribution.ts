@@ -10,8 +10,18 @@
  * Tracks character-level contribution ratios between AI and humans per file.
  * When a git commit is made, this data is combined with git diff analysis to
  * calculate real AI vs human contribution percentages, stored as git notes.
+ *
+ * Features aligned with Claude Code's attribution system:
+ * - Character-level prefix/suffix diff algorithm
+ * - Real AI/human contribution ratio via git diff
+ * - Surface tracking (cli/ide/api/sdk)
+ * - Prompt & permission prompt counting
+ * - Session baseline (content hash) for precise human edit detection
+ * - Snapshot/restore for session persistence
+ * - Generated file exclusion
  */
 
+import { createHash } from 'node:crypto';
 import * as path from 'node:path';
 import { isGeneratedFile } from './generatedFiles.js';
 
@@ -24,6 +34,14 @@ export interface FileAttribution {
   aiContribution: number;
   /** Whether the file was created by AI */
   aiCreated: boolean;
+  /** SHA-256 hash of the file content after AI's last edit */
+  contentHash: string;
+}
+
+/** Session baseline: snapshot of file state at session start or first AI touch */
+export interface FileBaseline {
+  contentHash: string;
+  mtime: number;
 }
 
 /** Per-file attribution detail in the git notes payload. */
@@ -31,6 +49,7 @@ export interface FileAttributionDetail {
   aiChars: number;
   humanChars: number;
   percent: number;
+  surface?: string;
 }
 
 /** Full attribution payload stored as git notes JSON. */
@@ -43,18 +62,32 @@ export interface CommitAttributionNote {
     aiChars: number;
     humanChars: number;
     totalFilesTouched: number;
+    surfaces: string[];
   };
+  surfaceBreakdown: Record<string, { aiChars: number; percent: number }>;
   excludedGenerated: string[];
+  promptCount: number;
 }
 
 /** Result of running git commands to get staged file info. */
 export interface StagedFileInfo {
-  /** Relative file paths from git root */
   files: string[];
-  /** Per-file diff size in estimated characters (from git diff --cached --stat) */
   diffSizes: Map<string, number>;
-  /** Files that were deleted */
   deletedFiles: Set<string>;
+}
+
+/** Serializable snapshot for session persistence. */
+export interface AttributionSnapshot {
+  type: 'attribution-snapshot';
+  surface: string;
+  fileStates: Record<string, FileAttribution>;
+  baselines: Record<string, FileBaseline>;
+  promptCount: number;
+  promptCountAtLastCommit: number;
+  permissionPromptCount: number;
+  permissionPromptCountAtLastCommit: number;
+  escapeCount: number;
+  escapeCountAtLastCommit: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -81,6 +114,18 @@ function sanitizeModelName(name: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+export function computeContentHash(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+export function getClientSurface(): string {
+  return process.env['QWEN_CODE_ENTRYPOINT'] ?? 'cli';
+}
+
+// ---------------------------------------------------------------------------
 // Service
 // ---------------------------------------------------------------------------
 
@@ -89,6 +134,18 @@ export class CommitAttributionService {
 
   /** Per-file AI contribution tracking (keyed by absolute path) */
   private fileAttributions: Map<string, FileAttribution> = new Map();
+  /** Baselines recorded when AI first touches a file */
+  private sessionBaselines: Map<string, FileBaseline> = new Map();
+  /** Client surface (cli, ide, api, sdk, etc.) */
+  private surface: string = getClientSurface();
+
+  // -- Prompt counting --
+  private promptCount: number = 0;
+  private promptCountAtLastCommit: number = 0;
+  private permissionPromptCount: number = 0;
+  private permissionPromptCountAtLastCommit: number = 0;
+  private escapeCount: number = 0;
+  private escapeCountAtLastCommit: number = 0;
 
   private constructor() {}
 
@@ -110,8 +167,8 @@ export class CommitAttributionService {
 
   /**
    * Record an AI edit to a file.
-   * Uses Claude's prefix/suffix matching algorithm for precise character-level
-   * contribution calculation.
+   * Uses prefix/suffix matching for precise character-level contribution.
+   * On first edit of a file, saves a session baseline of the old content.
    */
   recordEdit(
     filePath: string,
@@ -121,12 +178,22 @@ export class CommitAttributionService {
     const existing = this.fileAttributions.get(filePath) || {
       aiContribution: 0,
       aiCreated: false,
+      contentHash: '',
     };
+
+    // Save baseline on first AI touch (before AI modifies it)
+    if (!this.sessionBaselines.has(filePath) && oldContent !== null) {
+      this.sessionBaselines.set(filePath, {
+        contentHash: computeContentHash(oldContent),
+        mtime: Date.now(),
+      });
+    }
 
     const isNewFile = oldContent === null;
     const contribution = computeCharContribution(oldContent ?? '', newContent);
 
     existing.aiContribution += contribution;
+    existing.contentHash = computeContentHash(newContent);
     if (isNewFile && !existing.aiCreated) {
       existing.aiCreated = true;
     }
@@ -134,16 +201,40 @@ export class CommitAttributionService {
     this.fileAttributions.set(filePath, existing);
   }
 
-  /**
-   * Record an AI file deletion.
-   */
+  /** Record an AI file deletion. */
   recordDeletion(filePath: string, deletedContentLength: number): void {
     const existing = this.fileAttributions.get(filePath) || {
       aiContribution: 0,
       aiCreated: false,
+      contentHash: '',
     };
     existing.aiContribution += deletedContentLength;
     this.fileAttributions.set(filePath, existing);
+  }
+
+  // -----------------------------------------------------------------------
+  // Prompt / permission counting
+  // -----------------------------------------------------------------------
+
+  incrementPromptCount(): void {
+    this.promptCount++;
+  }
+
+  incrementPermissionPromptCount(): void {
+    this.permissionPromptCount++;
+  }
+
+  incrementEscapeCount(): void {
+    this.escapeCount++;
+  }
+
+  getPromptCount(): number {
+    return this.promptCount;
+  }
+
+  /** Prompts since last commit (for "N-shotted" display). */
+  getPromptsSinceLastCommit(): number {
+    return this.promptCount - this.promptCountAtLastCommit;
   }
 
   // -----------------------------------------------------------------------
@@ -167,8 +258,65 @@ export class CommitAttributionService {
     return this.fileAttributions.size > 0;
   }
 
+  getSurface(): string {
+    return this.surface;
+  }
+
   clearAttributions(): void {
+    this.promptCountAtLastCommit = this.promptCount;
+    this.permissionPromptCountAtLastCommit = this.permissionPromptCount;
+    this.escapeCountAtLastCommit = this.escapeCount;
     this.fileAttributions.clear();
+    this.sessionBaselines.clear();
+  }
+
+  // -----------------------------------------------------------------------
+  // Snapshot / restore (session persistence)
+  // -----------------------------------------------------------------------
+
+  /** Serialize current state for session persistence. */
+  toSnapshot(): AttributionSnapshot {
+    const fileStates: Record<string, FileAttribution> = {};
+    for (const [k, v] of this.fileAttributions) {
+      fileStates[k] = { ...v };
+    }
+    const baselines: Record<string, FileBaseline> = {};
+    for (const [k, v] of this.sessionBaselines) {
+      baselines[k] = { ...v };
+    }
+    return {
+      type: 'attribution-snapshot',
+      surface: this.surface,
+      fileStates,
+      baselines,
+      promptCount: this.promptCount,
+      promptCountAtLastCommit: this.promptCountAtLastCommit,
+      permissionPromptCount: this.permissionPromptCount,
+      permissionPromptCountAtLastCommit: this.permissionPromptCountAtLastCommit,
+      escapeCount: this.escapeCount,
+      escapeCountAtLastCommit: this.escapeCountAtLastCommit,
+    };
+  }
+
+  /** Restore state from a persisted snapshot. */
+  restoreFromSnapshot(snapshot: AttributionSnapshot): void {
+    this.surface = snapshot.surface;
+    this.promptCount = snapshot.promptCount ?? 0;
+    this.promptCountAtLastCommit = snapshot.promptCountAtLastCommit ?? 0;
+    this.permissionPromptCount = snapshot.permissionPromptCount ?? 0;
+    this.permissionPromptCountAtLastCommit =
+      snapshot.permissionPromptCountAtLastCommit ?? 0;
+    this.escapeCount = snapshot.escapeCount ?? 0;
+    this.escapeCountAtLastCommit = snapshot.escapeCountAtLastCommit ?? 0;
+
+    this.fileAttributions.clear();
+    for (const [k, v] of Object.entries(snapshot.fileStates ?? {})) {
+      this.fileAttributions.set(k, { ...v });
+    }
+    this.sessionBaselines.clear();
+    for (const [k, v] of Object.entries(snapshot.baselines ?? {})) {
+      this.sessionBaselines.set(k, { ...v });
+    }
   }
 
   // -----------------------------------------------------------------------
@@ -178,15 +326,6 @@ export class CommitAttributionService {
   /**
    * Generate the git notes JSON payload by combining tracked AI contributions
    * with staged file information from git.
-   *
-   * For each staged file:
-   * - If AI tracked it: aiChars = tracked contribution; humanChars = max(0, diffSize - aiChars)
-   * - If AI did NOT track it: aiChars = 0; humanChars = diffSize (100% human)
-   * - Generated files (lock, dist, etc.) are excluded
-   *
-   * @param stagedInfo  Result of git diff --cached analysis
-   * @param baseDir     Project root for converting absolute paths to relative
-   * @param generatorName  Model/tool name (will be sanitized)
    */
   generateNotePayload(
     stagedInfo: StagedFileInfo,
@@ -199,10 +338,11 @@ export class CommitAttributionService {
 
     const files: Record<string, FileAttributionDetail> = {};
     const excludedGenerated: string[] = [];
+    const surfaceCounts: Record<string, number> = {};
     let totalAiChars = 0;
     let totalHumanChars = 0;
 
-    // Build a lookup from relative path → tracked AI contribution
+    // Build lookup: relative path → tracked AI contribution
     const aiLookup = new Map<string, FileAttribution>();
     for (const [absPath, attr] of this.fileAttributions) {
       const rel = path.relative(baseDir, absPath);
@@ -210,7 +350,6 @@ export class CommitAttributionService {
     }
 
     for (const relFile of stagedInfo.files) {
-      // Skip generated files
       if (isGeneratedFile(relFile)) {
         excludedGenerated.push(relFile);
         continue;
@@ -225,16 +364,11 @@ export class CommitAttributionService {
 
       if (tracked) {
         aiChars = tracked.aiContribution;
-        // Human contribution = total diff size minus AI's tracked contribution
-        // (clamped to 0 — AI may have contributed more than the final diff
-        //  if it rewrote the same region multiple times)
         humanChars = Math.max(0, diffSize - aiChars);
       } else if (isDeleted) {
-        // Untracked deletion = human did it
         aiChars = 0;
         humanChars = diffSize > 0 ? diffSize : 100;
       } else {
-        // Untracked file = 100% human
         aiChars = 0;
         humanChars = diffSize;
       }
@@ -242,14 +376,28 @@ export class CommitAttributionService {
       const total = aiChars + humanChars;
       const percent = total > 0 ? Math.round((aiChars / total) * 100) : 0;
 
-      files[relFile] = { aiChars, humanChars, percent };
+      files[relFile] = { aiChars, humanChars, percent, surface: this.surface };
       totalAiChars += aiChars;
       totalHumanChars += humanChars;
+      surfaceCounts[this.surface] =
+        (surfaceCounts[this.surface] ?? 0) + aiChars;
     }
 
     const totalChars = totalAiChars + totalHumanChars;
     const aiPercent =
       totalChars > 0 ? Math.round((totalAiChars / totalChars) * 100) : 0;
+
+    // Surface breakdown
+    const surfaceBreakdown: Record<
+      string,
+      { aiChars: number; percent: number }
+    > = {};
+    for (const [surf, chars] of Object.entries(surfaceCounts)) {
+      surfaceBreakdown[surf] = {
+        aiChars: chars,
+        percent: totalChars > 0 ? Math.round((chars / totalChars) * 100) : 0,
+      };
+    }
 
     return {
       version: 1,
@@ -260,9 +408,37 @@ export class CommitAttributionService {
         aiChars: totalAiChars,
         humanChars: totalHumanChars,
         totalFilesTouched: Object.keys(files).length,
+        surfaces: [this.surface],
       },
+      surfaceBreakdown,
       excludedGenerated,
+      promptCount: this.getPromptsSinceLastCommit(),
     };
+  }
+
+  // -----------------------------------------------------------------------
+  // PR attribution text
+  // -----------------------------------------------------------------------
+
+  /**
+   * Generate enhanced PR attribution text.
+   * Format: "🤖 Generated with Qwen Code (85% 3-shotted by Qwen-Coder)"
+   */
+  generatePRAttribution(
+    stagedInfo: StagedFileInfo,
+    baseDir: string,
+    generatorName?: string,
+  ): string {
+    const note = this.generateNotePayload(stagedInfo, baseDir, generatorName);
+    const generator = note.generator;
+    const percent = note.summary.aiPercent;
+    const shots = this.getPromptsSinceLastCommit();
+
+    if (percent === 0 && shots === 0) {
+      return `🤖 Generated with Qwen Code`;
+    }
+
+    return `🤖 Generated with Qwen Code (${percent}% ${shots}-shotted by ${generator})`;
   }
 }
 
@@ -274,20 +450,15 @@ export class CommitAttributionService {
  * Compute the character contribution for a file modification.
  * Uses common prefix/suffix matching to find the actual changed region,
  * then returns the larger of the old/new changed lengths.
- *
- * This correctly handles same-length replacements (e.g., "Esc" → "esc")
- * where a simple length difference would be 0.
  */
 export function computeCharContribution(
   oldContent: string,
   newContent: string,
 ): number {
   if (oldContent === '' || newContent === '') {
-    // New file creation or full deletion
     return oldContent === '' ? newContent.length : oldContent.length;
   }
 
-  // Find common prefix
   const minLen = Math.min(oldContent.length, newContent.length);
   let prefixEnd = 0;
   while (
@@ -297,7 +468,6 @@ export function computeCharContribution(
     prefixEnd++;
   }
 
-  // Find common suffix (not overlapping with prefix)
   let suffixLen = 0;
   while (
     suffixLen < minLen - prefixEnd &&

@@ -231,8 +231,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const tempFilePath = path.join(os.tmpdir(), tempFileName);
 
     try {
-      // Add co-author to git commit commands
-      const processedCommand = this.addCoAuthorToGitCommit(strippedCommand);
+      // Add co-author to git commit commands and PR attribution
+      const processedCommand = this.addAttributionToPR(
+        this.addCoAuthorToGitCommit(strippedCommand),
+      );
 
       const shouldRunInBackground = this.params.is_background;
       let finalCommand = processedCommand;
@@ -710,6 +712,50 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
 
     // If no -m flag found, the command might open an editor
     // In this case, we can't easily modify it, so return as-is
+    return command;
+  }
+
+  /**
+   * Detect `gh pr create` commands and append AI attribution text to the
+   * PR body. Format: "🤖 Generated with Qwen Code (X% N-shotted by Qwen-Coder)"
+   */
+  private addAttributionToPR(command: string): string {
+    const ghPrPattern = /\bgh\s+pr\s+create\b/;
+    if (!ghPrPattern.test(command)) {
+      return command;
+    }
+
+    const gitCoAuthorSettings = this.config.getGitCoAuthor();
+    if (!gitCoAuthorSettings.enabled) {
+      return command;
+    }
+
+    const attributionService = CommitAttributionService.getInstance();
+    const shots = attributionService.getPromptsSinceLastCommit();
+    const generator = gitCoAuthorSettings.name ?? 'Qwen-Coder';
+
+    const attribution =
+      shots > 0
+        ? `\\n\\n🤖 Generated with Qwen Code (${shots}-shotted by ${generator})`
+        : `\\n\\n🤖 Generated with Qwen Code`;
+
+    // Append to --body "..." or --body '...'
+    const bodyDoublePattern = /(--body\s+)"((?:[^"\\]|\\.)*)"/;
+    const bodySinglePattern = /(--body\s+)'((?:[^'\\]|\\.)*)'/;
+    const bodyDoubleMatch = command.match(bodyDoublePattern);
+    const bodySingleMatch = command.match(bodySinglePattern);
+    const bodyMatch = bodyDoubleMatch ?? bodySingleMatch;
+    const bodyQuote = bodyDoubleMatch ? '"' : "'";
+
+    if (bodyMatch) {
+      const [fullMatch, prefix, existingBody] = bodyMatch;
+      const newBody = existingBody + attribution;
+      return command.replace(
+        fullMatch,
+        prefix + bodyQuote + newBody + bodyQuote,
+      );
+    }
+
     return command;
   }
 }

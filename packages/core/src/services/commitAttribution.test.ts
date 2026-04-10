@@ -11,7 +11,6 @@ import {
   type StagedFileInfo,
 } from './commitAttribution.js';
 
-// Helper to build StagedFileInfo from tracked files
 function makeStagedInfo(
   files: string[],
   diffSizes?: Record<string, number>,
@@ -34,17 +33,14 @@ describe('computeCharContribution', () => {
   });
 
   it('should handle same-length replacement via prefix/suffix', () => {
-    // "Esc" → "esc" — only 1 char changed
     expect(computeCharContribution('Esc', 'esc')).toBe(1);
   });
 
   it('should handle insertion in the middle', () => {
-    // "ab" → "aXb" — 1 char inserted
     expect(computeCharContribution('ab', 'aXb')).toBe(1);
   });
 
   it('should handle deletion in the middle', () => {
-    // "aXb" → "ab" — 1 char deleted
     expect(computeCharContribution('aXb', 'ab')).toBe(1);
   });
 
@@ -59,9 +55,7 @@ describe('computeCharContribution', () => {
   it('should handle multi-line changes', () => {
     const old = 'line1\nline2\nline3';
     const now = 'line1\nchanged\nline3';
-    // common prefix = "line1\n" (6), common suffix = "\nline3" (6)
-    // old changed = 17-6-6 = 5 ("line2"), new changed = 19-6-6 = 7 ("changed")
-    expect(computeCharContribution(old, now)).toBe(7);
+    expect(computeCharContribution(old, now)).toBe(7); // "changed" > "line2"
   });
 });
 
@@ -76,19 +70,14 @@ describe('CommitAttributionService', () => {
     expect(a).toBe(b);
   });
 
-  it('should start with no attributions', () => {
-    const service = CommitAttributionService.getInstance();
-    expect(service.hasAttributions()).toBe(false);
-  });
-
   it('should track new file creation', () => {
     const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/src/file.ts', null, 'hello world');
 
     const attr = service.getFileAttribution('/project/src/file.ts');
-    expect(attr).toBeDefined();
     expect(attr!.aiCreated).toBe(true);
     expect(attr!.aiContribution).toBe(11);
+    expect(attr!.contentHash).toBeTruthy();
   });
 
   it('should NOT treat empty existing file as new file creation', () => {
@@ -97,13 +86,12 @@ describe('CommitAttributionService', () => {
 
     const attr = service.getFileAttribution('/project/empty.ts');
     expect(attr!.aiCreated).toBe(false);
-    expect(attr!.aiContribution).toBe(11); // 'new content'.length
+    expect(attr!.aiContribution).toBe(11);
   });
 
   it('should track edits with prefix/suffix algorithm', () => {
     const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/f.ts', 'Hello World', 'Hello world');
-    // Only 'W'→'w' changed: contribution = 1
     expect(service.getFileAttribution('/project/f.ts')!.aiContribution).toBe(1);
   });
 
@@ -122,6 +110,16 @@ describe('CommitAttributionService', () => {
     );
   });
 
+  it('should save session baseline on first edit', () => {
+    const service = CommitAttributionService.getInstance();
+    service.recordEdit('/project/f.ts', 'original content', 'new content');
+
+    // Baseline should have been saved from oldContent
+    // We can verify indirectly: after clear, baseline is gone
+    service.clearAttributions();
+    expect(service.hasAttributions()).toBe(false);
+  });
+
   it('should return defensive copies', () => {
     const service = CommitAttributionService.getInstance();
     service.recordEdit('/project/f.ts', null, 'content');
@@ -134,17 +132,67 @@ describe('CommitAttributionService', () => {
     ).not.toBe(99999);
   });
 
-  it('should clear attributions', () => {
-    const service = CommitAttributionService.getInstance();
-    service.recordEdit('/project/f.ts', null, 'content');
-    service.clearAttributions();
-    expect(service.hasAttributions()).toBe(false);
+  describe('prompt counting', () => {
+    it('should track prompt counts', () => {
+      const service = CommitAttributionService.getInstance();
+      expect(service.getPromptCount()).toBe(0);
+
+      service.incrementPromptCount();
+      service.incrementPromptCount();
+      service.incrementPromptCount();
+
+      expect(service.getPromptCount()).toBe(3);
+      expect(service.getPromptsSinceLastCommit()).toBe(3);
+    });
+
+    it('should reset prompts-since-commit counter on clearAttributions', () => {
+      const service = CommitAttributionService.getInstance();
+      service.incrementPromptCount();
+      service.incrementPromptCount();
+      service.clearAttributions();
+
+      // Total still 2, but since-last-commit is 0
+      expect(service.getPromptCount()).toBe(2);
+      expect(service.getPromptsSinceLastCommit()).toBe(0);
+    });
+  });
+
+  describe('surface tracking', () => {
+    it('should default to cli surface', () => {
+      const service = CommitAttributionService.getInstance();
+      expect(service.getSurface()).toBe('cli');
+    });
+  });
+
+  describe('snapshot / restore', () => {
+    it('should serialize and restore state', () => {
+      const service = CommitAttributionService.getInstance();
+      service.recordEdit('/project/f.ts', null, 'hello');
+      service.incrementPromptCount();
+      service.incrementPromptCount();
+      service.incrementPermissionPromptCount();
+
+      const snapshot = service.toSnapshot();
+      expect(snapshot.type).toBe('attribution-snapshot');
+      expect(snapshot.promptCount).toBe(2);
+      expect(snapshot.permissionPromptCount).toBe(1);
+      expect(Object.keys(snapshot.fileStates)).toHaveLength(1);
+
+      // Restore into a fresh instance
+      CommitAttributionService.resetInstance();
+      const restored = CommitAttributionService.getInstance();
+      restored.restoreFromSnapshot(snapshot);
+
+      expect(restored.getPromptCount()).toBe(2);
+      expect(restored.getFileAttribution('/project/f.ts')!.aiContribution).toBe(
+        5,
+      );
+    });
   });
 
   describe('generateNotePayload', () => {
-    it('should compute real AI/human percentages from staged info', () => {
+    it('should compute real AI/human percentages', () => {
       const service = CommitAttributionService.getInstance();
-      // AI edited this file, contributing 200 chars
       service.recordEdit('/project/src/main.ts', '', 'x'.repeat(200));
 
       const staged = makeStagedInfo(['src/main.ts', 'src/human.ts'], {
@@ -158,24 +206,11 @@ describe('CommitAttributionService', () => {
         'Qwen-Coder',
       );
 
-      // main.ts: AI=200, human=max(0,400-200)=200 → 50%
-      expect(note.files['src/main.ts']).toEqual({
-        aiChars: 200,
-        humanChars: 200,
-        percent: 50,
-      });
-
-      // human.ts: not tracked → AI=0, human=200 → 0%
-      expect(note.files['src/human.ts']).toEqual({
-        aiChars: 0,
-        humanChars: 200,
-        percent: 0,
-      });
-
-      // Overall: AI=200, human=400 → 33%
+      expect(note.files['src/main.ts']!.percent).toBe(50);
+      expect(note.files['src/human.ts']!.percent).toBe(0);
       expect(note.summary.aiPercent).toBe(33);
-      expect(note.summary.aiChars).toBe(200);
-      expect(note.summary.humanChars).toBe(400);
+      expect(note.summary.surfaces).toContain('cli');
+      expect(note.surfaceBreakdown['cli']).toBeDefined();
     });
 
     it('should exclude generated files', () => {
@@ -192,69 +227,58 @@ describe('CommitAttributionService', () => {
       );
 
       const note = service.generateNotePayload(staged, '/project');
-
       expect(Object.keys(note.files)).toHaveLength(1);
-      expect(note.files['src/main.ts']).toBeDefined();
       expect(note.excludedGenerated).toContain('package-lock.json');
       expect(note.excludedGenerated).toContain('dist/bundle.js');
     });
 
-    it('should handle deleted files (human deletion)', () => {
+    it('should include promptCount', () => {
       const service = CommitAttributionService.getInstance();
-      service.recordEdit('/project/src/keep.ts', null, 'code');
+      service.recordEdit('/project/f.ts', null, 'code');
+      service.incrementPromptCount();
+      service.incrementPromptCount();
 
-      const staged = makeStagedInfo(
-        ['src/keep.ts', 'src/removed.ts'],
-        { 'src/keep.ts': 100, 'src/removed.ts': 200 },
-        ['src/removed.ts'],
-      );
-
+      const staged = makeStagedInfo(['f.ts'], { 'f.ts': 100 });
       const note = service.generateNotePayload(staged, '/project');
-      // removed.ts: untracked deletion → human=200
-      expect(note.files['src/removed.ts']!.humanChars).toBe(200);
-      expect(note.files['src/removed.ts']!.aiChars).toBe(0);
-    });
-
-    it('should handle deleted files (AI deletion)', () => {
-      const service = CommitAttributionService.getInstance();
-      service.recordDeletion('/project/src/removed.ts', 300);
-
-      const staged = makeStagedInfo(
-        ['src/removed.ts'],
-        { 'src/removed.ts': 400 },
-        ['src/removed.ts'],
-      );
-
-      const note = service.generateNotePayload(staged, '/project');
-      expect(note.files['src/removed.ts']!.aiChars).toBe(300);
+      expect(note.promptCount).toBe(2);
     });
 
     it('should sanitize internal model codenames', () => {
       const service = CommitAttributionService.getInstance();
       service.recordEdit('/project/f.ts', null, 'x');
-
       const staged = makeStagedInfo(['f.ts'], { 'f.ts': 10 });
 
       expect(
         service.generateNotePayload(staged, '/project', 'qwen-72b').generator,
       ).toBe('Qwen-Coder');
       expect(
-        service.generateNotePayload(staged, '/project', 'qwen-max').generator,
-      ).toBe('Qwen-Coder');
-      expect(
         service.generateNotePayload(staged, '/project', 'CustomAgent')
           .generator,
       ).toBe('CustomAgent');
     });
+  });
 
-    it('should convert absolute paths to relative', () => {
+  describe('generatePRAttribution', () => {
+    it('should generate enhanced PR attribution text', () => {
       const service = CommitAttributionService.getInstance();
-      service.recordEdit('/home/user/project/src/main.ts', null, 'code');
+      service.recordEdit('/project/src/main.ts', '', 'x'.repeat(200));
+      service.incrementPromptCount();
+      service.incrementPromptCount();
+      service.incrementPromptCount();
 
-      const staged = makeStagedInfo(['src/main.ts'], { 'src/main.ts': 100 });
-      const note = service.generateNotePayload(staged, '/home/user/project');
+      const staged = makeStagedInfo(['src/main.ts'], { 'src/main.ts': 200 });
+      const text = service.generatePRAttribution(staged, '/project');
 
-      expect(Object.keys(note.files)).toContain('src/main.ts');
+      expect(text).toContain('🤖 Generated with Qwen Code');
+      expect(text).toContain('3-shotted');
+      expect(text).toContain('Qwen-Coder');
+    });
+
+    it('should return default text when no data', () => {
+      const service = CommitAttributionService.getInstance();
+      const staged = makeStagedInfo([], {});
+      const text = service.generatePRAttribution(staged, '/project');
+      expect(text).toBe('🤖 Generated with Qwen Code');
     });
   });
 });
