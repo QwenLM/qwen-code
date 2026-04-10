@@ -14,7 +14,7 @@ Qwen Code and Claude Code both provide a Ctrl+O shortcut for toggling between co
 | Toggle semantics     | Temporary peek at details                   | Persistent preference switch                  |
 | Persistence          | Session-only, resets on restart             | Persisted to settings.json                    |
 | Scope                | Global screen switch (prompt ↔ transcript) | Per-component rendering toggle                |
-| Frozen snapshot      | None (no concept)                           | Infrastructure exists, currently unused       |
+| Frozen snapshot      | None (no concept)                           | None (removed)                                |
 | Per-tool expand hint | Yes ("ctrl+o to expand")                    | Yes ("Press Ctrl+O to show full tool output") |
 
 ## 2. Claude Code Implementation Analysis
@@ -90,7 +90,6 @@ Qwen Code uses a **component-level rendering flag** that each UI component reads
 ┌─────────────────────────────────────┐
 │      CompactModeContext             │
 │  compactMode: boolean (default: false)│
-│  frozenSnapshot: items[] | null     │
 │  setCompactMode: (v) => void        │
 └──────────┬──────────────────────────┘
            │
@@ -117,18 +116,18 @@ Qwen Code uses a **component-level rendering flag** that each UI component reads
 
 ### 3.2 Key Source Files
 
-| Component       | File                                  | Key Logic                                         |
-| --------------- | ------------------------------------- | ------------------------------------------------- |
-| Toggle handler  | `AppContainer.tsx:1684-1694`          | Toggles `compactMode`, persists, clears snapshot  |
-| Context         | `CompactModeContext.tsx`              | `compactMode`, `frozenSnapshot`, `setCompactMode` |
-| Tool group      | `ToolGroupMessage.tsx:105-110`        | `showCompact` with 4 force-expand conditions      |
-| Tool message    | `ToolMessage.tsx:346-350`             | Hides `displayRenderer` in compact mode           |
-| Compact display | `CompactToolGroupDisplay.tsx:49-108`  | Single-line summary with status + hint            |
-| Confirmation    | `ToolConfirmationMessage.tsx:113-147` | Simplified 3-option compact approval              |
-| Tips            | `Tips.tsx:14-29`                      | Startup tip rotation includes compact mode hint   |
-| Settings sync   | `SettingsDialog.tsx:189-192`          | Syncs with CompactModeContext                     |
-| MainContent     | `MainContent.tsx:63-72`               | frozenSnapshot with WaitingForConfirmation guard  |
-| Thinking        | `HistoryItemDisplay.tsx:123-133`      | Hides `gemini_thought` in compact mode            |
+| Component       | File                                  | Key Logic                                       |
+| --------------- | ------------------------------------- | ----------------------------------------------- |
+| Toggle handler  | `AppContainer.tsx:1684-1690`          | Toggles `compactMode`, persists to settings     |
+| Context         | `CompactModeContext.tsx`              | `compactMode`, `setCompactMode`                 |
+| Tool group      | `ToolGroupMessage.tsx:105-110`        | `showCompact` with 4 force-expand conditions    |
+| Tool message    | `ToolMessage.tsx:346-350`             | Hides `displayRenderer` in compact mode         |
+| Compact display | `CompactToolGroupDisplay.tsx:49-108`  | Single-line summary with status + hint          |
+| Confirmation    | `ToolConfirmationMessage.tsx:113-147` | Simplified 3-option compact approval            |
+| Tips            | `Tips.tsx:14-29`                      | Startup tip rotation includes compact mode hint |
+| Settings sync   | `SettingsDialog.tsx:189-193`          | Syncs with CompactModeContext + refreshStatic   |
+| MainContent     | `MainContent.tsx:60-76`               | Renders live pendingHistoryItems                |
+| Thinking        | `HistoryItemDisplay.tsx:123-133`      | Hides `gemini_thought` in compact mode          |
 
 ### 3.3 Design Decisions
 
@@ -136,7 +135,7 @@ Qwen Code uses a **component-level rendering flag** that each UI component reads
 2. **Persistent preference.** `compactMode` is saved to `settings.json` and survives across sessions.
 3. **Component-level rendering.** Each component reads `compactMode` from context and adjusts its own rendering.
 4. **Force-expand protection.** Four conditions override compact mode to ensure critical UI elements are always visible (confirmations, errors, shell, user-initiated).
-5. **No snapshot freezing.** Although the `frozenSnapshot` infrastructure exists, it is never activated — toggle always shows live output.
+5. **No snapshot freezing.** The toggle always shows live output — no frozen snapshots.
 6. **Settings dialog sync.** Toggling compact mode from Settings updates React state immediately via `setCompactMode`.
 7. **Non-intrusive discoverability.** Compact mode is introduced via the startup Tips rotation rather than a persistent footer indicator, avoiding UI clutter.
 
@@ -211,24 +210,14 @@ Session start → verbose mode (default)
 
 Qwen Code's verbose default is the right choice for its current stage. Users who are new to the tool need transparency to build trust. As the product matures, consider making compact the default (like Claude Code).
 
-### 5.2 [P1] Simplify frozenSnapshot Infrastructure
-
-Currently `frozenSnapshot` state and infrastructure exist but are never used (always null). Two options:
-
-- **Option A — Remove entirely.** Clean up dead code. If per-tool expansion is needed later, re-implement.
-- **Option B — Keep as infrastructure.** Useful if we plan to add Claude Code-style per-tool "(ctrl+o to expand)" temporary expansion for individual large outputs.
-
-**Recommendation:** Option B — keep the infrastructure but add a code comment marking it as reserved for future per-tool expansion.
-
-### 5.3 [P1] Per-Tool Expansion for Large Outputs
+### 5.2 [P1] Per-Tool Expansion for Large Outputs
 
 Claude Code shows "(ctrl+o to expand)" on individual tools that produce large output. Qwen Code currently only has a global toggle. Consider:
 
 - When a single tool produces output exceeding N lines, show a per-tool "expand" hint in compact mode.
-- This would use the existing `frozenSnapshot` infrastructure.
 - Scope: future enhancement, not current priority.
 
-### 5.4 [P2] Consider Session-Scoped Override
+### 5.3 [P2] Consider Session-Scoped Override
 
 Some users may want compact mode as their default but occasionally need verbose for a specific session. Consider supporting both:
 
@@ -238,7 +227,7 @@ Some users may want compact mode as their default but occasionally need verbose 
 
 This gives users the best of both worlds. Implementation would require separating "settings default" from "session override" state.
 
-### 5.5 [P2] Structural Separation for Confirmations
+### 5.4 [P2] Structural Separation for Confirmations
 
 Currently, confirmation protection relies on `showCompact` conditions in `ToolGroupMessage`. Consider a more robust approach:
 
@@ -274,7 +263,7 @@ After the `feat/compact-mode-optimization` branch changes:
 | `packages/cli/src/ui/components/messages/ToolMessage.tsx`             | Per-tool output hiding                                 |
 | `packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx` | Compact view rendering                                 |
 | `packages/cli/src/ui/components/messages/ToolConfirmationMessage.tsx` | Compact confirmation UI                                |
-| `packages/cli/src/ui/components/MainContent.tsx`                      | frozenSnapshot rendering                               |
+| `packages/cli/src/ui/components/MainContent.tsx`                      | Pending history items rendering                        |
 | `packages/cli/src/ui/components/Tips.tsx`                             | Startup tip with compact mode hint                     |
 | `packages/cli/src/ui/components/Help.tsx`                             | /help shortcut entry                                   |
 | `packages/cli/src/ui/components/KeyboardShortcuts.tsx`                | ? shortcut entry                                       |

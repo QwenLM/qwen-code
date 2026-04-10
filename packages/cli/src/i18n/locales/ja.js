@@ -1175,6 +1175,8 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Ctrl+O でコンパクトモードを切り替え — ツール出力と思考を非表示にしてすっきり表示。',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',
@@ -1464,6 +1466,8 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
   compact: 'コンパクト',
+  'compact mode: on (Ctrl+O off)': 'コンパクトモード: オン (Ctrl+O でオフ)',
+  'to toggle compact mode': 'コンパクトモードの切り替え',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'コンパクトモードでツール出力と思考を非表示にします（Ctrl+O で切り替え）。',
   'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',

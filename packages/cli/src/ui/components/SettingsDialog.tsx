@@ -30,6 +30,7 @@ import {
 import { updateOutputLanguageFile } from '../../utils/languageUtils.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import chalk from 'chalk';
@@ -62,6 +63,7 @@ export function SettingsDialog({
   const { vimEnabled, toggleVimEnabled } = useVimMode();
   // Get compact mode context to sync compact mode changes
   const { compactMode, setCompactMode } = useCompactMode();
+  const uiActions = useUIActions();
 
   // Mode state: 'settings' or 'scope' (view switching like ThemeDialog)
   const [mode, setMode] = useState<'settings' | 'scope'>('settings');
@@ -187,8 +189,10 @@ export function SettingsDialog({
             }
 
             // Special handling for compact mode to sync with CompactModeContext
+            // and refresh static content so already-rendered history updates.
             if (key === 'ui.compactMode' && newValue !== compactMode) {
               setCompactMode?.(newValue as boolean);
+              uiActions.refreshStatic();
             }
 
             // Special handling for approval mode to apply to current session

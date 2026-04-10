@@ -40,6 +40,12 @@ import { OUTPUT_LANGUAGE_AUTO } from '../../utils/languageUtils.js';
 const mockToggleVimEnabled = vi.fn();
 const mockSetVimMode = vi.fn();
 
+// Mock the CompactModeContext
+const mockSetCompactMode = vi.fn();
+
+// Mock the UIActionsContext
+const mockRefreshStatic = vi.fn();
+
 enum TerminalKeys {
   ENTER = '\u000D',
   TAB = '\t',
@@ -118,6 +124,27 @@ vi.mock('../contexts/VimModeContext.js', async () => {
       vimMode: 'INSERT' as const,
       toggleVimEnabled: mockToggleVimEnabled,
       setVimMode: mockSetVimMode,
+    }),
+  };
+});
+
+vi.mock('../contexts/CompactModeContext.js', async () => {
+  const actual = await vi.importActual('../contexts/CompactModeContext.js');
+  return {
+    ...actual,
+    useCompactMode: () => ({
+      compactMode: false,
+      setCompactMode: mockSetCompactMode,
+    }),
+  };
+});
+
+vi.mock('../contexts/UIActionsContext.js', async () => {
+  const actual = await vi.importActual('../contexts/UIActionsContext.js');
+  return {
+    ...actual,
+    useUIActions: () => ({
+      refreshStatic: mockRefreshStatic,
     }),
   };
 });
@@ -430,6 +457,58 @@ describe('SettingsDialog', () => {
         expect.any(LoadedSettings),
         SettingScope.User,
       );
+
+      unmount();
+    });
+
+    it('should sync compact mode with CompactModeContext when toggled', async () => {
+      vi.mocked(saveModifiedSettings).mockClear();
+      mockSetCompactMode.mockClear();
+      mockRefreshStatic.mockClear();
+
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+      const component = (
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>
+      );
+
+      const { stdin, unmount, lastFrame } = render(component);
+
+      await waitFor(() => {
+        expect(lastFrame()).toContain('● Tool Approval Mode');
+      });
+
+      const dialogKeys = getDialogSettingKeys();
+      const targetIndex = dialogKeys.indexOf('ui.compactMode');
+      expect(targetIndex).toBeGreaterThan(0);
+
+      // Navigate to Compact Mode setting
+      for (let i = 0; i < targetIndex; i++) {
+        act(() => {
+          stdin.write(TerminalKeys.DOWN_ARROW as string);
+        });
+        await wait();
+      }
+      await waitFor(() => {
+        expect(lastFrame()).toContain('● Compact Mode');
+      });
+
+      // Toggle the setting
+      act(() => {
+        stdin.write(TerminalKeys.ENTER as string);
+      });
+      await waitFor(() => {
+        expect(
+          vi.mocked(saveModifiedSettings).mock.calls.length,
+        ).toBeGreaterThan(0);
+      });
+
+      // Verify compact mode context was synced
+      expect(mockSetCompactMode).toHaveBeenCalledWith(true);
+      // Verify refreshStatic was called to update rendered history
+      expect(mockRefreshStatic).toHaveBeenCalled();
 
       unmount();
     });

@@ -1779,6 +1779,8 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Strg+O drücken, um den Kompaktmodus umzuschalten — Tool-Ausgabe und Denkprozess ausblenden.',
 
   // ============================================================================
   // Custom API Key Configuration
@@ -1972,6 +1974,8 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
   compact: 'kompakt',
+  'compact mode: on (Ctrl+O off)': 'Kompaktmodus: ein (Strg+O aus)',
+  'to toggle compact mode': 'Kompaktmodus umschalten',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Strg+O umschalten).',
   'Press Ctrl+O to show full tool output':
