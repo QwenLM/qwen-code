@@ -16,16 +16,19 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 
 export const modelCommand: SlashCommand = {
   name: 'model',
+  completionPriority: 100,
   get description() {
-    return t('Switch the model for this session');
+    return t('Switch the model for this session (--fast for suggestion model)');
   },
   kind: CommandKind.BUILT_IN,
   completion: async (_context, partialArg) => {
-    if ('--fast'.startsWith(partialArg)) {
+    if (partialArg && '--fast'.startsWith(partialArg)) {
       return [
         {
           value: '--fast',
-          description: t('Set fast model for background tasks'),
+          description: t(
+            'Set a lighter model for prompt suggestions and speculative execution',
+          ),
         },
       ];
     }

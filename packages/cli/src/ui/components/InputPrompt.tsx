@@ -720,6 +720,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (
         key.name === 'tab' &&
         !key.paste &&
+        !key.shift &&
         buffer.text.length === 0 &&
         !completion.showSuggestions &&
         !reverseSearchActive &&
