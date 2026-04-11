@@ -207,7 +207,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 forceShowResult={
                   isUserInitiated ||
                   tool.status === ToolCallStatus.Confirming ||
-                  tool.status === ToolCallStatus.Error
+                  tool.status === ToolCallStatus.Error ||
+                  isAgentWithPendingConfirmation(tool.resultDisplay)
                 }
                 isFocused={isSubagentFocused}
                 isWaitingForOtherApproval={isWaitingForOtherApproval}
