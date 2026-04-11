@@ -1014,6 +1014,16 @@ const SETTINGS_SCHEMA = {
           'Sandbox execution environment (can be a boolean or a path string).',
         showInDialog: false,
       },
+      sandboxImage: {
+        type: 'string',
+        label: 'Sandbox Image',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.',
+        showInDialog: false,
+      },
       shell: {
         type: 'object',
         label: 'Shell',

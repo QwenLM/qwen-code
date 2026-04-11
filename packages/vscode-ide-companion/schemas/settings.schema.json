@@ -438,6 +438,10 @@
           "type": "object",
           "additionalProperties": true
         },
+        "sandboxImage": {
+          "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
+          "type": "string"
+        },
         "shell": {
           "description": "Settings for shell execution.",
           "type": "object",
