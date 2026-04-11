@@ -19,6 +19,7 @@ import { getProjectHash } from '../utils/paths.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
+  getResumePromptTokenCount,
   type ConversationRecord,
 } from './sessionService.js';
 import { CompressionStatus } from '../core/turn.js';
@@ -716,6 +717,81 @@ describe('SessionService', () => {
         recordB2.message,
         postCompressionRecord.message,
       ]);
+    });
+  });
+
+  describe('getResumePromptTokenCount', () => {
+    it('should return undefined for empty conversation', () => {
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        messages: [],
+      };
+      expect(getResumePromptTokenCount(conversation)).toBeUndefined();
+    });
+
+    it('should return compression newTokenCount when no messages follow', () => {
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        messages: [
+          {
+            ...recordA1,
+            type: 'system',
+            subtype: 'chat_compression',
+            systemPayload: {
+              info: {
+                originalTokenCount: 50000,
+                newTokenCount: 18000,
+                compressionStatus: CompressionStatus.SUCCESS,
+              },
+              compressedHistory: [],
+            },
+          } as ChatRecord,
+        ],
+      };
+      expect(getResumePromptTokenCount(conversation)).toBe(18000);
+    });
+
+    it('should prefer newer assistant usage over compression checkpoint', () => {
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        messages: [
+          {
+            ...recordA1,
+            type: 'system',
+            subtype: 'chat_compression',
+            systemPayload: {
+              info: {
+                originalTokenCount: 50000,
+                newTokenCount: 18000,
+                compressionStatus: CompressionStatus.SUCCESS,
+              },
+              compressedHistory: [],
+            },
+          } as ChatRecord,
+          // User chatted after compression, so there's a newer assistant
+          // message with an updated token count.
+          {
+            ...recordB2,
+            type: 'assistant',
+            usageMetadata: { totalTokenCount: 17900 },
+          } as ChatRecord,
+        ],
+      };
+      expect(getResumePromptTokenCount(conversation)).toBe(17900);
+    });
+
+    it('should fall back to assistant usage when no compression exists', () => {
+      const conversation: ConversationRecord = {
+        sessionId: sessionIdA,
+        messages: [
+          {
+            ...recordB2,
+            type: 'assistant',
+            usageMetadata: { totalTokenCount: 25000 },
+          } as ChatRecord,
+        ],
+      };
+      expect(getResumePromptTokenCount(conversation)).toBe(25000);
     });
   });
 });

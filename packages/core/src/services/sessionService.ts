@@ -690,7 +690,10 @@ export function getResumePromptTokenCount(
         | ChatCompressionRecordPayload
         | undefined;
       if (payload?.info) {
-        return payload.info.newTokenCount;
+        // Prefer a newer assistant message's usage data (already captured in
+        // fallback) over the compression checkpoint, since the user may have
+        // continued chatting after compression.
+        return fallback ?? payload.info.newTokenCount;
       }
     }
 
