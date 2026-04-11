@@ -111,8 +111,9 @@ export function isGeneratedFile(filePath: string): boolean {
     }
   }
 
+  const normalizedPathLower = normalizedPath.toLowerCase();
   for (const dir of EXCLUDED_DIRECTORIES) {
-    if (normalizedPath.includes(dir)) {
+    if (normalizedPathLower.includes(dir)) {
       return true;
     }
   }

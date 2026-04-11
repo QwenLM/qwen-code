@@ -307,7 +307,7 @@ export class CommitAttributionService {
 
   /** Restore state from a persisted snapshot. */
   restoreFromSnapshot(snapshot: AttributionSnapshot): void {
-    this.surface = snapshot.surface;
+    this.surface = snapshot.surface ?? getClientSurface();
     this.promptCount = snapshot.promptCount ?? 0;
     this.promptCountAtLastCommit = snapshot.promptCountAtLastCommit ?? 0;
     this.permissionPromptCount = snapshot.permissionPromptCount ?? 0;
@@ -350,9 +350,10 @@ export class CommitAttributionService {
     let totalHumanChars = 0;
 
     // Build lookup: relative path → tracked AI contribution
+    // Normalize to forward slashes so git-style paths match on Windows
     const aiLookup = new Map<string, FileAttribution>();
     for (const [absPath, attr] of this.fileAttributions) {
-      const rel = path.relative(baseDir, absPath);
+      const rel = path.relative(baseDir, absPath).split(path.sep).join('/');
       aiLookup.set(rel, attr);
     }
 

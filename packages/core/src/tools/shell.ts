@@ -524,7 +524,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     const gitCoAuthorSettings = this.config.getGitCoAuthor();
     if (!gitCoAuthorSettings.enabled) {
-      attributionService.clearAttributions(false);
+      // Commit succeeded but attribution disabled — still reset prompt counters
+      attributionService.clearAttributions(true);
       return;
     }
 
@@ -613,11 +614,33 @@ export class ShellToolInvocation extends BaseToolInvocation<
     };
 
     try {
-      // Get changed file names.
-      // For the initial commit (no parent), use --root to diff against empty tree.
+      // Detect whether HEAD has a parent. Also fails for shallow clones
+      // where the parent was pruned, which is fine — diff-tree --root is
+      // a safe fallback that diffs against the empty tree.
       const hasParent = (await runGit('rev-parse --verify HEAD~1')).length > 0;
-      const diffRef = hasParent ? 'HEAD~1 HEAD' : '--root HEAD';
-      const nameOutput = await runGit(`diff --name-only ${diffRef}`);
+
+      // Get changed file names.
+      // For the initial commit (no parent), use diff-tree --root since
+      // `git diff --root` is not a valid option for porcelain diff.
+      let nameOutput: string;
+      let statusOutput: string;
+      let statOutput: string;
+      if (hasParent) {
+        nameOutput = await runGit('diff --name-only HEAD~1 HEAD');
+        statusOutput = await runGit('diff --name-status HEAD~1 HEAD');
+        statOutput = await runGit('diff --stat HEAD~1 HEAD');
+      } else {
+        nameOutput = await runGit(
+          'diff-tree --root --no-commit-id -r --name-only HEAD',
+        );
+        statusOutput = await runGit(
+          'diff-tree --root --no-commit-id -r --name-status HEAD',
+        );
+        statOutput = await runGit(
+          'diff-tree --root --no-commit-id -r --stat HEAD',
+        );
+      }
+
       const files = nameOutput
         .split('\n')
         .map((f) => f.trim())
@@ -625,7 +648,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       if (files.length === 0) return empty;
 
       // Get deleted files
-      const statusOutput = await runGit(`diff --name-status ${diffRef}`);
       const deletedFiles = new Set<string>();
       for (const line of statusOutput.split('\n')) {
         if (line.startsWith('D\t')) {
@@ -634,7 +656,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
 
       // Get diff sizes from stat output
-      const statOutput = await runGit(`diff --stat ${diffRef}`);
       const diffSizes = this.parseDiffStat(statOutput);
 
       return { files, diffSizes, deletedFiles };
@@ -659,7 +680,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // Format: " path/to/file | 5 ++---"
       const match = line.match(/^\s*(.+?)\s+\|\s+(\d+)/);
       if (match) {
-        const filePath = match[1]!.trim();
+        let filePath = match[1]!.trim();
+        // Handle rename brace notation: "{old => new}" or "dir/{old => new}"
+        // Extract the new name so the key matches --name-only output
+        filePath = filePath.replace(/\{[^}]*?=>\s*([^}]*)\}/g, '$1');
         const changes = parseInt(match[2]!, 10);
         // Approximate chars: lines changed * avg 40 chars/line
         sizes.set(filePath, changes * 40);
@@ -699,7 +723,8 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
     //   \\.          matches escape sequences like \" or \\
     //   (?:...|...)* matches normal chars or escapes, repeated
     const doubleQuotePattern = /(-[a-zA-Z]*m\s+)"((?:[^"\\]|\\.)*)"/;
-    const singleQuotePattern = /(-[a-zA-Z]*m\s+)'((?:[^'\\]|\\.)*)'/;
+    // Single quotes in bash have no escape mechanism — match until next '
+    const singleQuotePattern = /(-[a-zA-Z]*m\s+)'([^']*)'/;
     const doubleMatch = command.match(doubleQuotePattern);
     const singleMatch = command.match(singleQuotePattern);
     const match = doubleMatch ?? singleMatch;
@@ -710,7 +735,16 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
       const newMessage = existingMessage + coAuthor;
       const replacement = prefix + quote + newMessage + quote;
 
-      return command.replace(fullMatch, replacement);
+      // Use indexOf + slice instead of String.replace() to avoid
+      // special replacement patterns ($&, $1, etc.) in user content
+      const idx = command.indexOf(fullMatch);
+      if (idx >= 0) {
+        return (
+          command.slice(0, idx) +
+          replacement +
+          command.slice(idx + fullMatch.length)
+        );
+      }
     }
 
     // If no -m flag found, the command might open an editor
@@ -739,12 +773,13 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
 
     const attribution =
       shots > 0
-        ? `\\n\\n🤖 Generated with Qwen Code (${shots}-shotted by ${generator})`
-        : `\\n\\n🤖 Generated with Qwen Code`;
+        ? `\n\n🤖 Generated with Qwen Code (${shots}-shotted by ${generator})`
+        : `\n\n🤖 Generated with Qwen Code`;
 
     // Append to --body "..." or --body '...'
     const bodyDoublePattern = /(--body\s+)"((?:[^"\\]|\\.)*)"/;
-    const bodySinglePattern = /(--body\s+)'((?:[^'\\]|\\.)*)'/;
+    // Single quotes in bash have no escape mechanism — match until next '
+    const bodySinglePattern = /(--body\s+)'([^']*)'/;
     const bodyDoubleMatch = command.match(bodyDoublePattern);
     const bodySingleMatch = command.match(bodySinglePattern);
     const bodyMatch = bodyDoubleMatch ?? bodySingleMatch;
@@ -753,10 +788,17 @@ Co-authored-by: ${gitCoAuthorSettings.name} <${gitCoAuthorSettings.email}>`;
     if (bodyMatch) {
       const [fullMatch, prefix, existingBody] = bodyMatch;
       const newBody = existingBody + attribution;
-      return command.replace(
-        fullMatch,
-        prefix + bodyQuote + newBody + bodyQuote,
-      );
+      // Use indexOf + slice instead of String.replace() to avoid
+      // special replacement patterns ($&, $1, etc.) in user content
+      const idx = command.indexOf(fullMatch);
+      if (idx >= 0) {
+        const replacement = prefix + bodyQuote + newBody + bodyQuote;
+        return (
+          command.slice(0, idx) +
+          replacement +
+          command.slice(idx + fullMatch.length)
+        );
+      }
     }
 
     return command;
