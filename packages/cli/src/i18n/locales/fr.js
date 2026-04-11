@@ -2058,7 +2058,7 @@ export default {
     'Masquer la sortie des outils et la réflexion pour une vue plus nette (basculer avec Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Appuyez sur Ctrl+O pour afficher la sortie complète des outils',
-
+  '  Models: Qwen latest models\n': '  Modèles : Derniers modèles Qwen\n',
   'Switch to plan mode or exit plan mode':
     'Passer en mode plan ou quitter le mode plan',
   'Exited plan mode. Previous approval mode restored.':
