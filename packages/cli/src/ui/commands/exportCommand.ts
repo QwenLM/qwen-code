@@ -25,11 +25,18 @@ import {
 import { t } from '../../i18n/index.js';
 
 /**
- * Action for the 'md' subcommand - exports session to markdown.
+ * Common validation and session loading logic for all export formats.
  */
-async function exportMarkdownAction(
+async function prepareExport(
   context: CommandContext,
-): Promise<MessageActionReturn> {
+): Promise<
+  | {
+      success: true;
+      cwd: string;
+      normalizedData: ReturnType<typeof normalizeSessionData>;
+    }
+  | MessageActionReturn
+> {
   const { services } = context;
   const { config } = services;
 
@@ -37,7 +44,7 @@ async function exportMarkdownAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Configuration not available.',
+      content: t('Configuration not available.'),
     };
   }
 
@@ -46,33 +53,49 @@ async function exportMarkdownAction(
     return {
       type: 'message',
       messageType: 'error',
-      content: 'Could not determine current working directory.',
+      content: t('Could not determine current working directory.'),
     };
   }
 
+  // Load the current session using the current session ID
+  const sessionService = new SessionService(cwd);
+  const sessionId = config.getSessionId();
+  const sessionData = await sessionService.loadSession(sessionId);
+
+  if (!sessionData) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: t('No active session found to export.'),
+    };
+  }
+
+  const { conversation } = sessionData;
+
+  // Collect and normalize export data (SSOT)
+  const exportData = await collectSessionData(conversation, config);
+  const normalizedData = normalizeSessionData(
+    exportData,
+    conversation.messages,
+    config,
+  );
+
+  return { success: true, cwd, normalizedData };
+}
+
+/**
+ * Action for the 'md' subcommand - exports session to markdown.
+ */
+async function exportMarkdownAction(
+  context: CommandContext,
+): Promise<MessageActionReturn> {
+  const result = await prepareExport(context);
+  if (!('success' in result)) {
+    return result;
+  }
+
   try {
-    // Load the current session using the current session ID
-    const sessionService = new SessionService(cwd);
-    const sessionId = config.getSessionId();
-    const sessionData = await sessionService.loadSession(sessionId);
-
-    if (!sessionData) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: 'No active session found to export.',
-      };
-    }
-
-    const { conversation } = sessionData;
-
-    // Collect and normalize export data (SSOT)
-    const exportData = await collectSessionData(conversation, config);
-    const normalizedData = normalizeSessionData(
-      exportData,
-      conversation.messages,
-      config,
-    );
+    const { cwd, normalizedData } = result;
 
     // Generate markdown from SSOT
     const markdown = toMarkdown(normalizedData);
@@ -86,13 +109,15 @@ async function exportMarkdownAction(
     return {
       type: 'message',
       messageType: 'info',
-      content: `Session exported to markdown: ${filename}`,
+      content: t('Session exported to markdown: {{filename}}', { filename }),
     };
   } catch (error) {
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
+      content: t('Failed to export session: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
 }
@@ -103,49 +128,13 @@ async function exportMarkdownAction(
 async function exportHtmlAction(
   context: CommandContext,
 ): Promise<MessageActionReturn> {
-  const { services } = context;
-  const { config } = services;
-
-  if (!config) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Configuration not available.',
-    };
-  }
-
-  const cwd = config.getWorkingDir() || config.getProjectRoot();
-  if (!cwd) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Could not determine current working directory.',
-    };
+  const result = await prepareExport(context);
+  if (!('success' in result)) {
+    return result;
   }
 
   try {
-    // Load the current session using the current session ID
-    const sessionService = new SessionService(cwd);
-    const sessionId = config.getSessionId();
-    const sessionData = await sessionService.loadSession(sessionId);
-
-    if (!sessionData) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: 'No active session found to export.',
-      };
-    }
-
-    const { conversation } = sessionData;
-
-    // Collect and normalize export data (SSOT)
-    const exportData = await collectSessionData(conversation, config);
-    const normalizedData = normalizeSessionData(
-      exportData,
-      conversation.messages,
-      config,
-    );
+    const { cwd, normalizedData } = result;
 
     // Generate HTML from SSOT
     const html = toHtml(normalizedData);
@@ -159,13 +148,15 @@ async function exportHtmlAction(
     return {
       type: 'message',
       messageType: 'info',
-      content: `Session exported to HTML: ${filename}`,
+      content: t('Session exported to HTML: {{filename}}', { filename }),
     };
   } catch (error) {
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
+      content: t('Failed to export session: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
 }
@@ -176,49 +167,13 @@ async function exportHtmlAction(
 async function exportJsonAction(
   context: CommandContext,
 ): Promise<MessageActionReturn> {
-  const { services } = context;
-  const { config } = services;
-
-  if (!config) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Configuration not available.',
-    };
-  }
-
-  const cwd = config.getWorkingDir() || config.getProjectRoot();
-  if (!cwd) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Could not determine current working directory.',
-    };
+  const result = await prepareExport(context);
+  if (!('success' in result)) {
+    return result;
   }
 
   try {
-    // Load the current session using the current session ID
-    const sessionService = new SessionService(cwd);
-    const sessionId = config.getSessionId();
-    const sessionData = await sessionService.loadSession(sessionId);
-
-    if (!sessionData) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: 'No active session found to export.',
-      };
-    }
-
-    const { conversation } = sessionData;
-
-    // Collect and normalize export data (SSOT)
-    const exportData = await collectSessionData(conversation, config);
-    const normalizedData = normalizeSessionData(
-      exportData,
-      conversation.messages,
-      config,
-    );
+    const { cwd, normalizedData } = result;
 
     // Generate JSON from SSOT
     const json = toJson(normalizedData);
@@ -232,13 +187,15 @@ async function exportJsonAction(
     return {
       type: 'message',
       messageType: 'info',
-      content: `Session exported to JSON: ${filename}`,
+      content: t('Session exported to JSON: {{filename}}', { filename }),
     };
   } catch (error) {
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
+      content: t('Failed to export session: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
 }
@@ -249,49 +206,13 @@ async function exportJsonAction(
 async function exportJsonlAction(
   context: CommandContext,
 ): Promise<MessageActionReturn> {
-  const { services } = context;
-  const { config } = services;
-
-  if (!config) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Configuration not available.',
-    };
-  }
-
-  const cwd = config.getWorkingDir() || config.getProjectRoot();
-  if (!cwd) {
-    return {
-      type: 'message',
-      messageType: 'error',
-      content: 'Could not determine current working directory.',
-    };
+  const result = await prepareExport(context);
+  if (!('success' in result)) {
+    return result;
   }
 
   try {
-    // Load the current session using the current session ID
-    const sessionService = new SessionService(cwd);
-    const sessionId = config.getSessionId();
-    const sessionData = await sessionService.loadSession(sessionId);
-
-    if (!sessionData) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: 'No active session found to export.',
-      };
-    }
-
-    const { conversation } = sessionData;
-
-    // Collect and normalize export data (SSOT)
-    const exportData = await collectSessionData(conversation, config);
-    const normalizedData = normalizeSessionData(
-      exportData,
-      conversation.messages,
-      config,
-    );
+    const { cwd, normalizedData } = result;
 
     // Generate JSONL from SSOT
     const jsonl = toJsonl(normalizedData);
@@ -305,13 +226,15 @@ async function exportJsonlAction(
     return {
       type: 'message',
       messageType: 'info',
-      content: `Session exported to JSONL: ${filename}`,
+      content: t('Session exported to JSONL: {{filename}}', { filename }),
     };
   } catch (error) {
     return {
       type: 'message',
       messageType: 'error',
-      content: `Failed to export session: ${error instanceof Error ? error.message : String(error)}`,
+      content: t('Failed to export session: {{error}}', {
+        error: error instanceof Error ? error.message : String(error),
+      }),
     };
   }
 }

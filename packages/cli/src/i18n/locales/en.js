@@ -2031,4 +2031,121 @@ export default {
     'Not in plan mode. Use "/plan" to enter plan mode first.',
 
   "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+
+  // ============================================================================
+  // Vim Mode
+  // ============================================================================
+  'Entered Vim mode. Run /vim again to exit.':
+    'Entered Vim mode. Run /vim again to exit.',
+  'Exited Vim mode.': 'Exited Vim mode.',
+
+  // ============================================================================
+  // Copy Command
+  // ============================================================================
+  'No output in history': 'No output in history',
+  'Last output copied to the clipboard': 'Last output copied to the clipboard',
+  'Failed to copy to the clipboard. {{message}}':
+    'Failed to copy to the clipboard. {{message}}',
+  'Last AI output contains no text to copy.':
+    'Last AI output contains no text to copy.',
+
+  // ============================================================================
+  // Restore Command
+  // ============================================================================
+  'Could not determine the .qwen directory path.':
+    'Could not determine the .qwen directory path.',
+  'No restorable tool calls found.': 'No restorable tool calls found.',
+  'Available tool calls to restore:\n\n{{fileList}}':
+    'Available tool calls to restore:\n\n{{fileList}}',
+  'File not found: {{selectedFile}}': 'File not found: {{selectedFile}}',
+  'loadHistory function is not available.':
+    'loadHistory function is not available.',
+  'Restored project to the state before the tool call.':
+    'Restored project to the state before the tool call.',
+  'Could not read restorable tool calls. This is the error: {{error}}':
+    'Could not read restorable tool calls. This is the error: {{error}}',
+
+  // ============================================================================
+  // Export Command
+  // ============================================================================
+  'Could not determine current working directory.':
+    'Could not determine current working directory.',
+  'No active session found to export.': 'No active session found to export.',
+  'Session exported to markdown: {{filename}}':
+    'Session exported to markdown: {{filename}}',
+  'Session exported to HTML: {{filename}}':
+    'Session exported to HTML: {{filename}}',
+  'Session exported to JSON: {{filename}}':
+    'Session exported to JSON: {{filename}}',
+  'Session exported to JSONL: {{filename}}':
+    'Session exported to JSONL: {{filename}}',
+  'Failed to export session: {{error}}': 'Failed to export session: {{error}}',
+
+  // ============================================================================
+  // Arena Command
+  // ============================================================================
+  [`Usage: /arena start --models model1,model2 <task>
+
+Options:
+  --models [authType:]model1,[authType:]model2
+                            Models to compete (required, at least 2)
+                            Format: authType:modelId or just modelId
+
+Examples:
+  /arena start --models openai:gpt-4o,anthropic:claude-3 "implement sorting"
+  /arena start --models qwen-coder-plus,kimi-for-coding "fix the bug"`]:
+    `Usage: /arena start --models model1,model2 <task>
+
+Options:
+  --models [authType:]model1,[authType:]model2
+                            Models to compete (required, at least 2)
+                            Format: authType:modelId or just modelId
+
+Examples:
+  /arena start --models openai:gpt-4o,anthropic:claude-3 "implement sorting"
+  /arena start --models qwen-coder-plus,kimi-for-coding "fix the bug"`,
+  [`Arena requires at least 2 models. Use --models model1,model2 to specify.
+Format: [authType:]modelId (e.g., openai:gpt-4o or just gpt-4o)`]:
+    `Arena requires at least 2 models. Use --models model1,model2 to specify.
+Format: [authType:]modelId (e.g., openai:gpt-4o or just gpt-4o)`,
+  'Arena started with {{count}} agents on task: "{{task}}"\nModels:\n{{modelList}}':
+    'Arena started with {{count}} agents on task: "{{task}}"\nModels:\n{{modelList}}',
+  'Arena panes are running in tmux. Attach with: `{{command}}`':
+    'Arena panes are running in tmux. Attach with: `{{command}}`',
+  'Start an Arena session with multiple models competing on the same task':
+    'Start an Arena session with multiple models competing on the same task',
+  'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.':
+    'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.',
+  'An Arena session exists. Use /arena stop or /arena select to end it before starting a new one.':
+    'An Arena session exists. Use /arena stop or /arena select to end it before starting a new one.',
+  'Stop the current Arena session': 'Stop the current Arena session',
+  'Arena is not supported in non-interactive mode. Use interactive mode to stop an Arena session.':
+    'Arena is not supported in non-interactive mode. Use interactive mode to stop an Arena session.',
+  'No running Arena session found.': 'No running Arena session found.',
+  'Show the current Arena session status':
+    'Show the current Arena session status',
+  'Arena is not supported in non-interactive mode.':
+    'Arena is not supported in non-interactive mode.',
+  'No Arena session found. Start one with /arena start.':
+    'No Arena session found. Start one with /arena start.',
+  'Select a model result and merge its diff into the current workspace':
+    'Select a model result and merge its diff into the current workspace',
+  'No arena session found. Start one with /arena start.':
+    'No arena session found. Start one with /arena start.',
+  'Arena session is still running. Wait for it to complete or use /arena stop first.':
+    'Arena session is still running. Wait for it to complete or use /arena stop first.',
+  'Discard all Arena results and clean up worktrees?':
+    'Discard all Arena results and clean up worktrees?',
+  'Arena results discarded. All worktrees cleaned up.':
+    'Arena results discarded. All worktrees cleaned up.',
+  [`No successful agent results to select from. All agents failed or were cancelled.
+Use /arena stop to end the session.`]:
+    `No successful agent results to select from. All agents failed or were cancelled.
+Use /arena stop to end the session.`,
+  'No idle agent found matching "{{model}}".':
+    'No idle agent found matching "{{model}}".',
+  'Failed to apply changes from {{label}}: {{error}}':
+    'Failed to apply changes from {{label}}: {{error}}',
+  'Applied changes from {{label}} to workspace. Arena session complete.':
+    'Applied changes from {{label}} to workspace. Arena session complete.',
 };

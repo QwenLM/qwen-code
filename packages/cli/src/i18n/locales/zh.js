@@ -1835,4 +1835,114 @@ export default {
     '未处于计划模式。请先使用 "/plan" 进入计划模式。',
 
   "Set up Qwen Code's status line UI": '配置 Qwen Code 的状态栏',
+
+  // ============================================================================
+  // Vim Mode
+  // ============================================================================
+  'Entered Vim mode. Run /vim again to exit.':
+    '已进入 Vim 模式。再次运行 /vim 退出。',
+  'Exited Vim mode.': '已退出 Vim 模式。',
+
+  // ============================================================================
+  // Copy Command
+  // ============================================================================
+  'No output in history': '历史记录中没有输出',
+  'Last output copied to the clipboard': '最近的输出已复制到剪贴板',
+  'Failed to copy to the clipboard. {{message}}':
+    '复制到剪贴板失败：{{message}}',
+  'Last AI output contains no text to copy.':
+    '最近的 AI 输出中没有可复制的文本。',
+
+  // ============================================================================
+  // Restore Command
+  // ============================================================================
+  'Could not determine the .qwen directory path.': '无法确定 .qwen 目录路径。',
+  'No restorable tool calls found.': '没有找到可恢复的工具调用。',
+  'Available tool calls to restore:\n\n{{fileList}}':
+    '可恢复的工具调用列表：\n\n{{fileList}}',
+  'File not found: {{selectedFile}}': '文件未找到：{{selectedFile}}',
+  'loadHistory function is not available.': 'loadHistory 函数不可用。',
+  'Restored project to the state before the tool call.':
+    '项目已恢复到工具调用之前的状态。',
+  'Could not read restorable tool calls. This is the error: {{error}}':
+    '无法读取可恢复的工具调用。错误信息：{{error}}',
+
+  // ============================================================================
+  // Export Command
+  // ============================================================================
+  'Could not determine current working directory.': '无法确定当前工作目录。',
+  'No active session found to export.': '没有找到可导出的活跃会话。',
+  'Session exported to markdown: {{filename}}':
+    '会话已导出为 markdown：{{filename}}',
+  'Session exported to HTML: {{filename}}': '会话已导出为 HTML：{{filename}}',
+  'Session exported to JSON: {{filename}}': '会话已导出为 JSON：{{filename}}',
+  'Session exported to JSONL: {{filename}}': '会话已导出为 JSONL：{{filename}}',
+  'Failed to export session: {{error}}': '导出会话失败：{{error}}',
+
+  // ============================================================================
+  // Arena Command
+  // ============================================================================
+  [`Usage: /arena start --models model1,model2 <task>
+
+Options:
+  --models [authType:]model1,[authType:]model2
+                            Models to compete (required, at least 2)
+                            Format: authType:modelId or just modelId
+
+Examples:
+  /arena start --models openai:gpt-4o,anthropic:claude-3 "implement sorting"
+  /arena start --models qwen-coder-plus,kimi-for-coding "fix the bug"`]:
+    '用法：/arena start --models 模型1,模型2 <任务>\n' +
+    '\n' +
+    '选项：\n' +
+    '  --models [认证类型:]模型1,[认证类型:]模型2\n' +
+    '                            参与竞争的模型（必填，至少 2 个）\n' +
+    '                            格式：认证类型:模型ID 或仅模型ID\n' +
+    '\n' +
+    '示例：\n' +
+    '  /arena start --models openai:gpt-4o,anthropic:claude-3 "实现排序"\n' +
+    '  /arena start --models qwen-coder-plus,kimi-for-coding "修复 bug"',
+  [`Arena requires at least 2 models. Use --models model1,model2 to specify.
+Format: [authType:]modelId (e.g., openai:gpt-4o or just gpt-4o)`]:
+    'Arena 需要至少 2 个模型。请使用 --models 模型1,模型2 指定。\n' +
+    '格式：[认证类型:]模型ID（例如：openai:gpt-4o 或仅 gpt-4o）',
+  'Arena started with {{count}} agents on task: "{{task}}"\nModels:\n{{modelList}}':
+    'Arena 已开始，{{count}} 个智能体执行任务："{{task}}"\n模型：\n{{modelList}}',
+  'Arena panes are running in tmux. Attach with: `{{command}}`':
+    'Arena 面板在 tmux 中运行。使用 `{{command}}` 连接。',
+  'Start an Arena session with multiple models competing on the same task':
+    '启动 Arena 会话，多个模型竞争执行同一任务',
+  'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.':
+    'Arena 不支持在非交互模式下使用。请使用交互模式启动 Arena 会话。',
+  'An Arena session exists. Use /arena stop or /arena select to end it before starting a new one.':
+    '已存在 Arena 会话。请先使用 /arena stop 或 /arena select 结束当前会话，再开始新的会话。',
+  'Stop the current Arena session': '停止当前 Arena 会话',
+  'Arena is not supported in non-interactive mode. Use interactive mode to stop an Arena session.':
+    'Arena 不支持在非交互模式下使用。请使用交互模式停止 Arena 会话。',
+  'No running Arena session found.': '没有找到运行中的 Arena 会话。',
+  'Show the current Arena session status': '显示当前 Arena 会话状态',
+  'Arena is not supported in non-interactive mode.':
+    'Arena 不支持在非交互模式下使用。',
+  'No Arena session found. Start one with /arena start.':
+    '没有找到 Arena 会话。使用 /arena start 启动一个。',
+  'Select a model result and merge its diff into the current workspace':
+    '选择模型结果并将其 diff 合并到当前工作区',
+  'No arena session found. Start one with /arena start.':
+    '没有找到 Arena 会话。使用 /arena start 启动一个。',
+  'Arena session is still running. Wait for it to complete or use /arena stop first.':
+    'Arena 会话仍在运行。请等待完成或先使用 /arena stop。',
+  'Discard all Arena results and clean up worktrees?':
+    '丢弃所有 Arena 结果并清理工作树？',
+  'Arena results discarded. All worktrees cleaned up.':
+    'Arena 结果已丢弃。所有工作树已清理。',
+  [`No successful agent results to select from. All agents failed or were cancelled.
+Use /arena stop to end the session.`]:
+    '没有成功的智能体结果可供选择。所有智能体均失败或已取消。\n' +
+    '使用 /arena stop 结束会话。',
+  'No idle agent found matching "{{model}}".':
+    '没有找到匹配 "{{model}}" 的空闲智能体。',
+  'Failed to apply changes from {{label}}: {{error}}':
+    '应用 {{label}} 的更改失败：{{error}}',
+  'Applied changes from {{label}} to workspace. Arena session complete.':
+    '已将 {{label}} 的更改应用到工作区。Arena 会话已完成。',
 };

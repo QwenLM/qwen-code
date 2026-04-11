@@ -18,8 +18,8 @@ export const vimCommand: SlashCommand = {
     const newVimState = await context.ui.toggleVimEnabled();
 
     const message = newVimState
-      ? 'Entered Vim mode. Run /vim again to exit.'
-      : 'Exited Vim mode.';
+      ? t('Entered Vim mode. Run /vim again to exit.')
+      : t('Exited Vim mode.');
     return {
       type: 'message',
       messageType: 'info',

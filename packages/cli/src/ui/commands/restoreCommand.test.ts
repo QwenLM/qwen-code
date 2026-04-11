@@ -12,6 +12,7 @@ import { restoreCommand } from './restoreCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { Config, GitService } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 
 describe('restoreCommand', () => {
   let mockContext: CommandContext;
@@ -89,7 +90,7 @@ describe('restoreCommand', () => {
       ).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Could not determine the .qwen directory path.',
+        content: t('Could not determine the .qwen directory path.'),
       });
     });
 
@@ -101,7 +102,7 @@ describe('restoreCommand', () => {
       expect(await command?.action?.(mockContext, '')).toEqual({
         type: 'message',
         messageType: 'info',
-        content: 'No restorable tool calls found.',
+        content: t('No restorable tool calls found.'),
       });
       // Verify the directory was created by the command.
       await expect(fs.stat(checkpointsDir)).resolves.toBeDefined();
@@ -115,7 +116,9 @@ describe('restoreCommand', () => {
       expect(await command?.action?.(mockContext, '')).toEqual({
         type: 'message',
         messageType: 'info',
-        content: 'Available tool calls to restore:\n\ntest1\ntest2',
+        content: t('Available tool calls to restore:\n\n{{fileList}}', {
+          fileList: 'test1\ntest2',
+        }),
       });
     });
 
@@ -126,7 +129,9 @@ describe('restoreCommand', () => {
       expect(await command?.action?.(mockContext, 'test2')).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'File not found: test2.json',
+        content: t('File not found: {{selectedFile}}', {
+          selectedFile: 'test2.json',
+        }),
       });
     });
 

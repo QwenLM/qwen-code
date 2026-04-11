@@ -17,6 +17,7 @@ import {
   toHtml,
   generateExportFilename,
 } from '../utils/export/index.js';
+import { t } from '../../i18n/index.js';
 
 const mockSessionServiceMocks = vi.hoisted(() => ({
   loadSession: vi.fn(),
@@ -164,7 +165,7 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Configuration not available.',
+        content: t('Configuration not available.'),
       });
     });
 
@@ -187,7 +188,7 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Could not determine current working directory.',
+        content: t('Could not determine current working directory.'),
       });
     });
 
@@ -203,7 +204,7 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'No active session found to export.',
+        content: t('No active session found to export.'),
       });
     });
 
@@ -220,7 +221,9 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Failed to export session: File write failed',
+        content: t('Failed to export session: {{error}}', {
+          error: 'File write failed',
+        }),
       });
     });
 
@@ -230,6 +233,7 @@ describe('exportCommand', () => {
           config: {
             getWorkingDir: vi.fn().mockReturnValue(null),
             getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+            getSessionId: vi.fn().mockReturnValue('test-session-id'),
           },
         },
       });
@@ -294,7 +298,7 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Configuration not available.',
+        content: t('Configuration not available.'),
       });
     });
 
@@ -319,7 +323,7 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Could not determine current working directory.',
+        content: t('Could not determine current working directory.'),
       });
     });
 
@@ -337,7 +341,7 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'No active session found to export.',
+        content: t('No active session found to export.'),
       });
     });
 
@@ -358,7 +362,9 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Failed to export session: Failed to generate HTML',
+        content: t('Failed to export session: {{error}}', {
+          error: 'Failed to generate HTML',
+        }),
       });
     });
 
@@ -377,7 +383,9 @@ describe('exportCommand', () => {
       expect(result).toEqual({
         type: 'message',
         messageType: 'error',
-        content: 'Failed to export session: File write failed',
+        content: t('Failed to export session: {{error}}', {
+          error: 'File write failed',
+        }),
       });
     });
   });

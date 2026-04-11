@@ -10,6 +10,7 @@ import { copyCommand } from './copyCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { copyToClipboard } from '../utils/commandUtils.js';
+import { t } from '../../i18n/index.js';
 
 vi.mock('../utils/commandUtils.js', () => ({
   copyToClipboard: vi.fn(),
@@ -59,7 +60,7 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'No output in history',
+      content: t('No output in history'),
     });
 
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
@@ -75,7 +76,7 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'No output in history',
+      content: t('No output in history'),
     });
 
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
@@ -98,7 +99,7 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'No output in history',
+      content: t('No output in history'),
     });
 
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
@@ -126,7 +127,7 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last output copied to the clipboard',
+      content: t('Last output copied to the clipboard'),
     });
 
     expect(mockCopyToClipboard).toHaveBeenCalledWith(
@@ -153,7 +154,7 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last output copied to the clipboard',
+      content: t('Last output copied to the clipboard'),
     });
   });
 
@@ -180,7 +181,7 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last output copied to the clipboard',
+      content: t('Last output copied to the clipboard'),
     });
   });
 
@@ -211,7 +212,7 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last output copied to the clipboard',
+      content: t('Last output copied to the clipboard'),
     });
   });
 
@@ -234,7 +235,9 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: `Failed to copy to the clipboard. ${clipboardError.message}`,
+      content: t('Failed to copy to the clipboard. {{message}}', {
+        message: clipboardError.message,
+      }),
     });
   });
 
@@ -257,7 +260,9 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: `Failed to copy to the clipboard. ${rejectedValue}`,
+      content: t('Failed to copy to the clipboard. {{message}}', {
+        message: String(rejectedValue),
+      }),
     });
   });
 
@@ -278,7 +283,7 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'Last AI output contains no text to copy.',
+      content: t('Last AI output contains no text to copy.'),
     });
 
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
@@ -296,7 +301,7 @@ describe('copyCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
-      content: 'No output in history',
+      content: t('No output in history'),
     });
 
     expect(mockCopyToClipboard).not.toHaveBeenCalled();
