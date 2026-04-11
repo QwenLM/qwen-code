@@ -16,6 +16,7 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 
 export const modelCommand: SlashCommand = {
   name: 'model',
+  completionPriority: 100,
   get description() {
     return t('Switch the model for this session (--fast for suggestion model)');
   },
