@@ -75,7 +75,7 @@ async function loadChannelsFromExtensions(): Promise<number> {
 
     for (const ext of extensions) {
       for (const [channelType, channelDef] of Object.entries(ext.channels!)) {
-        if (getPlugin(channelType)) {
+        if (await getPlugin(channelType)) {
           writeStderrLine(
             `[Extensions] Skipping channel "${channelType}" from "${ext.name}": type already registered`,
           );
@@ -123,13 +123,13 @@ async function loadChannelsFromExtensions(): Promise<number> {
   return loaded;
 }
 
-function createChannel(
+async function createChannel(
   name: string,
-  config: ReturnType<typeof parseChannelConfig>,
+  config: Awaited<ReturnType<typeof parseChannelConfig>>,
   bridge: AcpBridge,
   options?: { router?: SessionRouter; proxy?: string },
-): ChannelBase {
-  const channelPlugin = getPlugin(config.type);
+): Promise<ChannelBase> {
+  const channelPlugin = await getPlugin(config.type);
   if (!channelPlugin) {
     throw new Error(`Unknown channel type: "${config.type}".`);
   }
@@ -180,7 +180,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
 
   let config;
   try {
-    config = parseChannelConfig(
+    config = await parseChannelConfig(
       name,
       channelsConfig[name] as Record<string, unknown>,
     );
@@ -207,7 +207,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   );
   const channels: Map<string, ChannelBase> = new Map();
 
-  const channel = createChannel(name, config, bridge, { router, proxy });
+  const channel = await createChannel(name, config, bridge, { router, proxy });
   channels.set(name, channel);
   registerToolCallDispatch(bridge, router, channels);
 
@@ -299,13 +299,13 @@ async function startAll(proxy?: string): Promise<void> {
   // Parse all configs upfront — fail fast on bad config
   const parsed: Array<{
     name: string;
-    config: ReturnType<typeof parseChannelConfig>;
+    config: Awaited<ReturnType<typeof parseChannelConfig>>;
   }> = [];
   for (const [name, raw] of Object.entries(channelsConfig)) {
     try {
       parsed.push({
         name,
-        config: parseChannelConfig(name, raw as Record<string, unknown>),
+        config: await parseChannelConfig(name, raw as Record<string, unknown>),
       });
     } catch (err) {
       writeStderrLine(
@@ -350,7 +350,10 @@ async function startAll(proxy?: string): Promise<void> {
   );
 
   for (const { name, config } of parsed) {
-    channels.set(name, createChannel(name, config, bridge, { router, proxy }));
+    channels.set(
+      name,
+      await createChannel(name, config, bridge, { router, proxy }),
+    );
   }
   registerToolCallDispatch(bridge, router, channels);
 
