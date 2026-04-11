@@ -25,7 +25,7 @@
     "build": "tsc --build"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "file:../base",
+    "@qwen-code/channel-base": "npm:@alife/dataworks-qwen-code-channel-base@*",
     "grammy": "^1.41.1",
     "telegram-markdown-formatter": "^0.1.2"
   },

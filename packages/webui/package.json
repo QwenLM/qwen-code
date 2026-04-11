@@ -62,7 +62,7 @@
   },
   "devDependencies": {
     "@chromatic-com/storybook": "^5.0.0",
-    "@qwen-code/qwen-code-core": "file:../core",
+    "@qwen-code/qwen-code-core": "npm:@alife/dataworks-qwen-code-core@*",
     "@storybook/addon-a11y": "^10.1.11",
     "@storybook/addon-docs": "^10.1.11",
     "@storybook/addon-onboarding": "^10.1.11",

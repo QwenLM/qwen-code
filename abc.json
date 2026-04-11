@@ -2,7 +2,12 @@
   "assets": {
     "type": "command",
     "command": {
-      "cmd": ["npm i", "npm run build", "bash scripts/copy-to-package.sh"]
+      "cmd": [
+        "npm i",
+        "npm run test",
+        "npm run build",
+        "bash scripts/copy-to-package.sh"
+      ]
     }
   }
 }
