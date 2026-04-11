@@ -171,7 +171,7 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
-    it('should ignore request.model override and always use configured model', async () => {
+    it('should use request.model when provided', async () => {
       // Arrange
       const request: GenerateContentParameters = {
         model: 'override-model',
@@ -205,7 +205,54 @@ describe('ContentGenerationPipeline', () => {
       // Act
       const result = await pipeline.execute(request, userPromptId);
 
-      // Assert
+      // Assert — request.model takes precedence over contentGeneratorConfig.model
+      expect(result).toBe(mockGeminiResponse);
+      expect(
+        (mockConverter as unknown as { setModel: Mock }).setModel,
+      ).toHaveBeenCalledWith('override-model');
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'override-model',
+        }),
+        expect.any(Object),
+      );
+    });
+
+    it('should fall back to configured model when request.model is empty', async () => {
+      // Arrange — empty model string is falsy, should fall back to contentGeneratorConfig.model
+      const request: GenerateContentParameters = {
+        model: '',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          { message: { content: 'Hello response' }, finish_reason: 'stop' },
+        ],
+        created: Date.now(),
+        model: 'test-model',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      // Act
+      const result = await pipeline.execute(request, userPromptId);
+
+      // Assert — falls back to contentGeneratorConfig.model
       expect(result).toBe(mockGeminiResponse);
       expect(
         (mockConverter as unknown as { setModel: Mock }).setModel,
@@ -285,6 +332,174 @@ describe('ContentGenerationPipeline', () => {
           signal: undefined,
         }),
       );
+    });
+
+    it('should skip empty tools array in request', async () => {
+      // Arrange — tools: [] should NOT be included in the API request
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { tools: [] },
+      };
+      const userPromptId = 'test-prompt-id';
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [{ message: { content: 'Response' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      // Act
+      await pipeline.execute(request, userPromptId);
+
+      // Assert — tools should NOT be in the request
+      expect(mockConverter.convertGeminiToolsToOpenAI).not.toHaveBeenCalled();
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.tools).toBeUndefined();
+    });
+
+    it('should override enable_thinking when thinkingConfig disables it', async () => {
+      // Arrange — provider injects enable_thinking: true via extra_body,
+      // but request explicitly disables thinking
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        enable_thinking: true, // Simulates extra_body injection
+      }));
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Suggest next' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+      const userPromptId = 'forked_query';
+
+      const mockMessages = [
+        { role: 'user', content: 'Suggest next' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [
+          {
+            message: { content: '{"suggestion":"run tests"}' },
+            finish_reason: 'stop',
+          },
+        ],
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      // Act
+      await pipeline.execute(request, userPromptId);
+
+      // Assert — enable_thinking should be overridden to false
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(false);
+    });
+
+    it('should strip reasoning key from extra_body when thinking is disabled', async () => {
+      // Arrange — provider injects reasoning via extra_body
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        reasoning: { effort: 'high' },
+      }));
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Suggest next' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Suggest next' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [{ message: { content: 'run tests' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      // Act
+      await pipeline.execute(request, 'forked_query');
+
+      // Assert — reasoning should be stripped
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.reasoning).toBeUndefined();
+    });
+
+    it('should preserve enable_thinking when thinking is not explicitly disabled', async () => {
+      // Arrange — normal request (not forked query), enable_thinking should be preserved
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        enable_thinking: true,
+      }));
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        // No thinkingConfig — normal request
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [{ message: { content: 'Hi there' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      // Act
+      await pipeline.execute(request, 'main');
+
+      // Assert — enable_thinking should be PRESERVED (not disabled)
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.enable_thinking).toBe(true);
     });
 
     it('should handle errors and log them', async () => {
