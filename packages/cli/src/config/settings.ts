@@ -249,6 +249,62 @@ function getSettingsFileKeyWarnings(
   return warnings;
 }
 
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function hasOwnModelProviders(
+  settingsObj: Record<string, unknown>,
+): boolean {
+  return Object.prototype.hasOwnProperty.call(settingsObj, 'modelProviders');
+}
+
+function hasAnyProviderEntries(modelProviders: unknown): boolean {
+  if (!isPlainObject(modelProviders)) {
+    return false;
+  }
+
+  return Object.values(modelProviders).some(
+    (providerModels) => Array.isArray(providerModels) && providerModels.length > 0,
+  );
+}
+
+function getModelProvidersOverrideWarnings(
+  loadedSettings: LoadedSettings,
+): string[] {
+  // Untrusted workspaces are ignored in merge, so they cannot shadow user modelProviders.
+  if (!loadedSettings.isTrusted) {
+    return [];
+  }
+
+  const userOriginal =
+    loadedSettings.user.originalSettings as unknown as Record<string, unknown>;
+  const workspaceOriginal =
+    loadedSettings.workspace.originalSettings as unknown as Record<
+      string,
+      unknown
+    >;
+
+  if (!hasOwnModelProviders(userOriginal) || !hasOwnModelProviders(workspaceOriginal)) {
+    return [];
+  }
+
+  const userModelProviders = userOriginal['modelProviders'];
+  const workspaceModelProviders = workspaceOriginal['modelProviders'];
+  const workspaceIsEmptyModelProviders =
+    isPlainObject(workspaceModelProviders) &&
+    Object.keys(workspaceModelProviders).length === 0;
+
+  if (!workspaceIsEmptyModelProviders || !hasAnyProviderEntries(userModelProviders)) {
+    return [];
+  }
+
+  return [
+    `Warning: '${loadedSettings.workspace.path}' defines an empty 'modelProviders' object. ` +
+      `Because 'modelProviders' uses REPLACE merge strategy, this overrides user-level model providers in '${loadedSettings.user.path}' for this project.`,
+  ];
+}
+
 /**
  * Collects warnings for ignored legacy and unknown settings keys,
  * as well as migration warnings.
@@ -281,6 +337,10 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     )) {
       warningSet.add(warning);
     }
+  }
+
+  for (const warning of getModelProvidersOverrideWarnings(loadedSettings)) {
+    warningSet.add(warning);
   }
 
   return [...warningSet];

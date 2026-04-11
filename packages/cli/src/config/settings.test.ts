@@ -496,6 +496,98 @@ describe('Settings Loading and Merging', () => {
       expect(getSettingsWarnings(settings)).toEqual([]);
     });
 
+    it('should warn when trusted workspace empty modelProviders overrides user modelProviders', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        modelProviders: {
+          openai: [{ id: 'gpt-4o', envKey: 'OPENAI_API_KEY' }],
+        },
+      };
+      const workspaceSettingsContent = {
+        modelProviders: {},
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("defines an empty 'modelProviders' object"),
+        ]),
+      );
+    });
+
+    it('should not warn when workspace does not define modelProviders', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        modelProviders: {
+          openai: [{ id: 'gpt-4o', envKey: 'OPENAI_API_KEY' }],
+        },
+      };
+      const workspaceSettingsContent = {
+        model: { name: 'workspace-model' },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([]);
+    });
+
+    it('should not warn when workspace is untrusted', () => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        modelProviders: {
+          openai: [{ id: 'gpt-4o', envKey: 'OPENAI_API_KEY' }],
+        },
+      };
+      const workspaceSettingsContent = {
+        modelProviders: {},
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([]);
+    });
+
     it('should rewrite allowedTools to tools.allowed during migration', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
