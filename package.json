@@ -72,7 +72,8 @@
     "cliui": {
       "wrap-ansi": "7.0.0"
     },
-    "baseline-browser-mapping": "^2.9.19"
+    "baseline-browser-mapping": "^2.9.19",
+    "normalize-package-data": "^7.0.1"
   },
   "bin": {
     "qwen": "dist/cli.js"
@@ -111,7 +112,6 @@
     "mock-fs": "^5.5.0",
     "msw": "^2.10.4",
     "npm-run-all": "^4.1.5",
-    "patch-package": "^8.0.1",
     "prettier": "^3.5.3",
     "react-devtools-core": "^4.28.5",
     "semver": "^7.7.2",
@@ -123,7 +123,6 @@
   },
   "dependencies": {
     "@testing-library/dom": "^10.4.1",
-    "normalize-package-data": "^7.0.1",
     "simple-git": "^3.28.0"
   },
   "optionalDependencies": {
