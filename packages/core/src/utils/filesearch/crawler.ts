@@ -16,6 +16,8 @@ export interface CrawlOptions {
   cwd: string;
   // The fdir maxDepth option.
   maxDepth?: number;
+  // Maximum number of file entries to return. Prevents OOM on very large trees.
+  maxFiles?: number;
   // A pre-configured Ignore instance.
   ignore: Ignore;
   // Caching options.
@@ -33,6 +35,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
       options.crawlDirectory,
       options.ignore.getFingerprint(),
       options.maxDepth,
+      options.maxFiles,
     );
     const cachedResults = cache.read(cacheKey);
 
@@ -43,10 +46,12 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
 
   const posixCwd = toPosixPath(options.cwd);
   const posixCrawlDirectory = toPosixPath(options.crawlDirectory);
+  const relativeToCrawlDir = path.posix.relative(posixCwd, posixCrawlDirectory);
 
   let results: string[];
   try {
     const dirFilter = options.ignore.getDirectoryFilter();
+    const fileFilter = options.ignore.getFileFilter();
     const api = new fdir()
       .withRelativePaths()
       .withDirs()
@@ -54,10 +59,22 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
       .exclude((_, dirPath) => {
         const relativePath = path.posix.relative(posixCrawlDirectory, dirPath);
         return dirFilter(`${relativePath}/`);
+      })
+      .filter((filePath, isDirectory) => {
+        // Directories are already handled by the exclude() callback above.
+        if (isDirectory) return true;
+        // Apply file-level ignore patterns (e.g. *.log, *.map) during the
+        // crawl so they don't consume the maxFiles budget.
+        const cwdRelative = path.posix.join(relativeToCrawlDir, filePath);
+        return !fileFilter(cwdRelative);
       });
 
     if (options.maxDepth !== undefined) {
       api.withMaxDepth(options.maxDepth);
+    }
+
+    if (options.maxFiles !== undefined) {
+      api.withMaxFiles(options.maxFiles);
     }
 
     results = await api.crawl(options.crawlDirectory).withPromise();
@@ -65,8 +82,6 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     // The directory probably doesn't exist.
     return [];
   }
-
-  const relativeToCrawlDir = path.posix.relative(posixCwd, posixCrawlDirectory);
 
   const relativeToCwdResults = results.map((p) =>
     path.posix.join(relativeToCrawlDir, p),
@@ -77,6 +92,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
       options.crawlDirectory,
       options.ignore.getFingerprint(),
       options.maxDepth,
+      options.maxFiles,
     );
     cache.write(cacheKey, relativeToCwdResults, options.cacheTtl * 1000);
   }

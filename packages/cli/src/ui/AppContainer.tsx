@@ -71,7 +71,7 @@ import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
-import { VerboseModeProvider } from './contexts/VerboseModeContext.js';
+import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -781,6 +781,7 @@ export const AppContainer = (props: AppContainerProps) => {
     addMessage,
     clearQueue,
     getQueuedMessagesText,
+    popAllMessages,
     drainQueue,
   } = useMessageQueue({
     isConfigInitialized,
@@ -789,8 +790,8 @@ export const AppContainer = (props: AppContainerProps) => {
   });
 
   // Bridge message queue to mid-turn drain via ref.
-  // drainQueue reads from the synchronous queueRef inside useMessageQueue,
-  // so it always sees the latest state even between renders.
+  // drainQueue reads the synchronous queueRef inside the hook, so it
+  // stays consistent with popAllMessages even before React re-renders.
   midTurnDrainRef.current = drainQueue;
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
@@ -1262,8 +1263,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
-  const [verboseMode, setVerboseMode] = useState<boolean>(
-    settings.merged.ui?.verboseMode ?? true,
+  const [compactMode, setCompactMode] = useState<boolean>(
+    settings.merged.ui?.compactMode ?? false,
   );
   const [frozenSnapshot, setFrozenSnapshot] = useState<
     HistoryItemWithoutId[] | null
@@ -1681,10 +1682,10 @@ export const AppContainer = (props: AppContainerProps) => {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);
         }
-      } else if (keyMatchers[Command.TOGGLE_VERBOSE_MODE](key)) {
-        const newValue = !verboseMode;
-        setVerboseMode(newValue);
-        void settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
+      } else if (keyMatchers[Command.TOGGLE_COMPACT_MODE](key)) {
+        const newValue = !compactMode;
+        setCompactMode(newValue);
+        void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
         // Only freeze during the actual responding phase. WaitingForConfirmation
         // must keep focus so the user can approve/cancel tool confirmation UI.
@@ -1726,8 +1727,8 @@ export const AppContainer = (props: AppContainerProps) => {
       // debugKeystrokeLogging is read at call time, so no stale closure risk.
       settings,
       isAuthenticating,
-      verboseMode,
-      setVerboseMode,
+      compactMode,
+      setCompactMode,
       setFrozenSnapshot,
       pendingHistoryItems,
       refreshStatic,
@@ -2054,6 +2055,7 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openModelDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2072,6 +2074,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
+      popAllQueuedMessages: popAllMessages,
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
@@ -2112,6 +2115,7 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openModelDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2129,6 +2133,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       retryLastPrompt,
       handleClearScreen,
+      popAllMessages,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       // Subagent dialogs
@@ -2154,9 +2159,9 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
-  const verboseModeValue = useMemo(
-    () => ({ verboseMode, frozenSnapshot }),
-    [verboseMode, frozenSnapshot],
+  const compactModeValue = useMemo(
+    () => ({ compactMode, frozenSnapshot }),
+    [compactMode, frozenSnapshot],
   );
 
   return (
@@ -2169,11 +2174,11 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <VerboseModeProvider value={verboseModeValue}>
+            <CompactModeProvider value={compactModeValue}>
               <ShellFocusContext.Provider value={isFocused}>
                 <App />
               </ShellFocusContext.Provider>
-            </VerboseModeProvider>
+            </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>

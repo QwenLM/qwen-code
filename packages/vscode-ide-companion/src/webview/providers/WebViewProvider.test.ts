@@ -111,7 +111,7 @@ vi.mock('./MessageHandler.js', () => ({
     setPermissionHandler = vi.fn();
     setAskUserQuestionHandler = vi.fn();
     setCurrentConversationId = vi.fn();
-    getCurrentConversationId = vi.fn(() => 'conversation-1');
+    getCurrentConversationId = vi.fn(() => null);
     setupFileWatchers = vi.fn(() => ({ dispose: vi.fn() }));
     appendStreamContent = vi.fn();
     route = vi.fn();
@@ -296,6 +296,37 @@ describe('WebViewProvider.attachToView', () => {
       },
     });
     expect(panelPostMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('WebViewProvider.createNewSession', () => {
+  it('forces a fresh ACP session for the sidebar new-session action', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          createNewSession: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    const messageHandler = (
+      provider as unknown as {
+        messageHandler: {
+          setCurrentConversationId: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).messageHandler;
+
+    await provider.createNewSession();
+
+    expect(agentManager.createNewSession).toHaveBeenCalledWith(
+      '/workspace-root',
+      { forceNew: true },
+    );
+    expect(messageHandler.setCurrentConversationId).toHaveBeenCalledWith(null);
   });
 });
 

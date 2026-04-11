@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Bot } from 'grammy';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import {
   telegramFormat,
   splitHtmlForTelegram,
@@ -27,7 +28,14 @@ export class TelegramChannel extends ChannelBase {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
-    this.bot = new Bot(config.token);
+    const botConfig = this.proxy
+      ? {
+          client: {
+            baseFetchConfig: { agent: new HttpsProxyAgent(this.proxy) },
+          },
+        }
+      : undefined;
+    this.bot = new Bot(config.token, botConfig);
   }
 
   private getFileUrl(filePath: string): string {

@@ -989,9 +989,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': 'Modell für diese Sitzung wechseln',
-  'Set fast model for background tasks':
-    'Schnelles Modell für Hintergrundaufgaben festlegen',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Modell für diese Sitzung wechseln (--fast für Vorschlagsmodell)',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Leichteres Modell für Eingabevorschläge und spekulative Ausführung festlegen',
   'Content generator configuration not available.':
     'Inhaltsgenerator-Konfiguration nicht verfügbar.',
   'Authentication type not available.':
@@ -1441,6 +1442,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Drücken Sie erneut Strg+C zum Beenden.',
   'Press Ctrl+D again to exit.': 'Drücken Sie erneut Strg+D zum Beenden.',
   'Press Esc again to clear.': 'Drücken Sie erneut Esc zum Löschen.',
+  'Press ↑ to edit queued messages':
+    'Drücken Sie ↑, um Nachrichten in der Warteschlange zu bearbeiten',
 
   // ============================================================================
   // MCP Status
@@ -1970,9 +1973,9 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
-  verbose: 'ausführlich',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    'Vollständige Tool-Ausgabe und Denkprozess im ausführlichen Modus anzeigen (mit Strg+O umschalten).',
+  compact: 'kompakt',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Strg+O umschalten).',
   'Press Ctrl+O to show full tool output':
     'Strg+O für vollständige Tool-Ausgabe drücken',
 

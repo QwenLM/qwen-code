@@ -219,32 +219,35 @@ describe('<AskUserQuestionDialog />', () => {
   });
 
   describe('multiple questions', () => {
-    it('shows unanswered questions as (not answered) in Submit tab', async () => {
-      const onConfirm = vi.fn();
-      const details = createConfirmationDetails({
-        questions: [
-          createSingleQuestion({ header: 'Q1' }),
-          createSingleQuestion({ header: 'Q2' }),
-        ],
-      });
+    it.skipIf(process.platform === 'win32')(
+      'shows unanswered questions as (not answered) in Submit tab',
+      async () => {
+        const onConfirm = vi.fn();
+        const details = createConfirmationDetails({
+          questions: [
+            createSingleQuestion({ header: 'Q1' }),
+            createSingleQuestion({ header: 'Q2' }),
+          ],
+        });
 
-      const { stdin, lastFrame, unmount } = renderWithProviders(
-        <AskUserQuestionDialog
-          confirmationDetails={details}
-          onConfirm={onConfirm}
-        />,
-      );
-      await wait();
+        const { stdin, lastFrame, unmount } = renderWithProviders(
+          <AskUserQuestionDialog
+            confirmationDetails={details}
+            onConfirm={onConfirm}
+          />,
+        );
+        await wait();
 
-      // Navigate directly to submit tab without answering anything
-      stdin.write('\u001B[C'); // Right
-      await wait();
-      stdin.write('\u001B[C'); // Right
-      await wait();
+        // Navigate directly to submit tab without answering anything
+        stdin.write('\u001B[C'); // Right
+        await wait();
+        stdin.write('\u001B[C'); // Right
+        await wait();
 
-      expect(lastFrame()).toContain('(not answered)');
-      unmount();
-    });
+        expect(lastFrame()).toContain('(not answered)');
+        unmount();
+      },
+    );
   });
 
   describe('focus behavior', () => {

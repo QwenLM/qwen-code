@@ -28,7 +28,7 @@ import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
-import { useVerboseMode } from '../../contexts/VerboseModeContext.js';
+import { useCompactMode } from '../../contexts/CompactModeContext.js';
 
 import {
   ToolStatusIndicator,
@@ -343,9 +343,9 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
 
   // Use the custom hook to determine the display type
   const displayRenderer = useResultDisplayRenderer(resultDisplay);
-  const { verboseMode } = useVerboseMode();
+  const { compactMode } = useCompactMode();
   const effectiveDisplayRenderer =
-    verboseMode || forceShowResult
+    !compactMode || forceShowResult
       ? displayRenderer
       : { type: 'none' as const };
 
