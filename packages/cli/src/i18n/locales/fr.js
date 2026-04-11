@@ -2027,7 +2027,7 @@ export default {
   '  Type: Free tier': '  Type : Niveau gratuit',
   '  Limit: Up to 1,000 requests/day':
     '  Limite : Jusqu\'à 1 000 requêtes/jour',
-  '  Models: Qwen latest models': '  Modèles : Derniers modèles Qwen\n',
+  '  Models: Qwen latest models\n': '  Modèles : Derniers modèles Qwen\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Méthode d\'authentification : Alibaba Cloud Coding Plan',
   '中国 (China) - 阿里云百炼': '中国 (Chine) - 阿里云百炼',
