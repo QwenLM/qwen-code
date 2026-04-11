@@ -156,6 +156,32 @@ describe('extractSessionModelState', () => {
       ],
     });
   });
+
+  it('preserves explicit null contextLimit for known models', () => {
+    const result = extractSessionModelState({
+      models: {
+        currentModelId: 'qwen3-max',
+        availableModels: [
+          {
+            modelId: 'qwen3-max',
+            name: 'Qwen3 Max',
+            _meta: { contextLimit: null },
+          },
+        ],
+      },
+    });
+
+    expect(result).toEqual({
+      currentModelId: 'qwen3-max',
+      availableModels: [
+        {
+          modelId: 'qwen3-max',
+          name: 'Qwen3 Max',
+          _meta: { contextLimit: null },
+        },
+      ],
+    });
+  });
 });
 
 describe('extractModelInfoFromNewSessionResult', () => {
@@ -226,19 +252,35 @@ describe('extractModelInfoFromNewSessionResult', () => {
     expect(extractModelInfoFromNewSessionResult(null)).toBeNull();
   });
 
-  it('derives contextLimit for known models when the payload has null metadata', () => {
+  it('derives contextLimit for known models when metadata omits contextLimit', () => {
     expect(
       extractModelInfoFromNewSessionResult({
         model: {
           name: 'Qwen3 Max',
           modelId: 'qwen3-max',
-          _meta: null,
+          _meta: {},
         },
       }),
     ).toEqual({
       name: 'Qwen3 Max',
       modelId: 'qwen3-max',
       _meta: { contextLimit: 262144 },
+    });
+  });
+
+  it('preserves explicit null contextLimit for known models', () => {
+    expect(
+      extractModelInfoFromNewSessionResult({
+        model: {
+          name: 'Qwen3 Max',
+          modelId: 'qwen3-max',
+          _meta: { contextLimit: null },
+        },
+      }),
+    ).toEqual({
+      name: 'Qwen3 Max',
+      modelId: 'qwen3-max',
+      _meta: { contextLimit: null },
     });
   });
 
