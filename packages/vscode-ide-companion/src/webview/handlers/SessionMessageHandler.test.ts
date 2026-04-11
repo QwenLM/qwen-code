@@ -289,6 +289,44 @@ describe('SessionMessageHandler', () => {
     );
   });
 
+  it('prefers the active ACP session id over the local conversation id when exporting', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conv_local_123',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export',
+      },
+    });
+
+    expect(mockExportSessionToFile).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      cwd: '/workspace',
+      format: 'html',
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
   it('reports export failures back to the user', async () => {
     mockExportSessionToFile.mockRejectedValue(new Error('disk full'));
 

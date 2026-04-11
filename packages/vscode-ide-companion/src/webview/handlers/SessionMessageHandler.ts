@@ -303,8 +303,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
   private async handleExportCommand(
     format: SessionExportFormat,
   ): Promise<void> {
+    // Prefer the active ACP session id. The local conversation id may still be
+    // a webview-only `conv_*` placeholder after starting a fresh session.
     const sessionId =
-      this.currentConversationId ?? this.agentManager.currentSessionId;
+      this.agentManager.currentSessionId ?? this.currentConversationId;
     if (!sessionId) {
       const errorMsg = 'No active session found to export.';
       vscode.window.showErrorMessage(errorMsg);
