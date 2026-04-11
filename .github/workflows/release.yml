@@ -157,19 +157,19 @@ jobs:
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
 
+      - name: 'Clean Workspace'
+        run: |-
+          npm run clean
+
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci --no-audit --progress=false
 
-      - name: 'Clean Workspace'
+      - name: 'Format Project'
         run: |-
-          npm run clean
-
-      - name: 'Check Formatting'
-        run: |-
-          npx prettier --experimental-cli --check .
+          npm run format
 
       - name: 'Run Lint'
         run: |-
@@ -270,11 +270,11 @@ jobs:
 
       - name: 'Run CLI Docker Integration Tests'
         run: |-
-          QWEN_SANDBOX=docker vitest run --root ./integration-tests cli
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
 
       - name: 'Run Interactive Docker Integration Tests'
         run: |-
-          QWEN_SANDBOX=docker vitest run --root ./integration-tests interactive
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
 
   publish:
     name: 'Publish Release'
