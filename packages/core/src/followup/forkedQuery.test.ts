@@ -11,9 +11,9 @@ import {
   clearCacheSafeParams,
   runForkedQuery,
 } from './forkedQuery.js';
-import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
-import type { Config } from '../config/config.js';
 import type { GenerateContentConfig } from '@google/genai';
+import type { Config } from '../config/config.js';
+import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 
 vi.mock('../core/geminiChat.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../core/geminiChat.js')>();
@@ -26,7 +26,6 @@ vi.mock('../core/geminiChat.js', async (importOriginal) => {
 describe('CacheSafeParams', () => {
   beforeEach(() => {
     clearCacheSafeParams();
-    vi.mocked(GeminiChat).mockReset();
   });
 
   describe('saveCacheSafeParams / getCacheSafeParams', () => {
@@ -154,87 +153,6 @@ describe('CacheSafeParams', () => {
       expect(v2).toBe(v1);
     });
   });
-
-  describe('runForkedQuery', () => {
-    it('disables tools at request time while preserving cached chat config', async () => {
-      const schema = {
-        type: 'object',
-        properties: { answer: { type: 'string' } },
-      };
-      const abortController = new AbortController();
-      saveCacheSafeParams(
-        {
-          systemInstruction: 'stable',
-          tools: [{ functionDeclarations: [{ name: 'tool1' }] }],
-        },
-        [],
-        'qwen-max',
-      );
-
-      async function* stream() {
-        yield {
-          type: StreamEventType.CHUNK,
-          value: {
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: '{"answer":"ok"}' }],
-                },
-              },
-            ],
-            usageMetadata: {
-              promptTokenCount: 1,
-              candidatesTokenCount: 2,
-              cachedContentTokenCount: 3,
-            },
-          },
-        };
-      }
-
-      const sendMessageStream = vi.fn().mockResolvedValue(stream());
-      vi.mocked(GeminiChat).mockImplementation(
-        () =>
-          ({
-            sendMessageStream,
-          }) as unknown as GeminiChat,
-      );
-
-      const result = await runForkedQuery({} as Config, 'Suggest a follow-up', {
-        abortSignal: abortController.signal,
-        jsonSchema: schema,
-      });
-
-      expect(result).toEqual({
-        text: '{"answer":"ok"}',
-        jsonResult: { answer: 'ok' },
-        usage: {
-          inputTokens: 1,
-          outputTokens: 2,
-          cacheHitTokens: 3,
-        },
-      });
-
-      expect(GeminiChat).toHaveBeenCalledTimes(1);
-      expect(vi.mocked(GeminiChat).mock.calls[0]?.[1]).toMatchObject({
-        systemInstruction: 'stable',
-        tools: [{ functionDeclarations: [{ name: 'tool1' }] }],
-        thinkingConfig: { includeThoughts: false },
-      });
-      expect(sendMessageStream).toHaveBeenCalledWith(
-        'qwen-max',
-        {
-          message: [{ text: 'Suggest a follow-up' }],
-          config: {
-            tools: [],
-            abortSignal: abortController.signal,
-            responseMimeType: 'application/json',
-            responseJsonSchema: schema,
-          },
-        },
-        'forked_query',
-      );
-    });
-  });
 });
 
 describe('runForkedQuery', () => {
@@ -321,14 +239,7 @@ describe('runForkedQuery', () => {
     expect(ctorArgs[4]).toBeUndefined(); // telemetryService
 
     // Verify sendMessageStream was called
-    expect(mockSendMessageStream).toHaveBeenCalledExactlyOnceWith(
-      'test-model',
-      expect.objectContaining({
-        message: [{ text: 'suggest something' }],
-        config: expect.objectContaining({ tools: [] }),
-      }),
-      'forked_query',
-    );
+    expect(mockSendMessageStream).toHaveBeenCalledOnce();
     expect(capturedParams).not.toBeNull();
 
     // KEY ASSERTION: per-request config must have tools: [] to prevent
@@ -338,6 +249,14 @@ describe('runForkedQuery', () => {
     expect(sendParams.config!.tools).toEqual([]);
 
     // Verify prompt_id is 'forked_query' and message is passed correctly
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      'test-model',
+      expect.objectContaining({
+        message: [{ text: 'suggest something' }],
+        config: expect.objectContaining({ tools: [] }),
+      }),
+      'forked_query',
+    );
 
     // Verify result is correct
     expect(result.text).toBe('commit this');

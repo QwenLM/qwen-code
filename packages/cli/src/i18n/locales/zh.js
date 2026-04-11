@@ -69,8 +69,7 @@ export default {
   'Initializing...': '正在初始化...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     '正在连接到 MCP 服务器... ({{connected}}/{{total}})',
-  'Type your message or @path/to/file':
-    '输入您的消息, 比如:帮我确认下在 DataWorks 的身份和常用工作空间？',
+  'Type your message or @path/to/file': '输入您的消息或 @ 文件路径',
   '? for shortcuts': '按 ? 查看快捷键',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "按 'i' 进入插入模式，按 'Esc' 进入普通模式",
@@ -639,6 +638,9 @@ export default {
   'Loading hooks...': '正在加载 Hook...',
   'Error loading hooks:': '加载 Hook 出错：',
   'Press Escape to close': '按 Escape 关闭',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    '按 Escape、Ctrl+C 或 Ctrl+D 取消',
+  'Press Space, Enter, or Escape to dismiss': '按空格、回车或 Escape 关闭',
   'No hook selected': '未选择 Hook',
   // Hooks - List Step
   'No hook events found.': '未找到 Hook 事件。',
@@ -1090,7 +1092,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': '切换此会话的模型',
+  'Switch the model for this session (--fast for suggestion model)':
+    '切换此会话的模型（--fast 可设置建议模型）',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    '设置用于输入建议和推测执行的轻量模型',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1167,6 +1172,7 @@ export default {
   'Always allow {{action}} in this project': '在本项目中总是允许{{action}}',
   'Always allow for this user': '对该用户总是允许',
   'Always allow {{action}} for this user': '对该用户总是允许{{action}}',
+  'Yes, restore previous mode ({{mode}})': '是，恢复之前的模式 ({{mode}})',
   'Yes, and auto-accept edits': '是，并自动接受编辑',
   'Yes, and manually approve edits': '是，并手动批准编辑',
   'No, keep planning (esc)': '否，继续规划 (esc)',
@@ -1311,8 +1317,8 @@ export default {
   unknown: '未知',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "无法切换到模型 '{{modelId}}'.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — 高效混合架构，编程性能业界领先',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — 高效混合架构，编程性能业界领先',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     '来自阿里云 ModelStudio 的最新 Qwen Vision 模型（版本：qwen3-vl-plus-2025-09-23）',
 
@@ -1446,9 +1452,9 @@ export default {
   'Restarting MCP servers...': '正在重启 MCP 服务器...',
 
   // ============================================================================
-  // Startup Examples
+  // Startup Tips
   // ============================================================================
-  'Example: ': '示例：',
+  'Tips:': '提示：',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     '对话变长时用 /compress，总结历史并释放上下文。',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
@@ -1468,19 +1474,6 @@ export default {
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '试试 /insight，从聊天记录中生成个性化洞察。',
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 身份确认："帮我确认下在 DataWorks 的身份和权限？"',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 任务分析："帮我分析下 dataworks_analyze 这个工作空间最近一周新建的节点有哪些，并分析下具体在做什么？"',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 任务治理："在 dataworks_analyze 工作空间中，帮我找出创建时间长但一直没有发布的节点。"',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 问题定位："现在发现 dwd_is_it_software_released_df 和 ads_is_it_sfw_moni_key_released_recycled_df 的数据不一致，他们上游都是 ods_ism_it_software_key_released_df。帮我看一下他们的逻辑有什么不一样？"',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ 问题修复："员工信息表 my_project.ods_emp_info_d 中，工号 EMP001 的部门数据为空。请帮我排查原因并提供修复建议。"',
-  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
-    '当前为 Beta 版本，个人开发环境实例删除后，历史会话记录将无法恢复。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1724,6 +1717,8 @@ export default {
   'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
   'Run /context detail for per-item breakdown.':
     '运行 /context detail 查看详细分解。',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    '显示上下文窗口使用情况分解。输入 "/context detail" 查看详细分解。',
   'body loaded': '内容已加载',
   memory: '记忆',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
@@ -1824,11 +1819,20 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
-  'Verbose mode on — showing full tool output and thinking':
-    '已切换到详细模式 — 完整显示工具输出和思考过程',
-  'Compact mode on — showing tool names and final responses only':
-    '已切换到精简模式 — 仅显示工具名称和最终回答',
-  verbose: '详细',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    '详细模式下显示完整工具输出和思考过程（Ctrl+O 切换）。',
+  compact: '紧凑',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
+  'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
+
+  'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
+  'Exited plan mode. Previous approval mode restored.':
+    '已退出计划模式，已恢复之前的审批模式。',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    '启用计划模式。智能体将只分析和规划，而不执行工具。',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    '已处于计划模式。使用 "/plan exit" 退出计划模式。',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    '未处于计划模式。请先使用 "/plan" 进入计划模式。',
+
+  "Set up Qwen Code's status line UI": '配置 Qwen Code 的状态栏',
 };

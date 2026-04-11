@@ -67,12 +67,18 @@ export const DefaultAppLayout: React.FC = () => {
                   addItem={uiState.historyManager.addItem}
                 />
               </Box>
-            ) : uiState.btwItem ? (
-              <Box marginX={2} width={terminalWidth - 4}>
-                <BtwMessage btw={uiState.btwItem.btw} />
-              </Box>
             ) : (
-              <Composer />
+              <>
+                {uiState.btwItem && (
+                  <Box marginX={2} width={uiState.mainAreaWidth}>
+                    <BtwMessage
+                      btw={uiState.btwItem.btw}
+                      containerWidth={uiState.mainAreaWidth}
+                    />
+                  </Box>
+                )}
+                <Composer />
+              </>
             )}
             <ExitWarning />
           </Box>

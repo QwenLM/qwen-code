@@ -53,8 +53,6 @@ import {
   IDLE_SPECULATION,
   ApprovalMode,
   type PermissionMode,
-  ToolConfirmationOutcome,
-  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -73,6 +71,7 @@ import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
+import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -115,7 +114,6 @@ import {
 import { useCodingPlanUpdates } from './hooks/useCodingPlanUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
-import { VerboseModeProvider } from './contexts/VerboseModeContext.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -126,13 +124,10 @@ import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.j
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
-import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
-// [CUSTOM] Dual output confirmation bridge
-import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -292,7 +287,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
-
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
   const originalTitleRef = useRef(
@@ -731,7 +725,6 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
-    pendingToolCalls, // [CUSTOM] Exposed for dual-output confirmation bridge
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -788,132 +781,18 @@ export const AppContainer = (props: AppContainerProps) => {
     addMessage,
     clearQueue,
     getQueuedMessagesText,
-    drainQueue,
     popAllMessages,
+    drainQueue,
   } = useMessageQueue({
     isConfigInitialized,
     streamingState,
     submitQuery,
   });
 
-  // Connect remote input watcher to submitQuery for bidirectional sync.
-  // When an external process writes a command to the input-file,
-  // the watcher calls submitQuery as if the user typed it in the TUI.
-  const remoteInput = useRemoteInput();
-  useEffect(() => {
-    if (!remoteInput) return;
-    remoteInput.setSubmitFn((text: string) => submitQuery(text));
-  }, [remoteInput, submitQuery]);
-
-  // Notify remote input watcher when TUI becomes idle so it can
-  // retry queued commands that were deferred while TUI was busy.
-  useEffect(() => {
-    if (!remoteInput) return;
-    if (streamingState === StreamingState.Idle) {
-      remoteInput.notifyIdle();
-    }
-  }, [remoteInput, streamingState]);
-
-  // [CUSTOM] Dual output confirmation bridge — connects tool approval events
-  // between the TUI and external consumers via --json-file / --input-file.
-  const dualOutput = useDualOutput();
-  const confirmRequestMap = useRef(new Map<string, string>()); // requestId → callId
-  const confirmCallIdMap = useRef(new Map<string, string>()); // callId → requestId
-  const confirmEmitted = useRef(new Set<string>());
-
-  // Emit control_request when tools enter awaiting_approval
-  useEffect(() => {
-    if (!dualOutput || !dualOutput.isConnected) return;
-    for (const tc of pendingToolCalls) {
-      if (
-        tc.status === 'awaiting_approval' &&
-        !confirmEmitted.current.has(tc.request.callId)
-      ) {
-        const requestId = crypto.randomUUID();
-        confirmRequestMap.current.set(requestId, tc.request.callId);
-        confirmCallIdMap.current.set(tc.request.callId, requestId);
-        confirmEmitted.current.add(tc.request.callId);
-        dualOutput.emitControlRequest(
-          requestId,
-          tc.request.name,
-          tc.request.callId,
-          tc.request.args,
-          null,
-        );
-      }
-    }
-    // Detect tools that left awaiting_approval (TUI native resolution)
-    for (const [callId, requestId] of confirmCallIdMap.current) {
-      const tc = pendingToolCalls.find((t) => t.request.callId === callId);
-      if (
-        tc &&
-        tc.status !== 'awaiting_approval' &&
-        confirmEmitted.current.has(callId)
-      ) {
-        const allowed = tc.status !== 'cancelled' && tc.status !== 'error';
-        dualOutput.emitControlResponse(requestId, allowed);
-        confirmRequestMap.current.delete(requestId);
-        confirmCallIdMap.current.delete(callId);
-        confirmEmitted.current.delete(callId);
-      }
-    }
-  }, [dualOutput, pendingToolCalls]);
-
-  // Register confirmation handler for external responses via --input-file
-  useEffect(() => {
-    if (!remoteInput) return;
-    remoteInput.setConfirmationHandler(
-      (requestId: string, allowed: boolean) => {
-        const callId = confirmRequestMap.current.get(requestId);
-        if (!callId) return;
-        const tc = pendingToolCalls.find(
-          (t) =>
-            t.request.callId === callId && t.status === 'awaiting_approval',
-        );
-        if (!tc) return;
-        const waitingTc = tc as WaitingToolCall;
-        if (!waitingTc.confirmationDetails?.onConfirm) return;
-        void waitingTc.confirmationDetails.onConfirm(
-          allowed
-            ? ToolConfirmationOutcome.ProceedOnce
-            : ToolConfirmationOutcome.Cancel,
-        );
-        confirmRequestMap.current.delete(requestId);
-        confirmCallIdMap.current.delete(callId);
-        confirmEmitted.current.delete(callId);
-      },
-    );
-
-    return () => {
-      remoteInput.setConfirmationHandler(() => {});
-    };
-  }, [remoteInput, pendingToolCalls]);
-
-  // [CUSTOM] Emit session_start event to dual output channel
-  useEffect(() => {
-    if (!dualOutput) return;
-    dualOutput.emitSystemMessage('session_start', {
-      session_id: sessionStats.sessionId,
-      cwd: process.cwd(),
-    });
-  }, [dualOutput, sessionStats.sessionId]);
-
   // Bridge message queue to mid-turn drain via ref.
-  // drainQueue is a stable callback from useMessageQueue that atomically
-  // clears both the synchronous ref and React state.
+  // drainQueue reads the synchronous queueRef inside the hook, so it
+  // stays consistent with popAllMessages even before React re-renders.
   midTurnDrainRef.current = drainQueue;
-
-  // Bridge message queue to mid-turn drain via ref.
-  // Sync ref on every render so the drain callback always reads latest state.
-  const messageQueueRef = useRef(messageQueue);
-  messageQueueRef.current = messageQueue;
-  midTurnDrainRef.current = () => {
-    const queue = messageQueueRef.current;
-    if (queue.length === 0) return [];
-    messageQueueRef.current = [];
-    clearQueue();
-    return [...queue];
-  };
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
@@ -1083,6 +962,11 @@ export const AppContainer = (props: AppContainerProps) => {
     handleWelcomeBackClose,
   } = useWelcomeBack(config, handleFinalSubmit, buffer, settings.merged);
 
+  const pendingHistoryItems = useMemo(
+    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
+    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
+  );
+
   cancelHandlerRef.current = useCallback(() => {
     const pendingHistoryItems = [
       ...pendingSlashCommandHistoryItems,
@@ -1135,20 +1019,6 @@ export const AppContainer = (props: AppContainerProps) => {
     !isProcessing &&
     (streamingState === StreamingState.Idle ||
       streamingState === StreamingState.Responding);
-
-  // Auto-clear frozen snapshot when streaming ends so the live view
-  // is restored without requiring a second Ctrl+O press.
-  // Clear frozen snapshot when streaming ends OR when entering confirmation
-  // state. During WaitingForConfirmation, the user needs to see the latest
-  // pending items (including the confirmation message) rather than a stale snapshot.
-  useEffect(() => {
-    if (
-      streamingState === StreamingState.Idle ||
-      streamingState === StreamingState.WaitingForConfirmation
-    ) {
-      setFrozenSnapshot(null);
-    }
-  }, [streamingState]);
 
   const [controlsHeight, setControlsHeight] = useState(0);
 
@@ -1241,7 +1111,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Generate prompt suggestions when streaming completes
   const followupSuggestionsEnabled =
-    settings.merged.ui?.enableFollowupSuggestions !== false;
+    settings.merged.ui?.enableFollowupSuggestions === true;
 
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
@@ -1269,14 +1139,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Only trigger when transitioning from Responding to Idle (and enabled)
     // Skip when dialogs are active, in plan mode, elicitation pending, or last response was error
-    const isTransitionToIdle =
-      prevStreamingStateRef.current === StreamingState.Responding &&
-      streamingState === StreamingState.Idle;
     if (
       followupSuggestionsEnabled &&
       config.isInteractive() &&
       !config.getSdkMode() &&
-      isTransitionToIdle &&
+      prevStreamingStateRef.current === StreamingState.Responding &&
+      streamingState === StreamingState.Idle &&
       // Check both committed history and pending items for errors
       // (API errors go to pendingGeminiHistoryItems, not historyManager.history)
       historyManager.history[historyManager.history.length - 1]?.type !==
@@ -1296,12 +1164,9 @@ export const AppContainer = (props: AppContainerProps) => {
       const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
-      const enableCacheSharing =
-        settings.merged.ui?.enableCacheSharing === true;
-      const fastModel = settings.merged.fastModel || undefined;
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
-        enableCacheSharing,
-        model: fastModel,
+        enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
+        model: settings.merged.fastModel || undefined,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
@@ -1310,7 +1175,7 @@ export const AppContainer = (props: AppContainerProps) => {
             // Start speculation if enabled (runs in background)
             if (settings.merged.ui?.enableSpeculation) {
               startSpeculation(config, result.suggestion, ac.signal, {
-                model: fastModel,
+                model: settings.merged.fastModel || undefined,
               })
                 .then((state) => {
                   speculationRef.current = state;
@@ -1398,10 +1263,9 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
-  const [verboseMode, setVerboseMode] = useState<boolean>(
-    settings.merged.ui?.verboseMode ?? true,
+  const [compactMode, setCompactMode] = useState<boolean>(
+    settings.merged.ui?.compactMode ?? false,
   );
-
   const [frozenSnapshot, setFrozenSnapshot] = useState<
     HistoryItemWithoutId[] | null
   >(null);
@@ -1419,6 +1283,18 @@ export const AppContainer = (props: AppContainerProps) => {
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
+
+  useEffect(() => {
+    // Clear frozen snapshot when streaming ends OR when entering confirmation
+    // state. During WaitingForConfirmation, the user needs to see the latest
+    // pending items (including the confirmation message) rather than a stale snapshot.
+    if (
+      streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.WaitingForConfirmation
+    ) {
+      setFrozenSnapshot(null);
+    }
+  }, [streamingState]);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
@@ -1640,13 +1516,19 @@ export const AppContainer = (props: AppContainerProps) => {
         return; // Dialog closed, end processing
       }
 
-      // 3. Cancel ongoing requests
+      // 3. Cancel in-flight btw side-question
+      if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+        cancelBtw();
+        return; // Btw cancelled, end processing
+      }
+
+      // 4. Cancel ongoing requests
       if (streamingState === StreamingState.Responding) {
         cancelOngoingRequest?.();
         return; // Request cancelled, end processing
       }
 
-      // 4. Clear input buffer (if has content)
+      // 5. Clear input buffer (if has content)
       if (buffer.text.length > 0) {
         buffer.setText('');
         return; // Input cleared, end processing
@@ -1662,15 +1544,12 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthDialogOpen,
       handleSlashCommand,
       closeAnyOpenDialog,
+      btwItem,
+      cancelBtw,
       streamingState,
       cancelOngoingRequest,
       buffer,
     ],
-  );
-
-  const pendingHistoryItems = useMemo(
-    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
-    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
 
   const handleGlobalKeypress = useCallback(
@@ -1698,6 +1577,11 @@ export const AppContainer = (props: AppContainerProps) => {
         handleExit(ctrlCPressedOnce, setCtrlCPressedOnce, ctrlCTimerRef);
         return;
       } else if (keyMatchers[Command.EXIT](key)) {
+        // Cancel in-flight btw even when buffer has text (Ctrl+D)
+        if (btwItem && btwItem.btw.isPending && !dialogsVisibleRef.current) {
+          cancelBtw();
+          return;
+        }
         if (buffer.text.length > 0) {
           return;
         }
@@ -1766,6 +1650,9 @@ export const AppContainer = (props: AppContainerProps) => {
         }
       }
 
+      // Note: Ctrl+C/D btw cancellation is handled inside handleExit
+      // (step 3), not here, because Command.QUIT/EXIT match first.
+
       let enteringConstrainHeightMode = false;
       if (!constrainHeight) {
         enteringConstrainHeightMode = true;
@@ -1779,18 +1666,6 @@ export const AppContainer = (props: AppContainerProps) => {
         const mcpServers = config.getMcpServers();
         if (Object.keys(mcpServers || {}).length > 0) {
           handleSlashCommand(newValue ? '/mcp desc' : '/mcp nodesc');
-        }
-      } else if (keyMatchers[Command.TOGGLE_VERBOSE_MODE](key)) {
-        const newValue = !verboseMode;
-        setVerboseMode(newValue);
-        settings.setValue(SettingScope.User, 'ui.verboseMode', newValue);
-        refreshStatic();
-        // Only freeze during the actual responding phase. WaitingForConfirmation
-        // must keep focus so the user can approve/cancel tool confirmation UI.
-        if (streamingState === StreamingState.Responding) {
-          setFrozenSnapshot([...pendingHistoryItems]);
-        } else {
-          setFrozenSnapshot(null);
         }
       } else if (
         keyMatchers[Command.TOGGLE_IDE_CONTEXT_DETAIL](key) &&
@@ -1807,6 +1682,18 @@ export const AppContainer = (props: AppContainerProps) => {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);
         }
+      } else if (keyMatchers[Command.TOGGLE_COMPACT_MODE](key)) {
+        const newValue = !compactMode;
+        setCompactMode(newValue);
+        void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
+        refreshStatic();
+        // Only freeze during the actual responding phase. WaitingForConfirmation
+        // must keep focus so the user can approve/cancel tool confirmation UI.
+        if (streamingState === StreamingState.Responding) {
+          setFrozenSnapshot([...pendingHistoryItems]);
+        } else {
+          setFrozenSnapshot(null);
+        }
       }
     },
     [
@@ -1814,8 +1701,6 @@ export const AppContainer = (props: AppContainerProps) => {
       setConstrainHeight,
       showToolDescriptions,
       setShowToolDescriptions,
-      verboseMode,
-      setVerboseMode,
       config,
       ideContextState,
       handleExit,
@@ -1837,11 +1722,16 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      isAuthenticating,
+      // `settings` is a stable LoadedSettings instance (not recreated on render).
+      // ESLint requires it here because the callback calls settings.setValue().
+      // debugKeystrokeLogging is read at call time, so no stale closure risk.
       settings,
-      refreshStatic,
-      pendingHistoryItems,
+      isAuthenticating,
+      compactMode,
+      setCompactMode,
       setFrozenSnapshot,
+      pendingHistoryItems,
+      refreshStatic,
     ],
   );
 
@@ -1930,6 +1820,9 @@ export const AppContainer = (props: AppContainerProps) => {
     sessionStats,
   });
 
+  const showQueuedMessageDisplay =
+    settings.merged.features?.queuedMessageDisplay !== false;
+
   const uiState: UIState = useMemo(
     () => ({
       history: historyManager.history,
@@ -1992,6 +1885,7 @@ export const AppContainer = (props: AppContainerProps) => {
       currentLoadingPhrase,
       historyRemountKey,
       messageQueue,
+      showQueuedMessageDisplay,
       showAutoAcceptIndicator,
       currentModel,
       contextFileNames,
@@ -2098,6 +1992,7 @@ export const AppContainer = (props: AppContainerProps) => {
       currentLoadingPhrase,
       historyRemountKey,
       messageQueue,
+      showQueuedMessageDisplay,
       showAutoAcceptIndicator,
       contextFileNames,
       availableTerminalHeight,
@@ -2165,6 +2060,7 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openModelDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2224,6 +2120,7 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openModelDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2267,9 +2164,9 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
-  const verboseModeValue = useMemo(
-    () => ({ verboseMode, frozenSnapshot }),
-    [verboseMode, frozenSnapshot],
+  const compactModeValue = useMemo(
+    () => ({ compactMode, frozenSnapshot }),
+    [compactMode, frozenSnapshot],
   );
 
   return (
@@ -2282,11 +2179,11 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <VerboseModeProvider value={verboseModeValue}>
+            <CompactModeProvider value={compactModeValue}>
               <ShellFocusContext.Provider value={isFocused}>
                 <App />
               </ShellFocusContext.Provider>
-            </VerboseModeProvider>
+            </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>

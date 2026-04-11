@@ -12,15 +12,28 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { MessageType } from '../types.js';
-import { SettingScope } from '../../config/settings.js';
+import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 
 export const modelCommand: SlashCommand = {
   name: 'model',
+  completionPriority: 100,
   get description() {
-    return t('Switch the model for this session');
+    return t('Switch the model for this session (--fast for suggestion model)');
   },
   kind: CommandKind.BUILT_IN,
+  completion: async (_context, partialArg) => {
+    if (partialArg && '--fast'.startsWith(partialArg)) {
+      return [
+        {
+          value: '--fast',
+          description: t(
+            'Set a lighter model for prompt suggestions and speculative execution',
+          ),
+        },
+      ];
+    }
+    return null;
+  },
   action: async (
     context: CommandContext,
   ): Promise<OpenDialogActionReturn | MessageActionReturn> => {
@@ -47,17 +60,23 @@ export const modelCommand: SlashCommand = {
         };
       }
       // Set fast model
-      if (settings) {
-        settings.setValue(SettingScope.User, 'fastModel', modelName);
-        context.ui.addItem(
-          {
-            type: MessageType.SUCCESS,
-            text: t('Fast Model') + ': ' + modelName,
-          },
-          Date.now(),
-        );
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
+        };
       }
-      return { type: 'message', messageType: 'info', content: '' };
+      settings.setValue(
+        getPersistScopeForModelSelection(settings),
+        'fastModel',
+        modelName,
+      );
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t('Fast Model') + ': ' + modelName,
+      };
     }
 
     const contentGeneratorConfig = config.getContentGeneratorConfig();

@@ -18,13 +18,13 @@ export interface UseMessageQueueReturn {
   addMessage: (message: string) => void;
   clearQueue: () => void;
   getQueuedMessagesText: () => string;
+  popAllMessages: () => string | null;
   /**
    * Atomically drain all queued messages. Returns the drained messages
    * and clears both the synchronous ref and React state. Safe to call
    * from non-React contexts (e.g., tool completion callbacks).
    */
   drainQueue: () => string[];
-  popAllMessages: () => string | null;
 }
 
 /**
@@ -39,8 +39,7 @@ export function useMessageQueue({
 }: UseMessageQueueOptions): UseMessageQueueReturn {
   const [messageQueue, setMessageQueue] = useState<string[]>([]);
   // Synchronous ref mirrors React state so non-React callbacks (e.g.,
-  // mid-turn drain in handleCompletedTools) and atomic popAllMessages
-  // always see the latest queue without stale closure reads.
+  // mid-turn drain in handleCompletedTools) always see the latest queue.
   const queueRef = useRef<string[]>([]);
 
   // Add a message to the queue
@@ -64,6 +63,17 @@ export function useMessageQueue({
     return messageQueue.join('\n\n');
   }, [messageQueue]);
 
+  // Pop all messages from the queue for editing (atomic via ref to prevent
+  // duplicate pops from key auto-repeat before React re-renders)
+  const popAllMessages = useCallback((): string | null => {
+    const current = queueRef.current;
+    if (current.length === 0) return null;
+    const allText = current.join('\n\n');
+    queueRef.current = [];
+    setMessageQueue([]);
+    return allText;
+  }, []);
+
   // Atomically drain all queued messages (synchronous, safe from callbacks).
   const drainQueue = useCallback((): string[] => {
     const drained = queueRef.current;
@@ -71,17 +81,6 @@ export function useMessageQueue({
     queueRef.current = [];
     setMessageQueue([]);
     return drained;
-  }, []);
-
-  // Pop all messages from the queue for editing (atomic via ref to prevent
-  // duplicate pops from key auto-repeat before React re-renders)
-  const popAllMessages = useCallback((): string | null => {
-    const current = queueRef.current;
-    if (current.length === 0) return null;
-    const allText = current.join('\n');
-    queueRef.current = [];
-    setMessageQueue([]);
-    return allText;
   }, []);
 
   // Process queued messages when streaming becomes idle
@@ -110,7 +109,7 @@ export function useMessageQueue({
     addMessage,
     clearQueue,
     getQueuedMessagesText,
-    drainQueue,
     popAllMessages,
+    drainQueue,
   };
 }

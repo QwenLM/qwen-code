@@ -215,6 +215,31 @@ describe('useVim hook', () => {
 
       expect(testBuffer.vimMoveWordBackward).toHaveBeenCalledWith(1);
     });
+
+    it('should pass through ? in NORMAL mode when the buffer is empty', () => {
+      const emptyBuffer = createMockBuffer('', [0, 0]);
+      emptyBuffer.lines = [''];
+      emptyBuffer.text = '';
+      const { result } = renderVimHook(emptyBuffer);
+
+      let handled = true;
+      act(() => {
+        handled = result.current.handleInput({ sequence: '?', name: '' });
+      });
+
+      expect(handled).toBe(false);
+    });
+
+    it('should still handle ? in NORMAL mode when the buffer is not empty', () => {
+      const { result } = renderVimHook();
+
+      let handled = false;
+      act(() => {
+        handled = result.current.handleInput({ sequence: '?', name: '' });
+      });
+
+      expect(handled).toBe(true);
+    });
   });
 
   describe('Navigation commands', () => {

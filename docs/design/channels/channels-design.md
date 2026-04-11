@@ -2,7 +2,7 @@
 
 > External messaging integrations for Qwen Code — interact with an agent from Telegram, WeChat, and more.
 >
-> Channel-implementation status: `channels-implementation.md`. Testing: `channels-testing-guide.md`.
+> User documentation: [Channels Overview](../../users/features/channels/overview.md).
 
 ## Overview
 
@@ -173,18 +173,32 @@ packages/channels/
 └── dingtalk/                # @qwen-code/channel-dingtalk
 ```
 
-## What's Next
+## Future Work
 
-- **DingTalk: quoted bot responses** — persist outbound text keyed by `processQueryKey` (see `channels-dingtalk.md`)
-- **Streaming responses** — edit messages in-place as chunks arrive
-- **Structured logging** — pino; JSON by default, human-readable on TTY
-- **E2E tests** — mock servers for platform APIs + mock ACP agent
-- **Daemon mode** — background operation, systemd/launchd unit generation
+### Safety & Group Chat
 
-## Known Limitations
+- **Per-group tool restrictions** — `tools`/`toolsBySender` deny/allow lists per group
+- **Group context history** — ring buffer of recent skipped messages, prepended on @mention
+- **Regex mention patterns** — fallback `mentionPatterns` for unreliable @mention metadata
+- **Per-group instructions** — `instructions` field on `GroupConfig` for per-group personas
+- **`/activation` command** — runtime toggle for `requireMention`, persisted to disk
 
-- **Shared workspace conflicts** — multiple users editing the same `cwd` may cause file conflicts
-- **Crash-recovery sessions only** — sessions persist for bridge restarts but cleared on clean shutdown
-- **Sequential prompts per session** — messages queue within a session; different sessions run independently
-- **Single instance** — PID file prevents duplicates; `qwen channel stop` first
-- **Shared bridge model** — all channels share one ACP bridge process; if channels configure different models, only the first is used (warning shown)
+### Operational Tooling
+
+- **`qwen channel doctor`** — config validation, env vars, bot tokens, network checks
+- **`qwen channel status --probe`** — real connectivity checks per channel
+
+### Platform Expansion
+
+- **Discord** — Bot API + Gateway, servers/channels/DMs/threads
+- **Slack** — Bolt SDK, Socket Mode, workspaces/channels/DMs/threads
+
+### Multi-Agent
+
+- **Multi-agent routing** — multiple agents with bindings per channel/group/user
+- **Broadcast groups** — multiple agents respond to the same message
+
+### Plugin Ecosystem
+
+- **Community plugin template** — `create-qwen-channel` scaffolding tool
+- **Plugin registry/discovery** — `qwen extensions search`, version compatibility

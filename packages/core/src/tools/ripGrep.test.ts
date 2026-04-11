@@ -590,11 +590,12 @@ describe('RipGrepTool', () => {
   });
 
   describe('error handling and edge cases', () => {
-    it('should handle workspace boundary violations', () => {
+    it('should handle workspace boundary violations', async () => {
       const params: RipGrepToolParams = { pattern: 'test', path: '../outside' };
-      expect(() => grepTool.build(params)).toThrow(
-        /Path is not within workspace/,
-      );
+      // External paths are allowed; permission is deferred to getDefaultPermission()
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
 
     it('should handle empty directories gracefully', async () => {
@@ -862,6 +863,36 @@ describe('RipGrepTool', () => {
       const params: RipGrepToolParams = { pattern: 'testPattern', path: '.' };
       const invocation = grepTool.build(params);
       expect(invocation.getDescription()).toBe("'testPattern' in path '.'");
+    });
+  });
+
+  describe('getDefaultPermission', () => {
+    it('should return allow when no path is specified', async () => {
+      const params: RipGrepToolParams = { pattern: 'hello' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return allow for paths within workspace', async () => {
+      const params: RipGrepToolParams = { pattern: 'hello', path: '.' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return allow for subdirectories within workspace', async () => {
+      const params: RipGrepToolParams = { pattern: 'hello', path: 'sub' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for paths outside workspace', async () => {
+      const params: RipGrepToolParams = { pattern: 'hello', path: '/tmp' };
+      const invocation = grepTool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
   });
 });

@@ -397,19 +397,58 @@ export class PermissionManager {
   // ---------------------------------------------------------------------------
 
   /**
+   * Core tools that are subject to the coreTools allowlist check.
+   * Tools not in this set (MCP, Skill, Agent, etc.) bypass the check.
+   */
+  private static readonly CORE_TOOLS = new Set([
+    'read_file',
+    'write_file',
+    'edit',
+    'glob',
+    'grep_search',
+    'run_shell_command',
+    'list_directory',
+    'web_fetch',
+    'web_search',
+    'todo_write',
+    'save_memory',
+    'lsp',
+    'cron_create',
+    'cron_list',
+    'cron_delete',
+  ]);
+
+  /**
+   * Check if a tool is a core tool subject to the coreTools allowlist check.
+   */
+  private isCoreTool(toolName: string): boolean {
+    return PermissionManager.CORE_TOOLS.has(toolName);
+  }
+
+  /**
    * Determine whether a tool should be present in the tool registry.
    *
    * A tool is disabled (returns false) when a `deny` rule without a specifier
    * (i.e. a whole-tool deny) matches.  Specifier-based deny rules such as
    * `"Bash(rm -rf *)"` do NOT remove the tool from the registry – they only
    * deny specific invocations at runtime.
+   *
+   * Non-core tools (MCP, Skill, Agent, etc.) skip the coreTools allowlist
+   * check because they are dynamically discovered or essential for system
+   * operation.
    */
   async isToolEnabled(toolName: string): Promise<boolean> {
     const canonicalName = resolveToolName(toolName);
 
-    // If a coreTools allowlist is active, only explicitly listed tools are
-    // registered. This mirrors the legacy `tools.core` whitelist semantic:
-    // any tool NOT in the allowlist is excluded from the registry entirely.
+    // Non-core tools bypass coreTools allowlist check
+    if (!this.isCoreTool(canonicalName)) {
+      const decision = await this.evaluate({ toolName: canonicalName });
+      return decision !== 'deny';
+    }
+
+    // Core tools: if a coreTools allowlist is active, only explicitly listed
+    // tools are registered. This mirrors the legacy `tools.core` whitelist
+    // semantic: any tool NOT in the allowlist is excluded from the registry.
     if (this.coreToolsAllowList !== null && this.coreToolsAllowList.size > 0) {
       if (!this.coreToolsAllowList.has(canonicalName)) {
         return false;
