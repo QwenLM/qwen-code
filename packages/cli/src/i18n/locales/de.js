@@ -1442,6 +1442,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Drücken Sie erneut Strg+C zum Beenden.',
   'Press Ctrl+D again to exit.': 'Drücken Sie erneut Strg+D zum Beenden.',
   'Press Esc again to clear.': 'Drücken Sie erneut Esc zum Löschen.',
+  'Press ↑ to edit queued messages':
+    'Drücken Sie ↑, um Nachrichten in der Warteschlange zu bearbeiten',
 
   // ============================================================================
   // MCP Status

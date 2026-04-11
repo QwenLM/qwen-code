@@ -1367,6 +1367,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Нажмите Ctrl+C снова для выхода.',
   'Press Ctrl+D again to exit.': 'Нажмите Ctrl+D снова для выхода.',
   'Press Esc again to clear.': 'Нажмите Esc снова для очистки.',
+  'Press ↑ to edit queued messages':
+    'Нажмите ↑ для редактирования сообщений в очереди',
 
   // ============================================================================
   // Статус MCP
