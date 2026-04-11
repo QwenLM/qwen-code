@@ -7,7 +7,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import { QWEN_DIR } from '../config/storage.js';
-import crypto from 'node:crypto';
+import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
 
 /**
  * Session index data structure
@@ -34,40 +34,6 @@ function getIndexPath(projectDir: string): string {
 async function ensureQwenDir(projectDir: string): Promise<void> {
   const qwenDir = path.join(projectDir, QWEN_DIR);
   await fs.mkdir(qwenDir, { recursive: true });
-}
-
-/**
- * Atomically writes to a file (using temp file + rename)
- * @param filePath Target file path
- * @param content File content
- * @prerequisite The parent directory of filePath must exist
- */
-async function atomicWrite(filePath: string, content: string): Promise<void> {
-  const dir = path.dirname(filePath);
-  const tempFile = path.join(dir, `.tmp-${crypto.randomUUID()}`);
-  try {
-    await fs.writeFile(tempFile, content, 'utf-8');
-    await fs.rename(tempFile, filePath);
-  } catch (error) {
-    // Handle cross-device rename (EXDEV) - fallback to copy+delete
-    if (
-      typeof error === 'object' &&
-      error !== null &&
-      'code' in error &&
-      error.code === 'EXDEV'
-    ) {
-      await fs.writeFile(filePath, content, 'utf-8');
-      await fs.unlink(tempFile).catch(() => {});
-      return;
-    }
-    // Clean up temp file and rethrow
-    try {
-      await fs.unlink(tempFile);
-    } catch {
-      // Ignore cleanup errors
-    }
-    throw error;
-  }
 }
 
 /**
@@ -134,7 +100,7 @@ export async function saveSessionToIndex(
   const index = await readChatIndex(projectDir);
   index[name] = sessionId;
 
-  await atomicWrite(getIndexPath(projectDir), JSON.stringify(index, null, 2));
+  await atomicWriteJSON(getIndexPath(projectDir), index);
 }
 
 /**
@@ -154,7 +120,7 @@ export async function deleteSessionFromIndex(
   }
 
   delete index[name];
-  await atomicWrite(getIndexPath(projectDir), JSON.stringify(index, null, 2));
+  await atomicWriteJSON(getIndexPath(projectDir), index);
   return true;
 }
 

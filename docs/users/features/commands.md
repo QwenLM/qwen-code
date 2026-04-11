@@ -42,7 +42,7 @@ The `/chat` command provides session management through named aliases, stored in
 
 - Only letters, numbers, hyphens (`-`), underscores (`_`), and dots (`.`) are allowed
 - Maximum 128 characters
-- Reserved names `.` and `..` are blocked
+- Reserved names `.`, `..`, `__proto__`, `constructor`, and `prototype` are blocked
 
 **Example Workflow:**
 

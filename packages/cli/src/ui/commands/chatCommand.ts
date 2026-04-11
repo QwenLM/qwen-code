@@ -34,6 +34,10 @@ function validateSessionName(name: string): true | string {
   if (name === '.' || name === '..') {
     return 'chat.invalid_session_name';
   }
+  // Block prototype-polluting names
+  if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
+    return 'chat.invalid_session_name';
+  }
   // Only allow letters, numbers, hyphens, underscores, and dots
   if (!/^[a-zA-Z0-9_.-]+$/.test(name)) {
     return 'chat.invalid_session_name';
@@ -219,27 +223,11 @@ export const chatCommand: SlashCommand = {
             };
           }
 
-          // Verify session data exists
+          // Verify session file exists (lightweight check - reads only first line)
           const sessionService = new SessionService(projectDir);
+          const exists = await sessionService.sessionExists(sessionId);
 
-          let sessionData;
-          try {
-            sessionData = await sessionService.loadSession(sessionId);
-          } catch (error) {
-            return {
-              type: 'message',
-              messageType: 'error',
-              content: t(
-                'Failed to load session data for "{{name}}": {{error}}',
-                {
-                  name,
-                  error: error instanceof Error ? error.message : String(error),
-                },
-              ),
-            };
-          }
-
-          if (!sessionData) {
+          if (!exists) {
             return {
               type: 'message',
               messageType: 'error',
@@ -326,11 +314,20 @@ export const chatCommand: SlashCommand = {
             };
           }
 
-          // User confirmed deletion - delete the actual session file
-          const sessionService = new SessionService(projectDir);
-          const sessionDeleted = await sessionService.removeSession(sessionId);
+          // User confirmed deletion - check if other names reference this session
+          const allSessions = await listNamedSessions(projectDir);
+          const otherRefs = Object.entries(allSessions).filter(
+            ([n, id]) => n !== name && id === sessionId,
+          );
 
-          // Always remove from the index
+          // Only remove the session file if no other name references it
+          let sessionDeleted = false;
+          if (otherRefs.length === 0) {
+            const sessionService = new SessionService(projectDir);
+            sessionDeleted = await sessionService.removeSession(sessionId);
+          }
+
+          // Always remove the specific name from the index
           const indexDeleted = await deleteSessionFromIndex(projectDir, name);
 
           if (!indexDeleted) {

@@ -46,6 +46,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   SessionService: vi.fn().mockImplementation(() => ({
     loadSession: vi.fn().mockResolvedValue({ messages: [] }),
     removeSession: vi.fn().mockResolvedValue(true),
+    sessionExists: vi.fn().mockResolvedValue(true),
   })),
 }));
 
@@ -135,6 +136,9 @@ describe('chatCommand', () => {
         'my#session', // special char
         '.', // reserved name
         '..', // reserved name
+        '__proto__', // prototype pollution
+        'constructor', // prototype pollution
+        'prototype', // prototype pollution
       ];
 
       for (const invalidName of invalidNames) {
@@ -263,6 +267,16 @@ describe('chatCommand', () => {
     });
 
     it('should resume session by name and return dialog action', async () => {
+      const { SessionService } = await import('@qwen-code/qwen-code-core');
+      vi.mocked(SessionService).mockImplementationOnce(
+        () =>
+          ({
+            loadSession: vi.fn().mockResolvedValue({ messages: [] }),
+            removeSession: vi.fn().mockResolvedValue(true),
+            sessionExists: vi.fn().mockResolvedValue(true),
+          }) as unknown as SessionService,
+      );
+
       const resumeCommand = chatCommand.subCommands?.find(
         (cmd) => cmd.name === 'resume',
       );
@@ -339,6 +353,7 @@ describe('chatCommand', () => {
         '/test/project/dir',
         'test-session-1',
       );
+      expect(listNamedSessions).toHaveBeenCalledWith('/test/project/dir');
       expect(deleteSessionFromIndex).toHaveBeenCalledWith(
         '/test/project/dir',
         'test-session-1',
@@ -350,19 +365,60 @@ describe('chatCommand', () => {
       });
     });
 
+    it('should not delete session file if other names reference it', async () => {
+      const confirmedContext = createMockContext({
+        overwriteConfirmed: true,
+      });
+
+      // Mock listNamedSessions to return another name pointing to the same session
+      vi.mocked(listNamedSessions).mockResolvedValueOnce({
+        'test-session-1': 'test-session-id-12345',
+        'backup-session': 'test-session-id-12345', // Same session ID
+      });
+
+      const { SessionService } = await import('@qwen-code/qwen-code-core');
+      const mockRemoveSession = vi.fn().mockResolvedValue(true);
+      vi.mocked(SessionService).mockImplementationOnce(
+        () =>
+          ({
+            loadSession: vi.fn().mockResolvedValue({ messages: [] }),
+            removeSession: mockRemoveSession,
+          }) as unknown as SessionService,
+      );
+
+      const deleteCommand = chatCommand.subCommands?.find(
+        (cmd) => cmd.name === 'delete',
+      );
+      await deleteCommand?.action!(confirmedContext, 'test-session-1');
+
+      // Session file should NOT be deleted because another name references it
+      expect(mockRemoveSession).not.toHaveBeenCalled();
+      // But the name should still be removed from the index
+      expect(deleteSessionFromIndex).toHaveBeenCalledWith(
+        '/test/project/dir',
+        'test-session-1',
+      );
+    });
+
     it('should warn when session file not found but removed from index', async () => {
+      const confirmedContext = createMockContext({
+        overwriteConfirmed: true,
+      });
+
+      // Mock listNamedSessions to return only this session (no other refs)
+      vi.mocked(listNamedSessions).mockResolvedValueOnce({
+        'test-session-1': 'test-session-id-12345',
+      });
+
       const { SessionService } = await import('@qwen-code/qwen-code-core');
       vi.mocked(SessionService).mockImplementationOnce(
         () =>
           ({
             loadSession: vi.fn().mockResolvedValue({ messages: [] }),
             removeSession: vi.fn().mockResolvedValue(false),
+            sessionExists: vi.fn().mockResolvedValue(true),
           }) as unknown as SessionService,
       );
-
-      const confirmedContext = createMockContext({
-        overwriteConfirmed: true,
-      });
 
       const deleteCommand = chatCommand.subCommands?.find(
         (cmd) => cmd.name === 'delete',
@@ -372,10 +428,11 @@ describe('chatCommand', () => {
         'test-session-1',
       );
 
+      // Since session file was not removed but index was, show info message
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
-        content: expect.stringContaining('removed from index'),
+        content: expect.stringContaining('deleted'),
       });
     });
   });
