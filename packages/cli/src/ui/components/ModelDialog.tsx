@@ -266,7 +266,7 @@ export function ModelDialog({
 
   useKeypress(
     (key) => {
-      if (key.name === 'escape') {
+      if (key.name === 'escape' || (key.name === 'left' && isFastModelMode)) {
         onClose();
       }
     },

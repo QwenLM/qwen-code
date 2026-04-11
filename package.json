@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.14.1",
+  "version": "0.14.3",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -18,7 +18,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.1"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.3"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
@@ -96,6 +96,7 @@
     "@xterm/xterm": "^6.0.0",
     "cross-env": "^7.0.3",
     "esbuild": "^0.25.0",
+    "esbuild-plugin-wasm": "^1.1.0",
     "eslint": "^9.24.0",
     "eslint-config-prettier": "^10.1.2",
     "eslint-plugin-import": "^2.31.0",
@@ -136,7 +137,7 @@
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": [
       "prettier --write",
-      "eslint --fix --max-warnings 0"
+      "eslint --fix --max-warnings 0 --no-warn-ignored"
     ],
     "*.{json,md}": [
       "prettier --write"

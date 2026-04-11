@@ -168,15 +168,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     }
   }, []);
 
-  const [dirs, setDirs] = useState<readonly string[]>(
-    config.getWorkspaceContext().getDirectories(),
-  );
-  const dirsChanged = config.getWorkspaceContext().getDirectories();
-  useEffect(() => {
-    if (dirs.length !== dirsChanged.length) {
-      setDirs(dirsChanged);
-    }
-  }, [dirs.length, dirsChanged]);
   const [reverseSearchActive, setReverseSearchActive] = useState(false);
   const [commandSearchActive, setCommandSearchActive] = useState(false);
   const [textBeforeReverseSearch, setTextBeforeReverseSearch] = useState('');
@@ -190,7 +181,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const completion = useCommandCompletion(
     buffer,
-    dirs,
     config.getTargetDir(),
     slashCommands,
     commandContext,
@@ -729,6 +719,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // because ACCEPT_SUGGESTION also matches Enter which must fall through to SUBMIT.
       if (
         key.name === 'tab' &&
+        !key.paste &&
+        !key.shift &&
         buffer.text.length === 0 &&
         !completion.showSuggestions &&
         !reverseSearchActive &&
@@ -767,7 +759,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
         }
 
-        if (keyMatchers[Command.ACCEPT_SUGGESTION](key)) {
+        if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
           if (completion.suggestions.length > 0) {
             const targetIndex =
               completion.activeSuggestionIndex === -1
@@ -892,7 +884,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           followup.state.suggestion
         ) {
           const text = followup.state.suggestion;
-          followup.accept('enter');
+          // Skip onAccept (buffer.insert) — we pass the text directly to
+          // handleSubmitAndClear which clears the buffer synchronously.
+          // Without skipOnAccept the microtask in accept() would re-insert
+          // the suggestion into the buffer after it was already cleared.
+          followup.accept('enter', { skipOnAccept: true });
           handleSubmitAndClear(text);
           return true;
         }

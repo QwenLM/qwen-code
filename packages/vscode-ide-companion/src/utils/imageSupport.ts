@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isSupportedImageMimeType } from '@qwen-code/qwen-code-core/src/utils/request-tokenizer/supportedImageFormats.js';
-
 // ---------- Types ----------
 
 export interface ImageAttachment {
@@ -73,6 +71,11 @@ const PASTED_IMAGE_MIME_TO_EXTENSION: Record<string, string> = {
   'image/webp': '.webp',
 };
 
+// Keep this list aligned with packages/core/src/utils/request-tokenizer/supportedImageFormats.ts.
+export const SUPPORTED_PASTED_IMAGE_MIME_TYPES = new Set(
+  Object.keys(PASTED_IMAGE_MIME_TO_EXTENSION),
+);
+
 const DISPLAYABLE_IMAGE_EXTENSION_TO_MIME: Record<string, string> = {
   '.bmp': 'image/bmp',
   '.gif': 'image/gif',
@@ -86,7 +89,7 @@ const DISPLAYABLE_IMAGE_EXTENSION_TO_MIME: Record<string, string> = {
 };
 
 export function isSupportedPastedImageMimeType(mimeType: string): boolean {
-  return isSupportedImageMimeType(mimeType);
+  return SUPPORTED_PASTED_IMAGE_MIME_TYPES.has(mimeType);
 }
 
 export function getImageExtensionForMimeType(mimeType: string): string {

@@ -188,9 +188,8 @@ export class TelegramChannel extends ChannelBase {
           parse_mode: 'HTML',
         });
       } catch {
-        // Fallback to plain text if HTML parsing fails
-        await this.bot.api.sendMessage(chatId, text);
-        return;
+        // Fallback to plain text for the failed chunk only
+        await this.bot.api.sendMessage(chatId, chunk.replace(/<[^>]*>/g, ''));
       }
     }
   }

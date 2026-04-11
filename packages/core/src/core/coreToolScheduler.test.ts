@@ -42,10 +42,23 @@ import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import { IdeClient } from '../ide/ide-client.js';
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
 }));
+
+vi.mock('../ide/ide-client.js', () => ({
+  IdeClient: {
+    getInstance: vi.fn(),
+  },
+}));
+
+const mockIdeClient = {
+  openDiff: vi.fn(),
+  isDiffingEnabled: vi.fn(),
+  closeDiff: vi.fn(),
+};
 
 class TestApprovalTool extends BaseDeclarativeTool<{ id: string }, ToolResult> {
   static readonly Name = 'testApprovalTool';
@@ -3217,5 +3230,290 @@ describe('Fire hook functions integration', () => {
       expect(agentAStart).toBeLessThan(firstAgentEnd);
       expect(agentBStart).toBeLessThan(firstAgentEnd);
     });
+  });
+});
+
+describe('CoreToolScheduler IDE interaction', () => {
+  function createIdeMockConfig(
+    overrides: {
+      approvalMode?: ApprovalMode;
+      ideMode?: boolean;
+    } = {},
+  ) {
+    const mockModifiableTool = new MockModifiableTool();
+    mockModifiableTool.executeFn = vi.fn();
+
+    const mockToolRegistry = {
+      getTool: () => mockModifiableTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => mockModifiableTool,
+      getToolByDisplayName: () => mockModifiableTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => overrides.approvalMode ?? ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => overrides.ideMode ?? true,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+
+    return { mockConfig, mockModifiableTool, mockToolRegistry };
+  }
+
+  beforeEach(() => {
+    vi.mocked(IdeClient.getInstance).mockResolvedValue(
+      mockIdeClient as unknown as IdeClient,
+    );
+    mockIdeClient.isDiffingEnabled.mockReturnValue(true);
+    mockIdeClient.openDiff.mockReset();
+  });
+
+  it('should safely update args via _applyInlineModify when IDE returns modified content (#2709)', async () => {
+    const { mockConfig, mockModifiableTool } = createIdeMockConfig({
+      ideMode: true,
+    });
+
+    // IDE returns accepted with modified content
+    mockIdeClient.openDiff.mockResolvedValue({
+      status: 'accepted',
+      content: 'IDE-modified content',
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const originalArgs = { param: 'original-value' };
+    const request = {
+      callId: 'ide-1',
+      name: 'mockModifiableTool',
+      args: originalArgs,
+      isClientInitiated: false,
+      prompt_id: 'prompt-ide-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    // Wait for the tool to complete (IDE auto-confirms)
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+
+    // The tool should have been executed with the IDE-modified content
+    // via _applyInlineModify -> createUpdatedParams -> setArgsInternal
+    expect(mockModifiableTool.executeFn).toHaveBeenCalledWith({
+      newContent: 'IDE-modified content',
+    });
+
+    // CRITICAL: The original args object should NOT have been mutated (#2709)
+    expect(originalArgs).toEqual({ param: 'original-value' });
+    // The request.args (which is what goes into history) should also be safe.
+    // structuredClone in buildInvocation ensures the tool gets its own copy.
+    expect(request.args).toEqual({ param: 'original-value' });
+  });
+
+  it('should NOT call openDiff when AUTO_EDIT mode is active (#2673)', async () => {
+    const { mockConfig, mockModifiableTool } = createIdeMockConfig({
+      approvalMode: ApprovalMode.AUTO_EDIT,
+      ideMode: true,
+    });
+
+    mockModifiableTool.shouldConfirm = false; // AUTO_EDIT returns 'allow'
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'auto-edit-1',
+      name: 'mockModifiableTool',
+      args: { param: 'value' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-auto-edit-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    // openDiff should NOT have been called since AUTO_EDIT auto-approves
+    expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+  });
+
+  it('should execute normally when IDE accepts without modifying content', async () => {
+    const { mockConfig, mockModifiableTool } = createIdeMockConfig({
+      ideMode: true,
+    });
+
+    // IDE returns accepted without content (no modifications)
+    mockIdeClient.openDiff.mockResolvedValue({
+      status: 'accepted',
+      content: undefined,
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'ide-no-mod-1',
+      name: 'mockModifiableTool',
+      args: { param: 'keep-this' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-ide-no-mod-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+
+    // Tool should execute with original params (no _applyInlineModify call)
+    // executeFn receives the params object from the invocation
+    expect(mockModifiableTool.executeFn).toHaveBeenCalled();
+  });
+
+  it('should cancel tool when IDE rejects the diff', async () => {
+    const { mockConfig } = createIdeMockConfig({
+      ideMode: true,
+    });
+
+    // IDE rejects the diff
+    mockIdeClient.openDiff.mockResolvedValue({
+      status: 'rejected',
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'ide-reject-1',
+      name: 'mockModifiableTool',
+      args: { param: 'value' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-ide-reject-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('cancelled');
+  });
+
+  it('should not call openDiff when IDE mode is disabled', async () => {
+    const { mockConfig } = createIdeMockConfig({
+      ideMode: false,
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'no-ide-1',
+      name: 'mockModifiableTool',
+      args: { param: 'value' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-no-ide-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    // Tool should be awaiting approval but openDiff was never called
+    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+    expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
   });
 });

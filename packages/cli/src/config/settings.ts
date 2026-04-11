@@ -375,7 +375,7 @@ export class LoadedSettings {
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
-    saveSettings(settingsFile);
+    saveSettings(settingsFile, createSettingsUpdate(key, value));
   }
 }
 
@@ -572,8 +572,62 @@ export function loadSettings(
   ): { settings: Settings; rawJson?: string; migrationWarnings?: string[] } => {
     try {
       if (fs.existsSync(filePath)) {
-        const content = fs.readFileSync(filePath, 'utf-8');
-        const rawSettings: unknown = JSON.parse(stripJsonComments(content));
+        let content = fs.readFileSync(filePath, 'utf-8');
+        let rawSettings: unknown;
+        let recoveryWarning: string | undefined;
+
+        try {
+          rawSettings = JSON.parse(stripJsonComments(content));
+        } catch (parseError: unknown) {
+          // JSON parse failed — try to recover from .orig backup
+          const backupPath = `${filePath}.orig`;
+          if (fs.existsSync(backupPath)) {
+            debugLogger.warn(
+              `Settings file ${filePath} has invalid JSON (${getErrorMessage(parseError)}). Attempting recovery from backup ${backupPath}.`,
+            );
+            try {
+              const backupContent = fs.readFileSync(backupPath, 'utf-8');
+              const backupSettings = JSON.parse(
+                stripJsonComments(backupContent),
+              );
+              // Backup is valid — restore it
+              fs.writeFileSync(filePath, backupContent, 'utf-8');
+              content = backupContent;
+              rawSettings = backupSettings;
+              const recoveryMsg = `Settings file ${filePath} had invalid JSON and was recovered from backup ${backupPath}. Some recent settings changes may have been lost.`;
+              debugLogger.warn(recoveryMsg);
+              // Surface warning to user so they know settings were rolled back
+              recoveryWarning = recoveryMsg;
+            } catch (backupError) {
+              // Could be invalid JSON, read error, or write-back failure
+              debugLogger.warn(
+                `Failed to recover from backup ${backupPath}: ${getErrorMessage(backupError)}. Falling back to empty settings.`,
+              );
+            }
+          }
+
+          // No valid backup available — rename the corrupted file so the app
+          // can start with empty settings rather than crashing.
+          if (!rawSettings) {
+            const corruptedPath = `${filePath}.corrupted.${Date.now()}`;
+            let warningMsg: string;
+            try {
+              fs.renameSync(filePath, corruptedPath);
+              warningMsg = `Settings file ${filePath} has invalid JSON and was renamed to ${corruptedPath}. Your settings have been reset. To recover, fix the JSON in ${corruptedPath} and rename it back.`;
+            } catch (renameError) {
+              // If rename fails, still proceed with empty settings
+              debugLogger.error(
+                `Failed to rename corrupted settings file: ${getErrorMessage(renameError)}`,
+              );
+              warningMsg = `Settings file ${filePath} has invalid JSON. Your settings have been reset. Please fix the JSON in ${filePath} manually.`;
+            }
+            debugLogger.warn(warningMsg);
+            return {
+              settings: {},
+              migrationWarnings: [warningMsg],
+            };
+          }
+        }
 
         if (
           typeof rawSettings !== 'object' ||
@@ -636,10 +690,17 @@ export function loadSettings(
           persistSettingsObject('Error normalizing settings version on disk');
         }
 
+        // Prepend recovery warning if settings were restored from backup
+        const allWarnings = [
+          ...(recoveryWarning ? [recoveryWarning] : []),
+          ...(migrationWarnings ?? []),
+        ];
+
         return {
           settings: settingsObject as Settings,
           rawJson: content,
-          migrationWarnings,
+          migrationWarnings:
+            allWarnings.length > 0 ? allWarnings : migrationWarnings,
         };
       }
     } catch (error: unknown) {
@@ -771,7 +832,22 @@ export function loadSettings(
   );
 }
 
-export function saveSettings(settingsFile: SettingsFile): void {
+function createSettingsUpdate(
+  key: string,
+  value: unknown,
+): Record<string, unknown> {
+  const root: Record<string, unknown> = {};
+  setNestedPropertySafe(root, key, value);
+  return root;
+}
+
+export function saveSettings(
+  settingsFile: SettingsFile,
+  updates: Record<string, unknown> = settingsFile.originalSettings as Record<
+    string,
+    unknown
+  >,
+): void {
   try {
     // Ensure the directory exists
     const dirPath = path.dirname(settingsFile.path);
@@ -780,10 +856,7 @@ export function saveSettings(settingsFile: SettingsFile): void {
     }
 
     // Use the format-preserving update function
-    updateSettingsFilePreservingFormat(
-      settingsFile.path,
-      settingsFile.originalSettings as Record<string, unknown>,
-    );
+    updateSettingsFilePreservingFormat(settingsFile.path, updates);
   } catch (error) {
     debugLogger.error('Error saving user settings file.');
     debugLogger.error(error instanceof Error ? error.message : String(error));
