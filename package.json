@@ -72,7 +72,8 @@
     "cliui": {
       "wrap-ansi": "7.0.0"
     },
-    "baseline-browser-mapping": "^2.9.19"
+    "baseline-browser-mapping": "^2.9.19",
+    "normalize-package-data": "^7.0.1"
   },
   "bin": {
     "qwen": "dist/cli.js"
