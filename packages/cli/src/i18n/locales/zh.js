@@ -1409,6 +1409,7 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
+  'Press ↑ to edit queued messages': '按 ↑ 编辑排队消息',
 
   // ============================================================================
   // MCP Status

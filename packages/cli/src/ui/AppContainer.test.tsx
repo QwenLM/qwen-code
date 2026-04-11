@@ -243,6 +243,7 @@ describe('AppContainer State Management', () => {
       addMessage: vi.fn(),
       clearQueue: vi.fn(),
       getQueuedMessagesText: vi.fn().mockReturnValue(''),
+      popAllMessages: vi.fn().mockReturnValue(null),
       drainQueue: vi.fn().mockReturnValue([]),
     });
     mockedUseAutoAcceptIndicator.mockReturnValue(false);
@@ -456,6 +457,7 @@ describe('AppContainer State Management', () => {
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
       });
 
