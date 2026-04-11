@@ -1,21 +1,23 @@
 import type { ChannelPlugin } from '@qwen-code/channel-base';
 
 const registry = new Map<string, ChannelPlugin>();
-let builtinsLoaded = false;
+let builtinsPromise: Promise<void> | null = null;
 
-async function ensureBuiltins(): Promise<void> {
-  if (builtinsLoaded) return;
-  builtinsLoaded = true;
+function ensureBuiltins(): Promise<void> {
+  if (!builtinsPromise) {
+    builtinsPromise = (async () => {
+      const [telegram, weixin, dingtalk] = await Promise.all([
+        import('@qwen-code/channel-telegram'),
+        import('@qwen-code/channel-weixin'),
+        import('@qwen-code/channel-dingtalk'),
+      ]);
 
-  const [telegram, weixin, dingtalk] = await Promise.all([
-    import('@qwen-code/channel-telegram'),
-    import('@qwen-code/channel-weixin'),
-    import('@qwen-code/channel-dingtalk'),
-  ]);
-
-  for (const mod of [telegram, weixin, dingtalk]) {
-    registry.set(mod.plugin.channelType, mod.plugin);
+      for (const mod of [telegram, weixin, dingtalk]) {
+        registry.set(mod.plugin.channelType, mod.plugin);
+      }
+    })();
   }
+  return builtinsPromise;
 }
 
 export function registerPlugin(plugin: ChannelPlugin): void {
