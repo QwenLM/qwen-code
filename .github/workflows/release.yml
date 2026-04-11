@@ -286,6 +286,7 @@ jobs:
       - 'integration_docker'
     if: |-
       ${{
+        always() &&
         needs.prepare.result == 'success' &&
         (
           github.event.inputs.force_skip_tests == 'true' ||
