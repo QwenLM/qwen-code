@@ -2148,4 +2148,17 @@ Use /arena stop to end the session.`,
     'Failed to apply changes from {{label}}: {{error}}',
   'Applied changes from {{label}} to workspace. Arena session complete.':
     'Applied changes from {{label}} to workspace. Arena session complete.',
+
+  // BTW command
+  'Ask a quick side question without affecting the main conversation':
+    'Ask a quick side question without affecting the main conversation',
+  'Please provide a question. Usage: /btw <your question>':
+    'Please provide a question. Usage: /btw <your question>',
+  'Failed to answer btw question: {{error}}':
+    'Failed to answer btw question: {{error}}',
+  'No response received.': 'No response received.',
+  'Thinking...': 'Thinking...',
+
+  // Arena command
+  'Manage Arena sessions': 'Manage Arena sessions',
 };

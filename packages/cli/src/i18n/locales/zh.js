@@ -1945,4 +1945,16 @@ Use /arena stop to end the session.`]:
     '应用 {{label}} 的更改失败：{{error}}',
   'Applied changes from {{label}} to workspace. Arena session complete.':
     '已将 {{label}} 的更改应用到工作区。Arena 会话已完成。',
+
+  // BTW command
+  'Ask a quick side question without affecting the main conversation':
+    '在不影响主对话的情况下快速提问',
+  'Please provide a question. Usage: /btw <your question>':
+    '请提供问题。用法：/btw <你的问题>',
+  'Failed to answer btw question: {{error}}': '回答 btw 问题失败：{{error}}',
+  'No response received.': '未收到响应。',
+  'Thinking...': '思考中...',
+
+  // Arena command
+  'Manage Arena sessions': '管理 Arena 会话',
 };

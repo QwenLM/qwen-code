@@ -2083,4 +2083,17 @@ export default {
 
   "Set up Qwen Code's status line UI":
     "Configurer l'interface de la barre de statut de Qwen Code",
+
+  // BTW command
+  'Ask a quick side question without affecting the main conversation':
+    'Poser une question rapide sans affecter la conversation principale',
+  'Please provide a question. Usage: /btw <your question>':
+    'Veuillez fournir une question. Utilisation : /btw <votre question>',
+  'Failed to answer btw question: {{error}}':
+    'Échec de la réponse à la question btw : {{error}}',
+  'No response received.': 'Aucune réponse reçue.',
+  'Thinking...': 'Réflexion...',
+
+  // Arena command
+  'Manage Arena sessions': 'Gérer les sessions Arena',
 };

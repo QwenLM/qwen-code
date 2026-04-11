@@ -1481,4 +1481,17 @@ export default {
     'Not in plan mode. Use "/plan" to enter plan mode first.',
 
   "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+
+  // BTW command
+  'Ask a quick side question without affecting the main conversation':
+    'メインの会話に影響を与えずにクイックサイド質問をする',
+  'Please provide a question. Usage: /btw <your question>':
+    '質問を入力してください。使用方法: /btw <あなたの質問>',
+  'Failed to answer btw question: {{error}}':
+    'btw質問への回答に失敗しました：{{error}}',
+  'No response received.': '応答がありませんでした。',
+  'Thinking...': '考え中...',
+
+  // Arena command
+  'Manage Arena sessions': 'Arenaセッションを管理',
 };

@@ -391,7 +391,9 @@ function executeArenaCommand(
 
 export const arenaCommand: SlashCommand = {
   name: 'arena',
-  description: 'Manage Arena sessions',
+  get description() {
+    return t('Manage Arena sessions');
+  },
   kind: CommandKind.BUILT_IN,
   subCommands: [
     {

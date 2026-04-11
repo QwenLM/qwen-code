@@ -1988,4 +1988,17 @@ export default {
     'Not in plan mode. Use "/plan" to enter plan mode first.',
 
   "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+
+  // BTW command
+  'Ask a quick side question without affecting the main conversation':
+    'Задать быстрый побочный вопрос, не влияя на основной разговор',
+  'Please provide a question. Usage: /btw <your question>':
+    'Пожалуйста, задайте вопрос. Использование: /btw <ваш вопрос>',
+  'Failed to answer btw question: {{error}}':
+    'Не удалось ответить на btw вопрос: {{error}}',
+  'No response received.': 'Ответ не получен.',
+  'Thinking...': 'Думаю...',
+
+  // Arena command
+  'Manage Arena sessions': 'Управление сессиями Arena',
 };

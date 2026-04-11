@@ -27,9 +27,7 @@ import { t } from '../../i18n/index.js';
 /**
  * Common validation and session loading logic for all export formats.
  */
-async function prepareExport(
-  context: CommandContext,
-): Promise<
+async function prepareExport(context: CommandContext): Promise<
   | {
       success: true;
       cwd: string;
