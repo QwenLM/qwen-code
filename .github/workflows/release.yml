@@ -264,10 +264,12 @@ jobs:
         env:
           QWEN_SANDBOX: 'docker'
         run: |-
-          npm run build:sandbox
+          npm run build:sandbox -- -s
 
       - name: 'Run CLI Docker Integration Tests'
         run: |-
+          # The package.json docker test scripts each rebuild the sandbox image.
+          # Run vitest directly here so this job reuses the image built above.
           QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
 
       - name: 'Run Interactive Docker Integration Tests'
