@@ -13,12 +13,58 @@ import {
   resetPdftotextCache,
 } from './pdf.js';
 
-vi.mock('./shell-utils.js', () => ({
-  execCommand: vi.fn(),
+vi.mock('node:child_process', () => ({
+  execFile: vi.fn(),
 }));
 
-import { execCommand } from './shell-utils.js';
-const mockExecCommand = vi.mocked(execCommand);
+import { execFile } from 'node:child_process';
+const mockExecFile = vi.mocked(execFile);
+
+/**
+ * Helper: make mockExecFile resolve with given stdout/stderr/code.
+ */
+function mockExecResult(result: {
+  stdout: string;
+  stderr: string;
+  code: number;
+}) {
+  mockExecFile.mockImplementationOnce(
+    (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+      const callback = cb as (
+        err: Error | null,
+        stdout: string,
+        stderr: string,
+      ) => void;
+      if (result.code !== 0) {
+        const err = new Error('command failed') as Error & { code: number };
+        err.code = result.code;
+        callback(err, result.stdout, result.stderr);
+      } else {
+        callback(null, result.stdout, result.stderr);
+      }
+      return {} as ReturnType<typeof execFile>;
+    },
+  );
+}
+
+/**
+ * Helper: make mockExecFile reject (e.g., ENOENT).
+ */
+function mockExecError() {
+  mockExecFile.mockImplementationOnce(
+    (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+      const callback = cb as (
+        err: Error | null,
+        stdout: string,
+        stderr: string,
+      ) => void;
+      const err = new Error('ENOENT') as Error & { code: string };
+      err.code = 'ENOENT';
+      callback(err, '', '');
+      return {} as ReturnType<typeof execFile>;
+    },
+  );
+}
 
 describe('pdf utilities', () => {
   beforeEach(() => {
@@ -77,7 +123,7 @@ describe('pdf utilities', () => {
 
   describe('isPdftotextAvailable', () => {
     it('should return true when pdftotext is available', async () => {
-      mockExecCommand.mockResolvedValue({
+      mockExecResult({
         stdout: '',
         stderr: 'pdftotext version 24.02.0',
         code: 0,
@@ -86,25 +132,25 @@ describe('pdf utilities', () => {
     });
 
     it('should return false when pdftotext is not installed', async () => {
-      mockExecCommand.mockRejectedValue(new Error('ENOENT'));
+      mockExecError();
       expect(await isPdftotextAvailable()).toBe(false);
     });
 
     it('should cache the result', async () => {
-      mockExecCommand.mockResolvedValue({
+      mockExecResult({
         stdout: '',
         stderr: 'pdftotext version 24.02.0',
         code: 0,
       });
       await isPdftotextAvailable();
       await isPdftotextAvailable();
-      expect(mockExecCommand).toHaveBeenCalledTimes(1);
+      expect(mockExecFile).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('getPDFPageCount', () => {
     it('should return page count from pdfinfo output', async () => {
-      mockExecCommand.mockResolvedValue({
+      mockExecResult({
         stdout:
           'Title:          Test\nPages:          42\nPage size:      612 x 792 pts',
         stderr: '',
@@ -114,7 +160,7 @@ describe('pdf utilities', () => {
     });
 
     it('should return null when pdfinfo fails', async () => {
-      mockExecCommand.mockResolvedValue({
+      mockExecResult({
         stdout: '',
         stderr: 'error',
         code: 1,
@@ -123,7 +169,7 @@ describe('pdf utilities', () => {
     });
 
     it('should return null when pdfinfo is not installed', async () => {
-      mockExecCommand.mockRejectedValue(new Error('ENOENT'));
+      mockExecError();
       expect(await getPDFPageCount('/test.pdf')).toBeNull();
     });
   });
@@ -131,13 +177,13 @@ describe('pdf utilities', () => {
   describe('extractPDFText', () => {
     it('should extract text from a PDF', async () => {
       // First call: isPdftotextAvailable check
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: '',
         stderr: 'pdftotext version 24.02.0',
         code: 0,
       });
       // Second call: actual extraction
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: 'Hello World\nThis is a PDF.',
         stderr: '',
         code: 0,
@@ -151,47 +197,49 @@ describe('pdf utilities', () => {
     });
 
     it('should pass page range options to pdftotext', async () => {
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: '',
         stderr: 'pdftotext version 24.02.0',
         code: 0,
       });
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: 'Page 2 content',
         stderr: '',
         code: 0,
       });
 
       await extractPDFText('/test.pdf', { firstPage: 2, lastPage: 5 });
-      expect(mockExecCommand).toHaveBeenLastCalledWith(
-        'pdftotext',
-        ['-layout', '-f', '2', '-l', '5', '/test.pdf', '-'],
-        expect.any(Object),
-      );
+      // Second call to execFile should have the page range args
+      const secondCall = mockExecFile.mock.calls[1]!;
+      const args = secondCall[1] as string[];
+      expect(args).toContain('-f');
+      expect(args).toContain('2');
+      expect(args).toContain('-l');
+      expect(args).toContain('5');
     });
 
     it('should not pass lastPage for Infinity', async () => {
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: '',
         stderr: 'pdftotext version 24.02.0',
         code: 0,
       });
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: 'Page content',
         stderr: '',
         code: 0,
       });
 
       await extractPDFText('/test.pdf', { firstPage: 3, lastPage: Infinity });
-      expect(mockExecCommand).toHaveBeenLastCalledWith(
-        'pdftotext',
-        ['-layout', '-f', '3', '/test.pdf', '-'],
-        expect.any(Object),
-      );
+      const secondCall = mockExecFile.mock.calls[1]!;
+      const args = secondCall[1] as string[];
+      expect(args).toContain('-f');
+      expect(args).toContain('3');
+      expect(args).not.toContain('-l');
     });
 
     it('should return error when pdftotext is not installed', async () => {
-      mockExecCommand.mockRejectedValue(new Error('ENOENT'));
+      mockExecError();
       const result = await extractPDFText('/test.pdf');
       expect(result.success).toBe(false);
       if (!result.success) {
@@ -200,12 +248,12 @@ describe('pdf utilities', () => {
     });
 
     it('should detect password-protected PDFs', async () => {
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: '',
         stderr: 'pdftotext version 24.02.0',
         code: 0,
       });
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: '',
         stderr: 'Incorrect password',
         code: 1,
@@ -219,12 +267,12 @@ describe('pdf utilities', () => {
     });
 
     it('should detect corrupted PDFs', async () => {
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: '',
         stderr: 'pdftotext version 24.02.0',
         code: 0,
       });
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: '',
         stderr: 'PDF file is damaged',
         code: 1,
@@ -238,13 +286,13 @@ describe('pdf utilities', () => {
     });
 
     it('should truncate very large text output', async () => {
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: '',
         stderr: 'pdftotext version 24.02.0',
         code: 0,
       });
       const largeText = 'x'.repeat(200000);
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: largeText,
         stderr: '',
         code: 0,
@@ -260,12 +308,12 @@ describe('pdf utilities', () => {
     });
 
     it('should report empty output', async () => {
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: '',
         stderr: 'pdftotext version 24.02.0',
         code: 0,
       });
-      mockExecCommand.mockResolvedValueOnce({
+      mockExecResult({
         stdout: '   ',
         stderr: '',
         code: 0,

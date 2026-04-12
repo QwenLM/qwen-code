@@ -4,9 +4,44 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execCommand } from './shell-utils.js';
+import { execFile, type ExecFileOptions } from 'node:child_process';
 
 const MAX_PDF_TEXT_OUTPUT_CHARS = 100000;
+
+/**
+ * Lightweight wrapper around execFile that returns { stdout, stderr, code }.
+ * Avoids importing shell-utils.ts (which pulls in tool-utils → barrel index →
+ * circular dependency in vitest mock environments).
+ */
+function execCommand(
+  command: string,
+  args: string[],
+  options: ExecFileOptions = {},
+): Promise<{ stdout: string; stderr: string; code: number }> {
+  return new Promise((resolve) => {
+    execFile(
+      command,
+      args,
+      { encoding: 'utf8', ...options },
+      (error, stdout, stderr) => {
+        if (error) {
+          // ENOENT (command not found) — code is a string, not a number
+          resolve({
+            stdout: String(stdout ?? ''),
+            stderr: String(stderr ?? ''),
+            code: typeof error.code === 'number' ? error.code : 1,
+          });
+          return;
+        }
+        resolve({
+          stdout: String(stdout ?? ''),
+          stderr: String(stderr ?? ''),
+          code: 0,
+        });
+      },
+    );
+  });
+}
 
 /**
  * Parse a page range string into firstPage/lastPage numbers.
@@ -64,7 +99,6 @@ export async function isPdftotextAvailable(): Promise<boolean> {
   if (pdftotextAvailable !== undefined) return pdftotextAvailable;
   try {
     const { stderr } = await execCommand('pdftotext', ['-v'], {
-      preserveOutputOnError: true,
       timeout: 5000,
     });
     // pdftotext prints version info to stderr
@@ -91,7 +125,6 @@ export async function getPDFPageCount(
 ): Promise<number | null> {
   try {
     const { stdout, code } = await execCommand('pdfinfo', [filePath], {
-      preserveOutputOnError: true,
       timeout: 10000,
     });
     if (code !== 0) {
@@ -143,7 +176,6 @@ export async function extractPDFText(
 
   try {
     const { stdout, stderr, code } = await execCommand('pdftotext', args, {
-      preserveOutputOnError: true,
       timeout: 30000,
       maxBuffer: 5 * 1024 * 1024, // 5MB — default 1MB is too small for dense PDFs
     });
