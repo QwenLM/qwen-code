@@ -227,6 +227,7 @@ export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiscovery.js';
 export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
 export * from './utils/partUtils.js';
+export * from './utils/sessionStorageUtils.js';
 export * from './utils/pathReader.js';
 export * from './utils/paths.js';
 export * from './utils/projectSummary.js';

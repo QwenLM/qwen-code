@@ -15,11 +15,14 @@ import * as jsonl from '../utils/jsonl-utils.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
-  CustomTitleRecordPayload,
   UiTelemetryRecordPayload,
 } from './chatRecordingService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  extractLastJsonStringField,
+  readHeadAndTailSync,
+} from '../utils/sessionStorageUtils.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -117,7 +120,10 @@ const MAX_FILES_TO_PROCESS = 10000;
 const SESSION_FILE_PATTERN = /^[0-9a-fA-F-]{32,36}\.jsonl$/;
 /** Maximum number of lines to scan when looking for the first prompt text. */
 const MAX_PROMPT_SCAN_LINES = 10;
-/** Maximum bytes to read from the tail of a session file to find custom title. */
+/**
+ * Maximum bytes to read from head/tail of a session file.
+ * Used by readLastRecordUuid which still does its own tail read.
+ */
 const TAIL_READ_SIZE = 64 * 1024;
 
 /**
@@ -145,53 +151,25 @@ export class SessionService {
   }
 
   /**
-   * Reads custom title from the tail of a session JSONL file.
-   * Scans the last TAIL_READ_SIZE bytes for a custom_title system record.
-   * Returns the last custom title found (most recent wins).
+   * Reads the session title from a JSONL file using head+tail dual-read.
+   *
+   * Uses string-level field extraction (no full JSON parse) for performance.
+   * Reads both the first and last 64KB of the file, then resolves title with
+   * priority: tail customTitle > head customTitle.
+   *
+   * This ensures:
+   * - The most recent title in the tail takes precedence
+   * - Titles near the start of the file are still found via head scan
    */
-  private readCustomTitleFromFile(filePath: string): string | undefined {
-    try {
-      const stats = fs.statSync(filePath);
-      const fileSize = stats.size;
-      const readStart = Math.max(0, fileSize - TAIL_READ_SIZE);
-      const readLength = Math.min(fileSize, TAIL_READ_SIZE);
+  private readSessionTitleFromFile(filePath: string): string | undefined {
+    const { head, tail } = readHeadAndTailSync(filePath);
+    if (!head) return undefined;
 
-      const fd = fs.openSync(filePath, 'r');
-      let buffer: Buffer;
-      try {
-        buffer = Buffer.alloc(readLength);
-        fs.readSync(fd, buffer, 0, readLength, readStart);
-      } finally {
-        fs.closeSync(fd);
-      }
-
-      const tail = buffer.toString('utf-8');
-      const lines = tail.split('\n');
-
-      let customTitle: string | undefined;
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const record = JSON.parse(trimmed) as ChatRecord;
-          if (record.type === 'system' && record.subtype === 'custom_title') {
-            const payload = record.systemPayload as
-              | CustomTitleRecordPayload
-              | undefined;
-            if (payload?.customTitle) {
-              customTitle = payload.customTitle;
-            }
-          }
-        } catch {
-          // Ignore malformed lines (including partial first line from tail read)
-          continue;
-        }
-      }
-
-      return customTitle;
-    } catch {
-      return undefined;
-    }
+    // Tail (most recent) wins over head (oldest).
+    return (
+      extractLastJsonStringField(tail, 'customTitle') ??
+      extractLastJsonStringField(head, 'customTitle')
+    );
   }
 
   /**
@@ -401,7 +379,7 @@ export class SessionService {
         gitBranch: firstRecord.gitBranch,
         filePath,
         messageCount,
-        customTitle: this.readCustomTitleFromFile(filePath),
+        customTitle: this.readSessionTitleFromFile(filePath),
       });
     }
 
@@ -677,7 +655,7 @@ export class SessionService {
     }
     const chatsDir = this.getChatsDir();
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
-    return this.readCustomTitleFromFile(filePath);
+    return this.readSessionTitleFromFile(filePath);
   }
 
   /**

@@ -124,4 +124,39 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     expect(writtenRecord.uuid).toBeDefined();
     expect(writtenRecord.timestamp).toBeDefined();
   });
+
+  describe('finalize', () => {
+    it('should re-append cached custom title to EOF', () => {
+      chatRecordingService.recordCustomTitle('my-feature');
+      vi.mocked(jsonl.writeLineSync).mockClear();
+
+      chatRecordingService.finalize();
+
+      expect(jsonl.writeLineSync).toHaveBeenCalledOnce();
+      const record = vi.mocked(jsonl.writeLineSync).mock
+        .calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('custom_title');
+      expect(record.systemPayload).toEqual({ customTitle: 'my-feature' });
+    });
+
+    it('should not write anything when no custom title was set', () => {
+      chatRecordingService.finalize();
+
+      expect(jsonl.writeLineSync).not.toHaveBeenCalled();
+    });
+
+    it('should re-append the latest title after multiple renames', () => {
+      chatRecordingService.recordCustomTitle('first-name');
+      chatRecordingService.recordCustomTitle('second-name');
+      vi.mocked(jsonl.writeLineSync).mockClear();
+
+      chatRecordingService.finalize();
+
+      expect(jsonl.writeLineSync).toHaveBeenCalledOnce();
+      const record = vi.mocked(jsonl.writeLineSync).mock
+        .calls[0][1] as ChatRecord;
+      expect(record.systemPayload).toEqual({ customTitle: 'second-name' });
+    });
+  });
 });

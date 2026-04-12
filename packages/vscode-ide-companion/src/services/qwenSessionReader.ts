@@ -424,7 +424,6 @@ export class QwenSessionReader {
   ): Promise<boolean> {
     try {
       const session = await this.getSession(sessionId, workingDir);
-      console.log('[QwenSessionReader] Renaming session:', sessionId, title);
       if (!session || !session.filePath) {
         return false;
       }
