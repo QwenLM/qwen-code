@@ -60,6 +60,8 @@ packages/vscode-ide-companion/*.vsix
 !.qwen/commands/**
 !.qwen/skills/
 !.qwen/skills/**
+!.qwen/agents/
+!.qwen/agents/**
 logs/
 # GHA credentials
 gha-creds-*.json

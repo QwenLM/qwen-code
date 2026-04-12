@@ -52,6 +52,9 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
   QwenAgentManager: class {
     isConnected = false;
     currentSessionId = null;
+    connect = vi.fn();
+    createNewSession = vi.fn();
+    setModelFromUi = vi.fn();
     onMessage = vi.fn();
     onStreamChunk = vi.fn();
     onThoughtChunk = vi.fn();
@@ -67,6 +70,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onPlan = vi.fn();
     onPermissionRequest = vi.fn();
     onAskUserQuestion = vi.fn();
+    onDisconnected = vi.fn();
     disconnect = vi.fn();
   },
 }));
@@ -74,6 +78,10 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
 vi.mock('../../services/conversationStore.js', () => ({
   ConversationStore: class {
     constructor(_context: unknown) {}
+    createConversation = vi.fn().mockResolvedValue({
+      id: 'conversation-1',
+      messages: [],
+    });
   },
 }));
 
@@ -102,6 +110,8 @@ vi.mock('./MessageHandler.js', () => ({
     setLoginHandler = vi.fn();
     setPermissionHandler = vi.fn();
     setAskUserQuestionHandler = vi.fn();
+    setCurrentConversationId = vi.fn();
+    getCurrentConversationId = vi.fn(() => null);
     setupFileWatchers = vi.fn(() => ({ dispose: vi.fn() }));
     appendStreamContent = vi.fn();
     route = vi.fn();
@@ -286,5 +296,80 @@ describe('WebViewProvider.attachToView', () => {
       },
     });
     expect(panelPostMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('WebViewProvider.createNewSession', () => {
+  it('forces a fresh ACP session for the sidebar new-session action', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          createNewSession: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    const messageHandler = (
+      provider as unknown as {
+        messageHandler: {
+          setCurrentConversationId: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).messageHandler;
+
+    await provider.createNewSession();
+
+    expect(agentManager.createNewSession).toHaveBeenCalledWith(
+      '/workspace-root',
+      { forceNew: true },
+    );
+    expect(messageHandler.setCurrentConversationId).toHaveBeenCalledWith(null);
+  });
+});
+
+describe('WebViewProvider initial model inheritance', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGetPanel.mockReturnValue(null);
+  });
+
+  it('applies the requested initial model after creating a new session', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    provider.setInitialModelId('glm-5');
+
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          currentSessionId: string | null;
+          createNewSession: ReturnType<typeof vi.fn>;
+          setModelFromUi: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    agentManager.createNewSession.mockResolvedValue('session-1');
+    agentManager.setModelFromUi.mockResolvedValue({
+      modelId: 'glm-5',
+      name: 'GLM-5',
+    });
+
+    await (
+      provider as unknown as {
+        loadCurrentSessionMessages: (options?: {
+          autoAuthenticate?: boolean;
+        }) => Promise<boolean>;
+      }
+    ).loadCurrentSessionMessages();
+
+    expect(agentManager.createNewSession).toHaveBeenCalledWith(
+      '/workspace-root',
+      { autoAuthenticate: true },
+    );
+    expect(agentManager.setModelFromUi).toHaveBeenCalledWith('glm-5');
   });
 });

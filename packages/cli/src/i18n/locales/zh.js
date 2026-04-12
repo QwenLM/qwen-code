@@ -1092,8 +1092,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': '切换此会话的模型',
-  'Set fast model for background tasks': '设置后台任务的快速模型',
+  'Switch the model for this session (--fast for suggestion model)':
+    '切换此会话的模型（--fast 可设置建议模型）',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    '设置用于输入建议和推测执行的轻量模型',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1170,6 +1172,7 @@ export default {
   'Always allow {{action}} in this project': '在本项目中总是允许{{action}}',
   'Always allow for this user': '对该用户总是允许',
   'Always allow {{action}} for this user': '对该用户总是允许{{action}}',
+  'Yes, restore previous mode ({{mode}})': '是，恢复之前的模式 ({{mode}})',
   'Yes, and auto-accept edits': '是，并自动接受编辑',
   'Yes, and manually approve edits': '是，并手动批准编辑',
   'No, keep planning (esc)': '否，继续规划 (esc)',
@@ -1406,6 +1409,7 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
+  'Press ↑ to edit queued messages': '按 ↑ 编辑排队消息',
 
   // ============================================================================
   // MCP Status
@@ -1713,6 +1717,8 @@ export default {
   'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
   'Run /context detail for per-item breakdown.':
     '运行 /context detail 查看详细分解。',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    '显示上下文窗口使用情况分解。输入 "/context detail" 查看详细分解。',
   'body loaded': '内容已加载',
   memory: '记忆',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
@@ -1813,4 +1819,20 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
+  compact: '紧凑',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
+  'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
+
+  'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
+  'Exited plan mode. Previous approval mode restored.':
+    '已退出计划模式，已恢复之前的审批模式。',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    '启用计划模式。智能体将只分析和规划，而不执行工具。',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    '已处于计划模式。使用 "/plan exit" 退出计划模式。',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    '未处于计划模式。请先使用 "/plan" 进入计划模式。',
+
+  "Set up Qwen Code's status line UI": '配置 Qwen Code 的状态栏',
 };

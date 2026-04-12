@@ -2,6 +2,8 @@
  * QR code login flow for WeChat iLink Bot.
  */
 
+import { buildHeaders } from './api.js';
+
 export interface LoginResult {
   connected: boolean;
   token?: string;
@@ -54,7 +56,7 @@ export async function waitForLogin(params: {
       const resp = await fetch(
         `${apiBaseUrl}/ilink/bot/get_qrcode_status?qrcode=${encodeURIComponent(currentQrcodeId)}`,
         {
-          headers: { 'iLink-App-ClientVersion': '1' },
+          headers: buildHeaders(),
           signal: controller.signal,
         },
       );

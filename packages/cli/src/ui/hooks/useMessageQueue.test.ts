@@ -232,4 +232,68 @@ describe('useMessageQueue', () => {
     expect(mockSubmitQuery).toHaveBeenCalledWith('Second batch');
     expect(mockSubmitQuery).toHaveBeenCalledTimes(2);
   });
+
+  it('should pop all messages from queue', () => {
+    const { result } = renderHook(() =>
+      useMessageQueue({
+        isConfigInitialized: true,
+        streamingState: StreamingState.Responding,
+        submitQuery: mockSubmitQuery,
+      }),
+    );
+
+    act(() => {
+      result.current.addMessage('Message 1');
+      result.current.addMessage('Message 2');
+      result.current.addMessage('Message 3');
+    });
+
+    let popped: string | null = null;
+    act(() => {
+      popped = result.current.popAllMessages();
+    });
+
+    expect(popped).toBe('Message 1\n\nMessage 2\n\nMessage 3');
+    expect(result.current.messageQueue).toEqual([]);
+  });
+
+  it('should pop single message without separator', () => {
+    const { result } = renderHook(() =>
+      useMessageQueue({
+        isConfigInitialized: true,
+        streamingState: StreamingState.Responding,
+        submitQuery: mockSubmitQuery,
+      }),
+    );
+
+    act(() => {
+      result.current.addMessage('Only message');
+    });
+
+    let popped: string | null = null;
+    act(() => {
+      popped = result.current.popAllMessages();
+    });
+
+    expect(popped).toBe('Only message');
+    expect(result.current.messageQueue).toEqual([]);
+  });
+
+  it('should return null when popping from empty queue', () => {
+    const { result } = renderHook(() =>
+      useMessageQueue({
+        isConfigInitialized: true,
+        streamingState: StreamingState.Responding,
+        submitQuery: mockSubmitQuery,
+      }),
+    );
+
+    let popped: string | null = null;
+    act(() => {
+      popped = result.current.popAllMessages();
+    });
+
+    expect(popped).toBeNull();
+    expect(result.current.messageQueue).toEqual([]);
+  });
 });

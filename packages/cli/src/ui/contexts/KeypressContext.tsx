@@ -137,9 +137,6 @@ export function KeypressProvider({
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
-  const isDraggingRef = useRef(false);
-  const dragBufferRef = useRef('');
-  const draggingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const subscribe = useCallback(
     (handler: KeypressHandler) => {
@@ -156,13 +153,6 @@ export function KeypressProvider({
   );
 
   useEffect(() => {
-    const clearDraggingTimer = () => {
-      if (draggingTimerRef.current) {
-        clearTimeout(draggingTimerRef.current);
-        draggingTimerRef.current = null;
-      }
-    };
-
     const wasRaw = stdin.isRaw;
     if (wasRaw === false) {
       setRawMode(true);
@@ -199,13 +189,35 @@ export function KeypressProvider({
       clearKittyTimeout();
       kittySequenceTimeout = setTimeout(() => {
         if (kittySequenceBufferRef.current) {
-          if (debugKeystrokeLogging) {
-            debugLogger.debug(
-              '[DEBUG] Kitty buffer timeout, clearing:',
-              kittySequenceBufferRef.current,
-            );
+          // Before discarding, try to salvage any parseable sequences
+          // that may have been missed (e.g., due to chunked input).
+          while (kittySequenceBufferRef.current) {
+            const parsed = parseKittyPrefix(kittySequenceBufferRef.current);
+            if (parsed) {
+              kittySequenceBufferRef.current =
+                kittySequenceBufferRef.current.slice(parsed.length);
+              broadcast(parsed.key);
+              continue;
+            }
+            const plain = parsePlainTextPrefix(kittySequenceBufferRef.current);
+            if (plain) {
+              kittySequenceBufferRef.current =
+                kittySequenceBufferRef.current.slice(plain.length);
+              broadcast(plain.key);
+              continue;
+            }
+            break;
           }
-          kittySequenceBufferRef.current = '';
+          // Clear any remaining unparseable content
+          if (kittySequenceBufferRef.current) {
+            if (debugKeystrokeLogging) {
+              debugLogger.debug(
+                '[DEBUG] Kitty buffer timeout, clearing:',
+                kittySequenceBufferRef.current,
+              );
+            }
+            kittySequenceBufferRef.current = '';
+          }
         }
       }, KITTY_SEQUENCE_TIMEOUT_MS);
     };
@@ -341,14 +353,19 @@ export function KeypressProvider({
         };
       }
 
-      // 3) CSI-u form: ESC [ <code> ; <mods> (u|~)
-      // 3) CSI-u and tilde-coded functional keys: ESC [ <code> ; <mods> (u|~)
+      // 3) CSI-u form: ESC [ <code>[:<shifted>][:<base>] ; <mods>[:<event>] [; <text>] (u|~)
+      // 3) CSI-u and tilde-coded functional keys with optional kitty extensions:
+      //    Full kitty format: ESC [ code:shifted:base ; mods:event ; text u
       //    'u' terminator: Kitty CSI-u; '~' terminator: tilde-coded function keys.
-      const csiUPrefix = new RegExp(`^${ESC}\\[(\\d+)(;(\\d+))?([u~])`);
+      //    The colon-separated fields (shifted key, base key, event type, text)
+      //    are optional extensions that some terminals send.
+      const csiUPrefix = new RegExp(
+        `^${ESC}\\[(\\d+)(?::\\d+)*(?:;(\\d+)(?::\\d+)*)?(?:;\\d+)?([u~])`,
+      );
       m = buffer.match(csiUPrefix);
       if (m) {
         const keyCode = parseInt(m[1], 10);
-        let modifiers = m[3] ? parseInt(m[3], 10) : KITTY_MODIFIER_BASE;
+        let modifiers = m[2] ? parseInt(m[2], 10) : KITTY_MODIFIER_BASE;
         if (modifiers >= KITTY_MODIFIER_EVENT_TYPES_OFFSET) {
           modifiers -= KITTY_MODIFIER_EVENT_TYPES_OFFSET;
         }
@@ -357,7 +374,7 @@ export function KeypressProvider({
           (modifierBits & MODIFIER_SHIFT_BIT) === MODIFIER_SHIFT_BIT;
         const alt = (modifierBits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
         const ctrl = (modifierBits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
-        const terminator = m[4];
+        const terminator = m[3];
 
         // Tilde-coded functional keys (Delete, Insert, PageUp/Down, Home/End)
         if (terminator === '~') {
@@ -627,26 +644,9 @@ export function KeypressProvider({
         return;
       }
 
-      if (
-        key.sequence === SINGLE_QUOTE ||
-        key.sequence === DOUBLE_QUOTE ||
-        isDraggingRef.current
-      ) {
-        isDraggingRef.current = true;
-        dragBufferRef.current += key.sequence;
-
-        clearDraggingTimer();
-        draggingTimerRef.current = setTimeout(() => {
-          isDraggingRef.current = false;
-          const seq = dragBufferRef.current;
-          dragBufferRef.current = '';
-          if (seq) {
-            broadcast({ ...key, name: '', paste: true, sequence: seq });
-          }
-        }, DRAG_COMPLETION_TIMEOUT_MS);
-
-        return;
-      }
+      // Note: We no longer treat quotes specially for drag-and-drop detection.
+      // Modern terminals use bracketed paste mode (PASTE_MODE_PREFIX) for file drops,
+      // which is handled above. This prevents input lag on quote keystrokes.
 
       if (key.name === 'return' && waitingForEnterAfterBackslash) {
         if (backslashTimeout) {
@@ -1050,23 +1050,6 @@ export function KeypressProvider({
           sequence: pasteBuffer.toString(),
         });
         pasteBuffer = Buffer.alloc(0);
-      }
-
-      if (draggingTimerRef.current) {
-        clearTimeout(draggingTimerRef.current);
-        draggingTimerRef.current = null;
-      }
-      if (isDraggingRef.current && dragBufferRef.current) {
-        broadcast({
-          name: '',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: true,
-          sequence: dragBufferRef.current,
-        });
-        isDraggingRef.current = false;
-        dragBufferRef.current = '';
       }
     };
   }, [

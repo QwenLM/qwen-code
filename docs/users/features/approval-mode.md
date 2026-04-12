@@ -1,6 +1,6 @@
 # Approval Mode
 
-Qwen Code offers three distinct permission modes that allow you to flexibly control how AI interacts with your code and system based on task complexity and risk level.
+Qwen Code offers four distinct permission modes that allow you to flexibly control how AI interacts with your code and system based on task complexity and risk level.
 
 ## Permission Modes Comparison
 
@@ -40,6 +40,18 @@ You can switch into Plan Mode during a session using **Shift+Tab** (or **Tab** o
 
 If you are in Normal Mode, **Shift+Tab** (or **Tab** on Windows) first switches into `auto-edits` Mode, indicated by `⏵⏵ accept edits on` at the bottom of the terminal. A subsequent **Shift+Tab** (or **Tab** on Windows) will switch into Plan Mode, indicated by `⏸ plan mode`.
 
+**Use the `/plan` command**
+
+The `/plan` command provides a quick shortcut for entering and exiting Plan Mode:
+
+```bash
+/plan                          # Enter plan mode
+/plan refactor the auth module # Enter plan mode and start planning
+/plan exit                     # Exit plan mode, restore previous mode
+```
+
+When you exit Plan Mode with `/plan exit`, your previous approval mode is automatically restored (e.g., if you were in Auto-Edit before entering Plan Mode, you'll return to Auto-Edit).
+
 **Start a new session in Plan Mode**
 
 To start a new session in Plan Mode, use the `/approval-mode` then select `plan`
@@ -59,14 +71,10 @@ qwen --prompt "What is machine learning?"
 ### Example: Planning a complex refactor
 
 ```bash
-/approval-mode plan
+/plan I need to refactor our authentication system to use OAuth2. Create a detailed migration plan.
 ```
 
-```
-I need to refactor our authentication system to use OAuth2. Create a detailed migration plan.
-```
-
-Qwen Code analyzes the current implementation and create a comprehensive plan. Refine with follow-ups:
+Qwen Code enters Plan Mode and analyzes the current implementation to create a comprehensive plan. Refine with follow-ups:
 
 ```
 What about backward compatibility?
@@ -235,7 +243,7 @@ qwen --prompt "Run the test suite, fix all failing tests, then commit changes"
 
 ### Keyboard Shortcut Switching
 
-During a Qwen Code session, use **Shift+Tab**​ (or **Tab** on Windows) to quickly cycle through the three modes:
+During a Qwen Code session, use **Shift+Tab**​ (or **Tab** on Windows) to quickly cycle through the four modes:
 
 ```
 Default Mode → Auto-Edit Mode → YOLO Mode → Plan Mode → Default Mode

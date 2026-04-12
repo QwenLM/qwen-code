@@ -71,6 +71,7 @@ import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
+import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
 import { useStdin, useStdout } from 'ink';
@@ -286,7 +287,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
   const branchName = useGitBranchName(config.getTargetDir());
-
   // Layout measurements
   const mainControlsRef = useRef<DOMElement>(null);
   const originalTitleRef = useRef(
@@ -712,6 +712,7 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [config, historyManager, settings.merged]);
 
   const cancelHandlerRef = useRef<() => void>(() => {});
+  const midTurnDrainRef = useRef<(() => string[]) | null>(null);
 
   const {
     streamingState,
@@ -743,6 +744,7 @@ export const AppContainer = (props: AppContainerProps) => {
     setEmbeddedShellFocused,
     terminalWidth,
     terminalHeight,
+    midTurnDrainRef,
   );
 
   // Track whether suggestions are visible for Tab key handling
@@ -774,12 +776,23 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const { messageQueue, addMessage, clearQueue, getQueuedMessagesText } =
-    useMessageQueue({
-      isConfigInitialized,
-      streamingState,
-      submitQuery,
-    });
+  const {
+    messageQueue,
+    addMessage,
+    clearQueue,
+    getQueuedMessagesText,
+    popAllMessages,
+    drainQueue,
+  } = useMessageQueue({
+    isConfigInitialized,
+    streamingState,
+    submitQuery,
+  });
+
+  // Bridge message queue to mid-turn drain via ref.
+  // drainQueue reads the synchronous queueRef inside the hook, so it
+  // stays consistent with popAllMessages even before React re-renders.
+  midTurnDrainRef.current = drainQueue;
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
@@ -949,6 +962,11 @@ export const AppContainer = (props: AppContainerProps) => {
     handleWelcomeBackClose,
   } = useWelcomeBack(config, handleFinalSubmit, buffer, settings.merged);
 
+  const pendingHistoryItems = useMemo(
+    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
+    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
+  );
+
   cancelHandlerRef.current = useCallback(() => {
     const pendingHistoryItems = [
       ...pendingSlashCommandHistoryItems,
@@ -1093,7 +1111,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Generate prompt suggestions when streaming completes
   const followupSuggestionsEnabled =
-    settings.merged.ui?.enableFollowupSuggestions !== false;
+    settings.merged.ui?.enableFollowupSuggestions === true;
 
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
@@ -1245,6 +1263,13 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
+  const [compactMode, setCompactMode] = useState<boolean>(
+    settings.merged.ui?.compactMode ?? false,
+  );
+  const [frozenSnapshot, setFrozenSnapshot] = useState<
+    HistoryItemWithoutId[] | null
+  >(null);
+
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -1258,6 +1283,18 @@ export const AppContainer = (props: AppContainerProps) => {
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
+
+  useEffect(() => {
+    // Clear frozen snapshot when streaming ends OR when entering confirmation
+    // state. During WaitingForConfirmation, the user needs to see the latest
+    // pending items (including the confirmation message) rather than a stale snapshot.
+    if (
+      streamingState === StreamingState.Idle ||
+      streamingState === StreamingState.WaitingForConfirmation
+    ) {
+      setFrozenSnapshot(null);
+    }
+  }, [streamingState]);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
@@ -1645,6 +1682,18 @@ export const AppContainer = (props: AppContainerProps) => {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);
         }
+      } else if (keyMatchers[Command.TOGGLE_COMPACT_MODE](key)) {
+        const newValue = !compactMode;
+        setCompactMode(newValue);
+        void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
+        refreshStatic();
+        // Only freeze during the actual responding phase. WaitingForConfirmation
+        // must keep focus so the user can approve/cancel tool confirmation UI.
+        if (streamingState === StreamingState.Responding) {
+          setFrozenSnapshot([...pendingHistoryItems]);
+        } else {
+          setFrozenSnapshot(null);
+        }
       }
     },
     [
@@ -1673,8 +1722,16 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      settings.merged.general?.debugKeystrokeLogging,
+      // `settings` is a stable LoadedSettings instance (not recreated on render).
+      // ESLint requires it here because the callback calls settings.setValue().
+      // debugKeystrokeLogging is read at call time, so no stale closure risk.
+      settings,
       isAuthenticating,
+      compactMode,
+      setCompactMode,
+      setFrozenSnapshot,
+      pendingHistoryItems,
+      refreshStatic,
     ],
   );
 
@@ -1762,11 +1819,6 @@ export const AppContainer = (props: AppContainerProps) => {
     history: historyManager.history,
     sessionStats,
   });
-
-  const pendingHistoryItems = useMemo(
-    () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
-    [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
-  );
 
   const uiState: UIState = useMemo(
     () => ({
@@ -2003,6 +2055,7 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openModelDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2021,6 +2074,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
+      popAllQueuedMessages: popAllMessages,
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
@@ -2061,6 +2115,7 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openModelDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2078,6 +2133,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       retryLastPrompt,
       handleClearScreen,
+      popAllMessages,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       // Subagent dialogs
@@ -2103,6 +2159,11 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
+  const compactModeValue = useMemo(
+    () => ({ compactMode, frozenSnapshot }),
+    [compactMode, frozenSnapshot],
+  );
+
   return (
     <UIStateContext.Provider value={uiState}>
       <UIActionsContext.Provider value={uiActions}>
@@ -2113,9 +2174,11 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings: props.startupWarnings || [],
             }}
           >
-            <ShellFocusContext.Provider value={isFocused}>
-              <App />
-            </ShellFocusContext.Provider>
+            <CompactModeProvider value={compactModeValue}>
+              <ShellFocusContext.Provider value={isFocused}>
+                <App />
+              </ShellFocusContext.Provider>
+            </CompactModeProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>

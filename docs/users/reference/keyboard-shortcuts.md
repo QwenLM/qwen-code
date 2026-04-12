@@ -10,7 +10,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+C`                       | Cancel the ongoing request and clear the input. Press twice to exit the application.                                  |
 | `Ctrl+D`                       | Exit the application if the input is empty. Press twice to confirm.                                                   |
 | `Ctrl+L`                       | Clear the screen.                                                                                                     |
-| `Ctrl+O`                       | Toggle the display of the debug console.                                                                              |
+| `Ctrl+O`                       | Toggle compact mode (hide/show tool output and thinking).                                                             |
 | `Ctrl+S`                       | Allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output. |
 | `Ctrl+T`                       | Toggle the display of tool descriptions.                                                                              |
 | `Shift+Tab` (`Tab` on Windows) | Cycle approval modes (`plan` → `default` → `auto-edit` → `yolo`)                                                      |
