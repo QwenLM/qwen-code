@@ -11,7 +11,7 @@ import type {
   AnsiOutput,
   AnsiToken,
 } from '@qwen-code/qwen-code-core';
-import { formatMemoryUsage } from '../utils/formatters.js';
+import { formatDuration, formatMemoryUsage } from '../utils/formatters.js';
 import { theme } from '../semantic-colors.js';
 
 const DEFAULT_HEIGHT = 24;
@@ -55,24 +55,21 @@ export interface ShellStatsBarProps {
   totalLines?: number;
   totalBytes?: number;
   timeoutMs?: number;
+  displayHeight?: number;
 }
 
 export const ShellStatsBar: React.FC<ShellStatsBarProps> = ({
   totalLines,
   totalBytes,
   timeoutMs,
+  displayHeight = DEFAULT_HEIGHT,
 }) => {
-  const displayHeight = DEFAULT_HEIGHT;
   const parts: string[] = [];
   if (totalLines && totalLines > displayHeight) {
     parts.push(`+${totalLines - displayHeight} lines`);
   }
   if (timeoutMs) {
-    const timeoutStr =
-      timeoutMs >= 60000
-        ? `${Math.floor(timeoutMs / 60000)}m`
-        : `${Math.floor(timeoutMs / 1000)}s`;
-    parts.push(`timeout ${timeoutStr}`);
+    parts.push(`timeout ${formatDuration(timeoutMs)}`);
   }
   if (totalBytes && totalBytes > 0) {
     parts.push(formatMemoryUsage(totalBytes));

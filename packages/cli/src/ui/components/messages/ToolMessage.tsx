@@ -422,7 +422,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                   availableTerminalHeight={availableHeight}
                 />
                 {effectiveDisplayRenderer.stats && (
-                  <ShellStatsBar {...effectiveDisplayRenderer.stats} />
+                  <ShellStatsBar
+                    {...effectiveDisplayRenderer.stats}
+                    displayHeight={availableHeight}
+                  />
                 )}
               </>
             )}
