@@ -256,4 +256,15 @@ export class NativeLspClient implements LspClient {
   ): Promise<boolean> {
     return this.service.applyWorkspaceEdit(edit, serverName);
   }
+
+  /**
+   * Notify LSP servers that a document has been saved.
+   * This triggers servers to re-read the file from disk and update diagnostics.
+   *
+   * @param uri - The document URI (file:// path)
+   * @param serverName - Optional specific LSP server to notify
+   */
+  notifyDocumentSaved(uri: string, serverName?: string): Promise<void> {
+    return this.service.notifyDocumentSaved(uri, serverName);
+  }
 }

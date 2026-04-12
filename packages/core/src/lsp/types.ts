@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type * as lsp from 'vscode-languageserver-protocol';
+
 export interface LspPosition {
   line: number;
   character: number;
@@ -358,6 +360,12 @@ export interface LspClient {
     edit: LspWorkspaceEdit,
     serverName?: string,
   ): Promise<boolean>;
+
+  /**
+   * Notify LSP servers that a document has been saved.
+   * This triggers servers to re-read the file from disk and update diagnostics.
+   */
+  notifyDocumentSaved(uri: string, serverName?: string): Promise<void>;
 }
 
 // ============================================================================
@@ -456,7 +464,7 @@ export interface LspConnectionInterface {
   /** Send a request and wait for response */
   request: (method: string, params: unknown) => Promise<unknown>;
   /** Send initialize request */
-  initialize: (params: unknown) => Promise<unknown>;
+  initialize: (params: lsp.InitializeParams) => Promise<lsp.InitializeResult>;
   /** Send shutdown request */
   shutdown: () => Promise<void>;
   /** End the connection */
@@ -494,6 +502,8 @@ export interface LspServerHandle {
   restartAttempts?: number;
   /** Lock to prevent concurrent startup attempts */
   startingPromise?: Promise<void>;
+  /** Server capabilities returned from initialize */
+  serverCapabilities?: lsp.ServerCapabilities;
 }
 
 /**
@@ -519,5 +529,5 @@ export interface LspConnectionResult {
   /** Force exit the connection */
   exit: () => void;
   /** Send initialize request */
-  initialize: (params: unknown) => Promise<unknown>;
+  initialize: (params: lsp.InitializeParams) => Promise<lsp.InitializeResult>;
 }

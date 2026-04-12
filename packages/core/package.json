@@ -70,6 +70,7 @@
     "tar": "^7.5.2",
     "undici": "^6.22.0",
     "uuid": "^9.0.1",
+    "vscode-languageserver-protocol": "^3.17.5",
     "web-tree-sitter": "^0.24.7",
     "ws": "^8.18.0"
   },

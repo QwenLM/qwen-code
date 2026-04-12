@@ -1099,4 +1099,255 @@ describe('NativeLspService', () => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
+
+  describe('notifyDocumentSaved', () => {
+    test('should send didSave notification to servers that support it', async () => {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-save-'));
+      const filePath = path.join(tempDir, 'test.ts');
+      fs.writeFileSync(filePath, 'const x = 1;', 'utf-8');
+      const uri = pathToFileURL(filePath).toString();
+
+      const sentMessages: Array<{ method: string; params: unknown }> = [];
+      const connection = {
+        send: vi.fn((message: { method: string; params?: unknown }) => {
+          sentMessages.push({ method: message.method, params: message.params });
+        }),
+      };
+
+      const handle = {
+        config: { name: 'tsserver', languages: ['typescript'] },
+        status: 'READY' as const,
+        connection,
+        serverCapabilities: {
+          textDocumentSync: { save: { includeText: false } },
+        },
+      };
+
+      const serverManager = {
+        getHandles: () => new Map([['tsserver', handle]]),
+      };
+
+      const service = new NativeLspService(
+        mockConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+      );
+      (service as unknown as { serverManager: unknown }).serverManager =
+        serverManager;
+
+      await service.notifyDocumentSaved(uri);
+
+      expect(connection.send).toHaveBeenCalledTimes(1);
+      expect(sentMessages[0]).toEqual({
+        method: 'textDocument/didSave',
+        params: { textDocument: { uri } },
+      });
+
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    test('should not send didSave when server does not support it', async () => {
+      const uri = 'file:///test/workspace/test.ts';
+
+      const connection = { send: vi.fn() };
+      const handle = {
+        config: { name: 'some-server', languages: ['typescript'] },
+        status: 'READY' as const,
+        connection,
+        serverCapabilities: {
+          textDocumentSync: 0, // TextDocumentSyncKind.None
+        },
+      };
+
+      const serverManager = {
+        getHandles: () => new Map([['some-server', handle]]),
+      };
+
+      const service = new NativeLspService(
+        mockConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+      );
+      (service as unknown as { serverManager: unknown }).serverManager =
+        serverManager;
+
+      await service.notifyDocumentSaved(uri);
+
+      expect(connection.send).not.toHaveBeenCalled();
+    });
+
+    test('should send didSave when textDocumentSync is a number (Full or Incremental)', async () => {
+      const uri = 'file:///test/workspace/test.ts';
+
+      const sentMessages: Array<{ method: string }> = [];
+      const connection = {
+        send: vi.fn((message: { method: string }) => {
+          sentMessages.push({ method: message.method });
+        }),
+      };
+
+      // TextDocumentSyncKind.Full (1)
+      const handle = {
+        config: { name: 'clangd', languages: ['cpp'] },
+        status: 'READY' as const,
+        connection,
+        serverCapabilities: {
+          textDocumentSync: 1, // TextDocumentSyncKind.Full
+        },
+      };
+
+      const serverManager = {
+        getHandles: () => new Map([['clangd', handle]]),
+      };
+
+      const service = new NativeLspService(
+        mockConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+      );
+      (service as unknown as { serverManager: unknown }).serverManager =
+        serverManager;
+
+      await service.notifyDocumentSaved(uri);
+
+      expect(connection.send).toHaveBeenCalledTimes(1);
+      expect(sentMessages[0].method).toBe('textDocument/didSave');
+    });
+
+    test('should send didSave when save capability is true (boolean)', async () => {
+      const uri = 'file:///test/workspace/test.ts';
+
+      const sentMessages: Array<{ method: string }> = [];
+      const connection = {
+        send: vi.fn((message: { method: string }) => {
+          sentMessages.push({ method: message.method });
+        }),
+      };
+
+      const handle = {
+        config: { name: 'pyright', languages: ['python'] },
+        status: 'READY' as const,
+        connection,
+        serverCapabilities: {
+          textDocumentSync: { save: true },
+        },
+      };
+
+      const serverManager = {
+        getHandles: () => new Map([['pyright', handle]]),
+      };
+
+      const service = new NativeLspService(
+        mockConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+      );
+      (service as unknown as { serverManager: unknown }).serverManager =
+        serverManager;
+
+      await service.notifyDocumentSaved(uri);
+
+      expect(connection.send).toHaveBeenCalledTimes(1);
+      expect(sentMessages[0].method).toBe('textDocument/didSave');
+    });
+
+    test('should send didSave to specific server when serverName is provided', async () => {
+      const uri = 'file:///test/workspace/test.ts';
+
+      const server1Sent: Array<{ method: string }> = [];
+      const server2Sent: Array<{ method: string }> = [];
+
+      const connection1 = {
+        send: vi.fn((message: { method: string }) => {
+          server1Sent.push({ method: message.method });
+        }),
+      };
+      const connection2 = {
+        send: vi.fn((message: { method: string }) => {
+          server2Sent.push({ method: message.method });
+        }),
+      };
+
+      const handle1 = {
+        config: { name: 'server1', languages: ['typescript'] },
+        status: 'READY' as const,
+        connection: connection1,
+        serverCapabilities: { textDocumentSync: { save: true } },
+      };
+      const handle2 = {
+        config: { name: 'server2', languages: ['python'] },
+        status: 'READY' as const,
+        connection: connection2,
+        serverCapabilities: { textDocumentSync: { save: true } },
+      };
+
+      const serverManager = {
+        getHandles: () =>
+          new Map([
+            ['server1', handle1],
+            ['server2', handle2],
+          ]),
+      };
+
+      const service = new NativeLspService(
+        mockConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+      );
+      (service as unknown as { serverManager: unknown }).serverManager =
+        serverManager;
+
+      // Only notify server1
+      await service.notifyDocumentSaved(uri, 'server1');
+
+      expect(connection1.send).toHaveBeenCalledTimes(1);
+      expect(connection2.send).not.toHaveBeenCalled();
+      expect(server1Sent[0].method).toBe('textDocument/didSave');
+    });
+
+    test('should handle connection errors gracefully', async () => {
+      const uri = 'file:///test/workspace/test.ts';
+
+      const connection = {
+        send: vi.fn(() => {
+          throw new Error('Connection failed');
+        }),
+      };
+
+      const handle = {
+        config: { name: 'error-server', languages: ['typescript'] },
+        status: 'READY' as const,
+        connection,
+        serverCapabilities: { textDocumentSync: { save: true } },
+      };
+
+      const serverManager = {
+        getHandles: () => new Map([['error-server', handle]]),
+      };
+
+      const service = new NativeLspService(
+        mockConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+      );
+      (service as unknown as { serverManager: unknown }).serverManager =
+        serverManager;
+
+      // Should not throw
+      await expect(service.notifyDocumentSaved(uri)).resolves.toBeUndefined();
+      expect(connection.send).toHaveBeenCalledTimes(1);
+    });
+  });
 });

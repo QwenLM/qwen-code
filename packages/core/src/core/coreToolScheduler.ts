@@ -18,6 +18,7 @@ import type {
   AnyToolInvocation,
   ChatRecordingService,
 } from '../index.js';
+import { pathToFileURL } from 'url';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   generateToolUseId,
@@ -1365,7 +1366,7 @@ export class CoreToolScheduler {
     const scheduledCall = toolCall;
     const { callId, name: toolName } = scheduledCall.request;
     const invocation = scheduledCall.invocation;
-    const toolInput = scheduledCall.request.args as Record<string, unknown>;
+    const toolInput = scheduledCall.request.args;
 
     // Generate unique tool_use_id for hook tracking
     const toolUseId = generateToolUseId();
@@ -1517,6 +1518,19 @@ export class CoreToolScheduler {
             );
             this.setStatusInternal(callId, 'error', errorResponse);
             return;
+          }
+        }
+
+        // Notify LSP servers if this was a file edit operation
+        // Goes after hooks because hook may modify the content too.
+        if (scheduledCall.tool.kind === Kind.Edit) {
+          const filePath = toolInput['file_path'] as string | undefined;
+          if (filePath && typeof filePath === 'string') {
+            const uri = pathToFileURL(filePath).toString();
+            const lspClient = this.config.getLspClient();
+            if (lspClient) {
+              await lspClient.notifyDocumentSaved(uri);
+            }
           }
         }
 
