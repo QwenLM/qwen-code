@@ -35,6 +35,9 @@ const PROGRESS_CLEAR = wrapForMultiplexer(`${OSC}9;4;0;${BEL}`);
 const PROGRESS_INDETERMINATE = wrapForMultiplexer(`${OSC}9;4;3;;${BEL}`);
 
 function isProgressBarSupported(): boolean {
+  // Don't emit escape sequences when stdout is not a TTY (CI, piped output,
+  // redirected to log files, etc.)
+  if (!process.stdout?.isTTY) return false;
   const term = process.env['TERM_PROGRAM'];
   if (term === 'iTerm.app') return true;
   if (term === 'ghostty') return true;
@@ -72,7 +75,10 @@ export function useTerminalProgress(
     }
 
     return () => {
-      writeProgress(PROGRESS_CLEAR);
+      // Only clear if we actually wrote sequences (i.e., terminal supports it)
+      if (isProgressBarSupported()) {
+        writeProgress(PROGRESS_CLEAR);
+      }
     };
   }, [streamingState, hasToolExecuting, writeProgress]);
 }
