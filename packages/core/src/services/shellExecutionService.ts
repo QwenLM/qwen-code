@@ -198,12 +198,16 @@ const getErrorMessage = (error: unknown): string =>
 
 const isExpectedPtyReadExitError = (error: unknown): boolean => {
   const code = getErrnoCode(error);
-  if (code === 'EIO') {
+  if (code === 'EIO' || code === 'EINTR' || code === 'ENODEV') {
     return true;
   }
 
   const message = getErrorMessage(error);
-  return message.includes('read EIO');
+  return (
+    message.includes('read EIO') ||
+    message.includes('read EINTR') ||
+    message.includes('pty')
+  );
 };
 
 const isExpectedPtyExitRaceError = (error: unknown): boolean => {
@@ -622,7 +626,7 @@ export class ShellExecutionService {
         let decoder: TextDecoder | null = null;
         let output: string | AnsiOutput | null = null;
         const outputChunks: Buffer[] = [];
-        const error: Error | null = null;
+        let error: Error | null = null;
         let exited = false;
 
         let isStreamingRawContent = true;
@@ -812,8 +816,30 @@ export class ShellExecutionService {
             return;
           }
 
-          // Surface unexpected PTY errors to preserve existing crash behavior.
-          throw err;
+          // Store the error and trigger exit handling.
+          // Throwing from an async event callback causes uncaught exception.
+          error = err;
+          if (!exited) {
+            exited = true;
+            abortSignal.removeEventListener('abort', abortHandler);
+            this.activePtys.delete(ptyProcess.pid);
+            try {
+              ptyProcess.kill();
+            } catch {
+              // PTY may already be dead
+            }
+            resolve({
+              rawOutput: Buffer.concat(outputChunks),
+              output: '',
+              exitCode: 1,
+              signal: null,
+              error,
+              aborted: abortSignal.aborted,
+              pid: ptyProcess.pid,
+              executionMethod:
+                (ptyInfo?.name as 'node-pty' | 'lydell-node-pty') ?? 'node-pty',
+            });
+          }
         });
 
         ptyProcess.onExit(

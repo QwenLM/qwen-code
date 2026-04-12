@@ -423,7 +423,7 @@ describe('ShellExecutionService', () => {
       expect(result.exitCode).toBe(0);
     });
 
-    it('should throw unexpected PTY errors from error event', async () => {
+    it('should capture unexpected PTY errors in result instead of throwing', async () => {
       const abortController = new AbortController();
       const handle = await ShellExecutionService.execute(
         'ls -l',
@@ -435,15 +435,15 @@ describe('ShellExecutionService', () => {
       );
       await new Promise((resolve) => process.nextTick(resolve));
 
-      const unexpectedError = Object.assign(new Error('unexpected pty error'), {
+      const unexpectedError = Object.assign(new Error('connection broken'), {
         code: 'EPIPE',
       });
-      expect(() => mockPtyProcess.emit('error', unexpectedError)).toThrow(
-        'unexpected pty error',
-      );
+      // Should not throw — error is captured in result instead
+      expect(() => mockPtyProcess.emit('error', unexpectedError)).not.toThrow();
 
-      mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      await handle.result;
+      const result = await handle.result;
+      expect(result.error).toBe(unexpectedError);
+      expect(result.exitCode).toBe(1);
     });
 
     it('should ignore ioctl EBADF message-only resize race errors', async () => {
