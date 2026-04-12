@@ -86,7 +86,7 @@ describe('renameCommand', () => {
   });
 
   it('should rename via ChatRecordingService when available', async () => {
-    const mockRecordCustomTitle = vi.fn();
+    const mockRecordCustomTitle = vi.fn().mockReturnValue(true);
     const mockConfig = {
       getChatRecordingService: vi.fn().mockReturnValue({
         recordCustomTitle: mockRecordCustomTitle,

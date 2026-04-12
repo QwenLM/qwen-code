@@ -469,8 +469,10 @@ export class ChatRecordingService {
    * Records a custom title for the session (set via /rename).
    * Appended as a system record so it persists with the session data.
    * Also caches the title in memory for re-append on shutdown.
+   *
+   * @returns true if the record was written successfully, false on I/O error.
    */
-  recordCustomTitle(customTitle: string): void {
+  recordCustomTitle(customTitle: string): boolean {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -481,8 +483,10 @@ export class ChatRecordingService {
 
       this.appendRecord(record);
       this.currentCustomTitle = customTitle;
+      return true;
     } catch (error) {
       debugLogger.error('Error saving custom title record:', error);
+      return false;
     }
   }
 

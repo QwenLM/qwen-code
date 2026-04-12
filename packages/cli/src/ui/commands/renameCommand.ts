@@ -6,12 +6,15 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { getResponseText } from '@qwen-code/qwen-code-core';
+import {
+  getResponseText,
+  SESSION_TITLE_MAX_LENGTH,
+} from '@qwen-code/qwen-code-core';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 
-const MAX_TITLE_LENGTH = 200;
+const MAX_TITLE_LENGTH = SESSION_TITLE_MAX_LENGTH;
 
 /**
  * Extracts a short text summary from conversation history for title generation.
@@ -76,7 +79,7 @@ async function generateSessionTitle(
     if (!text) {
       return null;
     }
-    // Clean up: take first line, remove quotes/backticks, enforce kebab-case-ish
+    // Clean up: take first line, remove quotes/backticks
     const cleaned = text.split('\n')[0].replace(/["`']/g, '').trim();
     return cleaned.length > 0 && cleaned.length <= MAX_TITLE_LENGTH
       ? cleaned
@@ -136,7 +139,14 @@ export const renameCommand: SlashCommand = {
     // Record the custom title in the current session's JSONL file
     const chatRecordingService = config.getChatRecordingService();
     if (chatRecordingService) {
-      chatRecordingService.recordCustomTitle(name);
+      const ok = chatRecordingService.recordCustomTitle(name);
+      if (!ok) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Failed to rename session.'),
+        };
+      }
     } else {
       // Fallback: write via SessionService for non-recording sessions
       const sessionId = config.getSessionId();

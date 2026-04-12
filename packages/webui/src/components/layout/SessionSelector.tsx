@@ -194,7 +194,7 @@ export const SessionSelector: FC<SessionSelectorProps> = ({
                           <input
                             ref={renameInputRef}
                             type="text"
-                            maxLength={200}
+                            maxLength={200} // SESSION_TITLE_MAX_LENGTH
                             className="flex-1 bg-[var(--vscode-input-background,var(--app-input-background))] text-[var(--vscode-input-foreground,var(--app-primary-foreground))] border-2 border-[var(--vscode-focusBorder)] rounded px-2 py-1 text-[var(--vscode-chat-font-size,13px)] font-[var(--vscode-chat-font-family)] outline-none min-w-0 shadow-[0_0_0_1px_var(--vscode-focusBorder)]"
                             value={renameValue}
                             onChange={(e) => setRenameValue(e.target.value)}

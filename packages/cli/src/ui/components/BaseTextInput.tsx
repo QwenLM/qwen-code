@@ -70,7 +70,6 @@ export interface BaseTextInputProps {
   prefix?: React.ReactNode;
   /** Border color for the input box. */
   borderColor?: string;
-  /** Label overlaid on the top border (right-aligned). */
   /** Label rendered on the top border line (right-aligned). Plain string for width calculation. */
   topRightLabel?: string;
   /** Whether keyboard handling is active. Defaults to true. */

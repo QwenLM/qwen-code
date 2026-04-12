@@ -113,6 +113,12 @@ export interface ResumedSessionData {
 const MAX_FILES_TO_PROCESS = 10000;
 
 /**
+ * Maximum character length for a session custom title.
+ * Shared across CLI, WebUI, VSCode, and ACP.
+ */
+export const SESSION_TITLE_MAX_LENGTH = 200;
+
+/**
  * Pattern for validating session file names.
  * Session files are named as `${sessionId}.jsonl` where sessionId is a UUID-like identifier
  * (32-36 hex characters, optionally with hyphens).

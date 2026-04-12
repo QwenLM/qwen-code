@@ -1057,6 +1057,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         });
         return;
       }
+      // Matches SESSION_TITLE_MAX_LENGTH from @qwen-code/qwen-code-core/sessionService
       if (trimmedTitle.length > 200) {
         this.sendToWebView({
           type: 'error',

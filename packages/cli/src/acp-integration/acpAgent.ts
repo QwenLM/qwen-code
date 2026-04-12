@@ -14,6 +14,7 @@ import {
   qwenOAuth2Events,
   MCPServerConfig,
   SessionService,
+  SESSION_TITLE_MAX_LENGTH,
   tokenLimit,
   type Config,
   type ConversationRecord,
@@ -405,6 +406,12 @@ class QwenAgent implements Agent {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing title',
+          );
+        }
+        if (title.length > SESSION_TITLE_MAX_LENGTH) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Title too long (max ${SESSION_TITLE_MAX_LENGTH} chars)`,
           );
         }
         const success = await runWithAcpRuntimeOutputDir(

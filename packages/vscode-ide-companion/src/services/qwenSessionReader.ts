@@ -10,6 +10,7 @@ import * as os from 'os';
 import * as readline from 'readline';
 import * as crypto from 'crypto';
 import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
+import { getGitBranch } from '@qwen-code/qwen-code-core/src/utils/gitUtils.js';
 
 export interface QwenMessage {
   id: string;
@@ -437,6 +438,7 @@ export class QwenSessionReader {
       // chained into the parent history (reconstructHistory walks from tail).
       const lastUuid = this.readLastRecordUuid(session.filePath);
 
+      const cwd = session.cwd || workingDir;
       const record = JSON.stringify({
         uuid: crypto.randomUUID(),
         parentUuid: lastUuid,
@@ -444,8 +446,9 @@ export class QwenSessionReader {
         timestamp: new Date().toISOString(),
         type: 'system',
         subtype: 'custom_title',
-        cwd: session.cwd || workingDir,
+        cwd,
         version: 'vscode',
+        gitBranch: getGitBranch(cwd),
         systemPayload: { customTitle: title },
       });
 
