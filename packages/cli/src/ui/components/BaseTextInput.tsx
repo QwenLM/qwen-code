@@ -27,6 +27,7 @@ import type { TextBuffer } from './shared/text-buffer.js';
 import type { Key } from '../hooks/useKeypress.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
+import stringWidth from 'string-width';
 import { cpSlice, cpLen } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
 
@@ -247,7 +248,7 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
   const columns = process.stdout.columns || 80;
   // Build the top border line: ─────── label ──
   // Label takes: 1 space + text + 1 space + 2 trailing dashes = label.length + 4
-  const labelWidth = topRightLabel ? topRightLabel.length + 4 : 0;
+  const labelWidth = topRightLabel ? stringWidth(topRightLabel) + 4 : 0;
   const dashCount = Math.max(1, columns - labelWidth);
   const topBorderLine = topRightLabel
     ? `${'─'.repeat(dashCount)} ${topRightLabel} ${'─'.repeat(2)}`
