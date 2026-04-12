@@ -33,7 +33,7 @@ on:
         type: 'boolean'
         default: false
       force_skip_tests:
-        description: 'Select to skip the "Run Tests" step in testing. Prod releases should run tests'
+        description: 'Skip the release validation jobs ("quality", "integration_none", and "integration_docker"), allowing publish to proceed without them. Prod releases should run validation.'
         required: false
         type: 'boolean'
         default: false
@@ -419,7 +419,10 @@ jobs:
     if: |-
       ${{
         always() &&
-        needs.prepare.outputs.is_dry_run == 'false' &&
+        (
+          github.event_name == 'schedule' ||
+          github.event.inputs.dry_run != 'true'
+        ) &&
         (
           needs.prepare.result == 'failure' ||
           needs.quality.result == 'failure' ||
@@ -436,7 +439,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           GH_REPO: '${{ github.repository }}'
-          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag || ''N/A'' }}'
+          RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           gh issue create \
