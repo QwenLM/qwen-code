@@ -181,7 +181,7 @@ export const APPROVAL_MODE_INFO: Record<ApprovalMode, ApprovalModeInfo> = {
   [ApprovalMode.YOLO]: {
     id: ApprovalMode.YOLO,
     name: 'YOLO',
-    description: 'Automatically approve all tools',
+    description: 'Automatically approve tools except dangerous shell commands',
   },
 };
 

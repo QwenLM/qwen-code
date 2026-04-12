@@ -274,6 +274,19 @@ export const DANGEROUS_ROOT_COMMANDS: ReadonlySet<string> = new Set([
 
 const ENV_ASSIGNMENT_REGEX = /^[A-Za-z_][A-Za-z0-9_]*=/;
 
+/** Windows executable suffixes to strip before matching. */
+const WIN_EXE_SUFFIXES = ['.exe', '.cmd', '.bat', '.com'];
+
+/** Strip Windows executable suffix from a lowercased basename. */
+function stripExeSuffix(name: string): string {
+  for (const suffix of WIN_EXE_SUFFIXES) {
+    if (name.endsWith(suffix)) {
+      return name.slice(0, -suffix.length);
+    }
+  }
+  return name;
+}
+
 /**
  * Commands that act as transparent wrappers — the real command follows
  * after wrapper-specific arguments.  We skip these and inspect the
@@ -333,13 +346,20 @@ function normaliseBinName(basename: string): string {
   }
 
   // Also try stripping a trailing bare digit run: `python3` → `python`
-  const noDigitSuffix = name.replace(/\d+$/, '');
-  if (
-    noDigitSuffix &&
-    noDigitSuffix !== name &&
-    DANGEROUS_ROOT_COMMANDS.has(noDigitSuffix)
+  // Uses manual scan instead of /\d+$/ to avoid CodeQL polynomial-redos.
+  let digitStart = name.length;
+  while (
+    digitStart > 0 &&
+    name[digitStart - 1]! >= '0' &&
+    name[digitStart - 1]! <= '9'
   ) {
-    return noDigitSuffix;
+    digitStart--;
+  }
+  if (digitStart > 0 && digitStart < name.length) {
+    const noDigitSuffix = name.substring(0, digitStart);
+    if (DANGEROUS_ROOT_COMMANDS.has(noDigitSuffix)) {
+      return noDigitSuffix;
+    }
   }
 
   return basename;
@@ -374,11 +394,14 @@ function extractRootCommand(segment: string): string | undefined {
     return undefined;
   }
 
-  // Take the basename of the token (handles /usr/bin/python3).
+  // Take the basename of the token (handles /usr/bin/python3 and C:\python3.exe).
   const raw = tokens[idx]!;
-  let basename = (
-    raw.includes('/') ? raw.split('/').pop()! : raw
-  ).toLowerCase();
+  let basename = stripExeSuffix(
+    (raw.includes('/') || raw.includes('\\')
+      ? raw.split(/[/\\]/).pop()!
+      : raw
+    ).toLowerCase(),
+  );
 
   // Skip transparent wrappers — inspect their effective command argument.
   // e.g. `env python3 …`, `env VAR=val python3 …`, `command -v python3`
@@ -395,9 +418,12 @@ function extractRootCommand(segment: string): string | undefined {
       return basename; // wrapper with no command argument → return wrapper itself
     }
     const nextRaw = tokens[idx]!;
-    basename = (
-      nextRaw.includes('/') ? nextRaw.split('/').pop()! : nextRaw
-    ).toLowerCase();
+    basename = stripExeSuffix(
+      (nextRaw.includes('/') || nextRaw.includes('\\')
+        ? nextRaw.split(/[/\\]/).pop()!
+        : nextRaw
+      ).toLowerCase(),
+    );
   }
 
   return normaliseBinName(basename);

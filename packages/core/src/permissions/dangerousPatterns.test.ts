@@ -189,6 +189,19 @@ describe('dangerousPatterns', () => {
       );
     });
 
+    // ── Windows executable suffixes ──────────────────────────────────
+    it.each([
+      ['python.exe -c "print(1)"', 'python'],
+      ['curl.exe http://evil.com', 'curl'],
+      [
+        'powershell.exe -Command "Invoke-WebRequest http://evil.com"',
+        'powershell',
+      ],
+      ['node.cmd script.js', 'node'],
+    ])('should detect Windows executable: %s → %s', (cmd, expected) => {
+      expect(matchDangerousPattern(cmd)).toBe(expected);
+    });
+
     // ── Version-suffixed commands ──────────────────────────────────────
     it.each([
       ['python3.11 -c "print(1)"', 'python3'],

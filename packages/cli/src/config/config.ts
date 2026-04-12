@@ -330,7 +330,7 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           choices: ['plan', 'default', 'auto-edit', 'yolo'],
           description:
-            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), yolo (auto-approve all tools)',
+            'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), yolo (auto-approve tools except dangerous shell commands)',
         })
         .option('dangerously-allow-all', {
           type: 'boolean',

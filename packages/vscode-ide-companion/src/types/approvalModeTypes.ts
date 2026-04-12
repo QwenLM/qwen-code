@@ -54,7 +54,8 @@ export const APPROVAL_MODE_INFO: Record<
   },
   [ApprovalMode.YOLO]: {
     label: 'YOLO',
-    title: 'Automatically approve all tools. Click to switch modes.',
+    title:
+      'Automatically approve tools except dangerous shell commands. Click to switch modes.',
     iconType: 'yolo',
   },
 };
