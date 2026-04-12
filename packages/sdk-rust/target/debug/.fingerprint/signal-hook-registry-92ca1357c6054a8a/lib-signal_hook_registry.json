@@ -1,0 +1,23 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[]",
+  "declared_features": "[]",
+  "target": 17877812014956321412,
+  "profile": 15937477380097664331,
+  "path": 1661419420080001642,
+  "deps": [
+    [3666973139609465052, "errno", false, 9508681051050770101],
+    [12111499963430175700, "libc", false, 12149961767603389071]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/signal-hook-registry-92ca1357c6054a8a/dep-lib-signal_hook_registry",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

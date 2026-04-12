@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"const_generics\"]",
+  "declared_features": "[\"arbitrary\", \"bincode\", \"const_generics\", \"const_new\", \"debugger_visualizer\", \"drain_filter\", \"drain_keep_rest\", \"impl_bincode\", \"malloc_size_of\", \"may_dangle\", \"serde\", \"specialization\", \"union\", \"unty\", \"write\"]",
+  "target": 9091769176333489034,
+  "profile": 11096710085073448781,
+  "path": 18076863751306239903,
+  "deps": [],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/smallvec-91ea2f5a4fb2f2a5/dep-lib-smallvec",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

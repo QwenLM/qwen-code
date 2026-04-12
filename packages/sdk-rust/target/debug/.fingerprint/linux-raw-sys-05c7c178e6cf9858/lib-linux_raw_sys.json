@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"auxvec\", \"elf\", \"errno\", \"general\", \"ioctl\", \"no_std\"]",
+  "declared_features": "[\"auxvec\", \"bootparam\", \"btrfs\", \"core\", \"default\", \"elf\", \"elf_uapi\", \"errno\", \"general\", \"if_arp\", \"if_ether\", \"if_packet\", \"if_tun\", \"image\", \"io_uring\", \"ioctl\", \"landlock\", \"loop_device\", \"mempolicy\", \"net\", \"netlink\", \"no_std\", \"prctl\", \"ptrace\", \"rustc-dep-of-std\", \"std\", \"system\", \"vm_sockets\", \"xdp\"]",
+  "target": 5772965225213482929,
+  "profile": 2362418436085470895,
+  "path": 6477182626675776452,
+  "deps": [],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/linux-raw-sys-05c7c178e6cf9858/dep-lib-linux_raw_sys",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

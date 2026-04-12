@@ -1,0 +1,23 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"default\", \"std\"]",
+  "declared_features": "[\"default\", \"std\"]",
+  "target": 13586076721141200315,
+  "profile": 11096710085073448781,
+  "path": 11373592070436487974,
+  "deps": [
+    [2448563160050429386, "build_script_build", false, 1905935733721302989],
+    [10353313219209519794, "thiserror_impl", false, 4725419732400198694]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/thiserror-8f64e90b82526020/dep-lib-thiserror",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

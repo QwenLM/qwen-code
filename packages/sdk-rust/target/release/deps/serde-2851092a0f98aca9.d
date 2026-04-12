@@ -1,0 +1,14 @@
+/home/euxaristia/Projects/qwen-code/packages/sdk-rust/target/release/deps/serde-2851092a0f98aca9.d: /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/euxaristia/Projects/qwen-code/packages/sdk-rust/target/release/build/serde-61714260f89fc6a2/out/private.rs
+
+/home/euxaristia/Projects/qwen-code/packages/sdk-rust/target/release/deps/libserde-2851092a0f98aca9.rlib: /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/euxaristia/Projects/qwen-code/packages/sdk-rust/target/release/build/serde-61714260f89fc6a2/out/private.rs
+
+/home/euxaristia/Projects/qwen-code/packages/sdk-rust/target/release/deps/libserde-2851092a0f98aca9.rmeta: /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs /home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs /home/euxaristia/Projects/qwen-code/packages/sdk-rust/target/release/build/serde-61714260f89fc6a2/out/private.rs
+
+/home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/lib.rs:
+/home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/integer128.rs:
+/home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/mod.rs:
+/home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/de.rs:
+/home/euxaristia/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.228/src/private/ser.rs:
+/home/euxaristia/Projects/qwen-code/packages/sdk-rust/target/release/build/serde-61714260f89fc6a2/out/private.rs:
+
+# env-dep:OUT_DIR=/home/euxaristia/Projects/qwen-code/packages/sdk-rust/target/release/build/serde-61714260f89fc6a2/out

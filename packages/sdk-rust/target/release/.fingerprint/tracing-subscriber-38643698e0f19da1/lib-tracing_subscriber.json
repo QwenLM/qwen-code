@@ -1,0 +1,31 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"alloc\", \"ansi\", \"default\", \"env-filter\", \"fmt\", \"matchers\", \"nu-ansi-term\", \"once_cell\", \"registry\", \"sharded-slab\", \"smallvec\", \"std\", \"thread_local\", \"tracing\", \"tracing-log\"]",
+  "declared_features": "[\"alloc\", \"ansi\", \"chrono\", \"default\", \"env-filter\", \"fmt\", \"json\", \"local-time\", \"matchers\", \"nu-ansi-term\", \"once_cell\", \"parking_lot\", \"regex\", \"registry\", \"serde\", \"serde_json\", \"sharded-slab\", \"smallvec\", \"std\", \"thread_local\", \"time\", \"tracing\", \"tracing-log\", \"tracing-serde\", \"valuable\", \"valuable-serde\", \"valuable_crate\"]",
+  "target": 4817557058868189149,
+  "profile": 15570067083837110542,
+  "path": 6813850136936640826,
+  "deps": [
+    [1017461770342116999, "sharded_slab", false, 4399798163954387660],
+    [1359731229228270592, "thread_local", false, 3757176901517938670],
+    [3621165330500844947, "regex_automata", false, 1992634451581628385],
+    [3666196340704888985, "smallvec", false, 9886172731017143653],
+    [5599393681448432053, "nu_ansi_term", false, 11457468885729453],
+    [5855319743879205494, "once_cell", false, 15485930673199211900],
+    [10806489435541507125, "tracing_log", false, 17997664787683477622],
+    [14757622794040968908, "tracing", false, 15865870630489934222],
+    [16023452927926505185, "tracing_core", false, 12588881527095165006],
+    [18218885586351977002, "matchers", false, 10571658800042196497]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/tracing-subscriber-38643698e0f19da1/dep-lib-tracing_subscriber",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

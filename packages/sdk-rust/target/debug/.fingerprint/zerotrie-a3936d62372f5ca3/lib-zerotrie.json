@@ -1,0 +1,24 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"yoke\", \"zerofrom\"]",
+  "declared_features": "[\"alloc\", \"databake\", \"default\", \"dense\", \"litemap\", \"serde\", \"yoke\", \"zerofrom\", \"zerovec\"]",
+  "target": 12445875338185814621,
+  "profile": 14690156640775457501,
+  "path": 15291133378080860175,
+  "deps": [
+    [5298260564258778412, "displaydoc", false, 15099380854204061362],
+    [11416707103264493240, "yoke", false, 5124458939437869545],
+    [12771427830955461916, "zerofrom", false, 15259116955930854787]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/zerotrie-a3936d62372f5ca3/dep-lib-zerotrie",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"default\", \"once_cell\", \"std\"]",
+  "declared_features": "[\"default\", \"once_cell\", \"std\", \"valuable\"]",
+  "target": 14276081467424924844,
+  "profile": 11153085890024916055,
+  "path": 12125238075378906771,
+  "deps": [[5855319743879205494, "once_cell", false, 16029078125582927596]],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/tracing-core-dee900889a15b285/dep-lib-tracing_core",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

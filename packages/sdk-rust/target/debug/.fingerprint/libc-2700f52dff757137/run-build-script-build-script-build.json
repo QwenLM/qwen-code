@@ -1,0 +1,52 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "",
+  "declared_features": "",
+  "target": 0,
+  "profile": 0,
+  "path": 0,
+  "deps": [
+    [12111499963430175700, "build_script_build", false, 443038447768941688]
+  ],
+  "local": [
+    {
+      "RerunIfChanged": {
+        "output": "debug/build/libc-2700f52dff757137/output",
+        "paths": ["build.rs"]
+      }
+    },
+    {
+      "RerunIfEnvChanged": {
+        "var": "RUST_LIBC_UNSTABLE_FREEBSD_VERSION",
+        "val": null
+      }
+    },
+    {
+      "RerunIfEnvChanged": {
+        "var": "RUST_LIBC_UNSTABLE_MUSL_V1_2_3",
+        "val": null
+      }
+    },
+    {
+      "RerunIfEnvChanged": {
+        "var": "RUST_LIBC_UNSTABLE_LINUX_TIME_BITS64",
+        "val": null
+      }
+    },
+    {
+      "RerunIfEnvChanged": {
+        "var": "RUST_LIBC_UNSTABLE_GNU_FILE_OFFSET_BITS",
+        "val": null
+      }
+    },
+    {
+      "RerunIfEnvChanged": {
+        "var": "RUST_LIBC_UNSTABLE_GNU_TIME_BITS",
+        "val": null
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 0,
+  "compile_kind": 0
+}

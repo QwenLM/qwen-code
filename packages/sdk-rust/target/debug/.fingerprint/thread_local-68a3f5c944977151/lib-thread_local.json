@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[]",
+  "declared_features": "[\"nightly\"]",
+  "target": 4721033718741301145,
+  "profile": 17799211994809287645,
+  "path": 9832262735376481852,
+  "deps": [[7667230146095136825, "cfg_if", false, 4671268645462238215]],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/thread_local-68a3f5c944977151/dep-lib-thread_local",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

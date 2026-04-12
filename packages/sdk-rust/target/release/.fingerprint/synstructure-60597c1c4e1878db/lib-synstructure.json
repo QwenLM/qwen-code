@@ -1,0 +1,24 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"default\", \"proc-macro\"]",
+  "declared_features": "[\"default\", \"proc-macro\"]",
+  "target": 14291004384071580589,
+  "profile": 7823001198215926889,
+  "path": 5432934962442218335,
+  "deps": [
+    [4289358735036141001, "proc_macro2", false, 8278327954979409204],
+    [10420560437213941093, "syn", false, 4531571975807302754],
+    [13111758008314797071, "quote", false, 6034342660974617721]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/synstructure-60597c1c4e1878db/dep-lib-synstructure",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

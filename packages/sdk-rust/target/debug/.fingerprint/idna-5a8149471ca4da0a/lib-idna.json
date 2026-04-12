@@ -1,0 +1,24 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"alloc\", \"compiled_data\", \"std\"]",
+  "declared_features": "[\"alloc\", \"compiled_data\", \"default\", \"std\"]",
+  "target": 2602963282308965300,
+  "profile": 17799211994809287645,
+  "path": 4372646665360525404,
+  "deps": [
+    [3666196340704888985, "smallvec", false, 5465283211564793462],
+    [5078124415930854154, "utf8_iter", false, 12095683561631912867],
+    [15512052560677395824, "idna_adapter", false, 7297448112333884565]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/idna-5a8149471ca4da0a/dep-lib-idna",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}
