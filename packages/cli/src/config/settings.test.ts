@@ -524,6 +524,8 @@ describe('Settings Loading and Merging', () => {
       expect(getSettingsWarnings(settings)).toEqual(
         expect.arrayContaining([
           expect.stringContaining("defines an empty 'modelProviders' object"),
+          expect.stringContaining('has no effect with current merge behavior'),
+          expect.stringContaining('may indicate a configuration error'),
         ]),
       );
     });

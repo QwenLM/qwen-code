@@ -20,6 +20,7 @@ import stripJsonComments from 'strip-json-comments';
 import { DefaultLight } from '../ui/themes/default-light.js';
 import { DefaultDark } from '../ui/themes/default.js';
 import { isWorkspaceTrusted } from './trustedFolders.js';
+import { hasOwnModelProviders } from './modelProvidersScope.js';
 import {
   type Settings,
   type MemoryImportFormat,
@@ -253,12 +254,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function hasOwnModelProviders(
-  settingsObj: Record<string, unknown>,
-): boolean {
-  return Object.prototype.hasOwnProperty.call(settingsObj, 'modelProviders');
-}
-
 function hasAnyProviderEntries(modelProviders: unknown): boolean {
   if (!isPlainObject(modelProviders)) {
     return false;
@@ -301,7 +296,8 @@ function getModelProvidersOverrideWarnings(
 
   return [
     `Warning: '${loadedSettings.workspace.path}' defines an empty 'modelProviders' object. ` +
-      `Because 'modelProviders' uses REPLACE merge strategy, this overrides user-level model providers in '${loadedSettings.user.path}' for this project.`,
+      `This has no effect with current merge behavior, but may indicate a configuration error. ` +
+      `If REPLACE semantics are introduced for 'modelProviders' in the future, this would override user-level model providers in '${loadedSettings.user.path}'.`,
   ];
 }
 
