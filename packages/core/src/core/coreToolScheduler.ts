@@ -1045,6 +1045,8 @@ export class CoreToolScheduler {
               confirmationDetails,
               reqInfo.callId,
               signal,
+            ).catch((err) =>
+              debugLogger.error(`IDE confirmation handling failed: ${err}`),
             );
 
             const originalOnConfirm = confirmationDetails.onConfirm;

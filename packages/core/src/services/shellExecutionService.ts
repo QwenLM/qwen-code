@@ -844,6 +844,10 @@ export class ShellExecutionService {
 
         ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
+            // If the error handler already resolved, skip redundant cleanup.
+            if (error) {
+              return;
+            }
             exited = true;
             abortSignal.removeEventListener('abort', abortHandler);
             this.activePtys.delete(ptyProcess.pid);
