@@ -47,7 +47,8 @@ export interface ReadFileToolParams {
 
   /**
    * For PDF files, the page range to extract as text (e.g. "1-5", "3", "10-20").
-   * Pages are 1-indexed. Max 20 pages per request.
+   * Pages are 1-indexed. Max 20 pages per request. Open-ended ranges like "3-"
+   * are not supported.
    */
   pages?: string;
 }
@@ -206,7 +207,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
           },
           pages: {
             description:
-              "Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max 20 pages per request. When provided, PDF content is extracted as text regardless of model capabilities.",
+              "Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max 20 pages per request. Open-ended ranges like '3-' are not supported. When provided, PDF content is extracted as text regardless of model capabilities.",
             type: 'string',
           },
         },
@@ -238,13 +239,13 @@ export class ReadFileTool extends BaseDeclarativeTool<
     if (params.pages !== undefined) {
       const parsed = parsePDFPageRange(params.pages);
       if (!parsed) {
-        return `Invalid pages parameter: '${params.pages}'. Use formats like '5', '1-10', or '3-'.`;
+        return `Invalid pages parameter: '${params.pages}'. Use formats like '5' or '1-10'.`;
+      }
+      if (parsed.lastPage === Infinity) {
+        return `Open-ended page ranges (e.g. '3-') are not supported; specify an explicit end page within the 20-page limit (e.g. '3-22').`;
       }
       const maxPages = 20;
-      if (
-        parsed.lastPage !== Infinity &&
-        parsed.lastPage - parsed.firstPage + 1 > maxPages
-      ) {
+      if (parsed.lastPage - parsed.firstPage + 1 > maxPages) {
         return `Pages range exceeds maximum of ${maxPages} pages per request.`;
       }
     }

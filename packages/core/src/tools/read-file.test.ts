@@ -464,6 +464,14 @@ describe('ReadFileTool', () => {
       );
     });
 
+    it('should reject open-ended pages range', () => {
+      const params: ReadFileToolParams = {
+        file_path: '/tmp/test.pdf',
+        pages: '3-',
+      };
+      expect(() => tool.build(params)).toThrow('Open-ended page ranges');
+    });
+
     it('should accept valid pages parameter', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(tempRootDir, 'test.pdf'),
