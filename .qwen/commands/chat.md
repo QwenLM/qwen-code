@@ -30,8 +30,14 @@ Split "{{args}}" by spaces. The first token is the flag, the rest is the session
      - Warn the user: 'Session "{{name}}" already exists. Do you want to overwrite it? (yes/no)'
      - **Do NOT proceed without explicit "yes" confirmation.** If user says anything other than "yes", stop and confirm cancellation.
    - **If the name does NOT exist in the index:** Proceed directly to save without asking for confirmation.
-   - Find most recent `.jsonl` file in `.qwen/projects/<project-hash>/chats/` to get real session ID
-   - Write to index: `"{{name}}": "sessionId"` (ensure `.qwen` directory exists first, format JSON with 2-space indent)
+   - **Get the current session ID:**
+     - Check if `.qwen/projects/` directory exists
+     - If it exists, scan for the project hash subdirectory and find the most recent `.jsonl` file in `chats/`
+     - The filename (without `.jsonl`) IS the session ID (UUID format)
+     - **If `.qwen/projects/` does NOT exist or no `.jsonl` files found:**
+       - Generate a new UUID (format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+       - Tell the user: "Note: Could not detect active session file. Generated a new session ID. If you're using an older session format, this reference may not be resolvable."
+   - Write to index: `"{{name}}": "<actual-session-id>"` (ensure `.qwen` directory exists first, format JSON with 2-space indent)
    - If new: Confirm: `Saved: {{name}} -> <sessionId>`
    - If overwrite: Confirm: `Overwritten: {{name}} -> <sessionId>`
 
