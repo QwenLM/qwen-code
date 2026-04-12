@@ -75,7 +75,7 @@ import { getErrorMessage } from '../utils/errors.js';
 import { checkNextSpeaker } from '../utils/nextSpeakerChecker.js';
 import { flatMapTextParts } from '../utils/partUtils.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
-import { retryWithBackoff } from '../utils/retry.js';
+import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
 
 // Hook types and utilities
 import {
@@ -962,6 +962,8 @@ export class GeminiClient {
       };
       const result = await retryWithBackoff(apiCall, {
         authType: this.config.getContentGeneratorConfig()?.authType,
+        persistentMode: isUnattendedMode(),
+        signal: abortSignal,
       });
       return result;
     } catch (error: unknown) {
