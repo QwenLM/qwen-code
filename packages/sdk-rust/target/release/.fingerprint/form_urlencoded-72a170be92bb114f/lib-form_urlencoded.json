@@ -1,0 +1,22 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"alloc\", \"std\"]",
+  "declared_features": "[\"alloc\", \"default\", \"std\"]",
+  "target": 6496257856677244489,
+  "profile": 11096710085073448781,
+  "path": 4471808737508632685,
+  "deps": [
+    [6803352382179706244, "percent_encoding", false, 2228746120517263444]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/form_urlencoded-72a170be92bb114f/dep-lib-form_urlencoded",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

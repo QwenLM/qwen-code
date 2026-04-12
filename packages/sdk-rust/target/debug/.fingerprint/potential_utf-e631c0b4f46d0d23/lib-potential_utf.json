@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"zerovec\"]",
+  "declared_features": "[\"alloc\", \"databake\", \"default\", \"serde\", \"writeable\", \"zerovec\"]",
+  "target": 16089386906944150126,
+  "profile": 18322636919602171843,
+  "path": 475595777442127642,
+  "deps": [[9119616491714376884, "zerovec", false, 11238450900351233362]],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/potential_utf-e631c0b4f46d0d23/dep-lib-potential_utf",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

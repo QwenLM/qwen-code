@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"std\"]",
+  "declared_features": "[\"arbitrary\", \"bytemuck\", \"example_generated\", \"serde\", \"serde_core\", \"std\"]",
+  "target": 7691312148208718491,
+  "profile": 16350173703357974910,
+  "path": 4066145724648283084,
+  "deps": [],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/bitflags-b5e270f4c73078ca/dep-lib-bitflags",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

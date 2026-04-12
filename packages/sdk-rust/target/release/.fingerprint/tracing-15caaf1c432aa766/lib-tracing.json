@@ -1,0 +1,24 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"attributes\", \"default\", \"std\", \"tracing-attributes\"]",
+  "declared_features": "[\"async-await\", \"attributes\", \"default\", \"log\", \"log-always\", \"max_level_debug\", \"max_level_error\", \"max_level_info\", \"max_level_off\", \"max_level_trace\", \"max_level_warn\", \"release_max_level_debug\", \"release_max_level_error\", \"release_max_level_info\", \"release_max_level_off\", \"release_max_level_trace\", \"release_max_level_warn\", \"std\", \"tracing-attributes\", \"valuable\"]",
+  "target": 5568135053145998517,
+  "profile": 15570067083837110542,
+  "path": 9590463212793285995,
+  "deps": [
+    [2251399859588827949, "pin_project_lite", false, 1085578559511617692],
+    [5938672567312282946, "tracing_attributes", false, 7420804775237622898],
+    [16023452927926505185, "tracing_core", false, 12588881527095165006]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/tracing-15caaf1c432aa766/dep-lib-tracing",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

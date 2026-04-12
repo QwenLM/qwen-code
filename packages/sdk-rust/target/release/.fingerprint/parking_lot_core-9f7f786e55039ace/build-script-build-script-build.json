@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[]",
+  "declared_features": "[\"backtrace\", \"deadlock_detection\", \"nightly\", \"petgraph\"]",
+  "target": 5408242616063297496,
+  "profile": 7823001198215926889,
+  "path": 16079728844957841894,
+  "deps": [],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/parking_lot_core-9f7f786e55039ace/dep-build-script-build-script-build",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

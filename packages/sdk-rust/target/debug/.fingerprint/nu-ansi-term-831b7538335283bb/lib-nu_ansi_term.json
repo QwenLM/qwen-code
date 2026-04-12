@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"default\", \"std\"]",
+  "declared_features": "[\"default\", \"derive_serde_style\", \"gnu_legacy\", \"serde\", \"std\"]",
+  "target": 5239985456149308223,
+  "profile": 16350173703357974910,
+  "path": 12321699688763828250,
+  "deps": [],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/nu-ansi-term-831b7538335283bb/dep-lib-nu_ansi_term",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

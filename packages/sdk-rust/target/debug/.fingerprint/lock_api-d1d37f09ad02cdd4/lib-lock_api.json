@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"atomic_usize\", \"default\"]",
+  "declared_features": "[\"arc_lock\", \"atomic_usize\", \"default\", \"nightly\", \"owning_ref\", \"serde\"]",
+  "target": 16157403318809843794,
+  "profile": 16350173703357974910,
+  "path": 16073956171228958919,
+  "deps": [[15358414700195712381, "scopeguard", false, 16343938432629356435]],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/lock_api-d1d37f09ad02cdd4/dep-lib-lock_api",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

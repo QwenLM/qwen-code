@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"alloc\", \"default\", \"fs\", \"std\"]",
+  "declared_features": "[\"all-apis\", \"alloc\", \"core\", \"default\", \"event\", \"fs\", \"io_uring\", \"libc\", \"libc_errno\", \"linux_4_11\", \"linux_5_1\", \"linux_5_11\", \"linux_latest\", \"mm\", \"mount\", \"net\", \"param\", \"pipe\", \"process\", \"pty\", \"rand\", \"runtime\", \"rustc-dep-of-std\", \"rustc-std-workspace-alloc\", \"shm\", \"std\", \"stdio\", \"system\", \"termios\", \"thread\", \"time\", \"try_close\", \"use-explicitly-provided-auxv\", \"use-libc\", \"use-libc-auxv\"]",
+  "target": 5408242616063297496,
+  "profile": 231785253222813247,
+  "path": 12528934192477006482,
+  "deps": [],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/rustix-6b2967056197df4a/dep-build-script-build-script-build",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

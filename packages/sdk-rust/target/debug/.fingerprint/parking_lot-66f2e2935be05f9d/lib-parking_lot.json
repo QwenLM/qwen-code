@@ -1,0 +1,23 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"default\"]",
+  "declared_features": "[\"arc_lock\", \"deadlock_detection\", \"default\", \"hardware-lock-elision\", \"nightly\", \"owning_ref\", \"send_guard\", \"serde\"]",
+  "target": 9887373948397848517,
+  "profile": 16350173703357974910,
+  "path": 11057880244928329701,
+  "deps": [
+    [2555121257709722468, "lock_api", false, 7709535350764001032],
+    [6545091685033313457, "parking_lot_core", false, 2535129330024976995]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/parking_lot-66f2e2935be05f9d/dep-lib-parking_lot",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

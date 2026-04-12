@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"alloc\", \"default\", \"std\"]",
+  "declared_features": "[\"alloc\", \"default\", \"getrandom\", \"js\", \"std\"]",
+  "target": 9543367341069791401,
+  "profile": 11096710085073448781,
+  "path": 11904033030791150799,
+  "deps": [],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/fastrand-ae9eb9c7c1c11382/dep-lib-fastrand",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

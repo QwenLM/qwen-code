@@ -1,0 +1,24 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[]",
+  "declared_features": "[\"async-await\"]",
+  "target": 8647784244936583625,
+  "profile": 8165011571146420835,
+  "path": 1597967144895786638,
+  "deps": [
+    [4289358735036141001, "proc_macro2", false, 8278327954979409204],
+    [10420560437213941093, "syn", false, 4531571975807302754],
+    [13111758008314797071, "quote", false, 6034342660974617721]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/tracing-attributes-24ff193576b4bd12/dep-lib-tracing_attributes",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

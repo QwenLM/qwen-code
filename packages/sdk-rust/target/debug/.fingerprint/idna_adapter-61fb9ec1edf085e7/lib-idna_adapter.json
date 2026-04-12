@@ -1,0 +1,23 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"compiled_data\"]",
+  "declared_features": "[\"compiled_data\"]",
+  "target": 9682399050268992880,
+  "profile": 17799211994809287645,
+  "path": 17125586217621763079,
+  "deps": [
+    [2309614597000388150, "icu_normalizer", false, 6643350239533211617],
+    [5565326065051315429, "icu_properties", false, 13597131922510401420]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/idna_adapter-61fb9ec1edf085e7/dep-lib-idna_adapter",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

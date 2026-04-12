@@ -15,11 +15,6 @@ import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopDetectionService } from './loopDetectionService.js';
 
-vi.mock('../telemetry/loggers.js', () => ({
-  logLoopDetected: vi.fn(),
-  logLoopDetectionDisabled: vi.fn(),
-}));
-
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
@@ -31,9 +26,11 @@ describe('LoopDetectionService', () => {
   beforeEach(() => {
     mockConfig = {
       getTelemetryEnabled: () => true,
+      getUsageStatisticsEnabled: () => false,
     } as unknown as Config;
     service = new LoopDetectionService(mockConfig);
-    vi.clearAllMocks();
+    vi.spyOn(loggers, 'logLoopDetected').mockImplementation(() => {});
+    vi.spyOn(loggers, 'logLoopDetectionDisabled').mockImplementation(() => {});
   });
 
   const createToolCallRequestEvent = (
@@ -161,6 +158,13 @@ describe('LoopDetectionService', () => {
         const content = generateRandomString(10);
         const isLoop = service.addAndCheck(createContentEvent(content));
         expect(isLoop).toBe(false);
+        // Add different tool call every 10 content events to reset stagnation counter
+        if (i % 10 === 0) {
+          const toolEvent = createToolCallRequestEvent('testTool', {
+            param: `value-${i}`,
+          });
+          service.addAndCheck(toolEvent);
+        }
       }
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
@@ -180,14 +184,24 @@ describe('LoopDetectionService', () => {
     it('should not detect a loop if repetitions are very far apart', () => {
       service.reset('');
       const repeatedContent = createRepetitiveContent(1, CONTENT_CHUNK_SIZE);
-      const fillerContent = generateRandomString(500);
 
-      let isLoop = false;
       for (let i = 0; i < CONTENT_LOOP_THRESHOLD; i++) {
-        isLoop = service.addAndCheck(createContentEvent(repeatedContent));
-        isLoop = service.addAndCheck(createContentEvent(fillerContent));
+        const isLoop1 = service.addAndCheck(
+          createContentEvent(repeatedContent),
+        );
+        expect(isLoop1).toBe(false);
+        // Use much larger unique filler to avoid content loop detection
+        const fillerContent = generateRandomString(2000);
+        const isLoop2 = service.addAndCheck(createContentEvent(fillerContent));
+        expect(isLoop2).toBe(false);
+        // Add tool call every 2 iterations to prevent action stagnation
+        if (i % 2 === 0) {
+          const toolEvent = createToolCallRequestEvent('testTool', {
+            param: `value-${i}`,
+          });
+          service.addAndCheck(toolEvent);
+        }
       }
-      expect(isLoop).toBe(false);
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
   });
@@ -328,14 +342,20 @@ describe('LoopDetectionService', () => {
 
     it('should not detect a loop for a long code block with some repeating tokens', () => {
       service.reset('');
-      const repeatingTokens =
-        'for (let i = 0; i < 10; i++) { console.log(i); }';
+      const repeatingToken = 'for (let i = 0; i < 10; i++) { console.log(i); }';
+      const toolEvent = createToolCallRequestEvent('testTool', {
+        param: 'value',
+      });
 
       service.addAndCheck(createContentEvent('```\n'));
 
       for (let i = 0; i < 20; i++) {
-        const isLoop = service.addAndCheck(createContentEvent(repeatingTokens));
+        const isLoop = service.addAndCheck(createContentEvent(repeatingToken));
         expect(isLoop).toBe(false);
+        // Add tool call every 10 iterations to prevent action stagnation
+        if (i % 10 === 0) {
+          service.addAndCheck(toolEvent);
+        }
       }
 
       const isLoop = service.addAndCheck(createContentEvent('\n```'));
@@ -346,10 +366,14 @@ describe('LoopDetectionService', () => {
     it('should reset tracking when a code fence is found', () => {
       service.reset('');
       const repeatedContent = createRepetitiveContent(1, CONTENT_CHUNK_SIZE);
+      const toolEvent = createToolCallRequestEvent('testTool', {
+        param: 'value',
+      });
 
       for (let i = 0; i < CONTENT_LOOP_THRESHOLD - 1; i++) {
         service.addAndCheck(createContentEvent(repeatedContent));
       }
+      service.addAndCheck(toolEvent); // Reset stagnation counter
 
       // This should not trigger a loop because of the reset
       service.addAndCheck(createContentEvent('```'));
@@ -617,6 +641,234 @@ describe('LoopDetectionService', () => {
       } as unknown as ServerGeminiStreamEvent;
       expect(service.addAndCheck(otherEvent)).toBe(false);
       expect(service.addAndCheck(otherEvent)).toBe(false);
+    });
+  });
+
+  describe('Thought Loop Detection', () => {
+    const createThoughtEvent = (
+      subject: string,
+      description: string,
+    ): ServerGeminiStreamEvent => ({
+      type: GeminiEventType.Thought,
+      value: { subject, description },
+    });
+
+    it('should not detect a loop for fewer than 3 similar thoughts', () => {
+      const event = createThoughtEvent(
+        'Analyze the issue',
+        'The problem is with the retry loop',
+      );
+
+      service.addAndCheck(event);
+      expect(service.addAndCheck(event)).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('should detect a loop on the 3rd identical thought', () => {
+      const event = createThoughtEvent(
+        'Analyze the issue',
+        'The problem is with the retry loop',
+      );
+
+      service.addAndCheck(event);
+      service.addAndCheck(event);
+      expect(service.addAndCheck(event)).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('should detect a loop with highly similar thoughts', () => {
+      const thought1 = createThoughtEvent(
+        'The issue is clear',
+        'when a 401 occurs for Qwen, the retry loop only handles Anthropic OAuth tokens',
+      );
+      const thought2 = createThoughtEvent(
+        'The issue is clear',
+        'when a 401 occurs for Qwen, the retry loop handles Anthropic OAuth tokens only',
+      );
+      const thought3 = createThoughtEvent(
+        'The issue is clear:',
+        'when a 401 occurs for Qwen the retry loop only handles Anthropic OAuth tokens',
+      );
+
+      service.addAndCheck(thought1);
+      service.addAndCheck(thought2);
+      expect(service.addAndCheck(thought3)).toBe(true);
+    });
+
+    it('should not detect a loop with different thoughts', () => {
+      const thought1 = createThoughtEvent(
+        'First issue',
+        'Problem with authentication',
+      );
+      const thought2 = createThoughtEvent(
+        'Second issue',
+        'Problem with file reading',
+      );
+      const thought3 = createThoughtEvent(
+        'Third issue',
+        'Problem with network calls',
+      );
+
+      service.addAndCheck(thought1);
+      service.addAndCheck(thought2);
+      expect(service.addAndCheck(thought3)).toBe(false);
+    });
+  });
+
+  describe('Read File Loop Detection', () => {
+    const createReadFileEvent = (
+      filePath: string,
+    ): ServerGeminiToolCallRequestEvent => ({
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        name: 'ReadFile',
+        args: { file_path: filePath },
+        callId: 'test-id',
+        isClientInitiated: false,
+        prompt_id: 'test-prompt-id',
+      },
+    });
+
+    const createGlobEvent = (): ServerGeminiToolCallRequestEvent => ({
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        name: 'Glob',
+        args: { pattern: '**/*.ts' },
+        callId: 'test-id',
+        isClientInitiated: false,
+        prompt_id: 'test-prompt-id',
+      },
+    });
+
+    const createEditEvent = (): ServerGeminiToolCallRequestEvent => ({
+      type: GeminiEventType.ToolCallRequest,
+      value: {
+        name: 'Edit',
+        args: { file_path: 'test.ts', old_string: 'a', new_string: 'b' },
+        callId: 'test-id',
+        isClientInitiated: false,
+        prompt_id: 'test-prompt-id',
+      },
+    });
+
+    it('should detect a loop after 4 consecutive read operations', () => {
+      const event = createReadFileEvent('test.ts');
+
+      service.addAndCheck(event);
+      service.addAndCheck(event);
+      service.addAndCheck(event);
+      expect(service.addAndCheck(event)).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
+    });
+
+    it('should not detect a loop with mixed operations', () => {
+      const readEvent = createReadFileEvent('test.ts');
+      const editEvent = createEditEvent();
+
+      service.addAndCheck(readEvent);
+      service.addAndCheck(readEvent);
+      service.addAndCheck(editEvent); // Resets counter
+      service.addAndCheck(readEvent);
+      service.addAndCheck(readEvent);
+      expect(service.addAndCheck(readEvent)).toBe(false);
+    });
+
+    it('should detect loop with different read operations', () => {
+      const readEvent = createReadFileEvent('test1.ts');
+      const globEvent = createGlobEvent();
+
+      service.addAndCheck(readEvent);
+      service.addAndCheck(readEvent);
+      service.addAndCheck(globEvent);
+      expect(service.addAndCheck(readEvent)).toBe(true);
+    });
+  });
+
+  describe('Action Stagnation Detection', () => {
+    const createContentEvent = (content: string): ServerGeminiContentEvent => ({
+      type: GeminiEventType.Content,
+      value: content,
+    });
+
+    it('should detect stagnation after 20 content events without tool calls', () => {
+      // Simulate 20 content events without any tool calls
+      // First 19 should not trigger
+      for (let i = 0; i < 19; i++) {
+        expect(service.addAndCheck(createContentEvent(`Content ${i}`))).toBe(
+          false,
+        );
+      }
+      // 20th should trigger
+      expect(service.addAndCheck(createContentEvent('Content 19'))).toBe(true);
+    });
+
+    it('should not detect stagnation when tool calls are present', () => {
+      // Use different content each time to avoid content loop detection
+      for (let i = 0; i < 15; i++) {
+        const readEvent: ServerGeminiToolCallRequestEvent = {
+          type: GeminiEventType.ToolCallRequest,
+          value: {
+            name: 'ReadFile',
+            args: { file_path: `test${i}.ts` },
+            callId: 'test-id',
+            isClientInitiated: false,
+            prompt_id: 'test-prompt-id',
+          },
+        };
+        const contentEvent = createContentEvent(`Unique content ${i}`);
+        service.addAndCheck(readEvent);
+        service.addAndCheck(contentEvent);
+        // Add an action operation every 3 iterations to reset read file loop counter
+        if (i % 3 === 0) {
+          const editEvent: ServerGeminiToolCallRequestEvent = {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              name: 'Edit',
+              args: {
+                file_path: `test${i}.ts`,
+                old_string: 'a',
+                new_string: 'b',
+              },
+              callId: 'test-id',
+              isClientInitiated: false,
+              prompt_id: 'test-prompt-id',
+            },
+          };
+          service.addAndCheck(editEvent);
+        }
+      }
+      // Should not trigger because tool calls reset the counter
+      expect(
+        service.addAndCheck(createContentEvent('Final unique content')),
+      ).toBe(false);
+    });
+
+    it('should reset stagnation counter on action tool call', () => {
+      const editEvent: ServerGeminiToolCallRequestEvent = {
+        type: GeminiEventType.ToolCallRequest,
+        value: {
+          name: 'Edit',
+          args: { file_path: 'test.ts', old_string: 'a', new_string: 'b' },
+          callId: 'test-id',
+          isClientInitiated: false,
+          prompt_id: 'test-prompt-id',
+        },
+      };
+
+      // Build up some stagnation with content only
+      for (let i = 0; i < 5; i++) {
+        service.addAndCheck(createContentEvent(`Content ${i}`));
+      }
+
+      // Perform an action
+      service.addAndCheck(editEvent);
+
+      // Should not trigger immediately after action
+      for (let i = 0; i < 7; i++) {
+        expect(
+          service.addAndCheck(createContentEvent(`New content ${i}`)),
+        ).toBe(false);
+      }
     });
   });
 });

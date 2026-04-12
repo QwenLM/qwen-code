@@ -1,0 +1,26 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"compiled_data\"]",
+  "declared_features": "[\"compiled_data\", \"datagen\", \"default\", \"harfbuzz_traits\", \"icu_properties\", \"serde\", \"utf16_iter\", \"utf8_iter\", \"write16\"]",
+  "target": 4082895731217690114,
+  "profile": 18322636919602171843,
+  "path": 11278047652921095876,
+  "deps": [
+    [2740396133377933779, "icu_collections", false, 6715931838659991757],
+    [3666196340704888985, "smallvec", false, 5465283211564793462],
+    [6775492119671411220, "icu_provider", false, 15474239612823053743],
+    [8537256058173792506, "icu_normalizer_data", false, 9628742537722550313],
+    [9119616491714376884, "zerovec", false, 11238450900351233362]
+  ],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/icu_normalizer-53a9f591a78d61f7/dep-lib-icu_normalizer",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

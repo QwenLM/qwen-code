@@ -23,6 +23,14 @@ const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
 const MAX_HISTORY_LENGTH = 1000;
 
+// Thought loop detection: detect when the same thought subject repeats
+const THOUGHT_LOOP_THRESHOLD = 3;
+const THOUGHT_SIMILARITY_THRESHOLD = 0.85; // 85% similarity
+
+// Action stagnation detection: detect when agent reads files without taking action
+const READ_FILE_LOOP_THRESHOLD = 4;
+const TURNS_WITHOUT_ACTION_THRESHOLD = 20; // Increased threshold to avoid false positives
+
 /**
  * Service for detecting and preventing infinite loops in AI responses.
  * Monitors tool call repetitions and content sentence repetitions.
@@ -45,8 +53,174 @@ export class LoopDetectionService {
   // Session-level disable flag
   private disabledForSession = false;
 
+  // Thought loop tracking
+  private recentThoughts: Array<{ subject: string; description: string }> = [];
+
+  // Action stagnation tracking
+  private consecutiveReadsWithoutAction = 0;
+  private turnsWithoutMeaningfulAction = 0;
+  private totalTurns = 0;
+
   constructor(config: Config) {
     this.config = config;
+  }
+
+  /**
+   * Calculates similarity between two strings using Levenshtein distance ratio.
+   * Returns a value between 0 and 1, where 1 means identical.
+   */
+  private calculateSimilarity(str1: string, str2: string): number {
+    const s1 = str1.toLowerCase().trim();
+    const s2 = str2.toLowerCase().trim();
+
+    if (s1 === s2) return 1;
+    if (s1.length === 0 || s2.length === 0) return 0;
+
+    // Use a simple character-level similarity for performance
+    const longer = s1.length > s2.length ? s1 : s2;
+    const shorter = s1.length > s2.length ? s2 : s1;
+    const longerLen = longer.length;
+
+    if (longerLen === 0) return 1;
+
+    // Count matching characters in order
+    let matchCount = 0;
+    const shortArray = shorter.split('');
+    const longArray = longer.split('');
+
+    for (const char of shortArray) {
+      const idx = longArray.indexOf(char);
+      if (idx !== -1) {
+        matchCount++;
+        longArray.splice(idx, 1);
+      }
+    }
+
+    return matchCount / longerLen;
+  }
+
+  /**
+   * Checks if a thought is similar to recent thoughts, indicating a loop.
+   */
+  private checkThoughtLoop(thought: {
+    subject: string;
+    description: string;
+  }): boolean {
+    this.recentThoughts.push(thought);
+
+    // Keep only recent thoughts (last 10)
+    if (this.recentThoughts.length > 10) {
+      this.recentThoughts.shift();
+    }
+
+    if (this.recentThoughts.length < THOUGHT_LOOP_THRESHOLD) {
+      return false;
+    }
+
+    // Check if the current thought is similar to recent ones
+    const recentSimilarThoughts = this.recentThoughts.slice(
+      -THOUGHT_LOOP_THRESHOLD,
+    );
+
+    let similarCount = 0;
+    for (let i = 0; i < recentSimilarThoughts.length - 1; i++) {
+      const prevThought = recentSimilarThoughts[i];
+      const currentThought =
+        recentSimilarThoughts[recentSimilarThoughts.length - 1];
+
+      // Compare subjects first (higher weight)
+      const subjectSimilarity = this.calculateSimilarity(
+        prevThought.subject,
+        currentThought.subject,
+      );
+
+      // Compare descriptions if subjects aren't similar enough
+      const descriptionSimilarity = this.calculateSimilarity(
+        prevThought.description,
+        currentThought.description,
+      );
+
+      // Weighted average: subject is more important
+      const similarity = subjectSimilarity * 0.7 + descriptionSimilarity * 0.3;
+
+      if (similarity >= THOUGHT_SIMILARITY_THRESHOLD) {
+        similarCount++;
+      }
+    }
+
+    if (similarCount >= THOUGHT_LOOP_THRESHOLD - 1) {
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.REPETITIVE_THOUGHTS, this.promptId),
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Checks if the agent is stuck in a read-file loop without taking action.
+   * Detects when the agent repeatedly reads files without making progress.
+   */
+  private checkReadFileLoop(toolCall: { name: string; args: object }): boolean {
+    const isReadOperation =
+      toolCall.name === 'ReadFile' ||
+      toolCall.name === 'Glob' ||
+      toolCall.name === 'Grep';
+
+    const isActionOperation =
+      toolCall.name === 'Edit' ||
+      toolCall.name === 'WriteFile' ||
+      toolCall.name === 'Shell' ||
+      toolCall.name === 'WebFetch' ||
+      toolCall.name === 'Tool';
+
+    if (isReadOperation) {
+      this.consecutiveReadsWithoutAction++;
+
+      if (this.consecutiveReadsWithoutAction >= READ_FILE_LOOP_THRESHOLD) {
+        logLoopDetected(
+          this.config,
+          new LoopDetectedEvent(LoopType.READ_FILE_LOOP, this.promptId),
+        );
+        return true;
+      }
+    } else if (isActionOperation) {
+      // Reset counter on meaningful action
+      this.trackMeaningfulAction();
+    }
+
+    return false;
+  }
+
+  /**
+   * Checks if the agent is stuck without making meaningful progress.
+   * Detects when too many turns pass without action operations.
+   */
+  private checkActionStagnation(): boolean {
+    this.turnsWithoutMeaningfulAction++;
+
+    if (
+      this.turnsWithoutMeaningfulAction >= TURNS_WITHOUT_ACTION_THRESHOLD &&
+      this.consecutiveReadsWithoutAction === 0
+    ) {
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.ACTION_STAGNATION, this.promptId),
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Tracks meaningful action operations that reset the stagnation counter.
+   */
+  private trackMeaningfulAction(): void {
+    this.turnsWithoutMeaningfulAction = 0;
+    this.consecutiveReadsWithoutAction = 0;
   }
 
   /**
@@ -78,13 +252,25 @@ export class LoopDetectionService {
 
     switch (event.type) {
       case GeminiEventType.ToolCallRequest:
-        // content chanting only happens in one single stream, reset if there
+        // Content chanting only happens in one single stream, reset if there
         // is a tool call in between
         this.resetContentTracking();
         this.loopDetected = this.checkToolCallLoop(event.value);
+        if (!this.loopDetected) {
+          this.loopDetected = this.checkReadFileLoop(event.value);
+        }
+        // Reset stagnation counter on any tool call - agent is actively doing something
+        this.turnsWithoutMeaningfulAction = 0;
+        this.totalTurns++;
         break;
       case GeminiEventType.Content:
         this.loopDetected = this.checkContentLoop(event.value);
+        if (!this.loopDetected) {
+          this.loopDetected = this.checkActionStagnation();
+        }
+        break;
+      case GeminiEventType.Thought:
+        this.loopDetected = this.checkThoughtLoop(event.value);
         break;
       default:
         break;
@@ -299,6 +485,10 @@ export class LoopDetectionService {
     this.resetToolCallCount();
     this.resetContentTracking();
     this.loopDetected = false;
+    this.recentThoughts = [];
+    this.consecutiveReadsWithoutAction = 0;
+    this.turnsWithoutMeaningfulAction = 0;
+    this.totalTurns = 0;
   }
 
   private resetToolCallCount(): void {

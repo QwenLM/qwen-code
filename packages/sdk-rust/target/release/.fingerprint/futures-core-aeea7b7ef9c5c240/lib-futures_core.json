@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[\"alloc\", \"default\", \"std\"]",
+  "declared_features": "[\"alloc\", \"cfg-target-has-atomic\", \"default\", \"portable-atomic\", \"std\", \"unstable\"]",
+  "target": 9453135960607436725,
+  "profile": 13909014486897387802,
+  "path": 13732147016105239581,
+  "deps": [],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "release/.fingerprint/futures-core-aeea7b7ef9c5c240/dep-lib-futures_core",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}

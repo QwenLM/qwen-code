@@ -1,0 +1,20 @@
+{
+  "rustc": 9071837629633067779,
+  "features": "[]",
+  "declared_features": "[]",
+  "target": 7529200858990304138,
+  "profile": 8499122571979279025,
+  "path": 3033488195281951828,
+  "deps": [],
+  "local": [
+    {
+      "CheckDepInfo": {
+        "dep_info": "debug/.fingerprint/pin-project-lite-f425c5373185600a/dep-lib-pin_project_lite",
+        "checksum": false
+      }
+    }
+  ],
+  "rustflags": [],
+  "config": 8247474407144887393,
+  "compile_kind": 0
+}
