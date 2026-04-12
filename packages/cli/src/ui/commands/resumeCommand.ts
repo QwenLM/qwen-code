@@ -60,8 +60,8 @@ export const resumeCommand: SlashCommand = {
     }
 
     if (matches.length > 1) {
-      // Multiple matches — show picker to let user choose
-      return { type: 'dialog', dialog: 'resume' };
+      // Multiple matches — show picker with only the matching sessions
+      return { type: 'dialog', dialog: 'resume', matchedSessions: matches };
     }
 
     return {

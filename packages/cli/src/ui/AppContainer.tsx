@@ -554,6 +554,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const {
     isResumeDialogOpen,
+    resumeMatchedSessions,
     openResumeDialog,
     closeResumeDialog,
     handleResume,
@@ -1876,6 +1877,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
+      resumeMatchedSessions,
       isDeleteDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,
@@ -1986,6 +1988,7 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
+      resumeMatchedSessions,
       isDeleteDialogOpen,
       slashCommands,
       pendingSlashCommandHistoryItems,

@@ -355,7 +355,10 @@ export async function main() {
         writeStderrLine(
           `Multiple sessions found with title "${argv.resume}". Please select one:`,
         );
-        resolvedSessionId = await showResumeSessionPicker();
+        resolvedSessionId = await showResumeSessionPicker(
+          process.cwd(),
+          matches,
+        );
       }
       // matches.length === 0 → resolvedSessionId stays undefined, handled below
     }

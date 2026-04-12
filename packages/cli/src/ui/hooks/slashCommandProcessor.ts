@@ -18,6 +18,7 @@ import {
   SlashCommandStatus,
   ToolConfirmationOutcome,
   IdeClient,
+  type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -79,7 +80,7 @@ interface SlashCommandProcessorActions {
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
-  openResumeDialog: () => void;
+  openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => void;
   openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
@@ -264,6 +265,7 @@ export const useSlashCommandProcessor = (
           clearItems();
           clearScreen();
           refreshStatic();
+          setSessionName?.(null);
         },
         loadHistory,
         setDebugMessage: actions.setDebugMessage,
@@ -550,7 +552,7 @@ export const useSlashCommandProcessor = (
                       if (result.sessionId) {
                         actions.handleResume(result.sessionId);
                       } else {
-                        actions.openResumeDialog();
+                        actions.openResumeDialog(result.matchedSessions);
                       }
                       return { type: 'handled' };
                     case 'delete':

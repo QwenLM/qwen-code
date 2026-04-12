@@ -8,6 +8,7 @@ import { useState, useCallback } from 'react';
 import {
   SessionService,
   type Config,
+  type SessionListItem,
   SessionStartSource,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
@@ -24,7 +25,9 @@ export interface UseResumeCommandOptions {
 
 export interface UseResumeCommandResult {
   isResumeDialogOpen: boolean;
-  openResumeDialog: () => void;
+  /** Pre-filtered sessions for the picker (when multiple title matches). */
+  resumeMatchedSessions: SessionListItem[] | undefined;
+  openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   closeResumeDialog: () => void;
   handleResume: (sessionId: string) => void;
 }
@@ -33,13 +36,21 @@ export function useResumeCommand(
   options?: UseResumeCommandOptions,
 ): UseResumeCommandResult {
   const [isResumeDialogOpen, setIsResumeDialogOpen] = useState(false);
+  const [resumeMatchedSessions, setResumeMatchedSessions] = useState<
+    SessionListItem[] | undefined
+  >();
 
-  const openResumeDialog = useCallback(() => {
-    setIsResumeDialogOpen(true);
-  }, []);
+  const openResumeDialog = useCallback(
+    (matchedSessions?: SessionListItem[]) => {
+      setResumeMatchedSessions(matchedSessions);
+      setIsResumeDialogOpen(true);
+    },
+    [],
+  );
 
   const closeResumeDialog = useCallback(() => {
     setIsResumeDialogOpen(false);
+    setResumeMatchedSessions(undefined);
   }, []);
 
   const { config, historyManager, startNewSession, setSessionName, remount } =
@@ -106,6 +117,7 @@ export function useResumeCommand(
 
   return {
     isResumeDialogOpen,
+    resumeMatchedSessions,
     openResumeDialog,
     closeResumeDialog,
     handleResume,

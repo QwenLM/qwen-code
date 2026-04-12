@@ -143,6 +143,7 @@ describe('resumeCommand', () => {
     expect(result).toEqual({
       type: 'dialog',
       dialog: 'resume',
+      matchedSessions: [{ sessionId: 'id-1' }, { sessionId: 'id-2' }],
     });
   });
 

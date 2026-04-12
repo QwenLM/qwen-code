@@ -35,6 +35,12 @@ export interface SessionPickerProps {
    * Defaults to true so dialog + standalone behave identically.
    */
   centerSelection?: boolean;
+
+  /**
+   * Pre-filtered sessions to display instead of loading all sessions.
+   * When provided, skips initial load and disables pagination.
+   */
+  initialSessions?: SessionData[];
 }
 
 const PREFIX_CHARS = {
@@ -129,6 +135,7 @@ export function SessionPicker(props: SessionPickerProps) {
     currentBranch,
     title,
     centerSelection = true,
+    initialSessions,
   } = props;
 
   const { columns: width, rows: height } = useTerminalSize();
@@ -152,6 +159,7 @@ export function SessionPicker(props: SessionPickerProps) {
     onCancel,
     maxVisibleItems,
     centerSelection,
+    initialSessions,
     isActive: true,
   });
 
