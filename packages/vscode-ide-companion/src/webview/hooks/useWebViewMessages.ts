@@ -122,7 +122,12 @@ interface UseWebViewMessagesProps {
   // Edit mode setter (maps ACP modes to UI modes)
   setEditMode?: (mode: ApprovalModeValue) => void;
   // Authentication state setter
-  setIsAuthenticated?: (authenticated: boolean | null) => void;
+  setIsAuthenticated?: (
+    authenticated: boolean | null,
+    authMethods?: Array<Record<string, unknown>>,
+  ) => void;
+  // Login error state setter
+  setLoginErrorMessage?: (errorMessage: string) => void;
   // Usage stats setter
   setUsageStats?: (stats: UsageStatsPayload | undefined) => void;
   // Model info setter
@@ -199,6 +204,7 @@ export const useWebViewMessages = ({
   setInputText,
   setEditMode,
   setIsAuthenticated,
+  setLoginErrorMessage,
   setUsageStats,
   setModelInfo,
   setAvailableCommands,
@@ -235,6 +241,7 @@ export const useWebViewMessages = ({
     handlePermissionRequest,
     handleAskUserQuestion,
     setIsAuthenticated,
+    setLoginErrorMessage,
     setUsageStats,
     setModelInfo,
     setAvailableCommands,
@@ -285,6 +292,7 @@ export const useWebViewMessages = ({
       handlePermissionRequest,
       handleAskUserQuestion,
       setIsAuthenticated,
+      setLoginErrorMessage,
       setUsageStats,
       setModelInfo,
       setAvailableCommands,
@@ -429,18 +437,17 @@ export const useWebViewMessages = ({
         }
 
         case 'agentConnectionError': {
-          // Agent connection failed; surface the error and unblock the UI
+          // Agent connection failed; show the error on the Onboarding page
+          // instead of adding it as a chat message (which would prevent
+          // Onboarding from rendering due to hasContent becoming true).
           handlers.messageHandling.clearWaitingForResponse();
           const errorMsg =
             (message?.data?.message as string) ||
             'Failed to connect to Qwen agent.';
 
-          handlers.messageHandling.addMessage({
-            role: 'assistant',
-            content: `Failed to connect to Qwen agent: ${errorMsg}\nYou can still use the chat UI, but messages won't be sent to AI.`,
-            timestamp: Date.now(),
-          });
-          // Set authentication state to false
+          handlers.setLoginErrorMessage?.(
+            `Failed to connect to Qwen agent: ${errorMsg}`,
+          );
           handlers.setIsAuthenticated?.(false);
           break;
         }
@@ -449,26 +456,28 @@ export const useWebViewMessages = ({
           // Clear loading state and show error notice
           handlers.messageHandling.clearWaitingForResponse();
           const errorMsg =
-            (message?.data?.message as string) ||
-            'Login failed. Please try again.';
-          handlers.messageHandling.addMessage({
-            role: 'assistant',
-            content: errorMsg,
-            timestamp: Date.now(),
-          });
-          // Set authentication state to false
+            typeof message?.data?.message === 'string'
+              ? message.data.message
+              : 'Login failed. Please try again.';
+
+          // Set error to Onboarding component rather than appending it into the chat messages
+          handlers.setLoginErrorMessage?.(errorMsg);
           handlers.setIsAuthenticated?.(false);
           break;
         }
 
         case 'authState': {
-          const state = (
-            message?.data as { authenticated?: boolean | null } | undefined
-          )?.authenticated;
+          const payload = message?.data as
+            | {
+                authenticated?: boolean | null;
+                authMethods?: Array<Record<string, unknown>>;
+              }
+            | undefined;
+          const state = payload?.authenticated;
           if (typeof state === 'boolean') {
-            handlers.setIsAuthenticated?.(state);
+            handlers.setIsAuthenticated?.(state, payload?.authMethods);
           } else {
-            handlers.setIsAuthenticated?.(null);
+            handlers.setIsAuthenticated?.(null, payload?.authMethods);
           }
           break;
         }
@@ -479,6 +488,9 @@ export const useWebViewMessages = ({
           handlers.messageHandling.setMessages(
             materializeMessages(conversation.messages as WebViewMessageBase[]),
           );
+          handlers.clearToolCalls();
+          handlers.setPlanEntries([]);
+          handlers.messageHandling.clearWaitingForResponse();
           break;
         }
 

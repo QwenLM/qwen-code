@@ -30,7 +30,6 @@ import {
   type QwenConnectionResult,
 } from '../services/qwenConnectionHandler.js';
 import { QwenSessionUpdateHandler } from './qwenSessionUpdateHandler.js';
-import { authMethod } from '../types/acpTypes.js';
 import {
   extractModelInfoFromNewSessionResult,
   extractSessionModeState,
@@ -91,7 +90,8 @@ export class QwenAgentManager {
   private sessionManager: QwenSessionManager;
   private connectionHandler: QwenConnectionHandler;
   private sessionUpdateHandler: QwenSessionUpdateHandler;
-  private currentWorkingDir: string = process.cwd();
+  currentWorkingDir: string = process.cwd();
+  availableAuthMethods: Array<Record<string, unknown>> | undefined;
   // When loading a past session via ACP, the CLI replays history through
   // session/update notifications. We set this flag to route message chunks
   // (user/assistant) as discrete chat messages instead of live streaming.
@@ -275,6 +275,9 @@ export class QwenAgentManager {
     this.connection.onInitialized = (init: unknown) => {
       try {
         const obj = (init || {}) as Record<string, unknown>;
+        if (Array.isArray(obj['authMethods'])) {
+          this.availableAuthMethods = obj['authMethods'];
+        }
         const modes = obj['modes'] as
           | {
               currentModeId?: 'plan' | 'default' | 'auto-edit' | 'yolo';
@@ -1186,6 +1189,13 @@ export class QwenAgentManager {
    * @param workingDir - Working directory
    * @returns Newly created session ID
    */
+  async authenticate(
+    methodId?: string,
+    _meta?: Record<string, unknown>,
+  ): Promise<void> {
+    await this.connection.authenticate(methodId, _meta);
+  }
+
   async createNewSession(
     workingDir: string,
     options?: AgentSessionOptions,
@@ -1235,24 +1245,9 @@ export class QwenAgentManager {
               throw err;
             }
             console.warn(
-              '[QwenAgentManager] session/new requires authentication. Retrying with authenticate...',
+              '[QwenAgentManager] session/new requires authentication but we cannot pick an auth method automatically. Throwing to let UI handle.',
             );
-            try {
-              // Let CLI handle authentication - it's the single source of truth
-              await this.connection.authenticate(authMethod);
-              console.log(
-                '[QwenAgentManager] createNewSession Authentication successful. Retrying session/new...',
-              );
-              // Add a slight delay to ensure auth state is settled
-              await new Promise((resolve) => setTimeout(resolve, 300));
-              newSessionResult = await this.connection.newSession(workingDir);
-            } catch (reauthErr) {
-              console.error(
-                '[QwenAgentManager] Re-authentication failed:',
-                reauthErr,
-              );
-              throw reauthErr;
-            }
+            throw err;
           } else {
             throw err;
           }

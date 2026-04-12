@@ -13,16 +13,24 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
  * Handles all authentication-related messages
  */
 export class AuthMessageHandler extends BaseMessageHandler {
-  private loginHandler: (() => Promise<void>) | null = null;
+  private loginHandler:
+    | ((methodId?: string, _meta?: Record<string, unknown>) => Promise<void>)
+    | null = null;
 
   canHandle(messageType: string): boolean {
     return ['login'].includes(messageType);
   }
 
-  async handle(message: { type: string; data?: unknown }): Promise<void> {
+  async handle(message: {
+    type: string;
+    data?: Record<string, unknown>;
+  }): Promise<void> {
     switch (message.type) {
       case 'login':
-        await this.handleLogin();
+        await this.handleLogin(
+          message.data?.methodId as string | undefined,
+          message.data?._meta as Record<string, unknown> | undefined,
+        );
         break;
 
       default:
@@ -37,14 +45,22 @@ export class AuthMessageHandler extends BaseMessageHandler {
   /**
    * Set login handler
    */
-  setLoginHandler(handler: () => Promise<void>): void {
+  setLoginHandler(
+    handler: (
+      methodId?: string,
+      _meta?: Record<string, unknown>,
+    ) => Promise<void>,
+  ): void {
     this.loginHandler = handler;
   }
 
   /**
    * Handle login request
    */
-  private async handleLogin(): Promise<void> {
+  private async handleLogin(
+    methodId?: string,
+    _meta?: Record<string, unknown>,
+  ): Promise<void> {
     try {
       console.log('[AuthMessageHandler] Login requested');
       console.log(
@@ -55,7 +71,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       // Direct login without additional confirmation
       if (this.loginHandler) {
         console.log('[AuthMessageHandler] Calling login handler');
-        await this.loginHandler();
+        await this.loginHandler(methodId, _meta);
         console.log(
           '[AuthMessageHandler] Login handler completed successfully',
         );

@@ -22,7 +22,9 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
  */
 export class SessionMessageHandler extends BaseMessageHandler {
   private currentStreamContent = '';
-  private loginHandler: (() => Promise<void>) | null = null;
+  private loginHandler:
+    | ((methodId?: string, _meta?: Record<string, unknown>) => Promise<void>)
+    | null = null;
   private isTitleSet = false; // Flag to track if title has been set
 
   canHandle(messageType: string): boolean {
@@ -44,7 +46,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
   /**
    * Set login handler
    */
-  setLoginHandler(handler: () => Promise<void>): void {
+  setLoginHandler(
+    handler: (
+      methodId?: string,
+      _meta?: Record<string, unknown>,
+    ) => Promise<void>,
+  ): void {
     this.loginHandler = handler;
   }
 

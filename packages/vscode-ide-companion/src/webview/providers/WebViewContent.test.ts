@@ -13,6 +13,9 @@ vi.mock('vscode', () => ({
       fsPath: `/ext/${parts.join('/')}`,
     })),
   },
+  env: {
+    language: 'en',
+  },
 }));
 
 /**
