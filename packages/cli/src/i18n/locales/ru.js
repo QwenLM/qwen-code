@@ -2001,4 +2001,5 @@ export default {
 
   // Arena command
   'Manage Arena sessions': 'Управление сессиями Arena',
+  '[{{label}}] failed: {{error}}': '[{{label}}] ошибка: {{error}}',
 };

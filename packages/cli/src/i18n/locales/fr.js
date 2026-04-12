@@ -2096,4 +2096,5 @@ export default {
 
   // Arena command
   'Manage Arena sessions': 'Gérer les sessions Arena',
+  '[{{label}}] failed: {{error}}': '[{{label}}] échec : {{error}}',
 };

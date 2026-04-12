@@ -2004,4 +2004,5 @@ export default {
 
   // Arena command
   'Manage Arena sessions': 'Arena-Sitzungen verwalten',
+  '[{{label}}] failed: {{error}}': '[{{label}}] fehlgeschlagen: {{error}}',
 };

@@ -1994,4 +1994,5 @@ export default {
 
   // Arena command
   'Manage Arena sessions': 'Gerenciar sessões Arena',
+  '[{{label}}] failed: {{error}}': '[{{label}}] falhou: {{error}}',
 };

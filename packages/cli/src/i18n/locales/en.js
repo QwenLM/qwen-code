@@ -2112,6 +2112,7 @@ Format: [authType:]modelId (e.g., openai:gpt-4o or just gpt-4o)`,
     'Arena started with {{count}} agents on task: "{{task}}"\nModels:\n{{modelList}}',
   'Arena panes are running in tmux. Attach with: `{{command}}`':
     'Arena panes are running in tmux. Attach with: `{{command}}`',
+  '[{{label}}] failed: {{error}}': '[{{label}}] failed: {{error}}',
   'Start an Arena session with multiple models competing on the same task':
     'Start an Arena session with multiple models competing on the same task',
   'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.':

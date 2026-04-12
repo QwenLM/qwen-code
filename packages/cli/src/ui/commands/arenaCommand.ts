@@ -266,7 +266,10 @@ function executeArenaCommand(
     const label = agentLabels.get(event.agentId) || event.agentId;
     addAndRecordArenaMessage(
       MessageType.ERROR,
-      `[${label}] failed: ${event.error}`,
+      t('[{{label}}] failed: {{error}}', {
+        label,
+        error: String(event.error),
+      }),
     );
   };
 

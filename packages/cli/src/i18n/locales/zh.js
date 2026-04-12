@@ -1910,6 +1910,7 @@ Format: [authType:]modelId (e.g., openai:gpt-4o or just gpt-4o)`]:
     'Arena 已开始，{{count}} 个智能体执行任务："{{task}}"\n模型：\n{{modelList}}',
   'Arena panes are running in tmux. Attach with: `{{command}}`':
     'Arena 面板在 tmux 中运行。使用 `{{command}}` 连接。',
+  '[{{label}}] failed: {{error}}': '[{{label}}] 失败：{{error}}',
   'Start an Arena session with multiple models competing on the same task':
     '启动 Arena 会话，多个模型竞争执行同一任务',
   'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.':

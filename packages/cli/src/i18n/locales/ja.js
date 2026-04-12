@@ -1494,4 +1494,5 @@ export default {
 
   // Arena command
   'Manage Arena sessions': 'Arenaセッションを管理',
+  '[{{label}}] failed: {{error}}': '[{{label}}] 失敗: {{error}}',
 };
