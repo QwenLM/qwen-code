@@ -17,6 +17,7 @@ import {
   processSingleFileContent,
   getSpecificMimeType,
 } from '../utils/fileUtils.js';
+import { parsePDFPageRange } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
@@ -43,6 +44,12 @@ export interface ReadFileToolParams {
    * The number of lines to read (optional)
    */
   limit?: number;
+
+  /**
+   * For PDF files, the page range to extract as text (e.g. "1-5", "3", "10-20").
+   * Pages are 1-indexed. Max 20 pages per request.
+   */
+  pages?: string;
 }
 
 class ReadFileToolInvocation extends BaseToolInvocation<
@@ -62,6 +69,10 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       this.config.getTargetDir(),
     );
     const shortPath = shortenPath(relativePath);
+
+    if (this.params.pages) {
+      return `${shortPath} (pages ${this.params.pages})`;
+    }
 
     const { offset, limit } = this.params;
     if (offset !== undefined && limit !== undefined) {
@@ -111,6 +122,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       this.config,
       this.params.offset,
       this.params.limit,
+      this.params.pages,
     );
 
     if (result.error) {
@@ -173,7 +185,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), and PDF files. For text files, it can read specific line ranges.`,
+      `Reads and returns the content of a specified file. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max 20 pages per request. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
       Kind.Read,
       {
         properties: {
@@ -191,6 +203,11 @@ export class ReadFileTool extends BaseDeclarativeTool<
             description:
               "Optional: For text files, maximum number of lines to read. Use with 'offset' to paginate through large files. If omitted, reads the entire file (if feasible, up to a default limit).",
             type: 'number',
+          },
+          pages: {
+            description:
+              "Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max 20 pages per request. When provided, PDF content is extracted as text regardless of model capabilities.",
+            type: 'string',
           },
         },
         required: ['file_path'],
@@ -216,6 +233,20 @@ export class ReadFileTool extends BaseDeclarativeTool<
     }
     if (params.limit !== undefined && params.limit <= 0) {
       return 'Limit must be a positive number';
+    }
+
+    if (params.pages !== undefined) {
+      const parsed = parsePDFPageRange(params.pages);
+      if (!parsed) {
+        return `Invalid pages parameter: '${params.pages}'. Use formats like '5', '1-10', or '3-'.`;
+      }
+      const maxPages = 20;
+      if (
+        parsed.lastPage !== Infinity &&
+        parsed.lastPage - parsed.firstPage + 1 > maxPages
+      ) {
+        return `Pages range exceeds maximum of ${maxPages} pages per request.`;
+      }
     }
 
     const fileService = this.config.getFileService();

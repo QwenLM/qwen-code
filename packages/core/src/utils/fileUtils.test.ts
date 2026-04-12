@@ -802,6 +802,10 @@ describe('fileUtils', () => {
       expect(await detectFileType(filePathForDetectTest)).toBe('binary');
     });
 
+    it('should detect .ipynb as notebook', async () => {
+      expect(await detectFileType('analysis.ipynb')).toBe('notebook');
+    });
+
     it('should default to text if mime type is unknown and content is not binary', async () => {
       mockMimeGetType.mockReturnValueOnce(false); // Unknown mime type
       // filePathForDetectTest is already a text file by default from beforeEach
@@ -915,7 +919,7 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Skipped image file');
     });
 
-    it('should reject PDF files when model does not support PDF', async () => {
+    it('should fall back to pdftotext when model does not support PDF', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
@@ -932,12 +936,10 @@ describe('fileUtils', () => {
         mockConfigNoPdf,
       );
       expect(typeof result.llmContent).toBe('string');
-      expect(result.llmContent).toContain('Unsupported pdf file');
-      expect(result.llmContent).toContain(
-        'does not support PDF input directly',
-      );
-      expect(result.llmContent).toContain('/extensions install');
-      expect(result.returnDisplay).toContain('Skipped pdf file');
+      // When pdftotext is not installed, should return a helpful error
+      // rather than silently skipping
+      expect(result.llmContent).toContain('Cannot extract text from PDF');
+      expect(result.returnDisplay).toContain('Failed to read pdf');
     });
 
     it('should accept PDF files when model supports PDF', async () => {
