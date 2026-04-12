@@ -1,25 +1,8 @@
----
-description: Resume a saved session by name. Usage: /chat-resume <name>
----
-
-Please resume the session named "{{args}}".
-
-Follow these steps:
-
-1. Validate the session name "{{args}}":
-   - Must match: `^[a-zA-Z0-9_.-]+$`
-   - Must NOT be: `.`, `..`, `__proto__`, `constructor`, `prototype`
-   - If invalid, output an error message and stop.
-
-2. Look up the session ID:
-   - Read `.qwen/chat-index.json` from the project root
-   - Find the session ID mapped to "{{args}}"
-   - If not found, tell the user: 'Session "{{args}}" not found. Use /chat-list to see available sessions.'
-
-3. Verify the session file exists:
-   - Check that the session data file exists in `.qwen/projects/` or wherever sessions are stored
-   - If the file is missing, tell the user the session data may have been deleted
-
-4. Resume the session:
-   - If everything checks out, tell the user: 'Resuming session "{{args}}" (ID: <sessionId>)'
-   - The application should then load the session history and continue from where it left off
+1. Validate `{{name}}` (Common rules).
+2. Look up ID in `.qwen/chat-index.json`. Missing → show list, stop.
+3. Verify `~/.qwen/projects/<hash>/chats/<id>.jsonl` exists. Missing → warn, stop.
+4. Open new window (detect OS):
+   - Windows: `start pwsh -NoExit -Command "qwen --resume <id>"`
+   - macOS: `osascript -e 'tell app "Terminal" to do script "qwen --resume <id>"'`
+   - Linux: `gnome-terminal -- qwen --resume <id>` (or `xterm -e ...`)
+5. Output: `Session "{{name}}" resumed in new window. (ID: <id>)`
