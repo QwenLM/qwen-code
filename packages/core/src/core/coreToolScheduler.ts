@@ -67,6 +67,7 @@ import * as Diff from 'diff';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
+import { matchDangerousPattern } from '../permissions/dangerousPatterns.js';
 import { IdeClient } from '../ide/ide-client.js';
 
 const TRUNCATION_PARAM_GUIDANCE =
@@ -1049,13 +1050,38 @@ export class CoreToolScheduler {
             reqInfo.name === ToolNames.ASK_USER_QUESTION;
           let confirmationDetails: ToolCallConfirmationDetails | undefined;
 
-          if (approvalMode === ApprovalMode.YOLO && !isAskUserQuestionTool) {
+          // ── YOLO mode: auto-approve unless dangerous ──────────────────
+          // In YOLO mode, shell commands matching dangerous patterns
+          // (code execution, network, system ops …) are NOT auto-approved
+          // unless --dangerously-allow-all is explicitly set.
+          let yoloDangerousMatch: string | undefined;
+          if (
+            approvalMode === ApprovalMode.YOLO &&
+            !isAskUserQuestionTool &&
+            !this.config.getDangerouslyAllowAll?.()
+          ) {
+            const command = pmCtx.command;
+            if (command) {
+              yoloDangerousMatch = matchDangerousPattern(command);
+            }
+          }
+
+          if (
+            approvalMode === ApprovalMode.YOLO &&
+            !isAskUserQuestionTool &&
+            !yoloDangerousMatch
+          ) {
             this.setToolCallOutcome(
               reqInfo.callId,
               ToolConfirmationOutcome.ProceedAlways,
             );
             this.setStatusInternal(reqInfo.callId, 'scheduled');
           } else {
+            if (yoloDangerousMatch) {
+              debugLogger.info(
+                `YOLO mode: dangerous pattern "${yoloDangerousMatch}" detected in command, requiring manual approval`,
+              );
+            }
             confirmationDetails =
               await invocation.getConfirmationDetails(signal);
 

@@ -115,6 +115,7 @@ export interface CliArgs {
   systemPrompt: string | undefined;
   appendSystemPrompt: string | undefined;
   yolo: boolean | undefined;
+  dangerouslyAllowAll: boolean | undefined;
   bare: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
@@ -330,6 +331,12 @@ export async function parseArguments(): Promise<CliArgs> {
           choices: ['plan', 'default', 'auto-edit', 'yolo'],
           description:
             'Set the approval mode: plan (plan only), default (prompt for approval), auto-edit (auto-approve edit tools), yolo (auto-approve all tools)',
+        })
+        .option('dangerously-allow-all', {
+          type: 'boolean',
+          description:
+            'When used with YOLO mode, skip dangerous-pattern protection and auto-approve ALL commands including code execution, network, and system operations',
+          default: false,
         })
         .option('checkpointing', {
           type: 'boolean',
@@ -1142,6 +1149,7 @@ export async function loadCliConfig(
       ? Array.from(excludedMcpServers)
       : undefined,
     approvalMode,
+    dangerouslyAllowAll: argv.dangerouslyAllowAll ?? false,
     accessibility: {
       ...settings.ui?.accessibility,
       screenReader,

@@ -53,6 +53,7 @@ import {
   getPlanModeSystemReminder,
   getSubagentSystemReminder,
   getArenaSystemReminder,
+  matchDangerousPattern,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -1369,20 +1370,32 @@ export class Session implements SessionContext {
       const isAskUserQuestionTool = fc.name === ToolNames.ASK_USER_QUESTION;
 
       // ---- L3: Tool's default permission ----
-      // In YOLO mode, force 'allow' for everything except ask_user_question.
-      const defaultPermission =
-        this.config.getApprovalMode() !== ApprovalMode.YOLO ||
-        isAskUserQuestionTool
-          ? await invocation.getDefaultPermission()
-          : 'allow';
-
-      // ---- L4: PermissionManager override (if relevant rules exist) ----
+      // In YOLO mode, force 'allow' for everything except ask_user_question
+      // and shell commands matching dangerous patterns (code execution,
+      // network, system ops) — unless --dangerously-allow-all is set.
       const toolParams = invocation.params as Record<string, unknown>;
       const pmCtx = buildPermissionCheckContext(
         fc.name,
         toolParams,
         this.config.getTargetDir?.() ?? '',
       );
+
+      let yoloForceAllow =
+        this.config.getApprovalMode() === ApprovalMode.YOLO &&
+        !isAskUserQuestionTool;
+
+      if (yoloForceAllow && !this.config.getDangerouslyAllowAll?.()) {
+        const command = pmCtx.command;
+        if (command && matchDangerousPattern(command)) {
+          yoloForceAllow = false;
+        }
+      }
+
+      const defaultPermission = yoloForceAllow
+        ? 'allow'
+        : await invocation.getDefaultPermission();
+
+      // ---- L4: PermissionManager override (if relevant rules exist) ----
       const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
         pm,
         defaultPermission,

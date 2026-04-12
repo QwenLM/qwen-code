@@ -10,3 +10,8 @@ export { PermissionManager } from './permission-manager.js';
 export type { PermissionManagerConfig } from './permission-manager.js';
 export { extractShellOperations } from './shell-semantics.js';
 export type { ShellOperation } from './shell-semantics.js';
+export {
+  DANGEROUS_ROOT_COMMANDS,
+  matchDangerousPattern,
+  isDangerousCommand,
+} from './dangerousPatterns.js';
