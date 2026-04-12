@@ -18,6 +18,25 @@ import { theme } from '../../semantic-colors.js';
 
 export const STATUS_INDICATOR_WIDTH = 3;
 
+/**
+ * Formats elapsed seconds as compact human-readable text.
+ * Under 60s: "3s", "45s" (integer seconds, matching Claude Code style).
+ * 60s and above: "1m", "1m 30s", "2h 15m" (via formatDuration).
+ */
+function formatElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainingSeconds = seconds % 60;
+  if (minutes < 60) {
+    return remainingSeconds > 0
+      ? `${minutes}m ${remainingSeconds}s`
+      : `${minutes}m`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
+}
+
 type ToolStatusIndicatorProps = {
   status: ToolCallStatus;
   name: string;
@@ -61,7 +80,10 @@ export const ToolStatusIndicator: React.FC<ToolStatusIndicatorProps> = ({
             nonRespondingDisplay={TOOL_STATUS.EXECUTING}
           />
           {showElapsed && (
-            <Text color={theme.text.secondary}> {elapsedSeconds}s</Text>
+            <Text color={theme.text.secondary}>
+              {' '}
+              {formatElapsed(elapsedSeconds)}
+            </Text>
           )}
         </>
       )}
