@@ -296,6 +296,15 @@ function toParts(input: PartListUnion): Part[] {
   return parts;
 }
 
+const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
+
+/** Directive injected when a tool call repeatedly fails validation. */
+const RETRY_LOOP_STOP_DIRECTIVE =
+  '\n\n⚠️ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
+  'STOP retrying the same approach. Re-examine the tool schema and parameter requirements, then try a ' +
+  'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
+  'instead of retrying.';
+
 const createErrorResponse = (
   request: ToolCallRequestInfo,
   error: Error,
@@ -342,6 +351,8 @@ export class CoreToolScheduler {
   private chatRecordingService?: ChatRecordingService;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
+  /** Tracks consecutive validation failures per tool name for retry loop detection. */
+  private validationRetryCounts = new Map<string, number>();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
@@ -408,6 +419,8 @@ export class CoreToolScheduler {
 
       switch (newStatus) {
         case 'success': {
+          // Any successful tool execution resets all validation retry counters
+          this.validationRetryCounts.clear();
           const durationMs = existingStartTime
             ? Date.now() - existingStartTime
             : undefined;
@@ -700,6 +713,19 @@ export class CoreToolScheduler {
       }
       const requestsToProcess = Array.isArray(request) ? request : [request];
 
+      // Check if this batch continues a validation retry loop.
+      // If the same tool name that previously failed validation appears again,
+      // keep tracking; otherwise reset.
+      if (this.validationRetryCounts.size > 0) {
+        const prevTool = this.validationRetryCounts.keys().next().value;
+        const hasPrevFailingTool = requestsToProcess.some(
+          (r) => r.name === prevTool,
+        );
+        if (!hasPrevFailingTool) {
+          this.validationRetryCounts.clear();
+        }
+      }
+
       const newToolCalls: ToolCall[] = [];
       for (const reqInfo of requestsToProcess) {
         // Check if the tool is excluded due to permissions/environment restrictions
@@ -774,11 +800,21 @@ export class CoreToolScheduler {
           reqInfo.args,
         );
         if (invocationOrError instanceof Error) {
-          const error = reqInfo.wasOutputTruncated
+          const baseError = reqInfo.wasOutputTruncated
             ? new Error(
                 `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
               )
             : invocationOrError;
+
+          // Track validation retry for loop detection
+          const count = (this.validationRetryCounts.get(reqInfo.name) ?? 0) + 1;
+          this.validationRetryCounts.set(reqInfo.name, count);
+
+          const error =
+            count >= VALIDATION_RETRY_LOOP_THRESHOLD
+              ? new Error(`${baseError.message}${RETRY_LOOP_STOP_DIRECTIVE}`)
+              : baseError;
+
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
@@ -792,6 +828,9 @@ export class CoreToolScheduler {
           });
           continue;
         }
+
+        // Reset retry counter for this tool since it passed validation
+        this.validationRetryCounts.delete(reqInfo.name);
 
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content.
