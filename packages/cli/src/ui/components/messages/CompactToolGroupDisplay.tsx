@@ -85,7 +85,11 @@ export const CompactToolGroupDisplay: React.FC<
     >
       {/* Status line: icon + tool name + description */}
       <Box flexDirection="row">
-        <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
+        <ToolStatusIndicator
+          status={overallStatus}
+          name={activeTool.name}
+          executionStartTime={activeTool.executionStartTime}
+        />
         <Box flexGrow={1}>
           <Text wrap="truncate-end">
             <Text bold>{activeTool.name}</Text>

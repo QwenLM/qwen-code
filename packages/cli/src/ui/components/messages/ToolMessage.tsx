@@ -10,7 +10,8 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
-import { AnsiOutputText } from '../AnsiOutput.js';
+import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
+import type { ShellStatsBarProps } from '../AnsiOutput.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
@@ -18,6 +19,7 @@ import type {
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutput,
+  AnsiOutputDisplay,
   Config,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
@@ -51,7 +53,7 @@ type DisplayRendererResult =
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
-  | { type: 'ansi'; data: AnsiOutput };
+  | { type: 'ansi'; data: AnsiOutput; stats?: ShellStatsBarProps };
 
 /**
  * Custom hook to determine the type of result display and return appropriate rendering info
@@ -136,7 +138,16 @@ const useResultDisplayRenderer = (
       resultDisplay !== null &&
       'ansiOutput' in resultDisplay
     ) {
-      return { type: 'ansi', data: resultDisplay.ansiOutput as AnsiOutput };
+      const display = resultDisplay as AnsiOutputDisplay;
+      return {
+        type: 'ansi',
+        data: display.ansiOutput,
+        stats: {
+          totalLines: display.totalLines,
+          totalBytes: display.totalBytes,
+          timeoutMs: display.timeoutMs,
+        },
+      };
     }
 
     // Default to string
@@ -282,6 +293,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   forceShowResult,
   isFocused,
   isWaitingForOtherApproval,
+  executionStartTime,
 }) => {
   const settings = useSettings();
   const isThisShellFocused =
@@ -352,7 +364,11 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
       <Box minHeight={1}>
-        <ToolStatusIndicator status={status} name={name} />
+        <ToolStatusIndicator
+          status={status}
+          name={name}
+          executionStartTime={executionStartTime}
+        />
         <ToolInfo
           name={name}
           status={status}
@@ -400,10 +416,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               />
             )}
             {effectiveDisplayRenderer.type === 'ansi' && (
-              <AnsiOutputText
-                data={effectiveDisplayRenderer.data}
-                availableTerminalHeight={availableHeight}
-              />
+              <>
+                <AnsiOutputText
+                  data={effectiveDisplayRenderer.data}
+                  availableTerminalHeight={availableHeight}
+                />
+                {effectiveDisplayRenderer.stats && (
+                  <ShellStatsBar {...effectiveDisplayRenderer.stats} />
+                )}
+              </>
             )}
             {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer

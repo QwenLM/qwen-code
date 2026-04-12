@@ -282,6 +282,7 @@ export function mapToDisplay(
               (trackedCall as TrackedExecutingToolCall).liveOutput ?? undefined,
             confirmationDetails: undefined,
             ptyId: (trackedCall as TrackedExecutingToolCall).pid,
+            executionStartTime: trackedCall.startTime,
           };
         case 'validating': // Fallthrough
         case 'scheduled':
@@ -290,6 +291,7 @@ export function mapToDisplay(
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
             resultDisplay: undefined,
             confirmationDetails: undefined,
+            executionStartTime: trackedCall.startTime,
           };
         default: {
           const exhaustiveCheck: never = trackedCall;
