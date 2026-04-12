@@ -1,4 +1,5 @@
 ---
+# @license Copyright 2026 Qwen Team SPDX-License-Identifier: Apache-2.0
 name: batch
 description: Execute batch operations on multiple files in parallel. Automatically discovers files, splits into chunks, and processes with parallel worker agents. Use `/batch` followed by operation and file pattern.
 allowedTools:
@@ -6,9 +7,10 @@ allowedTools:
   - glob
   - grep_search
   - read_file
-  - edit_file
+  - edit
   - write_file
   - run_shell_command
+  - ask_user_question
 ---
 
 # /batch - Parallel Batch Operations
@@ -30,7 +32,15 @@ First, parse the user's request to identify:
 
 If the user didn't specify a pattern, infer it from context or ask for clarification.
 
-Use the `glob` tool to discover matching files. Apply these common exclusions automatically:
+Use the `glob` tool to discover matching files.
+
+**If no files match the pattern**:
+
+- Inform the user that no files were found for the given pattern
+- Suggest checking the pattern or broadening the search scope
+- Do not proceed with an empty batch
+
+Apply these common exclusions automatically:
 
 - `node_modules/**`
 - `dist/**`
@@ -55,7 +65,7 @@ Split the discovered files into chunks based on these rules:
 | Total Files | Chunk Count | Files Per Chunk |
 | ----------- | ----------- | --------------- |
 | 1-5         | 1           | All files       |
-| 6-15        | 2           | ~7-8 each       |
+| 6-15        | 2           | 3-8 each        |
 | 16-30       | 3           | ~10 each        |
 | 31-50       | 4           | ~10-12 each     |
 | 51-75       | 5           | ~10-15 each     |
@@ -256,7 +266,7 @@ For each failed file, include:
 
 ## Dry-Run Mode
 
-If the user wants to preview what will be changed without actually modifying files, use the `--dry-run` flag:
+If the user wants to preview what will be changed without actually modifying files (e.g., "preview", "show me what would change", "dry run"):
 
 1. Discover and list all matching files with counts
 2. Show the planned operation for each file
@@ -267,7 +277,7 @@ If the user wants to preview what will be changed without actually modifying fil
 **Example**:
 
 ```
-/batch --dry-run add JSDoc comments to src/**/*.ts
+/batch preview adding JSDoc comments to src/**/*.ts
 ```
 
 **Expected output**:
