@@ -23,6 +23,18 @@ import { unescapePath } from '../paths.js';
  */
 const MAX_CRAWL_FILES = 100_000;
 
+/**
+ * Threshold above which we skip building the fzf fuzzy index. The fzf
+ * constructor does a synchronous `list.map(item => strToRunes(item.normalize()))`
+ * pass — roughly O(total path characters) — which blocks the UI main
+ * thread and gets visible to the user as "typing has no effect" the
+ * moment `@` triggers FileSearch.initialize(). Above this threshold we
+ * fall through to the picomatch substring filter (which is ~30× cheaper
+ * per query and yields to the event loop), at the cost of losing fuzzy
+ * scoring on result sets where it delivers little value anyway.
+ */
+const MAX_FZF_FILES = 50_000;
+
 export interface FileSearchOptions {
   projectRoot: string;
   ignoreDirs: string[];
@@ -126,13 +138,12 @@ class RecursiveFileSearch implements FileSearch {
     pattern: string,
     options: SearchOptions = {},
   ): Promise<string[]> {
-    // Check if engine is properly initialized.
-    // If fuzzy search is enabled (or undefined, default true), fzf must be initialized.
-    if (
-      !this.resultCache ||
-      (!this.fzf && this.options.enableFuzzySearch !== false) ||
-      !this.ignore
-    ) {
+    // Check if engine is properly initialized. `this.fzf` can legitimately
+    // be undefined after initialize() when the result set is above
+    // MAX_FZF_FILES — we deliberately skip fzf in that regime and let the
+    // picomatch fallback handle the query, so we can't treat a missing fzf
+    // as "not initialized".
+    if (!this.resultCache || !this.ignore) {
       throw new Error('Engine not initialized. Call initialize() first.');
     }
 
@@ -191,8 +202,13 @@ class RecursiveFileSearch implements FileSearch {
 
   private buildResultCache(): void {
     this.resultCache = new ResultCache(this.allFiles);
-    // Initialize fuzzy search if enabled (or undefined, default true).
-    if (this.options.enableFuzzySearch !== false) {
+    // Initialize fuzzy search if enabled (or undefined, default true) and
+    // the result set is small enough that the sync fzf constructor pass
+    // won't block the UI noticeably. See MAX_FZF_FILES for rationale.
+    if (
+      this.options.enableFuzzySearch !== false &&
+      this.allFiles.length <= MAX_FZF_FILES
+    ) {
       // The v1 algorithm is much faster since it only looks at the first
       // occurence of the pattern. We use it for search spaces that have >20k
       // files, because the v2 algorithm is just too slow in those cases.
