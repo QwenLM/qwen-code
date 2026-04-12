@@ -306,11 +306,27 @@ function normaliseBinName(basename: string): string {
 
   // Strip trailing version / numeric suffix separated by `.` or `-`.
   // e.g. python3.11 → python3, gcc-12 → gcc, ruby3.2.1 → ruby3 → ruby
+  //
+  // Uses a manual right-to-left scan instead of regex to avoid polynomial
+  // backtracking (CodeQL: polynomial-redos).
   let name = basename;
   for (;;) {
-    const shorter = name.replace(/[.-]\d[\w.]*$/, '');
-    if (shorter === name) break;
-    name = shorter;
+    // Find the rightmost `.-` or `--` followed by a digit.
+    let cutPos = -1;
+    for (let i = name.length - 1; i >= 1; i--) {
+      const prev = name[i - 1];
+      if (
+        (prev === '.' || prev === '-') &&
+        name[i]! >= '0' &&
+        name[i]! <= '9'
+      ) {
+        cutPos = i - 1;
+        break;
+      }
+    }
+    if (cutPos < 0) break;
+    name = name.substring(0, cutPos);
+    if (!name) break;
     if (DANGEROUS_ROOT_COMMANDS.has(name)) {
       return name;
     }
