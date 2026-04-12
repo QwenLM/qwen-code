@@ -302,6 +302,11 @@ export const App: React.FC = () => {
     });
   }, [messageHandling, vscode]);
 
+  const resetComposerState = useCallback(() => {
+    fileContext.clearFileReferences();
+    clearImages();
+  }, [clearImages, fileContext]);
+
   // Message handling
   useWebViewMessages({
     sessionManagement,
@@ -314,6 +319,7 @@ export const App: React.FC = () => {
     handleAskUserQuestion: setAskUserQuestionRequest,
     inputFieldRef,
     setInputText,
+    resetComposerState,
     setEditMode,
     setIsAuthenticated,
     setUsageStats: (stats) => setUsageStats(stats ?? null),

@@ -316,11 +316,15 @@ export function useCompletionTrigger(
         triggerChar = '/';
       }
 
-      // Check if trigger is at word boundary (start of line or after space)
+      // Check if trigger is in a valid context.
+      // Slash commands are only supported when the slash is the first character
+      // in the composer; @ mentions still allow a word-boundary trigger.
       if (triggerPos >= 0 && triggerChar) {
         const charBefore = triggerPos > 0 ? text[triggerPos - 1] : ' ';
         const isValidTrigger =
-          charBefore === ' ' || charBefore === '\n' || triggerPos === 0;
+          triggerChar === '/'
+            ? triggerPos === 0
+            : charBefore === ' ' || charBefore === '\n' || triggerPos === 0;
 
         if (isValidTrigger) {
           const query = text.substring(triggerPos + 1, effectiveCursorPosition);

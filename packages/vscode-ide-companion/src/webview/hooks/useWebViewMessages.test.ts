@@ -20,6 +20,8 @@ describe('resetConversationState', () => {
     const handleAskUserQuestion = vi.fn();
     const setCurrentSessionId = vi.fn();
     const setCurrentSessionTitle = vi.fn();
+    const inputFieldRef = { current: null };
+    const setInputText = vi.fn();
     const setUsageStats = vi.fn();
     const clearImageResolutions = vi.fn();
     const postMessage = vi.fn();
@@ -41,6 +43,8 @@ describe('resetConversationState', () => {
           setCurrentSessionId,
           setCurrentSessionTitle,
         },
+        inputFieldRef,
+        setInputText,
         setUsageStats,
       },
       clearImageResolutions,
@@ -52,6 +56,7 @@ describe('resetConversationState', () => {
     expect(endStreaming).toHaveBeenCalled();
     expect(clearWaitingForResponse).toHaveBeenCalled();
     expect(clearThinking).toHaveBeenCalled();
+    expect(setInputText).toHaveBeenCalledWith('');
     expect(clearMessages).toHaveBeenCalled();
     expect(clearToolCalls).toHaveBeenCalled();
     expect(clearActiveExecToolCalls).toHaveBeenCalled();
