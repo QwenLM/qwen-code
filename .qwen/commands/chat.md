@@ -31,12 +31,9 @@ Split "{{args}}" by spaces. The first token is the flag, the rest is the session
      - **Do NOT proceed without explicit "yes" confirmation.** If user says anything other than "yes", stop and confirm cancellation.
    - **If the name does NOT exist in the index:** Proceed directly to save without asking for confirmation.
    - **Get the current session ID:**
-     - Check if `.qwen/projects/` directory exists
-     - If it exists, scan for the project hash subdirectory and find the most recent `.jsonl` file in `chats/`
-     - The filename (without `.jsonl`) IS the session ID (UUID format)
-     - **If `.qwen/projects/` does NOT exist or no `.jsonl` files found:**
-       - Generate a new UUID (format: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
-       - Tell the user: "Note: Could not detect active session file. Generated a new session ID. If you're using an older session format, this reference may not be resolvable."
+     - You are the AI running inside the current session. **You MUST know your own session ID from the conversation context.**
+     - If you can determine the current session ID from context (e.g., it was mentioned in the system prompt, visible in the URL/title, or you can infer it from recent conversation history), use that real UUID.
+     - **If you truly cannot determine the session ID:** Do NOT generate a fake one. Instead, tell the user: "I cannot determine the current session ID from context. Please provide the session ID manually, or use the application's built-in save feature."
    - Write to index: `"{{name}}": "<actual-session-id>"` (ensure `.qwen` directory exists first, format JSON with 2-space indent)
    - If new: Confirm: `Saved: {{name}} -> <sessionId>`
    - If overwrite: Confirm: `Overwritten: {{name}} -> <sessionId>`
