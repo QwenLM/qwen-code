@@ -610,8 +610,10 @@ export async function processSingleFileContent(
       .replace(/\\/g, '/');
 
     const displayName = path.basename(filePath);
+    // Use optional call (`?.()`) so mock Configs that don't implement
+    // getContentGeneratorConfig still work for non-media file types.
     const modalities: InputModalities =
-      config.getContentGeneratorConfig()?.modalities ?? {};
+      config.getContentGeneratorConfig?.()?.modalities ?? {};
 
     // Check modality support for media files using the resolved config
     // (same source of truth the converter uses at API-call time).
