@@ -13,7 +13,7 @@ Use this if you want the simplest setup and you're using Qwen models.
 - **How it works**: on first start, Qwen Code opens a browser login page. After you finish, credentials are cached locally so you usually won't need to log in again.
 - **Requirements**: a `qwen.ai` account + internet access (at least for the first login).
 - **Benefits**: no API key management, automatic credential refresh.
-- **Cost & quota**: free, with a quota of **60 requests/minute** and **1,000 requests/day**.
+- **Cost & quota**: free, with a quota of **60 requests/minute** and **100 requests/day**.
 
 Start the CLI and follow the browser flow:
 
@@ -327,7 +327,7 @@ You'll see a selector with arrow-key navigation:
 ```
 Select authentication method:
 
-> Qwen OAuth - Free · Up to 1,000 requests/day · Qwen latest models
+> Qwen OAuth - Free · Up to 100 requests/day · Qwen latest models
   Alibaba Cloud Coding Plan - Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models
 
 (Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)

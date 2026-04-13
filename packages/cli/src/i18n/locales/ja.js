@@ -966,8 +966,8 @@ export default {
     '続行するには認証方法を選択してください。Ctrl+C をもう一度押すと終了します',
   'Terms of Services and Privacy Notice': '利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    '無料 \u00B7 1日最大1,000リクエスト \u00B7 Qwen最新モデル',
+  'Free \u00B7 Up to 100 requests/day \u00B7 Qwen latest models':
+    '無料 \u00B7 1日最大100リクエスト \u00B7 Qwen最新モデル',
   'Login with QwenChat account to use daily free quota.':
     'QwenChatアカウントでログインして、毎日の無料クォータをご利用ください。',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
@@ -1439,7 +1439,7 @@ export default {
     '  qwen auth                - インタラクティブ認証セットアップ\n',
   '✓ Authentication Method: Qwen OAuth': '✓ 認証方法: Qwen OAuth',
   '  Type: Free tier': '  タイプ: 無料プラン',
-  '  Limit: Up to 1,000 requests/day': '  制限: 1日最大1,000リクエスト',
+  '  Limit: Up to 100 requests/day': '  制限: 1日最大100リクエスト',
   '  Models: Qwen latest models\n': '  モデル: Qwen 最新モデル\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ 認証方法: Alibaba Cloud Coding Plan',

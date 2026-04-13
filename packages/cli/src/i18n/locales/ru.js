@@ -1175,8 +1175,8 @@ export default {
   'Terms of Services and Privacy Notice':
     'Условия обслуживания и уведомление о конфиденциальности',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Бесплатно \u00B7 До 1 000 запросов/день \u00B7 Новейшие модели Qwen',
+  'Free \u00B7 Up to 100 requests/day \u00B7 Qwen latest models':
+    'Бесплатно \u00B7 До 100 запросов/день \u00B7 Новейшие модели Qwen',
   'Login with QwenChat account to use daily free quota.':
     'Войдите с помощью аккаунта QwenChat, чтобы использовать ежедневную бесплатную квоту.',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
@@ -1945,7 +1945,7 @@ export default {
     '  qwen auth                - Интерактивная настройка аутентификации\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Метод аутентификации: Qwen OAuth',
   '  Type: Free tier': '  Тип: Бесплатный',
-  '  Limit: Up to 1,000 requests/day': '  Лимит: До 1 000 запросов/день',
+  '  Limit: Up to 100 requests/day': '  Лимит: До 100 запросов/день',
   '  Models: Qwen latest models\n': '  Модели: Последние модели Qwen\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Метод аутентификации: Alibaba Cloud Coding Plan',

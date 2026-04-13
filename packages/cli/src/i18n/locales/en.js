@@ -1298,8 +1298,8 @@ export default {
   'Terms of Services and Privacy Notice':
     'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
+  'Free \u00B7 Up to 100 requests/day \u00B7 Qwen latest models':
+    'Free \u00B7 Up to 100 requests/day \u00B7 Qwen latest models',
   'Login with QwenChat account to use daily free quota.':
     'Login with QwenChat account to use daily free quota.',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':

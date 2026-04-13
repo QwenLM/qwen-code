@@ -429,7 +429,7 @@ export async function showAuthStatus(): Promise<void> {
     if (selectedType === AuthType.QWEN_OAUTH) {
       writeStdoutLine(t('✓ Authentication Method: Qwen OAuth'));
       writeStdoutLine(t('  Type: Free tier'));
-      writeStdoutLine(t('  Limit: Up to 1,000 requests/day'));
+      writeStdoutLine(t('  Limit: Up to 100 requests/day'));
       writeStdoutLine(t('  Models: Qwen latest models\n'));
     } else if (selectedType === AuthType.USE_OPENAI) {
       // Check for Coding Plan configuration
