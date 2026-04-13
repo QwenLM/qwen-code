@@ -93,13 +93,12 @@ if (existsSync(join(fileSearchRsDir, 'Cargo.toml'))) {
     console.log('');
   } catch (e) {
     console.log('━'.repeat(60));
-    console.log(
-      '❌ Failed to build Rust file search module. Falling back to JavaScript.',
+    console.error(
+      '❌ Failed to build Rust file search module. Aborting build.',
     );
     console.log('━'.repeat(60));
-    console.log('');
-    console.warn('Error details:', e.message);
-    console.log('');
+    console.error('Error details:', e.message);
+    process.exit(1);
   }
 } else {
   console.log('');
