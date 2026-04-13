@@ -182,7 +182,7 @@ Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/ma
 
 ### Authentication
 
-Supports Qwen OAuth (browser-based, 1000 free requests/day) and OpenAI-compatible API keys.
+Supports Qwen OAuth (browser-based, 100 free requests/day, ending 2026-04-15 — switch to OpenRouter, Fireworks AI, or Alibaba Cloud ModelStudio after that) and OpenAI-compatible API keys.
 
 Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/configuration/auth.md
 
