@@ -813,6 +813,16 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
+      // Handle bare exit/quit commands (without the / prefix)
+      if (
+        ['exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
+          submittedValue.trim(),
+        )
+      ) {
+        void handleSlashCommand('/quit');
+        return;
+      }
+
       // Check if speculation has results for this submission
       const spec = speculationRef.current;
       if (
@@ -938,6 +948,7 @@ export const AppContainer = (props: AppContainerProps) => {
       agentViewState,
       streamingState,
       submitQuery,
+      handleSlashCommand,
       config,
       geminiClient,
       historyManager,
