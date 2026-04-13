@@ -294,6 +294,29 @@ describe('mcp-client', () => {
       });
     });
 
+    it('should connect via command without cwd', async () => {
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport(
+        'test-server',
+        {
+          command: 'test-command',
+          args: ['--foo', 'bar'],
+        },
+        false,
+      );
+
+      expect(mockedTransport).toHaveBeenCalledWith({
+        command: 'test-command',
+        args: ['--foo', 'bar'],
+        cwd: undefined,
+        env: expect.any(Object),
+        stderr: 'pipe',
+      });
+    });
+
     it('should throw if cwd does not exist', async () => {
       mockExistsSync.mockReturnValueOnce(false);
 
