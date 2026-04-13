@@ -57,6 +57,7 @@ import type {
 } from './agent-events.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
+import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { AgentTool } from '../../tools/agent.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
@@ -313,6 +314,19 @@ export class AgentCore {
           .getFunctionDeclarations()
           .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
       );
+    }
+
+    // Apply disallowedTools blocklist (supports MCP server-level patterns).
+    if (this.toolConfig?.disallowedTools?.length) {
+      const disallowed = this.toolConfig.disallowedTools;
+      return toolsList.filter((t) => {
+        if (!t.name) return true;
+        return !disallowed.some((pattern) =>
+          t.name!.startsWith('mcp__')
+            ? matchesMcpPattern(pattern, t.name!)
+            : pattern === t.name,
+        );
+      });
     }
 
     return toolsList;
