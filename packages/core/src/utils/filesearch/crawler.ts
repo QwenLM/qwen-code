@@ -31,10 +31,6 @@ function toPosixPath(p: string): string {
   return p.split(path.sep).join(path.posix.sep);
 }
 
-// ---------------------------------------------------------------------------
-// Throttling: rebuild index at most once per 5 seconds
-// ---------------------------------------------------------------------------
-
 const THROTTLE_MS = 5_000;
 const lastRebuildTime = new Map<string, number>();
 
@@ -48,10 +44,6 @@ function recordRebuild(crawlDirectory: string): void {
   lastRebuildTime.set(crawlDirectory, Date.now());
 }
 
-// ---------------------------------------------------------------------------
-// Mtime-based change detection
-// ---------------------------------------------------------------------------
-
 interface ChangeState {
   gitRootMtimeMs: number | null;
   fileList: string[];
@@ -61,23 +53,21 @@ const changeStateMap = new Map<string, ChangeState>();
 
 function getGitRootMtime(crawlDirectory: string): number | null {
   try {
-    // Walk up from crawlDirectory to find .git
     let current = crawlDirectory;
     while (current) {
       const gitDir = path.join(current, '.git');
       const stat = fs.statSync(gitDir);
       if (stat.isDirectory()) {
-        // Found .git, now get its index file mtime
         const indexPath = path.join(gitDir, 'index');
         const indexStat = fs.statSync(indexPath);
         return indexStat.mtimeMs;
       }
       const parent = path.dirname(current);
-      if (parent === current) break; // Reached root
+      if (parent === current) break;
       current = parent;
     }
   } catch {
-    // Not a git repo or can't stat
+    // Ignore errors when .git directory or index file doesn't exist
   }
   return null;
 }
@@ -88,12 +78,10 @@ function hasFileListChanged(crawlDirectory: string): boolean {
 
   if (!state) return true;
 
-  // If mtime changed since last crawl, files may have changed
   if (currentMtime !== null && state.gitRootMtimeMs !== null) {
     return currentMtime > state.gitRootMtimeMs;
   }
 
-  // If we can't determine mtime, always re-crawl
   return true;
 }
 
@@ -101,10 +89,6 @@ function updateChangeState(crawlDirectory: string, fileList: string[]): void {
   const mtime = getGitRootMtime(crawlDirectory);
   changeStateMap.set(crawlDirectory, { gitRootMtimeMs: mtime, fileList });
 }
-
-// ---------------------------------------------------------------------------
-// Process helpers: run a command with timeout and return stdout lines
-// ---------------------------------------------------------------------------
 
 interface CommandResult {
   success: boolean;
@@ -138,17 +122,9 @@ function runCommand(
   });
 }
 
-// ---------------------------------------------------------------------------
-// Normalize paths: convert Windows separators to POSIX
-// ---------------------------------------------------------------------------
-
 function normalizePath(p: string): string {
   return toPosixPath(p);
 }
-
-// ---------------------------------------------------------------------------
-// Yield to event loop periodically for async chunked indexing (200k+ files)
-// ---------------------------------------------------------------------------
 
 const YIELD_INTERVAL = 1000;
 
@@ -158,14 +134,6 @@ async function maybeYield(index: number): Promise<void> {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Primary: git ls-files
-// ---------------------------------------------------------------------------
-
-/**
- * Finds the git root for a given directory.
- * Returns the git root path, or null if not in a git repo.
- */
 async function findGitRoot(dir: string): Promise<string | null> {
   const result = await runCommand(
     'git',
@@ -177,10 +145,6 @@ async function findGitRoot(dir: string): Promise<string | null> {
   return normalizePath(result.lines[0]);
 }
 
-/**
- * Crawls using git ls-files. Returns tracked + untracked files.
- * The paths in the returned list are relative to `crawlDirectory`.
- */
 async function crawlWithGitLsFiles(
   crawlDirectory: string,
   cwd: string,
@@ -191,37 +155,25 @@ async function crawlWithGitLsFiles(
     return { success: false, files: [], isGitRepo: false };
   }
 
+  const posixCwd = normalizePath(cwd);
   const posixCrawlDir = normalizePath(crawlDirectory);
+  const relativeToCrawlDir = path.posix.relative(posixCwd, posixCrawlDir);
 
-  // Get relative path from git root to crawl directory
   const relativeToGitRoot = path.posix.relative(gitRoot, posixCrawlDir);
 
-  // Get tracked files (git ls-files outputs paths relative to git root)
-  // Use `--` separator to ensure crawlDirectory is treated as a path argument
-  // Pass crawlDirectory as path argument to scope results
-  const trackedArgs = [
-    'ls-files',
-    '--cached',
-    '--',
-    relativeToGitRoot === '.' || relativeToGitRoot === ''
-      ? posixCrawlDir
-      : relativeToGitRoot,
-  ];
+  const trackedArgs = ['ls-files', '--cached'];
+  if (relativeToGitRoot && relativeToGitRoot !== '.') {
+    trackedArgs.push(relativeToGitRoot);
+  }
   const trackedResult = await runCommand('git', trackedArgs, gitRoot, 20_000);
   if (!trackedResult.success) {
     return { success: false, files: [], isGitRepo: true };
   }
 
-  // Get untracked files (excluding standard git ignored files)
-  const untrackedArgs = [
-    'ls-files',
-    '--others',
-    '--exclude-standard',
-    '--',
-    relativeToGitRoot === '.' || relativeToGitRoot === ''
-      ? posixCrawlDir
-      : relativeToGitRoot,
-  ];
+  const untrackedArgs = ['ls-files', '--others', '--exclude-standard'];
+  if (relativeToGitRoot && relativeToGitRoot !== '.') {
+    untrackedArgs.push(relativeToGitRoot);
+  }
   const untrackedResult = await runCommand(
     'git',
     untrackedArgs,
@@ -229,18 +181,19 @@ async function crawlWithGitLsFiles(
     10_000,
   );
 
-  // Combine tracked + untracked files
   const fileSet = new Set<string>();
   let count = 0;
 
   for (const file of trackedResult.lines) {
     await maybeYield(count++);
     const normalizedFile = normalizePath(file);
-    // Convert from gitRoot-relative to crawlDirectory-relative
-    const fullPath = path.posix.relative(
-      posixCrawlDir,
-      path.posix.join(gitRoot, normalizedFile),
-    );
+    const fullPath =
+      relativeToGitRoot && relativeToGitRoot !== '.'
+        ? path.posix.join(
+            relativeToCrawlDir,
+            normalizedFile.slice(relativeToGitRoot.length + 1),
+          )
+        : path.posix.join(relativeToCrawlDir, normalizedFile);
     fileSet.add(fullPath);
   }
 
@@ -248,21 +201,21 @@ async function crawlWithGitLsFiles(
     for (const file of untrackedResult.lines) {
       await maybeYield(count++);
       const normalizedFile = normalizePath(file);
-      // Convert from gitRoot-relative to crawlDirectory-relative
-      const fullPath = path.posix.relative(
-        posixCrawlDir,
-        path.posix.join(gitRoot, normalizedFile),
-      );
+      const fullPath =
+        relativeToGitRoot && relativeToGitRoot !== '.'
+          ? path.posix.join(
+              relativeToCrawlDir,
+              normalizedFile.slice(relativeToGitRoot.length + 1),
+            )
+          : path.posix.join(relativeToCrawlDir, normalizedFile);
       if (!fileSet.has(fullPath)) {
         fileSet.add(fullPath);
       }
     }
   }
 
-  // Build results with directories
   const results = buildResultsFromFileSet(fileSet);
 
-  // Apply custom ignore rules
   const dirFilter = options.ignore.getDirectoryFilter();
   const fileFilter = options.ignore.getFileFilter();
 
@@ -272,19 +225,12 @@ async function crawlWithGitLsFiles(
     return !fileFilter(p);
   });
 
-  // Update change detection state
   updateChangeState(crawlDirectory, filteredResults);
   recordRebuild(crawlDirectory);
 
   return { success: true, files: filteredResults, isGitRepo: true };
 }
 
-/**
- * Given a set of file paths, produces a list that includes:
- * - The root marker '.'
- * - All unique parent directories (with trailing '/')
- * - All files
- */
 function buildResultsFromFileSet(files: Set<string>): string[] {
   const dirSet = new Set<string>();
   for (const file of files) {
@@ -297,10 +243,6 @@ function buildResultsFromFileSet(files: Set<string>): string[] {
   }
   return ['.', ...Array.from(dirSet), ...Array.from(files)];
 }
-
-// ---------------------------------------------------------------------------
-// Fallback 1: ripgrep --files
-// ---------------------------------------------------------------------------
 
 async function crawlWithRipgrep(
   crawlDirectory: string,
@@ -318,19 +260,22 @@ async function crawlWithRipgrep(
     return { success: false, files: [] };
   }
 
-  // ripgrep --files with crawlDirectory as cwd returns paths relative to crawlDirectory
-  // No need to adjust paths - they're already relative to crawlDirectory
+  const posixCwd = normalizePath(cwd);
+  const posixCrawlDir = normalizePath(crawlDirectory);
+  const relativeToCrawlDir = path.posix.relative(posixCwd, posixCrawlDir);
+
   const fileSet = new Set<string>();
   let count = 0;
   for (const file of rgResult.lines) {
     await maybeYield(count++);
     const normalizedFile = normalizePath(file);
-    fileSet.add(normalizedFile);
+
+    const fullPath = path.posix.join(relativeToCrawlDir, normalizedFile);
+    fileSet.add(fullPath);
   }
 
   const results = buildResultsFromFileSet(fileSet);
 
-  // Apply custom ignore rules
   const dirFilter = options.ignore.getDirectoryFilter();
   const fileFilter = options.ignore.getFileFilter();
 
@@ -344,10 +289,6 @@ async function crawlWithRipgrep(
   return { success: true, files: filteredResults };
 }
 
-// ---------------------------------------------------------------------------
-// Fallback 2: original fdir-based crawl
-// ---------------------------------------------------------------------------
-
 async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
   const posixCwd = toPosixPath(options.cwd);
   const posixCrawlDirectory = toPosixPath(options.crawlDirectory);
@@ -360,16 +301,13 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
     const api = new fdir()
       .withRelativePaths()
       .withDirs()
-      .withPathSeparator('/') // Always use unix style paths
+      .withPathSeparator('/')
       .exclude((_, dirPath) => {
         const relativePath = path.posix.relative(posixCrawlDirectory, dirPath);
         return dirFilter(`${relativePath}/`);
       })
       .filter((filePath, isDirectory) => {
-        // Directories are already handled by the exclude() callback above.
         if (isDirectory) return true;
-        // Apply file-level ignore patterns (e.g. *.log, *.map) during the
-        // crawl so they don't consume the maxFiles budget.
         const cwdRelative = path.posix.join(relativeToCrawlDir, filePath);
         return !fileFilter(cwdRelative);
       });
@@ -384,19 +322,13 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
 
     results = await api.crawl(options.crawlDirectory).withPromise();
   } catch {
-    // The directory probably doesn't exist.
     return [];
   }
 
   return results.map((p) => path.posix.join(relativeToCrawlDir, p));
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-
 export async function crawl(options: CrawlOptions): Promise<string[]> {
-  // Check in-memory cache first
   if (options.cache) {
     const cacheKey = cache.getCacheKey(
       options.crawlDirectory,
@@ -410,20 +342,15 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     }
   }
 
-  // Check throttling: don't rebuild more than once per 5 seconds
   if (isThrottled(options.crawlDirectory)) {
-    // Return cached result from changeStateMap if available
     const state = changeStateMap.get(options.crawlDirectory);
     if (state) {
       return applyMaxFilesLimit(state.fileList, options.maxFiles);
     }
-    // Fall through to crawl if no state available
   }
 
-  // Check if files have changed (mtime-based change detection)
   const needReCrawl = hasFileListChanged(options.crawlDirectory);
 
-  // If no re-crawl needed and we have cached state, return it
   if (!needReCrawl) {
     const state = changeStateMap.get(options.crawlDirectory);
     if (state) {
@@ -431,7 +358,6 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     }
   }
 
-  // Try git ls-files first (primary path)
   const gitResult = await crawlWithGitLsFiles(
     options.crawlDirectory,
     options.cwd,
@@ -453,7 +379,6 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     return results;
   }
 
-  // Not a git repo — try ripgrep fallback
   if (!gitResult.isGitRepo) {
     const rgResult = await crawlWithRipgrep(
       options.crawlDirectory,
@@ -477,7 +402,6 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     }
   }
 
-  // Ripgrep not available or failed — fall back to original fdir behavior
   const fdirResults = await crawlWithFdir(options);
   const limitedResults = applyMaxFilesLimit(fdirResults, options.maxFiles);
 
