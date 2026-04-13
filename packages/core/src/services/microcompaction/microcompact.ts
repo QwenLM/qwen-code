@@ -134,13 +134,15 @@ export function microcompactHistory(
   const { gapMs } = trigger;
 
   const envKeep = process.env['QWEN_MC_KEEP_RECENT'];
-  const configKeepRecent =
+  const rawKeepRecent =
     envKeep !== undefined && Number.isFinite(Number(envKeep))
       ? Number(envKeep)
       : (settings.toolResultsNumToKeep ?? 5);
+  const keepRecent = Number.isFinite(rawKeepRecent)
+    ? Math.max(1, rawKeepRecent)
+    : 5;
 
   const allRefs = collectCompactablePartRefs(history);
-  const keepRecent = Math.max(1, configKeepRecent);
   const keepRefs = new Set(
     allRefs.slice(-keepRecent).map((r) => `${r.contentIndex}:${r.partIndex}`),
   );
@@ -209,7 +211,7 @@ export function microcompactHistory(
       thresholdMinutes,
       toolsCleared,
       toolsKept: allRefs.length - clearRefs.length,
-      keepRecent: configKeepRecent,
+      keepRecent,
       tokensSaved,
     },
   };

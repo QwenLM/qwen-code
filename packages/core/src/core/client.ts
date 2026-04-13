@@ -584,9 +584,9 @@ export class GeminiClient {
       }
 
       // Idle cleanup: clear old tool results when idle > threshold.
-      // Runs only on user-initiated messages (not tool result submissions)
-      // so that model latency during a tool-call loop doesn't count as
-      // user idle time.
+      // Runs on user and cron messages (not tool result submissions or
+      // retries/hooks) so that model latency during a tool-call loop
+      // doesn't count as user idle time.
       const mcResult = microcompactHistory(
         this.getChat().getHistory(),
         this.lastApiCompletionTimestamp,
