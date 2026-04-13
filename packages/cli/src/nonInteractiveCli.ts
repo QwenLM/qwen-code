@@ -36,8 +36,6 @@ import {
   handleCancellationError,
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
-
-const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -48,7 +46,9 @@ import {
 } from './utils/nonInteractiveHelpers.js';
 import { TurnBuffer } from './acp-integration/session/rewrite/TurnBuffer.js';
 import { LlmRewriter } from './acp-integration/session/rewrite/LlmRewriter.js';
-import type { MessageRewriteConfig } from './acp-integration/session/rewrite/types.js';
+import { loadRewriteConfig } from './acp-integration/session/rewrite/config.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
 /**
  * Emits a final message for slash command results.
@@ -254,14 +254,7 @@ export async function runNonInteractive(
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
       // Initialize message rewriter if configured
-      const userOriginal = settings.user?.originalSettings as
-        | Record<string, unknown>
-        | undefined;
-      const workspaceOriginal = settings.workspace?.originalSettings as
-        | Record<string, unknown>
-        | undefined;
-      const rewriteConfig = (workspaceOriginal?.['messageRewrite'] ??
-        userOriginal?.['messageRewrite']) as MessageRewriteConfig | undefined;
+      const rewriteConfig = loadRewriteConfig(settings);
       const rewriter = rewriteConfig?.enabled
         ? new LlmRewriter(config, rewriteConfig)
         : null;
@@ -326,6 +319,7 @@ export async function runNonInteractive(
 
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
+            if (turnBuffer) turnBuffer.markToolCall();
           }
           if (
             outputFormat === OutputFormat.TEXT &&
@@ -351,10 +345,11 @@ export async function runNonInteractive(
           if (content) {
             rewriteTurnIndex++;
             try {
-              const rewritten = await rewriter.rewrite(
-                content,
-                abortController?.signal,
-              );
+              const rewriteSignal = AbortSignal.any([
+                abortController.signal,
+                AbortSignal.timeout(30000),
+              ]);
+              const rewritten = await rewriter.rewrite(content, rewriteSignal);
               if (rewritten) {
                 debugLogger.info(
                   `Turn ${rewriteTurnIndex}: rewritten ${rewritten.length} chars`,
@@ -512,13 +507,74 @@ export async function runNonInteractive(
                           return;
                         }
                         adapter.processEvent(event);
+
+                        // Accumulate turn content for rewriting
+                        if (turnBuffer) {
+                          if (
+                            event.type === GeminiEventType.Content &&
+                            typeof event.value === 'string'
+                          ) {
+                            turnBuffer.appendMessage(event.value);
+                          } else if (
+                            event.type === GeminiEventType.Thought &&
+                            event.value
+                          ) {
+                            const thought = event.value;
+                            const thoughtText = thought.subject
+                              ? `${thought.subject}: ${thought.description}`
+                              : thought.description;
+                            if (thoughtText)
+                              turnBuffer.appendThought(thoughtText);
+                          }
+                        }
+
                         if (event.type === GeminiEventType.ToolCallRequest) {
                           cronToolCallRequests.push(event.value);
+                          if (turnBuffer) turnBuffer.markToolCall();
                         }
                       }
 
                       adapter.finalizeAssistantMessage();
                       totalApiDurationMs += Date.now() - cronApiStartTime;
+
+                      // Flush turn buffer and append rewritten message for cron path
+                      if (rewriter && turnBuffer) {
+                        const content = turnBuffer.flush();
+                        if (content) {
+                          rewriteTurnIndex++;
+                          try {
+                            const rewriteSignal = AbortSignal.any([
+                              abortController.signal,
+                              AbortSignal.timeout(30000),
+                            ]);
+                            const rewritten = await rewriter.rewrite(
+                              content,
+                              rewriteSignal,
+                            );
+                            if (rewritten) {
+                              debugLogger.info(
+                                `Cron turn ${rewriteTurnIndex}: rewritten ${rewritten.length} chars`,
+                              );
+                              adapter.startAssistantMessage();
+                              adapter.processEvent({
+                                type: GeminiEventType.Content,
+                                value: rewritten,
+                                _meta: {
+                                  rewritten: true,
+                                  turnIndex: rewriteTurnIndex,
+                                },
+                              } as unknown as Parameters<
+                                JsonOutputAdapterInterface['processEvent']
+                              >[0]);
+                              adapter.finalizeAssistantMessage();
+                            }
+                          } catch (err) {
+                            debugLogger.warn(
+                              `Cron turn ${rewriteTurnIndex}: rewrite failed: ${err instanceof Error ? err.message : String(err)}`,
+                            );
+                          }
+                        }
+                      }
 
                       if (cronToolCallRequests.length > 0) {
                         const cronToolResponseParts: Part[] = [];

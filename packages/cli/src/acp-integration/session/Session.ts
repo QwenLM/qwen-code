@@ -90,7 +90,7 @@ import {
 } from './permissionUtils.js';
 import {
   MessageRewriteMiddleware,
-  type MessageRewriteConfig,
+  loadRewriteConfig,
 } from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
@@ -145,15 +145,7 @@ export class Session implements SessionContext {
     this.runtimeBaseDir = Storage.getRuntimeBaseDir();
 
     // Initialize message rewrite middleware if configured
-    // Read from user settings originalSettings (merged Settings type doesn't include unknown keys)
-    const userOriginal = settings.user?.originalSettings as
-      | Record<string, unknown>
-      | undefined;
-    const workspaceOriginal = settings.workspace?.originalSettings as
-      | Record<string, unknown>
-      | undefined;
-    const rewriteConfig = (workspaceOriginal?.['messageRewrite'] ??
-      userOriginal?.['messageRewrite']) as MessageRewriteConfig | undefined;
+    const rewriteConfig = loadRewriteConfig(settings);
     if (rewriteConfig?.enabled) {
       debugLogger.info('Message rewrite middleware enabled');
       this.messageRewriter = new MessageRewriteMiddleware(
@@ -591,6 +583,10 @@ export class Session implements SessionContext {
             }
 
             if (usageMetadata) {
+              // Flush rewrite buffer before emitting usage (marks turn boundary)
+              if (this.messageRewriter) {
+                await this.messageRewriter.flushTurn(ac.signal);
+              }
               const durationMs = Date.now() - streamStartTime;
               await this.messageEmitter.emitUsageMetadata(
                 usageMetadata,
