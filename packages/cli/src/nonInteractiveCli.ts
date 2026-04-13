@@ -260,6 +260,7 @@ export async function runNonInteractive(
         : null;
       const turnBuffer = rewriter ? new TurnBuffer() : null;
       let rewriteTurnIndex = 0;
+      const pendingRewrites: Array<Promise<void>> = [];
 
       if (rewriter) {
         debugLogger.info('Message rewrite enabled in non-interactive mode');
@@ -371,11 +372,11 @@ export async function runNonInteractive(
                 );
               }
             };
-            // Default async (fire-and-forget), sync if configured
+            // Default async (parallel with tool execution), sync if configured
             if (rewriteConfig?.async === false) {
               await doRewrite();
             } else {
-              void doRewrite();
+              pendingRewrites.push(doRewrite());
             }
           }
         }
@@ -651,6 +652,12 @@ export async function runNonInteractive(
               // Also check immediately in case jobs were already deleted
               checkDone();
             });
+          }
+
+          // Wait for all pending async rewrites before emitting result
+          if (pendingRewrites.length > 0) {
+            await Promise.allSettled(pendingRewrites);
+            pendingRewrites.length = 0;
           }
 
           const metrics = uiTelemetryService.getMetrics();

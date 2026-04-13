@@ -13,8 +13,11 @@ export interface MessageRewriteConfig {
   enabled: boolean;
   /** Which message types to rewrite */
   target: 'message' | 'thought' | 'both';
-  /** LLM rewrite prompt (system prompt for the rewriter) */
-  prompt: string;
+  /** LLM rewrite prompt (system prompt for the rewriter). Inline string. */
+  prompt?: string;
+  /** Path to a file containing the rewrite prompt. Resolved relative to CWD.
+   *  Takes precedence over `prompt` if both are set. */
+  promptFile?: string;
   /** Model to use for rewriting (empty = use current model) */
   model?: string;
   /** Whether to run rewrite async (parallel with tool execution, default true).

@@ -4,46 +4,33 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { readFileSync, existsSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { TurnContent, MessageRewriteConfig } from './types.js';
 
 const debugLogger = createDebugLogger('MESSAGE_REWRITER');
 
-const DEFAULT_REWRITE_PROMPT = `你是数据分析过程的展示优化助手。将 Agent 的原始输出改写为结构化的、面向业务同学的分析过程展示。
+const DEFAULT_REWRITE_PROMPT = `You are an assistant that rewrites raw coding-agent output into concise, user-friendly progress updates.
 
-## 输出风格参考
+The agent is a software engineering assistant that reads files, writes code, runs commands, and uses tools. Its raw output mixes internal reasoning with user-facing information. Your job: extract what the user cares about, drop what they don't.
 
-用简洁的要点列表展示分析过程，让业务同学清晰看到"在做什么、怎么做、发现了什么"：
+## Rules
 
-示例——数据理解阶段：
-"数据理解完成。数据记录了全球多个游戏的销售数据及评分信息，涵盖游戏名称、平台、类型、发行商等维度。
-• 涵盖游戏基本信息（名称、平台、类型、发行年份等）及全球销量
-• 各地区销量（北美、欧洲、日本、其他地区）
-• 媒体评分与用户评分数量"
+1. **Strictly based on original**: only surface information already in the input. Never invent details, plans, or conclusions the agent didn't state.
+2. **Keep**: goals, decisions, key findings, results, errors that affect the user, status updates.
+3. **Drop**: file paths, tool/skill names, internal reasoning about which tool to call, code snippets, stack traces, "let me…" / "now I'll…" filler phrases.
+4. **Progress turns**: if the agent is just starting a step (reading files, running a command, exploring code), output one short sentence describing what's happening — so the user isn't staring at silence.
+5. **Rich content**: if the input already contains well-structured user-facing content (tables, lists, formatted results), do light cleanup only (remove stray paths/tool names) and preserve the structure.
+6. **Pure internal ops**: if the input is entirely internal (fixing a typo in its own code, retrying a failed tool call, creating temp directories) → return empty string.
+7. **Preserve data exactly**: never alter numbers, percentages, file sizes, error codes, or quoted output.
 
-示例——分析执行阶段：
-"策略类游戏市场基本面分析
-• 清洗数据：将 'tbd' 替换为空值，确保评分字段为数值型
-• 计算策略类游戏的平均媒体评分与平均用户评分，并与全品类均值对比
-• 分析评分与销量的相关性（如高分是否带动高销量），绘制评分-销量散点图并计算相关系数
-• 识别'高分低销'与'低分高销'的异常游戏案例，初步推测原因"
+## Context continuity
 
-示例——结论阶段：
-"Central 地区盈利能力最差
-• 利润率仅 7.92%，是 West 地区（14.94%）的一半
-• 核心原因：折扣策略失控，平均折扣 24%，是其他地区的 2 倍
-• Texas 和 Illinois 两州合计亏损占 68%"
+If "Previous rewrite output" is provided, the user has already seen it. Don't repeat — build on it. If this turn adds nothing new, return empty string.
 
-## 规则
-
-1. **保留的内容**：数据概览、分析模块名称和目标、计算口径（如"利润率 = SUM(利润)/SUM(销售额)"）、分析方法选择原因、数据发现和洞察（含具体数字）、结论、建议、表格
-2. **过滤的内容**：文件路径、工具/Skill 名称、SQL 语句、Python 代码、技术报错信息、QWEN.md/工作流指令复述、"让我..."/"现在我来..."等自述性过渡语
-3. **纯技术操作**（修复代码错误、创建目录、安装依赖等）→ 输出空字符串
-4. **数据准确性**：不要改写任何数字、百分比、金额，原样保留
-5. **语言**：中文，简洁，用要点列表（•）组织
-
-只输出改写后的文本。如果输入无业务价值，返回空字符串。`;
+Output only the rewritten text, or empty string if the input has no user-facing value.`;
 
 /**
  * Uses LLM to rewrite turn content into business-friendly text.
@@ -51,12 +38,30 @@ const DEFAULT_REWRITE_PROMPT = `你是数据分析过程的展示优化助手。
  */
 export class LlmRewriter {
   private readonly prompt: string;
+  /** Last successful rewrite output, used as context for next turn */
+  private lastOutput: string | null = null;
 
   constructor(
     private readonly config: Config,
     rewriteConfig: MessageRewriteConfig,
   ) {
-    this.prompt = rewriteConfig.prompt || DEFAULT_REWRITE_PROMPT;
+    // promptFile takes precedence over inline prompt
+    if (rewriteConfig.promptFile) {
+      const filePath = resolve(rewriteConfig.promptFile);
+      if (existsSync(filePath)) {
+        this.prompt = readFileSync(filePath, 'utf-8').trim();
+        debugLogger.info(
+          `Loaded rewrite prompt from file: ${filePath} (${this.prompt.length} chars)`,
+        );
+      } else {
+        debugLogger.warn(
+          `Rewrite prompt file not found: ${filePath}, using default`,
+        );
+        this.prompt = DEFAULT_REWRITE_PROMPT;
+      }
+    } else {
+      this.prompt = rewriteConfig.prompt || DEFAULT_REWRITE_PROMPT;
+    }
   }
 
   /**
@@ -77,11 +82,21 @@ export class LlmRewriter {
       inputParts.push('[回复文本]\n' + turnContent.messages.join('\n'));
     }
 
+    // Prepend last rewrite output as context for coherence
+    if (this.lastOutput) {
+      inputParts.unshift('[上一轮改写结果]\n' + this.lastOutput);
+    }
+
     const inputText = inputParts.join('\n\n');
     if (!inputText.trim()) return null;
 
     // Skip very short turns that are likely just transitions
     if (inputText.length < 10) return null;
+
+    debugLogger.info(
+      `[REWRITE INPUT] system_prompt_len=${this.prompt.length} input_len=${inputText.length} prev_output=${this.lastOutput ? this.lastOutput.length : 0}\n` +
+        `--- INPUT TEXT ---\n${inputText}\n---`,
+    );
 
     try {
       const contentGenerator = this.config.getContentGenerator();
@@ -123,10 +138,21 @@ export class LlmRewriter {
 
       // If LLM returns empty or very short, skip
       if (!rewritten.trim() || rewritten.trim().length < 5) {
+        debugLogger.info(`[REWRITE OUTPUT] empty or too short, skipping`);
         return null;
       }
 
-      return rewritten.trim();
+      const trimmed = rewritten.trim();
+
+      debugLogger.info(
+        `[REWRITE OUTPUT] len=${trimmed.length}\n` +
+          `--- OUTPUT ---\n${trimmed}\n---`,
+      );
+
+      // Update context for next turn
+      this.lastOutput = trimmed;
+
+      return trimmed;
     } catch (error) {
       debugLogger.warn(
         `LLM rewrite failed, skipping: ${error instanceof Error ? error.message : String(error)}`,
