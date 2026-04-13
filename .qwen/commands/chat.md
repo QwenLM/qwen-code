@@ -2,22 +2,30 @@
 description: Chat session manager. /chat [-s|-l|-r|-d|-h] [name]
 ---
 
-Parse "{{args}}": first token = flag, rest = name.
+Parse `{{args}}`: first token = flag, rest = name.
 
-1. **Lang**: `~/.qwen/settings.json` → `general.language`. Match user prompt if missing.
-2. **OS**: Windows (`%OS%` → `Windows_NT`), Linux (`$OSTYPE` → `linux-*`), macOS (`darwin*`).
+## Detect
 
-- **Valid**: `^[a-zA-Z0-9_.-]+$`, ≤128 chars
+- **Lang**: `~/.qwen/settings.json` → `general.language`. Else match user prompt.
+- **OS**: Windows (`%OS%`→`Windows_NT`), Linux (`$OSTYPE`→`linux-*`), macOS (`darwin*`).
+
+## Rules
+
+- **Valid**: `^[a-zA-Z0-9_.-]+$`, ≤128
 - **Reserved**: `.`, `..`, `__proto__`, `constructor`, `prototype`
-- **Index**: `.qwen/chat-index.json` → `{"name": "sessionId"}`
+- **Index**: `.qwen/chat-index.json` → `{"name":"sessionId"}`
 - **Session ID**: newest `.jsonl` filename in `~/.qwen/projects/<hash>/chats/`
-- **<hash>**: cwd with `\`/`/`→`-`, lowercase
-  | Flag | Action |
-  | `-s`/`--save` `<name>` | Read `chat-save.md`, exec |
-  | `-l`/`--list` | Read `chat-list.md`, exec |
-  | `-r`/`--resume` `<name>` | Read `chat-resume.md`, exec |
-  | `-d`/`--delete` `<name>` | Read `chat-delete.md`, exec |
-  | `-h`/`--help`/empty | Show help below |
+- **Hash**: cwd `\`/`/`→`-`, lowercase
+
+## Route
+
+- `-s`/`--save` → chat-save.md
+- `-l`/`--list` → chat-list.md
+- `-r`/`--resume` → chat-resume.md
+- `-d`/`--delete` → chat-delete.md
+- else → show help
+
+## Help
 
 ```
 /chat [-s|-l|-r|-d|-h] [name]
