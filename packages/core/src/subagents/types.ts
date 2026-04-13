@@ -52,6 +52,15 @@ export interface SubagentConfig {
   tools?: string[];
 
   /**
+   * Optional permission mode for this subagent.
+   * Controls how tool calls are approved during execution.
+   * Valid values: 'default', 'plan', 'auto-edit', 'yolo'.
+   * If omitted, the resolved mode depends on the parent's mode
+   * (permissive parent modes win; otherwise defaults to 'auto-edit').
+   */
+  approvalMode?: string;
+
+  /**
    * System prompt content that defines the subagent's behavior.
    * Supports ${variable} templating via ContextState.
    */
