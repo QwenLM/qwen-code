@@ -5,10 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
-import {
-  BackgroundAgentRunner,
-  type BackgroundAgentResult,
-} from '../background/backgroundAgentRunner.js';
+import { runForkedAgent } from '../background/forkedAgent.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { safeJsonParse } from '../utils/safeJsonParse.js';
 import {
@@ -100,10 +97,6 @@ export interface AutoMemoryExtractionExecutionResult {
   patches: AutoMemoryExtractPatch[];
   touchedTopics: AutoMemoryType[];
   systemMessage?: string;
-}
-
-interface BackgroundAgentRunnerLike {
-  run(request: Parameters<BackgroundAgentRunner['run']>[0]): Promise<BackgroundAgentResult>;
 }
 
 function truncate(text: string, maxChars: number): string {
@@ -235,7 +228,6 @@ export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
   messages: AutoMemoryTranscriptMessage[],
-  runner: BackgroundAgentRunnerLike = new BackgroundAgentRunner(),
 ): Promise<AutoMemoryExtractionExecutionResult> {
   if (messages.length === 0) {
     return {
@@ -258,45 +250,28 @@ export async function runAutoMemoryExtractionByAgent(
 
   const topicSummaries = await buildTopicSummaryBlock(projectRoot);
   const memoryRoot = getAutoMemoryRoot(projectRoot);
-  const result = await runner.run({
-    taskType: 'managed-auto-memory-extraction-agent',
-    title: 'Managed auto-memory extraction agent',
-    description: 'Extract durable managed memory directly into topic files.',
-    projectRoot,
-    sessionId: config.getSessionId(),
-    dedupeKey: `managed-auto-memory-extraction-agent:${projectRoot}`,
+  const result = await runForkedAgent({
     name: 'managed-auto-memory-extractor',
-    runtimeContext: config,
+    config,
     taskPrompt: buildExecutionTaskPrompt(memoryRoot, messages, topicSummaries),
-    promptConfig: {
-      systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
-    },
-    modelConfig: {
-      model: config.getModel(),
-      temp: 0,
-    },
-    runConfig: {
-      max_turns: 5,
-      max_time_minutes: 2,
-    },
-    toolConfig: {
-      tools: [
-        'read_file',
-        'write_file',
-        'edit',
-        'list_directory',
-        'glob',
-        'grep_search',
-      ],
-    },
-    metadata: {
-      planner: 'extraction-agent',
-      stage: 'apply',
-    },
+    systemPrompt: EXTRACTION_AGENT_SYSTEM_PROMPT,
+    maxTurns: 5,
+    maxTimeMinutes: 2,
+    tools: [
+      'read_file',
+      'write_file',
+      'edit',
+      'list_directory',
+      'glob',
+      'grep_search',
+    ],
   });
 
   if (result.status !== 'completed' || !result.finalText) {
-    throw new Error(result.error || 'Extraction agent did not complete successfully');
+    throw new Error(
+      result.terminateReason ||
+        'Extraction agent did not complete successfully',
+    );
   }
 
   const parsed = safeJsonParse<ExtractionAgentExecutionResponse>(

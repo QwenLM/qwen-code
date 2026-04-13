@@ -6,9 +6,9 @@
 
 import type { Config } from '../config/config.js';
 import {
-  BackgroundAgentRunner,
-  type BackgroundAgentResult,
-} from '../background/backgroundAgentRunner.js';
+  runForkedAgent,
+  type ForkedAgentResult,
+} from '../background/forkedAgent.js';
 import { getProjectHash, QWEN_DIR } from '../utils/paths.js';
 import { AUTO_MEMORY_INDEX_FILENAME, getAutoMemoryRoot } from './paths.js';
 
@@ -75,56 +75,31 @@ export function buildConsolidationTaskPrompt(
   ].join('\n');
 }
 
-interface BackgroundAgentRunnerLike {
-  run(request: Parameters<BackgroundAgentRunner['run']>[0]): Promise<BackgroundAgentResult>;
-}
-
 export async function planManagedAutoMemoryDreamByAgent(
   config: Config,
   projectRoot: string,
-  runner: BackgroundAgentRunnerLike = new BackgroundAgentRunner(),
-): Promise<BackgroundAgentResult> {
+): Promise<ForkedAgentResult> {
   const memoryRoot = getAutoMemoryRoot(projectRoot);
   const transcriptDir = getTranscriptDir(projectRoot);
-  const result = await runner.run({
-    taskType: 'managed-auto-memory-dream-agent',
-    title: 'Managed auto-memory dream agent',
-    description: 'Consolidate managed memory files into cleaner summaries.',
-    projectRoot,
-    sessionId: config.getSessionId(),
-    dedupeKey: `managed-auto-memory-dream-agent:${projectRoot}`,
+  const result = await runForkedAgent({
     name: 'managed-auto-memory-dreamer',
-    runtimeContext: config,
+    config,
     taskPrompt: buildConsolidationTaskPrompt(memoryRoot, transcriptDir),
-    promptConfig: {
-      systemPrompt: DREAM_AGENT_SYSTEM_PROMPT,
-    },
-    modelConfig: {
-      model: config.getModel(),
-      temp: 0,
-    },
-    runConfig: {
-      max_turns: MAX_TURNS,
-      max_time_minutes: MAX_TIME_MINUTES,
-    },
-    toolConfig: {
-      tools: [
-        'read_file',
-        'write_file',
-        'edit',
-        'list_directory',
-        'glob',
-        'grep_search',
-      ],
-    },
-    metadata: {
-      planner: 'dream-agent',
-      stage: 'consolidation',
-    },
+    systemPrompt: DREAM_AGENT_SYSTEM_PROMPT,
+    maxTurns: MAX_TURNS,
+    maxTimeMinutes: MAX_TIME_MINUTES,
+    tools: [
+      'read_file',
+      'write_file',
+      'edit',
+      'list_directory',
+      'glob',
+      'grep_search',
+    ],
   });
 
   if (result.status === 'failed') {
-    throw new Error(result.error || 'Dream agent failed');
+    throw new Error(result.terminateReason || 'Dream agent failed');
   }
 
   return result;

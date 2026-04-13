@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
+import { runForkedAgent } from '../background/forkedAgent.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./scan.js')>();
@@ -17,10 +18,15 @@ vi.mock('./scan.js', async (importOriginal) => {
   };
 });
 
+vi.mock('../background/forkedAgent.js', () => ({
+  runForkedAgent: vi.fn(),
+}));
+
 describe('runAutoMemoryExtractionByAgent', () => {
   const mockConfig = {
     getSessionId: vi.fn().mockReturnValue('session-1'),
     getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+    getApprovalMode: vi.fn(),
   } as unknown as Config;
 
   beforeEach(() => {
@@ -40,29 +46,25 @@ describe('runAutoMemoryExtractionByAgent', () => {
   });
 
   it('returns parsed execution summary and enables write/edit tools', async () => {
-    const runner = {
-      run: vi.fn().mockResolvedValue({
-        taskId: 'task-1',
-        status: 'completed',
-        finalText: JSON.stringify({
-          patches: [
-            {
-              topic: 'user',
-              summary: 'User prefers terse responses.',
-              sourceOffset: 0,
-            },
-          ],
-          touchedTopics: ['user'],
-        }),
-        filesTouched: ['/tmp/user.md'],
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: JSON.stringify({
+        patches: [
+          {
+            topic: 'user',
+            summary: 'User prefers terse responses.',
+            sourceOffset: 0,
+          },
+        ],
+        touchedTopics: ['user'],
       }),
-    };
+      filesTouched: ['/tmp/user.md'],
+    });
 
     const result = await runAutoMemoryExtractionByAgent(
       mockConfig,
       '/tmp/project',
       [{ offset: 0, role: 'user', text: 'I prefer terse responses.' }],
-      runner,
     );
 
     expect(result).toEqual({
@@ -78,23 +80,53 @@ describe('runAutoMemoryExtractionByAgent', () => {
       touchedTopics: ['user'],
       systemMessage: 'Managed auto-memory updated: user.md',
     });
-    expect(runner.run).toHaveBeenCalledWith(
+    expect(runForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({
-        toolConfig: {
-          tools: [
-            'read_file',
-            'write_file',
-            'edit',
-            'list_directory',
-            'glob',
-            'grep_search',
-          ],
-        },
-        runConfig: expect.objectContaining({
-          max_turns: 5,
-          max_time_minutes: 2,
-        }),
+        tools: [
+          'read_file',
+          'write_file',
+          'edit',
+          'list_directory',
+          'glob',
+          'grep_search',
+        ],
+        maxTurns: 5,
+        maxTimeMinutes: 2,
       }),
     );
+  });
+
+  it('throws when the agent fails to complete', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'failed',
+      terminateReason: 'timeout',
+      filesTouched: [],
+    });
+
+    await expect(
+      runAutoMemoryExtractionByAgent(mockConfig, '/tmp/project', [
+        { offset: 0, role: 'user', text: 'I prefer terse.' },
+      ]),
+    ).rejects.toThrow('timeout');
+  });
+
+  it('returns empty result when messages array is empty', async () => {
+    const result = await runAutoMemoryExtractionByAgent(
+      mockConfig,
+      '/tmp/project',
+      [],
+    );
+    expect(result).toEqual({ patches: [], touchedTopics: [] });
+    expect(runForkedAgent).not.toHaveBeenCalled();
+  });
+
+  it('returns empty result when there are no user messages', async () => {
+    const result = await runAutoMemoryExtractionByAgent(
+      mockConfig,
+      '/tmp/project',
+      [{ offset: 0, role: 'model', text: 'Sure!' }],
+    );
+    expect(result).toEqual({ patches: [], touchedTopics: [] });
+    expect(runForkedAgent).not.toHaveBeenCalled();
   });
 });
