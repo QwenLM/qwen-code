@@ -9,7 +9,7 @@ triggers:
     branches: ['main', 'dev']
 
 params:
-  - name: skip_tests
+  skip_tests:
     description: '是否跳过测试步骤（默认不跳过）'
     type: boolean
     default: false
