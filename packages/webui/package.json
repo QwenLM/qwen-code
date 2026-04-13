@@ -28,7 +28,8 @@
     "**/*.css"
   ],
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://registry.anpm.alibaba-inc.com"
   },
   "scripts": {
     "dev": "vite build --watch",
