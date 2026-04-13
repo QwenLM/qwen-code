@@ -28,6 +28,7 @@ import { ANSILight } from './ansi-light.js';
 import { NoColorTheme } from './no-color.js';
 import process from 'node:process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { detectTerminalTheme } from './detect-terminal-theme.js';
 
 const debugLogger = createDebugLogger('THEME_MANAGER');
 
@@ -38,6 +39,7 @@ export interface ThemeDisplay {
 }
 
 export const DEFAULT_THEME: Theme = QwenDark;
+export const AUTO_THEME_NAME = 'auto';
 
 class ThemeManager {
   private readonly availableThemes: Theme[];
@@ -114,15 +116,31 @@ class ThemeManager {
   /**
    * Sets the active theme.
    * @param themeName The name of the theme to set as active.
+   *   If themeName is 'auto', detects the terminal theme and selects
+   *   Qwen Dark or Qwen Light accordingly.
    * @returns True if the theme was successfully set, false otherwise.
    */
   setActiveTheme(themeName: string | undefined): boolean {
+    if (themeName === AUTO_THEME_NAME) {
+      this.activeTheme = this.resolveAutoTheme();
+      debugLogger.info(`Auto-detected theme: ${this.activeTheme.name}`);
+      return true;
+    }
     const theme = this.findThemeByName(themeName);
     if (!theme) {
       return false;
     }
     this.activeTheme = theme;
     return true;
+  }
+
+  /**
+   * Detects the terminal's dark/light preference and returns the
+   * corresponding Qwen theme.
+   */
+  private resolveAutoTheme(): Theme {
+    const detected = detectTerminalTheme();
+    return detected === 'light' ? QwenLight : QwenDark;
   }
 
   /**
