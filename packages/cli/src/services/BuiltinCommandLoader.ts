@@ -32,6 +32,7 @@ import { languageCommand } from '../ui/commands/languageCommand.js';
 import { mcpCommand } from '../ui/commands/mcpCommand.js';
 import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
+import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
@@ -47,6 +48,7 @@ import { toolsCommand } from '../ui/commands/toolsCommand.js';
 import { vimCommand } from '../ui/commands/vimCommand.js';
 import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { insightCommand } from '../ui/commands/insightCommand.js';
+import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 
 const builtinDebugLogger = createDebugLogger('BUILTIN_COMMAND_LOADER');
 
@@ -103,6 +105,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       mcpCommand,
       memoryCommand,
       modelCommand,
+      planCommand,
       permissionsCommand,
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,
@@ -118,6 +121,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       setupGithubCommand,
       terminalSetupCommand,
       insightCommand,
+      statuslineCommand,
     ];
 
     return allDefinitions.filter((cmd): cmd is SlashCommand => cmd !== null);

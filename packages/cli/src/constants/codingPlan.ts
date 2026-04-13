@@ -65,6 +65,19 @@ export function generateCodingPlanTemplate(
         },
       },
       {
+        id: 'qwen3.6-plus',
+        name: '[ModelStudio Coding Plan] qwen3.6-plus',
+        description: 'Currently available to Pro subscribers only.',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+          contextWindowSize: 1000000,
+        },
+      },
+      {
         id: 'glm-5',
         name: '[ModelStudio Coding Plan] glm-5',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
@@ -150,6 +163,19 @@ export function generateCodingPlanTemplate(
     {
       id: 'qwen3.5-plus',
       name: '[ModelStudio Coding Plan for Global/Intl] qwen3.5-plus',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+        contextWindowSize: 1000000,
+      },
+    },
+    {
+      id: 'qwen3.6-plus',
+      name: '[ModelStudio Coding Plan for Global/Intl] qwen3.6-plus',
+      description: 'Currently available to Pro subscribers only.',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {

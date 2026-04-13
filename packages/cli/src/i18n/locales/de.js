@@ -989,9 +989,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': 'Modell für diese Sitzung wechseln',
-  'Set fast model for background tasks':
-    'Schnelles Modell für Hintergrundaufgaben festlegen',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Modell für diese Sitzung wechseln (--fast für Vorschlagsmodell)',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Leichteres Modell für Eingabevorschläge und spekulative Ausführung festlegen',
   'Content generator configuration not available.':
     'Inhaltsgenerator-Konfiguration nicht verfügbar.',
   'Authentication type not available.':
@@ -1184,6 +1185,8 @@ export default {
   'Always allow for this user': 'Für diesen Benutzer immer erlauben',
   'Always allow {{action}} for this user':
     '{{action}} für diesen Benutzer immer erlauben',
+  'Yes, restore previous mode ({{mode}})':
+    'Ja, vorherigen Modus wiederherstellen ({{mode}})',
   'Yes, and auto-accept edits': 'Ja, und Änderungen automatisch akzeptieren',
   'Yes, and manually approve edits': 'Ja, und Änderungen manuell genehmigen',
   'No, keep planning (esc)': 'Nein, weiter planen (Esc)',
@@ -1439,6 +1442,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Drücken Sie erneut Strg+C zum Beenden.',
   'Press Ctrl+D again to exit.': 'Drücken Sie erneut Strg+D zum Beenden.',
   'Press Esc again to clear.': 'Drücken Sie erneut Esc zum Löschen.',
+  'Press ↑ to edit queued messages':
+    'Drücken Sie ↑, um Nachrichten in der Warteschlange zu bearbeiten',
 
   // ============================================================================
   // MCP Status
@@ -1776,6 +1781,16 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Fügen Sie eine QWEN.md-Datei hinzu, um Qwen Code dauerhaften Projektkontext zu geben.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Verwenden Sie /btw, um eine kurze Nebenfrage zu stellen, ohne die Unterhaltung zu unterbrechen.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Der Kontext ist fast voll! Führen Sie jetzt /compress aus oder starten Sie /new, um fortzufahren.',
+  'Context is getting full. Use /compress to free up space.':
+    'Der Kontext füllt sich. Verwenden Sie /compress, um Platz freizugeben.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Lange Unterhaltung? /compress fasst den Verlauf zusammen, um Kontext freizugeben.',
 
   // ============================================================================
   // Custom API Key Configuration
@@ -1968,4 +1983,22 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
+  compact: 'kompakt',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Strg+O umschalten).',
+  'Press Ctrl+O to show full tool output':
+    'Strg+O für vollständige Tool-Ausgabe drücken',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

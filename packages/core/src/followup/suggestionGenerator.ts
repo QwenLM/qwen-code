@@ -17,6 +17,9 @@ import {
   EVENT_API_RESPONSE,
 } from '../telemetry/uiTelemetry.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('FOLLOWUP');
 
 /**
  * Prompt for suggestion generation.
@@ -24,13 +27,20 @@ import { ApiResponseEvent } from '../telemetry/types.js';
  */
 export const SUGGESTION_PROMPT = `[SUGGESTION MODE: Suggest what the user might naturally type next.]
 
-FIRST: Look at the user's recent messages and original request.
+FIRST: Read the LAST FEW LINES of the assistant's most recent message -- that's where
+next-step hints, tips, and actionable suggestions usually appear. Then check the user's
+recent messages and original request.
 
 Your job is to predict what THEY would type - not what you think they should do.
 
 THE TEST: Would they think "I was just about to type that"?
 
+PRIORITY: If the assistant's last message contains a tip or hint like "Tip: type X to ..."
+or "type X to ...", extract X as the suggestion. These are explicit next-step hints.
+
 EXAMPLES:
+Assistant says "Tip: type post comments to publish findings" → "post comments"
+Assistant says "type /review to start" → "/review"
 User asked "fix the bug and run tests", bug is fixed → "run the tests"
 After code written → "try it out"
 Model offers options → suggest the one the user would likely pick, based on conversation
@@ -97,6 +107,9 @@ export async function generatePromptSuggestion(
     // Try cache-aware forked query if enabled and params available
     const cacheSafe = options?.enableCacheSharing ? getCacheSafeParams() : null;
     const modelOverride = options?.model;
+    debugLogger.debug(
+      `Generating suggestion: cacheSharing=${!!cacheSafe}, model=${modelOverride || '(default)'}`,
+    );
     const raw = cacheSafe
       ? await generateViaForkedQuery(config, abortSignal, modelOverride)
       : await generateViaBaseLlm(
@@ -109,19 +122,25 @@ export async function generatePromptSuggestion(
     const suggestion = typeof raw === 'string' ? raw.trim() : null;
 
     if (!suggestion) {
+      debugLogger.debug('Suggestion generation returned empty result');
       return { suggestion: null, filterReason: 'empty' };
     }
 
     const filterReason = getFilterReason(suggestion);
     if (filterReason) {
+      debugLogger.debug(
+        `Suggestion filtered: reason=${filterReason}, text="${suggestion}"`,
+      );
       return { suggestion: null, filterReason };
     }
 
+    debugLogger.debug(`Suggestion accepted: "${suggestion}"`);
     return { suggestion };
-  } catch {
+  } catch (error) {
     if (abortSignal.aborted) {
       return { suggestion: null };
     }
+    debugLogger.warn('Suggestion generation failed:', error);
     return { suggestion: null, filterReason: 'error' };
   }
 }
@@ -211,7 +230,8 @@ async function generateViaBaseLlm(
   }
 
   const text = response.candidates?.[0]?.content?.parts
-    ?.map((p) => p.text ?? '')
+    ?.filter((p) => !(p as Record<string, unknown>)['thought'])
+    .map((p) => p.text ?? '')
     .join('')
     .trim();
   if (text) {

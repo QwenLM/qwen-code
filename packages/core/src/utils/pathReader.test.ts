@@ -20,6 +20,10 @@ const createMockConfig = (
   cwd: string,
   otherDirs: string[] = [],
   mockFileService?: FileDiscoveryService,
+  fileFilteringOptions?: {
+    respectGitIgnore: boolean;
+    respectQwenIgnore: boolean;
+  },
 ): Config => {
   const workspace = new WorkspaceContext(cwd, otherDirs);
   const fileSystemService = new StandardFileSystemService();
@@ -29,6 +33,11 @@ const createMockConfig = (
     getTargetDir: () => cwd,
     getFileSystemService: () => fileSystemService,
     getFileService: () => mockFileService,
+    getFileFilteringOptions: () =>
+      fileFilteringOptions ?? {
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      },
     getTruncateToolOutputThreshold: () => 2500,
     getTruncateToolOutputLines: () => 500,
     getContentGeneratorConfig: () => ({
@@ -339,6 +348,29 @@ describe('readPathFromWorkspace', () => {
       expect(resultText).toContain('visible');
       expect(resultText).not.toContain('invisible');
       expect(mockFileService.filterFiles).toHaveBeenCalled();
+    });
+
+    it('should pass respectGitIgnore: false from config to filterFiles', async () => {
+      mock({
+        [CWD]: {
+          'ignored.txt': 'ignored content',
+        },
+      });
+      const mockFileService = {
+        filterFiles: vi.fn((files) => files),
+      } as unknown as FileDiscoveryService;
+      const config = createMockConfig(CWD, [], mockFileService, {
+        respectGitIgnore: false,
+        respectQwenIgnore: true,
+      });
+      await readPathFromWorkspace('ignored.txt', config);
+      expect(mockFileService.filterFiles).toHaveBeenCalledWith(
+        ['ignored.txt'],
+        {
+          respectGitIgnore: false,
+          respectQwenIgnore: true,
+        },
+      );
     });
   });
 

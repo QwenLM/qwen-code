@@ -22,18 +22,7 @@ import { CompletionMenu } from './CompletionMenu.js';
 import { ContextIndicator } from './ContextIndicator.js';
 import type { CompletionItem } from '../../types/completion.js';
 import type { ContextUsage } from './ContextIndicator.js';
-/**
- * Minimal follow-up state shape used by InputForm.
- * Defined locally to avoid pulling @qwen-code/qwen-code-core into the
- * root entry's type declarations. The full FollowupState lives in
- * '@qwen-code/webui/followup'.
- */
-interface InputFormFollowupState {
-  /** Current suggestion text */
-  suggestion: string | null;
-  /** Whether to show suggestion */
-  isVisible: boolean;
-}
+import type { FollowupState } from '../../types/followup.js';
 
 /**
  * Edit mode display information
@@ -141,9 +130,12 @@ export interface InputFormProps {
   /** Whether the current draft is eligible to submit */
   canSubmit?: boolean;
   /** Prompt suggestion state */
-  followupState?: InputFormFollowupState;
+  followupState?: FollowupState;
   /** Callback to accept prompt suggestion */
-  onAcceptFollowup?: (method?: 'tab' | 'enter' | 'right') => void;
+  onAcceptFollowup?: (
+    method?: 'tab' | 'enter' | 'right',
+    options?: { skipOnAccept?: boolean },
+  ) => void;
   /** Callback to dismiss prompt suggestion */
   onDismissFollowup?: () => void;
 }
@@ -278,9 +270,10 @@ export const InputForm: FC<InputFormProps> = ({
       // Accept and submit prompt suggestion on Enter when input is empty
       if (hasFollowup && !inputText && followupSuggestion) {
         e.preventDefault();
-        onAcceptFollowup?.('enter');
-        // Pass suggestion text explicitly — onInputChange is async (React setState)
-        // so onSubmit cannot rely on reading inputText from the closure.
+        // Skip onAccept callback — we pass the text directly to onSubmit.
+        // Without skipOnAccept the microtask in accept() would re-insert
+        // the suggestion into the input after it was already cleared.
+        onAcceptFollowup?.('enter', { skipOnAccept: true });
         onSubmit(e, followupSuggestion);
         return;
       }
@@ -311,8 +304,8 @@ export const InputForm: FC<InputFormProps> = ({
     : '';
 
   return (
-    <div className="p-1 px-4 pb-4 absolute bottom-0 left-0 right-0 bg-gradient-to-b from-transparent to-[var(--app-primary-background)]">
-      <div className="block">
+    <div className="p-1 px-4 pb-4 absolute bottom-0 left-0 right-0 bg-gradient-to-b from-transparent to-[var(--app-primary-background)] pointer-events-none">
+      <div className="block pointer-events-auto">
         <form className="composer-form" onSubmit={onSubmit}>
           {/* Inner background layer */}
           <div className="composer-overlay" />

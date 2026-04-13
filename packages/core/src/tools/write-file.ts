@@ -39,7 +39,6 @@ import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
-import { IdeClient } from '../ide/ide-client.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { FileOperation } from '../telemetry/metrics.js';
@@ -143,16 +142,6 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       DEFAULT_DIFF_OPTIONS,
     );
 
-    const approvalMode = this.config.getApprovalMode();
-    const ideClient = await IdeClient.getInstance();
-    const ideConfirmation =
-      this.config.getIdeMode() &&
-      ideClient.isDiffingEnabled() &&
-      approvalMode !== ApprovalMode.AUTO_EDIT &&
-      approvalMode !== ApprovalMode.YOLO
-        ? ideClient.openDiff(this.params.file_path, this.params.content)
-        : undefined;
-
     const confirmationDetails: ToolEditConfirmationDetails = {
       type: 'edit',
       title: `Confirm Write: ${shortenPath(relativePath)}`,
@@ -165,15 +154,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
         }
-
-        if (ideConfirmation) {
-          const result = await ideConfirmation;
-          if (result.status === 'accepted' && result.content) {
-            this.params.content = result.content;
-          }
-        }
       },
-      ideConfirmation,
     };
     return confirmationDetails;
   }

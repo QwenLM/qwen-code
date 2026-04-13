@@ -49,6 +49,9 @@ import type {
   PartListUnion,
 } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
+import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
+import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
+import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
   buildPermissionCheckContext,
   evaluatePermissionRules,
@@ -65,6 +68,7 @@ import * as Diff from 'diff';
 import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
+import { IdeClient } from '../ide/ide-client.js';
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
@@ -327,6 +331,58 @@ interface CoreToolSchedulerOptions {
    * Optional recording service. If provided, tool results will be recorded.
    */
   chatRecordingService?: ChatRecordingService;
+}
+
+// ─── Tool Concurrency Helpers ────────────────────────────────
+
+interface ToolBatch {
+  concurrent: boolean;
+  calls: ScheduledToolCall[];
+}
+
+/**
+ * Returns true if a scheduled tool call can safely execute concurrently
+ * with other safe tools (no side effects, no shared mutable state).
+ */
+function isConcurrencySafe(call: ScheduledToolCall): boolean {
+  // Agent tools spawn independent sub-agents with no shared state.
+  if (call.request.name === ToolNames.AGENT) return true;
+  // Shell commands: check if the command is read-only (e.g., git log, cat).
+  // Uses the synchronous regex+shell-quote checker (not the async AST-based
+  // one) because partitioning runs synchronously. The sync checker covers
+  // the same command whitelist and is fail-closed — unknown commands remain
+  // sequential. The AST version is used separately for permission decisions.
+  if (call.tool.kind === Kind.Execute) {
+    const command = (call.request.args as { command?: string }).command;
+    if (typeof command !== 'string') return false;
+    try {
+      return isShellCommandReadOnly(stripShellWrapper(command));
+    } catch {
+      return false; // fail-closed
+    }
+  }
+  return CONCURRENCY_SAFE_KINDS.has(call.tool.kind);
+}
+
+/**
+ * Partition tool calls into consecutive batches by concurrency safety.
+ *
+ * Consecutive safe tools are merged into a single parallel batch.
+ * Each unsafe tool forms its own sequential batch.
+ *
+ * Example: [Read, Read, Edit, Read] → [[Read,Read](parallel), [Edit](seq), [Read](seq)]
+ */
+function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
+  return calls.reduce<ToolBatch[]>((batches, call) => {
+    const safe = isConcurrencySafe(call);
+    const lastBatch = batches[batches.length - 1];
+    if (safe && lastBatch?.concurrent) {
+      lastBatch.calls.push(call);
+    } else {
+      batches.push({ concurrent: safe, calls: [call] });
+    }
+    return batches;
+  }, []);
 }
 
 export class CoreToolScheduler {
@@ -592,7 +648,7 @@ export class CoreToolScheduler {
     args: object,
   ): AnyToolInvocation | Error {
     try {
-      return tool.build(args);
+      return tool.build(structuredClone(args));
     } catch (e) {
       if (e instanceof Error) {
         return e;
@@ -974,41 +1030,6 @@ export class CoreToolScheduler {
               continue;
             }
 
-            // Allow IDE to resolve confirmation
-            if (
-              confirmationDetails.type === 'edit' &&
-              confirmationDetails.ideConfirmation
-            ) {
-              confirmationDetails.ideConfirmation.then((resolution) => {
-                // Guard: skip if the tool was already handled (e.g. by CLI
-                // confirmation).  Without this check, resolveDiffFromCli
-                // triggers this handler AND the CLI's onConfirm, causing a
-                // race where ProceedOnce overwrites ProceedAlways.
-                const still = this.toolCalls.find(
-                  (c) =>
-                    c.request.callId === reqInfo.callId &&
-                    c.status === 'awaiting_approval',
-                );
-                if (!still) return;
-
-                if (resolution.status === 'accepted') {
-                  this.handleConfirmationResponse(
-                    reqInfo.callId,
-                    confirmationDetails!.onConfirm,
-                    ToolConfirmationOutcome.ProceedOnce,
-                    signal,
-                  );
-                } else {
-                  this.handleConfirmationResponse(
-                    reqInfo.callId,
-                    confirmationDetails!.onConfirm,
-                    ToolConfirmationOutcome.Cancel,
-                    signal,
-                  );
-                }
-              });
-            }
-
             // Fire PermissionRequest hook before showing the permission dialog.
             const messageBus = this.config.getMessageBus() as
               | MessageBus
@@ -1073,6 +1094,13 @@ export class CoreToolScheduler {
                 continue;
               }
             }
+
+            // Allow IDE to resolve confirmation
+            this.openIdeDiffIfEnabled(
+              confirmationDetails,
+              reqInfo.callId,
+              signal,
+            );
 
             const originalOnConfirm = confirmationDetails.onConfirm;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
@@ -1230,6 +1258,76 @@ export class CoreToolScheduler {
   }
 
   /**
+   * Opens an IDE diff view for edit-type tools when IDE mode is active.
+   * The IDE resolution is handled asynchronously — if the user accepts or
+   * rejects from the IDE, it triggers handleConfirmationResponse.
+   *
+   * Uses confirmationDetails.filePath / newContent (the same data shown in
+   * CLI diff) rather than ModifyContext so that the IDE diff is always
+   * consistent with the CLI and with resolveDiffFromCli.
+   */
+  private async openIdeDiffIfEnabled(
+    confirmationDetails: ToolCallConfirmationDetails,
+    callId: string,
+    signal: AbortSignal,
+  ) {
+    if (confirmationDetails.type !== 'edit' || !this.config.getIdeMode()) {
+      return;
+    }
+
+    let resolution: Awaited<ReturnType<IdeClient['openDiff']>>;
+    try {
+      const ideClient = await IdeClient.getInstance();
+      if (!ideClient.isDiffingEnabled()) return;
+
+      resolution = await ideClient.openDiff(
+        confirmationDetails.filePath,
+        confirmationDetails.newContent,
+      );
+    } catch (error) {
+      if (!signal.aborted) {
+        debugLogger.warn(
+          `IDE diff open failed for ${callId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return;
+    }
+
+    // Guard: skip if the tool was already handled (e.g. by CLI
+    // confirmation).  Without this check, resolveDiffFromCli
+    // triggers this handler AND the CLI's onConfirm, causing a
+    // race where ProceedOnce overwrites ProceedAlways.
+    const still = this.toolCalls.find(
+      (c) => c.request.callId === callId && c.status === 'awaiting_approval',
+    );
+    if (!still) return;
+
+    if (resolution.status === 'accepted') {
+      // When content is unchanged, skip the inline modify path so that
+      // the original tool params (e.g. partial old_string for edit tool)
+      // are preserved. Mitigate the multi-edit-on-same-file issue (#2702)
+      // for the common accept-without-edit case.
+      const userEdited =
+        resolution.content != null &&
+        resolution.content !== confirmationDetails.newContent;
+      await this.handleConfirmationResponse(
+        callId,
+        confirmationDetails.onConfirm,
+        ToolConfirmationOutcome.ProceedOnce,
+        signal,
+        userEdited ? { newContent: resolution.content } : undefined,
+      );
+    } else {
+      await this.handleConfirmationResponse(
+        callId,
+        confirmationDetails.onConfirm,
+        ToolConfirmationOutcome.Cancel,
+        signal,
+      );
+    }
+  }
+
+  /**
    * Applies user-provided content changes to a tool call that is awaiting confirmation.
    * This method updates the tool's arguments and refreshes the confirmation prompt with a new diff
    * before the tool is scheduled for execution.
@@ -1240,18 +1338,17 @@ export class CoreToolScheduler {
     payload: ToolConfirmationPayload,
     signal: AbortSignal,
   ): Promise<void> {
+    const confirmDetails = toolCall.confirmationDetails;
     if (
-      toolCall.confirmationDetails.type !== 'edit' ||
+      confirmDetails.type !== 'edit' ||
       !isModifiableDeclarativeTool(toolCall.tool) ||
       !payload.newContent
     ) {
       return;
     }
 
+    const currentContent = confirmDetails.originalContent ?? '';
     const modifyContext = toolCall.tool.getModifyContext(signal);
-    const currentContent = await modifyContext.getCurrentContent(
-      toolCall.request.args,
-    );
 
     const updatedParams = modifyContext.createUpdatedParams(
       currentContent,
@@ -1259,7 +1356,7 @@ export class CoreToolScheduler {
       toolCall.request.args,
     );
     const updatedDiff = Diff.createPatch(
-      modifyContext.getFilePath(toolCall.request.args),
+      confirmDetails.filePath,
       currentContent,
       payload.newContent,
       'Current',
@@ -1268,7 +1365,7 @@ export class CoreToolScheduler {
 
     this.setArgsInternal(toolCall.request.callId, updatedParams);
     this.setStatusInternal(toolCall.request.callId, 'awaiting_approval', {
-      ...toolCall.confirmationDetails,
+      ...confirmDetails,
       fileDiff: updatedDiff,
     });
   }
@@ -1286,32 +1383,51 @@ export class CoreToolScheduler {
 
     if (allCallsFinalOrScheduled) {
       const callsToExecute = this.toolCalls.filter(
-        (call) => call.status === 'scheduled',
+        (call): call is ScheduledToolCall => call.status === 'scheduled',
       );
 
-      // Task tools are safe to run concurrently — they spawn independent
-      // sub-agents with no shared mutable state.  All other tools run
-      // sequentially in their original order to preserve any implicit
-      // ordering the model may rely on.
-      const taskCalls = callsToExecute.filter(
-        (call) => call.request.name === ToolNames.AGENT,
-      );
-      const otherCalls = callsToExecute.filter(
-        (call) => call.request.name !== ToolNames.AGENT,
-      );
+      // Partition tool calls into consecutive batches by concurrency safety.
+      // Consecutive safe tools are grouped into parallel batches; unsafe
+      // tools each form their own sequential batch. Execute (shell) is safe
+      // only when isShellCommandReadOnly() returns true; otherwise sequential.
+      const batches = partitionToolCalls(callsToExecute);
 
-      const taskPromise = Promise.all(
-        taskCalls.map((tc) => this.executeSingleToolCall(tc, signal)),
-      );
-
-      const othersPromise = (async () => {
-        for (const toolCall of otherCalls) {
-          await this.executeSingleToolCall(toolCall, signal);
+      for (const batch of batches) {
+        if (batch.concurrent && batch.calls.length > 1) {
+          await this.runConcurrently(batch.calls, signal);
+        } else {
+          for (const call of batch.calls) {
+            await this.executeSingleToolCall(call, signal);
+          }
         }
-      })();
-
-      await Promise.all([taskPromise, othersPromise]);
+      }
     }
+  }
+
+  /**
+   * Execute multiple tool calls concurrently with a concurrency cap.
+   */
+  private async runConcurrently(
+    calls: ScheduledToolCall[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    const parsed = parseInt(
+      process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+      10,
+    );
+    const maxConcurrency = Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
+    const executing = new Set<Promise<void>>();
+
+    for (const call of calls) {
+      const p = this.executeSingleToolCall(call, signal).finally(() => {
+        executing.delete(p);
+      });
+      executing.add(p);
+      if (executing.size >= maxConcurrency) {
+        await Promise.race(executing);
+      }
+    }
+    await Promise.all(executing);
   }
 
   private async executeSingleToolCall(
@@ -1486,6 +1602,11 @@ export class CoreToolScheduler {
           error: undefined,
           errorType: undefined,
           contentLength,
+          // Propagate modelOverride from skill tools. Use `in` to distinguish
+          // "skill returned undefined (inherit)" from "non-skill tool (no field)".
+          ...('modelOverride' in toolResult
+            ? { modelOverride: toolResult.modelOverride }
+            : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
       } else {

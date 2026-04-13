@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type {
   Config,
@@ -42,10 +42,23 @@ import { MessageBusType } from '../confirmation-bus/types.js';
 import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import { IdeClient } from '../ide/ide-client.js';
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
 }));
+
+vi.mock('../ide/ide-client.js', () => ({
+  IdeClient: {
+    getInstance: vi.fn(),
+  },
+}));
+
+const mockIdeClient = {
+  openDiff: vi.fn(),
+  isDiffingEnabled: vi.fn(),
+  closeDiff: vi.fn(),
+};
 
 class TestApprovalTool extends BaseDeclarativeTool<{ id: string }, ToolResult> {
   static readonly Name = 'testApprovalTool';
@@ -2991,7 +3004,20 @@ describe('Fire hook functions integration', () => {
     });
   });
 
-  describe('Concurrent agent tool execution', () => {
+  describe('Concurrent tool execution', () => {
+    // Ensure tests are deterministic regardless of environment.
+    const origEnv = process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    beforeEach(() => {
+      delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+    });
+    afterEach(() => {
+      if (origEnv !== undefined) {
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] = origEnv;
+      } else {
+        delete process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'];
+      }
+    });
+
     function createScheduler(
       tools: Map<string, MockTool>,
       onAllToolCallsComplete: Mock,
@@ -3119,7 +3145,7 @@ describe('Fire hook functions integration', () => {
       expect(startIndices.every((i) => i < firstEnd)).toBe(true);
     });
 
-    it('should run agent tools concurrently while other tools run sequentially', async () => {
+    it('should run concurrency-safe tools in parallel and unsafe tools sequentially', async () => {
       const executionLog: string[] = [];
 
       const agentTool = new MockTool({
@@ -3138,10 +3164,11 @@ describe('Fire hook functions integration', () => {
 
       const readTool = new MockTool({
         name: 'read_file',
+        kind: Kind.Read,
         execute: async (params) => {
           const id = (params as { id: string }).id;
           executionLog.push(`read:start:${id}`);
-          await new Promise((r) => setTimeout(r, 20));
+          await new Promise((r) => setTimeout(r, 50));
           executionLog.push(`read:end:${id}`);
           return {
             llmContent: `Read ${id} done`,
@@ -3163,6 +3190,8 @@ describe('Fire hook functions integration', () => {
       );
 
       const abortController = new AbortController();
+      // All 4 calls are concurrency-safe (read_file=Kind.Read, agent=Agent name)
+      // so they form one parallel batch and all run concurrently.
       const requests = [
         {
           callId: '1',
@@ -3202,20 +3231,621 @@ describe('Fire hook functions integration', () => {
       expect(completedCalls).toHaveLength(4);
       expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
 
-      // Non-agent tools should execute sequentially: read:1 finishes before read:2 starts
-      const read1End = executionLog.indexOf('read:end:1');
-      const read2Start = executionLog.indexOf('read:start:2');
-      expect(read1End).toBeLessThan(read2Start);
-
-      // Agent tools should execute concurrently: both start before either ends
-      const agentAStart = executionLog.indexOf('agent:start:A');
-      const agentBStart = executionLog.indexOf('agent:start:B');
-      const firstAgentEnd = Math.min(
+      // All 4 tools are concurrency-safe → they should all start
+      // before any of them finishes (parallel execution).
+      const allStarts = [
+        executionLog.indexOf('read:start:1'),
+        executionLog.indexOf('agent:start:A'),
+        executionLog.indexOf('read:start:2'),
+        executionLog.indexOf('agent:start:B'),
+      ];
+      const firstEnd = Math.min(
+        executionLog.indexOf('read:end:1'),
         executionLog.indexOf('agent:end:A'),
+        executionLog.indexOf('read:end:2'),
         executionLog.indexOf('agent:end:B'),
       );
-      expect(agentAStart).toBeLessThan(firstAgentEnd);
-      expect(agentBStart).toBeLessThan(firstAgentEnd);
+      // Ensure all entries exist before comparing ordering
+      for (const start of allStarts) {
+        expect(start).not.toBe(-1);
+      }
+      expect(firstEnd).not.toBe(-1);
+      for (const start of allStarts) {
+        expect(start).toBeLessThan(firstEnd);
+      }
     });
+
+    it('should partition mixed safe/unsafe tools into correct batches', async () => {
+      const executionLog: string[] = [];
+
+      const readTool = new MockTool({
+        name: 'read_file',
+        kind: Kind.Read,
+        execute: async (params) => {
+          const id = (params as { id: string }).id;
+          executionLog.push(`read:start:${id}`);
+          await new Promise((r) => setTimeout(r, 50));
+          executionLog.push(`read:end:${id}`);
+          return {
+            llmContent: `Read ${id} done`,
+            returnDisplay: `Read ${id} done`,
+          };
+        },
+      });
+
+      const editTool = new MockTool({
+        name: 'edit',
+        kind: Kind.Edit,
+        execute: async (params) => {
+          const id = (params as { id: string }).id;
+          executionLog.push(`edit:start:${id}`);
+          await new Promise((r) => setTimeout(r, 20));
+          executionLog.push(`edit:end:${id}`);
+          return {
+            llmContent: `Edit ${id} done`,
+            returnDisplay: `Edit ${id} done`,
+          };
+        },
+      });
+
+      const tools = new Map<string, MockTool>([
+        ['read_file', readTool],
+        ['edit', editTool],
+      ]);
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+      const scheduler = createScheduler(
+        tools,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+      );
+
+      // [Read₁, Read₂, Edit, Read₃]
+      // Expected batches: [Read₁,Read₂](parallel) → [Edit](seq) → [Read₃](seq)
+      const requests = [
+        {
+          callId: '1',
+          name: 'read_file',
+          args: { id: '1' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '2',
+          name: 'read_file',
+          args: { id: '2' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '3',
+          name: 'edit',
+          args: { id: 'E' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '4',
+          name: 'read_file',
+          args: { id: '3' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ];
+
+      await scheduler.schedule(requests, new AbortController().signal);
+
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls).toHaveLength(4);
+      expect(completedCalls.every((c) => c.status === 'success')).toBe(true);
+
+      // Batch 1: Read₁ and Read₂ run in parallel (both start before either ends)
+      const read1Start = executionLog.indexOf('read:start:1');
+      const read2Start = executionLog.indexOf('read:start:2');
+      const firstReadEnd = Math.min(
+        executionLog.indexOf('read:end:1'),
+        executionLog.indexOf('read:end:2'),
+      );
+      expect(read1Start).not.toBe(-1);
+      expect(read2Start).not.toBe(-1);
+      expect(firstReadEnd).not.toBe(-1);
+      expect(read1Start).toBeLessThan(firstReadEnd);
+      expect(read2Start).toBeLessThan(firstReadEnd);
+
+      // Batch 2: Edit starts after both reads complete
+      const lastReadEnd = Math.max(
+        executionLog.indexOf('read:end:1'),
+        executionLog.indexOf('read:end:2'),
+      );
+      const editStart = executionLog.indexOf('edit:start:E');
+      expect(editStart).not.toBe(-1);
+      expect(editStart).toBeGreaterThan(lastReadEnd);
+
+      // Batch 3: Read₃ starts after Edit completes
+      const editEnd = executionLog.indexOf('edit:end:E');
+      const read3Start = executionLog.indexOf('read:start:3');
+      expect(editEnd).not.toBe(-1);
+      expect(read3Start).not.toBe(-1);
+      expect(read3Start).toBeGreaterThan(editEnd);
+    });
+
+    it('should run read-only shell commands concurrently and non-read-only sequentially', async () => {
+      const executionLog: string[] = [];
+
+      const shellTool = new MockTool({
+        name: 'run_shell_command',
+        kind: Kind.Execute,
+        execute: async (params) => {
+          const cmd = (params as { command: string }).command;
+          executionLog.push(`shell:start:${cmd}`);
+          await new Promise((r) => setTimeout(r, 50));
+          executionLog.push(`shell:end:${cmd}`);
+          return {
+            llmContent: `Shell ${cmd} done`,
+            returnDisplay: `Shell ${cmd} done`,
+          };
+        },
+      });
+
+      const tools = new Map<string, MockTool>([
+        ['run_shell_command', shellTool],
+      ]);
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+      const scheduler = createScheduler(
+        tools,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+      );
+
+      // "git log" and "ls" are read-only → concurrent
+      // "npm install" is not read-only → sequential, breaks the batch
+      const requests = [
+        {
+          callId: '1',
+          name: 'run_shell_command',
+          args: { command: 'git log' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '2',
+          name: 'run_shell_command',
+          args: { command: 'ls' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+        {
+          callId: '3',
+          name: 'run_shell_command',
+          args: { command: 'npm install' },
+          isClientInitiated: false,
+          prompt_id: 'p1',
+        },
+      ];
+
+      await scheduler.schedule(requests, new AbortController().signal);
+
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+
+      // "git log" and "ls" should start concurrently (both before either ends)
+      const gitStart = executionLog.indexOf('shell:start:git log');
+      const lsStart = executionLog.indexOf('shell:start:ls');
+      const firstReadOnlyEnd = Math.min(
+        executionLog.indexOf('shell:end:git log'),
+        executionLog.indexOf('shell:end:ls'),
+      );
+      expect(gitStart).not.toBe(-1);
+      expect(lsStart).not.toBe(-1);
+      expect(firstReadOnlyEnd).not.toBe(-1);
+      expect(gitStart).toBeLessThan(firstReadOnlyEnd);
+      expect(lsStart).toBeLessThan(firstReadOnlyEnd);
+
+      // "npm install" should start after both read-only commands complete
+      const lastReadOnlyEnd = Math.max(
+        executionLog.indexOf('shell:end:git log'),
+        executionLog.indexOf('shell:end:ls'),
+      );
+      const npmStart = executionLog.indexOf('shell:start:npm install');
+      expect(npmStart).not.toBe(-1);
+      expect(npmStart).toBeGreaterThan(lastReadOnlyEnd);
+    });
+  });
+});
+
+describe('CoreToolScheduler IDE interaction', () => {
+  function createIdeMockConfig(
+    overrides: {
+      approvalMode?: ApprovalMode;
+      ideMode?: boolean;
+    } = {},
+  ) {
+    const mockModifiableTool = new MockModifiableTool();
+    mockModifiableTool.executeFn = vi.fn();
+
+    const mockToolRegistry = {
+      getTool: () => mockModifiableTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => mockModifiableTool,
+      getToolByDisplayName: () => mockModifiableTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => overrides.approvalMode ?? ApprovalMode.DEFAULT,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => overrides.ideMode ?? true,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+
+    return { mockConfig, mockModifiableTool, mockToolRegistry };
+  }
+
+  beforeEach(() => {
+    vi.mocked(IdeClient.getInstance).mockResolvedValue(
+      mockIdeClient as unknown as IdeClient,
+    );
+    mockIdeClient.isDiffingEnabled.mockReturnValue(true);
+    mockIdeClient.openDiff.mockReset();
+  });
+
+  it('should safely update args via _applyInlineModify when IDE returns modified content (#2709)', async () => {
+    const { mockConfig, mockModifiableTool } = createIdeMockConfig({
+      ideMode: true,
+    });
+
+    // IDE returns accepted with modified content
+    mockIdeClient.openDiff.mockResolvedValue({
+      status: 'accepted',
+      content: 'IDE-modified content',
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const originalArgs = { param: 'original-value' };
+    const request = {
+      callId: 'ide-1',
+      name: 'mockModifiableTool',
+      args: originalArgs,
+      isClientInitiated: false,
+      prompt_id: 'prompt-ide-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    // Wait for the tool to complete (IDE auto-confirms)
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+
+    // The tool should have been executed with the IDE-modified content
+    // via _applyInlineModify -> createUpdatedParams -> setArgsInternal
+    expect(mockModifiableTool.executeFn).toHaveBeenCalledWith({
+      newContent: 'IDE-modified content',
+    });
+
+    // CRITICAL: The original args object should NOT have been mutated (#2709)
+    expect(originalArgs).toEqual({ param: 'original-value' });
+    // The request.args (which is what goes into history) should also be safe.
+    // structuredClone in buildInvocation ensures the tool gets its own copy.
+    expect(request.args).toEqual({ param: 'original-value' });
+  });
+
+  it('should NOT call openDiff when AUTO_EDIT mode is active (#2673)', async () => {
+    const { mockConfig, mockModifiableTool } = createIdeMockConfig({
+      approvalMode: ApprovalMode.AUTO_EDIT,
+      ideMode: true,
+    });
+
+    mockModifiableTool.shouldConfirm = false; // AUTO_EDIT returns 'allow'
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'auto-edit-1',
+      name: 'mockModifiableTool',
+      args: { param: 'value' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-auto-edit-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    // openDiff should NOT have been called since AUTO_EDIT auto-approves
+    expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+  });
+
+  it('should execute normally when IDE accepts without modifying content', async () => {
+    const { mockConfig, mockModifiableTool } = createIdeMockConfig({
+      ideMode: true,
+    });
+
+    // IDE returns accepted without content (no modifications)
+    mockIdeClient.openDiff.mockResolvedValue({
+      status: 'accepted',
+      content: undefined,
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'ide-no-mod-1',
+      name: 'mockModifiableTool',
+      args: { param: 'keep-this' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-ide-no-mod-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+
+    // Tool should execute with original params (no _applyInlineModify call)
+    // executeFn receives the params object from the invocation
+    expect(mockModifiableTool.executeFn).toHaveBeenCalled();
+  });
+
+  it('should cancel tool when IDE rejects the diff', async () => {
+    const { mockConfig } = createIdeMockConfig({
+      ideMode: true,
+    });
+
+    // IDE rejects the diff
+    mockIdeClient.openDiff.mockResolvedValue({
+      status: 'rejected',
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'ide-reject-1',
+      name: 'mockModifiableTool',
+      args: { param: 'value' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-ide-reject-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('cancelled');
+  });
+
+  it('should fall back to CLI confirmation when opening the IDE diff fails', async () => {
+    const { mockConfig } = createIdeMockConfig({
+      ideMode: true,
+    });
+
+    mockIdeClient.openDiff.mockRejectedValue(new Error('IDE disconnected'));
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'ide-open-fail-1',
+      name: 'mockModifiableTool',
+      args: { param: 'value' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-ide-open-fail-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+
+    expect(awaitingCall.status).toBe('awaiting_approval');
+    expect(mockIdeClient.openDiff).toHaveBeenCalled();
+    expect(onAllToolCallsComplete).not.toHaveBeenCalled();
+  });
+
+  it('should not swallow confirmation handling errors after IDE diff opens', async () => {
+    const { mockConfig } = createIdeMockConfig({
+      ideMode: true,
+    });
+
+    mockIdeClient.openDiff.mockResolvedValue({
+      status: 'rejected',
+    });
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'ide-confirmation-error-1',
+      name: 'mockModifiableTool',
+      args: { param: 'value' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-ide-confirmation-error-1',
+    };
+    const confirmationDetails = {
+      type: 'edit',
+      title: 'Confirm Mock Tool',
+      fileName: 'test.txt',
+      filePath: 'test.txt',
+      fileDiff: 'diff',
+      originalContent: 'originalContent',
+      newContent: 'newContent',
+      onConfirm: vi.fn(),
+    } satisfies ToolCallConfirmationDetails;
+    const confirmationError = new Error('confirmation handling failed');
+
+    (
+      scheduler as unknown as {
+        toolCalls: WaitingToolCall[];
+      }
+    ).toolCalls = [
+      {
+        status: 'awaiting_approval',
+        request,
+        tool: {} as never,
+        invocation: {} as never,
+        confirmationDetails,
+      },
+    ];
+
+    vi.spyOn(scheduler, 'handleConfirmationResponse').mockRejectedValue(
+      confirmationError,
+    );
+
+    await expect(
+      (
+        scheduler as unknown as {
+          openIdeDiffIfEnabled: (
+            confirmationDetails: ToolCallConfirmationDetails,
+            callId: string,
+            signal: AbortSignal,
+          ) => Promise<void>;
+        }
+      ).openIdeDiffIfEnabled(
+        confirmationDetails,
+        request.callId,
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('confirmation handling failed');
+  });
+
+  it('should not call openDiff when IDE mode is disabled', async () => {
+    const { mockConfig } = createIdeMockConfig({
+      ideMode: false,
+    });
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'no-ide-1',
+      name: 'mockModifiableTool',
+      args: { param: 'value' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-no-ide-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+
+    // Tool should be awaiting approval but openDiff was never called
+    await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
+    expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
   });
 });

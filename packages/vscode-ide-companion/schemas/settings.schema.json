@@ -73,7 +73,7 @@
           "default": false
         },
         "language": {
-          "description": "The language for the user interface. Use \"auto\" to detect from system settings. You can also use custom language codes (e.g., \"es\", \"fr\") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js). Options: auto, en, zh, ru, de, ja, pt",
+          "description": "The language for the user interface. Use \"auto\" to detect from system settings. You can also use custom language codes (e.g., \"es\", \"fr\") by placing JS language files in ~/.qwen/locales/ (e.g., ~/.qwen/locales/es.js). Options: auto, en, zh, ru, de, ja, pt, fr",
           "enum": [
             "auto",
             "en",
@@ -81,7 +81,8 @@
             "ru",
             "de",
             "ja",
-            "pt"
+            "pt",
+            "fr"
           ],
           "default": "auto"
         },
@@ -133,6 +134,11 @@
           "type": "string",
           "default": "Qwen Dark"
         },
+        "statusLine": {
+          "description": "Custom status line display configuration.",
+          "type": "object",
+          "additionalProperties": true
+        },
         "customThemes": {
           "description": "Custom theme definitions.",
           "type": "object",
@@ -183,7 +189,7 @@
         "enableFollowupSuggestions": {
           "description": "Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.",
           "type": "boolean",
-          "default": true
+          "default": false
         },
         "enableCacheSharing": {
           "description": "Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).",
@@ -214,6 +220,11 @@
           "description": "The last time the feedback dialog was shown.",
           "type": "number",
           "default": 0
+        },
+        "compactMode": {
+          "description": "Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).",
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -250,7 +261,7 @@
       "additionalProperties": true
     },
     "fastModel": {
-      "description": "Model for background tasks (suggestion generation, speculation). Leave empty to use the main model. A smaller/faster model (e.g., qwen3.5-flash) reduces latency and cost.",
+      "description": "Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.",
       "type": "string",
       "default": ""
     },
@@ -358,6 +369,27 @@
           "type": "boolean",
           "default": false
         },
+        "clearContextOnIdle": {
+          "description": "Settings for clearing stale context after idle periods. Use -1 to disable a threshold.",
+          "type": "object",
+          "properties": {
+            "thinkingThresholdMinutes": {
+              "description": "Minutes of inactivity before clearing old thinking blocks. Use -1 to disable.",
+              "type": "number",
+              "default": 5
+            },
+            "toolResultsThresholdMinutes": {
+              "description": "Minutes of inactivity before clearing old tool result content. Use -1 to disable.",
+              "type": "number",
+              "default": 60
+            },
+            "toolResultsNumToKeep": {
+              "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
+              "type": "number",
+              "default": 5
+            }
+          }
+        },
         "fileFiltering": {
           "description": "Settings for git-aware file filtering.",
           "type": "object",
@@ -421,6 +453,10 @@
           "description": "Sandbox execution environment (can be a boolean or a path string).",
           "type": "object",
           "additionalProperties": true
+        },
+        "sandboxImage": {
+          "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
+          "type": "string"
         },
         "shell": {
           "description": "Settings for shell execution.",

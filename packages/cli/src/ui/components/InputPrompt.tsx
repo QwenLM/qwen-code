@@ -168,15 +168,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     }
   }, []);
 
-  const [dirs, setDirs] = useState<readonly string[]>(
-    config.getWorkspaceContext().getDirectories(),
-  );
-  const dirsChanged = config.getWorkspaceContext().getDirectories();
-  useEffect(() => {
-    if (dirs.length !== dirsChanged.length) {
-      setDirs(dirsChanged);
-    }
-  }, [dirs.length, dirsChanged]);
   const [reverseSearchActive, setReverseSearchActive] = useState(false);
   const [commandSearchActive, setCommandSearchActive] = useState(false);
   const [textBeforeReverseSearch, setTextBeforeReverseSearch] = useState('');
@@ -190,7 +181,6 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const completion = useCommandCompletion(
     buffer,
-    dirs,
     config.getTargetDir(),
     slashCommands,
     commandContext,
@@ -524,6 +514,26 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       }
 
+      // Helper: pop all queued messages into the input buffer,
+      // preserving cursor position relative to existing text.
+      const popQueueIntoInput = (): boolean => {
+        const popped = uiActions.popAllQueuedMessages();
+        if (!popped) return false;
+        const currentText = buffer.text;
+        if (currentText) {
+          const currentCursorOffset = logicalPosToOffset(
+            buffer.lines,
+            buffer.cursor[0],
+            buffer.cursor[1],
+          );
+          buffer.setText(`${popped}\n${currentText}`);
+          buffer.moveToOffset(popped.length + 1 + currentCursorOffset);
+        } else {
+          buffer.setText(popped);
+        }
+        return true;
+      };
+
       // Reset ESC count and hide prompt on any non-ESC key
       if (key.name !== 'escape') {
         if (escPressCount > 0 || showEscapePrompt) {
@@ -604,6 +614,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           setExpandedSuggestionIndex(-1);
           resetEscapeState();
           return true;
+        }
+
+        // Pop queued messages into input on ESC (before double-ESC clear)
+        if (!isAttachmentMode && uiState.messageQueue.length > 0) {
+          if (popQueueIntoInput()) {
+            resetEscapeState();
+            return true;
+          }
+          // returned false (queue already cleared) — fall through
         }
 
         // Handle double ESC for clearing input
@@ -729,6 +748,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // because ACCEPT_SUGGESTION also matches Enter which must fall through to SUBMIT.
       if (
         key.name === 'tab' &&
+        !key.paste &&
+        !key.shift &&
         buffer.text.length === 0 &&
         !completion.showSuggestions &&
         !reverseSearchActive &&
@@ -767,7 +788,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
         }
 
-        if (keyMatchers[Command.ACCEPT_SUGGESTION](key)) {
+        if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
           if (completion.suggestions.length > 0) {
             const targetIndex =
               completion.activeSuggestionIndex === -1
@@ -839,6 +860,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           return true;
         }
 
+        // Pop all queued messages into input when pressing Up arrow at top of input
+        if (
+          !isAttachmentMode &&
+          uiState.messageQueue.length > 0 &&
+          keyMatchers[Command.NAVIGATION_UP](key) &&
+          (buffer.allVisualLines.length === 1 ||
+            (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
+        ) {
+          if (popQueueIntoInput()) return true;
+          // returned false (queue already cleared) — fall through to history
+        }
+
         if (keyMatchers[Command.HISTORY_UP](key)) {
           inputHistory.navigateUp();
           return true;
@@ -892,7 +925,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           followup.state.suggestion
         ) {
           const text = followup.state.suggestion;
-          followup.accept('enter');
+          // Skip onAccept (buffer.insert) — we pass the text directly to
+          // handleSubmitAndClear which clears the buffer synchronously.
+          // Without skipOnAccept the microtask in accept() would re-insert
+          // the suggestion into the buffer after it was already cleared.
+          followup.accept('enter', { skipOnAccept: true });
           handleSubmitAndClear(text);
           return true;
         }

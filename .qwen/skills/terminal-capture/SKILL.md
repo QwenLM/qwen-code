@@ -196,7 +196,7 @@ export default [
 
 ## Integration with PR Review
 
-This tool is commonly used for visual verification during PR reviews. For the complete code review + screenshot workflow, see the [pr-review](../pr-review/SKILL.md) skill.
+This tool is commonly used for visual verification during PR reviews.
 
 ## Troubleshooting
 

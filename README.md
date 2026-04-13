@@ -20,6 +20,8 @@
 
 ## 🎉 News
 
+- **2026-04-13**: Qwen OAuth free tier policy update: daily quota adjusted to 100 requests/day (from 1,000). The free tier will be discontinued on 2026-04-15. Please upgrade to [Alibaba Cloud Coding Plan](https://www.alibabacloud.com/help/en/model-studio/coding-plan) for continued service with higher quotas and more models.
+
 - **2026-04-02**: Qwen3.6-Plus is now live! Sign in via Qwen OAuth to use it directly, or get an API key from [Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3.6-plus) to access it through the OpenAI-compatible API.
 
 - **2026-02-16**: Qwen3.5-Plus is now live!

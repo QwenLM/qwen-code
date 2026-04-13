@@ -1,5 +1,6 @@
 export default {
   commands: 'Commands',
+  'code-review': 'Code Review',
   'followup-suggestions': 'Followup Suggestions',
   'sub-agents': 'SubAgents',
   arena: 'Agent Arena',
@@ -16,5 +17,7 @@ export default {
   language: 'i18n',
   channels: 'Channels',
   hooks: 'Hooks',
+  'status-line': 'Status Line',
   'scheduled-tasks': 'Scheduled Tasks',
+  tips: 'Contextual Tips',
 };
