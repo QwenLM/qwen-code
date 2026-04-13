@@ -256,9 +256,9 @@ If you are experiencing performance issues with file searching (e.g., with `@` c
 | Setting                          | Type    | Description                                                                       | Default |
 | -------------------------------- | ------- | --------------------------------------------------------------------------------- | ------- |
 | `memory.enableManagedAutoMemory` | boolean | Enable background extraction of memories from conversations.                      | `true`  |
-| `memory.enableManagedAutoDream`  | boolean | Enable automatic consolidation (deduplication and cleanup) of collected memories. | `true`  |
+| `memory.enableManagedAutoDream`  | boolean | Enable automatic consolidation (deduplication and cleanup) of collected memories. | `false` |
 
-See [Memory](../features/memory) for details on how auto-memory works and how to use the `/memory`, `/remember`, `/forget`, and `/dream` commands.
+See [Memory](../features/memory) for details on how auto-memory works and how to use the `/memory`, `/remember`, and `/dream` commands.
 
 #### permissions
 

@@ -970,7 +970,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Managed Auto-Dream',
         category: 'Memory',
         requiresRestart: false,
-        default: true,
+        default: false,
         description:
           'Enable automatic consolidation (dream) of collected memories.',
         showInDialog: false,

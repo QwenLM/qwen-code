@@ -413,7 +413,7 @@
         "enableManagedAutoDream": {
           "description": "Enable automatic consolidation (dream) of collected memories.",
           "type": "boolean",
-          "default": true
+          "default": false
         }
       }
     },

@@ -789,7 +789,7 @@ export class Config {
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
-    this.enableManagedAutoDream = params.enableManagedAutoDream ?? true;
+    this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.hooks = params.hooks;
   }
