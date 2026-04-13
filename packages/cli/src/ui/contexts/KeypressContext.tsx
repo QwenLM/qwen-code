@@ -255,6 +255,10 @@ export function KeypressProvider({
     // next keystroke is handled normally.
     const forceFlushStuckPaste = () => {
       clearPasteIdleTimeout();
+      // Nothing to recover from: not in paste mode AND no buffered content.
+      // We still run when either condition is true — e.g. isPaste=true with
+      // an empty buffer (need to clear the flag) or isPaste=false with stale
+      // buffered content (e.g. after a race between Ctrl+C and the timer).
       if (!isPaste && pasteBuffer.length === 0) return;
       const buffered = pasteBuffer.toString();
       isPaste = false;
@@ -711,6 +715,7 @@ export function KeypressProvider({
         // via the idle timeout or Ctrl+C escape — swallow it so we don't
         // broadcast a spurious empty/image paste event.
         if (pasteAlreadyFlushed) {
+          // Reset for the next paste cycle.
           pasteAlreadyFlushed = false;
           isPaste = false;
           pasteBuffer = Buffer.alloc(0);

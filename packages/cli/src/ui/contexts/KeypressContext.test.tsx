@@ -268,10 +268,11 @@ describe('KeypressContext - Kitty Protocol', () => {
     });
 
     it('auto-recovers from a stuck paste mode via idle timeout', async () => {
-      // Secondary fix: if paste-end never arrives, an idle timeout should
-      // flush whatever is in the paste buffer and reset paste state so
-      // normal typing resumes automatically (without requiring the user
-      // to hit Ctrl+C or restart the terminal).
+      // Automatic recovery safety net for the same "must restart terminal"
+      // lockup the Ctrl+C test above covers manually: if paste-end never
+      // arrives, an idle timeout should flush whatever is in the paste
+      // buffer and reset paste state so normal typing resumes automatically
+      // (without requiring the user to hit Ctrl+C or restart the terminal).
       const keyHandler = vi.fn();
 
       const { result } = renderHook(() => useKeypressContext(), {
