@@ -1,3 +1,18 @@
+/**
+ * Lightweight startup performance profiler.
+ *
+ * Activated by setting QWEN_CODE_PROFILE_STARTUP=1. When enabled, collects
+ * high-resolution timestamps at key phases of CLI startup and writes a JSON
+ * report to ~/.qwen/startup-perf/ on finalization.
+ *
+ * Usage (already wired in index.ts / gemini.tsx):
+ *   initStartupProfiler()        — call once at process start to record T0
+ *   profileCheckpoint('name')    — call at each phase boundary
+ *   finalizeStartupProfile(id)   — call after last checkpoint to write report
+ *
+ * Only profiles inside the sandbox child process to avoid duplicate reports.
+ * Zero overhead when disabled (single env var check).
+ */
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -57,6 +72,8 @@ export function getStartupReport(): StartupReport | null {
   const phases: StartupPhase[] = [];
   let prev = t0;
 
+  // Each phase's durationMs is the delta from the previous checkpoint (or T0
+  // for the first one). Checkpoints are assumed to be recorded sequentially.
   for (const cp of checkpoints) {
     phases.push({
       name: cp.name,
@@ -70,7 +87,7 @@ export function getStartupReport(): StartupReport | null {
 
   return {
     timestamp: new Date().toISOString(),
-    sessionId: '',
+    sessionId: 'unknown',
     totalMs: Math.round((lastTimestamp - t0) * 100) / 100,
     phases,
     nodeVersion: process.version,

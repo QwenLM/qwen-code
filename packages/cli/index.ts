@@ -8,6 +8,7 @@
 
 import { initStartupProfiler } from './src/utils/startupProfiler.js';
 
+// Must run before any other imports to capture the earliest possible T0.
 initStartupProfiler();
 
 import './src/gemini.js';

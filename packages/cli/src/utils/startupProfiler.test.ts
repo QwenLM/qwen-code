@@ -176,7 +176,7 @@ describe('startupProfiler', () => {
       expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
     });
 
-    it('should use "unknown" in filename when sessionId not provided', () => {
+    it('should use "unknown" as sessionId in both filename and JSON when not provided', () => {
       vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
       vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
       vi.spyOn(process.stderr, 'write').mockReturnValue(true);
@@ -192,7 +192,7 @@ describe('startupProfiler', () => {
       const writtenContent = JSON.parse(
         vi.mocked(fs.writeFileSync).mock.calls[0]![1] as string,
       );
-      expect(writtenContent.sessionId).toBe('');
+      expect(writtenContent.sessionId).toBe('unknown');
     });
 
     it('should not throw when file write fails', () => {
