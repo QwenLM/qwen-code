@@ -342,6 +342,7 @@ describe('computeUsageFromMetrics', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -384,6 +385,7 @@ describe('computeUsageFromMetrics', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
         'model-2': {
           api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
@@ -395,6 +397,7 @@ describe('computeUsageFromMetrics', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -437,6 +440,7 @@ describe('computeUsageFromMetrics', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {

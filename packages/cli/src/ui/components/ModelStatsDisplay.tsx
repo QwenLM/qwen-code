@@ -13,12 +13,17 @@ import {
   calculateCacheHitRate,
   calculateErrorRate,
 } from '../utils/computeStats.js';
-import type { ModelMetrics } from '../contexts/SessionContext.js';
+import type { ModelMetricsCore } from '../contexts/SessionContext.js';
 import { useSessionStats } from '../contexts/SessionContext.js';
+import { flattenModelsBySource } from '../utils/modelsBySource.js';
 import { t } from '../../i18n/index.js';
 
 const METRIC_COL_WIDTH = 28;
-const MODEL_COL_WIDTH = 22;
+// 28 + 2*24 = 76, fitting the 76-column panel at 80-column terminal width
+// when the session has a single (model, source) pair split into two columns.
+// Sessions with three or more sources will exceed the panel — acceptable per
+// the design doc, which accepts the crowded layout for many-subagent cases.
+const MODEL_COL_WIDTH = 24;
 
 interface StatRowProps {
   title: string;
@@ -59,11 +64,9 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
 }) => {
   const { stats } = useSessionStats();
   const { models } = stats.metrics;
-  const activeModels = Object.entries(models).filter(
-    ([, metrics]) => metrics.api.totalRequests > 0,
-  );
+  const entries = flattenModelsBySource(models);
 
-  if (activeModels.length === 0) {
+  if (entries.length === 0) {
     return (
       <Box
         borderStyle="round"
@@ -79,19 +82,17 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
     );
   }
 
-  const modelNames = activeModels.map(([name]) => name);
+  const columnLabels = entries.map(({ label }) => label);
 
   const getModelValues = (
-    getter: (metrics: ModelMetrics) => string | React.ReactElement,
-  ) => activeModels.map(([, metrics]) => getter(metrics));
+    getter: (metrics: ModelMetricsCore) => string | React.ReactElement,
+  ) => entries.map(({ metrics }) => getter(metrics));
 
-  const hasThoughts = activeModels.some(
-    ([, metrics]) => metrics.tokens.thoughts > 0,
+  const hasThoughts = entries.some(
+    ({ metrics }) => metrics.tokens.thoughts > 0,
   );
-  const hasTool = activeModels.some(([, metrics]) => metrics.tokens.tool > 0);
-  const hasCached = activeModels.some(
-    ([, metrics]) => metrics.tokens.cached > 0,
-  );
+  const hasTool = entries.some(({ metrics }) => metrics.tokens.tool > 0);
+  const hasCached = entries.some(({ metrics }) => metrics.tokens.cached > 0);
 
   return (
     <Box
@@ -114,10 +115,10 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
             {t('Metric')}
           </Text>
         </Box>
-        {modelNames.map((name) => (
-          <Box width={MODEL_COL_WIDTH} key={name}>
+        {columnLabels.map((label) => (
+          <Box width={MODEL_COL_WIDTH} key={label}>
             <Text bold color={theme.text.primary}>
-              {name}
+              {label}
             </Text>
           </Box>
         ))}
