@@ -235,10 +235,13 @@ export function ThemeDialog({
             </Text>
             {/* Get the Theme object for the highlighted theme, fall back to default if not found */}
             {(() => {
+              // For 'auto', show the currently resolved theme (set by onHighlight → applyTheme)
               const previewTheme =
-                themeManager.getTheme(
-                  highlightedThemeName || DEFAULT_THEME.name,
-                ) || DEFAULT_THEME;
+                highlightedThemeName === AUTO_THEME_NAME
+                  ? themeManager.getActiveTheme()
+                  : themeManager.getTheme(
+                      highlightedThemeName || DEFAULT_THEME.name,
+                    ) || DEFAULT_THEME;
               return (
                 <Box
                   borderStyle="single"

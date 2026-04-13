@@ -118,11 +118,22 @@ describe('detectTerminalTheme', () => {
   });
 
   describe('detectTerminalTheme', () => {
-    it('should prefer macOS detection over COLORFGBG', async () => {
+    it('should prefer COLORFGBG over macOS detection', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
       vi.mocked(childProcess.execSync).mockReturnValue('Dark\n');
-      // Set COLORFGBG to light to verify macOS takes precedence
+      // Set COLORFGBG to light — it should take precedence over macOS dark
       process.env['COLORFGBG'] = '0;15';
+
+      const { detectTerminalTheme } = await import(
+        './detect-terminal-theme.js'
+      );
+      expect(detectTerminalTheme()).toBe('light');
+    });
+
+    it('should fall back to macOS when COLORFGBG is not set', async () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      vi.mocked(childProcess.execSync).mockReturnValue('Dark\n');
+      delete process.env['COLORFGBG'];
 
       const { detectTerminalTheme } = await import(
         './detect-terminal-theme.js'

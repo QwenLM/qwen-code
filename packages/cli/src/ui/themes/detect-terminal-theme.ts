@@ -16,24 +16,29 @@ export type DetectedTheme = 'dark' | 'light';
  * Detects whether the terminal is using a dark or light theme.
  *
  * Detection order:
- * 1. macOS system appearance (AppleInterfaceStyle)
- * 2. COLORFGBG environment variable
+ * 1. COLORFGBG environment variable (terminal-specific, most accurate)
+ * 2. macOS system appearance (AppleInterfaceStyle, system-wide fallback)
+ *
+ * COLORFGBG is checked first because it is set by the terminal emulator
+ * itself and reflects the actual terminal background color, whereas the
+ * macOS system appearance is a system-wide setting that the terminal may
+ * not follow (e.g., a light terminal on a dark-mode system).
  *
  * Returns 'dark' as the default if detection fails.
  */
 export function detectTerminalTheme(): DetectedTheme {
+  const colorFgBgResult = detectFromColorFgBg();
+  if (colorFgBgResult) {
+    debugLogger.info(`Detected theme from COLORFGBG: ${colorFgBgResult}`);
+    return colorFgBgResult;
+  }
+
   const macResult = detectMacOSTheme();
   if (macResult) {
     debugLogger.info(
       `Detected theme from macOS system appearance: ${macResult}`,
     );
     return macResult;
-  }
-
-  const colorFgBgResult = detectFromColorFgBg();
-  if (colorFgBgResult) {
-    debugLogger.info(`Detected theme from COLORFGBG: ${colorFgBgResult}`);
-    return colorFgBgResult;
   }
 
   debugLogger.info('Could not detect terminal theme, defaulting to dark');
