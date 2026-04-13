@@ -54,10 +54,9 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
-    // For OpenAI-compatible providers, the configured model is the single source of truth.
-    // We intentionally ignore request.model because upstream callers may pass a model string
-    // that is not valid/available for the OpenAI-compatible backend.
-    const effectiveModel = this.contentGeneratorConfig.model;
+    // Use request.model when explicitly provided (e.g., fastModel for suggestion
+    // generation), falling back to the configured model as the default.
+    const effectiveModel = request.model || this.contentGeneratorConfig.model;
     this.converter.setModel(effectiveModel);
     this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     return this.executeWithErrorHandling(
@@ -85,7 +84,7 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    const effectiveModel = this.contentGeneratorConfig.model;
+    const effectiveModel = request.model || this.contentGeneratorConfig.model;
     this.converter.setModel(effectiveModel);
     this.converter.setModalities(this.contentGeneratorConfig.modalities ?? {});
     return this.executeWithErrorHandling(
@@ -331,15 +330,37 @@ export class ContentGenerationPipeline {
       baseRequest.stream_options = { include_usage: true };
     }
 
-    // Add tools if present
-    if (request.config?.tools) {
+    // Add tools if present and non-empty.
+    // Some providers reject tools: [] (empty array), so skip when there are no tools.
+    if (request.config?.tools && request.config.tools.length > 0) {
       baseRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
         request.config.tools,
       );
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)
-    return this.config.provider.buildRequest(baseRequest, userPromptId);
+    const providerRequest = this.config.provider.buildRequest(
+      baseRequest,
+      userPromptId,
+    );
+
+    // When thinking is explicitly disabled (e.g., forked queries for suggestions),
+    // override thinking-related keys that may have been injected by extra_body.
+    // extra_body is spread last in provider.buildRequest, so it overrides
+    // buildReasoningConfig's decision — we must post-process here.
+    if (request.config?.thinkingConfig?.includeThoughts === false) {
+      const typed = providerRequest as unknown as Record<string, unknown>;
+      if ('enable_thinking' in typed) {
+        typed['enable_thinking'] = false;
+      }
+      // Also strip reasoning config — extra_body could inject it, overriding
+      // buildReasoningConfig's decision to return {} for disabled thinking.
+      if ('reasoning' in typed) {
+        delete typed['reasoning'];
+      }
+    }
+
+    return providerRequest;
   }
 
   private buildGenerateContentConfig(

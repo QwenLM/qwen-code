@@ -782,7 +782,8 @@ export default {
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
-  'Switch the model for this session': 'このセッションのモデルを切り替え',
+  'Switch the model for this session (--fast for suggestion model)':
+    'このセッションのモデルを切り替え（--fast で提案モデルを設定）',
   'Set a lighter model for prompt suggestions and speculative execution':
     'プロンプト提案と投機的実行用の軽量モデルを設定',
   'Content generator configuration not available.':
@@ -1161,6 +1162,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Ctrl+C をもう一度押すと終了します',
   'Press Ctrl+D again to exit.': 'Ctrl+D をもう一度押すと終了します',
   'Press Esc again to clear.': 'Esc をもう一度押すとクリアします',
+  'Press ↑ to edit queued messages': '↑ を押してキュー内のメッセージを編集',
   // MCP Status
   '⏳ MCP servers are starting up ({{count}} initializing)...':
     '⏳ MCPサーバーを起動中({{count}} 初期化中)...',

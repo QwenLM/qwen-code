@@ -738,6 +738,17 @@ export const MUTATOR_KINDS: Kind[] = [
   Kind.Execute,
 ] as const;
 
+/**
+ * Tool kinds that are safe to execute concurrently (pure reads, no writes).
+ * Kind.Think is excluded because some Think tools write to disk
+ * (e.g., save_memory, todo_write).
+ */
+export const CONCURRENCY_SAFE_KINDS: ReadonlySet<Kind> = new Set([
+  Kind.Read,
+  Kind.Search,
+  Kind.Fetch,
+]);
+
 export interface ToolLocation {
   // Absolute path to the file
   path: string;

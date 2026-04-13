@@ -1036,7 +1036,8 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': 'Trocar o modelo para esta sessão',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Trocar o modelo para esta sessão (--fast para modelo de sugestões)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Definir modelo mais leve para sugestões de prompt e execução especulativa',
   'Content generator configuration not available.':
@@ -1484,6 +1485,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Pressione Ctrl+C novamente para sair.',
   'Press Ctrl+D again to exit.': 'Pressione Ctrl+D novamente para sair.',
   'Press Esc again to clear.': 'Pressione Esc novamente para limpar.',
+  'Press ↑ to edit queued messages':
+    'Pressione ↑ para editar mensagens na fila',
 
   // ============================================================================
   // MCP Status

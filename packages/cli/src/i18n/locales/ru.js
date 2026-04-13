@@ -1035,7 +1035,8 @@ export default {
   // ============================================================================
   // Команды - Модель
   // ============================================================================
-  'Switch the model for this session': 'Переключение модели для этой сессии',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Переключение модели для этой сессии (--fast для модели подсказок)',
   'Set a lighter model for prompt suggestions and speculative execution':
     'Установить облегчённую модель для подсказок и спекулятивного выполнения',
   'Content generator configuration not available.':
@@ -1404,6 +1405,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Нажмите Ctrl+C снова для выхода.',
   'Press Ctrl+D again to exit.': 'Нажмите Ctrl+D снова для выхода.',
   'Press Esc again to clear.': 'Нажмите Esc снова для очистки.',
+  'Press ↑ to edit queued messages':
+    'Нажмите ↑ для редактирования сообщений в очереди',
 
   // ============================================================================
   // Статус MCP

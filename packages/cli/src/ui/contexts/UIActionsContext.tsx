@@ -63,6 +63,7 @@ export interface UIActions {
   closeSettingsDialog: () => void;
   closeMemoryDialog: () => void;
   closeModelDialog: () => void;
+  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;
@@ -81,6 +82,7 @@ export interface UIActions {
   handleFinalSubmit: (value: string) => void;
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
+  popAllQueuedMessages: () => string | null;
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;

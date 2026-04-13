@@ -38,10 +38,14 @@ export enum HookEventName {
   SubagentStop = 'SubagentStop',
   // PreCompact - Before conversation compaction
   PreCompact = 'PreCompact',
+  // PostCompact - After conversation compaction
+  PostCompact = 'PostCompact',
   // SessionEnd - When a session is ending
   SessionEnd = 'SessionEnd',
   // When a permission dialog is displayed
   PermissionRequest = 'PermissionRequest',
+  // StopFailure - When the turn ends due to an API error (instead of Stop)
+  StopFailure = 'StopFailure',
 }
 
 /**
@@ -673,6 +677,36 @@ export interface PreCompactOutput extends HookOutput {
   };
 }
 
+/**
+ * PostCompact trigger types
+ */
+export enum PostCompactTrigger {
+  Manual = 'manual',
+  Auto = 'auto',
+}
+
+/**
+ * PostCompact hook input
+ * Fired after conversation compaction completes
+ */
+export interface PostCompactInput extends HookInput {
+  trigger: PostCompactTrigger;
+  compact_summary: string;
+}
+
+/**
+ * PostCompact hook output
+ * Note: PostCompact is not in the official decision mode supported events list,
+ * so hookSpecificOutput / additionalContext do not produce any control effects
+ */
+export interface PostCompactOutput extends HookOutput {
+  // All returned JSON is ignored for control purposes
+  hookSpecificOutput?: {
+    hookEventName: 'PostCompact';
+    additionalContext?: string;
+  };
+}
+
 export enum AgentType {
   Bash = 'Bash',
   Explorer = 'Explorer',
@@ -723,6 +757,36 @@ export interface SubagentStopOutput extends HookOutput {
     additionalContext?: string;
   };
 }
+
+/**
+ * StopFailure error types
+ * Fires instead of Stop when an API error ended the turn
+ */
+export type StopFailureErrorType =
+  | 'rate_limit'
+  | 'authentication_failed'
+  | 'billing_error'
+  | 'invalid_request'
+  | 'server_error'
+  | 'max_output_tokens'
+  | 'unknown';
+
+/**
+ * StopFailure hook input
+ * Fired when the turn ends due to an API error (instead of Stop)
+ */
+export interface StopFailureInput extends HookInput {
+  error: StopFailureErrorType;
+  error_details?: string;
+  last_assistant_message?: string;
+}
+
+/**
+ * StopFailure hook output
+ * Fire-and-forget: hook output and exit codes are ignored
+ * This type alias is used instead of an empty interface to satisfy ESLint rules
+ */
+export type StopFailureOutput = HookOutput;
 
 /**
  * Hook execution result
