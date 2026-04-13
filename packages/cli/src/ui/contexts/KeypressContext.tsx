@@ -206,6 +206,24 @@ export function KeypressProvider({
               broadcast(plain.key);
               continue;
             }
+            // Drop a stale `ESC[` prefix when the byte after it cannot
+            // possibly belong to a CSI sequence (CSI parameters live in
+            // 0x20-0x3F, terminators in 0x40-0x7E). UTF-8 multibyte (0x80+)
+            // from an IME commit lands here. Without this, the salvage
+            // loop gives up and the next block clears the buffer entirely,
+            // dropping every character the user just typed.
+            if (
+              kittySequenceBufferRef.current.length >= 3 &&
+              kittySequenceBufferRef.current.startsWith(`${ESC}[`)
+            ) {
+              const thirdCharCode =
+                kittySequenceBufferRef.current.charCodeAt(2);
+              if (thirdCharCode < 0x20 || thirdCharCode > 0x7e) {
+                kittySequenceBufferRef.current =
+                  kittySequenceBufferRef.current.slice(2);
+                continue;
+              }
+            }
             break;
           }
           // Clear any remaining unparseable content
@@ -821,6 +839,34 @@ export function KeypressProvider({
               broadcast(plainTextPrefix.key);
               bufferedInputHandled = true;
               continue;
+            }
+
+            // The buffer starts with `ESC[` (otherwise parsePlainTextPrefix
+            // would have matched). If the third byte is outside the valid
+            // CSI parameter (0x20-0x3F) and terminator (0x40-0x7E) ranges
+            // — for example a UTF-8 multibyte from an IME commit (0x80+)
+            // arriving while we were buffering an interrupted escape — the
+            // `ESC[` cannot possibly become a valid CSI sequence. Drop the
+            // stale prefix so the rest of the buffer can be reparsed as
+            // plain text. Without this, parsers loop forever and the 200ms
+            // timeout silently discards the typed CJK characters.
+            if (kittySequenceBufferRef.current.length >= 3) {
+              const thirdCharCode =
+                kittySequenceBufferRef.current.charCodeAt(2);
+              if (thirdCharCode < 0x20 || thirdCharCode > 0x7e) {
+                if (debugKeystrokeLogging) {
+                  debugLogger.debug(
+                    '[DEBUG] Dropping stale ESC[ before non-CSI byte:',
+                    `0x${thirdCharCode.toString(16)}`,
+                  );
+                }
+                updateKittyBuffer(kittySequenceBufferRef.current.slice(2));
+                if (!kittySequenceBufferRef.current) {
+                  clearKittyTimeout();
+                }
+                bufferedInputHandled = true;
+                continue;
+              }
             }
 
             // Look for the next potential CSI start beyond index 0

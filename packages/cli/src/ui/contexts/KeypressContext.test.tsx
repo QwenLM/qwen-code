@@ -230,6 +230,79 @@ describe('KeypressContext - Kitty Protocol', () => {
       );
     });
 
+    it('preserves UTF-8 chars that arrive after a stale ESC[ prefix', async () => {
+      // Regression test for the IME drop bug observed in Ghostty + Sogou
+      // pinyin on macOS: an interrupted/stray `ESC[` lingered in the kitty
+      // sequence buffer, then the user's CJK commit (raw UTF-8 multibyte
+      // bytes) was appended. Neither parseKittyPrefix nor parsePlainTextPrefix
+      // could match (the latter rejects ESC-prefixed buffers), the loop hit
+      // its silent `return`, and 200 ms later the timeout cleared the whole
+      // buffer — the typed characters never reached the input field.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Stray `ESC[` (e.g. from an interrupted escape sequence) followed
+      // immediately by CJK bytes from an IME commit.
+      act(() => {
+        stdin.sendKittySequence('\x1b[');
+      });
+      act(() => {
+        stdin.sendKittySequence('初步');
+      });
+
+      // Wait past the kitty sequence timeout to ensure the salvage path
+      // also runs.
+      await new Promise((r) => setTimeout(r, 350));
+
+      const sequences = keyHandler.mock.calls.map(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (c: any) => c[0]?.sequence,
+      );
+      expect(sequences).toContain('初');
+      expect(sequences).toContain('步');
+    });
+
+    it('salvages UTF-8 chars from a stale ESC[ buffer when the timeout fires', async () => {
+      // Same shape as above but the stray `ESC[` and the CJK bytes arrive
+      // far enough apart that the main loop is exercised independently for
+      // each chunk. The timeout-triggered salvage path must also drop the
+      // stale prefix instead of clearing the whole buffer.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.sendKittySequence('\x1b[');
+      });
+      // Wait *just under* the 200 ms kitty timeout, then send CJK so the
+      // bytes are appended to the still-pending buffer.
+      await new Promise((r) => setTimeout(r, 150));
+      act(() => {
+        stdin.sendKittySequence('调研');
+      });
+      await new Promise((r) => setTimeout(r, 350));
+
+      const sequences = keyHandler.mock.calls.map(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (c: any) => c[0]?.sequence,
+      );
+      expect(sequences).toContain('调');
+      expect(sequences).toContain('研');
+    });
+
     it('should not process kitty sequences when kitty protocol is disabled', async () => {
       const keyHandler = vi.fn();
 
