@@ -237,6 +237,7 @@ export const useGeminiStream = (
     null,
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
+  const modelOverrideRef = useRef<string | undefined>(undefined);
   const {
     startNewPrompt,
     getPromptCount,
@@ -1255,6 +1256,11 @@ export const useGeminiStream = (
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
+        // Clear model override for new user turns, but preserve it on retry
+        // so the same skill-selected model is used again.
+        if (submitType !== SendMessageType.Retry) {
+          modelOverrideRef.current = undefined;
+        }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
         // Clear both countdown-based errors AND static errors (those without
@@ -1354,7 +1360,7 @@ export const useGeminiStream = (
             finalQueryToSend,
             abortSignal,
             prompt_id!,
-            { type: submitType },
+            { type: submitType, modelOverride: modelOverrideRef.current },
           );
 
           const processingStatus = await processGeminiStreamEvents(
@@ -1619,6 +1625,15 @@ export const useGeminiStream = (
       const prompt_ids = geminiTools.map(
         (toolCall) => toolCall.request.prompt_id,
       );
+
+      // Persist model override from skill tool results (last one wins).
+      // Uses `in` so that undefined (from inherit/no-model skills) clears a
+      // prior override, while non-skill tools (field absent) leave it intact.
+      for (const toolCall of geminiTools) {
+        if ('modelOverride' in toolCall.response) {
+          modelOverrideRef.current = toolCall.response.modelOverride;
+        }
+      }
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
