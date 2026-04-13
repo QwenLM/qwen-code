@@ -72,6 +72,13 @@ export interface ToolConfig {
    * that the agent is permitted to use.
    */
   tools: Array<string | FunctionDeclaration>;
+
+  /**
+   * Optional list of tool names to exclude from the agent's tool pool.
+   * Applied after the allowlist and MCP bypass. Supports MCP server-level
+   * patterns (e.g., "mcp__server" blocks all tools from that server).
+   */
+  disallowedTools?: string[];
 }
 
 /**

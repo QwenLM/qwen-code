@@ -344,6 +344,36 @@ describe('SubagentValidator', () => {
       expect(result.errors).toHaveLength(0);
     });
 
+    it('should accept valid disallowedTools', () => {
+      const result = validator.validateConfig({
+        ...validConfig,
+        disallowedTools: ['write_file', 'mcp__slack'],
+      });
+      expect(result.isValid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('should reject non-string entries in disallowedTools', () => {
+      const result = validator.validateConfig({
+        ...validConfig,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        disallowedTools: [123, 'write_file'] as any,
+      });
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain(
+        'Tool name must be a string, got: number',
+      );
+    });
+
+    it('should reject empty strings in disallowedTools', () => {
+      const result = validator.validateConfig({
+        ...validConfig,
+        disallowedTools: ['', 'write_file'],
+      });
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain('Tool name cannot be empty');
+    });
+
     it('should collect errors from all validation steps', () => {
       const invalidConfig: SubagentConfig = {
         name: '',
