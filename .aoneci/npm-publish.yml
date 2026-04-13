@@ -48,6 +48,8 @@ jobs:
 
       - uses: npm-publisher
         inputs:
+          # npm access token
+          token: ${{ secrets.inner_npm_publish_token }}
           # main 分支发布正式版本（latest），其他分支（dev）发布预发布版本（beta）
           baseBranches: ['main']
           # beta 版本自动更新版本号
