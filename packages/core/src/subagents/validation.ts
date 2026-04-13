@@ -56,7 +56,7 @@ export class SubagentValidator {
     }
 
     // Validate disallowedTools if specified
-    if (config.disallowedTools) {
+    if (config.disallowedTools && config.disallowedTools.length > 0) {
       const disallowedValidation = this.validateTools(config.disallowedTools);
       if (!disallowedValidation.isValid) {
         errors.push(...disallowedValidation.errors);

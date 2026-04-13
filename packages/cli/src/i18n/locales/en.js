@@ -1151,8 +1151,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': 'Switch the model for this session',
-  'Set fast model for background tasks': 'Set fast model for background tasks',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Switch the model for this session (--fast for suggestion model)',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Set a lighter model for prompt suggestions and speculative execution',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',
@@ -1487,6 +1489,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
+  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
 
   // ============================================================================
   // MCP Status
@@ -1554,6 +1557,16 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Add a QWEN.md file to give Qwen Code persistent project context.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Use /btw to ask a quick side question without disrupting the conversation.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Context is almost full! Run /compress now or start /new to continue.',
+  'Context is getting full. Use /compress to free up space.':
+    'Context is getting full. Use /compress to free up space.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Long conversation? /compress summarizes history to free context.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -2010,9 +2023,9 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
-  verbose: 'verbose',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
+  compact: 'compact',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Press Ctrl+O to show full tool output',
 
@@ -2026,4 +2039,6 @@ export default {
     'Already in plan mode. Use "/plan exit" to exit plan mode.',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
     'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

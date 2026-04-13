@@ -24,6 +24,7 @@ interface MockToolOptions {
   name: string;
   displayName?: string;
   description?: string;
+  kind?: Kind;
   canUpdateOutput?: boolean;
   isOutputMarkdown?: boolean;
   getDefaultPermission?: () => Promise<PermissionDecision>;
@@ -97,7 +98,7 @@ export class MockTool extends BaseDeclarativeTool<
       options.name,
       options.displayName ?? options.name,
       options.description ?? options.name,
-      Kind.Other,
+      options.kind ?? Kind.Other,
       options.params,
       options.isOutputMarkdown ?? false,
       options.canUpdateOutput ?? false,

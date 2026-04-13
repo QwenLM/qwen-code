@@ -35,7 +35,7 @@ function randomUin(): string {
   return btoa(String.fromCharCode(...buf));
 }
 
-function buildHeaders(token?: string): Record<string, string> {
+export function buildHeaders(token?: string): Record<string, string> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     'X-WECHAT-UIN': randomUin(),

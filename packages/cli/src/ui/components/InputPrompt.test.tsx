@@ -27,6 +27,8 @@ import * as clipboardUtils from '../utils/clipboardUtils.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import stripAnsi from 'strip-ansi';
 import chalk from 'chalk';
+import { useUIState } from '../contexts/UIStateContext.js';
+import { useUIActions } from '../contexts/UIActionsContext.js';
 
 vi.mock('../hooks/useShellHistory.js');
 vi.mock('../hooks/useCommandCompletion.js');
@@ -34,12 +36,13 @@ vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../utils/clipboardUtils.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
-  useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false })),
+  useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
 }));
 vi.mock('../contexts/UIActionsContext.js', () => ({
   useUIActions: vi.fn(() => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
+    popAllQueuedMessages: vi.fn(() => null),
   })),
 }));
 
@@ -212,16 +215,16 @@ describe('InputPrompt', () => {
   const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
   describe('prompt suggestions', () => {
-    it('accepts the visible prompt suggestion on tab when the buffer is empty', async () => {
+    it('does not accept the prompt suggestion on shift+tab', async () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
       );
       await wait(350);
 
-      stdin.write('\t');
+      stdin.write('\x1b[Z'); // shift+tab
       await wait();
 
-      expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
       unmount();
     });
 
@@ -2517,12 +2520,14 @@ describe('InputPrompt', () => {
     let mockUIActions: {
       handleRetryLastPrompt: ReturnType<typeof vi.fn>;
       temporaryCloseFeedbackDialog: ReturnType<typeof vi.fn>;
+      popAllQueuedMessages: ReturnType<typeof vi.fn>;
     };
 
     beforeEach(() => {
       mockUIActions = {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
       };
 
       // Override the mock for useUIActions
@@ -2629,6 +2634,165 @@ describe('InputPrompt', () => {
       // Note: In actual implementation, temporaryCloseFeedbackDialog would be called
 
       vi.doUnmock('../contexts/UIStateContext.js');
+      unmount();
+    });
+  });
+
+  describe('queue input editing', () => {
+    afterEach(() => {
+      // Restore default mocks
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+      } as unknown as ReturnType<typeof useUIActions>);
+    });
+
+    it('should pop queued messages into input on Up arrow when queue is non-empty', async () => {
+      const mockPopAll = vi.fn(() => 'queued msg 1\n\nqueued msg 2');
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued msg 1', 'queued msg 2'],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAll,
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockPopAll).toHaveBeenCalled();
+      expect(props.buffer.setText).toHaveBeenCalledWith(
+        'queued msg 1\n\nqueued msg 2',
+      );
+      unmount();
+    });
+
+    it('should prepend queued messages before existing input text', async () => {
+      const mockPopAll = vi.fn(() => 'queued msg');
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued msg'],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAll,
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      // Set existing text in buffer
+      props.buffer.text = 'existing input';
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(props.buffer.setText).toHaveBeenCalledWith(
+        'queued msg\nexisting input',
+      );
+      // Cursor should be positioned at start of existing text
+      expect(props.buffer.moveToOffset).toHaveBeenCalledWith(
+        'queued msg'.length + 1, // popped length + newline
+      );
+      unmount();
+    });
+
+    it('should pop queued messages on ESC when queue is non-empty', async () => {
+      const mockPopAll = vi.fn(() => 'queued msg');
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued msg'],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAll,
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B'); // ESC
+      await wait();
+
+      expect(mockPopAll).toHaveBeenCalled();
+      expect(props.buffer.setText).toHaveBeenCalledWith('queued msg');
+      unmount();
+    });
+
+    it('should fall through to history when pop returns null (race condition)', async () => {
+      // Simulate: React state says queue is non-empty, but queueRef was
+      // already drained by another pop/drain — popAllQueuedMessages returns null.
+      const mockPopAll = vi.fn(() => null);
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['stale msg'],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAll,
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockPopAll).toHaveBeenCalled();
+      expect(props.buffer.setText).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('should navigate history on Up arrow when queue is empty', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('should not intercept Ctrl+P when queue is non-empty', async () => {
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued msg'],
+      } as ReturnType<typeof useUIState>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u0010'); // Ctrl+P
+      await wait();
+
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
       unmount();
     });
   });

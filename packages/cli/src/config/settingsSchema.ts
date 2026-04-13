@@ -429,6 +429,15 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      statusLine: {
+        type: 'object',
+        label: 'Status Line',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as { type: 'command'; command: string } | undefined,
+        description: 'Custom status line display configuration.',
+        showInDialog: false,
+      },
       customThemes: {
         type: 'object',
         label: 'Custom Themes',
@@ -582,15 +591,15 @@ const SETTINGS_SCHEMA = {
         description: 'The last time the feedback dialog was shown.',
         showInDialog: false,
       },
-      verboseMode: {
+      compactMode: {
         type: 'boolean',
-        label: 'Verbose Mode',
+        label: 'Compact Mode',
         category: 'UI',
         requiresRestart: false,
-        default: true,
+        default: false,
         description:
-          'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
-        showInDialog: false,
+          'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+        showInDialog: true,
       },
     },
   },
@@ -663,7 +672,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: '',
     description:
-      'Model for background tasks (suggestion generation, speculation). Leave empty to use the main model. A smaller/faster model (e.g., qwen3.5-flash) reduces latency and cost.',
+      'Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.',
     showInDialog: true,
   },
 
@@ -1003,6 +1012,16 @@ const SETTINGS_SCHEMA = {
         default: undefined as boolean | string | undefined,
         description:
           'Sandbox execution environment (can be a boolean or a path string).',
+        showInDialog: false,
+      },
+      sandboxImage: {
+        type: 'string',
+        label: 'Sandbox Image',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.',
         showInDialog: false,
       },
       shell: {
