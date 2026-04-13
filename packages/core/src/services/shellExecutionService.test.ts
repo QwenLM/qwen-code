@@ -423,7 +423,7 @@ describe('ShellExecutionService', () => {
       expect(result.exitCode).toBe(0);
     });
 
-    it('should capture unexpected PTY errors in result instead of throwing', async () => {
+    it('should capture unexpected PTY errors in output instead of throwing', async () => {
       const abortController = new AbortController();
       const handle = await ShellExecutionService.execute(
         'ls -l',
@@ -438,11 +438,12 @@ describe('ShellExecutionService', () => {
       const unexpectedError = Object.assign(new Error('connection broken'), {
         code: 'EPIPE',
       });
-      // Should not throw — error is captured in result instead
+      // Should not throw — error is reported in output instead
       expect(() => mockPtyProcess.emit('error', unexpectedError)).not.toThrow();
 
       const result = await handle.result;
-      expect(result.error).toBe(unexpectedError);
+      expect(result.error).toBeNull();
+      expect(result.output).toBe('connection broken');
       expect(result.exitCode).toBe(1);
     });
 

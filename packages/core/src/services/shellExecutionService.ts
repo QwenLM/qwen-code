@@ -206,7 +206,7 @@ const isExpectedPtyReadExitError = (error: unknown): boolean => {
   return (
     message.includes('read EIO') ||
     message.includes('read EINTR') ||
-    message.includes('pty')
+    (message.includes('read') && message.toLowerCase().includes('pty'))
   );
 };
 
@@ -828,12 +828,15 @@ export class ShellExecutionService {
             } catch {
               // PTY may already be dead
             }
+            // Do NOT set `error` — that field is reserved for spawn failures.
+            // Include the error message in output so downstream consumers
+            // correctly treat this as a runtime failure, not a startup failure.
             resolve({
               rawOutput: Buffer.concat(outputChunks),
-              output: '',
+              output: getErrorMessage(err),
               exitCode: 1,
               signal: null,
-              error,
+              error: null,
               aborted: abortSignal.aborted,
               pid: ptyProcess.pid,
               executionMethod:
