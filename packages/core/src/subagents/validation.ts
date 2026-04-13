@@ -107,8 +107,8 @@ export class SubagentValidator {
       errors.push('Name must be 50 characters or less');
     }
 
-    // Check valid characters (alphanumeric, hyphens, underscores)
-    const validNameRegex = /^[a-zA-Z0-9_-]+$/;
+    // Check valid characters (Unicode letters/numbers, hyphens, underscores)
+    const validNameRegex = /^[\p{L}\p{N}_-]+$/u;
     if (!validNameRegex.test(trimmedName)) {
       errors.push(
         'Name can only contain letters, numbers, hyphens, and underscores',
@@ -138,8 +138,11 @@ export class SubagentValidator {
       errors.push(`"${trimmedName}" is a reserved name and cannot be used`);
     }
 
-    // Warnings for naming conventions
-    if (trimmedName !== trimmedName.toLowerCase()) {
+    // Warnings for naming conventions (only for names that have case distinctions)
+    if (
+      trimmedName !== trimmedName.toLowerCase() &&
+      /[a-zA-Z]/.test(trimmedName)
+    ) {
       warnings.push('Consider using lowercase names for consistency');
     }
 
