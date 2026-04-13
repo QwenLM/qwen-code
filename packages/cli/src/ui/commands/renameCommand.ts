@@ -110,11 +110,22 @@ export const renameCommand: SlashCommand = {
 
     // If no name provided, auto-generate one from conversation history
     if (!name) {
+      const dots = ['.', '..', '...'];
+      let dotIndex = 0;
+      const baseText = t('Generating session name');
       context.ui.setPendingItem({
         type: 'info',
-        text: t('Generating session name…'),
+        text: baseText + dots[dotIndex],
       });
+      const timer = setInterval(() => {
+        dotIndex = (dotIndex + 1) % dots.length;
+        context.ui.setPendingItem({
+          type: 'info',
+          text: baseText + dots[dotIndex],
+        });
+      }, 500);
       const generated = await generateSessionTitle(config, context.abortSignal);
+      clearInterval(timer);
       context.ui.setPendingItem(null);
       if (!generated) {
         return {
