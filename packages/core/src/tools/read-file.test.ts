@@ -17,10 +17,48 @@ import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
+import { PDFParse, PasswordException } from 'pdf-parse';
 
 vi.mock('../telemetry/loggers.js', () => ({
   logFileOperation: vi.fn(),
 }));
+
+vi.mock('pdf-parse', () => {
+  const PasswordException = class PasswordException extends Error {
+    constructor(message: string, cause?: Error) {
+      super(message);
+      this.name = 'PasswordException';
+      if (cause) this.cause = cause;
+    }
+  };
+
+  // Module-level mock state accessible via vi.mocked(PDFParse).mockGetText etc.
+  const mockGetText = vi.fn();
+  const mockDestroy = vi.fn();
+
+  const MockPDFParse = vi.fn().mockImplementation(() => ({
+    getText: mockGetText,
+    destroy: mockDestroy,
+  }));
+
+  // Attach mock functions to the constructor for test access
+  (MockPDFParse as unknown as Record<string, unknown>)['__mockGetText'] =
+    mockGetText;
+  (MockPDFParse as unknown as Record<string, unknown>)['__mockDestroy'] =
+    mockDestroy;
+
+  return {
+    PDFParse: MockPDFParse,
+    PasswordException,
+  };
+});
+
+// Helper to get the mock getText function
+function getMockGetText(): ReturnType<typeof vi.fn> {
+  return (PDFParse as unknown as Record<string, unknown>)[
+    '__mockGetText'
+  ] as ReturnType<typeof vi.fn>;
+}
 
 describe('ReadFileTool', () => {
   let tempRootDir: string;
@@ -32,6 +70,9 @@ describe('ReadFileTool', () => {
     tempRootDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'read-file-tool-root-'),
     );
+
+    // Reset PDF parse mocks between tests
+    getMockGetText().mockReset();
 
     const mockConfigInstance = {
       getFileService: () => new FileDiscoveryService(tempRootDir),
@@ -339,15 +380,80 @@ describe('ReadFileTool', () => {
         ToolResult
       >;
 
+      getMockGetText().mockResolvedValue({
+        text: 'Hello from PDF\nLine 2',
+        pages: [],
+      });
+
       const result = await invocation.execute(abortSignal);
-      expect(result.llmContent).toEqual({
-        inlineData: {
-          data: pdfHeader.toString('base64'),
-          mimeType: 'application/pdf',
-          displayName: 'document.pdf',
+      expect(result.llmContent).toBe('Hello from PDF\nLine 2');
+      expect(result.returnDisplay).toBe('Read pdf file: document.pdf');
+    });
+
+    it('should handle encrypted PDF with password protection error', async () => {
+      const pdfPath = path.join(tempRootDir, 'encrypted.pdf');
+      const pdfHeader = Buffer.from('%PDF-1.4');
+      await fsp.writeFile(pdfPath, pdfHeader);
+      const params: ReadFileToolParams = { file_path: pdfPath };
+      const invocation = tool.build(params) as ToolInvocation<
+        ReadFileToolParams,
+        ToolResult
+      >;
+
+      getMockGetText().mockRejectedValue(
+        new PasswordException('Password required'),
+      );
+
+      const result = await invocation.execute(abortSignal);
+      expect(result.llmContent).toBe(
+        'This PDF is password-protected and cannot be read. Please provide the password to unlock the document.',
+      );
+      expect(result.returnDisplay).toBe(
+        'This PDF is password-protected and cannot be read.',
+      );
+      expect(result.error).toBeDefined();
+      expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+    });
+
+    it('should handle image-only PDF with empty text result', async () => {
+      const pdfPath = path.join(tempRootDir, 'scanned.pdf');
+      const pdfHeader = Buffer.from('%PDF-1.4');
+      await fsp.writeFile(pdfPath, pdfHeader);
+      const params: ReadFileToolParams = { file_path: pdfPath };
+      const invocation = tool.build(params) as ToolInvocation<
+        ReadFileToolParams,
+        ToolResult
+      >;
+
+      getMockGetText().mockResolvedValue({ text: '   \n  \n   ', pages: [] });
+
+      const result = await invocation.execute(abortSignal);
+      expect(result.llmContent).toBe(
+        'This PDF appears to be image-based (scanned). No text could be extracted. Consider using OCR software to extract text from this document.',
+      );
+      expect(result.returnDisplay).toBe(
+        'This PDF appears to be image-based (scanned). No text could be extracted.',
+      );
+    });
+
+    it('should handle non-existent PDF file', async () => {
+      const pdfPath = path.join(tempRootDir, 'nonexistent.pdf');
+      const params: ReadFileToolParams = { file_path: pdfPath };
+      const invocation = tool.build(params) as ToolInvocation<
+        ReadFileToolParams,
+        ToolResult
+      >;
+
+      const result = await invocation.execute(abortSignal);
+      expect(result).toEqual({
+        llmContent:
+          'Could not read file because no file was found at the specified path.',
+        returnDisplay: 'File not found.',
+        error: {
+          message: `File not found: ${pdfPath}`,
+          type: ToolErrorType.FILE_NOT_FOUND,
         },
       });
-      expect(result.returnDisplay).toBe('Read pdf file: document.pdf');
     });
 
     it('should handle binary file and skip content', async () => {

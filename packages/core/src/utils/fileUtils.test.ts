@@ -40,6 +40,31 @@ vi.mock('mime/lite', () => ({
   getType: vi.fn(),
 }));
 
+const pdfMocks = vi.hoisted(() => ({
+  getText: vi.fn(),
+  destroy: vi.fn(),
+}));
+
+vi.mock('pdf-parse', () => {
+  const PasswordException = class PasswordException extends Error {
+    constructor(message: string, cause?: Error) {
+      super(message);
+      this.name = 'PasswordException';
+      if (cause) this.cause = cause;
+    }
+  };
+
+  const PDFParse = vi.fn().mockImplementation(() => ({
+    getText: pdfMocks.getText,
+    destroy: pdfMocks.destroy,
+  }));
+
+  return {
+    PDFParse,
+    PasswordException,
+  };
+});
+
 const mockMimeGetType = mime.getType as Mock;
 
 describe('fileUtils', () => {
@@ -68,6 +93,9 @@ describe('fileUtils', () => {
 
   beforeEach(() => {
     vi.resetAllMocks(); // Reset all mocks, including mime.getType
+    // Reset pdf-parse mocks (hoisted)
+    pdfMocks.getText.mockReset();
+    pdfMocks.destroy.mockReset();
 
     tempRootDir = actualNodeFs.mkdtempSync(
       path.join(os.tmpdir(), 'fileUtils-test-'),
@@ -915,11 +943,18 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Skipped image file');
     });
 
-    it('should reject PDF files when model does not support PDF', async () => {
+    it('should extract text from PDF files regardless of model modality support', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
 
+      // Mock pdf-parse to return text
+      pdfMocks.getText.mockResolvedValue({
+        text: 'Extracted PDF text content',
+        pages: [],
+      });
+
+      // Even without pdf modality, text extraction should work
       const mockConfigNoPdf = {
         ...mockConfig,
         getContentGeneratorConfig: () => ({
@@ -931,19 +966,20 @@ describe('fileUtils', () => {
         testPdfFilePath,
         mockConfigNoPdf,
       );
-      expect(typeof result.llmContent).toBe('string');
-      expect(result.llmContent).toContain('Unsupported pdf file');
-      expect(result.llmContent).toContain(
-        'does not support PDF input directly',
-      );
-      expect(result.llmContent).toContain('/extensions install');
-      expect(result.returnDisplay).toContain('Skipped pdf file');
+      expect(result.llmContent).toBe('Extracted PDF text content');
+      expect(result.returnDisplay).toContain('Read pdf file');
     });
 
-    it('should accept PDF files when model supports PDF', async () => {
+    it('should handle image-only PDFs with empty text result', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
+
+      // Mock pdf-parse to return empty text (image-only PDF)
+      pdfMocks.getText.mockResolvedValue({
+        text: '   \n  \n   ',
+        pages: [],
+      });
 
       const mockConfigWithPdf = {
         ...mockConfig,
@@ -956,12 +992,9 @@ describe('fileUtils', () => {
         testPdfFilePath,
         mockConfigWithPdf,
       );
-      expect(result.llmContent).toHaveProperty('inlineData');
-      expect(
-        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
-          .mimeType,
-      ).toBe('application/pdf');
-      expect(result.returnDisplay).toContain('Read pdf file');
+      expect(result.llmContent).toContain('image-based');
+      expect(result.llmContent).toContain('scanned');
+      expect(result.returnDisplay).toContain('image-based');
     });
 
     it('should read an SVG file as text when under 1MB', async () => {

@@ -9,6 +9,7 @@ import fsPromises from 'node:fs/promises';
 import path from 'node:path';
 import type { PartUnion } from '@google/genai';
 import mime from 'mime/lite';
+import { PDFParse, PasswordException } from 'pdf-parse';
 import {
   iconvDecode,
   iconvEncodingExists,
@@ -510,17 +511,13 @@ export interface ProcessedFileReadResult {
 
 /**
  * For media file types, returns the corresponding modality key.
- * Returns undefined for non-media types (text, binary, svg) which are always supported.
+ * Returns undefined for non-media types (text, binary, svg, pdf) which are always supported.
+ * Note: PDF text extraction works regardless of model modality support.
  */
 function mediaModalityKey(
   fileType: 'image' | 'pdf' | 'audio' | 'video' | 'text' | 'binary' | 'svg',
 ): keyof InputModalities | undefined {
-  if (
-    fileType === 'image' ||
-    fileType === 'pdf' ||
-    fileType === 'audio' ||
-    fileType === 'video'
-  ) {
+  if (fileType === 'image' || fileType === 'audio' || fileType === 'video') {
     return fileType;
   }
   return undefined;
@@ -534,13 +531,7 @@ function unsupportedModalityMessage(
   modality: string,
   displayName: string,
 ): string {
-  let hint: string;
-  if (modality === 'pdf') {
-    hint =
-      'This model does not support PDF input directly. The read_file tool cannot extract PDF content either. To extract text from the PDF file, try using skills if applicable, or guide user to install pdf skill by running this slash command:\n/extensions install https://github.com/anthropics/skills:document-skills';
-  } else {
-    hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
-  }
+  const hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
   return `[Unsupported ${modality} file: "${displayName}". ${hint}]`;
 }
 
@@ -718,8 +709,7 @@ export async function processSingleFileContent(
       }
       case 'image':
       case 'audio':
-      case 'video':
-      case 'pdf': {
+      case 'video': {
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);
@@ -742,6 +732,49 @@ export async function processSingleFileContent(
           },
           returnDisplay: `Read ${fileType} file: ${relativePathForDisplay}`,
         };
+      }
+      case 'pdf': {
+        try {
+          const contentBuffer = await fs.promises.readFile(filePath);
+          const parser = new PDFParse({ data: contentBuffer });
+          const textResult = await parser.getText();
+          await parser.destroy();
+
+          const extractedText = textResult.text.trim();
+          if (!extractedText) {
+            return {
+              llmContent:
+                'This PDF appears to be image-based (scanned). No text could be extracted. Consider using OCR software to extract text from this document.',
+              returnDisplay:
+                'This PDF appears to be image-based (scanned). No text could be extracted.',
+            };
+          }
+
+          return {
+            llmContent: extractedText,
+            returnDisplay: `Read pdf file: ${relativePathForDisplay}`,
+          };
+        } catch (error) {
+          if (error instanceof PasswordException) {
+            return {
+              llmContent:
+                'This PDF is password-protected and cannot be read. Please provide the password to unlock the document.',
+              returnDisplay:
+                'This PDF is password-protected and cannot be read.',
+              error: `Password-protected PDF: ${filePath}`,
+              errorType: ToolErrorType.READ_CONTENT_FAILURE,
+            };
+          }
+
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          return {
+            llmContent: `Error reading PDF ${displayName}: ${errorMessage}`,
+            returnDisplay: `Error reading PDF: ${errorMessage}`,
+            error: `Error reading PDF ${filePath}: ${errorMessage}`,
+            errorType: ToolErrorType.READ_CONTENT_FAILURE,
+          };
+        }
       }
       default: {
         // Should not happen with current detectFileType logic
