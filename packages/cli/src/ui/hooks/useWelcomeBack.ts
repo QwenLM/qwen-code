@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   getProjectSummaryInfo,
+  SessionService,
   type ProjectSummaryInfo,
   type Config,
 } from '@qwen-code/qwen-code-core';
@@ -32,6 +33,7 @@ export function useWelcomeBack(
   submitQuery: (query: string) => void,
   buffer: { setText: (text: string) => void },
   settings: Settings,
+  handleResume?: (sessionId: string) => Promise<boolean>,
 ): WelcomeBackState & WelcomeBackActions {
   const [welcomeBackInfo, setWelcomeBackInfo] =
     useState<ProjectSummaryInfo | null>(null);
@@ -63,21 +65,44 @@ export function useWelcomeBack(
 
   // Handle welcome back dialog selection
   const handleWelcomeBackSelection = useCallback(
-    (choice: 'restart' | 'continue') => {
+    async (choice: 'restart' | 'continue') => {
       setWelcomeBackChoice(choice);
       setShowWelcomeBackDialog(false);
 
       if (choice === 'continue' && welcomeBackInfo?.content) {
-        // Create the context message to fill in the input box
-        const contextMessage = `@.qwen/PROJECT_SUMMARY.md, Based on our previous conversation,Let's continue?`;
+        // Try to resume the most recent session for this project so the user
+        // gets the actual conversation history back, not just the summary text.
+        // If no session JSONL exists (e.g., PROJECT_SUMMARY.md was committed
+        // without chat history), or if the listed session can't be loaded,
+        // fall back to injecting the summary as context. handleResume returns
+        // false when it short-circuits (e.g., loadSession returns nothing
+        // because the file disappeared or has malformed lines), so we check
+        // its result rather than treating any fulfilled call as success.
+        let didResume = false;
+        if (handleResume) {
+          try {
+            const sessionService = new SessionService(config.getTargetDir());
+            const result = await sessionService.listSessions({ size: 1 });
+            if (result.items.length > 0) {
+              didResume = await handleResume(result.items[0].sessionId);
+            }
+          } catch (error) {
+            config.getDebugLogger().debug('Welcome back resume failed:', error);
+          }
+        }
 
-        // Set the input fill state instead of directly submitting
-        setInputFillText(contextMessage);
-        setShouldFillInput(true);
+        if (!didResume) {
+          // Create the context message to fill in the input box
+          const contextMessage = `@.qwen/PROJECT_SUMMARY.md, Based on our previous conversation,Let's continue?`;
+
+          // Set the input fill state instead of directly submitting
+          setInputFillText(contextMessage);
+          setShouldFillInput(true);
+        }
       }
       // If choice is 'restart', just close the dialog and continue normally
     },
-    [welcomeBackInfo],
+    [config, handleResume, welcomeBackInfo],
   );
 
   const handleWelcomeBackClose = useCallback(() => {

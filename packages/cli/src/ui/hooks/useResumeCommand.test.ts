@@ -107,7 +107,7 @@ describe('useResumeCommand', () => {
     expect(result.current.handleResume).toBe(initialHandleResume);
   });
 
-  it('handleResume no-ops when config is null', async () => {
+  it('handleResume no-ops and returns false when config is null', async () => {
     const historyManager = { clearItems: vi.fn(), loadHistory: vi.fn() };
     const startNewSession = vi.fn();
 
@@ -119,16 +119,58 @@ describe('useResumeCommand', () => {
       }),
     );
 
+    let returnValue: boolean | undefined;
     await act(async () => {
-      await result.current.handleResume('session-1');
+      returnValue = await result.current.handleResume('session-1');
     });
 
+    expect(returnValue).toBe(false);
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();
     expect(historyManager.loadHistory).not.toHaveBeenCalled();
   });
 
-  it('handleResume closes the dialog immediately and restores session state', async () => {
+  it('handleResume returns false when loadSession yields no data', async () => {
+    resumeMocks.reset();
+    const historyManager = { clearItems: vi.fn(), loadHistory: vi.fn() };
+    const startNewSession = vi.fn();
+    const config = {
+      getTargetDir: () => '/tmp',
+      getGeminiClient: () => ({ initialize: vi.fn() }),
+      startNewSession: vi.fn(),
+      getDebugLogger: () => ({
+        warn: vi.fn(),
+        debug: vi.fn(),
+        error: vi.fn(),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    // Force the mocked loadSession to resolve with undefined, simulating a
+    // listed session whose file disappeared or has malformed lines.
+    resumeMocks.createPendingLoadSession();
+    resumeMocks.resolvePendingLoadSession(undefined);
+
+    const { result } = renderHook(() =>
+      useResumeCommand({
+        config,
+        historyManager,
+        startNewSession,
+      }),
+    );
+
+    let returnValue: boolean | undefined;
+    await act(async () => {
+      returnValue = await result.current.handleResume('stale-session');
+    });
+
+    expect(returnValue).toBe(false);
+    expect(startNewSession).not.toHaveBeenCalled();
+    expect(config.startNewSession).not.toHaveBeenCalled();
+    expect(historyManager.clearItems).not.toHaveBeenCalled();
+    expect(historyManager.loadHistory).not.toHaveBeenCalled();
+  });
+
+  it('handleResume closes the dialog immediately, restores session state, and returns true', async () => {
     resumeMocks.reset();
     resumeMocks.createPendingLoadSession();
 
@@ -163,13 +205,11 @@ describe('useResumeCommand', () => {
     });
     expect(result.current.isResumeDialogOpen).toBe(true);
 
-    let resumePromise: Promise<void> | undefined;
+    let resumePromise: Promise<boolean> | undefined;
     act(() => {
       // Start resume but do not await it yet — we want to assert the dialog
       // closes immediately before the async session load completes.
-      resumePromise = result.current.handleResume('session-2') as unknown as
-        | Promise<void>
-        | undefined;
+      resumePromise = result.current.handleResume('session-2');
     });
     expect(result.current.isResumeDialogOpen).toBe(false);
 
@@ -177,10 +217,12 @@ describe('useResumeCommand', () => {
     resumeMocks.resolvePendingLoadSession({
       conversation: [{ role: 'user', parts: [{ text: 'hello' }] }],
     });
+    let returnValue: boolean | undefined;
     await act(async () => {
-      await resumePromise;
+      returnValue = await resumePromise;
     });
 
+    expect(returnValue).toBe(true);
     expect(config.startNewSession).toHaveBeenCalledWith(
       'session-2',
       expect.objectContaining({

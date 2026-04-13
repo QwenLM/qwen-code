@@ -960,7 +960,13 @@ export const AppContainer = (props: AppContainerProps) => {
     welcomeBackChoice,
     handleWelcomeBackSelection,
     handleWelcomeBackClose,
-  } = useWelcomeBack(config, handleFinalSubmit, buffer, settings.merged);
+  } = useWelcomeBack(
+    config,
+    handleFinalSubmit,
+    buffer,
+    settings.merged,
+    handleResume,
+  );
 
   const pendingHistoryItems = useMemo(
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
