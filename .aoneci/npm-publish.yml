@@ -47,7 +47,7 @@ jobs:
         run: 'npm run build'
 
       - name: 'Configure .npmrc'
-        run: echo "registry=https://registry.anpm.alibaba-inc.com/:_authToken=${NPM_TOKEN}" > ~/.npmrc
+        run: echo "registry=https://registry.anpm.alibaba-inc.com/:_authToken=${NPM_TOKEN}" > .npmrc
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
