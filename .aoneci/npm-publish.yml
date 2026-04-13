@@ -8,8 +8,16 @@ triggers:
   push:
     branches: ['main', 'dev']
 
+parameters:
+  - name: skip_tests
+    description: '是否跳过测试步骤（默认不跳过）'
+    type: boolean
+    default: false
+
 jobs:
   npm-build-publish:
+    runs-on:
+      - 32-128Gi
     name: 'Build, Test & Publish'
     image: alios-8u
     steps:
@@ -26,6 +34,7 @@ jobs:
         run: 'npm ci'
 
       - name: 'Run tests'
+        if: ${{ parameters.skip_tests != true }}
         run: 'NO_COLOR=true npm run test:ci'
 
       - name: 'Build project'
