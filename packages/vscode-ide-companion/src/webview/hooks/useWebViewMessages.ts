@@ -119,6 +119,7 @@ interface UseWebViewMessagesProps {
   // Input
   inputFieldRef: React.RefObject<HTMLDivElement | null>;
   setInputText: (text: string) => void;
+  resetComposerState?: () => void;
   // Edit mode setter (maps ACP modes to UI modes)
   setEditMode?: (mode: ApprovalModeValue) => void;
   // Authentication state setter
@@ -150,6 +151,9 @@ type ConversationResetHandlers = {
     UseWebViewMessagesProps['sessionManagement'],
     'setCurrentSessionId' | 'setCurrentSessionTitle'
   >;
+  inputFieldRef: UseWebViewMessagesProps['inputFieldRef'];
+  setInputText: UseWebViewMessagesProps['setInputText'];
+  resetComposerState?: () => void;
   setUsageStats?: UseWebViewMessagesProps['setUsageStats'];
 };
 
@@ -166,6 +170,12 @@ export function resetConversationState({
   handlers.clearActiveExecToolCalls();
   handlers.messageHandling.clearWaitingForResponse();
   handlers.messageHandling.clearThinking();
+  handlers.setInputText('');
+  if (handlers.inputFieldRef.current) {
+    handlers.inputFieldRef.current.textContent = '\u200B';
+    handlers.inputFieldRef.current.setAttribute('data-empty', 'true');
+  }
+  handlers.resetComposerState?.();
   handlers.messageHandling.clearMessages();
   handlers.clearToolCalls();
   handlers.setPlanEntries([]);
@@ -197,6 +207,7 @@ export const useWebViewMessages = ({
   handleAskUserQuestion,
   inputFieldRef,
   setInputText,
+  resetComposerState,
   setEditMode,
   setIsAuthenticated,
   setUsageStats,
@@ -239,6 +250,9 @@ export const useWebViewMessages = ({
     setModelInfo,
     setAvailableCommands,
     setAvailableModels,
+    inputFieldRef,
+    setInputText,
+    resetComposerState,
   });
 
   // Track last "Updated Plan" snapshot toolcall to support merge/dedupe
@@ -289,6 +303,9 @@ export const useWebViewMessages = ({
       setModelInfo,
       setAvailableCommands,
       setAvailableModels,
+      inputFieldRef,
+      setInputText,
+      resetComposerState,
     };
   });
 

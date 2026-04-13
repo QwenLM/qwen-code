@@ -54,6 +54,7 @@ import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../types/acpTypes.js';
 import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
 import { computeContextUsage } from './utils/contextUsage.js';
+import { mergeLocalAvailableCommands } from './utils/localSlashCommands.js';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -104,6 +105,10 @@ export const App: React.FC = () => {
   const [isComposing, setIsComposing] = useState(false);
   // When true, do NOT auto-attach the active editor file/selection to message context
   const [skipAutoActiveContext, setSkipAutoActiveContext] = useState(false);
+  const slashCommands = useMemo(
+    () => mergeLocalAvailableCommands(availableCommands),
+    [availableCommands],
+  );
 
   // Completion system
   const getCompletionItems = React.useCallback(
@@ -171,8 +176,8 @@ export const App: React.FC = () => {
           },
         ];
 
-        // Slash Commands group - commands from server (available_commands_update)
-        const slashCommandItems: CompletionItem[] = availableCommands.map(
+        // Slash Commands group - ACP commands plus local companion-only commands
+        const slashCommandItems: CompletionItem[] = slashCommands.map(
           (cmd) => ({
             id: cmd.name,
             label: `/${cmd.name}`,
@@ -200,7 +205,7 @@ export const App: React.FC = () => {
         );
       }
     },
-    [fileContext, availableCommands, modelInfo?.name],
+    [fileContext, modelInfo?.name, slashCommands],
   );
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
@@ -297,6 +302,11 @@ export const App: React.FC = () => {
     });
   }, [messageHandling, vscode]);
 
+  const resetComposerState = useCallback(() => {
+    fileContext.clearFileReferences();
+    clearImages();
+  }, [clearImages, fileContext]);
+
   // Message handling
   useWebViewMessages({
     sessionManagement,
@@ -309,6 +319,7 @@ export const App: React.FC = () => {
     handleAskUserQuestion: setAskUserQuestionRequest,
     inputFieldRef,
     setInputText,
+    resetComposerState,
     setEditMode,
     setIsAuthenticated,
     setUsageStats: (stats) => setUsageStats(stats ?? null),
@@ -581,17 +592,19 @@ export const App: React.FC = () => {
           return;
         }
 
-        // Handle server-provided slash commands by sending them as messages.
+        // Handle slash commands by either invoking a local action or sending
+        // them as a message to the ACP session.
         // Skip when fillOnly (Tab) — let the generic insertion path fill the
         // command text so the user can keep typing arguments.
-        const serverCmd = availableCommands.find((c) => c.name === itemId);
-        if (serverCmd && !fillOnly) {
+        const slashCommand = slashCommands.find(
+          (command) => command.name === itemId,
+        );
+        if (slashCommand && !fillOnly) {
           // Clear the trigger text since we're sending the command
           clearTriggerText();
-          // Send the slash command as a user message
           vscode.postMessage({
             type: 'sendMessage',
-            data: { text: `/${serverCmd.name}` },
+            data: { text: `/${slashCommand.name}` },
           });
           completion.closeCompletion();
           return;
@@ -688,7 +701,7 @@ export const App: React.FC = () => {
       setInputText,
       fileContext,
       vscode,
-      availableCommands,
+      slashCommands,
     ],
   );
 

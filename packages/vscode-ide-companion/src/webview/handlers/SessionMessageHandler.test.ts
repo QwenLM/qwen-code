@@ -219,4 +219,121 @@ describe('SessionMessageHandler', () => {
       data: {},
     });
   });
+
+  it('treats /clear as a local fresh-session command instead of a chat prompt', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      createNewSession: vi.fn().mockResolvedValue('session-2'),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/clear',
+      },
+    });
+
+    expect(agentManager.createNewSession).toHaveBeenCalledWith('/workspace', {
+      forceNew: true,
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(conversationStore.createConversation).not.toHaveBeenCalled();
+    expect(handler.getCurrentConversationId()).toBeNull();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationCleared',
+      data: {},
+    });
+  });
+
+  it('treats /reset as a local fresh-session alias', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      createNewSession: vi.fn().mockResolvedValue('session-2'),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/reset',
+      },
+    });
+
+    expect(agentManager.createNewSession).toHaveBeenCalledWith('/workspace', {
+      forceNew: true,
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationCleared',
+      data: {},
+    });
+  });
+
+  it('does not treat bare clear text as a local command', async () => {
+    mockProcessImageAttachments.mockResolvedValue({
+      formattedText: 'clear',
+      displayText: 'clear',
+      savedImageCount: 0,
+      promptImages: [],
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      createNewSession: vi.fn(),
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: 'clear',
+      },
+    });
+
+    expect(agentManager.createNewSession).not.toHaveBeenCalled();
+    expect(agentManager.sendMessage).toHaveBeenCalledTimes(1);
+  });
 });

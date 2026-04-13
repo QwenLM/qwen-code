@@ -35,6 +35,7 @@ function renderHookHarness(overrides?: {
   setUsageStats?: ReturnType<typeof vi.fn>;
   endStreaming?: ReturnType<typeof vi.fn>;
   clearWaitingForResponse?: ReturnType<typeof vi.fn>;
+  resetComposerState?: ReturnType<typeof vi.fn>;
 }) {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -43,6 +44,7 @@ function renderHookHarness(overrides?: {
   const setUsageStats = overrides?.setUsageStats ?? vi.fn();
   const endStreaming = overrides?.endStreaming ?? vi.fn();
   const clearWaitingForResponse = overrides?.clearWaitingForResponse ?? vi.fn();
+  const resetComposerState = overrides?.resetComposerState ?? vi.fn();
 
   const handlers = {
     sessionManagement: {
@@ -83,6 +85,7 @@ function renderHookHarness(overrides?: {
     handleAskUserQuestion: vi.fn(),
     inputFieldRef: createRef<HTMLDivElement>(),
     setInputText: vi.fn(),
+    resetComposerState,
     setEditMode: vi.fn(),
     setIsAuthenticated: vi.fn(),
     setUsageStats,
@@ -107,6 +110,7 @@ function renderHookHarness(overrides?: {
     setUsageStats,
     endStreaming,
     clearWaitingForResponse,
+    resetComposerState,
   };
 }
 
@@ -157,6 +161,8 @@ describe('useWebViewMessages', () => {
     ).toHaveBeenCalledWith(null);
     expect(rendered.endStreaming).toHaveBeenCalled();
     expect(rendered.clearWaitingForResponse).toHaveBeenCalled();
+    expect(rendered.handlers.setInputText).toHaveBeenCalledWith('');
+    expect(rendered.resetComposerState).toHaveBeenCalled();
     expect(mockClearImageResolutions).toHaveBeenCalled();
     expect(rendered.setUsageStats).toHaveBeenCalledWith(undefined);
     expect(rendered.handlers.setPlanEntries).toHaveBeenCalledWith([]);
