@@ -53,7 +53,7 @@ jobs:
 
       - uses: npm-publisher
         inputs:
-          # token: ${{ secrets.NPM_TOKEN }}
+          token: ${{ secrets.NPM_TOKEN }}
           baseBranches: ['main']
           # beta 版本自动更新版本号
           autoVersion: true
