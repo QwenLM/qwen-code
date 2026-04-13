@@ -1514,6 +1514,16 @@ export default {
     'Você pode alternar o modo de permissão rapidamente com Shift+Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Experimente /insight para gerar insights personalizados do seu histórico de conversas.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Adicione um arquivo QWEN.md para dar ao Qwen Code um contexto persistente do projeto.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Use /btw para fazer uma pergunta lateral rápida sem interromper a conversa.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'O contexto está quase cheio! Execute /compress agora ou inicie /new para continuar.',
+  'Context is getting full. Use /compress to free up space.':
+    'O contexto está ficando cheio. Use /compress para liberar espaço.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Conversa longa? /compress resume o histórico para liberar contexto.',
 
   // ============================================================================
   // Exit Screen / Stats

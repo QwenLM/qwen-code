@@ -1474,6 +1474,16 @@ export default {
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '试试 /insight，从聊天记录中生成个性化洞察。',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    '添加 QWEN.md 文件，为 Qwen Code 提供持久的项目上下文。',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    '用 /btw 快速问一个小问题，不会打断当前对话。',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    '上下文即将用满！请立即执行 /compress 或使用 /new 开启新会话。',
+  'Context is getting full. Use /compress to free up space.':
+    '上下文空间不足，用 /compress 释放空间。',
+  'Long conversation? /compress summarizes history to free context.':
+    '对话太长？用 /compress 总结历史，释放上下文。',
 
   // ============================================================================
   // Exit Screen / Stats

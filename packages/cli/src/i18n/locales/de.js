@@ -1781,6 +1781,16 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Fügen Sie eine QWEN.md-Datei hinzu, um Qwen Code dauerhaften Projektkontext zu geben.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Verwenden Sie /btw, um eine kurze Nebenfrage zu stellen, ohne die Unterhaltung zu unterbrechen.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Der Kontext ist fast voll! Führen Sie jetzt /compress aus oder starten Sie /new, um fortzufahren.',
+  'Context is getting full. Use /compress to free up space.':
+    'Der Kontext füllt sich. Verwenden Sie /compress, um Platz freizugeben.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Lange Unterhaltung? /compress fasst den Verlauf zusammen, um Kontext freizugeben.',
 
   // ============================================================================
   // Custom API Key Configuration

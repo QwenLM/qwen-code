@@ -1708,6 +1708,16 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Добавьте файл QWEN.md, чтобы предоставить Qwen Code постоянный контекст проекта.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Используйте /btw, чтобы задать короткий побочный вопрос, не прерывая основной разговор.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Контекст почти заполнен! Выполните /compress сейчас или начните /new, чтобы продолжить.',
+  'Context is getting full. Use /compress to free up space.':
+    'Контекст заполняется. Используйте /compress, чтобы освободить место.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Долгий разговор? /compress подведёт итог истории, чтобы освободить контекст.',
 
   // ============================================================================
   // Custom API Key Configuration
