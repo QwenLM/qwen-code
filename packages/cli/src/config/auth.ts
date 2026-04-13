@@ -66,6 +66,26 @@ function hasApiKeyForAuth(
 
   // Try to find model-specific envKey from modelProviders
   const modelConfig = findModelConfig(modelProviders, authType, modelId);
+
+  // If a Config is available, prefer the API key already resolved into the
+  // generation config. The unified resolver folds CLI flags (e.g.
+  // --openai-api-key), env vars, settings.security.auth.apiKey, and
+  // modelProvider envKey lookups into this single value, so it is the same
+  // key that refreshAuth will actually use at runtime. Validating against it
+  // keeps pre-flight checks consistent with runtime behavior — without this,
+  // CLI-provided credentials are silently ignored when no env var is set
+  // (issue #3171).
+  const resolvedApiKey = config
+    ?.getModelsConfig()
+    .getGenerationConfig()?.apiKey;
+  if (resolvedApiKey) {
+    return {
+      hasKey: true,
+      checkedEnvKey: modelConfig?.envKey ?? DEFAULT_ENV_KEYS[authType],
+      isExplicitEnvKey: !!modelConfig?.envKey,
+    };
+  }
+
   if (modelConfig?.envKey) {
     // Explicit envKey configured - only check this env var, no apiKey fallback
     const hasKey = !!process.env[modelConfig.envKey];

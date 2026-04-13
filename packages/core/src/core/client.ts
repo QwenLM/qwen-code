@@ -16,6 +16,7 @@ import type {
 // Config
 import { ApprovalMode, type Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { microcompactHistory } from '../services/microcompaction/microcompact.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -115,6 +116,8 @@ export interface SendMessageOptions {
     iterationCount: number;
     reasons: string[];
   };
+  /** Model override from skill execution. When present, overrides the session model for this turn. */
+  modelOverride?: string;
 }
 
 const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
@@ -670,15 +673,16 @@ export class GeminiClient {
       // record user message for session management
       this.config.getChatRecordingService()?.recordUserMessage(request);
 
-      // Thinking block cross-turn retention with idle cleanup:
-      // - Active session (< threshold idle): keep thinking blocks for reasoning coherence
-      // - Idle > threshold: clear old thinking, keep only last 1 turn to free context
-      // - Latch: once triggered, never revert — prevents oscillation
+      // Idle cleanup: clear stale thinking blocks after idle period.
+      // Latch: once triggered, never revert — prevents oscillation.
+      const idleConfig = this.config.getClearContextOnIdle();
+      const thinkingThresholdMin = idleConfig.thinkingThresholdMinutes ?? 5;
       if (
+        thinkingThresholdMin >= 0 &&
         !this.thinkingClearLatched &&
         this.lastApiCompletionTimestamp !== null
       ) {
-        const thresholdMs = this.config.getThinkingIdleThresholdMs();
+        const thresholdMs = thinkingThresholdMin * 60 * 1000;
         const idleMs = Date.now() - this.lastApiCompletionTimestamp;
         if (idleMs > thresholdMs) {
           this.thinkingClearLatched = true;
@@ -690,6 +694,25 @@ export class GeminiClient {
       if (this.thinkingClearLatched) {
         this.getChat().stripThoughtsFromHistoryKeepRecent(1);
         debugLogger.debug('Stripped old thinking blocks (keeping last 1 turn)');
+      }
+
+      // Idle cleanup: clear old tool results when idle > threshold.
+      // Runs on user and cron messages (not tool result submissions or
+      // retries/hooks) so that model latency during a tool-call loop
+      // doesn't count as user idle time.
+      const mcResult = microcompactHistory(
+        this.getChat().getHistory(),
+        this.lastApiCompletionTimestamp,
+        this.config.getClearContextOnIdle(),
+      );
+      if (mcResult.meta) {
+        this.getChat().setHistory(mcResult.history);
+        const m = mcResult.meta;
+        debugLogger.debug(
+          `[TIME-BASED MC] gap ${m.gapMinutes}min > ${m.thresholdMinutes}min, ` +
+            `cleared ${m.toolsCleared} tool results (~${m.tokensSaved} tokens), ` +
+            `kept last ${m.toolsKept}`,
+        );
       }
     }
     if (messageType !== SendMessageType.Retry) {
@@ -778,6 +801,9 @@ export class GeminiClient {
 
     const turn = new Turn(this.getChat(), prompt_id);
 
+    // Determine the model to use for this turn
+    const model = options?.modelOverride ?? this.config.getModel();
+
     // append system reminders to the request
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
     if (
@@ -831,11 +857,7 @@ export class GeminiClient {
       requestToSent = [...systemReminders, ...requestToSent];
     }
 
-    const resultStream = turn.run(
-      this.config.getModel(),
-      requestToSent,
-      signal,
-    );
+    const resultStream = turn.run(model, requestToSent, signal);
     for await (const event of resultStream) {
       if (!this.config.getSkipLoopDetection()) {
         if (this.loopDetector.addAndCheck(event)) {
@@ -968,6 +990,7 @@ export class GeminiClient {
           prompt_id,
           {
             type: SendMessageType.Hook,
+            modelOverride: options?.modelOverride,
             stopHookState: {
               iterationCount: currentIterationCount,
               reasons: currentReasons,

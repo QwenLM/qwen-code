@@ -859,7 +859,7 @@ export function matchesDomainPattern(
  *   "mcp__puppeteer__*" wildcard syntax, also matches all tools from the server
  *   "mcp__puppeteer__puppeteer_navigate" matches only that exact tool
  */
-function matchesMcpPattern(pattern: string, toolName: string): boolean {
+export function matchesMcpPattern(pattern: string, toolName: string): boolean {
   if (pattern === toolName) {
     return true;
   }

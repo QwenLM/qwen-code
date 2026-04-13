@@ -260,7 +260,8 @@ function hasAnyProviderEntries(modelProviders: unknown): boolean {
   }
 
   return Object.values(modelProviders).some(
-    (providerModels) => Array.isArray(providerModels) && providerModels.length > 0,
+    (providerModels) =>
+      Array.isArray(providerModels) && providerModels.length > 0,
   );
 }
 
@@ -272,15 +273,15 @@ function getModelProvidersOverrideWarnings(
     return [];
   }
 
-  const userOriginal =
-    loadedSettings.user.originalSettings as unknown as Record<string, unknown>;
-  const workspaceOriginal =
-    loadedSettings.workspace.originalSettings as unknown as Record<
-      string,
-      unknown
-    >;
+  const userOriginal = loadedSettings.user
+    .originalSettings as unknown as Record<string, unknown>;
+  const workspaceOriginal = loadedSettings.workspace
+    .originalSettings as unknown as Record<string, unknown>;
 
-  if (!hasOwnModelProviders(userOriginal) || !hasOwnModelProviders(workspaceOriginal)) {
+  if (
+    !hasOwnModelProviders(userOriginal) ||
+    !hasOwnModelProviders(workspaceOriginal)
+  ) {
     return [];
   }
 
@@ -290,7 +291,10 @@ function getModelProvidersOverrideWarnings(
     isPlainObject(workspaceModelProviders) &&
     Object.keys(workspaceModelProviders).length === 0;
 
-  if (!workspaceIsEmptyModelProviders || !hasAnyProviderEntries(userModelProviders)) {
+  if (
+    !workspaceIsEmptyModelProviders ||
+    !hasAnyProviderEntries(userModelProviders)
+  ) {
     return [];
   }
 
