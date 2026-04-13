@@ -55,8 +55,8 @@ export class HookSystem {
   private messagesProvider?: MessagesProvider;
 
   constructor(config: Config) {
-    // Get allowed HTTP URLs from config if available
-    const allowedHttpUrls = this.getSecurityConfig(config)?.allowedHttpHookUrls;
+    // Get allowed HTTP URLs from config
+    const allowedHttpUrls = config.getAllowedHttpHookUrls();
 
     // Initialize components
     this.hookRegistry = new HookRegistry(config);
@@ -71,19 +71,6 @@ export class HookSystem {
       this.hookAggregator,
       this.sessionHooksManager,
     );
-  }
-
-  /**
-   * Get security configuration from config
-   */
-  private getSecurityConfig(
-    config: Config,
-  ): { allowedHttpHookUrls?: string[] } | undefined {
-    // Try to get security config - this depends on the actual Config interface
-    // For now, return undefined as the config structure may vary
-    return (
-      config as unknown as { security?: { allowedHttpHookUrls?: string[] } }
-    ).security;
   }
 
   /**

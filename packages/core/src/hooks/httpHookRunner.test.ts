@@ -8,17 +8,25 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { HookEventName, HookType } from './types.js';
 import type { HttpHookConfig, HookInput } from './types.js';
 import { HttpHookRunner } from './httpHookRunner.js';
-import { UrlValidator } from './urlValidator.js';
 
 // Mock fetch
 const mockFetch = vi.fn();
 vi.stubGlobal('fetch', mockFetch);
 
-// Mock validateWithDnsCheck to avoid real DNS lookups in tests
-UrlValidator.prototype.validateWithDnsCheck = async function (url: string) {
-  // Use sync validate to skip DNS resolution
-  return this.validate(url);
-};
+// Mock dns.lookup to avoid real DNS lookups in tests
+vi.mock('dns', () => ({
+  lookup: (
+    _hostname: string,
+    _options: object,
+    callback: (
+      err: null,
+      addresses: Array<{ address: string; family: number }>,
+    ) => void,
+  ) => {
+    // Return a mock public IP address
+    callback(null, [{ address: '8.8.8.8', family: 4 }]);
+  },
+}));
 
 describe('HttpHookRunner', () => {
   let httpRunner: HttpHookRunner;

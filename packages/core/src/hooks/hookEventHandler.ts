@@ -703,7 +703,9 @@ export class HookEventHandler {
   /**
    * Get hook type from execution result for telemetry
    */
-  private getHookTypeFromResult(result: HookExecutionResult): 'command' {
-    return result.hookConfig.type as 'command';
+  private getHookTypeFromResult(
+    result: HookExecutionResult,
+  ): 'command' | 'http' | 'function' {
+    return result.hookConfig.type;
   }
 }

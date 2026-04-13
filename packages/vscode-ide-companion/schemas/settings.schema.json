@@ -593,6 +593,14 @@
               "type": "string"
             }
           }
+        },
+        "allowedHttpHookUrls": {
+          "description": "Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).",
+          "type": "array",
+          "items": {
+            "description": "URL pattern (supports * wildcard)",
+            "type": "string"
+          }
         }
       }
     },

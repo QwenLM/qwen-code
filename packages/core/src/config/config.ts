@@ -439,6 +439,8 @@ export interface ConfigParameters {
   hooks?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
+  /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
+  allowedHttpHookUrls?: string[];
   /**
    * Callback for persisting a permission rule to settings.
    * Injected by the CLI layer; core uses this to write allow/ask/deny rules
@@ -597,6 +599,7 @@ export class Config {
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly warnings: string[];
+  private readonly allowedHttpHookUrls: string[];
   private readonly onPersistPermissionRuleCallback?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
@@ -714,6 +717,7 @@ export class Config {
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.warnings = params.warnings ?? [];
+    this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // Web search
@@ -1990,6 +1994,14 @@ export class Config {
    */
   getFolderTrust(): boolean {
     return this.folderTrust;
+  }
+
+  /**
+   * Returns the whitelist of allowed HTTP hook URL patterns.
+   * If empty, all URLs are allowed (subject to SSRF protection).
+   */
+  getAllowedHttpHookUrls(): string[] {
+    return this.allowedHttpHookUrls;
   }
 
   isTrustedFolder(): boolean {

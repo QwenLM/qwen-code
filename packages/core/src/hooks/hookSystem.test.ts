@@ -60,6 +60,7 @@ describe('HookSystem', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
+      getAllowedHttpHookUrls: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
     mockHookRegistry = {

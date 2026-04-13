@@ -1099,6 +1099,7 @@ export async function loadCliConfig(
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
+    allowedHttpHookUrls: settings.security?.allowedHttpHookUrls ?? [],
     cliVersion: await getCliVersion(),
     webSearch: buildWebSearchConfig(argv, settings, selectedAuthType),
     ideMode,

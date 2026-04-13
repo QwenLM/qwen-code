@@ -5,24 +5,10 @@
  */
 
 import { isIPv4, isIPv6 } from 'net';
-import * as dns from 'dns';
+import { isBlockedAddress } from './ssrfGuard.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('URL_VALIDATOR');
-
-/**
- * Private IP address ranges that should be blocked for SSRF protection
- * - 127.0.0.0/8 (loopback) is intentionally ALLOWED for local dev hooks
- * - 100.64.0.0/10 (CGNAT) blocked (some cloud metadata use this, e.g. Alibaba 100.100.100.200)
- */
-const PRIVATE_IP_RANGES = [
-  { start: '10.0.0.0', end: '10.255.255.255' },
-  { start: '100.64.0.0', end: '100.127.255.255' }, // CGNAT (RFC 6598)
-  { start: '172.16.0.0', end: '172.31.255.255' },
-  { start: '192.168.0.0', end: '192.168.255.255' },
-  { start: '169.254.0.0', end: '169.254.255.255' },
-  { start: '0.0.0.0', end: '0.255.255.255' },
-];
 
 /**
  * Hostnames that should be blocked for SSRF protection
@@ -38,7 +24,10 @@ const BLOCKED_HOSTS = [
 ];
 
 /**
- * URL validator for HTTP hooks with whitelist and SSRF protection
+ * URL validator for HTTP hooks with whitelist and SSRF protection.
+ *
+ * SSRF protection uses the authoritative ssrfGuard.ts module for IP blocking.
+ * This module focuses on URL whitelist validation and hostname blocklist.
  */
 export class UrlValidator {
   private readonly allowedPatterns: string[];
@@ -92,7 +81,8 @@ export class UrlValidator {
   }
 
   /**
-   * Check if a URL should be blocked for security reasons (SSRF protection)
+   * Check if a URL should be blocked for security reasons (SSRF protection).
+   * Uses ssrfGuard.ts for IP address blocking (authoritative implementation).
    * @param url - The URL to check
    * @returns True if the URL should be blocked
    */
@@ -101,21 +91,18 @@ export class UrlValidator {
       const parsed = new URL(url);
       const hostname = parsed.hostname.toLowerCase();
 
-      // Check blocked hostnames
+      // Check blocked hostnames (metadata endpoints, etc.)
       if (BLOCKED_HOSTS.includes(hostname)) {
         debugLogger.debug(`URL blocked: hostname ${hostname} is in blocklist`);
         return true;
       }
 
-      // Allow IPv6 loopback (::1) for local dev (matches Claude Code behavior)
-      if (hostname === '::1' || hostname === '[::1]') {
-        return false;
-      }
-
-      // Check if hostname is an IP address
+      // Check if hostname is an IP address - use ssrfGuard for authoritative check
       if (this.isIpAddress(hostname)) {
-        if (this.isPrivateIp(hostname)) {
-          debugLogger.debug(`URL blocked: IP ${hostname} is in private range`);
+        // Remove brackets from IPv6 addresses for isBlockedAddress
+        const cleanHostname = hostname.replace(/^\[|\]$/g, '');
+        if (isBlockedAddress(cleanHostname)) {
+          debugLogger.debug(`URL blocked: IP ${hostname} is blocked`);
           return true;
         }
       }
@@ -162,149 +149,6 @@ export class UrlValidator {
     // Remove brackets from IPv6 addresses (e.g., [::1] -> ::1)
     const cleanHostname = hostname.replace(/^\[|\]$/g, '');
     return isIPv4(cleanHostname) || isIPv6(cleanHostname);
-  }
-
-  /**
-   * Check if an IP address is in a private range
-   */
-  private isPrivateIp(ip: string): boolean {
-    const ipNum = this.ipToNumber(ip);
-    if (ipNum === null) {
-      return false;
-    }
-
-    for (const range of PRIVATE_IP_RANGES) {
-      const startNum = this.ipToNumber(range.start);
-      const endNum = this.ipToNumber(range.end);
-      if (startNum !== null && endNum !== null) {
-        if (ipNum >= startNum && ipNum <= endNum) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * Convert an IPv4 address to a number for range comparison
-   */
-  private ipToNumber(ip: string): number | null {
-    const parts = ip.split('.');
-    if (parts.length !== 4) {
-      return null;
-    }
-
-    let result = 0;
-    for (const part of parts) {
-      const num = parseInt(part, 10);
-      if (isNaN(num) || num < 0 || num > 255) {
-        return null;
-      }
-      result = result * 256 + num;
-    }
-
-    return result;
-  }
-
-  /**
-   * Validate that a hostname's resolved IP addresses are not private.
-   * This provides protection against DNS rebinding attacks where a domain
-   * initially resolves to a public IP but later resolves to a private IP.
-   *
-   * @param hostname - The hostname to validate
-   * @returns Promise that resolves to true if all resolved IPs are safe, false otherwise
-   */
-  async validateResolvedIp(hostname: string): Promise<boolean> {
-    // Skip validation for IP addresses (already checked in isBlocked)
-    if (this.isIpAddress(hostname)) {
-      return true;
-    }
-
-    try {
-      // Check IPv4 addresses
-      const ipv4Addresses = await dns.promises
-        .resolve4(hostname)
-        .catch(() => []);
-      for (const ip of ipv4Addresses) {
-        if (this.isPrivateIp(ip)) {
-          debugLogger.debug(
-            `DNS rebinding protection: ${hostname} resolves to private IPv4 ${ip}`,
-          );
-          return false;
-        }
-      }
-
-      // Check IPv6 addresses
-      const ipv6Addresses = await dns.promises
-        .resolve6(hostname)
-        .catch(() => []);
-      for (const ip of ipv6Addresses) {
-        // Check for IPv6 private addresses
-        const cleanIp = ip.replace(/^\[|\]$/g, '').toLowerCase();
-        if (
-          cleanIp === '::1' ||
-          cleanIp.startsWith('fe8') ||
-          cleanIp.startsWith('fe9') ||
-          cleanIp.startsWith('fea') ||
-          cleanIp.startsWith('feb') ||
-          cleanIp.startsWith('fc') ||
-          cleanIp.startsWith('fd')
-        ) {
-          debugLogger.debug(
-            `DNS rebinding protection: ${hostname} resolves to private IPv6 ${ip}`,
-          );
-          return false;
-        }
-      }
-
-      return true;
-    } catch {
-      // If DNS resolution fails, allow the request to proceed
-      // The actual HTTP request will fail if the hostname is invalid
-      debugLogger.debug(
-        `DNS resolution failed for ${hostname}, allowing request to proceed`,
-      );
-      return true;
-    }
-  }
-
-  /**
-   * Validate a URL for use in HTTP hooks with DNS rebinding protection.
-   * This is an async version of validate() that also checks resolved IPs.
-   *
-   * @param url - The URL to validate
-   * @returns Promise with validation result including allowed status and reason
-   */
-  async validateWithDnsCheck(
-    url: string,
-  ): Promise<{ allowed: boolean; reason?: string }> {
-    // First perform standard validation
-    const basicResult = this.validate(url);
-    if (!basicResult.allowed) {
-      return basicResult;
-    }
-
-    // Then check DNS resolution for rebinding attacks
-    try {
-      const parsed = new URL(url);
-      const hostname = parsed.hostname;
-
-      const dnsValid = await this.validateResolvedIp(hostname);
-      if (!dnsValid) {
-        return {
-          allowed: false,
-          reason: `DNS rebinding protection: ${hostname} resolves to a private IP address`,
-        };
-      }
-
-      return { allowed: true };
-    } catch {
-      return {
-        allowed: false,
-        reason: 'Invalid URL format',
-      };
-    }
   }
 }
 

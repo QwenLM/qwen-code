@@ -1343,6 +1343,20 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      allowedHttpHookUrls: {
+        type: 'array',
+        label: 'Allowed HTTP Hook URLs',
+        category: 'Security',
+        requiresRestart: false,
+        default: [] as string[],
+        description:
+          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).',
+        showInDialog: false,
+        items: {
+          type: 'string',
+          description: 'URL pattern (supports * wildcard)',
+        },
+      },
     },
   },
 
