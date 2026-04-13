@@ -501,7 +501,6 @@ OTHER AGENTS CANNOT:
           ...SHARED_TEST_OPTIONS,
           cwd: testWorkDir,
           agents: [testAgent],
-          debug: true,
           stderr: (msg: string) => {
             stderrMessages.push(msg);
           },

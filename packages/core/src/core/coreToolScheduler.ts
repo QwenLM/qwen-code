@@ -1157,7 +1157,36 @@ export class CoreToolScheduler {
       // Use custom cancel message from payload if provided, otherwise use default
       const cancelMessage =
         payload?.cancelMessage || 'User did not allow tool call';
-      this.setStatusInternal(callId, 'cancelled', cancelMessage);
+
+      // Determine if this is a permission denial from canUseTool
+      // Only cancelMessages with [PermissionDenied] prefix are treated as permission denials
+      // All other cases (infrastructure errors, regular UI cancellations) are treated as regular cancellations
+      const isPermissionDenial =
+        payload?.cancelMessage?.startsWith('[PermissionDenied] ') ?? false;
+
+      if (isPermissionDenial) {
+        // Permission denial from canUseTool - use error status
+        // Strip the prefix for the actual error message
+        const actualMessage = cancelMessage.slice('[PermissionDenied] '.length);
+        const errorType = payload?.interrupt
+          ? ToolErrorType.INTERRUPTED
+          : ToolErrorType.EXECUTION_DENIED;
+
+        const errorResponse = createErrorResponse(
+          toolCall.request,
+          new Error(actualMessage),
+          errorType,
+        );
+        this.setStatusInternal(callId, 'error', errorResponse);
+
+        // If interrupt is true, cancel all pending tools with the original denial context
+        if (payload?.interrupt) {
+          await this.cancelPendingTools(signal, callId, actualMessage);
+        }
+      } else {
+        // Regular UI cancellation - use cancelled status
+        this.setStatusInternal(callId, 'cancelled', cancelMessage);
+      }
     } else if (outcome === ToolConfirmationOutcome.ModifyWithEditor) {
       const waitingToolCall = toolCall as WaitingToolCall;
       if (isModifiableDeclarativeTool(waitingToolCall.tool)) {
@@ -1747,6 +1776,40 @@ export class CoreToolScheduler {
           error,
         );
       }
+    }
+  }
+
+  /**
+   * Cancel all pending tools (awaiting_approval or scheduled) when an interrupt is triggered.
+   * Cascade-cancelled tools are marked with INTERRUPTED error type.
+   * @param originalDenialMessage - The original denial reason to include in cascade-cancelled tool messages
+   */
+  private async cancelPendingTools(
+    signal: AbortSignal,
+    triggeringCallId: string,
+    originalDenialMessage?: string,
+  ): Promise<void> {
+    const pendingTools = this.toolCalls.filter(
+      (call) =>
+        (call.status === 'awaiting_approval' || call.status === 'scheduled') &&
+        call.request.callId !== triggeringCallId,
+    );
+
+    for (const pendingTool of pendingTools) {
+      // Cascade-cancelled tools use INTERRUPTED type with context about why
+      const cascadeMessage = originalDenialMessage
+        ? `Interrupted: ${originalDenialMessage}`
+        : "The user doesn't want to take this action right now.";
+      const errorResponse = createErrorResponse(
+        pendingTool.request,
+        new Error(cascadeMessage),
+        ToolErrorType.INTERRUPTED,
+      );
+      this.setStatusInternal(
+        pendingTool.request.callId,
+        'error',
+        errorResponse,
+      );
     }
   }
 }

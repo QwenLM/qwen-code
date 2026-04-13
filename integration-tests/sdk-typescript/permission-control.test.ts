@@ -338,7 +338,6 @@ describe('Permission Control (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           permissionMode: 'default',
-          debug: true,
         },
       });
 
