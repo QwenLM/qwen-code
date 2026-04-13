@@ -111,8 +111,19 @@ vi.mock('open', () => ({
 
 vi.mock('read-package-up', () => ({
   readPackageUp: vi.fn(() =>
-    Promise.resolve({ packageJson: { version: 'test-version' } }),
+    Promise.resolve({
+      packageJson: {
+        version: 'test-version',
+        config: { sandboxImageUri: 'pkg-default-image' },
+      },
+    }),
   ),
+}));
+
+vi.mock('command-exists', () => ({
+  default: {
+    sync: vi.fn(() => true),
+  },
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -2438,6 +2449,83 @@ describe('Telemetry configuration via environment variables', () => {
       [],
     );
     expect(config.getTelemetryLogPromptsEnabled()).toBe(false);
+  });
+});
+
+describe('sandbox image resolution precedence', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    delete process.env['QWEN_SANDBOX_IMAGE'];
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    delete process.env['QWEN_SANDBOX_IMAGE'];
+  });
+
+  it('uses --sandbox-image over env and settings', async () => {
+    vi.stubEnv('QWEN_SANDBOX_IMAGE', 'env-image');
+    process.argv = [
+      'node',
+      'script.js',
+      '--sandbox',
+      '--sandbox-image',
+      'cli-image',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        sandbox: true,
+        sandboxImage: 'settings-image',
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getSandbox()?.image).toBe('cli-image');
+  });
+
+  it('uses QWEN_SANDBOX_IMAGE over tools.sandboxImage', async () => {
+    vi.stubEnv('QWEN_SANDBOX_IMAGE', 'env-image');
+    process.argv = ['node', 'script.js', '--sandbox'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        sandbox: true,
+        sandboxImage: 'settings-image',
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getSandbox()?.image).toBe('env-image');
+  });
+
+  it('uses tools.sandboxImage when cli and env are absent', async () => {
+    process.argv = ['node', 'script.js', '--sandbox'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        sandbox: true,
+        sandboxImage: 'settings-image',
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getSandbox()?.image).toBe('settings-image');
+  });
+
+  it('falls back to package default image when no explicit source is provided', async () => {
+    process.argv = ['node', 'script.js', '--sandbox'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        sandbox: true,
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getSandbox()?.image).toBe('pkg-default-image');
   });
 });
 

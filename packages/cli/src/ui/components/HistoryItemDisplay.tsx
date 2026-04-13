@@ -48,6 +48,7 @@ import { ContextUsage } from './views/ContextUsage.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
+import { useCompactMode } from '../contexts/CompactModeContext.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -79,6 +80,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       ? 0
       : 1;
 
+  const { compactMode } = useCompactMode();
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
@@ -118,7 +120,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {itemForDisplay.type === 'gemini_thought' && (
+      {!compactMode && itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
           text={itemForDisplay.text}
           isPending={isPending}
@@ -128,7 +130,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {itemForDisplay.type === 'gemini_thought_content' && (
+      {!compactMode && itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
           text={itemForDisplay.text}
           isPending={isPending}
@@ -183,6 +185,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isFocused={isFocused}
           activeShellPtyId={activeShellPtyId}
           embeddedShellFocused={embeddedShellFocused}
+          isUserInitiated={itemForDisplay.isUserInitiated}
         />
       )}
       {itemForDisplay.type === 'compression' && (
@@ -235,7 +238,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <InsightProgressMessage progress={itemForDisplay.progress} />
       )}
       {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
-        <BtwMessage btw={itemForDisplay.btw} />
+        <BtwMessage btw={itemForDisplay.btw} containerWidth={contentWidth} />
       )}
       {itemForDisplay.type === 'user_prompt_submit_blocked' && (
         <Box flexDirection="column">

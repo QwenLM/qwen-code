@@ -135,26 +135,31 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
         properties: {
           type: {
             type: 'string',
-            description: 'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
+            description:
+              'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
             enum: ['command', 'http'],
             required: true,
           },
           command: {
             type: 'string',
-            description: 'The command to execute when the hook is triggered. Required for "command" type.',
+            description:
+              'The command to execute when the hook is triggered. Required for "command" type.',
           },
           url: {
             type: 'string',
-            description: 'The URL to send the POST request to. Required for "http" type.',
+            description:
+              'The URL to send the POST request to. Required for "http" type.',
           },
           headers: {
             type: 'object',
-            description: 'HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).',
+            description:
+              'HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).',
             additionalProperties: { type: 'string' },
           },
           allowedEnvVars: {
             type: 'array',
-            description: 'List of environment variables allowed for interpolation in headers and URL.',
+            description:
+              'List of environment variables allowed for interpolation in headers and URL.',
             items: { type: 'string' },
           },
           name: {
@@ -177,11 +182,13 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
           },
           async: {
             type: 'boolean',
-            description: 'Whether to execute the hook asynchronously (non-blocking, for "command" type only).',
+            description:
+              'Whether to execute the hook asynchronously (non-blocking, for "command" type only).',
           },
           once: {
             type: 'boolean',
-            description: 'Whether to execute the hook only once per session (for "http" type).',
+            description:
+              'Whether to execute the hook only once per session (for "http" type).',
           },
           statusMessage: {
             type: 'string',
@@ -459,6 +466,15 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      statusLine: {
+        type: 'object',
+        label: 'Status Line',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as { type: 'command'; command: string } | undefined,
+        description: 'Custom status line display configuration.',
+        showInDialog: false,
+      },
       customThemes: {
         type: 'object',
         label: 'Custom Themes',
@@ -543,6 +559,36 @@ const SETTINGS_SCHEMA = {
           'Show optional feedback dialog after conversations to help improve Qwen performance.',
         showInDialog: true,
       },
+      enableFollowupSuggestions: {
+        type: 'boolean',
+        label: 'Enable Follow-up Suggestions',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
+        showInDialog: true,
+      },
+      enableCacheSharing: {
+        type: 'boolean',
+        label: 'Enable Cache Sharing for Suggestions',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).',
+        showInDialog: false,
+      },
+      enableSpeculation: {
+        type: 'boolean',
+        label: 'Enable Speculative Execution',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).',
+        showInDialog: false,
+      },
       accessibility: {
         type: 'object',
         label: 'Accessibility',
@@ -581,6 +627,16 @@ const SETTINGS_SCHEMA = {
         default: 0,
         description: 'The last time the feedback dialog was shown.',
         showInDialog: false,
+      },
+      compactMode: {
+        type: 'boolean',
+        label: 'Compact Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+        showInDialog: true,
       },
     },
   },
@@ -644,6 +700,17 @@ const SETTINGS_SCHEMA = {
     default: undefined as TelemetrySettings | undefined,
     description: 'Telemetry configuration.',
     showInDialog: false,
+  },
+
+  fastModel: {
+    type: 'string',
+    label: 'Fast Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.',
+    showInDialog: true,
   },
 
   model: {
@@ -903,6 +970,16 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      gapThresholdMinutes: {
+        type: 'number',
+        label: 'Thinking Block Idle Threshold (minutes)',
+        category: 'Context',
+        requiresRestart: false,
+        default: 5,
+        description:
+          'Minutes of inactivity after which retained thinking blocks are cleared to free context tokens. Aligns with provider prompt-cache TTL.',
+        showInDialog: false,
+      },
     },
   },
 
@@ -972,6 +1049,16 @@ const SETTINGS_SCHEMA = {
         default: undefined as boolean | string | undefined,
         description:
           'Sandbox execution environment (can be a boolean or a path string).',
+        showInDialog: false,
+      },
+      sandboxImage: {
+        type: 'string',
+        label: 'Sandbox Image',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.',
         showInDialog: false,
       },
       shell: {

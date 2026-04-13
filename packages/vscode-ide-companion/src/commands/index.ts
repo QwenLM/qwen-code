@@ -90,10 +90,14 @@ export function registerNewCommands(
 
   // Open New Chat Tab: always create a new editor tab
   disposables.push(
-    vscode.commands.registerCommand(openNewChatTabCommand, async () => {
-      const provider = createWebViewProvider();
-      await provider.show();
-    }),
+    vscode.commands.registerCommand(
+      openNewChatTabCommand,
+      async (args?: { initialModelId?: string }) => {
+        const provider = createWebViewProvider();
+        provider.setInitialModelId(args?.initialModelId);
+        await provider.show();
+      },
+    ),
   );
 
   disposables.push(

@@ -6,7 +6,6 @@
 
 import type { FunctionDeclaration, Part, PartListUnion } from '@google/genai';
 import { ToolErrorType } from './tool-error.js';
-import type { DiffUpdateResult } from '../ide/ide-client.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import { SchemaValidator } from '../utils/schemaValidator.js';
 import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
@@ -592,7 +591,6 @@ export interface ToolEditConfirmationDetails {
   originalContent: string | null;
   newContent: string;
   isModifying?: boolean;
-  ideConfirmation?: Promise<DiffUpdateResult>;
 }
 
 export interface ToolConfirmationPayload {
@@ -669,6 +667,8 @@ export interface ToolPlanConfirmationDetails {
   /** @see ToolEditConfirmationDetails.hideAlwaysAllow */
   hideAlwaysAllow?: boolean;
   plan: string;
+  /** The approval mode that was active before entering plan mode (for display in the UI). */
+  prePlanMode?: string;
   onConfirm: (
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,
@@ -713,6 +713,8 @@ export enum ToolConfirmationOutcome {
   /** Persist the permission rule to the user settings (user scope). */
   ProceedAlwaysUser = 'proceed_always_user',
   ModifyWithEditor = 'modify_with_editor',
+  /** Restore the approval mode that was active before entering plan mode. */
+  RestorePrevious = 'restore_previous',
   Cancel = 'cancel',
 }
 
@@ -735,6 +737,17 @@ export const MUTATOR_KINDS: Kind[] = [
   Kind.Move,
   Kind.Execute,
 ] as const;
+
+/**
+ * Tool kinds that are safe to execute concurrently (pure reads, no writes).
+ * Kind.Think is excluded because some Think tools write to disk
+ * (e.g., save_memory, todo_write).
+ */
+export const CONCURRENCY_SAFE_KINDS: ReadonlySet<Kind> = new Set([
+  Kind.Read,
+  Kind.Search,
+  Kind.Fetch,
+]);
 
 export interface ToolLocation {
   // Absolute path to the file

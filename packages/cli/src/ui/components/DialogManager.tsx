@@ -202,6 +202,14 @@ export const DialogManager = ({
       </Box>
     );
   }
+  if (uiState.isModelDialogOpen) {
+    return (
+      <ModelDialog
+        onClose={uiActions.closeModelDialog}
+        isFastModelMode={uiState.isFastModelMode}
+      />
+    );
+  }
   if (uiState.isSettingsDialogOpen) {
     return (
       <Box flexDirection="column">
@@ -214,6 +222,10 @@ export const DialogManager = ({
             }
             if (settingName === 'general.preferredEditor') {
               uiActions.openEditorDialog();
+              return;
+            }
+            if (settingName === 'fastModel') {
+              uiActions.openModelDialog({ fastModelMode: true });
               return;
             }
             uiActions.closeSettingsDialog();
@@ -239,9 +251,6 @@ export const DialogManager = ({
         />
       </Box>
     );
-  }
-  if (uiState.isModelDialogOpen) {
-    return <ModelDialog onClose={uiActions.closeModelDialog} />;
   }
   if (uiState.activeArenaDialog === 'start') {
     return (

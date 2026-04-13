@@ -82,6 +82,7 @@ interface AgentConnectOptions {
 }
 interface AgentSessionOptions {
   autoAuthenticate?: boolean;
+  forceNew?: boolean;
 }
 
 export class QwenAgentManager {
@@ -294,6 +295,16 @@ export class QwenAgentManager {
         console.warn('[QwenAgentManager] onInitialized parse error:', err);
       }
     };
+
+    this.connection.onDisconnected = (
+      code: number | null,
+      signal: string | null,
+    ) => {
+      console.log(
+        `[QwenAgentManager] Process disconnected (code: ${code}, signal: ${signal})`,
+      );
+      this.callbacks.onDisconnected?.(code, signal);
+    };
   }
 
   /**
@@ -345,6 +356,23 @@ export class QwenAgentManager {
       });
     }
     return res;
+  }
+
+  /**
+   * Reconnect after unexpected disconnect.
+   * Re-spawns the ACP process and creates a new session.
+   */
+  async reconnect(
+    cliEntryPath: string,
+    options?: AgentConnectOptions,
+  ): Promise<QwenConnectionResult> {
+    console.log('[QwenAgentManager] Attempting reconnection...');
+    try {
+      this.connection.disconnect();
+    } catch (_e) {
+      // Already disconnected
+    }
+    return this.connect(this.currentWorkingDir, cliEntryPath, options);
   }
 
   /**
@@ -1163,8 +1191,10 @@ export class QwenAgentManager {
     options?: AgentSessionOptions,
   ): Promise<string | null> {
     const autoAuthenticate = options?.autoAuthenticate ?? true;
-    // Reuse existing session if present
-    if (this.connection.currentSessionId) {
+    const forceNew = options?.forceNew ?? false;
+    // Reuse the current session for implicit session bootstrap paths.
+    // Explicit "new session" actions must bypass this and call session/new.
+    if (!forceNew && this.connection.currentSessionId) {
       console.log(
         '[QwenAgentManager] createNewSession: reusing existing session',
         this.connection.currentSessionId,
@@ -1176,7 +1206,10 @@ export class QwenAgentManager {
       console.log(
         '[QwenAgentManager] createNewSession: session creation already in flight',
       );
-      return this.sessionCreateInFlight;
+      if (!forceNew) {
+        return this.sessionCreateInFlight;
+      }
+      await this.sessionCreateInFlight;
     }
 
     console.log('[QwenAgentManager] Creating new session...');
@@ -1409,6 +1442,15 @@ export class QwenAgentManager {
   onAvailableModels(callback: (models: ModelInfo[]) => void): void {
     this.callbacks.onAvailableModels = callback;
     this.sessionUpdateHandler.updateCallbacks(this.callbacks);
+  }
+
+  /**
+   * Register callback for unexpected process disconnection
+   */
+  onDisconnected(
+    callback: (code: number | null, signal: string | null) => void,
+  ): void {
+    this.callbacks.onDisconnected = callback;
   }
 
   /**

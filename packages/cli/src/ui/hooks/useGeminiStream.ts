@@ -9,6 +9,7 @@ import type {
   Config,
   EditorType,
   GeminiClient,
+  RetryInfo,
   ServerGeminiChatCompressedEvent,
   ServerGeminiContentEvent as ContentEvent,
   ServerGeminiFinishedEvent,
@@ -16,6 +17,7 @@ import type {
   ThoughtSummary,
   ToolCallRequestInfo,
   GeminiErrorEventValue,
+  StopFailureErrorType,
 } from '@qwen-code/qwen-code-core';
 import {
   GeminiEventType as ServerGeminiEventType,
@@ -76,6 +78,43 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+/**
+ * Classify API error to StopFailureErrorType
+ * @internal Exported for testing purposes
+ */
+export function classifyApiError(error: {
+  message: string;
+  status?: number;
+}): StopFailureErrorType {
+  const status = error.status;
+  const message = error.message?.toLowerCase() ?? '';
+
+  if (status === 429 || message.includes('rate limit')) {
+    return 'rate_limit';
+  }
+  if (status === 401 || message.includes('unauthorized')) {
+    return 'authentication_failed';
+  }
+  if (
+    status === 402 ||
+    status === 403 ||
+    message.includes('billing') ||
+    message.includes('quota')
+  ) {
+    return 'billing_error';
+  }
+  if (status === 400 || message.includes('invalid')) {
+    return 'invalid_request';
+  }
+  if (status !== undefined && status >= 500) {
+    return 'server_error';
+  }
+  if (message.includes('max_tokens') || message.includes('token limit')) {
+    return 'max_output_tokens';
+  }
+  return 'unknown';
+}
 
 /**
  * Checks if image parts have supported formats and returns unsupported ones
@@ -172,6 +211,7 @@ export const useGeminiStream = (
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
+  midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -272,6 +312,7 @@ export const useGeminiStream = (
    */
   const clearRetryCountdown = useCallback(() => {
     stopRetryCountdownTimer();
+    skipRetryDelayRef.current = null;
     setPendingRetryErrorItem(null);
     setPendingRetryCountdownItem(null);
   }, [
@@ -280,14 +321,14 @@ export const useGeminiStream = (
     stopRetryCountdownTimer,
   ]);
 
+  // Holds the skipDelay callback from the current rate-limit RetryInfo.
+  // Managed symmetrically: set in startRetryCountdown, cleared in clearRetryCountdown.
+  const skipRetryDelayRef = useRef<(() => void) | null>(null);
+
   const startRetryCountdown = useCallback(
-    (retryInfo: {
-      message?: string;
-      attempt: number;
-      maxRetries: number;
-      delayMs: number;
-    }) => {
+    (retryInfo: RetryInfo) => {
       stopRetryCountdownTimer();
+      skipRetryDelayRef.current = retryInfo.skipDelay;
       const startTime = Date.now();
       const { message, attempt, maxRetries, delayMs } = retryInfo;
       const retryReasonText =
@@ -792,6 +833,12 @@ export const useGeminiStream = (
       // (auto-retry countdown is shown when retryCountdownTimerRef is active)
       const isShowingAutoRetry = retryCountdownTimerRef.current !== null;
       clearRetryCountdown();
+
+      const formattedErrorText = parseAndFormatApiError(
+        eventValue.error,
+        config.getContentGeneratorConfig()?.authType,
+      );
+
       if (!isShowingAutoRetry) {
         const retryHint = t('Press Ctrl+Y to retry');
         // Store error with hint as a pending item (not in history).
@@ -799,14 +846,24 @@ export const useGeminiStream = (
         // since pending items are in the dynamic rendering area (not <Static>).
         setPendingRetryErrorItem({
           type: 'error' as const,
-          text: parseAndFormatApiError(
-            eventValue.error,
-            config.getContentGeneratorConfig()?.authType,
-          ),
+          text: formattedErrorText,
           hint: retryHint,
         });
       }
       setThought(null); // Reset thought when there's an error
+
+      // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+      const errorType = classifyApiError(eventValue.error);
+      config
+        .getHookSystem()
+        ?.fireStopFailureEvent(
+          errorType,
+          eventValue.error.message,
+          formattedErrorText,
+        )
+        .catch((err) => {
+          debugLogger.warn(`StopFailure hook failed: ${err}`);
+        });
     },
     [
       addItem,
@@ -1101,6 +1158,11 @@ export const useGeminiStream = (
             break;
           case ServerGeminiEventType.HookSystemMessage:
             // Display system message from Stop hooks with "Stop says:" prefix
+            // First commit any pending AI response to ensure correct ordering
+            if (pendingHistoryItemRef.current) {
+              addItem(pendingHistoryItemRef.current, userMessageTimestamp);
+              setPendingHistoryItem(null);
+            }
             addItem(
               {
                 type: 'stop_hook_system_message',
@@ -1386,6 +1448,15 @@ export const useGeminiStream = (
    * when the user presses Ctrl+Y (bound to Command.RETRY_LAST in keyBindings.ts).
    */
   const retryLastPrompt = useCallback(async () => {
+    // During a rate-limit retry countdown, skip the delay so the generator
+    // retries immediately — no abort/re-submit needed.
+    if (skipRetryDelayRef.current) {
+      skipRetryDelayRef.current();
+      skipRetryDelayRef.current = null;
+      clearRetryCountdown();
+      return;
+    }
+
     if (
       streamingState === StreamingState.Responding ||
       streamingState === StreamingState.WaitingForConfirmation
@@ -1556,6 +1627,23 @@ export const useGeminiStream = (
         return;
       }
 
+      // Mid-turn queue drain: inject queued user messages alongside tool
+      // results so the model sees them in the next API call.
+      // Skip if the turn was cancelled — messages stay in queue for next turn.
+      const drained =
+        turnCancelledRef.current || abortControllerRef.current?.signal.aborted
+          ? []
+          : (midTurnDrainRef?.current?.() ?? []);
+      if (drained.length > 0) {
+        for (const msg of drained) {
+          responsesToSend.push({
+            text: `\n[User message received during tool execution]: ${msg}`,
+          });
+          // Record in UI history so the transcript stays complete.
+          addItem({ type: MessageType.USER, text: msg }, Date.now());
+        }
+      }
+
       submitQuery(responsesToSend, SendMessageType.ToolResult, prompt_ids[0]);
     },
     [
@@ -1566,6 +1654,8 @@ export const useGeminiStream = (
       performMemoryRefresh,
       modelSwitchedFromQuotaError,
       config,
+      midTurnDrainRef,
+      addItem,
     ],
   );
 

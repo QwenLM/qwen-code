@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Bot } from 'grammy';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import {
   telegramFormat,
   splitHtmlForTelegram,
@@ -27,7 +28,14 @@ export class TelegramChannel extends ChannelBase {
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
-    this.bot = new Bot(config.token);
+    const botConfig = this.proxy
+      ? {
+          client: {
+            baseFetchConfig: { agent: new HttpsProxyAgent(this.proxy) },
+          },
+        }
+      : undefined;
+    this.bot = new Bot(config.token, botConfig);
   }
 
   private getFileUrl(filePath: string): string {
@@ -147,6 +155,59 @@ export class TelegramChannel extends ChannelBase {
       });
     });
 
+    // Voice messages
+    this.bot.on('message:voice', async (ctx) => {
+      const msg = ctx.message;
+      const voice = msg.voice;
+      const fileName = `voice_${Date.now()}.ogg`;
+
+      const envelope = this.buildEnvelope(
+        msg,
+        msg.caption || '(voice message)',
+        msg.caption_entities,
+      );
+
+      try {
+        const file = await ctx.api.getFile(voice.file_id);
+        const fileUrl = this.getFileUrl(file.file_path!);
+        const resp = await fetch(fileUrl);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const buf = Buffer.from(await resp.arrayBuffer());
+
+        // Save to temp dir so the agent can read it via read-file tool
+        const dir = join(tmpdir(), 'channel-files', randomUUID());
+        mkdirSync(dir, { recursive: true });
+        const filePath = join(dir, fileName);
+        writeFileSync(filePath, buf);
+
+        envelope.text = msg.caption || '';
+        envelope.attachments = [
+          {
+            type: 'audio',
+            filePath,
+            mimeType: voice.mime_type || 'audio/ogg',
+            fileName,
+          },
+        ];
+      } catch (err) {
+        process.stderr.write(
+          `[Telegram:${this.name}] Failed to download voice message: ${err instanceof Error ? err.message : err}\n`,
+        );
+        envelope.text =
+          (msg.caption || '') +
+          `\n\n(User sent a voice message but download failed)`;
+      }
+
+      this.handleInbound(envelope).catch((err) => {
+        process.stderr.write(
+          `[Telegram:${this.name}] Error handling message: ${err}\n`,
+        );
+        ctx
+          .reply('Sorry, something went wrong processing your message.')
+          .catch(() => {});
+      });
+    });
+
     this.bot.start({ drop_pending_updates: true }).catch((err) => {
       process.stderr.write(
         `[Telegram:${this.name}] Bot launch error: ${err}\n`,
@@ -188,9 +249,8 @@ export class TelegramChannel extends ChannelBase {
           parse_mode: 'HTML',
         });
       } catch {
-        // Fallback to plain text if HTML parsing fails
-        await this.bot.api.sendMessage(chatId, text);
-        return;
+        // Fallback to plain text for the failed chunk only
+        await this.bot.api.sendMessage(chatId, chunk.replace(/<[^>]*>/g, ''));
       }
     }
   }

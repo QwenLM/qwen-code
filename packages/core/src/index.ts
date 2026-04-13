@@ -172,6 +172,8 @@ export {
   logExtensionEnable,
   logIdeConnection,
   logModelSlashCommand,
+  logPromptSuggestion,
+  logSpeculation,
 } from './telemetry/loggers.js';
 export {
   AuthEvent,
@@ -182,6 +184,8 @@ export {
   IdeConnectionEvent,
   IdeConnectionType,
   ModelSlashCommandEvent,
+  PromptSuggestionEvent,
+  SpeculationEvent,
 } from './telemetry/types.js';
 
 // ============================================================================
@@ -193,6 +197,12 @@ export * from './prompts/mcp-prompts.js';
 export * from './skills/index.js';
 export * from './subagents/index.js';
 export * from './agents/index.js';
+
+// ============================================================================
+// Follow-up Suggestions
+// ============================================================================
+
+export * from './followup/index.js';
 
 // ============================================================================
 // Utilities
@@ -223,6 +233,7 @@ export * from './utils/projectSummary.js';
 export * from './utils/promptIdContext.js';
 export * from './utils/proxyUtils.js';
 export * from './utils/quotaErrorDetection.js';
+export * from './utils/rateLimit.js';
 export * from './utils/readManyFiles.js';
 export * from './utils/request-tokenizer/supportedImageFormats.js';
 export { TextTokenizer } from './utils/request-tokenizer/textTokenizer.js';

@@ -33,7 +33,7 @@ import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import {
   tokenLimit,
-  DEFAULT_OUTPUT_TOKEN_LIMIT,
+  CAPPED_DEFAULT_MAX_TOKENS,
   hasExplicitOutputLimit,
 } from '../tokenLimits.js';
 
@@ -234,12 +234,23 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const modelLimit = tokenLimit(modelId, 'output');
     const isKnownModel = hasExplicitOutputLimit(modelId);
 
-    const maxTokens =
-      userMaxTokens !== undefined && userMaxTokens !== null
-        ? isKnownModel
-          ? Math.min(userMaxTokens, modelLimit)
-          : userMaxTokens
-        : Math.min(modelLimit, DEFAULT_OUTPUT_TOKEN_LIMIT);
+    let maxTokens: number;
+    if (userMaxTokens !== undefined && userMaxTokens !== null) {
+      maxTokens = isKnownModel
+        ? Math.min(userMaxTokens, modelLimit)
+        : userMaxTokens;
+    } else {
+      // No explicit user config — check env var, then use capped default.
+      const envVal = process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+      const envMaxTokens = envVal ? parseInt(envVal, 10) : NaN;
+      if (!isNaN(envMaxTokens) && envMaxTokens > 0) {
+        maxTokens = isKnownModel
+          ? Math.min(envMaxTokens, modelLimit)
+          : envMaxTokens;
+      } else {
+        maxTokens = Math.min(modelLimit, CAPPED_DEFAULT_MAX_TOKENS);
+      }
+    }
 
     return {
       max_tokens: maxTokens,

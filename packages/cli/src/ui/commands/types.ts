@@ -157,6 +157,7 @@ export interface OpenDialogActionReturn {
     | 'editor'
     | 'settings'
     | 'model'
+    | 'fast-model'
     | 'subagent_create'
     | 'subagent_list'
     | 'trust'
@@ -241,6 +242,8 @@ export interface SlashCommand {
   altNames?: string[];
   description: string;
   hidden?: boolean;
+  /** Higher values win when slash completion candidates have comparable match quality. */
+  completionPriority?: number;
 
   kind: CommandKind;
 

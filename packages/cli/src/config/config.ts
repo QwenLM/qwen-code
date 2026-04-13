@@ -514,7 +514,7 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .deprecateOption(
           'sandbox-image',
-          'Use the "tools.sandbox" setting in settings.json instead. This flag will be removed in a future version.',
+          'Use the "tools.sandboxImage" setting in settings.json instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
           'checkpointing',
@@ -1069,6 +1069,7 @@ export async function loadCliConfig(
     telemetry: telemetrySettings,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     fileFiltering: settings.context?.fileFiltering,
+    thinkingIdleThresholdMinutes: settings.context?.gapThresholdMinutes,
     checkpointing:
       argv.checkpointing || settings.general?.checkpointing?.enabled,
     proxy:

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-telegram",
-  "version": "0.14.0",
+  "version": "0.14.3",
   "description": "Telegram channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
@@ -20,6 +20,7 @@
   "dependencies": {
     "@qwen-code/channel-base": "file:../base",
     "grammy": "^1.41.1",
+    "https-proxy-agent": "^7.0.6",
     "telegram-markdown-formatter": "^0.1.2"
   },
   "devDependencies": {
