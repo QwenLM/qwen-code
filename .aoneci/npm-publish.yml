@@ -10,9 +10,9 @@ triggers:
 
 params:
   skip_tests:
-    description: '是否跳过测试步骤（默认不跳过）'
-    type: boolean
-    default: false
+    description: '是否跳过测试步骤（1=跳过，0=不跳过，默认不跳过）'
+    type: string
+    default: '0'
 
 jobs:
   npm-build-publish:
@@ -34,8 +34,14 @@ jobs:
         run: 'npm ci'
 
       - name: 'Run tests'
-        if: ${{ params.skip_tests != 'true' }}
-        run: 'NO_COLOR=true npm run test:ci'
+        run: |
+          if [ "$SKIP_TESTS" = "1" ]; then
+            echo "⏭️ Skipping tests (skip_tests=1)"
+          else
+            NO_COLOR=true npm run test:ci
+          fi
+        env:
+          SKIP_TESTS: ${{ params.skip_tests }}
 
       - name: 'Build project'
         run: 'npm run build'
