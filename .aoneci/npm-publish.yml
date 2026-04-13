@@ -8,7 +8,7 @@ triggers:
   push:
     branches: ['main', 'dev']
 
-parameters:
+params:
   - name: skip_tests
     description: '是否跳过测试步骤（默认不跳过）'
     type: boolean
