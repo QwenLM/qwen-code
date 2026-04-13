@@ -230,6 +230,76 @@ describe('KeypressContext - Kitty Protocol', () => {
       );
     });
 
+    it('Ctrl+C escapes a paste mode that never received its paste-end marker', async () => {
+      // Regression test for the "must restart terminal" lockup reported by
+      // a user on Ghostty + Sogou pinyin: bracketed-paste-start arrived,
+      // isPaste was set true, and paste-end never followed. Every
+      // subsequent keystroke — including Ctrl+C — was silently buffered.
+      // This test checks that Ctrl+C is always dispatched regardless of
+      // paste mode state.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Send ONLY the paste-start marker (no paste-end) — this puts the
+      // dispatcher into the broken state.
+      act(() => {
+        stdin.emit('data', Buffer.from('\x1b[200~'));
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Ctrl+C should fire now, not get buffered into the stuck paste.
+      act(() => {
+        stdin.emit('data', Buffer.from('\x03'));
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const ctrlCSeen = keyHandler.mock.calls.some(
+        (c) => c[0]?.ctrl === true && c[0]?.name === 'c',
+      );
+      expect(ctrlCSeen).toBe(true);
+    });
+
+    it('auto-recovers from a stuck paste mode via idle timeout', async () => {
+      // Secondary fix: if paste-end never arrives, an idle timeout should
+      // flush whatever is in the paste buffer and reset paste state so
+      // normal typing resumes automatically (without requiring the user
+      // to hit Ctrl+C or restart the terminal).
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.emit('data', Buffer.from('\x1b[200~hello'));
+      });
+
+      // Wait long enough for the paste idle timeout to trigger recovery.
+      await new Promise((r) => setTimeout(r, 1500));
+
+      // A plain ASCII key after recovery must reach the handler.
+      act(() => {
+        stdin.emit('data', Buffer.from('z'));
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const zSeen = keyHandler.mock.calls.some(
+        (c) => c[0]?.sequence === 'z' && c[0]?.paste !== true,
+      );
+      expect(zSeen).toBe(true);
+    });
+
     it('should not process kitty sequences when kitty protocol is disabled', async () => {
       const keyHandler = vi.fn();
 
