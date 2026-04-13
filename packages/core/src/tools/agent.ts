@@ -21,6 +21,7 @@ import type { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
 import { ContextState } from '../agents/runtime/agent-headless.js';
+import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../agents/runtime/agent-core.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -609,14 +610,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           forkGenerationConfig = cacheSafeParams.generationConfig;
           const tools = cacheSafeParams.generationConfig.tools;
           if (tools && tools.length > 0) {
-            forkToolsOverride = tools.flatMap(
-              (t) =>
-                (
-                  t as {
-                    functionDeclarations?: Array<import('@google/genai').FunctionDeclaration>;
-                  }
-                ).functionDeclarations ?? [],
-            );
+            forkToolsOverride = tools
+              .flatMap(
+                (t) =>
+                  (
+                    t as {
+                      functionDeclarations?: Array<
+                        import('@google/genai').FunctionDeclaration
+                      >;
+                    }
+                  ).functionDeclarations ?? [],
+              )
+              .filter(
+                (decl) =>
+                  !(decl.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(decl.name)),
+              );
           }
         }
 

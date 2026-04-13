@@ -58,7 +58,6 @@ import type {
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
-import { AgentTool } from '../../tools/agent.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
@@ -66,6 +65,18 @@ import { type ContextState, templateString } from './agent-headless.js';
 /**
  * Result of a single reasoning loop invocation.
  */
+/**
+ * Tools that must never be available to subagents (including forked agents).
+ * - AgentTool prevents recursive subagent spawning.
+ * - Cron tools are session-scoped and should only run from the main session.
+ */
+export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
+  ToolNames.AGENT,
+  ToolNames.CRON_CREATE,
+  ToolNames.CRON_LIST,
+  ToolNames.CRON_DELETE,
+]);
+
 export interface ReasoningLoopResult {
   /** The final model text response (empty if terminated by abort/limits). */
   text: string;
@@ -297,14 +308,7 @@ export class AgentCore {
     const toolRegistry = this.runtimeContext.getToolRegistry();
     const toolsList: FunctionDeclaration[] = [];
 
-    // Tools excluded from subagents: AgentTool (prevent recursion) and
-    // cron tools (session-scoped, should only be used by the main session).
-    const excludedFromSubagents = new Set<string>([
-      AgentTool.Name,
-      ToolNames.CRON_CREATE,
-      ToolNames.CRON_LIST,
-      ToolNames.CRON_DELETE,
-    ]);
+    const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
 
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
