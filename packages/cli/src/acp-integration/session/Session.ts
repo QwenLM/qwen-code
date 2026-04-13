@@ -697,6 +697,10 @@ export class Session implements SessionContext {
       case ToolConfirmationOutcome.ProceedAlways:
         newModeId = 'auto-edit';
         break;
+      case ToolConfirmationOutcome.RestorePrevious:
+        // onConfirm has already restored the mode; read the actual current mode
+        newModeId = this.config.getApprovalMode() as ApprovalModeValue;
+        break;
       case ToolConfirmationOutcome.ProceedOnce:
       default:
         newModeId = 'default';
@@ -709,27 +713,6 @@ export class Session implements SessionContext {
     };
 
     await this.sendUpdate(update);
-  }
-
-  private async resolveIdeDiffForOutcome(
-    confirmationDetails: ToolCallConfirmationDetails,
-    outcome: ToolConfirmationOutcome,
-  ): Promise<void> {
-    if (
-      confirmationDetails.type !== 'edit' ||
-      !confirmationDetails.ideConfirmation
-    ) {
-      return;
-    }
-
-    const { IdeClient } = await import('@qwen-code/qwen-code-core');
-    const ideClient = await IdeClient.getInstance();
-    const cliOutcome =
-      outcome === ToolConfirmationOutcome.Cancel ? 'rejected' : 'accepted';
-    await ideClient.resolveDiffFromCli(
-      confirmationDetails.filePath,
-      cliOutcome as 'accepted' | 'rejected',
-    );
   }
 
   private async runTool(
@@ -946,10 +929,6 @@ export class Session implements SessionContext {
                   hookResult.updatedInput as typeof invocation.params;
               }
 
-              await this.resolveIdeDiffForOutcome(
-                confirmationDetails,
-                ToolConfirmationOutcome.ProceedOnce,
-              );
               await confirmationDetails.onConfirm(
                 ToolConfirmationOutcome.ProceedOnce,
               );
@@ -1020,8 +999,6 @@ export class Session implements SessionContext {
                   .nativeEnum(ToolConfirmationOutcome)
                   .parse(output.outcome.optionId);
 
-          await this.resolveIdeDiffForOutcome(confirmationDetails, outcome);
-
           await confirmationDetails.onConfirm(outcome, {
             answers: output.answers,
           });
@@ -1072,6 +1049,7 @@ export class Session implements SessionContext {
             case ToolConfirmationOutcome.ProceedAlwaysServer:
             case ToolConfirmationOutcome.ProceedAlwaysTool:
             case ToolConfirmationOutcome.ModifyWithEditor:
+            case ToolConfirmationOutcome.RestorePrevious:
               break;
             default: {
               const resultOutcome: never = outcome;

@@ -10,6 +10,7 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
+import { t } from '../../../i18n/index.js';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
 
 interface CompactToolGroupDisplayProps {
@@ -100,7 +101,7 @@ export const CompactToolGroupDisplay: React.FC<
 
       {/* Hint line */}
       <Text color={theme.text.secondary}>
-        使用 ctrl+o 可查看详细工具调用结果
+        {t('Press Ctrl+O to show full tool output')}
       </Text>
     </Box>
   );

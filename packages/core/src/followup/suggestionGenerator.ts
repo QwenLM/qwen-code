@@ -27,13 +27,20 @@ import { ApiResponseEvent } from '../telemetry/types.js';
  */
 export const SUGGESTION_PROMPT = `[SUGGESTION MODE: Suggest what the user might naturally type next.]
 
-FIRST: Look at the user's recent messages and original request.
+FIRST: Read the LAST FEW LINES of the assistant's most recent message -- that's where
+next-step hints, tips, and actionable suggestions usually appear. Then check the user's
+recent messages and original request.
 
 Your job is to predict what THEY would type - not what you think they should do.
 
 THE TEST: Would they think "I was just about to type that"?
 
+PRIORITY: If the assistant's last message contains a tip or hint like "Tip: type X to ..."
+or "type X to ...", extract X as the suggestion. These are explicit next-step hints.
+
 EXAMPLES:
+Assistant says "Tip: type post comments to publish findings" → "post comments"
+Assistant says "type /review to start" → "/review"
 User asked "fix the bug and run tests", bug is fixed → "run the tests"
 After code written → "try it out"
 Model offers options → suggest the one the user would likely pick, based on conversation
@@ -157,7 +164,6 @@ export async function generatePromptSuggestion(
     return { suggestion: null, filterReason: 'early_conversation' };
   }
 
-  // Resolve the fast generator if a different model is configured
   const fastModelId = options?.model;
   const fastGenerator = fastModelId
     ? await getOrCreateFastGenerator(config, fastModelId)
@@ -165,7 +171,6 @@ export async function generatePromptSuggestion(
   const effectiveModelId = fastModelId ?? config.getModel();
 
   try {
-    // Try cache-aware forked query if enabled and params available
     const cacheSafe = options?.enableCacheSharing ? getCacheSafeParams() : null;
 
     let raw: string | null = null;
@@ -181,15 +186,13 @@ export async function generatePromptSuggestion(
         fastGenerator ?? undefined,
       );
 
-      // Fallback: if the fast generator returned empty (some endpoints return
-      // candidatesLen=0 for certain requests), retry with the main generator.
       if (raw === null && fastGenerator) {
         raw = await generateViaBaseLlm(
           config,
           conversationHistory,
           abortSignal,
           config.getModel(),
-          undefined, // use main generator
+          undefined,
         );
       }
     }
@@ -218,8 +221,9 @@ export async function generatePromptSuggestion(
 async function generateViaForkedQuery(
   config: Config,
   abortSignal: AbortSignal,
-  model: string,
+  modelOverride?: string,
 ): Promise<string | null> {
+  const model = modelOverride || config.getModel();
   const startTime = Date.now();
   const result = await runForkedQuery(config, SUGGESTION_PROMPT, {
     abortSignal,
@@ -263,43 +267,61 @@ async function generateViaForkedQuery(
 }
 
 /**
- * Generate via direct ContentGenerator.generateContent.
+ * Generate via ContentGenerator (always reports usage).
  *
- * @param config - App config (used as fallback generator source)
- * @param conversationHistory - Conversation history to include in request
- * @param abortSignal - Abort signal
- * @param model - Effective model ID to pass in the request
- * @param generator - Optional dedicated ContentGenerator (e.g., for fastModel with different baseUrl).
- *   When provided, this generator is used instead of config.getContentGenerator(), which allows
- *   OpenAI-compatible providers to use the correct model/baseUrl instead of the main model.
+ * Main session path uses non-streaming `generateContent` with thinking disabled.
+ * Optional dedicated fast generator uses streaming and simplified history so
+ * OpenAI-compatible stacks get the correct model/baseUrl and BFF streaming works.
+ *
+ * @param generator - When set, used instead of config.getContentGenerator().
  */
 async function generateViaBaseLlm(
   config: Config,
   conversationHistory: Content[],
   abortSignal: AbortSignal,
-  model: string,
+  modelOverride: string | undefined,
   generator?: ContentGenerator,
 ): Promise<string | null> {
+  const model = modelOverride || config.getModel();
   const resolvedGenerator = generator ?? config.getContentGenerator();
 
-  // When using a dedicated fast generator (different model/provider), strip the
-  // conversation history down to plain text only.  Fast / lite models typically
-  // cannot handle function-call, function-response, or inline-data parts that
-  // the main model produced and will return an empty response (candidates: []).
-  const simplifiedHistory = generator
-    ? simplifyHistoryForFastModel(conversationHistory)
-    : conversationHistory;
+  if (!generator) {
+    const contents: Content[] = [
+      ...conversationHistory,
+      { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
+    ];
+    const startTime = Date.now();
+    const response = await resolvedGenerator.generateContent(
+      {
+        model,
+        contents,
+        config: {
+          abortSignal,
+          thinkingConfig: { includeThoughts: false },
+        },
+      },
+      'prompt_suggestion',
+    );
+    const durationMs = Date.now() - startTime;
+    const usage = response.usageMetadata;
+    if (usage) {
+      reportSuggestionUsage(model, usage, durationMs);
+    }
+    const text = response.candidates?.[0]?.content?.parts
+      ?.filter((p) => !('thought' in p && (p as { thought?: boolean }).thought))
+      .map((p) => p.text ?? '')
+      .join('')
+      .trim();
+    return parseSuggestionText(text);
+  }
 
+  const simplifiedHistory = simplifyHistoryForFastModel(conversationHistory);
   const contents: Content[] = [
     ...simplifiedHistory,
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
   ];
 
   const startTime = Date.now();
-
-  // Use streaming API (generateContentStream) instead of non-streaming
-  // (generateContent). Some OpenAI-compatible endpoints (e.g., BFF proxies)
-  // only support streaming and return empty choices for non-streaming requests.
   const stream = await resolvedGenerator.generateContentStream(
     {
       model,
@@ -309,7 +331,6 @@ async function generateViaBaseLlm(
     'prompt_suggestion',
   );
 
-  // Collect the full streamed response
   const allParts: Array<{ text?: string; thought?: boolean }> = [];
   let usageMetadata:
     | {
@@ -334,7 +355,6 @@ async function generateViaBaseLlm(
   }
   const durationMs = Date.now() - startTime;
 
-  // Report usage to session stats so /stats tracks suggestion model tokens
   if (usageMetadata) {
     reportSuggestionUsage(model, usageMetadata, durationMs);
   }
@@ -342,45 +362,45 @@ async function generateViaBaseLlm(
   const thoughtParts = allParts.filter((p) => 'thought' in p && p.thought);
   const textParts = allParts.filter((p) => !('thought' in p && p.thought));
 
-  // Extract text from non-thought parts first
   const text = textParts
     .map((p) => p.text ?? '')
     .join('')
     .trim();
 
-  if (text) {
-    // Try to parse as JSON first (model might return {"suggestion": "..."})
-    try {
-      const parsed = JSON.parse(text) as Record<string, unknown>;
-      const s = parsed['suggestion'];
-      if (typeof s === 'string') return s;
-    } catch {
-      // Not JSON — use raw text as the suggestion
-    }
-    return text;
+  const parsed = parseSuggestionText(text);
+  if (parsed !== null) {
+    return parsed;
   }
 
-  // Fallback: if the model put its answer entirely in thought parts (common
-  // with glm-5 style reasoning models), extract text from thought parts.
-  // This handles the case where the model wraps its entire response in thinking.
   if (thoughtParts.length > 0) {
     const thoughtText = thoughtParts
       .map((p) => p.text ?? '')
       .join('')
       .trim();
-    if (thoughtText) {
-      try {
-        const parsed = JSON.parse(thoughtText) as Record<string, unknown>;
-        const s = parsed['suggestion'];
-        if (typeof s === 'string') return s;
-      } catch {
-        // Not JSON — use raw thought text
-      }
-      return thoughtText;
-    }
+    return parseSuggestionText(thoughtText);
   }
 
   return null;
+}
+
+function parseSuggestionText(text: string | undefined): string | null {
+  if (!text) {
+    return null;
+  }
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+    const s = parsed['suggestion'];
+    if (typeof s === 'string') {
+      return s;
+    }
+  } catch {
+    // Not JSON — use raw text
+  }
+  return trimmed;
 }
 
 /**

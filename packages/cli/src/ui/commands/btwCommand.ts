@@ -14,6 +14,7 @@ import { MessageType } from '../types.js';
 import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
 import type { GeminiClient } from '@qwen-code/qwen-code-core';
+import type { Content } from '@google/genai';
 
 function makeBtwPromptId(sessionId: string): string {
   return `${sessionId}########btw-${Date.now()}`;
@@ -24,6 +25,24 @@ function formatBtwError(error: unknown): string {
     error:
       error instanceof Error ? error.message : String(error || 'Unknown error'),
   });
+}
+
+// Keep only the most recent history messages to limit token usage for side
+// questions. MAX_BTW_HISTORY_MESSAGES caps the number of history Content
+// entries included as context before the /btw question is appended.
+const MAX_BTW_HISTORY_MESSAGES = 20;
+
+function trimHistory(history: Content[]): Content[] {
+  if (history.length <= MAX_BTW_HISTORY_MESSAGES) {
+    return history;
+  }
+  // Slice from the end, ensuring we start on a 'user' message so the
+  // alternating user/model pattern is preserved.
+  const sliced = history.slice(-MAX_BTW_HISTORY_MESSAGES);
+  if (sliced[0]?.role === 'model' && sliced.length > 1) {
+    return sliced.slice(1);
+  }
+  return sliced;
 }
 
 /**
@@ -37,8 +56,13 @@ async function askBtw(
   abortSignal: AbortSignal,
   promptId: string,
 ): Promise<string> {
-  const history = geminiClient.getHistory();
+  const history = trimHistory(geminiClient.getHistory(true));
 
+  // Side-question guidance sent as a user message (not a system instruction).
+  // Inspired by Claude Code's design:
+  // - Emphasizes direct answering without tools
+  // - Clarifies the isolated nature of the side question
+  // - Prevents the model from promising actions it can't take
   const response = await geminiClient.generateContent(
     [
       ...history,
@@ -46,7 +70,23 @@ async function askBtw(
         role: 'user',
         parts: [
           {
-            text: `[Side question - answer briefly and concisely, this is a "by the way" question that doesn't need to be part of our main conversation]\n\n${question}`,
+            text: `[This is a side question - answer directly and concisely.
+
+IMPORTANT:
+- You are a separate, lightweight agent spawned to answer this one question
+- The main conversation continues independently in the background
+- Do NOT reference being interrupted or what you were "previously doing"
+
+CRITICAL CONSTRAINTS:
+- You have NO tools available - you cannot read files, run commands, search, or take any actions
+- This is a one-off response in a single turn
+- You can ONLY provide information based on what you already know from the conversation context
+- NEVER say things like "Let me try...", "I'll now...", "Let me check...", or promise to take any action
+- If you don't know the answer, say so - do not offer to look it up or investigate
+
+Simply answer the question directly with the information you have.]
+
+${question}`,
           },
         ],
       },

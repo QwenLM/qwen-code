@@ -1,11 +1,7 @@
 {
-  "name": "@alife/dataworks-qwen-code-channel-weixin",
-  "version": "0.14.1",
+  "name": "@qwen-code/channel-weixin",
+  "version": "0.14.3",
   "description": "WeChat (Weixin) channel adapter for Qwen Code",
-  "repository": {
-    "type": "git",
-    "url": "git@gitlab.alibaba-inc.com:alishu/qwen-code.git"
-  },
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -26,14 +22,11 @@
   "files": [
     "dist"
   ],
-  "publishConfig": {
-    "registry": "https://registry.anpm.alibaba-inc.com"
-  },
   "scripts": {
     "build": "tsc --build"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "npm:@alife/dataworks-qwen-code-channel-base@*"
+    "@qwen-code/channel-base": "file:../base"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

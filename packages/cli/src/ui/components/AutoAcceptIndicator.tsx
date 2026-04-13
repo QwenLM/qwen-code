@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
@@ -48,11 +48,9 @@ export const AutoAcceptIndicator: React.FC<AutoAcceptIndicatorProps> = ({
   }
 
   return (
-    <Box>
-      <Text color={textColor}>
-        {textContent}
-        {subText && <Text color={theme.text.secondary}>{subText}</Text>}
-      </Text>
-    </Box>
+    <Text color={textColor}>
+      {textContent}
+      {subText && <Text color={theme.text.secondary}>{subText}</Text>}
+    </Text>
   );
 };

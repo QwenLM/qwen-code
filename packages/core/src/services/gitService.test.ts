@@ -170,6 +170,15 @@ describe('GitService', () => {
       expect(hoistedMockInit).toHaveBeenCalled();
     });
 
+    it('should initialize git repo when root repo check throws', async () => {
+      hoistedMockCheckIsRepo.mockRejectedValueOnce(
+        new Error('fatal: not a git repository'),
+      );
+      const service = new GitService(projectRoot, storage);
+      await expect(service.setupShadowGitRepository()).resolves.toBeUndefined();
+      expect(hoistedMockInit).toHaveBeenCalled();
+    });
+
     it('should not initialize git repo if already initialized', async () => {
       hoistedMockCheckIsRepo.mockResolvedValue(true);
       const service = new GitService(projectRoot, storage);

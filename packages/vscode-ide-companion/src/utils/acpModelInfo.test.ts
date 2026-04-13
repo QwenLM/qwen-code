@@ -136,6 +136,26 @@ describe('extractSessionModelState', () => {
     // The function should still return a state with empty availableModels
     expect(result?.availableModels).toHaveLength(0);
   });
+
+  it('derives contextLimit for known models when the ACP payload omits it', () => {
+    const result = extractSessionModelState({
+      models: {
+        currentModelId: 'qwen3-max',
+        availableModels: [{ modelId: 'qwen3-max', name: 'Qwen3 Max' }],
+      },
+    });
+
+    expect(result).toEqual({
+      currentModelId: 'qwen3-max',
+      availableModels: [
+        {
+          modelId: 'qwen3-max',
+          name: 'Qwen3 Max',
+          _meta: { contextLimit: 262144 },
+        },
+      ],
+    });
+  });
 });
 
 describe('extractModelInfoFromNewSessionResult', () => {
@@ -204,5 +224,37 @@ describe('extractModelInfoFromNewSessionResult', () => {
   it('returns null when missing', () => {
     expect(extractModelInfoFromNewSessionResult({})).toBeNull();
     expect(extractModelInfoFromNewSessionResult(null)).toBeNull();
+  });
+
+  it('derives contextLimit for known models when the payload has null metadata', () => {
+    expect(
+      extractModelInfoFromNewSessionResult({
+        model: {
+          name: 'Qwen3 Max',
+          modelId: 'qwen3-max',
+          _meta: null,
+        },
+      }),
+    ).toEqual({
+      name: 'Qwen3 Max',
+      modelId: 'qwen3-max',
+      _meta: { contextLimit: 262144 },
+    });
+  });
+
+  it('preserves null contextLimit for unknown models', () => {
+    expect(
+      extractModelInfoFromNewSessionResult({
+        model: {
+          name: 'Unknown',
+          modelId: 'unknown-model-v1.0',
+          _meta: { contextLimit: null },
+        },
+      }),
+    ).toEqual({
+      name: 'Unknown',
+      modelId: 'unknown-model-v1.0',
+      _meta: { contextLimit: null },
+    });
   });
 });

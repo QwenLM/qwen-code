@@ -19,6 +19,7 @@ import { getProjectHash } from '../utils/paths.js';
 import {
   SessionService,
   buildApiHistoryFromConversation,
+  getResumePromptTokenCount,
   type ConversationRecord,
 } from './sessionService.js';
 import { CompressionStatus } from '../core/turn.js';
@@ -628,6 +629,71 @@ describe('SessionService', () => {
       const exists = await sessionService.sessionExists(sessionIdA);
 
       expect(exists).toBe(false);
+    });
+  });
+
+  describe('getResumePromptTokenCount', () => {
+    const baseRecord: ChatRecord = {
+      uuid: 'r1',
+      parentUuid: null,
+      sessionId: sessionIdA,
+      timestamp: '2024-01-01T00:00:00Z',
+      type: 'user',
+      cwd: '/test/project/root',
+      version: '1.0.0',
+    };
+
+    const makeConversation = (messages: ChatRecord[]): ConversationRecord => ({
+      sessionId: sessionIdA,
+      projectHash: 'test-project-hash',
+      startTime: '2024-01-01T00:00:00Z',
+      lastUpdated: '2024-01-01T00:00:00Z',
+      messages,
+    });
+
+    const compressionRecord: ChatRecord = {
+      ...baseRecord,
+      uuid: 'comp',
+      type: 'system',
+      subtype: 'chat_compression',
+      systemPayload: {
+        info: {
+          originalTokenCount: 1000,
+          newTokenCount: 300,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        },
+        compressedHistory: [],
+      },
+    };
+
+    it('should return latest assistant usage without scanning further back', () => {
+      const assistant: ChatRecord = {
+        ...baseRecord,
+        uuid: 'a1',
+        parentUuid: 'comp',
+        type: 'assistant',
+        usageMetadata: { totalTokenCount: 450 },
+      };
+      expect(
+        getResumePromptTokenCount(
+          makeConversation([compressionRecord, assistant]),
+        ),
+      ).toBe(450);
+    });
+
+    it('should fall back to compression when latest assistant has zero usage', () => {
+      const assistant: ChatRecord = {
+        ...baseRecord,
+        uuid: 'a1',
+        parentUuid: 'comp',
+        type: 'assistant',
+        usageMetadata: { totalTokenCount: 0, promptTokenCount: 0 },
+      };
+      expect(
+        getResumePromptTokenCount(
+          makeConversation([compressionRecord, assistant]),
+        ),
+      ).toBe(300);
     });
   });
 

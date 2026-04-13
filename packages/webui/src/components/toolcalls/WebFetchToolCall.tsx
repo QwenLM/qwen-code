@@ -15,6 +15,7 @@ import {
   mapToolStatusToContainerStatus,
 } from './shared/index.js';
 import type { BaseToolCallProps } from './shared/index.js';
+import { getToolDisplayLabel } from './labelUtils.js';
 
 type WebVariant = 'fetch' | 'search';
 
@@ -121,7 +122,7 @@ const WebFetchToolCallImpl: FC<BaseToolCallProps & { variant: WebVariant }> = ({
   const { title, content, rawInput, toolCallId } = toolCall;
 
   const webTarget = getWebTarget(variant, title, rawInput);
-  const label = variant === 'fetch' ? 'Web Fetch' : 'Web Search';
+  const label = getToolDisplayLabel({ kind: toolCall.kind, title });
 
   // Group content by type
   const { textOutputs, errors } = groupContent(content);

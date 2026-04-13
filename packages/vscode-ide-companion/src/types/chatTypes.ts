@@ -78,6 +78,7 @@ export interface QwenAgentCallbacks {
   onModelChanged?: (model: ModelInfo) => void;
   onAvailableCommands?: (commands: AvailableCommand[]) => void;
   onAvailableModels?: (models: ModelInfo[]) => void;
+  onDisconnected?: (code: number | null, signal: string | null) => void;
 }
 
 export interface ToolCallUpdate {

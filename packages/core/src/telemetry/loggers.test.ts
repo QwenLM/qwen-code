@@ -362,7 +362,7 @@ describe('loggers', () => {
   });
 
   describe('logApiResponse skips chatRecordingService for internal prompt IDs', () => {
-    it.each(['prompt_suggestion', 'forked_query'])(
+    it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
       'should not record to chatRecordingService when prompt_id is %s',
       (promptId) => {
         const mockRecordUiTelemetryEvent = vi.fn();
@@ -410,7 +410,7 @@ describe('loggers', () => {
   });
 
   describe('logApiError skips chatRecordingService for internal prompt IDs', () => {
-    it.each(['prompt_suggestion', 'forked_query'])(
+    it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
       'should not record to chatRecordingService when prompt_id is %s',
       (promptId) => {
         const mockRecordUiTelemetryEvent = vi.fn();
@@ -1107,6 +1107,46 @@ describe('loggers', () => {
         },
       });
     });
+
+    it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
+      'should not record to chatRecordingService when prompt_id is %s',
+      (promptId) => {
+        const mockRecordUiTelemetryEvent = vi.fn();
+        const configWithRecording = {
+          ...mockConfig,
+          getChatRecordingService: () => ({
+            recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+          }),
+        } as unknown as Config;
+
+        const call: CompletedToolCall = {
+          status: 'success',
+          request: {
+            name: 'test-function',
+            args: {},
+            callId: 'test-call-id',
+            isClientInitiated: true,
+            prompt_id: promptId,
+          },
+          response: {
+            callId: 'test-call-id',
+            responseParts: [{ text: 'ok' }],
+            resultDisplay: undefined,
+            error: undefined,
+            errorType: undefined,
+          },
+          tool: new EditTool(mockConfig),
+          invocation: {} as AnyToolInvocation,
+          durationMs: 50,
+          outcome: ToolConfirmationOutcome.ProceedOnce,
+        };
+        const event = new ToolCallEvent(call);
+        logToolCall(configWithRecording, event);
+
+        expect(mockRecordUiTelemetryEvent).not.toHaveBeenCalled();
+        expect(mockUiEvent.addEvent).toHaveBeenCalled();
+      },
+    );
   });
 
   describe('logMalformedJsonResponse', () => {

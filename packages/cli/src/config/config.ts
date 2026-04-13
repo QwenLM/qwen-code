@@ -1094,6 +1094,7 @@ export async function loadCliConfig(
     telemetry: telemetrySettings,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     fileFiltering: settings.context?.fileFiltering,
+    thinkingIdleThresholdMinutes: settings.context?.gapThresholdMinutes,
     checkpointing:
       argv.checkpointing || settings.general?.checkpointing?.enabled,
     proxy:

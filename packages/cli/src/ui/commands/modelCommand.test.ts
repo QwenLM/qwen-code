@@ -33,7 +33,9 @@ describe('modelCommand', () => {
 
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
-    expect(modelCommand.description).toBe('Switch the model for this session');
+    expect(modelCommand.description).toBe(
+      'Switch the model for this session (--fast for suggestion model)',
+    );
   });
 
   it('should return error when config is not available', async () => {

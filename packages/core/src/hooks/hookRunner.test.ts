@@ -231,6 +231,65 @@ describe('HookRunner', () => {
       expect(result.output?.reason).toBe('stderr error message');
     });
 
+    it('should parse JSON from stderr on exit code 2 to preserve additionalContext', async () => {
+      // Exit code 2 with JSON in stderr should parse structured output
+      // to preserve hookSpecificOutput.additionalContext
+      const jsonOutput = JSON.stringify({
+        decision: 'deny',
+        reason: 'blocked by policy',
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext: '[Hook] Tool execution blocked with context',
+        },
+      });
+      const mockProcess = createMockProcess(2, 'stdout ignored', jsonOutput);
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'exit 2',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toBe('blocked by policy');
+      expect(result.output?.hookSpecificOutput).toEqual({
+        hookEventName: 'PostToolUse',
+        additionalContext: '[Hook] Tool execution blocked with context',
+      });
+    });
+
+    it('should fall back to plain text when stderr JSON is invalid on exit code 2', async () => {
+      const mockProcess = createMockProcess(2, '', 'plain blocking error');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'exit 2',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toBe('plain blocking error');
+      expect(result.output?.hookSpecificOutput).toBeUndefined();
+    });
+
     it('should not parse JSON on exit code 2', async () => {
       // Exit code 2 should ignore JSON in stdout
       const mockProcess = createMockProcess(

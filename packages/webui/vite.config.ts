@@ -32,7 +32,7 @@ export default defineConfig({
     dts({
       include: ['src'],
       outDir: 'dist',
-      rollupTypes: false,
+      rollupTypes: true,
       insertTypesEntry: true,
     }),
   ],

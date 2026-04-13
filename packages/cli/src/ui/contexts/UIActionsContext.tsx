@@ -61,6 +61,7 @@ export interface UIActions {
   exitEditorDialog: () => void;
   closeSettingsDialog: () => void;
   closeModelDialog: () => void;
+  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
   handleArenaModelsSelected?: (models: string[]) => void;

@@ -80,7 +80,9 @@ export const Composer = () => {
 
       {!uiState.isConfigInitialized && <ConfigInitDisplay />}
 
-      <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
+      {uiState.showQueuedMessageDisplay && (
+        <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
+      )}
 
       {uiState.isFeedbackDialogOpen && <FeedbackDialog />}
 
