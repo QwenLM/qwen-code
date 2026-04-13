@@ -1286,6 +1286,20 @@ describe('GeminiChat', async () => {
           ),
         ).toBe(true);
 
+        // Verify telemetry: 3 stream retries + 1 non-stream fallback event
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        const lastRetryCall =
+          mockLogContentRetry.mock.calls[
+            mockLogContentRetry.mock.calls.length - 1
+          ];
+        expect(lastRetryCall?.[1]).toMatchObject({
+          'event.name': 'content_retry',
+          error_type: 'NON_STREAM_FALLBACK',
+          attempt_number: 4,
+          retry_delay_ms: 0,
+          model: 'glm-5',
+        });
+
         const history = chat.getHistory();
         expect(history.length).toBe(2);
         expect(history[1]?.parts?.[0]?.text).toBe(

@@ -427,10 +427,20 @@ export class GeminiChat {
                   error as InvalidStreamError,
                 )
               ) {
+                const totalStreamAttempts = invalidStreamRetryCount + 1;
                 debugLogger.warn(
                   `Invalid stream [${(error as InvalidStreamError).type}] persisted after ` +
-                    `${invalidStreamRetryCount + 1} streaming attempts for OpenAI-compatible provider. ` +
+                    `${totalStreamAttempts} streaming attempts for OpenAI-compatible provider. ` +
                     'Attempting non-streaming fallback.',
+                );
+                logContentRetry(
+                  self.config,
+                  new ContentRetryEvent(
+                    totalStreamAttempts,
+                    'NON_STREAM_FALLBACK',
+                    0,
+                    model,
+                  ),
                 );
                 try {
                   const fallbackStream =
@@ -448,6 +458,10 @@ export class GeminiChat {
                   lastError = null;
                   break;
                 } catch (fallbackError) {
+                  debugLogger.error(
+                    'Non-streaming fallback also failed.',
+                    fallbackError,
+                  );
                   lastError = fallbackError;
                 }
               }
