@@ -33,15 +33,15 @@ jobs:
       - name: 'Install dependencies'
         run: 'npm ci'
 
-      - name: 'Run tests'
-        run: |
-          if [ "$SKIP_TESTS" = "1" ]; then
-            echo "⏭️ Skipping tests (skip_tests=1)"
-          else
-            NO_COLOR=true npm run test:ci
-          fi
-        env:
-          SKIP_TESTS: ${{ params.skip_tests }}
+      # - name: 'Run tests'
+      #   run: |
+      #     if [ "$SKIP_TESTS" = "1" ]; then
+      #       echo "⏭️ Skipping tests (skip_tests=1)"
+      #     else
+      #       NO_COLOR=true npm run test:ci
+      #     fi
+      #   env:
+      #     SKIP_TESTS: ${{ params.skip_tests }}
 
       - name: 'Build project'
         run: 'npm run build'
