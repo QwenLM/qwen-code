@@ -20,7 +20,7 @@
 
 ## 🎉 News
 
-- **2026-04-15**: Qwen OAuth free tier has been discontinued. Please upgrade to [Alibaba Cloud Coding Plan](https://www.alibabacloud.com/help/en/model-studio/coding-plan) for continued service with higher quotas and more models.
+- **2026-04-15**: Qwen OAuth free tier has been discontinued. Consider using [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or [Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3.6-plus) as alternatives.
 
 - **2026-04-02**: Qwen3.6-Plus is now live! Get an API key from [Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3.6-plus) to access it through the OpenAI-compatible API.
 
