@@ -194,7 +194,7 @@ Overrides the auto-detected input modalities for the selected model. Qwen Code a
 
 Allows you to add custom HTTP headers to all API requests. This is useful for request tracing, monitoring, API gateway routing, or when different models require different headers. If `customHeaders` is defined in `modelProviders[].generationConfig.customHeaders`, it will be used directly; otherwise, headers from `model.generationConfig.customHeaders` will be used. No merging occurs between the two levels.
 
-The `extra_body` field allows you to add custom parameters to the request body sent to the API. This is useful for provider-specific options that are not covered by the standard configuration fields. **Note: This field is only supported for OpenAI-compatible providers (`openai`, `qwen-oauth`). It is ignored for Anthropic and Gemini providers.** If `extra_body` is defined in `modelProviders[].generationConfig.extra_body`, it will be used directly; otherwise, values from `model.generationConfig.extra_body` will be used.
+The `extra_body` field allows you to add custom parameters to the request body sent to the API. This is useful for provider-specific options that are not covered by the standard configuration fields. **Note: This field is only supported for OpenAI-compatible providers (`openai`). It is ignored for Anthropic and Gemini providers.** If `extra_body` is defined in `modelProviders[].generationConfig.extra_body`, it will be used directly; otherwise, values from `model.generationConfig.extra_body` will be used.
 
 **model.openAILoggingDir examples:**
 
@@ -389,7 +389,7 @@ LSP server configuration is done through `.lsp.json` files in your project root 
 
 > [!note]
 >
-> **Note about advanced.tavilyApiKey:** This is a legacy configuration format. For Qwen OAuth users, DashScope provider is automatically available without any configuration. For other authentication types, configure Tavily or Google providers using the new `webSearch` configuration format.
+> **Note about advanced.tavilyApiKey:** This is a legacy configuration format. For other authentication types, configure Tavily or Google providers using the new `webSearch` configuration format.
 
 #### mcpServers
 

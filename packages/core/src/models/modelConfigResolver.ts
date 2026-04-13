@@ -272,11 +272,17 @@ export function resolveModelConfig(
 /**
  * Special resolver for Qwen OAuth authentication.
  * Qwen OAuth has fixed model options and uses dynamic tokens.
+ * NOTE: Qwen OAuth free tier has been discontinued. This function is kept
+ * for potential future re-enablement but logs a warning.
  */
 function resolveQwenOAuthConfig(
   input: ModelConfigSourcesInput,
   warnings: string[],
 ): ModelConfigResolutionResult {
+  warnings.push(
+    'Warning: Qwen OAuth authentication has been discontinued (free tier discontinued). Please migrate to Alibaba Cloud Coding Plan or API Key authentication.',
+  );
+
   const { cli, settings, proxy, modelProvider } = input;
   const sources: ConfigSources = {};
 

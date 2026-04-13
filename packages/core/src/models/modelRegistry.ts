@@ -15,11 +15,12 @@ import {
   type AvailableModel,
 } from './types.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { QWEN_OAUTH_MODELS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MODEL_REGISTRY');
 
+// NOTE: QWEN_OAUTH_MODELS re-export kept for external consumers.
+// Model registration is disabled in the constructor (free tier discontinued).
 export { QWEN_OAUTH_MODELS } from './constants.js';
 
 /**
@@ -58,8 +59,9 @@ export class ModelRegistry {
   constructor(modelProvidersConfig?: ModelProvidersConfig) {
     this.modelsByAuthType = new Map();
 
-    // Always register qwen-oauth models (hard-coded, cannot be overridden)
-    this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
+    // NOTE: QWEN_OAUTH model registration is temporarily disabled
+    // (free tier discontinued). The code is kept for potential future re-enablement.
+    // this.registerAuthTypeModels(AuthType.QWEN_OAUTH, QWEN_OAUTH_MODELS);
 
     // Register user-configured models for other authTypes
     if (modelProvidersConfig) {

@@ -8,7 +8,6 @@ import {
   AuthType,
   type Config,
   type AvailableModel as CoreAvailableModel,
-  QWEN_OAUTH_MODELS,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
@@ -19,14 +18,9 @@ export type AvailableModel = {
   isVision?: boolean;
 };
 
-const CACHED_QWEN_OAUTH_MODELS: AvailableModel[] = QWEN_OAUTH_MODELS.map(
-  (model) => ({
-    id: model.id,
-    label: model.name ?? model.id,
-    description: model.description,
-    isVision: model.capabilities?.vision ?? false,
-  }),
-);
+// NOTE: QWEN_OAUTH models are disabled (free tier discontinued).
+// Returning empty array to prevent OAuth models from appearing in /model picker.
+const CACHED_QWEN_OAUTH_MODELS: AvailableModel[] = [];
 
 function getQwenOAuthModels(): readonly AvailableModel[] {
   return CACHED_QWEN_OAUTH_MODELS;

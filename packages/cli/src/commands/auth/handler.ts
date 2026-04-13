@@ -410,11 +410,6 @@ export async function showAuthStatus(): Promise<void> {
       writeStdoutLine(t('Run one of the following commands to get started:\n'));
       writeStdoutLine(
         t(
-          '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)',
-        ),
-      );
-      writeStdoutLine(
-        t(
           '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
         ),
       );
@@ -426,12 +421,7 @@ export async function showAuthStatus(): Promise<void> {
     }
 
     // Display status based on auth type
-    if (selectedType === AuthType.QWEN_OAUTH) {
-      writeStdoutLine(t('✓ Authentication Method: Qwen OAuth'));
-      writeStdoutLine(t('  Type: Free tier'));
-      writeStdoutLine(t('  Limit: Up to 1,000 requests/day'));
-      writeStdoutLine(t('  Models: Qwen latest models\n'));
-    } else if (selectedType === AuthType.USE_OPENAI) {
+    if (selectedType === AuthType.USE_OPENAI) {
       // Check for Coding Plan configuration
       const codingPlanRegion = mergedSettings.codingPlan?.region;
       const codingPlanVersion = mergedSettings.codingPlan?.version;
