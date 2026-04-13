@@ -383,6 +383,11 @@ export interface CLIControlSupportedCommandsRequest {
   subtype: 'supported_commands';
 }
 
+export interface CLIControlGetContextUsageRequest {
+  subtype: 'get_context_usage';
+  show_details?: boolean;
+}
+
 export type ControlRequestPayload =
   | CLIControlInterruptRequest
   | CLIControlPermissionRequest
@@ -392,7 +397,8 @@ export type ControlRequestPayload =
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
   | CLIControlMcpStatusRequest
-  | CLIControlSupportedCommandsRequest;
+  | CLIControlSupportedCommandsRequest
+  | CLIControlGetContextUsageRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';
@@ -585,6 +591,7 @@ export enum ControlRequestType {
   INTERRUPT = 'interrupt',
   SET_MODEL = 'set_model',
   SUPPORTED_COMMANDS = 'supported_commands',
+  GET_CONTEXT_USAGE = 'get_context_usage',
 
   // PermissionController requests
   CAN_USE_TOOL = 'can_use_tool',
