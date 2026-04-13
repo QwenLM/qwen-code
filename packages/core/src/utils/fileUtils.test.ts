@@ -43,6 +43,7 @@ vi.mock('mime/lite', () => ({
 const pdfMocks = vi.hoisted(() => ({
   getText: vi.fn(),
   destroy: vi.fn(),
+  PDFParse: vi.fn(),
 }));
 
 vi.mock('pdf-parse', () => {
@@ -54,13 +55,8 @@ vi.mock('pdf-parse', () => {
     }
   };
 
-  const PDFParse = vi.fn().mockImplementation(() => ({
-    getText: pdfMocks.getText,
-    destroy: pdfMocks.destroy,
-  }));
-
   return {
-    PDFParse,
+    PDFParse: pdfMocks.PDFParse,
     PasswordException,
   };
 });
@@ -93,9 +89,11 @@ describe('fileUtils', () => {
 
   beforeEach(() => {
     vi.resetAllMocks(); // Reset all mocks, including mime.getType
-    // Reset pdf-parse mocks (hoisted)
-    pdfMocks.getText.mockReset();
-    pdfMocks.destroy.mockReset();
+    // Restore pdf-parse mock implementation after reset
+    pdfMocks.PDFParse.mockImplementation(() => ({
+      getText: pdfMocks.getText,
+      destroy: pdfMocks.destroy,
+    }));
 
     tempRootDir = actualNodeFs.mkdtempSync(
       path.join(os.tmpdir(), 'fileUtils-test-'),
@@ -948,12 +946,8 @@ describe('fileUtils', () => {
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
 
-      // Debug: Check what PDFParse returns
-      const { PDFParse } = await import('pdf-parse');
-      const parser = new PDFParse({ data: fakePdfData });
-      console.log('PDFParse result:', parser);
-      console.log('parser.getText:', parser.getText);
-      console.log('typeof parser.getText:', typeof parser.getText);
+      // Verify mock is set up correctly
+      expect(typeof pdfMocks.getText).toBe('function');
 
       // Mock pdf-parse to return text
       pdfMocks.getText.mockResolvedValue({

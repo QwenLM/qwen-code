@@ -17,10 +17,16 @@ import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
-import { PDFParse, PasswordException } from 'pdf-parse';
+import { PasswordException } from 'pdf-parse';
 
 vi.mock('../telemetry/loggers.js', () => ({
   logFileOperation: vi.fn(),
+}));
+
+const pdfMocks = vi.hoisted(() => ({
+  getText: vi.fn(),
+  destroy: vi.fn(),
+  PDFParse: vi.fn(),
 }));
 
 vi.mock('pdf-parse', () => {
@@ -32,32 +38,15 @@ vi.mock('pdf-parse', () => {
     }
   };
 
-  // Module-level mock state accessible via vi.mocked(PDFParse).mockGetText etc.
-  const mockGetText = vi.fn();
-  const mockDestroy = vi.fn();
-
-  const MockPDFParse = vi.fn().mockImplementation(() => ({
-    getText: mockGetText,
-    destroy: mockDestroy,
-  }));
-
-  // Attach mock functions to the constructor for test access
-  (MockPDFParse as unknown as Record<string, unknown>)['__mockGetText'] =
-    mockGetText;
-  (MockPDFParse as unknown as Record<string, unknown>)['__mockDestroy'] =
-    mockDestroy;
-
   return {
-    PDFParse: MockPDFParse,
+    PDFParse: pdfMocks.PDFParse,
     PasswordException,
   };
 });
 
 // Helper to get the mock getText function
 function getMockGetText(): ReturnType<typeof vi.fn> {
-  return (PDFParse as unknown as Record<string, unknown>)[
-    '__mockGetText'
-  ] as ReturnType<typeof vi.fn>;
+  return pdfMocks.getText;
 }
 
 describe('ReadFileTool', () => {
@@ -73,6 +62,10 @@ describe('ReadFileTool', () => {
 
     // Reset PDF parse mocks between tests
     getMockGetText().mockReset();
+    pdfMocks.PDFParse.mockImplementation(() => ({
+      getText: pdfMocks.getText,
+      destroy: pdfMocks.destroy,
+    }));
 
     const mockConfigInstance = {
       getFileService: () => new FileDiscoveryService(tempRootDir),
