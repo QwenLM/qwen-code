@@ -46,6 +46,9 @@ import {
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
+import { TurnBuffer } from './acp-integration/session/rewrite/TurnBuffer.js';
+import { LlmRewriter } from './acp-integration/session/rewrite/LlmRewriter.js';
+import type { MessageRewriteConfig } from './acp-integration/session/rewrite/types.js';
 
 /**
  * Emits a final message for slash command results.
@@ -250,6 +253,25 @@ export async function runNonInteractive(
       const initialParts = normalizePartList(initialPartList);
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
+      // Initialize message rewriter if configured
+      const userOriginal = settings.user?.originalSettings as
+        | Record<string, unknown>
+        | undefined;
+      const workspaceOriginal = settings.workspace?.originalSettings as
+        | Record<string, unknown>
+        | undefined;
+      const rewriteConfig = (workspaceOriginal?.['messageRewrite'] ??
+        userOriginal?.['messageRewrite']) as MessageRewriteConfig | undefined;
+      const rewriter = rewriteConfig?.enabled
+        ? new LlmRewriter(config, rewriteConfig)
+        : null;
+      const turnBuffer = rewriter ? new TurnBuffer() : null;
+      let rewriteTurnIndex = 0;
+
+      if (rewriter) {
+        debugLogger.info('Message rewrite enabled in non-interactive mode');
+      }
+
       let isFirstTurn = true;
       let modelOverride: string | undefined;
       while (true) {
@@ -285,6 +307,23 @@ export async function runNonInteractive(
           }
           // Use adapter for all event processing
           adapter.processEvent(event);
+
+          // Accumulate for turn-end rewriting
+          if (turnBuffer) {
+            if (
+              event.type === GeminiEventType.Content &&
+              typeof event.value === 'string'
+            ) {
+              turnBuffer.appendMessage(event.value);
+            } else if (event.type === GeminiEventType.Thought && event.value) {
+              const thought = event.value;
+              const thoughtText = thought.subject
+                ? `${thought.subject}: ${thought.description}`
+                : thought.description;
+              if (thoughtText) turnBuffer.appendThought(thoughtText);
+            }
+          }
+
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
@@ -305,6 +344,39 @@ export async function runNonInteractive(
         // Finalize assistant message
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
+
+        // Flush turn buffer and append rewritten message
+        if (rewriter && turnBuffer) {
+          const content = turnBuffer.flush();
+          if (content) {
+            rewriteTurnIndex++;
+            try {
+              const rewritten = await rewriter.rewrite(
+                content,
+                abortController?.signal,
+              );
+              if (rewritten) {
+                debugLogger.info(
+                  `Turn ${rewriteTurnIndex}: rewritten ${rewritten.length} chars`,
+                );
+                // Emit rewritten as a separate assistant message with _meta.rewritten
+                adapter.startAssistantMessage();
+                adapter.processEvent({
+                  type: GeminiEventType.Content,
+                  value: rewritten,
+                  _meta: { rewritten: true, turnIndex: rewriteTurnIndex },
+                } as unknown as Parameters<
+                  JsonOutputAdapterInterface['processEvent']
+                >[0]);
+                adapter.finalizeAssistantMessage();
+              }
+            } catch (err) {
+              debugLogger.warn(
+                `Turn ${rewriteTurnIndex}: rewrite failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            }
+          }
+        }
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
