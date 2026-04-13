@@ -11,7 +11,7 @@ import type {
   GenerateContentResponse,
 } from '@google/genai';
 import { ApiError } from '@google/genai';
-import type { ContentGenerator } from '../core/contentGenerator.js';
+import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
 import {
   GeminiChat,
   InvalidStreamError,
@@ -1227,6 +1227,70 @@ describe('GeminiChat', async () => {
                 'Recovered after empty stream',
           ),
         ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should fall back to non-streaming generation after empty stream retries exhaust for openai-compatible providers', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_OPENAI,
+          model: 'glm-5',
+        });
+
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          (async function* () {
+            yield {
+              usageMetadata: {
+                promptTokenCount: 10,
+                candidatesTokenCount: 0,
+                totalTokenCount: 10,
+              },
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
+
+        vi.mocked(mockContentGenerator.generateContent).mockResolvedValue({
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ text: 'Recovered via non-stream fallback' }],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse);
+
+        const stream = await chat.sendMessageStream(
+          'glm-5',
+          { message: 'hi' },
+          'prompt-id-openai-empty-stream-fallback',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 35_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(4);
+        expect(mockContentGenerator.generateContent).toHaveBeenCalledTimes(1);
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered via non-stream fallback',
+          ),
+        ).toBe(true);
+
+        const history = chat.getHistory();
+        expect(history.length).toBe(2);
+        expect(history[1]?.parts?.[0]?.text).toBe(
+          'Recovered via non-stream fallback',
+        );
       } finally {
         vi.useRealTimers();
       }

@@ -11,6 +11,7 @@ import type {
   GenerateContentResponse,
   Content,
   GenerateContentConfig,
+  GenerateContentParameters,
   SendMessageParameters,
   Part,
   Tool,
@@ -25,6 +26,7 @@ import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
 import type { Config } from '../config/config.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import type { StructuredError } from './turn.js';
+import { AuthType } from './contentGenerator.js';
 import {
   logContentRetry,
   logContentRetryFailure,
@@ -420,6 +422,35 @@ export class GeminiChat {
             }
             // Transient budget exhausted — stop immediately.
             if (isTransientStreamError) {
+              if (
+                self.shouldAttemptNonStreamingFallback(
+                  error as InvalidStreamError,
+                )
+              ) {
+                debugLogger.warn(
+                  `Invalid stream [${(error as InvalidStreamError).type}] persisted after ` +
+                    `${invalidStreamRetryCount + 1} streaming attempts for OpenAI-compatible provider. ` +
+                    'Attempting non-streaming fallback.',
+                );
+                try {
+                  const fallbackStream =
+                    await self.makeApiCallAndProcessNonStream(
+                      model,
+                      requestContents,
+                      params,
+                      prompt_id,
+                    );
+
+                  for await (const chunk of fallbackStream) {
+                    yield { type: StreamEventType.CHUNK, value: chunk };
+                  }
+
+                  lastError = null;
+                  break;
+                } catch (fallbackError) {
+                  lastError = fallbackError;
+                }
+              }
               break;
             }
 
@@ -476,15 +507,15 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const request = this.buildGenerateContentRequest(
+      model,
+      requestContents,
+      params,
+    );
     const apiCall = () =>
-      this.config.getContentGenerator().generateContentStream(
-        {
-          model,
-          contents: requestContents,
-          config: { ...this.generationConfig, ...params.config },
-        },
-        prompt_id,
-      );
+      this.config
+        .getContentGenerator()
+        .generateContentStream(request, prompt_id);
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof Error) {
@@ -503,6 +534,67 @@ export class GeminiChat {
     });
 
     return this.processStreamResponse(model, streamResponse);
+  }
+
+  private async makeApiCallAndProcessNonStream(
+    model: string,
+    requestContents: Content[],
+    params: SendMessageParameters,
+    prompt_id: string,
+  ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const request = this.buildGenerateContentRequest(
+      model,
+      requestContents,
+      params,
+    );
+    const response = await retryWithBackoff(
+      () =>
+        this.config.getContentGenerator().generateContent(request, prompt_id),
+      {
+        shouldRetryOnError: (error: unknown) => {
+          if (error instanceof Error) {
+            if (isSchemaDepthError(error.message)) return false;
+            if (isInvalidArgumentError(error.message)) return false;
+          }
+
+          const status = getErrorStatus(error);
+          if (status === 400) return false;
+          if (status === 429) return true;
+          if (status && status >= 500 && status < 600) return true;
+
+          return false;
+        },
+        authType: this.config.getContentGeneratorConfig()?.authType,
+      },
+    );
+
+    return this.processStreamResponse(
+      model,
+      (async function* () {
+        yield response;
+      })(),
+    );
+  }
+
+  private buildGenerateContentRequest(
+    model: string,
+    requestContents: Content[],
+    params: SendMessageParameters,
+  ): GenerateContentParameters {
+    return {
+      model,
+      contents: requestContents,
+      config: { ...this.generationConfig, ...params.config },
+    };
+  }
+
+  private shouldAttemptNonStreamingFallback(
+    error: InvalidStreamError,
+  ): boolean {
+    return (
+      this.config.getContentGeneratorConfig()?.authType ===
+        AuthType.USE_OPENAI && error.type === 'NO_FINISH_REASON'
+    );
   }
 
   /**
