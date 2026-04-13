@@ -776,18 +776,12 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const {
-    messageQueue,
-    addMessage,
-    clearQueue,
-    getQueuedMessagesText,
-    popAllMessages,
-    drainQueue,
-  } = useMessageQueue({
-    isConfigInitialized,
-    streamingState,
-    submitQuery,
-  });
+  const { messageQueue, addMessage, popAllMessages, drainQueue } =
+    useMessageQueue({
+      isConfigInitialized,
+      streamingState,
+      submitQuery,
+    });
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it
@@ -977,23 +971,24 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
 
-    const lastUserMessage = userMessages.at(-1);
-    let textToSet = lastUserMessage || '';
-
-    const queuedText = getQueuedMessagesText();
-    if (queuedText) {
-      textToSet = textToSet ? `${textToSet}\n\n${queuedText}` : queuedText;
-      clearQueue();
-    }
-
-    if (textToSet) {
-      buffer.setText(textToSet);
+    // Move any queued follow-up messages back into the buffer so the user
+    // can edit or resubmit them. Otherwise leave the buffer alone — in
+    // particular, do NOT repopulate it with the previous prompt; the user
+    // can still recall it via history navigation (Up/Ctrl+P).
+    //
+    // popAllMessages is atomic via the queue's synchronous ref, matching
+    // the drain behavior used during tool completion.
+    const popped = popAllMessages();
+    if (popped) {
+      const currentText = buffer.text;
+      // Preserve any in-progress draft the user typed since submitting (this
+      // is reachable via Ctrl+C cancel, which fires regardless of buffer
+      // content). Mirrors the popQueueIntoInput convention in InputPrompt.
+      buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
     }
   }, [
     buffer,
-    userMessages,
-    getQueuedMessagesText,
-    clearQueue,
+    popAllMessages,
     pendingSlashCommandHistoryItems,
     pendingGeminiHistoryItems,
   ]);
