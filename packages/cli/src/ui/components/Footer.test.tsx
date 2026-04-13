@@ -11,7 +11,7 @@ import * as useTerminalSize from '../hooks/useTerminalSize.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { VimModeProvider } from '../contexts/VimModeContext.js';
-import { VerboseModeProvider } from '../contexts/VerboseModeContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../hooks/useTerminalSize.js');
@@ -34,7 +34,22 @@ const createMockUIState = (overrides: Partial<UIState> = {}): UIState =>
   ({
     sessionStats: {
       lastPromptTokenCount: 100,
+      sessionId: 'test-session',
+      metrics: {
+        models: {},
+        tools: {
+          totalCalls: 0,
+          totalSuccess: 0,
+          totalFail: 0,
+          totalDurationMs: 0,
+          totalDecisions: { accept: 0, reject: 0, modify: 0, auto_accept: 0 },
+          byName: {},
+        },
+        files: { totalLinesAdded: 0, totalLinesRemoved: 0 },
+      },
     },
+    currentModel: 'gemini-pro',
+    branchName: undefined,
     geminiMdFileCount: 0,
     contextFileNames: [],
     showToolDescriptions: false,
@@ -53,14 +68,17 @@ const createMockSettings = (): LoadedSettings =>
 
 const renderWithWidth = (width: number, uiState: UIState) => {
   useTerminalSizeMock.mockReturnValue({ columns: width, rows: 24 });
+  const mockSettings = createMockSettings();
   return render(
-    <ConfigContext.Provider value={createMockConfig() as never}>
-      <VimModeProvider settings={createMockSettings()}>
-        <UIStateContext.Provider value={uiState}>
-          <Footer />
-        </UIStateContext.Provider>
-      </VimModeProvider>
-    </ConfigContext.Provider>,
+    <SettingsContext.Provider value={mockSettings}>
+      <ConfigContext.Provider value={createMockConfig() as never}>
+        <VimModeProvider settings={mockSettings}>
+          <UIStateContext.Provider value={uiState}>
+            <Footer />
+          </UIStateContext.Provider>
+        </VimModeProvider>
+      </ConfigContext.Provider>
+    </SettingsContext.Provider>,
   );
 };
 
@@ -94,44 +112,6 @@ describe('<Footer />', () => {
     it('renders complete footer on narrow terminal', () => {
       const { lastFrame } = renderWithWidth(79, createMockUIState());
       expect(lastFrame()).toMatchSnapshot('complete-footer-narrow');
-    });
-  });
-
-  describe('verbose mode indicator', () => {
-    it('shows verbose label when verboseMode=true', () => {
-      useTerminalSizeMock.mockReturnValue({ columns: 120, rows: 24 });
-      const { lastFrame } = render(
-        <VerboseModeProvider
-          value={{ verboseMode: true, frozenSnapshot: null }}
-        >
-          <ConfigContext.Provider value={createMockConfig() as never}>
-            <VimModeProvider settings={createMockSettings()}>
-              <UIStateContext.Provider value={createMockUIState()}>
-                <Footer />
-              </UIStateContext.Provider>
-            </VimModeProvider>
-          </ConfigContext.Provider>
-        </VerboseModeProvider>,
-      );
-      expect(lastFrame()).toContain('verbose');
-    });
-
-    it('hides verbose label when verboseMode=false', () => {
-      useTerminalSizeMock.mockReturnValue({ columns: 120, rows: 24 });
-      const { lastFrame } = render(
-        <VerboseModeProvider
-          value={{ verboseMode: false, frozenSnapshot: null }}
-        >
-          <ConfigContext.Provider value={createMockConfig() as never}>
-            <VimModeProvider settings={createMockSettings()}>
-              <UIStateContext.Provider value={createMockUIState()}>
-                <Footer />
-              </UIStateContext.Provider>
-            </VimModeProvider>
-          </ConfigContext.Provider>
-        </VerboseModeProvider>,
-      );
-      expect(lastFrame()).not.toContain('verbose');
     });
   });
 });

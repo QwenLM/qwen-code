@@ -56,6 +56,7 @@ You'll be prompted to log in on first use. That's it! [Continue with Quickstart 
 - **Debug and fix issues**: Describe a bug or paste an error message. Qwen Code will analyze your codebase, identify the problem, and implement a fix.
 - **Navigate any codebase**: Ask anything about your team's codebase, and get a thoughtful answer back. Qwen Code maintains awareness of your entire project structure, can find up-to-date information from the web, and with [MCP](./features/mcp) can pull from external datasources like Google Drive, Figma, and Slack.
 - **Automate tedious tasks**: Fix fiddly lint issues, resolve merge conflicts, and write release notes. Do all this in a single command from your developer machines, or automatically in CI.
+- **[Followup suggestions](./features/followup-suggestions)**: Qwen Code predicts what you want to type next and shows it as ghost text. Press Tab to accept, or just keep typing to dismiss.
 
 ## Why developers love Qwen Code
 

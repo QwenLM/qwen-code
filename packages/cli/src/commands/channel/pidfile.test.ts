@@ -122,7 +122,6 @@ describe('signalService', () => {
   });
 
   it('returns false when process is not found', () => {
-
     process.kill = vi.fn(() => {
       throw new Error('ESRCH');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -140,7 +139,6 @@ describe('signalService', () => {
 
 describe('waitForExit', () => {
   it('returns true immediately if process is already dead', async () => {
-
     process.kill = vi.fn(() => {
       throw new Error('ESRCH');
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

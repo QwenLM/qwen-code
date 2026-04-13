@@ -82,12 +82,13 @@ export function cpSlice(str: string, start: number, end?: number): string {
  * Characters stripped:
  * - ANSI escape sequences (via strip-ansi)
  * - VT control sequences (via Node.js util.stripVTControlCharacters)
- * - C0 control chars (0x00-0x1F) except CR/LF which are handled elsewhere
+ * - C0 control chars (0x00-0x1F) except TAB/CR/LF which are handled elsewhere
  * - C1 control chars (0x80-0x9F) that can cause display issues
  *
  * Characters preserved:
  * - All printable Unicode including emojis
  * - DEL (0x7F) - handled functionally by applyOperations, not a display issue
+ * - TAB (0x09) - needed for pasted tab-separated data (e.g. from spreadsheets)
  * - CR/LF (0x0D/0x0A) - needed for line breaks
  */
 export function stripUnsafeCharacters(str: string): string {
@@ -99,8 +100,8 @@ export function stripUnsafeCharacters(str: string): string {
       const code = char.codePointAt(0);
       if (code === undefined) return false;
 
-      // Preserve CR/LF for line handling
-      if (code === 0x0a || code === 0x0d) return true;
+      // Preserve TAB/CR/LF for line handling and pasted tabular data
+      if (code === 0x09 || code === 0x0a || code === 0x0d) return true;
 
       // Remove C0 control chars (except CR/LF) that can break display
       // Examples: BELL(0x07) makes noise, BS(0x08) moves cursor, VT(0x0B), FF(0x0C)

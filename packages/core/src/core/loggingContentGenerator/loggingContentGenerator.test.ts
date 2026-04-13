@@ -480,7 +480,7 @@ describe('LoggingContentGenerator', () => {
     ]);
   });
 
-  it.each(['prompt_suggestion', 'forked_query'])(
+  it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
     'skips logApiRequest and OpenAI logging for internal promptId %s (generateContent)',
     async (promptId) => {
       const mockResponse = {
@@ -521,7 +521,7 @@ describe('LoggingContentGenerator', () => {
     },
   );
 
-  it.each(['prompt_suggestion', 'forked_query'])(
+  it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
     'skips logApiRequest and OpenAI logging for internal promptId %s (generateContentStream)',
     async (promptId) => {
       const mockChunk = {

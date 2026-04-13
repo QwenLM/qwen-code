@@ -228,6 +228,19 @@ describe('InputPrompt', () => {
       unmount();
     });
 
+    it('does not accept the prompt suggestion on shift+tab', async () => {
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} promptSuggestion="commit this" />,
+      );
+      await wait(350);
+
+      stdin.write('\x1b[Z'); // shift+tab
+      await wait();
+
+      expect(mockBuffer.insert).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it('accepts and submits the prompt suggestion on Enter when the buffer is empty', async () => {
       const { stdin, unmount } = renderWithProviders(
         <InputPrompt {...props} promptSuggestion="commit this" />,
@@ -454,7 +467,8 @@ describe('InputPrompt', () => {
     });
 
     // Windows uses Alt+V (\x1Bv), non-Windows uses Ctrl+V (\x16)
-    it.skipIf(isWindows)(
+    const describeConditional = isWindows ? it.skip : it;
+    describeConditional(
       'should handle Ctrl+V when clipboard has an image',
       async () => {
         vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
@@ -855,7 +869,6 @@ describe('InputPrompt', () => {
       // Verify useCompletion was called with correct signature
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -884,7 +897,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -913,7 +925,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -942,7 +953,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -971,7 +981,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1001,7 +1010,6 @@ describe('InputPrompt', () => {
       // Verify useCompletion was called with the buffer
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1030,7 +1038,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1060,7 +1067,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1090,7 +1096,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1120,7 +1125,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1150,7 +1154,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1182,7 +1185,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1212,7 +1214,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1244,7 +1245,6 @@ describe('InputPrompt', () => {
 
       expect(mockedUseCommandCompletion).toHaveBeenCalledWith(
         mockBuffer,
-        ['/test/project/src'],
         path.join('test', 'project', 'src'),
         mockSlashCommands,
         mockCommandContext,
@@ -1304,6 +1304,23 @@ describe('InputPrompt', () => {
 
       expect(props.vimHandleInput).toHaveBeenCalled();
       expect(mockBuffer.handleInput).toHaveBeenCalled();
+      unmount();
+    });
+
+    it('should toggle shortcuts when vim passes through ? on an empty prompt', async () => {
+      props.vimHandleInput = vi.fn().mockReturnValue(false);
+      props.onToggleShortcuts = vi.fn();
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('?');
+      await wait();
+
+      expect(props.vimHandleInput).toHaveBeenCalled();
+      expect(props.onToggleShortcuts).toHaveBeenCalled();
       unmount();
     });
   });
@@ -2407,36 +2424,6 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('should delete entire placeholder on backspace', async () => {
-      const placeholderText = '[Pasted Content 1001 chars]';
-      mockBuffer.text = placeholderText;
-      mockBuffer.lines = [placeholderText];
-      mockBuffer.cursor = [0, placeholderText.length];
-
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} />,
-      );
-      await wait();
-
-      // First set up a placeholder via paste
-      const largeContent = 'x'.repeat(1001);
-      stdin.write(`\x1b[200~${largeContent}\x1b[201~`);
-      await wait();
-
-      // Press backspace to delete the placeholder
-      stdin.write('\x7f'); // backspace character
-      await wait();
-
-      // Verify replaceRangeByOffset was called to delete entire placeholder
-      expect(mockBuffer.replaceRangeByOffset).toHaveBeenCalledWith(
-        0,
-        placeholderText.length,
-        '',
-      );
-
-      unmount();
-    });
-
     it('should reuse placeholder ID after deletion', async () => {
       // Set up mocks that actually update buffer state
       vi.mocked(mockBuffer.insert).mockImplementation((text: string) => {
@@ -2679,7 +2666,7 @@ describe('InputPrompt', () => {
     });
 
     it('should pop queued messages into input on Up arrow when queue is non-empty', async () => {
-      const mockPopAll = vi.fn(() => 'queued msg 1\nqueued msg 2');
+      const mockPopAll = vi.fn(() => 'queued msg 1\n\nqueued msg 2');
       vi.mocked(useUIState).mockReturnValue({
         isFeedbackDialogOpen: false,
         messageQueue: ['queued msg 1', 'queued msg 2'],
@@ -2700,8 +2687,94 @@ describe('InputPrompt', () => {
 
       expect(mockPopAll).toHaveBeenCalled();
       expect(props.buffer.setText).toHaveBeenCalledWith(
-        'queued msg 1\nqueued msg 2',
+        'queued msg 1\n\nqueued msg 2',
       );
+      unmount();
+    });
+
+    it('should prepend queued messages before existing input text', async () => {
+      const mockPopAll = vi.fn(() => 'queued msg');
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued msg'],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAll,
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      // Set existing text in buffer
+      props.buffer.text = 'existing input';
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(props.buffer.setText).toHaveBeenCalledWith(
+        'queued msg\nexisting input',
+      );
+      // Cursor should be positioned at start of existing text
+      expect(props.buffer.moveToOffset).toHaveBeenCalledWith(
+        'queued msg'.length + 1, // popped length + newline
+      );
+      unmount();
+    });
+
+    it('should pop queued messages on ESC when queue is non-empty', async () => {
+      const mockPopAll = vi.fn(() => 'queued msg');
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['queued msg'],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAll,
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B'); // ESC
+      await wait();
+
+      expect(mockPopAll).toHaveBeenCalled();
+      expect(props.buffer.setText).toHaveBeenCalledWith('queued msg');
+      unmount();
+    });
+
+    it('should fall through to history when pop returns null (race condition)', async () => {
+      // Simulate: React state says queue is non-empty, but queueRef was
+      // already drained by another pop/drain — popAllQueuedMessages returns null.
+      const mockPopAll = vi.fn(() => null);
+      vi.mocked(useUIState).mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: ['stale msg'],
+      } as ReturnType<typeof useUIState>);
+      vi.mocked(useUIActions).mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: mockPopAll,
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\u001B[A'); // Up arrow
+      await wait();
+
+      expect(mockPopAll).toHaveBeenCalled();
+      expect(props.buffer.setText).not.toHaveBeenCalled();
+      expect(mockInputHistory.navigateUp).toHaveBeenCalled();
       unmount();
     });
 

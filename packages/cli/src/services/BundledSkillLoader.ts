@@ -33,7 +33,23 @@ export class BundledSkillLoader implements ICommandLoader {
     }
 
     try {
-      const skills = await skillManager.listSkills({ level: 'bundled' });
+      const allSkills = await skillManager.listSkills({ level: 'bundled' });
+
+      // Hide skills whose allowedTools require cron when cron is disabled
+      const cronEnabled = this.config?.isCronEnabled() ?? false;
+      const skills = allSkills.filter((skill) => {
+        if (
+          !cronEnabled &&
+          skill.allowedTools?.some((t) => t.startsWith('cron_'))
+        ) {
+          debugLogger.debug(
+            `Hiding skill "${skill.name}" because cron is not enabled`,
+          );
+          return false;
+        }
+        return true;
+      });
+
       debugLogger.debug(
         `Loaded ${skills.length} bundled skill(s) as slash commands`,
       );
@@ -43,12 +59,22 @@ export class BundledSkillLoader implements ICommandLoader {
         description: skill.description,
         kind: CommandKind.SKILL,
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
+          // Resolve template variables in skill body
+          let body = skill.body;
+          const modelId = this.config?.getModel()?.trim() || '';
+          if (body.includes('{{model}}') || body.includes('YOUR_MODEL_ID')) {
+            body = body.replaceAll('{{model}}', modelId);
+            body = body.replaceAll('YOUR_MODEL_ID', modelId);
+            // Prepend model identity as a top-level declaration so the LLM
+            // cannot miss it even if it doesn't copy the template exactly.
+            if (modelId) {
+              body = `YOUR_MODEL_ID="${modelId}"\n\n${body}`;
+            }
+          }
+
           const content = context.invocation?.args
-            ? appendToLastTextPart(
-                [{ text: skill.body }],
-                context.invocation.raw,
-              )
-            : [{ text: skill.body }];
+            ? appendToLastTextPart([{ text: body }], context.invocation.raw)
+            : [{ text: body }];
 
           return {
             type: 'submit_prompt',

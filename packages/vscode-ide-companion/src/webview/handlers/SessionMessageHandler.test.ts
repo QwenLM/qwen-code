@@ -12,6 +12,9 @@ const { mockProcessImageAttachments, mockShowErrorMessage } = vi.hoisted(
     mockShowErrorMessage: vi.fn(),
   }),
 );
+const { mockExecuteCommand } = vi.hoisted(() => ({
+  mockExecuteCommand: vi.fn(),
+}));
 
 vi.mock('vscode', () => ({
   window: {
@@ -19,7 +22,7 @@ vi.mock('vscode', () => ({
     showErrorMessage: mockShowErrorMessage,
   },
   commands: {
-    executeCommand: vi.fn(),
+    executeCommand: mockExecuteCommand,
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
@@ -48,6 +51,27 @@ describe('SessionMessageHandler', () => {
     });
   });
 
+  it('forwards the active model when opening a new chat tab', async () => {
+    const handler = new SessionMessageHandler(
+      {
+        isConnected: true,
+        currentSessionId: 'session-1',
+      } as never,
+      {} as never,
+      null,
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'openNewChatTab',
+      data: { modelId: 'glm-5' },
+    });
+
+    expect(mockExecuteCommand).toHaveBeenCalledWith('qwenCode.openNewChatTab', {
+      initialModelId: 'glm-5',
+    });
+  });
+
   it('does not create conversation state or send an empty prompt when all pasted images fail to materialize', async () => {
     const agentManager = {
       isConnected: true,
@@ -64,7 +88,7 @@ describe('SessionMessageHandler', () => {
     const handler = new SessionMessageHandler(
       agentManager as never,
       conversationStore as never,
-      null,
+      'conversation-1',
       sendToWebView,
     );
 
@@ -160,5 +184,39 @@ describe('SessionMessageHandler', () => {
         uri: 'file:///tmp/clipboard/clipboard-123.png',
       },
     ]);
+  });
+
+  it('forces a fresh ACP session when the webview requests a new session', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      createNewSession: vi.fn().mockResolvedValue('session-2'),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'newQwenSession',
+    });
+
+    expect(handler.getCurrentConversationId()).toBeNull();
+    expect(agentManager.createNewSession).toHaveBeenCalledWith('/workspace', {
+      forceNew: true,
+    });
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'conversationCleared',
+      data: {},
+    });
   });
 });

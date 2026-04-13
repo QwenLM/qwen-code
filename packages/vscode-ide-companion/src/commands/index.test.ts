@@ -70,6 +70,7 @@ describe('registerNewCommands', () => {
     const provider = {
       show: vi.fn().mockResolvedValue(undefined),
       createNewSession: vi.fn().mockResolvedValue(undefined),
+      setInitialModelId: vi.fn(),
     };
 
     registerNewCommands(
@@ -80,10 +81,13 @@ describe('registerNewCommands', () => {
       () => provider as never,
     );
 
-    await getRegisteredHandler(openNewChatTabCommand)();
+    await getRegisteredHandler(openNewChatTabCommand)({
+      initialModelId: 'glm-5',
+    });
 
     expect(provider.show).toHaveBeenCalledTimes(1);
     expect(provider.createNewSession).not.toHaveBeenCalled();
+    expect(provider.setInitialModelId).toHaveBeenCalledWith('glm-5');
   });
 
   it('focusChat focuses the secondary sidebar when it is supported', async () => {

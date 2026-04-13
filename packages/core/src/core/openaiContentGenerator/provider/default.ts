@@ -7,7 +7,7 @@ import type { OpenAICompatibleProvider } from './types.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import {
   tokenLimit,
-  DEFAULT_OUTPUT_TOKEN_LIMIT,
+  CAPPED_DEFAULT_MAX_TOKENS,
   hasExplicitOutputLimit,
 } from '../../tokenLimits.js';
 
@@ -101,18 +101,19 @@ export class DefaultOpenAICompatibleProvider
    *    - For unknown models (deployment aliases, self-hosted): respect user's
    *      configured value entirely (backend may support larger limits)
    * 2. If user didn't configure max_tokens:
-   *    - Use min(modelLimit, DEFAULT_OUTPUT_TOKEN_LIMIT)
-   *    - This provides a conservative default (32K) that avoids truncating output
-   *      while preserving input quota (not occupying too much context window)
+   *    - Check QWEN_CODE_MAX_OUTPUT_TOKENS env var first
+   *    - Otherwise use min(modelLimit, CAPPED_DEFAULT_MAX_TOKENS=8K)
+   *    - Requests hitting the 8K cap get one clean retry at 64K (geminiChat.ts)
    * 3. If model has no specific limit (tokenLimit returns default):
-   *    - Still apply DEFAULT_OUTPUT_TOKEN_LIMIT as safeguard
+   *    - Still apply CAPPED_DEFAULT_MAX_TOKENS as safeguard
    *
    * Examples:
    * - User sets 4K, known model limit 64K → uses 4K (respects user preference)
    * - User sets 100K, known model limit 64K → uses 64K (capped to avoid API error)
    * - User sets 100K, unknown model → uses 100K (respects user, backend may support it)
-   * - User not set, model limit 64K → uses 32K (conservative default)
-   * - User not set, model limit 8K → uses 8K (model limit is lower)
+   * - User not set, model limit 64K → uses 8K (capped default for slot optimization)
+   * - User not set, model limit 4K → uses 4K (model limit is lower)
+   * - User not set, env QWEN_CODE_MAX_OUTPUT_TOKENS=16000 -> uses 16K
    *
    * @param request - The chat completion request parameters
    * @returns The request with max_tokens adjusted according to the logic
@@ -140,9 +141,18 @@ export class DefaultOpenAICompatibleProvider
         effectiveMaxTokens = userMaxTokens;
       }
     } else {
-      // User didn't configure, use conservative default:
-      // min(model-specific limit, DEFAULT_OUTPUT_TOKEN_LIMIT)
-      effectiveMaxTokens = Math.min(modelLimit, DEFAULT_OUTPUT_TOKEN_LIMIT);
+      // No explicit user config — check env var, then use capped default.
+      // Capped default (8K) reduces GPU slot over-reservation by ~4×.
+      // Requests hitting the cap get one clean retry at 64K (geminiChat.ts).
+      const envVal = process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+      const envMaxTokens = envVal ? parseInt(envVal, 10) : NaN;
+      if (!isNaN(envMaxTokens) && envMaxTokens > 0) {
+        effectiveMaxTokens = isKnownModel
+          ? Math.min(envMaxTokens, modelLimit)
+          : envMaxTokens;
+      } else {
+        effectiveMaxTokens = Math.min(modelLimit, CAPPED_DEFAULT_MAX_TOKENS);
+      }
     }
 
     return {

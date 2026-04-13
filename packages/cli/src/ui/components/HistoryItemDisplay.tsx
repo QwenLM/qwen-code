@@ -10,7 +10,6 @@ import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
 } from '../utils/textUtils.js';
-import { useVerboseMode } from '../contexts/VerboseModeContext.js';
 import type { HistoryItem } from '../types.js';
 import {
   UserMessage,
@@ -49,6 +48,7 @@ import { ContextUsage } from './views/ContextUsage.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
+import { useCompactMode } from '../contexts/CompactModeContext.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -75,23 +75,15 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   embeddedShellFocused,
   availableTerminalHeightGemini,
 }) => {
-  const { verboseMode } = useVerboseMode();
-  const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
-  const contentWidth = terminalWidth - 4;
-  const boxWidth = mainAreaWidth || contentWidth;
-
-  const isCompactSpacing =
-    !verboseMode &&
-    (item.type === 'tool_group' ||
-      item.type === 'gemini' ||
-      item.type === 'gemini_thought');
-
   const marginTop =
     item.type === 'gemini_content' || item.type === 'gemini_thought_content'
       ? 0
-      : isCompactSpacing
-        ? 0
-        : 1;
+      : 1;
+
+  const { compactMode } = useCompactMode();
+  const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
+  const contentWidth = terminalWidth - 4;
+  const boxWidth = mainAreaWidth || contentWidth;
 
   return (
     <Box
@@ -128,7 +120,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {verboseMode && itemForDisplay.type === 'gemini_thought' && (
+      {!compactMode && itemForDisplay.type === 'gemini_thought' && (
         <ThinkMessage
           text={itemForDisplay.text}
           isPending={isPending}
@@ -138,7 +130,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           contentWidth={contentWidth}
         />
       )}
-      {verboseMode && itemForDisplay.type === 'gemini_thought_content' && (
+      {!compactMode && itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
           text={itemForDisplay.text}
           isPending={isPending}
@@ -246,7 +238,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <InsightProgressMessage progress={itemForDisplay.progress} />
       )}
       {itemForDisplay.type === 'btw' && itemForDisplay.btw && (
-        <BtwMessage btw={itemForDisplay.btw} />
+        <BtwMessage btw={itemForDisplay.btw} containerWidth={contentWidth} />
       )}
       {itemForDisplay.type === 'user_prompt_submit_blocked' && (
         <Box flexDirection="column">

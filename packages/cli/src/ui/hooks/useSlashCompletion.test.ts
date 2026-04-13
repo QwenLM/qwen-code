@@ -246,6 +246,36 @@ describe('useSlashCompletion', () => {
       });
     });
 
+    it('should prefer higher completionPriority when match quality ties', async () => {
+      const slashCommands = [
+        createTestCommand({
+          name: 'mock',
+          description: 'Mock command',
+        }),
+        createTestCommand({
+          name: 'model',
+          description: 'Model command',
+          completionPriority: 100,
+        }),
+      ];
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/mo',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.map((s) => s.value)).toEqual([
+          'model',
+          'mock',
+        ]);
+      });
+    });
+
     it('should suggest commands based on partial altNames', async () => {
       const slashCommands = [
         createTestCommand({

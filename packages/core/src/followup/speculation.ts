@@ -136,6 +136,11 @@ export async function startSpeculation(
   // Run the speculative loop in the background
   runSpeculativeLoop(config, state, cacheSafe, options?.model)
     .then(async (result) => {
+      if (abortController.signal.aborted) {
+        state.status = 'aborted';
+        await overlayFs.cleanup();
+        return;
+      }
       if (state.status === 'running') {
         state.messages = result.messages;
         if (result.boundary) {

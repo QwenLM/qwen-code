@@ -6,9 +6,10 @@
 
 import esbuild from 'esbuild';
 import { createRequire } from 'node:module';
-import { existsSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { wasmLoader } from 'esbuild-plugin-wasm';
 
 const production = process.argv.includes('--production');
 const watch = process.argv.includes('--watch');
@@ -80,26 +81,29 @@ const reactDedupPlugin = {
   },
 };
 
-const coreDistAliasPlugin = {
-  name: 'core-dist-alias',
+/**
+ * Resolve `*.wasm?binary` imports to embedded Uint8Array content.
+ * This keeps the companion bundle compatible with core's inline-WASM loader.
+ * @type {import('esbuild').Plugin}
+ */
+const wasmBinaryPlugin = {
+  name: 'wasm-binary',
   setup(build) {
-    build.onResolve(
-      { filter: /^@qwen-code\/qwen-code-core\/src\// },
-      ({ path }) => {
-        const subpath = path.replace('@qwen-code/qwen-code-core/src/', '');
-        const resolvedPath = resolve(
-          repoRoot,
-          'packages/core/dist/src',
-          subpath,
-        );
+    build.onResolve({ filter: /\.wasm\?binary$/ }, (args) => {
+      const specifier = args.path.replace(/\?binary$/, '');
+      const localRequire = createRequire(
+        resolve(args.resolveDir || repoRoot, '_dummy_.js'),
+      );
+      return {
+        path: localRequire.resolve(specifier),
+        namespace: 'wasm-binary',
+      };
+    });
 
-        if (!existsSync(resolvedPath)) {
-          return undefined;
-        }
-
-        return { path: resolvedPath };
-      },
-    );
+    build.onLoad({ filter: /.*/, namespace: 'wasm-binary' }, (args) => ({
+      contents: readFileSync(args.path),
+      loader: 'binary',
+    }));
   },
 };
 
@@ -182,7 +186,12 @@ async function main() {
     define: {
       'import.meta.url': 'import_meta.url',
     },
-    plugins: [coreDistAliasPlugin, esbuildProblemMatcherPlugin],
+    plugins: [
+      wasmBinaryPlugin,
+      wasmLoader({ mode: 'embedded' }),
+      /* add to the end of plugins array */
+      esbuildProblemMatcherPlugin,
+    ],
     loader: { '.node': 'file' },
   });
 
@@ -200,14 +209,14 @@ async function main() {
     // Since @qwen-code/webui marks it as external in its own Vite build, the
     // browser bundle must also mark it external to avoid bundling Node.js-only
     // modules (undici, @grpc/grpc-js, fs, stream, etc.) into the webview.
-    external: ['@qwen-code/qwen-code-core'],
+    // The wildcard ensures deep sub-path imports (e.g.
+    // '@qwen-code/qwen-code-core/src/core/tokenLimits.js') are also excluded;
+    // without it esbuild only matches the bare package name and attempts to
+    // bundle the sub-path, which triggers "Dynamic require is not supported"
+    // at runtime in the browser.
+    external: ['@qwen-code/qwen-code-core', '@qwen-code/qwen-code-core/*'],
     logLevel: 'silent',
-    plugins: [
-      coreDistAliasPlugin,
-      reactDedupPlugin,
-      cssInjectPlugin,
-      esbuildProblemMatcherPlugin,
-    ],
+    plugins: [reactDedupPlugin, cssInjectPlugin, esbuildProblemMatcherPlugin],
     jsx: 'automatic', // Use new JSX transform (React 17+)
     define: {
       'process.env.NODE_ENV': production ? '"production"' : '"development"',

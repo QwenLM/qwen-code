@@ -14,6 +14,7 @@
 const INTERNAL_PROMPT_IDS: ReadonlySet<string> = new Set([
   'prompt_suggestion',
   'forked_query',
+  'speculation',
 ]);
 
 /**
@@ -21,7 +22,7 @@ const INTERNAL_PROMPT_IDS: ReadonlySet<string> = new Set([
  * whose events should not be recorded to the chatRecordingService,
  * OpenAI logs, or other persistent stores visible in the UI.
  *
- * Known internal IDs: `'prompt_suggestion'`, `'forked_query'`.
+ * Known internal IDs: `'prompt_suggestion'`, `'forked_query'`, `'speculation'`.
  */
 export function isInternalPromptId(promptId: string): boolean {
   return INTERNAL_PROMPT_IDS.has(promptId);

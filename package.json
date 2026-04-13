@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.14.0",
+  "version": "0.14.3",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -18,7 +18,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.0"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.3"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
@@ -67,19 +67,13 @@
     "pre-commit": "node scripts/pre-commit.js"
   },
   "overrides": {
-    "ink": "6.2.3",
     "wrap-ansi": "9.0.2",
     "ansi-regex": "6.2.2",
     "cliui": {
       "wrap-ansi": "7.0.0"
     },
     "baseline-browser-mapping": "^2.9.19",
-    "@qwen-code/channel-base": "npm:@alife/dataworks-qwen-code-channel-base@*",
-    "@qwen-code/channel-telegram": "npm:@alife/dataworks-qwen-code-channel-telegram@*",
-    "@qwen-code/channel-weixin": "npm:@alife/dataworks-qwen-code-channel-weixin@*",
-    "@qwen-code/channel-dingtalk": "npm:@alife/dataworks-qwen-code-channel-dingtalk@*",
-    "@qwen-code/qwen-code-core": "npm:@alife/dataworks-qwen-code-core@*",
-    "@qwen-code/web-templates": "npm:@alife/dataworks-qwen-code-web-templates@*"
+    "normalize-package-data": "^7.0.1"
   },
   "bin": {
     "qwen": "dist/cli.js"
@@ -102,6 +96,7 @@
     "@xterm/xterm": "^6.0.0",
     "cross-env": "^7.0.3",
     "esbuild": "^0.25.0",
+    "esbuild-plugin-wasm": "^1.1.0",
     "eslint": "^9.24.0",
     "eslint-config-prettier": "^10.1.2",
     "eslint-plugin-import": "^2.31.0",
@@ -142,7 +137,7 @@
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": [
       "prettier --write",
-      "eslint --fix --max-warnings 0"
+      "eslint --fix --max-warnings 0 --no-warn-ignored"
     ],
     "*.{json,md}": [
       "prettier --write"
