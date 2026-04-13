@@ -368,11 +368,8 @@ describe('readPathFromWorkspace', () => {
     ).rejects.toThrow('Path not found in workspace: not-found.txt');
   });
 
-  // mock-fs permission simulation is unreliable on Windows and when running as root (UID 0).
-  it.skipIf(
-    process.platform === 'win32' ||
-      (process.getuid !== undefined && process.getuid() === 0),
-  )(
+  // mock-fs permission simulation is unreliable on Windows.
+  it.skipIf(process.platform === 'win32')(
     'should return an error string if reading a file with no permissions',
     async () => {
       mock({

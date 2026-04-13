@@ -34,23 +34,6 @@ const anthropicMockState: {
   createImpl: vi.fn(),
 };
 
-// Mock undici to prevent real Agent instantiation which can hang in CI.
-vi.mock('undici', () => {
-  class MockAgent {
-    options: Record<string, unknown>;
-    constructor(options: Record<string, unknown>) {
-      this.options = options;
-    }
-  }
-  class MockProxyAgent {
-    options: Record<string, unknown>;
-    constructor(options: Record<string, unknown>) {
-      this.options = options;
-    }
-  }
-  return { Agent: MockAgent, ProxyAgent: MockProxyAgent };
-});
-
 vi.mock('@anthropic-ai/sdk', () => {
   class AnthropicMock {
     messages: { create: (...args: AnthropicCreateArgs) => unknown };
