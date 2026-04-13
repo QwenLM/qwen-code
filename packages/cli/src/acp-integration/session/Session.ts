@@ -88,6 +88,10 @@ import {
   buildPermissionRequestContent,
   toPermissionOptions,
 } from './permissionUtils.js';
+import {
+  MessageRewriteMiddleware,
+  type MessageRewriteConfig,
+} from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -124,6 +128,9 @@ export class Session implements SessionContext {
   private readonly planEmitter: PlanEmitter;
   private readonly messageEmitter: MessageEmitter;
 
+  // Message rewrite middleware (optional)
+  readonly messageRewriter?: MessageRewriteMiddleware;
+
   // Implement SessionContext interface
   readonly sessionId: string;
 
@@ -136,6 +143,18 @@ export class Session implements SessionContext {
   ) {
     this.sessionId = id;
     this.runtimeBaseDir = Storage.getRuntimeBaseDir();
+
+    // Initialize message rewrite middleware if configured
+    const rewriteConfig = (settings as Record<string, unknown>)
+      .messageRewrite as MessageRewriteConfig | undefined;
+    if (rewriteConfig?.enabled) {
+      debugLogger.info('Message rewrite middleware enabled');
+      this.messageRewriter = new MessageRewriteMiddleware(
+        config,
+        rewriteConfig,
+        (update) => this.sendUpdate(update),
+      );
+    }
 
     // Initialize modular components with this session as context
     this.toolCallEmitter = new ToolCallEmitter(this);
@@ -391,6 +410,11 @@ export class Session implements SessionContext {
           }
 
           if (usageMetadata) {
+            // Flush rewrite buffer before emitting usage (marks turn boundary)
+            if (this.messageRewriter) {
+              await this.messageRewriter.flushTurn(pendingSend.signal);
+            }
+
             const durationMs = Date.now() - streamStartTime;
             await this.messageEmitter.emitUsageMetadata(
               usageMetadata,

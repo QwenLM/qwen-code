@@ -11,6 +11,7 @@ import type {
   ToolCallLocation,
   ToolKind,
 } from '@agentclientprotocol/sdk';
+import type { MessageRewriteMiddleware } from './rewrite/index.js';
 
 export type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'yolo';
 
@@ -29,6 +30,8 @@ export interface SessionUpdateSender {
 export interface SessionContext extends SessionUpdateSender {
   readonly sessionId: string;
   readonly config: Config;
+  /** Optional message rewrite middleware for ACP message transformation */
+  readonly messageRewriter?: MessageRewriteMiddleware;
 }
 
 /**
