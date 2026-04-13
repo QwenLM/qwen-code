@@ -72,9 +72,12 @@ describe('ProcessTransport', () => {
   let mockStdin: Writable;
   let mockStdout: Readable;
   let mockStderr: Readable;
+  // Track exit listeners added during each test to clean them up afterwards.
+  let exitListenersBefore: ((...args: unknown[]) => void)[];
 
   beforeEach(() => {
     vi.clearAllMocks();
+    exitListenersBefore = [...process.listeners('exit')];
 
     // Clean up environment variables for FORK_MODE tests
     delete process.env.FORK_MODE;
@@ -116,6 +119,12 @@ describe('ProcessTransport', () => {
   });
 
   afterEach(() => {
+    // Remove exit listeners added during this test to prevent accumulation.
+    for (const listener of process.listeners('exit')) {
+      if (!exitListenersBefore.includes(listener)) {
+        process.removeListener('exit', listener as NodeJS.ExitListener);
+      }
+    }
     vi.restoreAllMocks();
   });
 
