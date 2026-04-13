@@ -948,6 +948,13 @@ describe('fileUtils', () => {
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
       mockMimeGetType.mockReturnValue('application/pdf');
 
+      // Debug: Check what PDFParse returns
+      const { PDFParse } = await import('pdf-parse');
+      const parser = new PDFParse({ data: fakePdfData });
+      console.log('PDFParse result:', parser);
+      console.log('parser.getText:', parser.getText);
+      console.log('typeof parser.getText:', typeof parser.getText);
+
       // Mock pdf-parse to return text
       pdfMocks.getText.mockResolvedValue({
         text: 'Extracted PDF text content',
