@@ -23,6 +23,11 @@ import {
 } from './mcp-client.js';
 import type { ToolRegistry } from './tool-registry.js';
 
+const mockExistsSync = vi.hoisted(() => vi.fn(() => true));
+
+vi.mock('node:fs', () => ({
+  existsSync: mockExistsSync,
+}));
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js');
 vi.mock('@modelcontextprotocol/sdk/client/index.js');
 vi.mock('@google/genai');
@@ -287,6 +292,23 @@ describe('mcp-client', () => {
         env: { ...process.env, FOO: 'bar' },
         stderr: 'pipe',
       });
+    });
+
+    it('should throw if cwd does not exist', async () => {
+      mockExistsSync.mockReturnValueOnce(false);
+
+      await expect(
+        createTransport(
+          'test-server',
+          {
+            command: 'test-command',
+            cwd: '/nonexistent/path',
+          },
+          false,
+        ),
+      ).rejects.toThrow(
+        "MCP server 'test-server': configured cwd does not exist: /nonexistent/path",
+      );
     });
 
     describe('useGoogleCredentialProvider', () => {
