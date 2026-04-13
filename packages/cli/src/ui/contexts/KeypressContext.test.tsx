@@ -13,6 +13,7 @@ import {
   KeypressProvider,
   useKeypressContext,
   DRAG_COMPLETION_TIMEOUT_MS,
+  PASTE_IDLE_TIMEOUT_MS,
   // CSI_END_O,
   // SS3_END,
   SINGLE_QUOTE,
@@ -286,7 +287,9 @@ describe('KeypressContext - Kitty Protocol', () => {
       });
 
       // Wait long enough for the paste idle timeout to trigger recovery.
-      await new Promise((r) => setTimeout(r, 1500));
+      // Derived from the production constant so the test stays in sync
+      // if the timeout is ever tuned.
+      await new Promise((r) => setTimeout(r, PASTE_IDLE_TIMEOUT_MS + 200));
 
       // A plain ASCII key after recovery must reach the handler.
       act(() => {
