@@ -35,7 +35,7 @@ export class MessageRewriteMiddleware {
 
   constructor(
     config: Config,
-    private readonly rewriteConfig: MessageRewriteConfig,
+    rewriteConfig: MessageRewriteConfig,
     private readonly sendUpdate: (update: SessionUpdate) => Promise<void>,
   ) {
     this.turnBuffer = new TurnBuffer();
@@ -51,8 +51,8 @@ export class MessageRewriteMiddleware {
     update: SessionUpdate,
     signal?: AbortSignal,
   ): Promise<void> {
-    const updateType = (update as Record<string, unknown>)
-      .sessionUpdate as string;
+    const updateRecord = update as Record<string, unknown>;
+    const updateType = updateRecord['sessionUpdate'] as string;
 
     // tool_call signals turn boundary — flush before passing through
     if (updateType === 'tool_call') {
@@ -69,9 +69,10 @@ export class MessageRewriteMiddleware {
       return this.sendUpdate(update);
     }
 
-    const text =
-      ((update as Record<string, unknown>).content as Record<string, string>)
-        ?.text ?? '';
+    const content = updateRecord['content'] as
+      | Record<string, string>
+      | undefined;
+    const text = content?.['text'] ?? '';
 
     // Always send original message as-is
     await this.sendUpdate(update);

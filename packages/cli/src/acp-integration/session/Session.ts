@@ -145,8 +145,9 @@ export class Session implements SessionContext {
     this.runtimeBaseDir = Storage.getRuntimeBaseDir();
 
     // Initialize message rewrite middleware if configured
-    const rewriteConfig = (settings as Record<string, unknown>)
-      .messageRewrite as MessageRewriteConfig | undefined;
+    const rewriteConfig = (settings as unknown as Record<string, unknown>)[
+      'messageRewrite'
+    ] as MessageRewriteConfig | undefined;
     if (rewriteConfig?.enabled) {
       debugLogger.info('Message rewrite middleware enabled');
       this.messageRewriter = new MessageRewriteMiddleware(

@@ -10,16 +10,40 @@ import type { TurnContent, MessageRewriteConfig } from './types.js';
 
 const debugLogger = createDebugLogger('MESSAGE_REWRITER');
 
-const DEFAULT_REWRITE_PROMPT = `你是 ACP 消息改写助手。将 Agent 的原始输出改写为业务人员可读的版本。
+const DEFAULT_REWRITE_PROMPT = `你是数据分析过程的展示优化助手。将 Agent 的原始输出改写为结构化的、面向业务同学的分析过程展示。
 
-规则：
-- 保留：分析结论、数据发现、计算口径说明、建议、表格数据
-- 过滤：文件路径、工具名称、SQL 语句、代码片段、技术调试信息、QWEN.md 指令复述
-- 如果输入是纯技术操作（修复错误、创建目录、读取文件等），输出空字符串
-- 风格：简洁、结论先行、中文
-- 保持数据准确性，不要改写数字
+## 输出风格参考
 
-只输出改写后的文本，不要解释。如果无有价值内容可输出，返回空字符串。`;
+用简洁的要点列表展示分析过程，让业务同学清晰看到"在做什么、怎么做、发现了什么"：
+
+示例——数据理解阶段：
+"数据理解完成。数据记录了全球多个游戏的销售数据及评分信息，涵盖游戏名称、平台、类型、发行商等维度。
+• 涵盖游戏基本信息（名称、平台、类型、发行年份等）及全球销量
+• 各地区销量（北美、欧洲、日本、其他地区）
+• 媒体评分与用户评分数量"
+
+示例——分析执行阶段：
+"策略类游戏市场基本面分析
+• 清洗数据：将 'tbd' 替换为空值，确保评分字段为数值型
+• 计算策略类游戏的平均媒体评分与平均用户评分，并与全品类均值对比
+• 分析评分与销量的相关性（如高分是否带动高销量），绘制评分-销量散点图并计算相关系数
+• 识别'高分低销'与'低分高销'的异常游戏案例，初步推测原因"
+
+示例——结论阶段：
+"Central 地区盈利能力最差
+• 利润率仅 7.92%，是 West 地区（14.94%）的一半
+• 核心原因：折扣策略失控，平均折扣 24%，是其他地区的 2 倍
+• Texas 和 Illinois 两州合计亏损占 68%"
+
+## 规则
+
+1. **保留的内容**：数据概览、分析模块名称和目标、计算口径（如"利润率 = SUM(利润)/SUM(销售额)"）、分析方法选择原因、数据发现和洞察（含具体数字）、结论、建议、表格
+2. **过滤的内容**：文件路径、工具/Skill 名称、SQL 语句、Python 代码、技术报错信息、QWEN.md/工作流指令复述、"让我..."/"现在我来..."等自述性过渡语
+3. **纯技术操作**（修复代码错误、创建目录、安装依赖等）→ 输出空字符串
+4. **数据准确性**：不要改写任何数字、百分比、金额，原样保留
+5. **语言**：中文，简洁，用要点列表（•）组织
+
+只输出改写后的文本。如果输入无业务价值，返回空字符串。`;
 
 /**
  * Uses LLM to rewrite turn content into business-friendly text.
@@ -47,14 +71,10 @@ export class LlmRewriter {
     const inputParts: string[] = [];
 
     if (turnContent.thoughts.length > 0) {
-      inputParts.push(
-        '[内部推理]\n' + turnContent.thoughts.join('\n'),
-      );
+      inputParts.push('[内部推理]\n' + turnContent.thoughts.join('\n'));
     }
     if (turnContent.messages.length > 0) {
-      inputParts.push(
-        '[回复文本]\n' + turnContent.messages.join('\n'),
-      );
+      inputParts.push('[回复文本]\n' + turnContent.messages.join('\n'));
     }
 
     const inputText = inputParts.join('\n\n');
@@ -70,8 +90,7 @@ export class LlmRewriter {
         return null;
       }
 
-      const model =
-        this.config.getSmallFastModel?.() || this.config.getModel();
+      const model = this.config.getModel();
 
       const result = await contentGenerator.generateContent(
         {
