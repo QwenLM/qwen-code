@@ -175,17 +175,19 @@ export function updateOutputLanguageFile(settingValue: string): void {
  * @param outputLanguage - The output language setting value (e.g., 'auto', 'Chinese', etc.)
  *
  * Behavior:
- * - Resolves the setting value ('auto' -> detected system language, or use as-is)
- * - Ensures the rule file matches the resolved language
- * - Creates the file if it doesn't exist
+ * - If the rule file already exists and contains a valid language setting, do nothing (preserve user modifications)
+ * - If the rule file doesn't exist, create it with the resolved language ('auto' -> detected system language, or use as-is)
  */
 export function initializeLlmOutputLanguage(outputLanguage?: string): void {
-  // Resolve 'auto' or undefined to the detected system language
-  const resolved = resolveOutputLanguage(outputLanguage);
+  // Check if the file already exists and has valid content
   const currentFileLanguage = readOutputLanguageFromFile();
 
-  // Only write if the file doesn't match the resolved language
-  if (currentFileLanguage !== resolved) {
-    writeOutputLanguageFile(resolved);
+  // If file exists with valid language, preserve user's setting - do nothing
+  if (currentFileLanguage) {
+    return;
   }
+
+  // File doesn't exist or has invalid content, create it with resolved language
+  const resolved = resolveOutputLanguage(outputLanguage);
+  writeOutputLanguageFile(resolved);
 }

@@ -674,6 +674,10 @@ export default {
   'Loading hooks...': 'Loading hooks...',
   'Error loading hooks:': 'Error loading hooks:',
   'Press Escape to close': 'Press Escape to close',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Press Escape, Ctrl+C, or Ctrl+D to cancel',
+  'Press Space, Enter, or Escape to dismiss':
+    'Press Space, Enter, or Escape to dismiss',
   'No hook selected': 'No hook selected',
   // Hooks - List Step
   'No hook events found.': 'No hook events found.',
@@ -1147,7 +1151,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': 'Switch the model for this session',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Switch the model for this session (--fast for suggestion model)',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Set a lighter model for prompt suggestions and speculative execution',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',
@@ -1231,6 +1238,8 @@ export default {
   'Always allow for this user': 'Always allow for this user',
   'Always allow {{action}} for this user':
     'Always allow {{action}} for this user',
+  'Yes, restore previous mode ({{mode}})':
+    'Yes, restore previous mode ({{mode}})',
   'Yes, and auto-accept edits': 'Yes, and auto-accept edits',
   'Yes, and manually approve edits': 'Yes, and manually approve edits',
   'No, keep planning (esc)': 'No, keep planning (esc)',
@@ -1386,8 +1395,8 @@ export default {
   unknown: 'unknown',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Failed to switch model to '{{modelId}}'.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — efficient hybrid model with leading coding performance',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — efficient hybrid model with leading coding performance',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)',
 
@@ -1525,9 +1534,9 @@ export default {
   'Restarting MCP servers...': 'Restarting MCP servers...',
 
   // ============================================================================
-  // Startup Examples
+  // Startup Tips
   // ============================================================================
-  'Example: ': 'Example: ',
+  'Tips:': 'Tips:',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     'Use /compress when the conversation gets long to summarize history and free up context.',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
@@ -1548,19 +1557,6 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 Identity: "Help me verify my identity and permissions in DataWorks?"',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."',
-  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
-    'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -2017,11 +2013,22 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
-  'Verbose mode on — showing full tool output and thinking':
-    'Verbose mode on — showing full tool output and thinking',
-  'Compact mode on — showing tool names and final responses only':
-    'Compact mode on — showing tool names and final responses only',
-  verbose: 'verbose',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).',
+  compact: 'compact',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+  'Press Ctrl+O to show full tool output':
+    'Press Ctrl+O to show full tool output',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code-webui",
-  "version": "0.14.2",
+  "version": "0.14.3",
   "description": "Shared UI components for Qwen Code packages",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -12,13 +12,8 @@
       "import": "./dist/index.js",
       "require": "./dist/index.cjs"
     },
-    "./followup": {
-      "types": "./dist/src/followup.d.ts",
-      "import": "./dist/followup.js",
-      "require": "./dist/followup.cjs"
-    },
     "./icons": {
-      "types": "./dist/src/components/icons/index.d.ts",
+      "types": "./dist/components/icons/index.d.ts",
       "import": "./dist/components/icons/index.js",
       "require": "./dist/components/icons/index.cjs"
     },
@@ -33,12 +28,11 @@
     "**/*.css"
   ],
   "publishConfig": {
-    "registry": "https://registry.anpm.alibaba-inc.com",
     "access": "public"
   },
   "scripts": {
     "dev": "vite build --watch",
-    "build": "vite build && vite build --config vite.config.followup.ts",
+    "build": "vite build",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src --ext .ts,.tsx",
     "lint:fix": "eslint src --ext .ts,.tsx --fix",
@@ -46,18 +40,10 @@
     "build-storybook": "storybook build"
   },
   "peerDependencies": {
-    "@qwen-code/qwen-code-core": ">=0.13.1",
     "react": "^18.0.0 || ^19.0.0",
     "react-dom": "^18.0.0 || ^19.0.0"
   },
-  "peerDependenciesMeta": {
-    "@qwen-code/qwen-code-core": {
-      "optional": true
-    }
-  },
   "dependencies": {
-    "alien-signals": "^0.4.14",
-    "compare-versions": "^6.1.1",
     "markdown-it": "^14.1.0"
   },
   "devDependencies": {
@@ -72,19 +58,23 @@
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^4.2.0",
-    "@vitest/browser": "^3.2.4",
-    "@vitest/coverage-v8": "^3.2.4",
     "autoprefixer": "^10.4.0",
-    "eslint-plugin-storybook": "^10.1.11",
-    "kolorist": "^1.8.0",
-    "playwright": "^1.57.0",
     "postcss": "^8.4.0",
-    "storybook": "^10.1.11",
     "tailwindcss": "^3.4.0",
     "typescript": "^5.0.0",
     "vite": "^5.0.0",
     "vite-plugin-dts": "^4.5.4",
-    "vscode-uri": "^3.0.8"
+    "storybook": "^10.1.11",
+    "@storybook/react-vite": "^10.1.11",
+    "@chromatic-com/storybook": "^5.0.0",
+    "@storybook/addon-vitest": "^10.1.11",
+    "@storybook/addon-a11y": "^10.1.11",
+    "@storybook/addon-docs": "^10.1.11",
+    "@storybook/addon-onboarding": "^10.1.11",
+    "eslint-plugin-storybook": "^10.1.11",
+    "playwright": "^1.57.0",
+    "@vitest/browser": "^3.2.4",
+    "@vitest/coverage-v8": "^3.2.4"
   },
   "keywords": [
     "qwen",

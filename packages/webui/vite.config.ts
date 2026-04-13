@@ -7,11 +7,7 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import dts from 'vite-plugin-dts';
-import { resolve, dirname } from 'path';
-import { writeFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { resolve } from 'path';
 
 /**
  * Vite configuration for @qwen-code/webui library
@@ -33,17 +29,8 @@ export default defineConfig({
     dts({
       include: ['src'],
       outDir: 'dist',
-      rollupTypes: false,
+      rollupTypes: true,
       insertTypesEntry: true,
-      afterBuild: () => {
-        // vite-plugin-dts outputs declarations under dist/src/ preserving
-        // directory structure, but the package "types" field points to
-        // dist/index.d.ts. The generated stub only contains `export {}`.
-        // Overwrite it with a re-export using .js extension so consumers
-        // with NodeNext moduleResolution can resolve the types correctly.
-        const stubPath = resolve(__dirname, 'dist/index.d.ts');
-        writeFileSync(stubPath, "export * from './src/index.js';\n");
-      },
     }),
   ],
   build: {

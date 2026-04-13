@@ -1,10 +1,10 @@
 {
   "name": "@alife/dataworks-qwen-code-web-templates",
-  "version": "0.14.2",
+  "version": "0.14.3",
   "description": "Web templates bundled as embeddable JS/CSS strings",
   "repository": {
     "type": "git",
-    "url": "git@gitlab.alibaba-inc.com:alishu/qwen-code.git"
+    "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "type": "module",
   "main": "dist/index.js",
@@ -22,9 +22,6 @@
   "files": [
     "dist"
   ],
-  "publishConfig": {
-    "registry": "https://registry.anpm.alibaba-inc.com"
-  },
   "dependencies": {},
   "devDependencies": {
     "@types/react": "^18.2.0",

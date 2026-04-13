@@ -373,4 +373,17 @@ export const contextCommand: SlashCommand = {
 
     context.ui.addItem(contextUsageItem, Date.now());
   },
+  subCommands: [
+    {
+      name: 'detail',
+      get description() {
+        return t('Show per-item context usage breakdown.');
+      },
+      kind: CommandKind.BUILT_IN,
+      action: async (context: CommandContext) => {
+        // Delegate to main action with 'detail' arg to show detailed view
+        await contextCommand.action!(context, 'detail');
+      },
+    },
+  ],
 };

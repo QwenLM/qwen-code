@@ -16,6 +16,7 @@
 
 import Parser from 'web-tree-sitter';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
@@ -24,15 +25,47 @@ import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 // Constants
 // ---------------------------------------------------------------------------
 
-function resolveModuleFilePath(moduleFilePath: string): string {
+/**
+ * Load a WASM file as a Uint8Array.
+ *
+ * In bundle mode (esbuild with wasmBinaryPlugin), the `?binary` import is
+ * transformed at build-time to embed the WASM bytes inline, so `dynamicImport`
+ * succeeds and returns the bytes immediately — no external vendor files needed.
+ *
+ * In source / transpiled mode (Vitest, tsx, etc.), the `?binary` specifier is
+ * unknown to Node's module resolver and the import throws.  The catch block
+ * falls back to reading the file directly from node_modules.
+ */
+async function loadWasmBinary(
+  dynamicImport: () => Promise<unknown>,
+  fallbackSpecifier: string,
+): Promise<Uint8Array> {
+  const nativeFs =
+    (process.getBuiltinModule?.('fs') as
+      | typeof import('node:fs')
+      | undefined) ?? fs;
+  const moduleFilePath = fileURLToPath(import.meta.url);
+  const isBundleMode =
+    !moduleFilePath.includes(path.join('src', '')) &&
+    !moduleFilePath.includes(path.join('dist', 'src', ''));
+
   try {
-    const resolved = fs.realpathSync(moduleFilePath);
-    // Guard against test environments where `fs` is mocked and realpathSync
-    // returns undefined rather than throwing.
-    return typeof resolved === 'string' ? resolved : moduleFilePath;
+    if (isBundleMode) {
+      // Bundle mode: esbuild replaces `?binary` imports with inline Uint8Array.
+      const mod = await dynamicImport();
+      const wasmBinary = (mod as { default?: unknown }).default;
+      if (wasmBinary instanceof Uint8Array && wasmBinary.byteLength > 0) {
+        return wasmBinary;
+      }
+    }
   } catch {
-    return moduleFilePath;
+    // Fall through to node_modules lookup below.
   }
+
+  // Source / dev mode: read the file directly from node_modules.
+  const require = createRequire(import.meta.url);
+  const filePath = require.resolve(fallbackSpecifier);
+  return new Uint8Array(nativeFs.readFileSync(filePath));
 }
 
 /**
@@ -574,123 +607,6 @@ let initPromise: Promise<void> | null = null;
 let parserInitFailed = false;
 
 /**
- * Resolve the path to a WASM file inside vendor/tree-sitter/.
- * Handles three deployment scenarios:
- *   - Source (src/utils/*.ts): 2 levels up to package root
- *   - Transpiled (dist/src/utils/*.js): 3 levels up
- *   - Bundle (dist/cli.js): vendor at same level (0 levels)
- *
- * For the bundle scenario the vendor directory must be located next to
- * the cli.js bundle file.  The challenge is that `import.meta.url` may
- * point to a symlink (e.g. `/usr/bin/qwen`) rather than the real file
- * (`/usr/lib/node_modules/@qwen-code/qwen-code/cli.js`), and whether
- * Node.js automatically resolves symlinks for `import.meta.url` depends
- * on the version and OS.  We therefore probe several candidate directories
- * and return the first path where the vendor file actually exists.
- */
-function resolveWasmPath(filename: string): string {
-  const rawPath = fileURLToPath(import.meta.url);
-
-  // Source / transpiled case: vendor is at a fixed relative depth.
-  if (rawPath.includes(path.join('src', 'utils'))) {
-    const levelsUp = rawPath.endsWith('.ts') ? 2 : 3;
-    return path.join(
-      path.dirname(rawPath),
-      ...Array<string>(levelsUp).fill('..'),
-      'vendor',
-      'tree-sitter',
-      filename,
-    );
-  }
-
-  // Bundle case: probe candidate directories so that symlinked installations
-  // and non-standard installs (e.g. direct binary copy) are handled robustly.
-  const candidateDirs = getWasmCandidateDirs(rawPath);
-  for (const dir of candidateDirs) {
-    const candidate = path.join(dir, 'vendor', 'tree-sitter', filename);
-    try {
-      if (fs.existsSync(candidate)) return candidate;
-    } catch {
-      /* ignore */
-    }
-  }
-
-  // Fallback: first candidate (caller will receive ENOENT if file is missing).
-  return path.join(
-    candidateDirs[0] ?? path.dirname(rawPath),
-    'vendor',
-    'tree-sitter',
-    filename,
-  );
-}
-
-/**
- * Return an ordered, deduplicated list of directories where the bundled
- * vendor directory might live.  We try multiple sources because:
- *
- *  1. `import.meta.url` may already be the real path (Node.js 18+ resolves
- *     symlinks for the entry module on most platforms).
- *  2. On some Linux configurations the symlink is NOT resolved, so we
- *     additionally try `fs.realpathSync` on the raw path.
- *  3. `process.argv[1]` is the path Node.js was actually invoked with and
- *     can differ from `import.meta.url` in certain execution environments.
- */
-function getWasmCandidateDirs(rawModulePath: string): string[] {
-  const unique = new Set<string>();
-  const add = (p: string | null | undefined) => {
-    if (p) unique.add(p);
-  };
-
-  // Candidate 1: directory of import.meta.url as-is.
-  add(path.dirname(rawModulePath));
-
-  // Candidate 2: realpath of import.meta.url (resolves symlinks when
-  // Node.js has not already done so).
-  try {
-    const real = fs.realpathSync(rawModulePath);
-    if (typeof real === 'string') add(path.dirname(real));
-  } catch {
-    /* ignore */
-  }
-
-  // Candidate 3 & 4: same two approaches but using process.argv[1], which
-  // may point to the real file even when import.meta.url does not.
-  if (process.argv[1]) {
-    add(path.dirname(process.argv[1]));
-    try {
-      const real = fs.realpathSync(process.argv[1]);
-      if (typeof real === 'string') add(path.dirname(real));
-    } catch {
-      /* ignore */
-    }
-  }
-
-  return [...unique];
-}
-
-function resolveWasmPathForModule(
-  filename: string,
-  moduleFilePath: string,
-  resolvePath: (moduleFilePath: string) => string = resolveModuleFilePath,
-): string {
-  const resolvedModuleFilePath = resolvePath(moduleFilePath);
-  const moduleDir = path.dirname(resolvedModuleFilePath);
-  const inSrcUtils = resolvedModuleFilePath.includes(path.join('src', 'utils'));
-  const levelsUp = !inSrcUtils
-    ? 0
-    : resolvedModuleFilePath.endsWith('.ts')
-      ? 2
-      : 3;
-  return path.join(
-    moduleDir,
-    ...Array<string>(levelsUp).fill('..'),
-    'vendor',
-    'tree-sitter',
-    filename,
-  );
-}
-
-/**
  * Initialise the tree-sitter Parser singleton.
  * Safe to call multiple times – only the first call does real work.
  */
@@ -704,14 +620,18 @@ export async function initParser(): Promise<void> {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    const treeSitterWasm = resolveWasmPath('tree-sitter.wasm');
-    await Parser.init({
-      locateFile: () => treeSitterWasm,
-    });
-    parserInstance = new Parser();
-    bashLanguage = await Parser.Language.load(
-      resolveWasmPath('tree-sitter-bash.wasm'),
+    const treeSitterWasm = await loadWasmBinary(
+      () => import('web-tree-sitter/tree-sitter.wasm?binary' as string),
+      'web-tree-sitter/tree-sitter.wasm',
     );
+    await Parser.init({ wasmBinary: treeSitterWasm });
+    parserInstance = new Parser();
+    const bashWasm = await loadWasmBinary(
+      () =>
+        import('tree-sitter-wasms/out/tree-sitter-bash.wasm?binary' as string),
+      'tree-sitter-wasms/out/tree-sitter-bash.wasm',
+    );
+    bashLanguage = await Parser.Language.load(bashWasm);
     parserInstance.setLanguage(bashLanguage);
   })().catch((err: unknown) => {
     // Mark as permanently failed so callers can use the regex fallback
@@ -1233,16 +1153,4 @@ export function _setParserFailedForTesting(): void {
     parserInstance = null;
   }
   bashLanguage = null;
-}
-
-/**
- * Internal helper exposed for tests.
- * @internal
- */
-export function _resolveWasmPathForTesting(
-  filename: string,
-  moduleFilePath: string,
-  resolvePath?: (moduleFilePath: string) => string,
-): string {
-  return resolveWasmPathForModule(filename, moduleFilePath, resolvePath);
 }

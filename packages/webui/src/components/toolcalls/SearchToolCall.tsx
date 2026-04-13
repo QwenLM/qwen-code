@@ -15,6 +15,7 @@ import {
 } from './shared/index.js';
 import type { BaseToolCallProps, ContainerStatus } from './shared/index.js';
 import { FileLink } from '../layout/FileLink.js';
+import { getToolDisplayLabel } from './labelUtils.js';
 
 /**
  * Collapsible output component for search results
@@ -88,22 +89,6 @@ const LocationsListLocal: FC<{
 );
 
 /**
- * Map tool call kind to appropriate display name
- */
-const getDisplayLabel = (kind: string): string => {
-  const normalizedKind = kind.toLowerCase();
-  if (normalizedKind === 'grep' || normalizedKind === 'grep_search') {
-    return 'Grep';
-  } else if (normalizedKind === 'glob') {
-    return 'Glob';
-  } else if (normalizedKind === 'web_search') {
-    return 'WebSearch';
-  } else {
-    return 'Search';
-  }
-};
-
-/**
  * Specialized component for Search tool calls
  * Optimized for displaying search operations and results
  */
@@ -114,7 +99,7 @@ export const SearchToolCall: FC<BaseToolCallProps> = ({
 }) => {
   const { kind, title, content, locations } = toolCall;
   const queryText = safeTitle(title);
-  const displayLabel = getDisplayLabel(kind);
+  const displayLabel = getToolDisplayLabel({ kind, title });
   const containerStatus: ContainerStatus = mapToolStatusToContainerStatus(
     toolCall.status,
   );

@@ -1,10 +1,10 @@
 {
   "name": "@alife/dataworks-qwen-code",
-  "version": "0.14.2",
+  "version": "0.14.3",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
-    "url": "git@gitlab.alibaba-inc.com:alishu/qwen-code.git"
+    "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "type": "module",
   "main": "dist/index.js",
@@ -33,7 +33,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.2"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.3"
   },
   "publishConfig": {
     "registry": "https://registry.anpm.alibaba-inc.com"

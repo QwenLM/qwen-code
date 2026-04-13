@@ -16,7 +16,7 @@ import type {
 import { ToolGroupMessage } from './messages/ToolGroupMessage.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
-import { VerboseModeProvider } from '../contexts/VerboseModeContext.js';
+import { CompactModeProvider } from '../contexts/CompactModeContext.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
@@ -286,7 +286,7 @@ describe('<HistoryItemDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
-  describe('verbose mode — thought rendering', () => {
+  describe('compact mode — thought rendering', () => {
     const thoughtItem: HistoryItem = {
       id: 1,
       type: 'gemini_thought',
@@ -295,8 +295,8 @@ describe('<HistoryItemDisplay />', () => {
 
     it('hides gemini_thought in compact mode', () => {
       const { lastFrame } = renderWithProviders(
-        <VerboseModeProvider
-          value={{ verboseMode: false, frozenSnapshot: null }}
+        <CompactModeProvider
+          value={{ compactMode: true, frozenSnapshot: null }}
         >
           <HistoryItemDisplay
             item={thoughtItem}
@@ -304,15 +304,15 @@ describe('<HistoryItemDisplay />', () => {
             availableTerminalHeight={24}
             terminalWidth={80}
           />
-        </VerboseModeProvider>,
+        </CompactModeProvider>,
       );
       expect(lastFrame()).not.toContain('thinking-text-xyz');
     });
 
     it('shows gemini_thought in verbose mode', () => {
       const { lastFrame } = renderWithProviders(
-        <VerboseModeProvider
-          value={{ verboseMode: true, frozenSnapshot: null }}
+        <CompactModeProvider
+          value={{ compactMode: false, frozenSnapshot: null }}
         >
           <HistoryItemDisplay
             item={thoughtItem}
@@ -320,7 +320,7 @@ describe('<HistoryItemDisplay />', () => {
             availableTerminalHeight={24}
             terminalWidth={80}
           />
-        </VerboseModeProvider>,
+        </CompactModeProvider>,
       );
       expect(lastFrame()).toContain('thinking-text-xyz');
     });
