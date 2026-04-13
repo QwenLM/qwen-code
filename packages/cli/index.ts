@@ -6,6 +6,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { initStartupProfiler } from './src/utils/startupProfiler.js';
+
+initStartupProfiler();
+
 import './src/gemini.js';
 import { main } from './src/gemini.js';
 import { FatalError } from '@qwen-code/qwen-code-core';
