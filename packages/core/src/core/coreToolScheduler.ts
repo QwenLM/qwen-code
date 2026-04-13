@@ -351,7 +351,6 @@ export class CoreToolScheduler {
   private chatRecordingService?: ChatRecordingService;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
-  /** Tracks consecutive validation failures per tool name for retry loop detection. */
   private validationRetryCounts = new Map<string, number>();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
@@ -419,8 +418,8 @@ export class CoreToolScheduler {
 
       switch (newStatus) {
         case 'success': {
-          // Any successful tool execution resets all validation retry counters
-          this.validationRetryCounts.clear();
+          // Successful execution only resets retry state for this tool
+          this.validationRetryCounts.delete(currentCall.request.name);
           const durationMs = existingStartTime
             ? Date.now() - existingStartTime
             : undefined;
@@ -807,13 +806,25 @@ export class CoreToolScheduler {
             : invocationOrError;
 
           // Track validation retry for loop detection
-          const count = (this.validationRetryCounts.get(reqInfo.name) ?? 0) + 1;
-          this.validationRetryCounts.set(reqInfo.name, count);
+          const errorKey = `${reqInfo.name}:${baseError.message}`;
+          const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
 
-          const error =
-            count >= VALIDATION_RETRY_LOOP_THRESHOLD
-              ? new Error(`${baseError.message}${RETRY_LOOP_STOP_DIRECTIVE}`)
-              : baseError;
+          // Only clear other validation counts for the same tool, preserve other tools' counts
+          for (const [key, _] of this.validationRetryCounts) {
+            if (key.startsWith(`${reqInfo.name}:`) && key !== errorKey) {
+              this.validationRetryCounts.delete(key);
+            }
+          }
+
+          this.validationRetryCounts.set(errorKey, count);
+
+          let finalError = baseError;
+          if (count >= 3) {
+            // Inject strong stop directive after 3 consecutive failures with same error
+            const stopDirective =
+              '\n⚠️ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. STOP retrying the same approach and try a fundamentally different strategy or ask for help.';
+            finalError = new Error(`${baseError.message}${stopDirective}`);
+          }
 
           newToolCalls.push({
             status: 'error',
@@ -821,7 +832,7 @@ export class CoreToolScheduler {
             tool: toolInstance,
             response: createErrorResponse(
               reqInfo,
-              error,
+              finalError,
               ToolErrorType.INVALID_TOOL_PARAMS,
             ),
             durationMs: 0,
@@ -829,8 +840,12 @@ export class CoreToolScheduler {
           continue;
         }
 
-        // Reset retry counter for this tool since it passed validation
-        this.validationRetryCounts.delete(reqInfo.name);
+        // Reset all validation retry counters for this tool since it passed validation
+        for (const [key, _] of this.validationRetryCounts) {
+          if (key.startsWith(`${reqInfo.name}:`)) {
+            this.validationRetryCounts.delete(key);
+          }
+        }
 
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content.

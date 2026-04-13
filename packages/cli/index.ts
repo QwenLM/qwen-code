@@ -47,7 +47,10 @@ const isExpectedPtyRaceError = (error: unknown): boolean => {
   }
 
   // EAGAIN: transient non-blocking read error from PTY fd
-  if (code === 'EAGAIN' || message.includes('EAGAIN')) {
+  if (
+    (code === 'EAGAIN' && message.includes('read')) ||
+    message.includes('read EAGAIN')
+  ) {
     return true;
   }
 
