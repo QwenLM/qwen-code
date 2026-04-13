@@ -7,18 +7,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const mockGenerateJson = vi.hoisted(() => vi.fn());
-const mockOpenDiff = vi.hoisted(() => vi.fn());
-
-import { IdeClient } from '../ide/ide-client.js';
-
-vi.mock('../ide/ide-client.js', () => ({
-  IdeClient: {
-    getInstance: vi.fn(),
-  },
-}));
 
 vi.mock('../utils/editor.js', () => ({
-  openDiff: mockOpenDiff,
+  openDiff: vi.fn(),
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
@@ -30,7 +21,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { EditToolParams } from './edit.js';
 import { applyReplacement, EditTool } from './edit.js';
 import type { FileDiff } from './tools.js';
-import { ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -875,95 +865,6 @@ describe('EditTool', () => {
       };
       const error = tool.validateToolParams(externalPath);
       expect(error).toBeNull();
-    });
-  });
-
-  describe('IDE mode', () => {
-    const testFile = 'edit_me.txt';
-    let filePath: string;
-    let ideClient: any;
-
-    beforeEach(() => {
-      filePath = path.join(rootDir, testFile);
-      ideClient = {
-        openDiff: vi.fn(),
-        isDiffingEnabled: vi.fn().mockReturnValue(true),
-      };
-      vi.mocked(IdeClient.getInstance).mockResolvedValue(ideClient);
-      (mockConfig as any).getIdeMode = () => true;
-    });
-
-    it('should call ideClient.openDiff and update params on confirmation', async () => {
-      const initialContent = 'some old content here';
-      const newContent = 'some new content here';
-      const modifiedContent = 'some modified content here';
-      fs.writeFileSync(filePath, initialContent);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-      ideClient.openDiff.mockResolvedValueOnce({
-        status: 'accepted',
-        content: modifiedContent,
-      });
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      );
-
-      expect(ideClient.openDiff).toHaveBeenCalledWith(filePath, newContent);
-
-      if (confirmation && 'onConfirm' in confirmation) {
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-      }
-
-      expect(params.old_string).toBe(initialContent);
-      expect(params.new_string).toBe(modifiedContent);
-    });
-
-    it('should not call ideClient.openDiff in AUTO_EDIT mode', async () => {
-      const initialContent = 'some old content here';
-      fs.writeFileSync(filePath, initialContent);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.AUTO_EDIT,
-      );
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      );
-
-      expect(ideClient.openDiff).not.toHaveBeenCalled();
-      expect(confirmation).toBeDefined();
-      expect((confirmation as any).ideConfirmation).toBeUndefined();
-    });
-
-    it('should not call ideClient.openDiff in YOLO mode', async () => {
-      const initialContent = 'some old content here';
-      fs.writeFileSync(filePath, initialContent);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
-        ApprovalMode.YOLO,
-      );
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      );
-
-      expect(ideClient.openDiff).not.toHaveBeenCalled();
-      expect((confirmation as any).ideConfirmation).toBeUndefined();
     });
   });
 });

@@ -207,6 +207,33 @@ describe('BuiltinCommandLoader', () => {
     expect(modelCmd?.name).toBe('model');
   });
 
+  it('should still load all other commands when ideCommand() throws', async () => {
+    // Simulate ideCommand() failure (e.g., platform-specific process detection fails)
+    const { ideCommand: ideCommandMock } = await import(
+      '../ui/commands/ideCommand.js'
+    );
+    (ideCommandMock as Mock).mockRejectedValueOnce(
+      new Error('PowerShell not available'),
+    );
+
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+
+    // IDE command should NOT be present
+    const ideCmd = commands.find((c) => c.name === 'ide');
+    expect(ideCmd).toBeUndefined();
+
+    // But all other built-in commands should still be loaded
+    const modelCmd = commands.find((c) => c.name === 'model');
+    expect(modelCmd).toBeDefined();
+
+    const statusCmd = commands.find((c) => c.name === 'status');
+    expect(statusCmd).toBeDefined();
+
+    const mcpCmd = commands.find((c) => c.name === 'mcp');
+    expect(mcpCmd).toBeDefined();
+  });
+
   it('should always include hooks command regardless of disableAllHooks', async () => {
     // When disableAllHooks is false
     const loader1 = new BuiltinCommandLoader(mockConfig);

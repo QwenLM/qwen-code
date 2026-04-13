@@ -84,7 +84,6 @@ const setupMocks = ({
 describe('useCommandCompletion', () => {
   const mockCommandContext = {} as CommandContext;
   const mockConfig = {} as Config;
-  const testDirs: string[] = [];
   const testRootDir = '/';
 
   // Helper to create real TextBuffer objects within renderHook
@@ -114,7 +113,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest(''),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -139,7 +137,6 @@ describe('useCommandCompletion', () => {
           const textBuffer = useTextBufferForTest('@file');
           const completion = useCommandCompletion(
             textBuffer,
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -172,7 +169,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('@files'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -200,7 +196,6 @@ describe('useCommandCompletion', () => {
         renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest(text),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -226,7 +221,6 @@ describe('useCommandCompletion', () => {
         renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest(text, cursorOffset),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -265,7 +259,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -286,7 +279,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -306,7 +298,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -332,7 +323,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -361,7 +351,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -398,7 +387,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -427,7 +415,6 @@ describe('useCommandCompletion', () => {
       renderHook(() =>
         useCommandCompletion(
           useTextBufferForTest(text),
-          testDirs,
           testRootDir,
           [],
           mockCommandContext,
@@ -455,7 +442,6 @@ describe('useCommandCompletion', () => {
       renderHook(() =>
         useCommandCompletion(
           useTextBufferForTest(text),
-          testDirs,
           testRootDir,
           [],
           mockCommandContext,
@@ -484,7 +470,6 @@ describe('useCommandCompletion', () => {
         const textBuffer = useTextBufferForTest(text);
         const completion = useCommandCompletion(
           textBuffer,
-          testDirs,
           testRootDir,
           [],
           mockCommandContext,
@@ -517,7 +502,6 @@ describe('useCommandCompletion', () => {
         const textBuffer = useTextBufferForTest('/mem');
         const completion = useCommandCompletion(
           textBuffer,
-          testDirs,
           testRootDir,
           [],
           mockCommandContext,
@@ -547,7 +531,6 @@ describe('useCommandCompletion', () => {
         const textBuffer = useTextBufferForTest('@src/fi');
         const completion = useCommandCompletion(
           textBuffer,
-          testDirs,
           testRootDir,
           [],
           mockCommandContext,
@@ -580,7 +563,6 @@ describe('useCommandCompletion', () => {
         const textBuffer = useTextBufferForTest(text, cursorOffset);
         const completion = useCommandCompletion(
           textBuffer,
-          testDirs,
           testRootDir,
           [],
           mockCommandContext,

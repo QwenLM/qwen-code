@@ -20,10 +20,10 @@ exports[`<ToolGroupMessage /> > Border Color Logic > uses yellow border when too
 ╰──────────────────────────────────────────────────────────────────────────────╯"
 `;
 
-exports[`<ToolGroupMessage /> > Compact Mode (dataworks fork) > uses CompactToolGroupDisplay when verboseMode is false 1`] = `
+exports[`<ToolGroupMessage /> > Compact Mode (dataworks fork) > uses CompactToolGroupDisplay when compactMode is true 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────╮
 │⊷  second-tool  A tool for testing                                            │
-│使用 ctrl+o 可查看详细工具调用结果                                            │
+│Press Ctrl+O to show full tool output                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯"
 `;
 

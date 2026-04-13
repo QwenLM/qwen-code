@@ -82,4 +82,25 @@ describe('QueuedMessageDisplay', () => {
     const output = lastFrame();
     expect(output).toContain('to edit queued messages');
   });
+
+  it('hides edit hint after showing it enough times', () => {
+    // Render with non-empty queue, then empty, then non-empty — repeat
+    // to simulate multiple queue cycles. Hint should disappear after 3.
+    const { lastFrame, rerender } = render(
+      <QueuedMessageDisplay messageQueue={['msg']} />,
+    );
+    expect(lastFrame()).toContain('to edit queued messages'); // 1st
+
+    rerender(<QueuedMessageDisplay messageQueue={[]} />);
+    rerender(<QueuedMessageDisplay messageQueue={['msg']} />);
+    expect(lastFrame()).toContain('to edit queued messages'); // 2nd
+
+    rerender(<QueuedMessageDisplay messageQueue={[]} />);
+    rerender(<QueuedMessageDisplay messageQueue={['msg']} />);
+    expect(lastFrame()).toContain('to edit queued messages'); // 3rd
+
+    rerender(<QueuedMessageDisplay messageQueue={[]} />);
+    rerender(<QueuedMessageDisplay messageQueue={['msg']} />);
+    expect(lastFrame()).not.toContain('to edit queued messages'); // 4th — hidden
+  });
 });

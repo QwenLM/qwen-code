@@ -386,6 +386,9 @@ export default {
   'Loading hooks...': 'フックを読み込んでいます...',
   'Error loading hooks:': 'フックの読み込みエラー：',
   'Press Escape to close': 'Escape キーで閉じる',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Escape、Ctrl+C、Ctrl+D でキャンセル',
+  'Press Space, Enter, or Escape to dismiss': 'Space、Enter、Escape で閉じる',
   'No hook selected': 'フックが選択されていません',
   // Hooks - List Step
   'No hook events found.': 'フックイベントが見つかりません。',
@@ -740,7 +743,10 @@ export default {
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
-  'Switch the model for this session': 'このセッションのモデルを切り替え',
+  'Switch the model for this session (--fast for suggestion model)':
+    'このセッションのモデルを切り替え（--fast で提案モデルを設定）',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'プロンプト提案と投機的実行用の軽量モデルを設定',
   'Content generator configuration not available.':
     'コンテンツジェネレーター設定が利用できません',
   'Authentication type not available.': '認証タイプが利用できません',
@@ -913,6 +919,8 @@ export default {
     'このプロジェクトで{{action}}を常に許可',
   'Always allow for this user': 'このユーザーに常に許可',
   'Always allow {{action}} for this user': 'このユーザーに{{action}}を常に許可',
+  'Yes, restore previous mode ({{mode}})':
+    'はい、以前のモードに戻す ({{mode}})',
   'Yes, and auto-accept edits': 'はい、編集を自動承認',
   'Yes, and manually approve edits': 'はい、編集を手動承認',
   'No, keep planning (esc)': 'いいえ、計画を続ける (Esc)',
@@ -1027,8 +1035,8 @@ export default {
   'not set': '未設定',
   none: 'なし',
   unknown: '不明',
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Alibaba Cloud ModelStudioの最新Qwen Visionモデル(バージョン: qwen3-vl-plus-2025-09-23)',
   // Dialogs - Permissions
@@ -1146,8 +1154,8 @@ export default {
   'to toggle tool descriptions on/off': 'ツール説明の表示/非表示を切り替え',
   "Starting OAuth authentication for MCP server '{{name}}'...":
     "MCPサーバー '{{name}}' のOAuth認証を開始中...",
-  // Startup Examples
-  'Example: ': '例：',
+  // Startup Tips
+  'Tips:': 'ヒント：',
   'Use /compress when the conversation gets long to summarize history and free up context.':
     '会話が長くなったら /compress で履歴を要約し、コンテキストを解放できます。',
   'Start a fresh idea with /clear or /new; the previous session stays available in history.':
@@ -1168,19 +1176,6 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
-  // DataWorks usage examples
-  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
-    '👤 ID確認：「DataWorksでのIDと権限を確認させていただけますか？」',
-  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
-    '📊 タスク分析：「dataworks_analyzeワークスペースで過去1週間に新規作成されたノードを分析し、何をしているか教えてください」',
-  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
-    '🧹 タスクガバナンス：「dataworks_analyzeワークスペースで、作成から時間が経っているのにまだ公開されていないノードを見つけてください」',
-  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
-    '🔍 問題特定：「dwd_is_it_software_released_dfとads_is_it_sfw_moni_key_released_recycled_dfのデータが不一致です。両方とも上流にods_ism_it_software_key_released_dfがあります。ロジックの違いを確認してください」',
-  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
-    '🛠️ 問題修正：「従業員テーブルmy_project.ods_emp_info_dで、従業員EMP001の部署データが空です。原因を調査し、修正案を提示してください」',
-  'This is a Beta version. Chat history will be lost after the personal development environment instance is deleted.':
-    'Beta版です。個人開発環境インスタンスが削除されると、チャット履歴は失われます。',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',
@@ -1469,11 +1464,21 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
-  'Verbose mode on — showing full tool output and thinking':
-    '詳細モードオン — 完全なツール出力と思考を表示しています',
-  'Compact mode on — showing tool names and final responses only':
-    'コンパクトモードオン — ツール名と最終応答のみ表示しています',
-  verbose: '詳細',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    '詳細モードで完全なツール出力と思考を表示します（Ctrl+O で切り替え）。',
+  compact: 'コンパクト',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'コンパクトモードでツール出力と思考を非表示にします（Ctrl+O で切り替え）。',
+  'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

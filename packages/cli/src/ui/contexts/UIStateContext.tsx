@@ -96,6 +96,8 @@ export interface UIState {
   currentLoadingPhrase: string;
   historyRemountKey: number;
   messageQueue: string[];
+  /** When false, hide queued-message UI (see `features.queuedMessageDisplay` in settings). */
+  showQueuedMessageDisplay: boolean;
   showAutoAcceptIndicator: ApprovalMode;
   // Quota-related state
   currentModel: string;

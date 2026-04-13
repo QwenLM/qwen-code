@@ -133,6 +133,55 @@ interface UseWebViewMessagesProps {
   setAvailableModels?: (models: ModelInfo[]) => void;
 }
 
+type ConversationResetHandlers = {
+  messageHandling: Pick<
+    UseWebViewMessagesProps['messageHandling'],
+    | 'clearMessages'
+    | 'endStreaming'
+    | 'clearWaitingForResponse'
+    | 'clearThinking'
+  >;
+  clearToolCalls: UseWebViewMessagesProps['clearToolCalls'];
+  clearActiveExecToolCalls: () => void;
+  setPlanEntries: UseWebViewMessagesProps['setPlanEntries'];
+  handlePermissionRequest: UseWebViewMessagesProps['handlePermissionRequest'];
+  handleAskUserQuestion: UseWebViewMessagesProps['handleAskUserQuestion'];
+  sessionManagement: Pick<
+    UseWebViewMessagesProps['sessionManagement'],
+    'setCurrentSessionId' | 'setCurrentSessionTitle'
+  >;
+  setUsageStats?: UseWebViewMessagesProps['setUsageStats'];
+};
+
+export function resetConversationState({
+  handlers,
+  clearImageResolutions,
+  vscode,
+}: {
+  handlers: ConversationResetHandlers;
+  clearImageResolutions: () => void;
+  vscode: { postMessage: (message: unknown) => void };
+}) {
+  handlers.messageHandling.endStreaming();
+  handlers.clearActiveExecToolCalls();
+  handlers.messageHandling.clearWaitingForResponse();
+  handlers.messageHandling.clearThinking();
+  handlers.messageHandling.clearMessages();
+  handlers.clearToolCalls();
+  handlers.setPlanEntries([]);
+  handlers.handlePermissionRequest(null);
+  handlers.handleAskUserQuestion(null);
+  handlers.sessionManagement.setCurrentSessionId(null);
+  clearImageResolutions();
+  handlers.setUsageStats?.(undefined);
+  handlers.sessionManagement.setCurrentSessionTitle('Past Conversations');
+  // Reset the VS Code tab title to default label
+  vscode.postMessage({
+    type: 'updatePanelTitle',
+    data: { title: 'Qwen Code' },
+  });
+}
+
 /**
  * WebView message handling Hook
  * Handles all messages from VSCode Extension uniformly
@@ -914,17 +963,15 @@ export const useWebViewMessages = ({
           break;
 
         case 'conversationCleared':
-          handlers.messageHandling.clearMessages();
-          handlers.clearToolCalls();
-          handlers.sessionManagement.setCurrentSessionId(null);
-          clearImageResolutions();
-          handlers.sessionManagement.setCurrentSessionTitle(
-            'Past Conversations',
-          );
-          // Reset the VS Code tab title to default label
-          vscode.postMessage({
-            type: 'updatePanelTitle',
-            data: { title: 'Qwen Code' },
+          resetConversationState({
+            handlers: {
+              ...handlers,
+              clearActiveExecToolCalls: () => {
+                activeExecToolCallsRef.current.clear();
+              },
+            },
+            clearImageResolutions,
+            vscode,
           });
           lastPlanSnapshotRef.current = null;
           break;

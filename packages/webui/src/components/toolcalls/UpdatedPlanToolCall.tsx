@@ -16,6 +16,7 @@ import type {
   PlanEntryStatus,
 } from './shared/index.js';
 import { CheckboxDisplay } from './CheckboxDisplay.js';
+import { getToolDisplayLabel } from './labelUtils.js';
 
 /**
  * Custom container for UpdatedPlanToolCall with specific styling
@@ -141,7 +142,10 @@ export const UpdatedPlanToolCall: FC<BaseToolCallProps> = ({
   }
 
   const entries = parsePlanEntries(textOutputs);
-  const label = safeTitle(toolCall.title) || 'TodoWrite';
+  const label = getToolDisplayLabel({
+    kind: toolCall.kind,
+    title: safeTitle(toolCall.title),
+  });
 
   return (
     <PlanToolCallContainer

@@ -26,7 +26,10 @@ import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 
 /** Per-request config that strips tools so the model never produces function calls. */
-const NO_TOOLS: Readonly<Pick<GenerateContentConfig, 'tools'>> = { tools: [] };
+const NO_TOOLS = Object.freeze({ tools: [] as const }) as Pick<
+  GenerateContentConfig,
+  'tools'
+>;
 
 /**
  * Snapshot of the main conversation's cache-critical parameters.
@@ -149,6 +152,9 @@ export function createForkedChat(
     config,
     {
       ...params.generationConfig,
+      // Disable thinking for forked queries — suggestions/speculation don't need
+      // reasoning tokens and it wastes cost + latency on the fast model path.
+      // This doesn't affect cache prefix (system + tools + history).
       thinkingConfig: {
         ...params.generationConfig.thinkingConfig,
         includeThoughts: false,
