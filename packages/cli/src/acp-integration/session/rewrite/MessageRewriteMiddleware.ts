@@ -31,6 +31,7 @@ export class MessageRewriteMiddleware {
   private readonly turnBuffer: TurnBuffer;
   private readonly rewriter: LlmRewriter;
   private readonly target: MessageRewriteConfig['target'];
+  private readonly asyncMode: boolean;
   private turnIndex = 0;
 
   constructor(
@@ -41,6 +42,7 @@ export class MessageRewriteMiddleware {
     this.turnBuffer = new TurnBuffer();
     this.rewriter = new LlmRewriter(config, rewriteConfig);
     this.target = rewriteConfig.target;
+    this.asyncMode = rewriteConfig.async !== false; // default true
   }
 
   /**
@@ -89,9 +91,14 @@ export class MessageRewriteMiddleware {
     }
   }
 
+  /** Pending rewrite promise — resolved when rewrite completes and message is emitted */
+  private pendingRewrite: Promise<void> | null = null;
+
   /**
-   * Flush the turn buffer: rewrite accumulated content and emit
-   * a rewritten message with _meta.rewritten=true.
+   * Flush the turn buffer: rewrite accumulated content and emit.
+   *
+   * In async mode (default): non-blocking, rewrite runs parallel to tool execution.
+   * In sync mode: blocks until rewrite completes, ensures strict message ordering.
    *
    * Called when:
    * - A tool_call is about to be emitted (turn boundary)
@@ -103,32 +110,53 @@ export class MessageRewriteMiddleware {
     if (!content) return;
 
     this.turnIndex++;
+    const turnIdx = this.turnIndex;
 
-    try {
-      const rewritten = await this.rewriter.rewrite(content, signal);
-      if (!rewritten) {
-        debugLogger.info(`Turn ${this.turnIndex}: no rewrite output`);
-        return;
+    const doRewrite = (async () => {
+      try {
+        const rewritten = await this.rewriter.rewrite(content, signal);
+        if (!rewritten) {
+          debugLogger.info(`Turn ${turnIdx}: no rewrite output`);
+          return;
+        }
+
+        debugLogger.info(
+          `Turn ${turnIdx}: rewritten ${rewritten.length} chars`,
+        );
+
+        // Emit rewritten message with special _meta
+        await this.sendUpdate({
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: rewritten },
+          _meta: {
+            rewritten: true,
+            turnIndex: turnIdx,
+          },
+        } as SessionUpdate);
+      } catch (error) {
+        debugLogger.warn(
+          `Turn ${turnIdx}: rewrite failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
       }
+    })();
 
-      debugLogger.info(
-        `Turn ${this.turnIndex}: rewritten ${rewritten.length} chars`,
-      );
+    if (this.asyncMode) {
+      // Non-blocking: rewrite runs parallel to tool execution
+      this.pendingRewrite = doRewrite;
+    } else {
+      // Blocking: wait for rewrite before proceeding (strict message order)
+      await doRewrite;
+    }
+  }
 
-      // Emit rewritten message with special _meta
-      await this.sendUpdate({
-        sessionUpdate: 'agent_message_chunk',
-        content: { type: 'text', text: rewritten },
-        _meta: {
-          rewritten: true,
-          turnIndex: this.turnIndex,
-        },
-      } as SessionUpdate);
-    } catch (error) {
-      debugLogger.warn(
-        `Turn ${this.turnIndex}: rewrite failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      // On failure, original messages already sent — just skip rewrite
+  /**
+   * Wait for any pending rewrite to complete.
+   * Call this before session ends to ensure all rewrites are flushed.
+   */
+  async waitForPendingRewrite(): Promise<void> {
+    if (this.pendingRewrite) {
+      await this.pendingRewrite;
+      this.pendingRewrite = null;
     }
   }
 }

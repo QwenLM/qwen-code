@@ -409,9 +409,9 @@ export class Session implements SessionContext {
           }
 
           if (usageMetadata) {
-            // Flush rewrite buffer before emitting usage (marks turn boundary)
+            // Kick off rewrite in background (non-blocking, runs parallel to tools)
             if (this.messageRewriter) {
-              await this.messageRewriter.flushTurn(pendingSend.signal);
+              this.messageRewriter.flushTurn(pendingSend.signal);
             }
 
             const durationMs = Date.now() - streamStartTime;
@@ -436,6 +436,10 @@ export class Session implements SessionContext {
 
             nextMessage = { role: 'user', parts: toolResponseParts };
           }
+        }
+        // Wait for any pending rewrite before returning
+        if (this.messageRewriter) {
+          await this.messageRewriter.waitForPendingRewrite();
         }
         return { stopReason: 'end_turn' };
       },

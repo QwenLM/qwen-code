@@ -339,36 +339,43 @@ export async function runNonInteractive(
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
 
-        // Flush turn buffer and append rewritten message
+        // Rewrite turn content (async by default, parallel with tool execution)
         if (rewriter && turnBuffer) {
           const content = turnBuffer.flush();
           if (content) {
             rewriteTurnIndex++;
-            try {
-              const rewriteSignal = AbortSignal.any([
-                abortController.signal,
-                AbortSignal.timeout(30000),
-              ]);
-              const rewritten = await rewriter.rewrite(content, rewriteSignal);
-              if (rewritten) {
-                debugLogger.info(
-                  `Turn ${rewriteTurnIndex}: rewritten ${rewritten.length} chars`,
+            const turnIdx = rewriteTurnIndex;
+            const doRewrite = async () => {
+              try {
+                const rewritten = await rewriter.rewrite(
+                  content,
+                  abortController?.signal,
                 );
-                // Emit rewritten as a separate assistant message with _meta.rewritten
-                adapter.startAssistantMessage();
-                adapter.processEvent({
-                  type: GeminiEventType.Content,
-                  value: rewritten,
-                  _meta: { rewritten: true, turnIndex: rewriteTurnIndex },
-                } as unknown as Parameters<
-                  JsonOutputAdapterInterface['processEvent']
-                >[0]);
-                adapter.finalizeAssistantMessage();
+                if (rewritten) {
+                  debugLogger.info(
+                    `Turn ${turnIdx}: rewritten ${rewritten.length} chars`,
+                  );
+                  adapter.startAssistantMessage();
+                  adapter.processEvent({
+                    type: GeminiEventType.Content,
+                    value: rewritten,
+                    _meta: { rewritten: true, turnIndex: turnIdx },
+                  } as unknown as Parameters<
+                    JsonOutputAdapterInterface['processEvent']
+                  >[0]);
+                  adapter.finalizeAssistantMessage();
+                }
+              } catch (err) {
+                debugLogger.warn(
+                  `Turn ${turnIdx}: rewrite failed: ${err instanceof Error ? err.message : String(err)}`,
+                );
               }
-            } catch (err) {
-              debugLogger.warn(
-                `Turn ${rewriteTurnIndex}: rewrite failed: ${err instanceof Error ? err.message : String(err)}`,
-              );
+            };
+            // Default async (fire-and-forget), sync if configured
+            if (rewriteConfig?.async === false) {
+              await doRewrite();
+            } else {
+              void doRewrite();
             }
           }
         }
