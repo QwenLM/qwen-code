@@ -28,7 +28,10 @@ import { ANSILight } from './ansi-light.js';
 import { NoColorTheme } from './no-color.js';
 import process from 'node:process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
-import { detectTerminalTheme } from './detect-terminal-theme.js';
+import {
+  detectTerminalTheme,
+  detectTerminalThemeAsync,
+} from './detect-terminal-theme.js';
 
 const debugLogger = createDebugLogger('THEME_MANAGER');
 
@@ -135,12 +138,25 @@ class ThemeManager {
   }
 
   /**
-   * Detects the terminal's dark/light preference and returns the
-   * corresponding Qwen theme.
+   * Detects the terminal's dark/light preference (synchronous) and returns
+   * the corresponding Qwen theme.
+   * Used by the theme dialog for instant preview.
    */
   private resolveAutoTheme(): Theme {
     const detected = detectTerminalTheme();
     return detected === 'light' ? QwenLight : QwenDark;
+  }
+
+  /**
+   * Asynchronous auto-detection that includes an OSC 11 probe.
+   * Intended for startup where a short async delay (~200 ms) is acceptable.
+   * Sets the active theme and returns true.
+   */
+  async resolveAutoThemeAsync(): Promise<boolean> {
+    const detected = await detectTerminalThemeAsync();
+    this.activeTheme = detected === 'light' ? QwenLight : QwenDark;
+    debugLogger.info(`Auto-detected theme (async): ${this.activeTheme.name}`);
+    return true;
   }
 
   /**

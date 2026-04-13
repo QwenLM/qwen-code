@@ -37,7 +37,7 @@ import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
 import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
-import { themeManager } from './ui/themes/theme-manager.js';
+import { themeManager, AUTO_THEME_NAME } from './ui/themes/theme-manager.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
 import {
@@ -234,11 +234,14 @@ export async function main() {
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
   if (settings.merged.ui?.theme) {
-    if (!themeManager.setActiveTheme(settings.merged.ui?.theme)) {
+    if (settings.merged.ui.theme === AUTO_THEME_NAME) {
+      // Use async detection (includes OSC 11 probe) at startup.
+      await themeManager.resolveAutoThemeAsync();
+    } else if (!themeManager.setActiveTheme(settings.merged.ui.theme)) {
       // If the theme is not found during initial load, log a warning and continue.
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       writeStderrLine(
-        `Warning: Theme "${settings.merged.ui?.theme}" not found.`,
+        `Warning: Theme "${settings.merged.ui.theme}" not found.`,
       );
     }
   }

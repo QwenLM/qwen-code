@@ -25,6 +25,92 @@ describe('detectTerminalTheme', () => {
     process.env = originalEnv;
   });
 
+  // ---------------------------------------------------------------------------
+  // parseOscRgb + themeFromOscColor (pure, synchronous)
+  // ---------------------------------------------------------------------------
+
+  describe('parseOscRgb', () => {
+    it('should parse rgb:RRRR/GGGG/BBBB format', async () => {
+      const { parseOscRgb } = await import('./detect-terminal-theme.js');
+      const rgb = parseOscRgb('rgb:0000/0000/0000');
+      expect(rgb).toEqual({ r: 0, g: 0, b: 0 });
+    });
+
+    it('should parse short hex components (rgb:RR/GG/BB)', async () => {
+      const { parseOscRgb } = await import('./detect-terminal-theme.js');
+      const rgb = parseOscRgb('rgb:ff/ff/ff');
+      expect(rgb).toEqual({ r: 1, g: 1, b: 1 });
+    });
+
+    it('should parse #RRGGBB format', async () => {
+      const { parseOscRgb } = await import('./detect-terminal-theme.js');
+      const rgb = parseOscRgb('#000000');
+      expect(rgb).toEqual({ r: 0, g: 0, b: 0 });
+    });
+
+    it('should parse #RRRRGGGGBBBB format', async () => {
+      const { parseOscRgb } = await import('./detect-terminal-theme.js');
+      const rgb = parseOscRgb('#ffffffffffff');
+      expect(rgb).toEqual({ r: 1, g: 1, b: 1 });
+    });
+
+    it('should return undefined for invalid data', async () => {
+      const { parseOscRgb } = await import('./detect-terminal-theme.js');
+      expect(parseOscRgb('garbage')).toBeUndefined();
+      expect(parseOscRgb('')).toBeUndefined();
+    });
+  });
+
+  describe('themeFromOscColor', () => {
+    it('should return "dark" for a dark background', async () => {
+      const { themeFromOscColor } = await import('./detect-terminal-theme.js');
+      // Pure black background
+      expect(themeFromOscColor('rgb:0000/0000/0000')).toBe('dark');
+      // Typical dark terminal (e.g., #1e1e2e)
+      expect(themeFromOscColor('rgb:1e1e/1e1e/2e2e')).toBe('dark');
+    });
+
+    it('should return "light" for a light background', async () => {
+      const { themeFromOscColor } = await import('./detect-terminal-theme.js');
+      // Pure white background
+      expect(themeFromOscColor('rgb:ffff/ffff/ffff')).toBe('light');
+      // Typical light terminal (e.g., #fafafa)
+      expect(themeFromOscColor('rgb:fafa/fafa/fafa')).toBe('light');
+    });
+
+    it('should return undefined for unparseable data', async () => {
+      const { themeFromOscColor } = await import('./detect-terminal-theme.js');
+      expect(themeFromOscColor('not-a-color')).toBeUndefined();
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // detectOsc11Theme (async, TTY interaction)
+  // ---------------------------------------------------------------------------
+
+  describe('detectOsc11Theme', () => {
+    it('should return undefined when stdin is not a TTY', async () => {
+      const origIsTTY = process.stdin.isTTY;
+      Object.defineProperty(process.stdin, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+
+      const { detectOsc11Theme } = await import('./detect-terminal-theme.js');
+      const result = await detectOsc11Theme();
+      expect(result).toBeUndefined();
+
+      Object.defineProperty(process.stdin, 'isTTY', {
+        value: origIsTTY,
+        configurable: true,
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // detectMacOSTheme (sync)
+  // ---------------------------------------------------------------------------
+
   describe('detectMacOSTheme', () => {
     it('should return "dark" when macOS dark mode is active', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
@@ -52,10 +138,13 @@ describe('detectTerminalTheme', () => {
     });
   });
 
+  // ---------------------------------------------------------------------------
+  // detectFromColorFgBg (sync)
+  // ---------------------------------------------------------------------------
+
   describe('detectFromColorFgBg', () => {
     it('should return "dark" when background is dark (COLORFGBG=15;0)', async () => {
       process.env['COLORFGBG'] = '15;0';
-
       const { detectFromColorFgBg } = await import(
         './detect-terminal-theme.js'
       );
@@ -64,7 +153,6 @@ describe('detectTerminalTheme', () => {
 
     it('should return "light" when background is light (COLORFGBG=0;15)', async () => {
       process.env['COLORFGBG'] = '0;15';
-
       const { detectFromColorFgBg } = await import(
         './detect-terminal-theme.js'
       );
@@ -73,7 +161,6 @@ describe('detectTerminalTheme', () => {
 
     it('should return "light" when background is 7 (light gray)', async () => {
       process.env['COLORFGBG'] = '0;7';
-
       const { detectFromColorFgBg } = await import(
         './detect-terminal-theme.js'
       );
@@ -82,7 +169,6 @@ describe('detectTerminalTheme', () => {
 
     it('should return "dark" when background is 8 (dark gray)', async () => {
       process.env['COLORFGBG'] = '15;8';
-
       const { detectFromColorFgBg } = await import(
         './detect-terminal-theme.js'
       );
@@ -91,7 +177,6 @@ describe('detectTerminalTheme', () => {
 
     it('should handle three-part format (fg;extra;bg)', async () => {
       process.env['COLORFGBG'] = '15;0;0';
-
       const { detectFromColorFgBg } = await import(
         './detect-terminal-theme.js'
       );
@@ -100,7 +185,6 @@ describe('detectTerminalTheme', () => {
 
     it('should return undefined when COLORFGBG is not set', async () => {
       delete process.env['COLORFGBG'];
-
       const { detectFromColorFgBg } = await import(
         './detect-terminal-theme.js'
       );
@@ -109,7 +193,6 @@ describe('detectTerminalTheme', () => {
 
     it('should return undefined when COLORFGBG has invalid value', async () => {
       process.env['COLORFGBG'] = 'invalid';
-
       const { detectFromColorFgBg } = await import(
         './detect-terminal-theme.js'
       );
@@ -117,11 +200,14 @@ describe('detectTerminalTheme', () => {
     });
   });
 
-  describe('detectTerminalTheme', () => {
+  // ---------------------------------------------------------------------------
+  // detectTerminalTheme (sync entry point)
+  // ---------------------------------------------------------------------------
+
+  describe('detectTerminalTheme (sync)', () => {
     it('should prefer COLORFGBG over macOS detection', async () => {
       Object.defineProperty(process, 'platform', { value: 'darwin' });
       vi.mocked(childProcess.execSync).mockReturnValue('Dark\n');
-      // Set COLORFGBG to light — it should take precedence over macOS dark
       process.env['COLORFGBG'] = '0;15';
 
       const { detectTerminalTheme } = await import(

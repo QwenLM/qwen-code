@@ -32,6 +32,7 @@ vi.mock('node:os', async (importOriginal) => {
 });
 vi.mock('./detect-terminal-theme.js', () => ({
   detectTerminalTheme: vi.fn(() => 'dark'),
+  detectTerminalThemeAsync: vi.fn(async () => 'dark'),
 }));
 
 const validCustomTheme: CustomTheme = {
@@ -139,6 +140,24 @@ describe('ThemeManager', () => {
 
     it('should always return true for auto theme', () => {
       expect(themeManager.setActiveTheme(AUTO_THEME_NAME)).toBe(true);
+    });
+
+    it('should resolve async auto theme with Qwen Light for light', async () => {
+      vi.mocked(detectModule.detectTerminalThemeAsync).mockResolvedValue(
+        'light',
+      );
+      const result = await themeManager.resolveAutoThemeAsync();
+      expect(result).toBe(true);
+      expect(themeManager.getActiveTheme().name).toBe('Qwen Light');
+    });
+
+    it('should resolve async auto theme with Qwen Dark for dark', async () => {
+      vi.mocked(detectModule.detectTerminalThemeAsync).mockResolvedValue(
+        'dark',
+      );
+      const result = await themeManager.resolveAutoThemeAsync();
+      expect(result).toBe(true);
+      expect(themeManager.getActiveTheme().name).toBe('Qwen Dark');
     });
   });
 
