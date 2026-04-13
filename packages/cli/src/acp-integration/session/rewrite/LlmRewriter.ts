@@ -100,6 +100,8 @@ export class LlmRewriter {
             abortSignal: signal,
             temperature: 0.3,
             maxOutputTokens: 1024,
+            // Disable thinking to avoid thinking leaking into output
+            thinkingConfig: { includeThoughts: false },
           },
           contents: [
             {
@@ -111,9 +113,11 @@ export class LlmRewriter {
         `rewrite-turn`,
       );
 
+      // Extract only non-thought text parts
       const rewritten =
         result.candidates?.[0]?.content?.parts
-          ?.map((p) => p.text)
+          ?.filter((p) => !p.thought)
+          .map((p) => p.text)
           .filter(Boolean)
           .join('') ?? '';
 
