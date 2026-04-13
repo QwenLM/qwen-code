@@ -25,9 +25,18 @@ vi.mock('../../i18n/index.js', () => ({
 
 // Must use vi.hoisted so the mock factory can reference it before module eval.
 const mockRunForkedAgent = vi.hoisted(() => vi.fn());
+const mockGetCacheSafeParams = vi.hoisted(() =>
+  vi.fn().mockReturnValue({
+    generationConfig: {},
+    history: [],
+    model: 'test-model',
+    version: 1,
+  }),
+);
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   runForkedAgent: mockRunForkedAgent,
+  getCacheSafeParams: mockGetCacheSafeParams,
 }));
 
 describe('btwCommand', () => {
@@ -96,9 +105,8 @@ describe('btwCommand', () => {
 
     it('should set btwItem and update it on success', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        status: 'completed',
-        finalText: 'The answer is 42.',
-        filesTouched: [],
+        text: 'The answer is 42.',
+        usage: { inputTokens: 10, outputTokens: 5, cacheHitTokens: 3 },
       });
 
       await btwCommand.action!(mockContext, 'what is the meaning of life?');
@@ -132,11 +140,10 @@ describe('btwCommand', () => {
       expect(mockContext.ui.addItem).not.toHaveBeenCalled();
     });
 
-    it('should invoke runForkedAgent with no tools and maxTurns 1', async () => {
+    it('should invoke runForkedAgent with cacheSafeParams and userMessage', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        status: 'completed',
-        finalText: 'answer',
-        filesTouched: [],
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
       });
 
       await btwCommand.action!(mockContext, 'my question');
@@ -144,10 +151,8 @@ describe('btwCommand', () => {
 
       expect(mockRunForkedAgent).toHaveBeenCalledWith(
         expect.objectContaining({
-          name: 'btw-side-question',
-          tools: [],
-          maxTurns: 1,
-          taskPrompt: 'my question',
+          cacheSafeParams: expect.objectContaining({ model: 'test-model' }),
+          userMessage: expect.stringContaining('my question'),
         }),
       );
     });
@@ -188,9 +193,8 @@ describe('btwCommand', () => {
 
     it('should not block when another pendingItem exists', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        status: 'completed',
-        finalText: 'answer',
-        filesTouched: [],
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
       });
 
       const busyContext = createMockCommandContext({
@@ -215,9 +219,8 @@ describe('btwCommand', () => {
             setTimeout(
               () =>
                 resolve({
-                  status: 'completed',
-                  finalText: 'late answer',
-                  filesTouched: [],
+                  text: 'late answer',
+                  usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
                 }),
               50,
             ),
@@ -242,9 +245,8 @@ describe('btwCommand', () => {
 
     it('should clear btwAbortControllerRef after successful completion', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        status: 'completed',
-        finalText: 'answer',
-        filesTouched: [],
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
       });
 
       await btwCommand.action!(mockContext, 'test question');
@@ -274,9 +276,8 @@ describe('btwCommand', () => {
 
     it('should cancel previous btw when starting a new one', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        status: 'completed',
-        finalText: 'answer',
-        filesTouched: [],
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
       });
 
       await btwCommand.action!(mockContext, 'first question');
@@ -288,11 +289,10 @@ describe('btwCommand', () => {
       expect(mockContext.ui.cancelBtw).toHaveBeenCalledTimes(2);
     });
 
-    it('should return fallback text when finalText is empty', async () => {
+    it('should return fallback text when text is null', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        status: 'completed',
-        finalText: undefined,
-        filesTouched: [],
+        text: null,
+        usage: { inputTokens: 5, outputTokens: 0, cacheHitTokens: 0 },
       });
 
       await btwCommand.action!(mockContext, 'test question');
@@ -310,9 +310,8 @@ describe('btwCommand', () => {
 
     it('should return void immediately without blocking', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        status: 'completed',
-        finalText: 'answer',
-        filesTouched: [],
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
       });
 
       const result = await btwCommand.action!(mockContext, 'test question');
@@ -343,9 +342,8 @@ describe('btwCommand', () => {
 
     it('should return info message on success', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        status: 'completed',
-        finalText: 'the answer',
-        filesTouched: [],
+        text: 'the answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
       });
 
       const result = await btwCommand.action!(
@@ -390,9 +388,8 @@ describe('btwCommand', () => {
 
     it('should return stream_messages generator on success', async () => {
       mockRunForkedAgent.mockResolvedValue({
-        status: 'completed',
-        finalText: 'streamed answer',
-        filesTouched: [],
+        text: 'streamed answer',
+        usage: { inputTokens: 5, outputTokens: 3, cacheHitTokens: 0 },
       });
 
       const result = (await btwCommand.action!(acpContext, 'my question')) as {

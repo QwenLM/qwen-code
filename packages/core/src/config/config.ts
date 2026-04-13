@@ -436,6 +436,13 @@ export interface ConfigParameters {
   /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
   enableManagedAutoDream?: boolean;
   /**
+   * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
+   * When set and valid for the current auth type, forked agents use this model instead of
+   * the main session model, reducing latency and cost.
+   * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
+   */
+  fastModel?: string;
+  /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
    * Users with old settings.json containing hooksConfig.enabled should migrate
@@ -619,6 +626,7 @@ export class Config {
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
+  private fastModel?: string;
   private readonly disableAllHooks: boolean;
   private readonly hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
@@ -790,6 +798,7 @@ export class Config {
     });
     this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
+    this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.hooks = params.hooks;
   }
@@ -1223,6 +1232,29 @@ export class Config {
 
   getModel(): string {
     return this.contentGeneratorConfig?.model || this.modelsConfig.getModel();
+  }
+
+  /**
+   * Returns the fast model if one is configured and valid for the current auth type,
+   * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
+   * use this as a cheaper alternative to the main session model.
+   */
+  getFastModel(): string | undefined {
+    if (!this.fastModel) return undefined;
+    const authType = this.contentGeneratorConfig?.authType;
+    if (!authType) return undefined;
+    const available = this.getAvailableModelsForAuthType(authType);
+    return available.some((m) => m.id === this.fastModel)
+      ? this.fastModel
+      : undefined;
+  }
+
+  /**
+   * Update the fast model at runtime (e.g., when the user runs `/model --fast <model>`).
+   * Pass undefined or an empty string to clear the fast model override.
+   */
+  setFastModel(model: string | undefined): void {
+    this.fastModel = model || undefined;
   }
 
   /**

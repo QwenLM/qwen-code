@@ -312,6 +312,8 @@ export function ModelDialog({
         }
         const scope = getPersistScopeForModelSelection(settings);
         settings.setValue(scope, 'fastModel', modelId);
+        // Sync the runtime Config so forked agents pick up the change immediately.
+        config?.setFastModel(modelId);
         uiState?.historyManager.addItem(
           {
             type: 'success',

@@ -61,11 +61,11 @@ import {
 } from '../telemetry/index.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
-// Forked query cache
+// Forked agent cache
 import {
   saveCacheSafeParams,
   clearCacheSafeParams,
-} from '../followup/forkedQuery.js';
+} from '../background/forkedAgent.js';
 
 // Utilities
 import {

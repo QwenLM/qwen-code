@@ -24,8 +24,8 @@ import { evaluateToolCall, rewritePathArgs } from './speculationToolGate.js';
 import {
   getCacheSafeParams,
   createForkedChat,
-  runForkedQuery,
-} from './forkedQuery.js';
+  runForkedAgent,
+} from '../background/forkedAgent.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 
 // ---------------------------------------------------------------------------
@@ -197,7 +197,7 @@ interface LoopResult {
 async function runSpeculativeLoop(
   config: Config,
   state: SpeculationState,
-  cacheSafe: import('./forkedQuery.js').CacheSafeParams,
+  cacheSafe: import('../background/forkedAgent.js').CacheSafeParams,
   modelOverride?: string,
 ): Promise<LoopResult> {
   const chat = createForkedChat(config, cacheSafe);
@@ -537,10 +537,15 @@ The assistant responded: ${speculatedSummary || '(tool calls executed)'}
 
 ${SUGGESTION_PROMPT}`;
 
-    const result = await runForkedQuery(config, augmentedPrompt, {
-      abortSignal,
+    const cacheSafeParams = getCacheSafeParams();
+    if (!cacheSafeParams) return null;
+    const result = await runForkedAgent({
+      config,
+      userMessage: augmentedPrompt,
+      cacheSafeParams,
       jsonSchema: PIPELINED_SCHEMA,
       model: modelOverride,
+      abortSignal,
     });
 
     if (abortSignal.aborted) return null;

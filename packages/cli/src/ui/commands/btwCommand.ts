@@ -13,7 +13,7 @@ import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemBtw } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { runForkedAgent } from '@qwen-code/qwen-code-core';
+import { getCacheSafeParams, runForkedAgent } from '@qwen-code/qwen-code-core';
 
 function formatBtwError(error: unknown): string {
   return t('Failed to answer btw question: {{error}}', {
@@ -22,25 +22,38 @@ function formatBtwError(error: unknown): string {
   });
 }
 
-const BTW_SYSTEM_PROMPT = [
-  'You are a separate, lightweight agent spawned to answer a single side question.',
-  'The main conversation continues independently in the background.',
-  '',
-  'Rules:',
-  '- Answer the question directly and concisely in a single response.',
-  '- Do NOT reference being interrupted or what you were "previously doing".',
-  '- You have NO tools available — you cannot read files, run commands, or take any actions.',
-  '- You can ONLY use information already present in the conversation context.',
-  '- NEVER promise to look something up or investigate further.',
-  '- If you do not know the answer, say so.',
-].join('\n');
+/**
+ * Wrap the user's side question with constraints so the model knows it must
+ * answer without tools in a single response.
+ *
+ * The system-reminder is embedded in the user message rather than overriding
+ * systemInstruction, because runForkedAgent inherits systemInstruction from
+ * CacheSafeParams (changing it would bust the prompt cache).
+ */
+function buildBtwPrompt(question: string): string {
+  return [
+    '<system-reminder>',
+    'This is a side question from the user. Answer directly in a single response.',
+    '',
+    'CRITICAL CONSTRAINTS:',
+    '- You have NO tools available — you cannot read files, run commands, or take any actions.',
+    '- You can ONLY use information already present in the conversation context.',
+    '- NEVER promise to look something up or investigate further.',
+    '- If you do not know the answer, say so.',
+    '- The main conversation is NOT interrupted; you are a separate, lightweight fork.',
+    '</system-reminder>',
+    '',
+    question,
+  ].join('\n');
+}
 
 /**
- * Run a side question using a forked agent.
+ * Run a side question using runForkedAgent (cache path).
  *
- * Mirrors Claude Code's runSideQuestion() design:
- * - tools: [] (all tools denied — no file I/O, no shell)
- * - maxTurns: 1 (single response, no follow-up turns)
+ * runForkedAgent with cacheSafeParams shares the main conversation's
+ * CacheSafeParams (systemInstruction + history) so the fork sees the full
+ * conversation context and benefits from prompt-cache hits. Tools are denied
+ * at the per-request level (NO_TOOLS) — single-turn, text-only.
  */
 async function askBtw(
   context: CommandContext,
@@ -50,20 +63,18 @@ async function askBtw(
   const { config } = context.services;
   if (!config) throw new Error('Config not loaded');
 
+  const cacheSafeParams = getCacheSafeParams();
+  if (!cacheSafeParams)
+    throw new Error(t('No conversation context available for /btw'));
+
   const result = await runForkedAgent({
-    name: 'btw-side-question',
     config,
-    systemPrompt: BTW_SYSTEM_PROMPT,
-    taskPrompt: question,
-    tools: [], // deny all tools — single-turn text answer only
-    maxTurns: 1,
+    userMessage: buildBtwPrompt(question),
+    cacheSafeParams,
     abortSignal,
   });
 
-  if (result.status === 'cancelled') {
-    throw new Error('Cancelled');
-  }
-  return result.finalText || t('No response received.');
+  return result.text || t('No response received.');
 }
 
 export const btwCommand: SlashCommand = {

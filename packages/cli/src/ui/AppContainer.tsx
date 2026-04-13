@@ -1118,24 +1118,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const followupSuggestionsEnabled =
     settings.merged.ui?.enableFollowupSuggestions === true;
 
-  // Resolve fastModel, validating it belongs to the current authType.
-  // If the configured fastModel is from a different provider, the API call
-  // would fail silently (DashScope/Qwen client rejects unknown model IDs),
-  // so fall back to the main model instead.
-  const resolveFastModel = useCallback((): string | undefined => {
-    const fastModel = settings.merged.fastModel;
-    if (!fastModel) return undefined;
-    const currentAuthType = config.getContentGeneratorConfig()?.authType;
-    if (!currentAuthType) return undefined;
-    const availableModels = config
-      .getModelsConfig()
-      .getAvailableModelsForAuthType(currentAuthType);
-    const belongsToCurrentAuth = availableModels.some(
-      (m) => m.id === fastModel,
-    );
-    return belongsToCurrentAuth ? fastModel : undefined;
-  }, [settings.merged.fastModel, config]);
-
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
     if (!followupSuggestionsEnabled) {
@@ -1187,7 +1169,7 @@ export const AppContainer = (props: AppContainerProps) => {
       const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
-      const fastModel = resolveFastModel();
+      const fastModel = config.getFastModel();
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
         model: fastModel,

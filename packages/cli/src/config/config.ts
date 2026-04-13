@@ -1122,6 +1122,7 @@ export async function loadCliConfig(
     hooks: settings.hooks,
     enableManagedAutoMemory: settings.memory?.enableManagedAutoMemory ?? true,
     enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    fastModel: settings.fastModel || undefined,
     disableAllHooks: settings.disableAllHooks ?? false,
     channel: argv.channel,
     // Precedence: explicit CLI flag > settings file > default(true).
