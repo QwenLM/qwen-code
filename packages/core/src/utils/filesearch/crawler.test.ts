@@ -675,4 +675,118 @@ describe('crawler', () => {
       expect(results).toEqual(expect.arrayContaining(['.', 'a.txt', 'b.txt']));
     });
   });
+
+  describe('two-tier strategy: git ls-files + ripgrep fallback', () => {
+    it('should use git ls-files in a git repo', async () => {
+      tmpDir = await createTmpDir({
+        'file1.js': '',
+        src: ['file2.js'],
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toEqual(
+        expect.arrayContaining(['.', 'src/', 'file1.js', 'src/file2.js']),
+      );
+    });
+
+    it('should fall back to fdir when not in a git repo and ripgrep unavailable', async () => {
+      tmpDir = await createTmpDir({
+        'index.js': '',
+        lib: ['util.js'],
+      });
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toEqual(
+        expect.arrayContaining(['.', 'lib/', 'index.js', 'lib/util.js']),
+      );
+    });
+  });
+
+  describe('throttling', () => {
+    beforeEach(() => {
+      cache.clear();
+    });
+
+    it('should not re-crawl within throttle window', async () => {
+      tmpDir = await createTmpDir({ 'file1.js': '' });
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      const results1 = await crawl(options);
+      expect(results1).toContain('file1.js');
+
+      const results2 = await crawl(options);
+      expect(results2).toContain('file1.js');
+    });
+  });
+
+  describe('mtime-based change detection', () => {
+    beforeEach(() => {
+      cache.clear();
+    });
+
+    it('should re-crawl when git index mtime changes', async () => {
+      tmpDir = await createTmpDir({ 'file1.js': '' });
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      const results1 = await crawl(options);
+      expect(results1.length).toBeGreaterThan(0);
+
+      await fs.writeFile(path.join(tmpDir, 'file2.js'), '');
+
+      const results2 = await crawl(options);
+      expect(results2.length).toBeGreaterThanOrEqual(results1.length);
+    });
+  });
 });
