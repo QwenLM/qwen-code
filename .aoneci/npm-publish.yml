@@ -34,7 +34,7 @@ jobs:
         run: 'npm ci'
 
       - name: 'Run tests'
-        if: ${{ parameters.skip_tests != true }}
+        if: ${{ params.skip_tests != 'true' }}
         run: 'NO_COLOR=true npm run test:ci'
 
       - name: 'Build project'
