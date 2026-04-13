@@ -1,38 +1,15 @@
 # Authentication
 
-Qwen Code supports three authentication methods. Pick the one that matches how you want to run the CLI:
+Qwen Code supports two authentication methods. Pick the one that matches how you want to run the CLI:
 
-- **Qwen OAuth**: sign in with your `qwen.ai` account in a browser. Free with a daily quota.
 - **Alibaba Cloud Coding Plan**: use an API key from Alibaba Cloud. Paid subscription with diverse model options and higher quotas.
 - **API Key**: bring your own API key. Flexible to your own needs — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
-## Option 1: Qwen OAuth (Free)
-
-Use this if you want the simplest setup and you're using Qwen models.
-
-- **How it works**: on first start, Qwen Code opens a browser login page. After you finish, credentials are cached locally so you usually won't need to log in again.
-- **Requirements**: a `qwen.ai` account + internet access (at least for the first login).
-- **Benefits**: no API key management, automatic credential refresh.
-- **Cost & quota**: free, with a quota of **60 requests/minute** and **1,000 requests/day**.
-
-Start the CLI and follow the browser flow:
-
-```bash
-qwen
-```
-
-Or authenticate directly without starting a session:
-
-```bash
-qwen auth qwen-oauth
-```
-
 > [!note]
 >
-> In non-interactive or headless environments (e.g., CI, SSH, containers), you typically **cannot** complete the OAuth browser login flow.  
-> In these cases, please use the Alibaba Cloud Coding Plan or API Key authentication method.
+> **Qwen OAuth (free tier) has been discontinued as of 2026-04-15.** If you previously used Qwen OAuth, please migrate to the Alibaba Cloud Coding Plan or API Key authentication method.
 
-## 💳 Option 2: Alibaba Cloud Coding Plan
+## Option 1: Alibaba Cloud Coding Plan
 
 Use this if you want predictable costs with diverse model options and higher usage quotas.
 
@@ -103,7 +80,7 @@ If you prefer to skip the interactive `/auth` flow, add the following to `~/.qwe
 >
 > The Coding Plan uses a dedicated endpoint (`https://coding.dashscope.aliyuncs.com/v1`) that is different from the standard Dashscope endpoint. Make sure to use the correct `baseUrl`.
 
-## 🚀 Option 3: API Key (flexible)
+## 🚀 Option 2: API Key (flexible)
 
 Use this if you want to connect to third-party providers such as OpenAI, Anthropic, Google, Azure OpenAI, OpenRouter, ModelScope, or a self-hosted endpoint. Supports multiple protocols and providers.
 
@@ -338,7 +315,6 @@ Select authentication method:
 | Command                                              | Description                                       |
 | ---------------------------------------------------- | ------------------------------------------------- |
 | `qwen auth`                                          | Interactive authentication setup                  |
-| `qwen auth qwen-oauth`                               | Authenticate with Qwen OAuth                      |
 | `qwen auth coding-plan`                              | Authenticate with Alibaba Cloud Coding Plan       |
 | `qwen auth coding-plan --region china --key sk-sp-…` | Non-interactive Coding Plan setup (for scripting) |
 | `qwen auth status`                                   | Show current authentication status                |
@@ -346,9 +322,6 @@ Select authentication method:
 **Examples:**
 
 ```bash
-# Authenticate with Qwen OAuth directly
-qwen auth qwen-oauth
-
 # Set up Coding Plan interactively (prompts for region and key)
 qwen auth coding-plan
 
