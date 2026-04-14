@@ -9,7 +9,8 @@ import type { MessageRewriteConfig } from './types.js';
 
 /**
  * Reads messageRewrite configuration from user/workspace originalSettings.
- * Workspace settings take precedence over user settings.
+ * Workspace settings are only used when the workspace is trusted,
+ * preventing untrusted repos from enabling the rewriter with a custom prompt.
  */
 export function loadRewriteConfig(
   settings: LoadedSettings,
@@ -17,9 +18,11 @@ export function loadRewriteConfig(
   const userOriginal = settings.user?.originalSettings as
     | Record<string, unknown>
     | undefined;
-  const workspaceOriginal = settings.workspace?.originalSettings as
-    | Record<string, unknown>
-    | undefined;
+  const workspaceOriginal = settings.isTrusted
+    ? (settings.workspace?.originalSettings as
+        | Record<string, unknown>
+        | undefined)
+    : undefined;
   return (workspaceOriginal?.['messageRewrite'] ??
     userOriginal?.['messageRewrite']) as MessageRewriteConfig | undefined;
 }

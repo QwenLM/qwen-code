@@ -109,9 +109,15 @@ export class MessageRewriteMiddleware {
     this.turnIndex++;
     const turnIdx = this.turnIndex;
 
+    // Always enforce a 30s timeout, combined with caller's signal if provided
+    const timeoutSignal = AbortSignal.timeout(30_000);
+    const rewriteSignal = signal
+      ? AbortSignal.any([signal, timeoutSignal])
+      : timeoutSignal;
+
     this.pendingRewrite = (async () => {
       try {
-        const rewritten = await this.rewriter.rewrite(content, signal);
+        const rewritten = await this.rewriter.rewrite(content, rewriteSignal);
         if (!rewritten) {
           debugLogger.info(`Turn ${turnIdx}: no rewrite output`);
           return;

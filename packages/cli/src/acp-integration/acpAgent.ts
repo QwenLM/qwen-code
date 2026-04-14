@@ -514,6 +514,9 @@ class QwenAgent implements Agent {
       await session.replayHistory(conversation.messages);
     }
 
+    // Install rewriter AFTER history replay to avoid rewriting historical messages
+    session.installRewriter();
+
     return session;
   }
 

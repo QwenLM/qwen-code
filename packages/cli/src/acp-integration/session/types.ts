@@ -30,8 +30,9 @@ export interface SessionUpdateSender {
 export interface SessionContext extends SessionUpdateSender {
   readonly sessionId: string;
   readonly config: Config;
-  /** Optional message rewrite middleware for ACP message transformation */
-  readonly messageRewriter?: MessageRewriteMiddleware;
+  /** Optional message rewrite middleware for ACP message transformation.
+   *  Installed after history replay to avoid rewriting historical messages. */
+  messageRewriter?: MessageRewriteMiddleware;
 }
 
 /**

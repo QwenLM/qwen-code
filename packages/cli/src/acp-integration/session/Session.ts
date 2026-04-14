@@ -128,8 +128,8 @@ export class Session implements SessionContext {
   private readonly planEmitter: PlanEmitter;
   private readonly messageEmitter: MessageEmitter;
 
-  // Message rewrite middleware (optional)
-  readonly messageRewriter?: MessageRewriteMiddleware;
+  // Message rewrite middleware (optional, installed after history replay)
+  messageRewriter?: MessageRewriteMiddleware;
 
   // Implement SessionContext interface
   readonly sessionId: string;
@@ -144,17 +144,6 @@ export class Session implements SessionContext {
     this.sessionId = id;
     this.runtimeBaseDir = Storage.getRuntimeBaseDir();
 
-    // Initialize message rewrite middleware if configured
-    const rewriteConfig = loadRewriteConfig(settings);
-    if (rewriteConfig?.enabled) {
-      debugLogger.info('Message rewrite middleware enabled');
-      this.messageRewriter = new MessageRewriteMiddleware(
-        config,
-        rewriteConfig,
-        (update) => this.sendUpdate(update),
-      );
-    }
-
     // Initialize modular components with this session as context
     this.toolCallEmitter = new ToolCallEmitter(this);
     this.planEmitter = new PlanEmitter(this);
@@ -168,6 +157,22 @@ export class Session implements SessionContext {
 
   getConfig(): Config {
     return this.config;
+  }
+
+  /**
+   * Install the message rewrite middleware if configured.
+   * Must be called AFTER history replay to avoid rewriting historical messages.
+   */
+  installRewriter(): void {
+    const rewriteConfig = loadRewriteConfig(this.settings);
+    if (rewriteConfig?.enabled) {
+      debugLogger.info('Message rewrite middleware enabled');
+      this.messageRewriter = new MessageRewriteMiddleware(
+        this.config,
+        rewriteConfig,
+        (update) => this.sendUpdate(update),
+      );
+    }
   }
 
   /**
