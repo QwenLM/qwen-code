@@ -55,6 +55,7 @@ import {
   logExtensionInstallEvent,
   logExtensionUninstall,
   logHookCall,
+  logApiError,
 } from './loggers.js';
 import * as metrics from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
@@ -77,6 +78,7 @@ import {
   ExtensionInstallEvent,
   ExtensionUninstallEvent,
   HookCallEvent,
+  ApiErrorEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -356,6 +358,101 @@ describe('loggers', () => {
         'event.name': EVENT_API_RESPONSE,
         'event.timestamp': '2025-01-01T00:00:00.000Z',
       });
+    });
+  });
+
+  describe('logApiResponse skips chatRecordingService for internal prompt IDs', () => {
+    it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
+      'should not record to chatRecordingService when prompt_id is %s',
+      (promptId) => {
+        const mockRecordUiTelemetryEvent = vi.fn();
+        const configWithRecording = {
+          getSessionId: () => 'test-session-id',
+          getUsageStatisticsEnabled: () => false,
+          getChatRecordingService: () => ({
+            recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+          }),
+        } as unknown as Config;
+
+        const event = new ApiResponseEvent(
+          'resp-id',
+          'test-model',
+          50,
+          promptId,
+        );
+        logApiResponse(configWithRecording, event);
+
+        expect(mockRecordUiTelemetryEvent).not.toHaveBeenCalled();
+        expect(mockUiEvent.addEvent).toHaveBeenCalled();
+      },
+    );
+
+    it('should record to chatRecordingService for normal prompt IDs', () => {
+      const mockRecordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => false,
+        getChatRecordingService: () => ({
+          recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+        }),
+      } as unknown as Config;
+
+      const event = new ApiResponseEvent(
+        'resp-id',
+        'test-model',
+        50,
+        'user_query',
+      );
+      logApiResponse(configWithRecording, event);
+
+      expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
+    });
+  });
+
+  describe('logApiError skips chatRecordingService for internal prompt IDs', () => {
+    it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
+      'should not record to chatRecordingService when prompt_id is %s',
+      (promptId) => {
+        const mockRecordUiTelemetryEvent = vi.fn();
+        const configWithRecording = {
+          getSessionId: () => 'test-session-id',
+          getUsageStatisticsEnabled: () => false,
+          getChatRecordingService: () => ({
+            recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+          }),
+        } as unknown as Config;
+
+        const event = new ApiErrorEvent({
+          model: 'test-model',
+          durationMs: 100,
+          promptId,
+          errorMessage: 'test error',
+        });
+        logApiError(configWithRecording, event);
+
+        expect(mockRecordUiTelemetryEvent).not.toHaveBeenCalled();
+      },
+    );
+
+    it('should record to chatRecordingService for normal prompt IDs', () => {
+      const mockRecordUiTelemetryEvent = vi.fn();
+      const configWithRecording = {
+        getSessionId: () => 'test-session-id',
+        getUsageStatisticsEnabled: () => false,
+        getChatRecordingService: () => ({
+          recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+        }),
+      } as unknown as Config;
+
+      const event = new ApiErrorEvent({
+        model: 'test-model',
+        durationMs: 100,
+        promptId: 'user_query',
+        errorMessage: 'test error',
+      });
+      logApiError(configWithRecording, event);
+
+      expect(mockRecordUiTelemetryEvent).toHaveBeenCalled();
     });
   });
 
@@ -1010,6 +1107,46 @@ describe('loggers', () => {
         },
       });
     });
+
+    it.each(['prompt_suggestion', 'forked_query', 'speculation'])(
+      'should not record to chatRecordingService when prompt_id is %s',
+      (promptId) => {
+        const mockRecordUiTelemetryEvent = vi.fn();
+        const configWithRecording = {
+          ...mockConfig,
+          getChatRecordingService: () => ({
+            recordUiTelemetryEvent: mockRecordUiTelemetryEvent,
+          }),
+        } as unknown as Config;
+
+        const call: CompletedToolCall = {
+          status: 'success',
+          request: {
+            name: 'test-function',
+            args: {},
+            callId: 'test-call-id',
+            isClientInitiated: true,
+            prompt_id: promptId,
+          },
+          response: {
+            callId: 'test-call-id',
+            responseParts: [{ text: 'ok' }],
+            resultDisplay: undefined,
+            error: undefined,
+            errorType: undefined,
+          },
+          tool: new EditTool(mockConfig),
+          invocation: {} as AnyToolInvocation,
+          durationMs: 50,
+          outcome: ToolConfirmationOutcome.ProceedOnce,
+        };
+        const event = new ToolCallEvent(call);
+        logToolCall(configWithRecording, event);
+
+        expect(mockRecordUiTelemetryEvent).not.toHaveBeenCalled();
+        expect(mockUiEvent.addEvent).toHaveBeenCalled();
+      },
+    );
   });
 
   describe('logMalformedJsonResponse', () => {

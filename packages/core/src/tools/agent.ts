@@ -36,6 +36,7 @@ import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { PermissionMode } from '../hooks/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
+import { ApprovalMode } from '../config/config.js';
 
 export interface AgentParams {
   description: string;
@@ -44,6 +45,98 @@ export interface AgentParams {
 }
 
 const debugLogger = createDebugLogger('AGENT');
+
+/**
+ * Maps ApprovalMode to PermissionMode for hook events.
+ */
+function approvalModeToPermissionMode(mode: ApprovalMode): PermissionMode {
+  switch (mode) {
+    case ApprovalMode.YOLO:
+      return PermissionMode.Yolo;
+    case ApprovalMode.AUTO_EDIT:
+      return PermissionMode.AutoEdit;
+    case ApprovalMode.PLAN:
+      return PermissionMode.Plan;
+    case ApprovalMode.DEFAULT:
+    default:
+      return PermissionMode.Default;
+  }
+}
+
+/**
+ * Resolves the effective permission mode for a sub-agent.
+ *
+ * Rules (matching claw-code):
+ * - Permissive parent modes (yolo, auto-edit) always win
+ * - Otherwise, the agent definition's mode applies if set
+ * - Default fallback is auto-edit (sub-agents need autonomy)
+ */
+export function resolveSubagentApprovalMode(
+  parentApprovalMode: ApprovalMode,
+  agentApprovalMode?: string,
+  isTrustedFolder?: boolean,
+): PermissionMode {
+  // Permissive parent modes always win
+  if (
+    parentApprovalMode === ApprovalMode.YOLO ||
+    parentApprovalMode === ApprovalMode.AUTO_EDIT
+  ) {
+    return approvalModeToPermissionMode(parentApprovalMode);
+  }
+
+  // Agent definition's mode applies if set
+  if (agentApprovalMode) {
+    const resolved = approvalModeToPermissionMode(
+      agentApprovalMode as ApprovalMode,
+    );
+    // Privileged modes require trusted folder
+    if (
+      !isTrustedFolder &&
+      (resolved === PermissionMode.Yolo || resolved === PermissionMode.AutoEdit)
+    ) {
+      return approvalModeToPermissionMode(parentApprovalMode);
+    }
+    return resolved;
+  }
+
+  // Default: match parent mode. In plan mode, stay in plan.
+  // In default mode in trusted folders, auto-edit for autonomy.
+  if (parentApprovalMode === ApprovalMode.PLAN) {
+    return PermissionMode.Plan;
+  }
+  if (isTrustedFolder) {
+    return PermissionMode.AutoEdit;
+  }
+  return approvalModeToPermissionMode(parentApprovalMode);
+}
+
+/**
+ * Maps PermissionMode back to ApprovalMode.
+ */
+function permissionModeToApprovalMode(mode: PermissionMode): ApprovalMode {
+  switch (mode) {
+    case PermissionMode.Yolo:
+      return ApprovalMode.YOLO;
+    case PermissionMode.AutoEdit:
+      return ApprovalMode.AUTO_EDIT;
+    case PermissionMode.Plan:
+      return ApprovalMode.PLAN;
+    case PermissionMode.Default:
+    default:
+      return ApprovalMode.DEFAULT;
+  }
+}
+
+/**
+ * Creates a Config override with a different approval mode.
+ * Uses prototype delegation to avoid mutating the parent config.
+ */
+function createApprovalModeOverride(base: Config, mode: ApprovalMode): Config {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const override = Object.create(base) as any;
+  override.getApprovalMode = (): ApprovalMode => mode;
+  return override as Config;
+}
 
 /**
  * Agent tool that enables primary agents to delegate tasks to specialized agents.
@@ -349,7 +442,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // When a tool result arrives for the tool that had a pending
         // confirmation, clear the stale prompt. This handles the case where
         // the IDE diff-tab accept resolved the tool via CoreToolScheduler's
-        // ideConfirmation.then path, which bypasses the UI's onConfirm wrapper.
+        // IDE confirmation handler, which bypasses the UI's onConfirm wrapper.
         const clearPending =
           pendingConfirmationCallId === event.callId
             ? { pendingConfirmation: undefined }
@@ -521,9 +614,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       if (updateOutput) {
         updateOutput(this.currentDisplay);
       }
+      // Resolve the subagent's permission mode before creating it
+      const resolvedMode = resolveSubagentApprovalMode(
+        this.config.getApprovalMode(),
+        subagentConfig.approvalMode,
+        this.config.isTrustedFolder(),
+      );
+
+      // Create a config override with the resolved approval mode so the
+      // subagent's tool scheduler uses the correct mode for permission checks.
+      const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
+      const agentConfig =
+        resolvedApprovalMode !== this.config.getApprovalMode()
+          ? createApprovalModeOverride(this.config, resolvedApprovalMode)
+          : this.config;
+
       const subagent = await this.subagentManager.createAgentHeadless(
         subagentConfig,
-        this.config,
+        agentConfig,
         { eventEmitter: this.eventEmitter },
       );
 
@@ -541,7 +649,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const startHookOutput = await hookSystem.fireSubagentStartEvent(
             agentId,
             agentType,
-            PermissionMode.Default,
+            resolvedMode,
             signal,
           );
 
@@ -589,7 +697,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               transcriptPath,
               subagent.getFinalText(),
               stopHookActive,
-              PermissionMode.Default,
+              resolvedMode,
               signal,
             );
 

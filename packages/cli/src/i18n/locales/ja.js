@@ -743,9 +743,10 @@ export default {
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
-  'Switch the model for this session': 'このセッションのモデルを切り替え',
-  'Set fast model for background tasks':
-    'バックグラウンドタスク用の高速モデルを設定',
+  'Switch the model for this session (--fast for suggestion model)':
+    'このセッションのモデルを切り替え（--fast で提案モデルを設定）',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'プロンプト提案と投機的実行用の軽量モデルを設定',
   'Content generator configuration not available.':
     'コンテンツジェネレーター設定が利用できません',
   'Authentication type not available.': '認証タイプが利用できません',
@@ -918,6 +919,8 @@ export default {
     'このプロジェクトで{{action}}を常に許可',
   'Always allow for this user': 'このユーザーに常に許可',
   'Always allow {{action}} for this user': 'このユーザーに{{action}}を常に許可',
+  'Yes, restore previous mode ({{mode}})':
+    'はい、以前のモードに戻す ({{mode}})',
   'Yes, and auto-accept edits': 'はい、編集を自動承認',
   'Yes, and manually approve edits': 'はい、編集を手動承認',
   'No, keep planning (esc)': 'いいえ、計画を続ける (Esc)',
@@ -963,8 +966,8 @@ export default {
     '続行するには認証方法を選択してください。Ctrl+C をもう一度押すと終了します',
   'Terms of Services and Privacy Notice': '利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    '無料 \u00B7 1日最大1,000リクエスト \u00B7 Qwen最新モデル',
+  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
+    '無料 \u00B7 1日100リクエスト \u00B7 2026-04-15に終了',
   'Login with QwenChat account to use daily free quota.':
     'QwenChatアカウントでログインして、毎日の無料クォータをご利用ください。',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
@@ -1120,6 +1123,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Ctrl+C をもう一度押すと終了します',
   'Press Ctrl+D again to exit.': 'Ctrl+D をもう一度押すと終了します',
   'Press Esc again to clear.': 'Esc をもう一度押すとクリアします',
+  'Press ↑ to edit queued messages': '↑ を押してキュー内のメッセージを編集',
   // MCP Status
   '⏳ MCP servers are starting up ({{count}} initializing)...':
     '⏳ MCPサーバーを起動中({{count}} 初期化中)...',
@@ -1172,6 +1176,16 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'QWEN.md ファイルを追加すると、Qwen Code に永続的なプロジェクトコンテキストを与えられます。',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    '会話を中断せずに /btw でちょっとした横道の質問ができます。',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'コンテキストがもうすぐいっぱいです！今すぐ /compress を実行するか、/new を開始して続けてください。',
+  'Context is getting full. Use /compress to free up space.':
+    'コンテキストが埋まりつつあります。/compress を使って空きを増やしてください。',
+  'Long conversation? /compress summarizes history to free context.':
+    '会話が長くなりましたか？ /compress は履歴を要約してコンテキストを空けます。',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',
@@ -1434,8 +1448,9 @@ export default {
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - インタラクティブ認証セットアップ\n',
   '✓ Authentication Method: Qwen OAuth': '✓ 認証方法: Qwen OAuth',
-  '  Type: Free tier': '  タイプ: 無料プラン',
-  '  Limit: Up to 1,000 requests/day': '  制限: 1日最大1,000リクエスト',
+  '  Type: Free tier (ending 2026-04-15)':
+    '  タイプ: 無料プラン（2026-04-15に終了）',
+  '  Limit: 100 requests/day': '  制限: 1日100リクエスト',
   '  Models: Qwen latest models\n': '  モデル: Qwen 最新モデル\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ 認証方法: Alibaba Cloud Coding Plan',
@@ -1460,4 +1475,21 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
+  compact: 'コンパクト',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'コンパクトモードでツール出力と思考を非表示にします（Ctrl+O で切り替え）。',
+  'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

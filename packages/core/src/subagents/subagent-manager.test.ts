@@ -95,6 +95,22 @@ describe('SubagentManager', () => {
     // Setup yaml parser mocks with sophisticated behavior
     mockParseYaml.mockImplementation((yamlString: string) => {
       // Handle different test cases based on YAML content
+      // Check disallowedTools before tools to avoid substring match
+      if (yamlString.includes('disallowedTools: write_file')) {
+        // Scalar form
+        return {
+          name: 'test-agent',
+          description: 'A test subagent',
+          disallowedTools: 'write_file',
+        };
+      }
+      if (yamlString.includes('disallowedTools:')) {
+        return {
+          name: 'test-agent',
+          description: 'A test subagent',
+          disallowedTools: ['write_file', 'mcp__slack'],
+        };
+      }
       if (yamlString.includes('tools:')) {
         return {
           name: 'test-agent',
@@ -147,7 +163,9 @@ describe('SubagentManager', () => {
     mockStringifyYaml.mockImplementation((obj: Record<string, unknown>) => {
       let yaml = '';
       for (const [key, value] of Object.entries(obj)) {
-        if (key === 'tools' && Array.isArray(value)) {
+        if (key === 'disallowedTools' && Array.isArray(value)) {
+          yaml += `disallowedTools:\n${value.map((t) => `  - ${t}`).join('\n')}\n`;
+        } else if (key === 'tools' && Array.isArray(value)) {
           yaml += `tools:\n${value.map((tool) => `  - ${tool}`).join('\n')}\n`;
         } else if (key === 'model') {
           yaml += `model: ${value}\n`;
@@ -237,6 +255,46 @@ You are a helpful assistant.
       );
 
       expect(config.tools).toEqual(['read_file', 'write_file']);
+    });
+
+    it('should parse content with disallowedTools array', () => {
+      const markdownWithDisallowed = `---
+name: test-agent
+description: A test subagent
+disallowedTools:
+  - write_file
+  - mcp__slack
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithDisallowed,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.disallowedTools).toEqual(['write_file', 'mcp__slack']);
+    });
+
+    it('should normalize scalar disallowedTools to array', () => {
+      const markdownWithScalar = `---
+name: test-agent
+description: A test subagent
+disallowedTools: write_file
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithScalar,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.disallowedTools).toEqual(['write_file']);
     });
 
     it('should parse content with model selector', () => {
@@ -470,6 +528,41 @@ You are a helpful assistant.
       expect(serialized).not.toContain('tools:');
       expect(serialized).not.toContain('model:');
       expect(serialized).not.toContain('runConfig:');
+      expect(serialized).not.toContain('disallowedTools:');
+    });
+
+    it('should serialize configuration with disallowedTools', () => {
+      const configWithDisallowed: SubagentConfig = {
+        ...validConfig,
+        disallowedTools: ['write_file', 'mcp__slack'],
+      };
+
+      const serialized = manager.serializeSubagent(configWithDisallowed);
+
+      expect(serialized).toContain('disallowedTools:');
+      expect(serialized).toContain('- write_file');
+      expect(serialized).toContain('- mcp__slack');
+    });
+
+    it('should roundtrip disallowedTools through serialize and parse', () => {
+      const configWithDisallowed: SubagentConfig = {
+        ...validConfig,
+        disallowedTools: ['write_file', 'mcp__slack'],
+      };
+
+      const serialized = manager.serializeSubagent(configWithDisallowed);
+
+      expect(serialized).toContain('disallowedTools:');
+      expect(serialized).toContain('- write_file');
+      expect(serialized).toContain('- mcp__slack');
+
+      const parsed = manager.parseSubagentContent(
+        serialized,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(parsed.disallowedTools).toEqual(['write_file', 'mcp__slack']);
     });
   });
 
@@ -946,13 +1039,14 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(5); // agent1 (project takes precedence), agent2, agent3, general-purpose (built-in), Explore (built-in)
+      expect(subagents).toHaveLength(6); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup (built-in)
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
         'agent3',
         'general-purpose',
         'Explore',
+        'statusline-setup',
       ]);
     });
 
@@ -985,6 +1079,7 @@ System prompt 3`);
         'agent3',
         'Explore',
         'general-purpose',
+        'statusline-setup',
       ]);
     });
 
@@ -996,10 +1091,11 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(2); // Only built-in agents remain
+      expect(subagents).toHaveLength(3); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
+        'statusline-setup',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
@@ -1011,10 +1107,11 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(2); // Only built-in agents remain
+      expect(subagents).toHaveLength(3); // Only built-in agents remain
       expect(subagents.map((s) => s.name)).toEqual([
         'general-purpose',
         'Explore',
+        'statusline-setup',
       ]);
       expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });

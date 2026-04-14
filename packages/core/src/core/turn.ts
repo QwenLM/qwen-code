@@ -108,6 +108,7 @@ export interface ToolCallResponseInfo {
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
   contentLength?: number;
+  modelOverride?: string;
 }
 
 export interface ServerToolCallConfirmationDetails {
@@ -280,8 +281,13 @@ export class Turn {
           return;
         }
 
-        // Handle the new RETRY event
+        // Handle the new RETRY event: clear accumulated state from the
+        // previous attempt to avoid duplicate tool calls and stale metadata.
         if (streamEvent.type === 'retry') {
+          this.pendingToolCalls.length = 0;
+          this.pendingCitations.clear();
+          this.debugResponses = [];
+          this.finishReason = undefined;
           yield {
             type: GeminiEventType.Retry,
             retryInfo: streamEvent.retryInfo,

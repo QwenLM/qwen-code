@@ -281,6 +281,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       return {
         llmContent: [{ text: llmContent }],
         returnDisplay: skill.description,
+        modelOverride: skill.model,
       };
     } catch (error) {
       const errorMessage =

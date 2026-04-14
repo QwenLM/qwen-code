@@ -6,6 +6,7 @@
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
 
@@ -208,6 +209,19 @@ export interface ChatCompressionSettings {
   contextPercentageThreshold?: number;
 }
 
+/**
+ * Settings for clearing stale context after idle periods.
+ * Threshold values of -1 mean "never clear" (disabled).
+ */
+export interface ClearContextOnIdleSettings {
+  /** Minutes idle before clearing old thinking blocks. Default 5. Use -1 to disable. */
+  thinkingThresholdMinutes?: number;
+  /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
+  toolResultsThresholdMinutes?: number;
+  /** Number of most-recent tool results to preserve. Default 5. */
+  toolResultsNumToKeep?: number;
+}
+
 export interface TelemetrySettings {
   enabled?: boolean;
   target?: TelemetryTarget;
@@ -370,6 +384,7 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
@@ -529,6 +544,7 @@ export class Config {
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private approvalMode: ApprovalMode;
+  private prePlanMode?: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
@@ -557,6 +573,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
   private readonly overrideExtensions?: string[];
@@ -683,6 +700,14 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.clearContextOnIdle = {
+      thinkingThresholdMinutes:
+        params.clearContextOnIdle?.thinkingThresholdMinutes ?? 5,
+      toolResultsThresholdMinutes:
+        params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
+      toolResultsNumToKeep:
+        params.clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+    };
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
@@ -1329,6 +1354,10 @@ export class Config {
     return this.maxSessionTurns;
   }
 
+  getClearContextOnIdle(): ClearContextOnIdleSettings {
+    return this.clearContextOnIdle;
+  }
+
   getSessionTokenLimit(): number {
     return this.sessionTokenLimit;
   }
@@ -1634,6 +1663,14 @@ export class Config {
     return this.approvalMode;
   }
 
+  /**
+   * Returns the approval mode that was active before entering plan mode.
+   * Falls back to DEFAULT if no pre-plan mode was recorded.
+   */
+  getPrePlanMode(): ApprovalMode {
+    return this.prePlanMode ?? ApprovalMode.DEFAULT;
+  }
+
   setApprovalMode(mode: ApprovalMode): void {
     if (
       !this.isTrustedFolder() &&
@@ -1644,7 +1681,53 @@ export class Config {
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
+    // Track the mode before entering plan mode so it can be restored later
+    if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
+      this.prePlanMode = this.approvalMode;
+    } else if (
+      mode !== ApprovalMode.PLAN &&
+      this.approvalMode === ApprovalMode.PLAN
+    ) {
+      this.prePlanMode = undefined;
+    }
     this.approvalMode = mode;
+  }
+
+  /**
+   * Returns the file path for this session's plan file.
+   */
+  getPlanFilePath(): string {
+    return Storage.getPlanFilePath(this.sessionId);
+  }
+
+  /**
+   * Saves a plan to disk for the current session.
+   */
+  savePlan(plan: string): void {
+    const filePath = this.getPlanFilePath();
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, plan, 'utf-8');
+  }
+
+  /**
+   * Loads the plan for the current session, or returns undefined if none exists.
+   */
+  loadPlan(): string | undefined {
+    const filePath = this.getPlanFilePath();
+    try {
+      return fs.readFileSync(filePath, 'utf-8');
+    } catch (error: unknown) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   getInputFormat(): 'text' | 'stream-json' {

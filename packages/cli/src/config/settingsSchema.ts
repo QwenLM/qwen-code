@@ -429,6 +429,15 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      statusLine: {
+        type: 'object',
+        label: 'Status Line',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as { type: 'command'; command: string } | undefined,
+        description: 'Custom status line display configuration.',
+        showInDialog: false,
+      },
       customThemes: {
         type: 'object',
         label: 'Custom Themes',
@@ -518,7 +527,7 @@ const SETTINGS_SCHEMA = {
         label: 'Enable Follow-up Suggestions',
         category: 'UI',
         requiresRestart: false,
-        default: true,
+        default: false,
         description:
           'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
         showInDialog: true,
@@ -581,6 +590,16 @@ const SETTINGS_SCHEMA = {
         default: 0,
         description: 'The last time the feedback dialog was shown.',
         showInDialog: false,
+      },
+      compactMode: {
+        type: 'boolean',
+        label: 'Compact Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+        showInDialog: true,
       },
     },
   },
@@ -653,7 +672,7 @@ const SETTINGS_SCHEMA = {
     requiresRestart: false,
     default: '',
     description:
-      'Model for background tasks (suggestion generation, speculation). Leave empty to use the main model. A smaller/faster model (e.g., qwen3.5-flash) reduces latency and cost.',
+      'Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.',
     showInDialog: true,
   },
 
@@ -867,6 +886,48 @@ const SETTINGS_SCHEMA = {
         description: 'Whether to load memory files from include directories.',
         showInDialog: false,
       },
+      clearContextOnIdle: {
+        type: 'object',
+        label: 'Clear Context On Idle',
+        category: 'Context',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for clearing stale context after idle periods. Use -1 to disable a threshold.',
+        showInDialog: false,
+        properties: {
+          thinkingThresholdMinutes: {
+            type: 'number',
+            label: 'Thinking Idle Threshold (minutes)',
+            category: 'Context',
+            requiresRestart: false,
+            default: 5 as number,
+            description:
+              'Minutes of inactivity before clearing old thinking blocks. Use -1 to disable.',
+            showInDialog: false,
+          },
+          toolResultsThresholdMinutes: {
+            type: 'number',
+            label: 'Tool Results Idle Threshold (minutes)',
+            category: 'Context',
+            requiresRestart: false,
+            default: 60 as number,
+            description:
+              'Minutes of inactivity before clearing old tool result content. Use -1 to disable.',
+            showInDialog: false,
+          },
+          toolResultsNumToKeep: {
+            type: 'number',
+            label: 'Tool Results Number To Keep',
+            category: 'Context',
+            requiresRestart: false,
+            default: 5 as number,
+            description:
+              'Number of most-recent compactable tool results to preserve when clearing. Floor at 1.',
+            showInDialog: false,
+          },
+        },
+      },
       fileFiltering: {
         type: 'object',
         label: 'File Filtering',
@@ -983,6 +1044,16 @@ const SETTINGS_SCHEMA = {
         default: undefined as boolean | string | undefined,
         description:
           'Sandbox execution environment (can be a boolean or a path string).',
+        showInDialog: false,
+      },
+      sandboxImage: {
+        type: 'string',
+        label: 'Sandbox Image',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.',
         showInDialog: false,
       },
       shell: {

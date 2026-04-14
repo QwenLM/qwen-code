@@ -25,12 +25,16 @@ import type {
   PostToolUseFailureInput,
   PreCompactInput,
   PreCompactTrigger,
+  PostCompactInput,
+  PostCompactTrigger,
   NotificationInput,
   NotificationType,
   PermissionRequestInput,
   PermissionSuggestion,
   SubagentStartInput,
   SubagentStopInput,
+  StopFailureInput,
+  StopFailureErrorType,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -390,6 +394,57 @@ export class HookEventHandler {
       {
         agentType: String(agentType),
       },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a StopFailure event
+   * Called when an API error ends the turn (instead of Stop)
+   * Fire-and-forget: output and exit codes are ignored
+   */
+  async fireStopFailureEvent(
+    error: StopFailureErrorType,
+    errorDetails?: string,
+    lastAssistantMessage?: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: StopFailureInput = {
+      ...this.createBaseInput(HookEventName.StopFailure),
+      error,
+      error_details: errorDetails,
+      last_assistant_message: lastAssistantMessage,
+    };
+
+    // Pass error type as context for matcher filtering (fieldToMatch: 'error')
+    return this.executeHooks(
+      HookEventName.StopFailure,
+      input,
+      { error },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a PostCompact event
+   * Called after conversation compaction completes
+   */
+  async firePostCompactEvent(
+    trigger: PostCompactTrigger,
+    compactSummary: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: PostCompactInput = {
+      ...this.createBaseInput(HookEventName.PostCompact),
+      trigger,
+      compact_summary: compactSummary,
+    };
+
+    // Pass trigger as context for matcher filtering
+    return this.executeHooks(
+      HookEventName.PostCompact,
+      input,
+      { trigger },
       signal,
     );
   }
