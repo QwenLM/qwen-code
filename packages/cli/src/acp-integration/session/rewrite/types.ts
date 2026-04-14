@@ -20,10 +20,6 @@ export interface MessageRewriteConfig {
   promptFile?: string;
   /** Model to use for rewriting (empty = use current model) */
   model?: string;
-  /** Whether to run rewrite async (parallel with tool execution, default true).
-   *  async=true: no added latency, but rewritten messages may arrive after tool calls
-   *  async=false: rewrite blocks before tools, messages in strict order */
-  async?: boolean;
 }
 
 /**

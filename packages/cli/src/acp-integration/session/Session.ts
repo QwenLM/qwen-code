@@ -587,9 +587,9 @@ export class Session implements SessionContext {
             }
 
             if (usageMetadata) {
-              // Flush rewrite buffer before emitting usage (marks turn boundary)
+              // Kick off rewrite in background (non-blocking)
               if (this.messageRewriter) {
-                await this.messageRewriter.flushTurn(ac.signal);
+                this.messageRewriter.flushTurn(ac.signal);
               }
               const durationMs = Date.now() - streamStartTime;
               await this.messageEmitter.emitUsageMetadata(

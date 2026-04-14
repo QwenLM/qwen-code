@@ -31,7 +31,6 @@ export class MessageRewriteMiddleware {
   private readonly turnBuffer: TurnBuffer;
   private readonly rewriter: LlmRewriter;
   private readonly target: MessageRewriteConfig['target'];
-  private readonly asyncMode: boolean;
   private turnIndex = 0;
 
   constructor(
@@ -42,7 +41,6 @@ export class MessageRewriteMiddleware {
     this.turnBuffer = new TurnBuffer();
     this.rewriter = new LlmRewriter(config, rewriteConfig);
     this.target = rewriteConfig.target;
-    this.asyncMode = rewriteConfig.async !== false; // default true
   }
 
   /**
@@ -97,8 +95,7 @@ export class MessageRewriteMiddleware {
   /**
    * Flush the turn buffer: rewrite accumulated content and emit.
    *
-   * In async mode (default): non-blocking, rewrite runs parallel to tool execution.
-   * In sync mode: blocks until rewrite completes, ensures strict message ordering.
+   * Non-blocking: rewrite runs in background, parallel to tool execution.
    *
    * Called when:
    * - A tool_call is about to be emitted (turn boundary)
@@ -112,7 +109,7 @@ export class MessageRewriteMiddleware {
     this.turnIndex++;
     const turnIdx = this.turnIndex;
 
-    const doRewrite = (async () => {
+    this.pendingRewrite = (async () => {
       try {
         const rewritten = await this.rewriter.rewrite(content, signal);
         if (!rewritten) {
@@ -139,14 +136,6 @@ export class MessageRewriteMiddleware {
         );
       }
     })();
-
-    if (this.asyncMode) {
-      // Non-blocking: rewrite runs parallel to tool execution
-      this.pendingRewrite = doRewrite;
-    } else {
-      // Blocking: wait for rewrite before proceeding (strict message order)
-      await doRewrite;
-    }
   }
 
   /**
