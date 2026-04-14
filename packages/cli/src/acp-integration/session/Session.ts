@@ -14,6 +14,7 @@ import type {
   Config,
   GeminiChat,
   ToolCallConfirmationDetails,
+  ToolEditConfirmationDetails,
   ToolResult,
   ChatRecord,
   AgentEventEmitter,
@@ -715,10 +716,12 @@ export class Session implements SessionContext {
     confirmationDetails: ToolCallConfirmationDetails,
     outcome: ToolConfirmationOutcome,
   ): Promise<void> {
-    if (
-      confirmationDetails.type !== 'edit' ||
-      !confirmationDetails.ideConfirmation
-    ) {
+    if (confirmationDetails.type !== 'edit') {
+      return;
+    }
+
+    const editDetails = confirmationDetails as ToolEditConfirmationDetails;
+    if (!editDetails.ideConfirmation) {
       return;
     }
 
@@ -727,7 +730,7 @@ export class Session implements SessionContext {
     const cliOutcome =
       outcome === ToolConfirmationOutcome.Cancel ? 'rejected' : 'accepted';
     await ideClient.resolveDiffFromCli(
-      confirmationDetails.filePath,
+      editDetails.filePath,
       cliOutcome as 'accepted' | 'rejected',
     );
   }
@@ -1072,6 +1075,7 @@ export class Session implements SessionContext {
             case ToolConfirmationOutcome.ProceedAlwaysServer:
             case ToolConfirmationOutcome.ProceedAlwaysTool:
             case ToolConfirmationOutcome.ModifyWithEditor:
+            case ToolConfirmationOutcome.RestorePrevious:
               break;
             default: {
               const resultOutcome: never = outcome;

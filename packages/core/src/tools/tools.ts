@@ -714,6 +714,7 @@ export enum ToolConfirmationOutcome {
   ProceedAlwaysUser = 'proceed_always_user',
   ModifyWithEditor = 'modify_with_editor',
   Cancel = 'cancel',
+  RestorePrevious = 'restore_previous',
 }
 
 export enum Kind {

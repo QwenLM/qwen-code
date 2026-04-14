@@ -97,13 +97,18 @@ const listCommand: SlashCommand = {
     for (const [eventName, hooks] of hooksByEvent) {
       output += `### ${eventName}\n`;
       for (const hook of hooks) {
-        const name =
-          hook.config.name ||
-          (hook.config.type === 'command'
-            ? hook.config.command
-            : hook.config.type === 'prompt'
-              ? hook.config.prompt?.slice(0, 30)
-              : 'unnamed');
+        const config = hook.config;
+        let name: string;
+        if (config.name) {
+          name = config.name;
+        } else if (config.type === 'command') {
+          name = config.command;
+        } else if (config.type === 'prompt') {
+          name =
+            (config as { prompt?: string }).prompt?.slice(0, 30) ?? 'unnamed';
+        } else {
+          name = 'unnamed';
+        }
         const source = formatHookSource(hook.source);
         const status = formatHookStatus(hook.enabled);
         const matcher = hook.matcher ? ` (matcher: ${hook.matcher})` : '';
