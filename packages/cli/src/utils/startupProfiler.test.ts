@@ -91,6 +91,7 @@ describe('startupProfiler', () => {
       expect(report!.phases[1]!.name).toBe('phase_b');
       expect(report!.phases[2]!.name).toBe('phase_c');
       expect(report!.totalMs).toBeGreaterThanOrEqual(0);
+      expect(report!.processUptimeAtT0Ms).toBeGreaterThan(0);
       expect(report!.nodeVersion).toBe(process.version);
       expect(report!.platform).toBe(process.platform);
       expect(report!.arch).toBe(process.arch);

@@ -32,6 +32,8 @@ export interface StartupPhase {
 export interface StartupReport {
   timestamp: string;
   sessionId: string;
+  /** Time from Node.js process start to T0 (initStartupProfiler call), covers module loading. */
+  processUptimeAtT0Ms: number;
   totalMs: number;
   phases: StartupPhase[];
   nodeVersion: string;
@@ -41,6 +43,7 @@ export interface StartupReport {
 
 let enabled = false;
 let t0 = 0;
+let processUptimeAtT0Ms = 0;
 let checkpoints: Checkpoint[] = [];
 let finalized = false;
 
@@ -58,6 +61,7 @@ export function initStartupProfiler(): void {
   }
   enabled = true;
   finalized = false;
+  processUptimeAtT0Ms = Math.round(process.uptime() * 1000 * 100) / 100;
   t0 = performance.now();
   checkpoints = [];
 }
@@ -89,6 +93,7 @@ export function getStartupReport(): StartupReport | null {
   return {
     timestamp: new Date().toISOString(),
     sessionId: 'unknown',
+    processUptimeAtT0Ms,
     totalMs: Math.round((lastTimestamp - t0) * 100) / 100,
     phases,
     nodeVersion: process.version,
@@ -126,6 +131,7 @@ export function finalizeStartupProfile(sessionId?: string): void {
 export function resetStartupProfiler(): void {
   enabled = false;
   t0 = 0;
+  processUptimeAtT0Ms = 0;
   checkpoints = [];
   finalized = false;
 }
