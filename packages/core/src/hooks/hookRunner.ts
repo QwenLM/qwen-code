@@ -45,19 +45,20 @@ const EXIT_CODE_NON_BLOCKING_ERROR = 1;
  * Hook runner that executes command and LLM hooks
  */
 export class HookRunner {
-  private contentGenerator?: ContentGenerator;
-  private defaultModel?: string;
+  private configProvider?: () => {
+    contentGenerator: ContentGenerator;
+    model: string;
+  };
 
   /**
-   * Set the content generator for LLM hook execution.
-   * Called by HookSystem after initialization.
+   * Set a lazy config provider for LLM hook execution.
+   * Content generator may not be available at hook system init time,
+   * so we resolve it lazily at execution time.
    */
-  setContentGenerator(
-    contentGenerator: ContentGenerator,
-    defaultModel: string,
+  setConfigProvider(
+    provider: () => { contentGenerator: ContentGenerator; model: string },
   ): void {
-    this.contentGenerator = contentGenerator;
-    this.defaultModel = defaultModel;
+    this.configProvider = provider;
   }
 
   /**
@@ -260,7 +261,16 @@ export class HookRunner {
     startTime: number,
     signal?: AbortSignal,
   ): Promise<HookExecutionResult> {
-    if (!this.contentGenerator) {
+    let contentGenerator: ContentGenerator;
+    let defaultModel: string;
+    try {
+      const config = this.configProvider?.();
+      if (!config) {
+        throw new Error('Config provider not set');
+      }
+      contentGenerator = config.contentGenerator;
+      defaultModel = config.model;
+    } catch {
       return {
         hookConfig,
         eventName,
@@ -315,8 +325,8 @@ export class HookRunner {
     }
 
     try {
-      const model = hookConfig.model || this.defaultModel || '';
-      const result = await this.contentGenerator.generateContent(
+      const model = hookConfig.model || defaultModel || '';
+      const result = await contentGenerator.generateContent(
         {
           model,
           config: {

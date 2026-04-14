@@ -60,16 +60,11 @@ export class HookSystem {
   async initialize(): Promise<void> {
     await this.hookRegistry.initialize();
 
-    // Wire content generator to hook runner for LLM hooks
-    try {
-      const contentGenerator = this.config.getContentGenerator();
-      const model = this.config.getModel();
-      this.hookRunner.setContentGenerator(contentGenerator, model);
-    } catch {
-      debugLogger.debug(
-        'Content generator not available yet for LLM hooks (will be set later)',
-      );
-    }
+    // Wire config to hook runner for lazy LLM hook content generator access
+    this.hookRunner.setConfigProvider(() => ({
+      contentGenerator: this.config.getContentGenerator(),
+      model: this.config.getModel(),
+    }));
 
     debugLogger.debug('Hook system initialized successfully');
   }
