@@ -53,10 +53,13 @@ import {
   IDLE_SPECULATION,
   ApprovalMode,
   type PermissionMode,
+  ToolConfirmationOutcome,
+  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
+import { randomUUID } from 'node:crypto';
 import process from 'node:process';
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
@@ -124,10 +127,12 @@ import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.j
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
+import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -719,6 +724,7 @@ export const AppContainer = (props: AppContainerProps) => {
     submitQuery,
     initError,
     pendingHistoryItems: pendingGeminiHistoryItems,
+    pendingToolCalls = [],
     thought,
     cancelOngoingRequest,
     retryLastPrompt,
@@ -788,6 +794,106 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     submitQuery,
   });
+
+  const remoteInput = useRemoteInput();
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setSubmitFn((text: string) => submitQuery(text));
+  }, [remoteInput, submitQuery]);
+
+  useEffect(() => {
+    if (!remoteInput) return;
+    if (streamingState === StreamingState.Idle) {
+      remoteInput.notifyIdle();
+    }
+  }, [remoteInput, streamingState]);
+
+  const dualOutput = useDualOutput();
+  const confirmRequestMap = useRef(new Map<string, string>());
+  const confirmCallIdMap = useRef(new Map<string, string>());
+  const confirmEmitted = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (!dualOutput || !dualOutput.isConnected) return;
+
+    for (const tc of pendingToolCalls) {
+      if (
+        tc.status === 'awaiting_approval' &&
+        !confirmEmitted.current.has(tc.request.callId)
+      ) {
+        const requestId = randomUUID();
+        confirmRequestMap.current.set(requestId, tc.request.callId);
+        confirmCallIdMap.current.set(tc.request.callId, requestId);
+        confirmEmitted.current.add(tc.request.callId);
+        dualOutput.emitControlRequest(
+          requestId,
+          tc.request.name,
+          tc.request.callId,
+          tc.request.args,
+          null,
+        );
+      }
+    }
+
+    for (const [callId, requestId] of confirmCallIdMap.current) {
+      const tc = pendingToolCalls.find(
+        (toolCall) => toolCall.request.callId === callId,
+      );
+      if (
+        tc &&
+        tc.status !== 'awaiting_approval' &&
+        confirmEmitted.current.has(callId)
+      ) {
+        const allowed = tc.status !== 'cancelled' && tc.status !== 'error';
+        dualOutput.emitControlResponse(requestId, allowed);
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      }
+    }
+  }, [dualOutput, pendingToolCalls]);
+
+  useEffect(() => {
+    if (!remoteInput) return;
+
+    remoteInput.setConfirmationHandler(
+      (requestId: string, allowed: boolean) => {
+        const callId = confirmRequestMap.current.get(requestId);
+        if (!callId) return;
+
+        const tc = pendingToolCalls.find(
+          (toolCall) =>
+            toolCall.request.callId === callId &&
+            toolCall.status === 'awaiting_approval',
+        );
+        if (!tc) return;
+
+        const waitingTc = tc as WaitingToolCall;
+        if (!waitingTc.confirmationDetails?.onConfirm) return;
+
+        void waitingTc.confirmationDetails.onConfirm(
+          allowed
+            ? ToolConfirmationOutcome.ProceedOnce
+            : ToolConfirmationOutcome.Cancel,
+        );
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      },
+    );
+
+    return () => {
+      remoteInput.setConfirmationHandler(() => {});
+    };
+  }, [remoteInput, pendingToolCalls]);
+
+  useEffect(() => {
+    if (!dualOutput) return;
+    dualOutput.emitSystemMessage('session_start', {
+      session_id: sessionStats.sessionId,
+      cwd: process.cwd(),
+    });
+  }, [dualOutput, sessionStats.sessionId]);
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it

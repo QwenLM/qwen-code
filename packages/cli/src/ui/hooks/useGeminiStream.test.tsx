@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useGeminiStream } from './useGeminiStream.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
+import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import type {
   TrackedToolCall,
   TrackedCompletedToolCall,
@@ -131,6 +132,9 @@ vi.mock('../contexts/SessionContext.js', () => ({
 vi.mock('./slashCommandProcessor.js', () => ({
   handleSlashCommand: vi.fn().mockReturnValue(false),
 }));
+vi.mock('../../dualOutput/DualOutputContext.js', () => ({
+  useDualOutput: vi.fn(),
+}));
 
 // --- END MOCKS ---
 
@@ -144,6 +148,7 @@ describe('useGeminiStream', () => {
   let mockCancelAllToolCalls: Mock;
   let mockMarkToolsAsSubmitted: Mock;
   let handleAtCommandSpy: MockInstance;
+  const mockedUseDualOutput = useDualOutput as Mock;
 
   beforeEach(() => {
     vi.clearAllMocks(); // Clear mocks before each test
@@ -232,6 +237,7 @@ describe('useGeminiStream', () => {
       .mockClear()
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
+    mockedUseDualOutput.mockReturnValue(null);
   });
 
   const mockLoadedSettings: LoadedSettings = {
@@ -566,6 +572,118 @@ describe('useGeminiStream', () => {
       // Ensure we do NOT call back to the API
       expect(mockSendMessageStream).not.toHaveBeenCalled();
     });
+  });
+
+  it('emits user and assistant stream events to dual output when enabled', async () => {
+    const dualOutput = {
+      emitUserMessage: vi.fn(),
+      startAssistantMessage: vi.fn(),
+      processEvent: vi.fn(),
+      finalizeAssistantMessage: vi.fn(),
+    };
+    mockedUseDualOutput.mockReturnValue(dualOutput);
+
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'Hello from model',
+        };
+        yield {
+          type: ServerGeminiEventType.Finished,
+          value: { reason: 'STOP' },
+        };
+      })(),
+    );
+
+    const { result } = renderTestHook();
+
+    await act(async () => {
+      await result.current.submitQuery('hello dual output');
+    });
+
+    expect(dualOutput.emitUserMessage).toHaveBeenCalledWith([
+      { text: 'hello dual output' },
+    ]);
+    expect(dualOutput.startAssistantMessage).toHaveBeenCalledTimes(1);
+    expect(dualOutput.processEvent).toHaveBeenCalledTimes(2);
+    expect(dualOutput.finalizeAssistantMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('emits completed tool results to dual output when enabled', async () => {
+    const dualOutput = {
+      emitToolResult: vi.fn(),
+    };
+    mockedUseDualOutput.mockReturnValue(dualOutput);
+
+    const completedToolCalls: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call-1',
+          name: 'tool1',
+          args: { foo: 'bar' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-tool',
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId: 'call-1',
+          responseParts: [{ text: 'done' }],
+          errorType: undefined,
+        },
+        tool: {
+          displayName: 'tool1',
+          isOutputMarkdown: false,
+        },
+        invocation: {
+          getDescription: () => 'tool1({ foo: "bar" })',
+        } as unknown as AnyToolInvocation,
+      } as TrackedCompletedToolCall,
+    ];
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete(completedToolCalls);
+      }
+    });
+
+    expect(dualOutput.emitToolResult).toHaveBeenCalledWith(
+      completedToolCalls[0].request,
+      completedToolCalls[0].response,
+    );
   });
 
   it('should group multiple cancelled tool call responses into a single history entry', async () => {
