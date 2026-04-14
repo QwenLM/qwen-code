@@ -9,6 +9,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
 import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
+import { truncatePanelTitle } from '../webview/utils/panelTitleUtils.js';
 
 export interface QwenMessage {
   id: string;
@@ -190,10 +191,7 @@ export class QwenSessionReader {
       return 'Untitled Session';
     }
 
-    const codePoints = [...text];
-    return codePoints.length <= 50
-      ? text
-      : codePoints.slice(0, 50).join('') + '…';
+    return truncatePanelTitle(text);
   }
 
   /**

@@ -668,7 +668,7 @@ export class WebViewProvider {
           ).trim();
           const panelRef = this.panelManager.getPanel();
           if (panelRef) {
-            panelRef.title = truncatePanelTitle(title || 'Qwen Code');
+            panelRef.title = title ? truncatePanelTitle(title) : 'Qwen Code';
           }
           return;
         }
@@ -1504,7 +1504,7 @@ export class WebViewProvider {
           ).trim();
           const panelRef = this.panelManager.getPanel();
           if (panelRef) {
-            panelRef.title = truncatePanelTitle(title || 'Qwen Code');
+            panelRef.title = title ? truncatePanelTitle(title) : 'Qwen Code';
           }
           return;
         }
