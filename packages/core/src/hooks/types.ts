@@ -837,8 +837,6 @@ export interface PostTurnInput extends HookInput {
   thoughts: string[];
   messages: string[];
   has_tool_calls: boolean;
-  /** Previous acpMessage outputs from earlier PostTurn hooks in this session (most recent last). */
-  previous_hook_outputs: string[];
 }
 
 /**

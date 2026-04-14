@@ -510,7 +510,6 @@ export async function firePostTurnHook(
   thoughts: string[],
   messages: string[],
   hasToolCalls: boolean,
-  previousHookOutputs: string[],
   signal?: AbortSignal,
 ): Promise<PostTurnHookResult> {
   if (!messageBus) {
@@ -530,7 +529,6 @@ export async function firePostTurnHook(
           thoughts,
           messages,
           has_tool_calls: hasToolCalls,
-          previous_hook_outputs: previousHookOutputs,
         },
         signal,
       },
