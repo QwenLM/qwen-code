@@ -7,6 +7,7 @@
 type EarlyInputState = {
   chunks: Buffer[];
   listener: ((chunk: Buffer) => void) | null;
+  exitHandler: (() => void) | null;
   wasRaw: boolean;
   changedRawMode: boolean;
 } | null;
@@ -66,16 +67,21 @@ export function startCapturingEarlyInput(): void {
   const listener = (chunk: Buffer) => {
     chunks.push(Buffer.from(chunk));
   };
+  const exitHandler = () => {
+    disposeEarlyInput(false);
+  };
 
   earlyInputState = {
     chunks,
     listener,
+    exitHandler,
     wasRaw,
     changedRawMode,
   };
 
   process.stdin.resume();
   process.stdin.on('data', listener);
+  process.on('exit', exitHandler);
 }
 
 export function drainEarlyInput(): Buffer[] {
@@ -83,11 +89,24 @@ export function drainEarlyInput(): Buffer[] {
     return [];
   }
 
-  const { chunks, listener, wasRaw, changedRawMode } = earlyInputState;
+  return disposeEarlyInput(true);
+}
+
+function disposeEarlyInput(removeExitHandler: boolean): Buffer[] {
+  if (!earlyInputState) {
+    return [];
+  }
+
+  const { chunks, listener, exitHandler, wasRaw, changedRawMode } =
+    earlyInputState;
   earlyInputState = null;
 
   if (listener) {
     process.stdin.removeListener('data', listener);
+  }
+
+  if (removeExitHandler && exitHandler) {
+    process.removeListener('exit', exitHandler);
   }
 
   if (changedRawMode && supportsRawMode(process.stdin)) {

@@ -66,12 +66,18 @@ describe('earlyInput', () => {
   });
 
   it('buffers tty input and restores raw mode when drained', () => {
+    const processOnSpy = vi.spyOn(process, 'on');
+    const processRemoveListenerSpy = vi.spyOn(process, 'removeListener');
+
     startCapturingEarlyInput();
 
     emitData('a');
     emitData('bc');
 
     const chunks = drainEarlyInput();
+    const exitHandler = processOnSpy.mock.calls.find(
+      ([event]) => event === 'exit',
+    )?.[1];
 
     expect(mockStdin.setRawMode).toHaveBeenNthCalledWith(1, true);
     expect(mockStdin.setRawMode).toHaveBeenNthCalledWith(2, false);
@@ -81,6 +87,8 @@ describe('earlyInput', () => {
       'bc',
     ]);
     expect(mockStdin.removeListener).toHaveBeenCalledTimes(1);
+    expect(exitHandler).toBeTypeOf('function');
+    expect(processRemoveListenerSpy).toHaveBeenCalledWith('exit', exitHandler);
   });
 
   it('is a no-op when stdin is not a tty', () => {
@@ -107,5 +115,29 @@ describe('earlyInput', () => {
       '\x1b[A',
     ]);
     expect(process.env[EARLY_INPUT_ENV_KEY]).toBeUndefined();
+  });
+
+  it('restores raw mode if the process exits before draining early input', () => {
+    const processOnSpy = vi.spyOn(process, 'on');
+    const processRemoveListenerSpy = vi.spyOn(process, 'removeListener');
+
+    startCapturingEarlyInput();
+    emitData('typed-before-exit');
+
+    const exitHandler = processOnSpy.mock.calls.find(
+      ([event]) => event === 'exit',
+    )?.[1];
+
+    expect(exitHandler).toBeTypeOf('function');
+    (exitHandler as () => void)();
+
+    expect(mockStdin.setRawMode).toHaveBeenNthCalledWith(1, true);
+    expect(mockStdin.setRawMode).toHaveBeenNthCalledWith(2, false);
+    expect(mockStdin.removeListener).toHaveBeenCalledTimes(1);
+    expect(processRemoveListenerSpy).not.toHaveBeenCalledWith(
+      'exit',
+      exitHandler,
+    );
+    expect(drainEarlyInput()).toEqual([]);
   });
 });
