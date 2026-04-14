@@ -59,13 +59,24 @@ export const HOOKS_CONFIG_FIELDS = ['enabled', 'disabled', 'notifications'];
  * Hook configuration entry
  */
 export interface CommandHookConfig {
-  type: HookType.Command;
+  type: HookType;
   command: string;
   name?: string;
   description?: string;
   timeout?: number;
   source?: HooksConfigSource;
   env?: Record<string, string>;
+  // LLM hook fields (only used when type='llm')
+  /** System prompt for the LLM call (type: "llm" only). */
+  prompt?: string;
+  /** Path to system prompt file, relative to CWD (type: "llm" only). Takes precedence over prompt. */
+  promptFile?: string;
+  /** Model to use for LLM call (type: "llm" only). Empty = use session model. */
+  model?: string;
+  /** Temperature for LLM call (type: "llm" only). Default 0.3. */
+  temperature?: number;
+  /** Max output tokens for LLM call (type: "llm" only). Default 1024. */
+  maxTokens?: number;
 }
 
 export type HookConfig = CommandHookConfig;
@@ -84,6 +95,7 @@ export interface HookDefinition {
  */
 export enum HookType {
   Command = 'command',
+  Llm = 'llm',
 }
 
 /**
@@ -91,7 +103,11 @@ export enum HookType {
  */
 export function getHookKey(hook: HookConfig): string {
   const name = hook.name ?? '';
-  return name ? `${name}:${hook.command}` : hook.command;
+  const id =
+    hook.type === HookType.Command
+      ? hook.command
+      : `llm:${hook.model ?? 'default'}`;
+  return name ? `${name}:${id}` : id;
 }
 
 /**

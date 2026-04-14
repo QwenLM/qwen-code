@@ -135,14 +135,38 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
         properties: {
           type: {
             type: 'string',
-            description: 'The type of hook.',
-            enum: ['command'],
+            description:
+              'The type of hook. "command" spawns an external process; "llm" calls the session LLM directly.',
+            enum: ['command', 'llm'],
             required: true,
           },
           command: {
             type: 'string',
-            description: 'The command to execute when the hook is triggered.',
-            required: true,
+            description:
+              'The command to execute when the hook is triggered (type: "command" only).',
+          },
+          prompt: {
+            type: 'string',
+            description:
+              'System prompt for LLM hook (type: "llm" only). Overridden by promptFile.',
+          },
+          promptFile: {
+            type: 'string',
+            description:
+              'Path to system prompt file for LLM hook (type: "llm" only, relative to CWD).',
+          },
+          model: {
+            type: 'string',
+            description:
+              'Model for LLM hook (type: "llm" only). Empty = use session model.',
+          },
+          temperature: {
+            type: 'number',
+            description: 'Temperature for LLM hook (type: "llm" only).',
+          },
+          maxTokens: {
+            type: 'number',
+            description: 'Max output tokens for LLM hook (type: "llm" only).',
           },
           name: {
             type: 'string',

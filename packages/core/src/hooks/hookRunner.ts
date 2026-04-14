@@ -5,7 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { HookEventName } from './types.js';
+import { HookEventName, HookType } from './types.js';
 import type {
   HookConfig,
   HookInput,
@@ -14,6 +14,7 @@ import type {
   PreToolUseInput,
   UserPromptSubmitInput,
 } from './types.js';
+import type { ContentGenerator } from '../core/contentGenerator.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   escapeShellArg,
@@ -41,9 +42,24 @@ const EXIT_CODE_SUCCESS = 0;
 const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 
 /**
- * Hook runner that executes command hooks
+ * Hook runner that executes command and LLM hooks
  */
 export class HookRunner {
+  private contentGenerator?: ContentGenerator;
+  private defaultModel?: string;
+
+  /**
+   * Set the content generator for LLM hook execution.
+   * Called by HookSystem after initialization.
+   */
+  setContentGenerator(
+    contentGenerator: ContentGenerator,
+    defaultModel: string,
+  ): void {
+    this.contentGenerator = contentGenerator;
+    this.defaultModel = defaultModel;
+  }
+
   /**
    * Execute a single hook
    * @param hookConfig Hook configuration
@@ -61,7 +77,10 @@ export class HookRunner {
 
     // Check if already aborted before starting
     if (signal?.aborted) {
-      const hookId = hookConfig.name || hookConfig.command || 'unknown';
+      const hookId =
+        hookConfig.name ||
+        (hookConfig.type === HookType.Command ? hookConfig.command : 'llm') ||
+        'unknown';
       return {
         hookConfig,
         eventName,
@@ -72,6 +91,15 @@ export class HookRunner {
     }
 
     try {
+      if (hookConfig.type === HookType.Llm) {
+        return await this.executeLlmHook(
+          hookConfig,
+          eventName,
+          input,
+          startTime,
+          signal,
+        );
+      }
       return await this.executeCommandHook(
         hookConfig,
         eventName,
@@ -221,6 +249,141 @@ export class HookRunner {
    * @param startTime Start time for duration calculation
    * @param signal Optional AbortSignal to cancel hook execution
    */
+  /**
+   * Execute an LLM hook — calls the session's content generator directly.
+   * No external process, reuses existing connection/retry/auth.
+   */
+  private async executeLlmHook(
+    hookConfig: HookConfig,
+    eventName: HookEventName,
+    input: HookInput,
+    startTime: number,
+    signal?: AbortSignal,
+  ): Promise<HookExecutionResult> {
+    if (!this.contentGenerator) {
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        error: new Error('Content generator not available for LLM hook'),
+        duration: Date.now() - startTime,
+      };
+    }
+
+    // Load system prompt (promptFile > prompt > empty)
+    let systemPrompt = hookConfig.prompt || '';
+    if (hookConfig.promptFile) {
+      try {
+        const { readFileSync, existsSync } = await import('node:fs');
+        const { resolve } = await import('node:path');
+        const filePath = resolve(hookConfig.promptFile);
+        if (existsSync(filePath)) {
+          systemPrompt = readFileSync(filePath, 'utf-8').trim();
+        }
+      } catch {
+        // Fall back to inline prompt
+      }
+    }
+
+    // Build user message from hook input
+    const inputRecord = input as unknown as Record<string, unknown>;
+    const thoughts = (inputRecord['thoughts'] as string[]) || [];
+    const messages = (inputRecord['messages'] as string[]) || [];
+    const toolCalls =
+      (inputRecord['tool_calls'] as Array<{ name: string }>) || [];
+
+    const parts: string[] = [];
+    if (thoughts.length > 0) {
+      parts.push('[Internal reasoning]\n' + thoughts.join('\n'));
+    }
+    if (messages.length > 0) {
+      parts.push('[Response text]\n' + messages.join('\n'));
+    }
+    if (toolCalls.length > 0) {
+      parts.push('[Tool calls] ' + toolCalls.map((tc) => tc.name).join(', '));
+    }
+
+    const userMessage = parts.join('\n\n');
+    if (!userMessage.trim() || userMessage.trim().length < 10) {
+      return {
+        hookConfig,
+        eventName,
+        success: true,
+        output: { decision: 'allow' } as HookOutput,
+        duration: Date.now() - startTime,
+      };
+    }
+
+    try {
+      const model = hookConfig.model || this.defaultModel || '';
+      const result = await this.contentGenerator.generateContent(
+        {
+          model,
+          config: {
+            systemInstruction: systemPrompt,
+            abortSignal: signal,
+            temperature: hookConfig.temperature ?? 0.3,
+            maxOutputTokens: hookConfig.maxTokens ?? 1024,
+            thinkingConfig: { includeThoughts: false },
+          },
+          contents: [{ role: 'user', parts: [{ text: userMessage }] }],
+        },
+        'hook-llm',
+      );
+
+      // Extract text, filter out thought parts
+      const rewritten =
+        result.candidates?.[0]?.content?.parts
+          ?.filter((p) => !p.thought)
+          .map((p) => p.text)
+          .filter(Boolean)
+          .join('') ?? '';
+
+      const trimmed = rewritten.trim();
+      const duration = Date.now() - startTime;
+
+      if (!trimmed || trimmed.length < 5) {
+        return {
+          hookConfig,
+          eventName,
+          success: true,
+          output: { decision: 'allow' } as HookOutput,
+          duration,
+        };
+      }
+
+      debugLogger.info(
+        `LLM hook (${eventName}): rewritten ${trimmed.length}c in ${duration}ms`,
+      );
+
+      return {
+        hookConfig,
+        eventName,
+        success: true,
+        output: {
+          decision: 'allow',
+          hookSpecificOutput: {
+            hookEventName: eventName,
+            acpMessage: trimmed,
+          },
+        } as HookOutput,
+        stdout: trimmed,
+        duration,
+      };
+    } catch (error) {
+      debugLogger.warn(
+        `LLM hook failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        error: error instanceof Error ? error : new Error(String(error)),
+        duration: Date.now() - startTime,
+      };
+    }
+  }
+
   private async executeCommandHook(
     hookConfig: HookConfig,
     eventName: HookEventName,

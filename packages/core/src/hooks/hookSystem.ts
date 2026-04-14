@@ -40,7 +40,7 @@ export class HookSystem {
   private readonly hookPlanner: HookPlanner;
   private readonly hookEventHandler: HookEventHandler;
 
-  constructor(config: Config) {
+  constructor(private readonly config: Config) {
     // Initialize components
     this.hookRegistry = new HookRegistry(config);
     this.hookRunner = new HookRunner();
@@ -59,6 +59,18 @@ export class HookSystem {
    */
   async initialize(): Promise<void> {
     await this.hookRegistry.initialize();
+
+    // Wire content generator to hook runner for LLM hooks
+    try {
+      const contentGenerator = this.config.getContentGenerator();
+      const model = this.config.getModel();
+      this.hookRunner.setContentGenerator(contentGenerator, model);
+    } catch {
+      debugLogger.debug(
+        'Content generator not available yet for LLM hooks (will be set later)',
+      );
+    }
+
     debugLogger.debug('Hook system initialized successfully');
   }
 
