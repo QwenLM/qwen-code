@@ -966,8 +966,8 @@ export default {
     '続行するには認証方法を選択してください。Ctrl+C をもう一度押すと終了します',
   'Terms of Services and Privacy Notice': '利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    '無料 \u00B7 1日最大1,000リクエスト \u00B7 Qwen最新モデル',
+  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
+    '無料 \u00B7 1日100リクエスト \u00B7 2026-04-15に終了',
   'Login with QwenChat account to use daily free quota.':
     'QwenChatアカウントでログインして、毎日の無料クォータをご利用ください。',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
@@ -1123,6 +1123,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Ctrl+C をもう一度押すと終了します',
   'Press Ctrl+D again to exit.': 'Ctrl+D をもう一度押すと終了します',
   'Press Esc again to clear.': 'Esc をもう一度押すとクリアします',
+  'Press ↑ to edit queued messages': '↑ を押してキュー内のメッセージを編集',
   // MCP Status
   '⏳ MCP servers are starting up ({{count}} initializing)...':
     '⏳ MCPサーバーを起動中({{count}} 初期化中)...',
@@ -1175,6 +1176,16 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'QWEN.md ファイルを追加すると、Qwen Code に永続的なプロジェクトコンテキストを与えられます。',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    '会話を中断せずに /btw でちょっとした横道の質問ができます。',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'コンテキストがもうすぐいっぱいです！今すぐ /compress を実行するか、/new を開始して続けてください。',
+  'Context is getting full. Use /compress to free up space.':
+    'コンテキストが埋まりつつあります。/compress を使って空きを増やしてください。',
+  'Long conversation? /compress summarizes history to free context.':
+    '会話が長くなりましたか？ /compress は履歴を要約してコンテキストを空けます。',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',
@@ -1437,8 +1448,9 @@ export default {
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - インタラクティブ認証セットアップ\n',
   '✓ Authentication Method: Qwen OAuth': '✓ 認証方法: Qwen OAuth',
-  '  Type: Free tier': '  タイプ: 無料プラン',
-  '  Limit: Up to 1,000 requests/day': '  制限: 1日最大1,000リクエスト',
+  '  Type: Free tier (ending 2026-04-15)':
+    '  タイプ: 無料プラン（2026-04-15に終了）',
+  '  Limit: 100 requests/day': '  制限: 1日100リクエスト',
   '  Models: Qwen latest models\n': '  モデル: Qwen 最新モデル\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ 認証方法: Alibaba Cloud Coding Plan',

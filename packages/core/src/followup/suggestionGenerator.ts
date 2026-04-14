@@ -17,6 +17,9 @@ import {
   EVENT_API_RESPONSE,
 } from '../telemetry/uiTelemetry.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('FOLLOWUP');
 
 /**
  * Prompt for suggestion generation.
@@ -104,6 +107,9 @@ export async function generatePromptSuggestion(
     // Try cache-aware forked query if enabled and params available
     const cacheSafe = options?.enableCacheSharing ? getCacheSafeParams() : null;
     const modelOverride = options?.model;
+    debugLogger.debug(
+      `Generating suggestion: cacheSharing=${!!cacheSafe}, model=${modelOverride || '(default)'}`,
+    );
     const raw = cacheSafe
       ? await generateViaForkedQuery(config, abortSignal, modelOverride)
       : await generateViaBaseLlm(
@@ -116,19 +122,25 @@ export async function generatePromptSuggestion(
     const suggestion = typeof raw === 'string' ? raw.trim() : null;
 
     if (!suggestion) {
+      debugLogger.debug('Suggestion generation returned empty result');
       return { suggestion: null, filterReason: 'empty' };
     }
 
     const filterReason = getFilterReason(suggestion);
     if (filterReason) {
+      debugLogger.debug(
+        `Suggestion filtered: reason=${filterReason}, text="${suggestion}"`,
+      );
       return { suggestion: null, filterReason };
     }
 
+    debugLogger.debug(`Suggestion accepted: "${suggestion}"`);
     return { suggestion };
-  } catch {
+  } catch (error) {
     if (abortSignal.aborted) {
       return { suggestion: null };
     }
+    debugLogger.warn('Suggestion generation failed:', error);
     return { suggestion: null, filterReason: 'error' };
   }
 }
@@ -218,7 +230,8 @@ async function generateViaBaseLlm(
   }
 
   const text = response.candidates?.[0]?.content?.parts
-    ?.map((p) => p.text ?? '')
+    ?.filter((p) => !(p as Record<string, unknown>)['thought'])
+    .map((p) => p.text ?? '')
     .join('')
     .trim();
   if (text) {

@@ -1298,8 +1298,8 @@ export default {
   'Terms of Services and Privacy Notice':
     'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
+  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
+    'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15',
   'Login with QwenChat account to use daily free quota.':
     'Login with QwenChat account to use daily free quota.',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
@@ -1489,6 +1489,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
+  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
 
   // ============================================================================
   // MCP Status
@@ -1556,6 +1557,16 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Add a QWEN.md file to give Qwen Code persistent project context.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Use /btw to ask a quick side question without disrupting the conversation.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Context is almost full! Run /compress now or start /new to continue.',
+  'Context is getting full. Use /compress to free up space.':
+    'Context is getting full. Use /compress to free up space.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Long conversation? /compress summarizes history to free context.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1986,8 +1997,9 @@ export default {
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Interactive authentication setup\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Authentication Method: Qwen OAuth',
-  '  Type: Free tier': '  Type: Free tier',
-  '  Limit: Up to 1,000 requests/day': '  Limit: Up to 1,000 requests/day',
+  '  Type: Free tier (ending 2026-04-15)':
+    '  Type: Free tier (ending 2026-04-15)',
+  '  Limit: 100 requests/day': '  Limit: 100 requests/day',
   '  Models: Qwen latest models\n': '  Models: Qwen latest models\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Authentication Method: Alibaba Cloud Coding Plan',

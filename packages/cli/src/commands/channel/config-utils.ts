@@ -24,19 +24,20 @@ export function findCliEntryPath(): string {
   throw new Error('Cannot determine CLI entry path');
 }
 
-export function parseChannelConfig(
+export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
-): ChannelConfig & Record<string, unknown> {
+): Promise<ChannelConfig & Record<string, unknown>> {
   if (!rawConfig['type']) {
     throw new Error(`Channel "${name}" is missing required field "type".`);
   }
 
   const channelType = rawConfig['type'] as string;
-  const plugin = getPlugin(channelType);
+  const plugin = await getPlugin(channelType);
   if (!plugin) {
+    const types = await supportedTypes();
     throw new Error(
-      `Channel type "${channelType}" is not supported. Available: ${supportedTypes().join(', ')}`,
+      `Channel type "${channelType}" is not supported. Available: ${types.join(', ')}`,
     );
   }
 
