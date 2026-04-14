@@ -18,7 +18,7 @@ import {
   type NotificationType,
   type PermissionRequestHookOutput,
   type PermissionSuggestion,
-  type PostTurnHookOutput,
+  type HookOutput,
 } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { Part, PartListUnion } from '@google/genai';
@@ -539,14 +539,22 @@ export async function firePostTurnHook(
       return {};
     }
 
-    const postTurnOutput = createHookOutput(
-      'PostTurn',
-      response.output,
-    ) as PostTurnHookOutput;
+    // response.output may be a PostTurnHookOutput instance or a plain object
+    // (depending on MessageBus serialization). Read hookSpecificOutput directly.
+    const output = response.output as HookOutput;
+    const specific = (output.hookSpecificOutput ?? {}) as {
+      acpMessage?: string;
+      acpMeta?: Record<string, unknown>;
+    };
+    const acpMessage = specific.acpMessage?.trim();
+
+    if (!acpMessage || acpMessage.length < 5) {
+      return {};
+    }
 
     return {
-      acpMessage: postTurnOutput.getAcpMessage(),
-      acpMeta: postTurnOutput.getAcpMeta(),
+      acpMessage,
+      acpMeta: specific.acpMeta,
     };
   } catch (error) {
     // PostTurn hook errors must not affect agent execution
