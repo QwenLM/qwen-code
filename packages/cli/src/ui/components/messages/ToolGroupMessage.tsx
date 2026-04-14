@@ -16,18 +16,31 @@ import { theme } from '../../semantic-colors.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
 import { useCompactMode } from '../../contexts/CompactModeContext.js';
-import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
+import type {
+  AgentResultDisplay,
+  AgentBatchResultDisplay,
+} from '@qwen-code/qwen-code-core';
 
 function isAgentWithPendingConfirmation(
   rd: IndividualToolCallDisplay['resultDisplay'],
-): rd is AgentResultDisplay {
-  return (
-    typeof rd === 'object' &&
-    rd !== null &&
-    'type' in rd &&
+): rd is AgentResultDisplay | AgentBatchResultDisplay {
+  if (typeof rd !== 'object' || rd === null || !('type' in rd)) {
+    return false;
+  }
+  if (
     (rd as AgentResultDisplay).type === 'task_execution' &&
     (rd as AgentResultDisplay).pendingConfirmation !== undefined
-  );
+  ) {
+    return true;
+  }
+  // For batch results, treat the whole tool call as pending if any child
+  // slot is awaiting confirmation.
+  if ((rd as AgentBatchResultDisplay).type === 'task_execution_batch') {
+    return (rd as AgentBatchResultDisplay).tasks.some(
+      (t) => t.pendingConfirmation !== undefined,
+    );
+  }
+  return false;
 }
 
 interface ToolGroupMessageProps {

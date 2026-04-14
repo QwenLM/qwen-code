@@ -137,9 +137,25 @@ Assign severity based on the tool's own categorization:
 
 ## Step 4: Parallel multi-dimensional review
 
-Launch review agents by invoking all `task` tools in a **single response**. The runtime executes agent tools concurrently — they will run in parallel. You MUST include all tool calls in one response; do NOT send them one at a time. Launch **5 agents** for same-repo reviews, or **4 agents** (skip Agent 5: Build & Test) for cross-repo lightweight mode since there is no local codebase to build/test. Each agent should focus exclusively on its dimension.
+Launch review agents with **a single `task` tool call** whose `tasks` parameter is an array of agent specs. The runtime fans out and executes every task in the array concurrently — parallelism is guaranteed at the runtime level and does NOT depend on the model emitting multiple tool_use blocks. Launch **5 tasks** for same-repo reviews, or **4 tasks** (skip Agent 5: Build & Test) for cross-repo lightweight mode since there is no local codebase to build/test. Each task should focus exclusively on its dimension.
 
-**IMPORTANT**: Keep each agent's prompt **short** (under 200 words) to fit all tool calls in one response. Do NOT paste the full diff — give each agent:
+The `task` call must look like (substitute a real subagent name from the "Available subagents" list shown in the tool description — not the literal placeholder):
+
+```
+task({
+  tasks: [
+    { description: "Correctness & Security",    subagent_type: "<reviewer>", prompt: "..." },
+    { description: "Code Quality",               subagent_type: "<reviewer>", prompt: "..." },
+    { description: "Performance & Efficiency",   subagent_type: "<reviewer>", prompt: "..." },
+    { description: "Undirected Audit",           subagent_type: "<reviewer>", prompt: "..." },
+    { description: "Build & Test Verification",  subagent_type: "<reviewer>", prompt: "..." }
+  ]
+})
+```
+
+Each `description` must match one of the Agent sections defined below (Agents 1–5). Do NOT issue separate `task` calls for each dimension — that forces serial execution on models that only emit one tool_use per turn.
+
+**IMPORTANT**: Keep each task's `prompt` **short** (under 200 words). Do NOT paste the full diff — give each task:
 
 - The diff command (e.g., `git diff main...HEAD`)
 - A one-sentence summary of what the changes are about

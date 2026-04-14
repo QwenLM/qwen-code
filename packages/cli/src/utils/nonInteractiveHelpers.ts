@@ -527,86 +527,95 @@ export function createAgentToolProgressHandler(
     }
   };
 
+  // Process a single task display update against previous state for a given
+  // state key. Extracted so batch updates can invoke it per child slot.
+  const processSingleTaskUpdate = (
+    stateKey: string,
+    taskDisplay: AgentResultDisplay,
+  ) => {
+    const previous = previousTaskStates.get(stateKey);
+
+    // Only process if adapter supports subagent APIs
+    if (!adapter.processSubagentToolCall || !adapter.emitSubagentErrorResult) {
+      previousTaskStates.set(stateKey, taskDisplay);
+      return;
+    }
+
+    if (taskDisplay.toolCalls) {
+      if (!previous || !previous.toolCalls) {
+        for (const toolCall of taskDisplay.toolCalls) {
+          processToolCall(toolCall);
+        }
+      } else {
+        for (const toolCall of taskDisplay.toolCalls) {
+          const previousCall = previous.toolCalls.find(
+            (tc) => tc.callId === toolCall.callId,
+          );
+          processToolCall(toolCall, previousCall);
+        }
+      }
+    }
+
+    if (taskDisplay.status === 'failed' || taskDisplay.status === 'cancelled') {
+      const previousStatus = previous?.status;
+      if (
+        previousStatus !== 'failed' &&
+        previousStatus !== 'cancelled' &&
+        previousStatus !== undefined
+      ) {
+        const errorMessage =
+          taskDisplay.terminateReason ||
+          (taskDisplay.status === 'cancelled'
+            ? 'Task was cancelled'
+            : 'Task execution failed');
+        adapter.emitSubagentErrorResult(errorMessage, 0, agentToolCallId);
+      }
+    }
+
+    if (
+      !previous &&
+      taskDisplay.taskPrompt &&
+      !config.isInteractive() &&
+      (config.getOutputFormat() === OutputFormat.JSON ||
+        config.getOutputFormat() === OutputFormat.STREAM_JSON)
+    ) {
+      adapter.emitUserMessage(
+        [{ text: taskDisplay.taskPrompt }],
+        agentToolCallId,
+      );
+    }
+
+    previousTaskStates.set(stateKey, taskDisplay);
+  };
+
   const outputUpdateHandler = (
     callId: string,
     outputChunk: ToolResultDisplay,
   ) => {
-    // Only process AgentResultDisplay (Task tool updates)
     if (
-      typeof outputChunk === 'object' &&
-      outputChunk !== null &&
-      'type' in outputChunk &&
-      outputChunk.type === 'task_execution'
+      typeof outputChunk !== 'object' ||
+      outputChunk === null ||
+      !('type' in outputChunk)
     ) {
-      const taskDisplay = outputChunk as AgentResultDisplay;
-      const previous = previousTaskStates.get(callId);
+      return;
+    }
 
-      // Only process if adapter supports subagent APIs
-      if (
-        !adapter.processSubagentToolCall ||
-        !adapter.emitSubagentErrorResult
-      ) {
-        previousTaskStates.set(callId, taskDisplay);
-        return;
-      }
+    if (outputChunk.type === 'task_execution') {
+      processSingleTaskUpdate(callId, outputChunk as AgentResultDisplay);
+      return;
+    }
 
-      if (taskDisplay.toolCalls) {
-        if (!previous || !previous.toolCalls) {
-          // First time seeing tool calls - process all initial ones
-          for (const toolCall of taskDisplay.toolCalls) {
-            processToolCall(toolCall);
-          }
-        } else {
-          // Compare with previous state to find new/changed tool calls
-          for (const toolCall of taskDisplay.toolCalls) {
-            const previousCall = previous.toolCalls.find(
-              (tc) => tc.callId === toolCall.callId,
-            );
-            processToolCall(toolCall, previousCall);
-          }
-        }
-      }
-
-      // Handle task-level errors (status: 'failed', 'cancelled')
-      if (
-        taskDisplay.status === 'failed' ||
-        taskDisplay.status === 'cancelled'
-      ) {
-        const previousStatus = previous?.status;
-        // Only emit error result if status changed to failed/cancelled
-        if (
-          previousStatus !== 'failed' &&
-          previousStatus !== 'cancelled' &&
-          previousStatus !== undefined
-        ) {
-          const errorMessage =
-            taskDisplay.terminateReason ||
-            (taskDisplay.status === 'cancelled'
-              ? 'Task was cancelled'
-              : 'Task execution failed');
-          // Use subagent adapter's emitSubagentErrorResult method
-          adapter.emitSubagentErrorResult(errorMessage, 0, agentToolCallId);
-        }
-      }
-
-      // Handle subagent initial message (prompt) in non-interactive mode with json/stream-json output
-      // Emit when this is the first update (previous is undefined) and task starts
-      if (
-        !previous &&
-        taskDisplay.taskPrompt &&
-        !config.isInteractive() &&
-        (config.getOutputFormat() === OutputFormat.JSON ||
-          config.getOutputFormat() === OutputFormat.STREAM_JSON)
-      ) {
-        // Emit the user message with the correct parent_tool_use_id
-        adapter.emitUserMessage(
-          [{ text: taskDisplay.taskPrompt }],
-          agentToolCallId,
-        );
-      }
-
-      // Update previous state
-      previousTaskStates.set(callId, taskDisplay);
+    // Batch: process each child task slot under its own state key. All
+    // emissions still attribute to the parent agentToolCallId, so from the
+    // protocol's perspective a batch looks like one tool call that wraps
+    // multiple subagent runs.
+    if (outputChunk.type === 'task_execution_batch') {
+      const batch = outputChunk as {
+        tasks: AgentResultDisplay[];
+      };
+      batch.tasks.forEach((task, i) => {
+        processSingleTaskUpdate(`${callId}:${i}`, task);
+      });
     }
   };
 

@@ -25,7 +25,10 @@ import type {
   ToolCallResponseInfo,
 } from '../core/turn.js';
 import type { Status } from '../core/coreToolScheduler.js';
-import type { AgentResultDisplay } from '../tools/tools.js';
+import type {
+  AgentResultDisplay,
+  AgentBatchResultDisplay,
+} from '../tools/tools.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 
 /**
@@ -352,7 +355,8 @@ export class ChatRecordingService {
       };
 
       if (toolCallResult) {
-        // special case for task executions - we don't want to record the tool calls
+        // Special case for task executions - we don't want to record the
+        // nested tool calls from the subagent in the transcript.
         if (
           typeof toolCallResult.resultDisplay === 'object' &&
           toolCallResult.resultDisplay !== null &&
@@ -365,6 +369,21 @@ export class ChatRecordingService {
             resultDisplay: {
               ...taskResult,
               toolCalls: [],
+            },
+          };
+        } else if (
+          typeof toolCallResult.resultDisplay === 'object' &&
+          toolCallResult.resultDisplay !== null &&
+          'type' in toolCallResult.resultDisplay &&
+          toolCallResult.resultDisplay.type === 'task_execution_batch'
+        ) {
+          const batchResult =
+            toolCallResult.resultDisplay as AgentBatchResultDisplay;
+          record.toolCallResult = {
+            ...toolCallResult,
+            resultDisplay: {
+              ...batchResult,
+              tasks: batchResult.tasks.map((t) => ({ ...t, toolCalls: [] })),
             },
           };
         } else {

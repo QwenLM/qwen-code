@@ -809,30 +809,50 @@ export class Session implements SessionContext {
       const invocation = tool.build(args);
 
       if (isAgentTool && 'eventEmitter' in invocation) {
-        // Access eventEmitter from AgentTool invocation
-        const taskEventEmitter = (
-          invocation as {
-            eventEmitter: AgentEventEmitter;
-          }
-        ).eventEmitter;
-
-        // Extract subagent metadata from AgentTool call
         const parentToolCallId = callId;
-        const subagentType = (args['subagent_type'] as string) ?? '';
 
-        // Create a SubAgentTracker for this tool execution
-        const subSubAgentTracker = new SubAgentTracker(
-          this,
-          this.client,
-          parentToolCallId,
-          subagentType,
-        );
+        // Prefer the per-slot emitters array (set by AgentToolInvocation
+        // since batch support was added). In batch mode this contains one
+        // emitter per concurrent subagent; in legacy single-task mode it
+        // is a one-element array. Fall back to the legacy singular field
+        // if an older invocation shape is encountered.
+        const inv = invocation as {
+          eventEmitter: AgentEventEmitter;
+          eventEmitters?: AgentEventEmitter[];
+          slotSubagentTypes?: string[];
+        };
 
-        // Set up sub-agent tool tracking
-        subAgentCleanupFunctions = subSubAgentTracker.setup(
-          taskEventEmitter,
-          abortSignal,
-        );
+        const emitters: AgentEventEmitter[] =
+          Array.isArray(inv.eventEmitters) && inv.eventEmitters.length > 0
+            ? inv.eventEmitters
+            : [inv.eventEmitter];
+
+        // Attribution for per-slot trackers: prefer slotSubagentTypes
+        // (aligned with emitters). Fall back to the legacy
+        // args.subagent_type, which only exists in single-task calls.
+        const subagentTypes: string[] =
+          Array.isArray(inv.slotSubagentTypes) &&
+          inv.slotSubagentTypes.length === emitters.length
+            ? inv.slotSubagentTypes
+            : emitters.map(() => (args['subagent_type'] as string) ?? '');
+
+        // Create one SubAgentTracker per slot so every concurrent
+        // subagent's tool activity is reported to the IDE panel, not just
+        // the first slot. All trackers share the same parentToolCallId
+        // (the outer AgentTool call), so from the protocol's view the
+        // batch still looks like one tool use with multiple child runs.
+        subAgentCleanupFunctions = [];
+        for (let i = 0; i < emitters.length; i++) {
+          const tracker = new SubAgentTracker(
+            this,
+            this.client,
+            parentToolCallId,
+            subagentTypes[i],
+          );
+          subAgentCleanupFunctions.push(
+            ...tracker.setup(emitters[i], abortSignal),
+          );
+        }
       }
 
       // L3→L4→L5 Permission Flow (aligned with coreToolScheduler)

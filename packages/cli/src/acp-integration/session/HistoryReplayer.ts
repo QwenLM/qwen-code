@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ChatRecord, AgentResultDisplay } from '@qwen-code/qwen-code-core';
+import type {
+  ChatRecord,
+  AgentResultDisplay,
+  AgentBatchResultDisplay,
+} from '@qwen-code/qwen-code-core';
 import type {
   Content,
   GenerateContentResponseUsageMetadata,
@@ -156,17 +160,24 @@ export class HistoryReplayer {
       timestamp: record.timestamp,
     });
 
-    // Special handling: Task tool execution summary contains token usage
+    // Special handling: Task tool execution summary contains token usage.
+    // Batch results carry per-child summaries; emit each so totals accrue.
     const { resultDisplay } = result ?? {};
     if (
       !!resultDisplay &&
       typeof resultDisplay === 'object' &&
-      'type' in resultDisplay &&
-      (resultDisplay as { type?: unknown }).type === 'task_execution'
+      'type' in resultDisplay
     ) {
-      await this.emitTaskUsageFromResultDisplay(
-        resultDisplay as AgentResultDisplay,
-      );
+      const rdType = (resultDisplay as { type?: unknown }).type;
+      if (rdType === 'task_execution') {
+        await this.emitTaskUsageFromResultDisplay(
+          resultDisplay as AgentResultDisplay,
+        );
+      } else if (rdType === 'task_execution_batch') {
+        for (const task of (resultDisplay as AgentBatchResultDisplay).tasks) {
+          await this.emitTaskUsageFromResultDisplay(task);
+        }
+      }
     }
   }
 

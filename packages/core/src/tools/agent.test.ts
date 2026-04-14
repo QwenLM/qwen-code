@@ -9,6 +9,7 @@ import {
   AgentTool,
   type AgentParams,
   resolveSubagentApprovalMode,
+  AGENT_BATCH_MAX_CONCURRENCY,
 } from './agent.js';
 import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from './tools.js';
@@ -452,7 +453,8 @@ describe('AgentTool', () => {
       const result = await invocation.execute();
 
       const llmText = partToString(result.llmContent);
-      expect(llmText).toContain('Failed to run subagent: Creation failed');
+      expect(llmText).toContain('Failed to run subagent');
+      expect(llmText).toContain('Creation failed');
       const display = result.returnDisplay as AgentResultDisplay;
 
       expect(display.status).toBe('failed');
@@ -1015,7 +1017,7 @@ describe('AgentTool', () => {
         .calls[0]?.[0] as string;
 
       expect(startAgentId).toBe(stopAgentId);
-      expect(startAgentId).toMatch(/^file-search-\d+$/);
+      expect(startAgentId).toMatch(/^file-search-\d+-[a-z0-9]+$/);
     });
   });
 
@@ -1307,6 +1309,398 @@ describe('AgentTool', () => {
 
       // The onConfirm callback should have cleared pendingConfirmation
       expect(snapshots.some((s) => !s.hasPendingConfirmation)).toBe(true);
+    });
+  });
+
+  describe('batch mode (tasks[])', () => {
+    let mockAgent: AgentHeadless;
+    let mockContextState: ContextState;
+
+    beforeEach(() => {
+      mockAgent = {
+        execute: vi.fn().mockResolvedValue(undefined),
+        getFinalText: vi.fn().mockReturnValue('batch task result'),
+        getExecutionSummary: vi.fn().mockReturnValue({
+          rounds: 1,
+          totalDurationMs: 100,
+          totalToolCalls: 0,
+          successfulToolCalls: 0,
+          failedToolCalls: 0,
+          successRate: 100,
+          inputTokens: 10,
+          outputTokens: 10,
+          totalTokens: 20,
+          toolUsage: [],
+        }),
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+      } as unknown as AgentHeadless;
+      mockContextState = { set: vi.fn() } as unknown as ContextState;
+      MockedContextState.mockImplementation(() => mockContextState);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockSubagents[0],
+      );
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
+        mockAgent,
+      );
+    });
+
+    it('schema exposes tasks[] with subagent enum on items', () => {
+      const schema = agentTool.schema.parametersJsonSchema as {
+        properties: {
+          tasks: {
+            items: {
+              properties: {
+                subagent_type: { enum?: string[] };
+              };
+            };
+          };
+        };
+      };
+      expect(
+        schema.properties.tasks.items.properties.subagent_type.enum,
+      ).toEqual(['file-search', 'code-review']);
+    });
+
+    it('validates a well-formed batch of tasks', () => {
+      expect(
+        agentTool.validateToolParams({
+          tasks: [
+            { description: 't1', prompt: 'p1', subagent_type: 'file-search' },
+            { description: 't2', prompt: 'p2', subagent_type: 'code-review' },
+          ],
+        }),
+      ).toBeNull();
+    });
+
+    it('rejects mixing single-task fields and tasks[]', () => {
+      const result = agentTool.validateToolParams({
+        description: 'mixed',
+        prompt: 'p',
+        subagent_type: 'file-search',
+        tasks: [
+          { description: 't1', prompt: 'p1', subagent_type: 'file-search' },
+        ],
+      });
+      expect(result).toContain('not both');
+    });
+
+    it('rejects empty params (neither shape provided)', () => {
+      const result = agentTool.validateToolParams({} as AgentParams);
+      expect(result).toContain('missing');
+    });
+
+    it('rejects invalid subagent_type inside tasks[]', () => {
+      const result = agentTool.validateToolParams({
+        tasks: [
+          { description: 't1', prompt: 'p1', subagent_type: 'file-search' },
+          { description: 't2', prompt: 'p2', subagent_type: 'does-not-exist' },
+        ],
+      });
+      expect(result).toContain('tasks[1]');
+      expect(result).toContain('does-not-exist');
+    });
+
+    it('rejects missing fields inside tasks[]', () => {
+      const result = agentTool.validateToolParams({
+        tasks: [{ description: '', prompt: 'p', subagent_type: 'file-search' }],
+      });
+      expect(result).toContain('tasks[0]');
+      expect(result).toContain('description');
+    });
+
+    it('executes all tasks in a batch and returns task_execution_batch display', async () => {
+      const params: AgentParams = {
+        tasks: [
+          {
+            description: 'Task A',
+            prompt: 'prompt A',
+            subagent_type: 'file-search',
+          },
+          {
+            description: 'Task B',
+            prompt: 'prompt B',
+            subagent_type: 'file-search',
+          },
+          {
+            description: 'Task C',
+            prompt: 'prompt C',
+            subagent_type: 'file-search',
+          },
+        ],
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      // All 3 tasks should have triggered createAgentHeadless
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(3);
+      expect(mockAgent.execute).toHaveBeenCalledTimes(3);
+
+      const display = result.returnDisplay as {
+        type: string;
+        tasks: AgentResultDisplay[];
+        status: string;
+      };
+      expect(display.type).toBe('task_execution_batch');
+      expect(display.tasks).toHaveLength(3);
+      expect(display.status).toBe('completed');
+      for (const task of display.tasks) {
+        expect(task.type).toBe('task_execution');
+        expect(task.status).toBe('completed');
+      }
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('Task A');
+      expect(llmText).toContain('Task B');
+      expect(llmText).toContain('Task C');
+    });
+
+    it('runs batch tasks concurrently (all executes start before any resolves)', async () => {
+      // Make each agent execute pend on an external resolver, so we can
+      // observe that all 3 start before any complete.
+      const resolvers: Array<() => void> = [];
+      const executeStartCounts = { value: 0 };
+      vi.mocked(mockAgent.execute).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            executeStartCounts.value += 1;
+            resolvers.push(() => resolve(undefined));
+          }),
+      );
+
+      const params: AgentParams = {
+        tasks: [
+          { description: 'A', prompt: 'a', subagent_type: 'file-search' },
+          { description: 'B', prompt: 'b', subagent_type: 'file-search' },
+          { description: 'C', prompt: 'c', subagent_type: 'file-search' },
+        ],
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const execPromise = invocation.execute();
+
+      // Drain microtasks so all 3 runOneTask calls reach subagent.execute().
+      await vi.runAllTimersAsync();
+
+      expect(executeStartCounts.value).toBe(3);
+      expect(resolvers).toHaveLength(3);
+
+      // Now release all pending executes and let the invocation finish.
+      resolvers.forEach((r) => r());
+      await execPromise;
+    });
+
+    it('isolates per-task failures via allSettled (one failure does not block others)', async () => {
+      // First call succeeds, second throws, third succeeds.
+      let call = 0;
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockImplementation(
+        async () => {
+          call += 1;
+          if (call === 2) {
+            throw new Error('slot 2 boom');
+          }
+          return mockAgent;
+        },
+      );
+
+      const params: AgentParams = {
+        tasks: [
+          { description: 'A', prompt: 'a', subagent_type: 'file-search' },
+          { description: 'B', prompt: 'b', subagent_type: 'file-search' },
+          { description: 'C', prompt: 'c', subagent_type: 'file-search' },
+        ],
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const display = result.returnDisplay as {
+        type: string;
+        tasks: AgentResultDisplay[];
+        status: string;
+      };
+      expect(display.type).toBe('task_execution_batch');
+      expect(display.tasks[0].status).toBe('completed');
+      expect(display.tasks[1].status).toBe('failed');
+      expect(display.tasks[1].terminateReason).toContain('slot 2 boom');
+      expect(display.tasks[2].status).toBe('completed');
+      // Aggregate status is failed because at least one failed
+      expect(display.status).toBe('failed');
+    });
+
+    it('emits task_execution_batch live updates via updateOutput', async () => {
+      const updates: ToolResultDisplay[] = [];
+      const params: AgentParams = {
+        tasks: [
+          { description: 'A', prompt: 'a', subagent_type: 'file-search' },
+          { description: 'B', prompt: 'b', subagent_type: 'file-search' },
+        ],
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      await invocation.execute(undefined, (u) => updates.push(u));
+
+      // The first emit is the initial running state, and every update must
+      // carry the batch discriminator.
+      expect(updates.length).toBeGreaterThan(0);
+      for (const u of updates) {
+        expect(typeof u).toBe('object');
+        expect(u).toHaveProperty('type', 'task_execution_batch');
+      }
+      const last = updates[updates.length - 1] as {
+        tasks: AgentResultDisplay[];
+        status: string;
+      };
+      expect(last.tasks).toHaveLength(2);
+      expect(last.status).toBe('completed');
+    });
+
+    it('getDescription summarizes a batch', () => {
+      const params: AgentParams = {
+        tasks: [
+          { description: 'Audit A', prompt: 'p', subagent_type: 'file-search' },
+          { description: 'Audit B', prompt: 'p', subagent_type: 'file-search' },
+        ],
+      };
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const desc = invocation.getDescription();
+      expect(desc).toContain('2 tasks');
+      expect(desc).toContain('Audit A');
+      expect(desc).toContain('Audit B');
+    });
+
+    it('exposes per-slot eventEmitters and slotSubagentTypes aligned with tasks', () => {
+      const params: AgentParams = {
+        tasks: [
+          { description: 'A', prompt: 'a', subagent_type: 'file-search' },
+          { description: 'B', prompt: 'b', subagent_type: 'code-review' },
+          { description: 'C', prompt: 'c', subagent_type: 'file-search' },
+        ],
+      };
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params) as unknown as {
+        eventEmitter: AgentEventEmitter;
+        eventEmitters: AgentEventEmitter[];
+        slotSubagentTypes: string[];
+      };
+
+      expect(invocation.eventEmitters).toHaveLength(3);
+      expect(invocation.slotSubagentTypes).toEqual([
+        'file-search',
+        'code-review',
+        'file-search',
+      ]);
+      // Legacy singular field points at slot 0
+      expect(invocation.eventEmitter).toBe(invocation.eventEmitters[0]);
+      // All three emitters must be distinct instances (no shared state)
+      const unique = new Set(invocation.eventEmitters);
+      expect(unique.size).toBe(3);
+    });
+
+    it('legacy single-task form exposes a one-element eventEmitters array', () => {
+      const params: AgentParams = {
+        description: 'Legacy',
+        prompt: 'legacy prompt',
+        subagent_type: 'file-search',
+      };
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params) as unknown as {
+        eventEmitter: AgentEventEmitter;
+        eventEmitters: AgentEventEmitter[];
+        slotSubagentTypes: string[];
+      };
+
+      expect(invocation.eventEmitters).toHaveLength(1);
+      expect(invocation.eventEmitter).toBe(invocation.eventEmitters[0]);
+      expect(invocation.slotSubagentTypes).toEqual(['file-search']);
+    });
+
+    it('caps concurrency: a batch larger than the limit runs in waves', async () => {
+      // Force task count above the batch concurrency cap so we can observe
+      // that not all subagent.execute() calls start at once. Pulls the
+      // cap from the exported constant rather than hardcoding so this
+      // test tracks any future cap change automatically.
+      const limit = AGENT_BATCH_MAX_CONCURRENCY;
+      const batchSize = limit + 4;
+
+      const releasers: Array<() => void> = [];
+      let inFlight = 0;
+      let peakInFlight = 0;
+
+      vi.mocked(mockAgent.execute).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            inFlight += 1;
+            if (inFlight > peakInFlight) peakInFlight = inFlight;
+            releasers.push(() => {
+              inFlight -= 1;
+              resolve(undefined);
+            });
+          }),
+      );
+
+      const tasks = Array.from({ length: batchSize }, (_, i) => ({
+        description: `T${i}`,
+        prompt: `prompt ${i}`,
+        subagent_type: 'file-search',
+      }));
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({ tasks });
+      const execPromise = invocation.execute();
+
+      // Let the first wave reach subagent.execute().
+      await vi.runAllTimersAsync();
+
+      // At most `limit` should be in flight at any point in the first wave.
+      expect(peakInFlight).toBeLessThanOrEqual(limit);
+      expect(releasers.length).toBeLessThanOrEqual(limit);
+      expect(releasers.length).toBeGreaterThan(0);
+
+      // Drain waves until everything completes, releasing pending executes
+      // as they queue up. Each release frees a worker slot for the next
+      // queued task.
+      while (releasers.length > 0) {
+        const next = releasers.shift()!;
+        next();
+        await vi.runAllTimersAsync();
+      }
+
+      await execPromise;
+
+      // Across the whole run, peak concurrency must have stayed at or
+      // below the cap — the waves property we care about.
+      expect(peakInFlight).toBeLessThanOrEqual(limit);
+      // And every task must have executed exactly once.
+      expect(mockAgent.execute).toHaveBeenCalledTimes(batchSize);
+    });
+
+    it('legacy single-task form still returns task_execution (backwards compat)', async () => {
+      const params: AgentParams = {
+        description: 'Legacy',
+        prompt: 'legacy prompt',
+        subagent_type: 'file-search',
+      };
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.type).toBe('task_execution');
+      expect(display.status).toBe('completed');
     });
   });
 });

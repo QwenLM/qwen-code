@@ -408,19 +408,40 @@ export const useGeminiStream = (
     if (toolCalls.some((tc) => tc.status === 'awaiting_approval')) {
       return StreamingState.WaitingForConfirmation;
     }
-    // Check if any executing subagent task has a pending confirmation
+    // Check if any executing subagent task has a pending confirmation.
+    // Batch subagent calls are pending if any of their child task slots
+    // are awaiting confirmation.
     if (
       toolCalls.some((tc) => {
         if (tc.status !== 'executing') return false;
         const liveOutput = (tc as TrackedExecutingToolCall).liveOutput;
-        return (
-          typeof liveOutput === 'object' &&
-          liveOutput !== null &&
-          'type' in liveOutput &&
+        if (
+          typeof liveOutput !== 'object' ||
+          liveOutput === null ||
+          !('type' in liveOutput)
+        ) {
+          return false;
+        }
+        if (
           liveOutput.type === 'task_execution' &&
           'pendingConfirmation' in liveOutput &&
           liveOutput.pendingConfirmation != null
-        );
+        ) {
+          return true;
+        }
+        if (liveOutput.type === 'task_execution_batch') {
+          const tasks = (liveOutput as { tasks?: unknown[] }).tasks;
+          if (Array.isArray(tasks)) {
+            return tasks.some(
+              (t) =>
+                typeof t === 'object' &&
+                t !== null &&
+                (t as { pendingConfirmation?: unknown }).pendingConfirmation !=
+                  null,
+            );
+          }
+        }
+        return false;
       })
     ) {
       return StreamingState.WaitingForConfirmation;

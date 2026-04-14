@@ -517,6 +517,12 @@ export interface AgentResultDisplay {
   }>;
 }
 
+export interface AgentBatchResultDisplay {
+  type: 'task_execution_batch';
+  tasks: AgentResultDisplay[];
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+}
+
 export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
 }
@@ -541,6 +547,7 @@ export type ToolResultDisplay =
   | TodoResultDisplay
   | PlanResultDisplay
   | AgentResultDisplay
+  | AgentBatchResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData;
 

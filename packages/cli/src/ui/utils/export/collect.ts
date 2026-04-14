@@ -229,30 +229,49 @@ function extractTaskToolTokens(record: ChatRecord): number {
   }
 
   const { resultDisplay } = record.toolCallResult;
-  if (
-    typeof resultDisplay === 'object' &&
-    'type' in resultDisplay &&
-    resultDisplay.type === 'task_execution' &&
-    'executionSummary' in resultDisplay
-  ) {
-    const summary = resultDisplay.executionSummary as {
+  if (typeof resultDisplay !== 'object' || !('type' in resultDisplay)) {
+    return 0;
+  }
+
+  const sumFromSummary = (summary: unknown): number => {
+    if (!summary || typeof summary !== 'object') return 0;
+    const s = summary as {
       totalTokens?: number;
       inputTokens?: number;
       outputTokens?: number;
       thoughtTokens?: number;
       cachedTokens?: number;
     };
-    // Use totalTokens if available, otherwise sum individual token counts
-    if (typeof summary.totalTokens === 'number') {
-      return summary.totalTokens;
-    }
-    // Fallback: sum available token counts
+    if (typeof s.totalTokens === 'number') return s.totalTokens;
     return (
-      (summary.inputTokens ?? 0) +
-      (summary.outputTokens ?? 0) +
-      (summary.thoughtTokens ?? 0) +
-      (summary.cachedTokens ?? 0)
+      (s.inputTokens ?? 0) +
+      (s.outputTokens ?? 0) +
+      (s.thoughtTokens ?? 0) +
+      (s.cachedTokens ?? 0)
     );
+  };
+
+  if (
+    resultDisplay.type === 'task_execution' &&
+    'executionSummary' in resultDisplay
+  ) {
+    return sumFromSummary(resultDisplay.executionSummary);
+  }
+
+  // Batch: sum tokens across all child task executionSummaries.
+  if (
+    resultDisplay.type === 'task_execution_batch' &&
+    'tasks' in resultDisplay
+  ) {
+    const tasks = (
+      resultDisplay as { tasks?: Array<{ executionSummary?: unknown }> }
+    ).tasks;
+    if (Array.isArray(tasks)) {
+      return tasks.reduce(
+        (acc, t) => acc + sumFromSummary(t.executionSummary),
+        0,
+      );
+    }
   }
 
   return 0;

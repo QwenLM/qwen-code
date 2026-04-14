@@ -16,6 +16,7 @@ import { TodoDisplay } from '../TodoDisplay.js';
 import type {
   TodoResultDisplay,
   AgentResultDisplay,
+  AgentBatchResultDisplay,
   PlanResultDisplay,
   AnsiOutput,
   Config,
@@ -51,6 +52,7 @@ type DisplayRendererResult =
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
+  | { type: 'task_batch'; data: AgentBatchResultDisplay }
   | { type: 'ansi'; data: AnsiOutput };
 
 /**
@@ -99,6 +101,20 @@ const useResultDisplayRenderer = (
       return {
         type: 'task',
         data: resultDisplay as AgentResultDisplay,
+      };
+    }
+
+    // Check for batched subagent execution (multiple concurrent tasks from a
+    // single AgentTool call).
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      resultDisplay.type === 'task_execution_batch'
+    ) {
+      return {
+        type: 'task_batch',
+        data: resultDisplay as AgentBatchResultDisplay,
       };
     }
 
@@ -191,6 +207,42 @@ const SubagentExecutionRenderer: React.FC<{
     isFocused={isFocused}
     isWaitingForOtherApproval={isWaitingForOtherApproval}
   />
+);
+
+/**
+ * Minimal batch renderer: iterates over child tasks and renders each with
+ * the existing single-task component. Deliberately no aggregation UI in
+ * Phase 1 — correctness first, polish later.
+ */
+const SubagentBatchExecutionRenderer: React.FC<{
+  data: AgentBatchResultDisplay;
+  availableHeight?: number;
+  childWidth: number;
+  config: Config;
+  isFocused?: boolean;
+  isWaitingForOtherApproval?: boolean;
+}> = ({
+  data,
+  availableHeight,
+  childWidth,
+  config,
+  isFocused,
+  isWaitingForOtherApproval,
+}) => (
+  <Box flexDirection="column">
+    {data.tasks.map((task, i) => (
+      <Box key={i} flexDirection="column" marginTop={i === 0 ? 0 : 1}>
+        <AgentExecutionDisplay
+          data={task}
+          availableHeight={availableHeight}
+          childWidth={childWidth}
+          config={config}
+          isFocused={isFocused}
+          isWaitingForOtherApproval={isWaitingForOtherApproval}
+        />
+      </Box>
+    ))}
+  </Box>
 );
 
 /**
@@ -383,6 +435,16 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
             )}
             {effectiveDisplayRenderer.type === 'task' && config && (
               <SubagentExecutionRenderer
+                data={effectiveDisplayRenderer.data}
+                availableHeight={availableHeight}
+                childWidth={innerWidth}
+                config={config}
+                isFocused={isFocused}
+                isWaitingForOtherApproval={isWaitingForOtherApproval}
+              />
+            )}
+            {effectiveDisplayRenderer.type === 'task_batch' && config && (
+              <SubagentBatchExecutionRenderer
                 data={effectiveDisplayRenderer.data}
                 availableHeight={availableHeight}
                 childWidth={innerWidth}
