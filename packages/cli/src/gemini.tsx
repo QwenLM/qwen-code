@@ -61,6 +61,10 @@ import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import {
+  drainEarlyInput,
+  startCapturingEarlyInput,
+} from './utils/earlyInput.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -143,6 +147,7 @@ export async function startInteractiveUI(
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
+  initialInputChunks: Buffer[] = [],
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
@@ -157,6 +162,7 @@ export async function startInteractiveUI(
           kittyProtocolEnabled={kittyProtocolStatus.enabled}
           config={config}
           debugKeystrokeLogging={settings.merged.general?.debugKeystrokeLogging}
+          initialInputChunks={initialInputChunks}
           pasteWorkaround={
             process.platform === 'win32' || nodeMajorVersion < 20
           }
@@ -211,6 +217,7 @@ export async function startInteractiveUI(
 
 export async function main() {
   setupUnhandledRejectionHandler();
+  startCapturingEarlyInput();
   const settings = loadSettings();
   await cleanupCheckpoints();
 
@@ -218,6 +225,7 @@ export async function main() {
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
+    drainEarlyInput();
     writeStderrLine(
       'Error: The --prompt-interactive flag cannot be used when input is piped from stdin.',
     );
@@ -317,6 +325,7 @@ export async function main() {
 
       const sandboxArgs = injectStdinIntoArgs(process.argv, stdinData);
 
+      drainEarlyInput();
       await relaunchOnExitCode(() =>
         start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
       );
@@ -324,6 +333,7 @@ export async function main() {
     } else {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
+      drainEarlyInput();
       await relaunchAppInChildProcess(memoryArgs, []);
     }
   }
@@ -333,6 +343,7 @@ export async function main() {
   // under a custom runtimeOutputDir (setRuntimeBaseDir is idempotent and will
   // be called again inside loadCliConfig).
   if (argv.resume === '') {
+    drainEarlyInput();
     Storage.setRuntimeBaseDir(
       settings.merged.advanced?.runtimeOutputDir,
       process.cwd(),
@@ -340,6 +351,7 @@ export async function main() {
     const selectedSessionId = await showResumeSessionPicker();
     if (!selectedSessionId) {
       // User cancelled or no sessions available
+      drainEarlyInput();
       process.exit(0);
     }
 
@@ -431,6 +443,7 @@ export async function main() {
 
     // Render UI, passing necessary config values. Check that there is no command line question.
     if (config.isInteractive()) {
+      const initialInputChunks = drainEarlyInput();
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
       await startInteractiveUI(
@@ -439,9 +452,12 @@ export async function main() {
         startupWarnings,
         process.cwd(),
         initializationResult!,
+        initialInputChunks,
       );
       return;
     }
+
+    drainEarlyInput();
 
     // Print debug mode notice to stderr for non-interactive mode
     if (config.getDebugMode()) {

@@ -137,12 +137,14 @@ export function KeypressProvider({
   pasteWorkaround = false,
   config,
   debugKeystrokeLogging,
+  initialInputChunks = [],
 }: {
   children?: React.ReactNode;
   kittyProtocolEnabled: boolean;
   pasteWorkaround?: boolean;
   config?: Config;
   debugKeystrokeLogging?: boolean;
+  initialInputChunks?: readonly Buffer[];
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
@@ -1098,6 +1100,61 @@ export function KeypressProvider({
       stdin.on('keypress', handleKeypress);
     }
 
+    if (initialInputChunks.length > 0) {
+      let isMounted = true;
+      queueMicrotask(() => {
+        if (!isMounted) {
+          return;
+        }
+        for (const chunk of initialInputChunks) {
+          stdin.emit('data', chunk);
+        }
+      });
+
+      return () => {
+        isMounted = false;
+        if (usePassthrough) {
+          keypressStream.removeListener('keypress', handleKeypress);
+          stdin.removeListener('data', handleRawKeypress);
+        } else {
+          stdin.removeListener('keypress', handleKeypress);
+        }
+
+        rl.close();
+
+        // Restore the terminal to its original state.
+        if (wasRaw === false) {
+          setRawMode(false);
+        }
+
+        if (backslashTimeout) {
+          clearTimeout(backslashTimeout);
+          backslashTimeout = null;
+        }
+
+        clearKittyBufferAndTimeout();
+        clearPasteIdleTimeout();
+
+        if (rawFlushTimeout) {
+          clearTimeout(rawFlushTimeout);
+          rawFlushTimeout = null;
+        }
+
+        // Flush any pending paste data to avoid data loss on exit.
+        if (isPaste) {
+          broadcast({
+            name: '',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: true,
+            sequence: pasteBuffer.toString(),
+          });
+          pasteBuffer = Buffer.alloc(0);
+        }
+      };
+    }
+
     return () => {
       if (usePassthrough) {
         keypressStream.removeListener('keypress', handleKeypress);
@@ -1147,6 +1204,7 @@ export function KeypressProvider({
     pasteWorkaround,
     config,
     subscribers,
+    initialInputChunks,
   ]);
 
   return (

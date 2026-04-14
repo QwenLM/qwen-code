@@ -13,6 +13,7 @@ import {
   afterEach,
   type MockInstance,
 } from 'vitest';
+import type { ReactElement, ReactNode } from 'react';
 import {
   main,
   setupUnhandledRejectionHandler,
@@ -25,6 +26,10 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
+const mockEarlyInput = vi.hoisted(() => ({
+  startCapturingEarlyInput: vi.fn(),
+  drainEarlyInput: vi.fn(() => [] as Buffer[]),
+}));
 
 // Custom error to identify mock process.exit calls
 class MockProcessExitError extends Error {
@@ -103,6 +108,16 @@ vi.mock('./core/initializer.js', () => ({
     shouldOpenAuthDialog: false,
     geminiMdFileCount: 0,
   }),
+}));
+
+vi.mock('./utils/earlyInput.js', () => mockEarlyInput);
+
+vi.mock('./ui/hooks/useKittyKeyboardProtocol.js', () => ({
+  useKittyKeyboardProtocol: vi.fn(() => ({
+    supported: false,
+    enabled: false,
+    checking: false,
+  })),
 }));
 
 describe('gemini.tsx main function', () => {
@@ -430,6 +445,7 @@ describe('gemini.tsx main function kitty protocol', () => {
     const { detectAndEnableKittyProtocol } = await import(
       './ui/utils/kittyProtocolDetector.js'
     );
+    const earlyInputModule = await import('./utils/earlyInput.js');
     const { loadCliConfig, parseArguments } = await import(
       './config/config.js'
     );
@@ -513,6 +529,8 @@ describe('gemini.tsx main function kitty protocol', () => {
 
     await main();
 
+    expect(earlyInputModule.startCapturingEarlyInput).toHaveBeenCalledTimes(1);
+    expect(earlyInputModule.drainEarlyInput).toHaveBeenCalled();
     expect(setRawModeSpy).toHaveBeenCalledWith(true);
     expect(detectAndEnableKittyProtocol).toHaveBeenCalledTimes(1);
   });
@@ -551,6 +569,7 @@ describe('startInteractiveUI', () => {
   const mockConfig = {
     getProjectRoot: () => '/root',
     getScreenReader: () => false,
+    getSessionId: () => 'test-session',
   } as Config;
   const mockSettings = {
     merged: {
@@ -568,6 +587,8 @@ describe('startInteractiveUI', () => {
 
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
+    isKittyProtocolSupported: vi.fn(() => false),
+    isKittyProtocolEnabled: vi.fn(() => false),
   }));
 
   vi.mock('./ui/utils/updateCheck.js', () => ({
@@ -619,6 +640,64 @@ describe('startInteractiveUI', () => {
 
     // Verify React element structure is valid (but don't deep dive into JSX internals)
     expect(reactElement).toBeDefined();
+  });
+
+  it('passes buffered startup input to KeypressProvider', async () => {
+    const { render } = await import('ink');
+    const { KeypressProvider } = await import(
+      './ui/contexts/KeypressContext.js'
+    );
+    const renderSpy = vi.mocked(render);
+    const bufferedChunks = [Buffer.from('typed early')];
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+      bufferedChunks,
+    );
+
+    const [reactElement] = renderSpy.mock.calls[0];
+    expect(reactElement).toBeDefined();
+    const appTree = (
+      reactElement as ReactElement<unknown, () => ReactElement>
+    ).type();
+
+    const stack: ReactNode[] = [appTree];
+    while (stack.length > 0) {
+      const node = stack.pop();
+      if (!node || typeof node !== 'object' || !('type' in node)) {
+        continue;
+      }
+      if (node.type === KeypressProvider) {
+        expect(
+          (
+            node as ReactElement<{
+              initialInputChunks?: Buffer[];
+            }>
+          ).props.initialInputChunks,
+        ).toBe(bufferedChunks);
+        return;
+      }
+      const children = (node as ReactElement<{ children?: ReactNode }>).props
+        ?.children;
+      if (Array.isArray(children)) {
+        stack.push(...children);
+      } else if (children) {
+        stack.push(children);
+      }
+    }
+
+    throw new Error('KeypressProvider not found in rendered tree');
   });
 
   it('should perform all startup tasks in correct order', async () => {
