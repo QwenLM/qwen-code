@@ -420,7 +420,10 @@ export class Session implements SessionContext {
           ) {
             postTurnIndex++;
             const turnIdx = postTurnIndex;
-            const hasToolCalls = functionCalls.length > 0;
+            const turnToolCalls = functionCalls.map((fc) => ({
+              name: fc.name ?? '',
+              args: fc.args as Record<string, unknown> | undefined,
+            }));
             pendingPostTurnHooks.push(
               (async () => {
                 const result = await firePostTurnHook(
@@ -428,7 +431,7 @@ export class Session implements SessionContext {
                   turnIdx,
                   turnThoughts,
                   turnMessages,
-                  hasToolCalls,
+                  turnToolCalls,
                   pendingSend.signal,
                 );
                 if (result.acpMessage) {

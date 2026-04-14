@@ -832,11 +832,16 @@ export type StopFailureOutput = HookOutput;
  * Fired after each model turn completes (at tool_call boundary or end of response).
  * Receives accumulated thoughts and messages from the turn.
  */
+export interface PostTurnToolCall {
+  name: string;
+  args?: Record<string, unknown>;
+}
+
 export interface PostTurnInput extends HookInput {
   turn_index: number;
   thoughts: string[];
   messages: string[];
-  has_tool_calls: boolean;
+  tool_calls: PostTurnToolCall[];
 }
 
 /**

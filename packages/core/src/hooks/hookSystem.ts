@@ -130,14 +130,14 @@ export class HookSystem {
     turnIndex: number,
     thoughts: string[],
     messages: string[],
-    hasToolCalls: boolean,
+    toolCalls: Array<{ name: string; args?: Record<string, unknown> }>,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     return this.hookEventHandler.firePostTurnEvent(
       turnIndex,
       thoughts,
       messages,
-      hasToolCalls,
+      toolCalls,
       signal,
     );
   }

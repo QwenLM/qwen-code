@@ -113,7 +113,7 @@ export class HookEventHandler {
     turnIndex: number,
     thoughts: string[],
     messages: string[],
-    hasToolCalls: boolean,
+    toolCalls: Array<{ name: string; args?: Record<string, unknown> }>,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: PostTurnInput = {
@@ -121,7 +121,7 @@ export class HookEventHandler {
       turn_index: turnIndex,
       thoughts,
       messages,
-      has_tool_calls: hasToolCalls,
+      tool_calls: toolCalls,
     };
 
     return this.executeHooks(HookEventName.PostTurn, input, undefined, signal);
