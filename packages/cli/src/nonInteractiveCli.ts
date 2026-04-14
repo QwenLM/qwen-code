@@ -258,6 +258,7 @@ export async function runNonInteractive(
       const rewriter = rewriteConfig?.enabled
         ? new LlmRewriter(config, rewriteConfig)
         : null;
+      const rewriteTarget = rewriteConfig?.target ?? 'both';
       const turnBuffer = rewriter ? new TurnBuffer() : null;
       let rewriteTurnIndex = 0;
       const pendingRewrites: Array<Promise<void>> = [];
@@ -302,14 +303,19 @@ export async function runNonInteractive(
           // Use adapter for all event processing
           adapter.processEvent(event);
 
-          // Accumulate for turn-end rewriting
+          // Accumulate for turn-end rewriting (respecting target filter)
           if (turnBuffer) {
             if (
               event.type === GeminiEventType.Content &&
-              typeof event.value === 'string'
+              typeof event.value === 'string' &&
+              (rewriteTarget === 'message' || rewriteTarget === 'both')
             ) {
               turnBuffer.appendMessage(event.value);
-            } else if (event.type === GeminiEventType.Thought && event.value) {
+            } else if (
+              event.type === GeminiEventType.Thought &&
+              event.value &&
+              (rewriteTarget === 'thought' || rewriteTarget === 'both')
+            ) {
               const thought = event.value;
               const thoughtText = thought.subject
                 ? `${thought.subject}: ${thought.description}`
@@ -349,9 +355,13 @@ export async function runNonInteractive(
             pendingRewrites.push(
               (async () => {
                 try {
+                  const rewriteSignal = AbortSignal.any([
+                    abortController.signal,
+                    AbortSignal.timeout(30_000),
+                  ]);
                   const rewritten = await rewriter.rewrite(
                     content,
-                    abortController?.signal,
+                    rewriteSignal,
                   );
                   if (rewritten) {
                     debugLogger.info(
@@ -512,16 +522,20 @@ export async function runNonInteractive(
                         }
                         adapter.processEvent(event);
 
-                        // Accumulate turn content for rewriting
+                        // Accumulate turn content for rewriting (respecting target filter)
                         if (turnBuffer) {
                           if (
                             event.type === GeminiEventType.Content &&
-                            typeof event.value === 'string'
+                            typeof event.value === 'string' &&
+                            (rewriteTarget === 'message' ||
+                              rewriteTarget === 'both')
                           ) {
                             turnBuffer.appendMessage(event.value);
                           } else if (
                             event.type === GeminiEventType.Thought &&
-                            event.value
+                            event.value &&
+                            (rewriteTarget === 'thought' ||
+                              rewriteTarget === 'both')
                           ) {
                             const thought = event.value;
                             const thoughtText = thought.subject
@@ -550,9 +564,13 @@ export async function runNonInteractive(
                           pendingRewrites.push(
                             (async () => {
                               try {
+                                const cronRewriteSignal = AbortSignal.any([
+                                  abortController.signal,
+                                  AbortSignal.timeout(30_000),
+                                ]);
                                 const rewritten = await rewriter.rewrite(
                                   content,
-                                  abortController.signal,
+                                  cronRewriteSignal,
                                 );
                                 if (rewritten) {
                                   debugLogger.info(

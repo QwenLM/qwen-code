@@ -444,7 +444,7 @@ export class Session implements SessionContext {
         }
         // Wait for any pending rewrite before returning
         if (this.messageRewriter) {
-          await this.messageRewriter.waitForPendingRewrite();
+          await this.messageRewriter.waitForPendingRewrites();
         }
         return { stopReason: 'end_turn' };
       },

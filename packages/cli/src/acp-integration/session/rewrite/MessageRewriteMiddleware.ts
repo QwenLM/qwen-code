@@ -89,8 +89,8 @@ export class MessageRewriteMiddleware {
     }
   }
 
-  /** Pending rewrite promise — resolved when rewrite completes and message is emitted */
-  private pendingRewrite: Promise<void> | null = null;
+  /** Pending rewrite promises — all must settle before session exits */
+  private pendingRewrites: Array<Promise<void>> = [];
 
   /**
    * Flush the turn buffer: rewrite accumulated content and emit.
@@ -115,43 +115,45 @@ export class MessageRewriteMiddleware {
       ? AbortSignal.any([signal, timeoutSignal])
       : timeoutSignal;
 
-    this.pendingRewrite = (async () => {
-      try {
-        const rewritten = await this.rewriter.rewrite(content, rewriteSignal);
-        if (!rewritten) {
-          debugLogger.info(`Turn ${turnIdx}: no rewrite output`);
-          return;
+    this.pendingRewrites.push(
+      (async () => {
+        try {
+          const rewritten = await this.rewriter.rewrite(content, rewriteSignal);
+          if (!rewritten) {
+            debugLogger.info(`Turn ${turnIdx}: no rewrite output`);
+            return;
+          }
+
+          debugLogger.info(
+            `Turn ${turnIdx}: rewritten ${rewritten.length} chars`,
+          );
+
+          // Emit rewritten message with special _meta
+          await this.sendUpdate({
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: rewritten },
+            _meta: {
+              rewritten: true,
+              turnIndex: turnIdx,
+            },
+          } as SessionUpdate);
+        } catch (error) {
+          debugLogger.warn(
+            `Turn ${turnIdx}: rewrite failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
         }
-
-        debugLogger.info(
-          `Turn ${turnIdx}: rewritten ${rewritten.length} chars`,
-        );
-
-        // Emit rewritten message with special _meta
-        await this.sendUpdate({
-          sessionUpdate: 'agent_message_chunk',
-          content: { type: 'text', text: rewritten },
-          _meta: {
-            rewritten: true,
-            turnIndex: turnIdx,
-          },
-        } as SessionUpdate);
-      } catch (error) {
-        debugLogger.warn(
-          `Turn ${turnIdx}: rewrite failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-    })();
+      })(),
+    );
   }
 
   /**
-   * Wait for any pending rewrite to complete.
+   * Wait for all pending rewrites to complete.
    * Call this before session ends to ensure all rewrites are flushed.
    */
-  async waitForPendingRewrite(): Promise<void> {
-    if (this.pendingRewrite) {
-      await this.pendingRewrite;
-      this.pendingRewrite = null;
+  async waitForPendingRewrites(): Promise<void> {
+    if (this.pendingRewrites.length > 0) {
+      await Promise.allSettled(this.pendingRewrites);
+      this.pendingRewrites = [];
     }
   }
 }
