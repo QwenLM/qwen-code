@@ -1472,11 +1472,15 @@ export class Session implements SessionContext {
           abortSignal,
         );
 
-        // If hook indicates to stop, emit a message and end
+        // If hook indicates to stop, return an error response
         if (postHookResult.shouldStop) {
+          const stopMessage =
+            postHookResult.stopReason ||
+            'Execution stopped by PostToolUse hook';
           debugLogger.info(
-            `PostToolUse hook requested stop for ${fc.name}: ${postHookResult.stopReason}`,
+            `PostToolUse hook requested stop for ${fc.name}: ${stopMessage}`,
           );
+          return earlyErrorResponse(new Error(stopMessage), fc.name);
         }
 
         // Add additional context from PostToolUse hook if provided

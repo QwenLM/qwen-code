@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  afterAll,
+  type MockInstance,
+} from 'vitest';
 
 // Mock cleanup module before importing anything else
 const { mockRunExitCleanup } = vi.hoisted(() => ({
@@ -56,6 +65,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     debug: vi.fn(),
     error: vi.fn(),
     warn: vi.fn(),
+    info: vi.fn(),
   }),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
@@ -66,6 +76,14 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   MCPServerConfig: {},
   SessionService: vi.fn(),
   tokenLimit: vi.fn(),
+  SessionStartSource: {
+    Startup: 'startup',
+    Resume: 'resume',
+  },
+  SessionEndReason: {
+    PromptInputExit: 'prompt_input_exit',
+    Other: 'other',
+  },
 }));
 
 vi.mock('./authMethods.js', () => ({ buildAuthMethods: vi.fn() }));
@@ -83,10 +101,14 @@ import { runAcpAgent } from './acpAgent.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
+import { SessionEndReason } from '@qwen-code/qwen-code-core';
 
 describe('runAcpAgent shutdown cleanup', () => {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let processExitSpy: any;
+  let processExitSpy: MockInstance<typeof process.exit>;
+  let processOnSpy: MockInstance<typeof process.on>;
+  let processOffSpy: MockInstance<typeof process.off>;
+  let stdinDestroySpy: MockInstance<typeof process.stdin.destroy>;
+  let stdoutDestroySpy: MockInstance<typeof process.stdout.destroy>;
   let sigTermListeners: NodeJS.SignalsListener[];
   let sigIntListeners: NodeJS.SignalsListener[];
   let mockConfig: Config;
@@ -102,6 +124,7 @@ describe('runAcpAgent shutdown cleanup', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getModel: vi.fn().mockReturnValue('test-model'),
     } as unknown as Config;
 
     mockRunExitCleanup.mockResolvedValue(undefined);
@@ -110,7 +133,7 @@ describe('runAcpAgent shutdown cleanup', () => {
     sigIntListeners = [];
 
     // Intercept signal handler registration
-    vi.spyOn(process, 'on').mockImplementation(((
+    processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
       event: string,
       listener: (...args: unknown[]) => void,
     ) => {
@@ -121,9 +144,18 @@ describe('runAcpAgent shutdown cleanup', () => {
       return process;
     }) as typeof process.on);
 
-    vi.spyOn(process, 'off').mockImplementation(
-      (() => process) as typeof process.off,
-    );
+    processOffSpy = vi.spyOn(process, 'off').mockImplementation(((
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (event === 'SIGTERM') {
+        sigTermListeners = sigTermListeners.filter((l) => l !== listener);
+      }
+      if (event === 'SIGINT') {
+        sigIntListeners = sigIntListeners.filter((l) => l !== listener);
+      }
+      return process;
+    }) as typeof process.off);
 
     // Mock process.exit to prevent actually exiting
     processExitSpy = vi
@@ -131,15 +163,24 @@ describe('runAcpAgent shutdown cleanup', () => {
       .mockImplementation((() => undefined) as unknown as typeof process.exit);
 
     // Mock stdin/stdout destroy
-    vi.spyOn(process.stdin, 'destroy').mockImplementation(() => process.stdin);
-    vi.spyOn(process.stdout, 'destroy').mockImplementation(
-      () => process.stdout,
-    );
+    stdinDestroySpy = vi
+      .spyOn(process.stdin, 'destroy')
+      .mockImplementation(() => process.stdin);
+    stdoutDestroySpy = vi
+      .spyOn(process.stdout, 'destroy')
+      .mockImplementation(() => process.stdout);
   });
 
   afterEach(() => {
     processExitSpy.mockRestore();
-    vi.restoreAllMocks();
+    stdinDestroySpy.mockRestore();
+    stdoutDestroySpy.mockRestore();
+    vi.clearAllMocks();
+  });
+
+  afterAll(() => {
+    processOnSpy.mockRestore();
+    processOffSpy.mockRestore();
   });
 
   it('calls runExitCleanup and process.exit on SIGTERM', async () => {
@@ -226,6 +267,188 @@ describe('runAcpAgent shutdown cleanup', () => {
     await vi.waitFor(() => {
       expect(processExitSpy).toHaveBeenCalledWith(0);
     });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+});
+
+describe('runAcpAgent SessionEnd hooks', () => {
+  let processExitSpy: MockInstance<typeof process.exit>;
+  let processOnSpy: MockInstance<typeof process.on>;
+  let processOffSpy: MockInstance<typeof process.off>;
+  let stdinDestroySpy: MockInstance<typeof process.stdin.destroy>;
+  let stdoutDestroySpy: MockInstance<typeof process.stdout.destroy>;
+  let sigTermListeners: NodeJS.SignalsListener[];
+  let sigIntListeners: NodeJS.SignalsListener[];
+  let mockConfig: Config;
+  let mockHookSystem: {
+    fireSessionEndEvent: ReturnType<typeof vi.fn>;
+    fireSessionStartEvent: ReturnType<typeof vi.fn>;
+  };
+
+  const mockSettings = { merged: {} } as LoadedSettings;
+  const mockArgv = {} as CliArgs;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockHookSystem = {
+      fireSessionEndEvent: vi.fn().mockResolvedValue(undefined),
+      fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    mockConfig = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      getHookSystem: vi.fn().mockReturnValue(mockHookSystem),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(true),
+      getModel: vi.fn().mockReturnValue('test-model'),
+    } as unknown as Config;
+
+    mockRunExitCleanup.mockResolvedValue(undefined);
+    mockConnectionState.reset();
+    sigTermListeners = [];
+    sigIntListeners = [];
+
+    processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (event === 'SIGTERM')
+        sigTermListeners.push(listener as NodeJS.SignalsListener);
+      if (event === 'SIGINT')
+        sigIntListeners.push(listener as NodeJS.SignalsListener);
+      return process;
+    }) as typeof process.on);
+
+    processOffSpy = vi.spyOn(process, 'off').mockImplementation(((
+      event: string,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (event === 'SIGTERM') {
+        sigTermListeners = sigTermListeners.filter((l) => l !== listener);
+      }
+      if (event === 'SIGINT') {
+        sigIntListeners = sigIntListeners.filter((l) => l !== listener);
+      }
+      return process;
+    }) as typeof process.off);
+
+    processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+
+    stdinDestroySpy = vi
+      .spyOn(process.stdin, 'destroy')
+      .mockImplementation(() => process.stdin);
+    stdoutDestroySpy = vi
+      .spyOn(process.stdout, 'destroy')
+      .mockImplementation(() => process.stdout);
+  });
+
+  afterEach(() => {
+    processExitSpy.mockRestore();
+    stdinDestroySpy.mockRestore();
+    stdoutDestroySpy.mockRestore();
+    vi.clearAllMocks();
+  });
+
+  afterAll(() => {
+    processOnSpy.mockRestore();
+    processOffSpy.mockRestore();
+  });
+
+  it('fires SessionEnd hook with Other reason on SIGTERM', async () => {
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
+
+    sigTermListeners[0]('SIGTERM');
+
+    await vi.waitFor(() => {
+      expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
+        SessionEndReason.Other,
+      );
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('fires SessionEnd hook with Other reason on SIGINT', async () => {
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+
+    await vi.waitFor(() => {
+      expect(sigIntListeners.length).toBeGreaterThan(0);
+    });
+
+    sigIntListeners[0]('SIGINT');
+
+    await vi.waitFor(() => {
+      expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
+        SessionEndReason.Other,
+      );
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('fires SessionEnd hook with PromptInputExit on connection.closed', async () => {
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+
+    // Resolve connection to simulate IDE disconnect
+    mockConnectionState.resolve();
+
+    await vi.waitFor(() => {
+      expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
+        SessionEndReason.PromptInputExit,
+      );
+    });
+
+    await agentPromise;
+  });
+
+  it('does not fire SessionEnd hook when hooks are disabled', async () => {
+    mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
+
+    sigTermListeners[0]('SIGTERM');
+
+    await vi.waitFor(() => {
+      expect(mockRunExitCleanup).toHaveBeenCalled();
+    });
+
+    // SessionEnd hook should NOT be called
+    expect(mockHookSystem.fireSessionEndEvent).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not fire SessionEnd hook when event not registered', async () => {
+    mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(false);
+
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
+
+    sigTermListeners[0]('SIGTERM');
+
+    await vi.waitFor(() => {
+      expect(mockRunExitCleanup).toHaveBeenCalled();
+    });
+
+    // SessionEnd hook should NOT be called
+    expect(mockHookSystem.fireSessionEndEvent).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

@@ -147,7 +147,6 @@ export async function runAcpAgent(
   const hookSystem = config.getHookSystem?.();
   const hooksEnabled = !config.getDisableAllHooks?.();
   if (hooksEnabled && hookSystem && config.hasHooksForEvent?.('SessionEnd')) {
-    process.stderr.write('[ACP DEBUG] Calling fireSessionEndEvent...\n');
     try {
       await hookSystem.fireSessionEndEvent(SessionEndReason.PromptInputExit);
     } catch (err) {
