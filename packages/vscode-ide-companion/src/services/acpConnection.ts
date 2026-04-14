@@ -572,7 +572,9 @@ export class AcpConnection {
     apiKeyEnvKey: string | null;
   }> {
     const conn = this.ensureConnection();
-    const result = await conn.extMethod('getAccountInfo', {});
+    const result = await conn.extMethod('getAccountInfo', {
+      sessionId: this.sessionId,
+    });
     return {
       authType: (result['authType'] as string | null) ?? null,
       model: (result['model'] as string | null) ?? null,

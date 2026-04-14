@@ -368,13 +368,16 @@ class QwenAgent implements Agent {
 
   async extMethod(
     method: string,
-    _params: Record<string, unknown>,
+    params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     if (method === 'getAccountInfo') {
-      const cfg = this.config.getContentGeneratorConfig();
+      const sessionId = params['sessionId'] as string | undefined;
+      const session = sessionId ? this.sessions.get(sessionId) : undefined;
+      const config = session ? session.getConfig() : this.config;
+      const cfg = config.getContentGeneratorConfig();
       return {
-        authType: cfg?.authType ?? this.config.getAuthType() ?? null,
-        model: cfg?.model ?? this.config.getModel() ?? null,
+        authType: cfg?.authType ?? config.getAuthType() ?? null,
+        model: cfg?.model ?? config.getModel() ?? null,
         baseUrl: cfg?.baseUrl ?? null,
         apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
       };
