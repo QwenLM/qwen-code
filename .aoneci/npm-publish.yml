@@ -46,14 +46,10 @@ jobs:
       - name: 'Build project'
         run: 'npm run build'
 
-      - name: 'Configure .npmrc'
-        run: echo "registry=https://registry.anpm.alibaba-inc.com/:_authToken=${NPM_TOKEN}" > .npmrc
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
       - uses: npm-publisher
         inputs:
-          token: ${{ secrets.NPM_TOKEN }}
+          token: ${{ secrets.inner_npm_publish_token }}
+          innerToken: ${{ secrets.inner_npm_publish_token }}
           baseBranches: ['main']
           # beta 版本自动更新版本号
           autoVersion: true
