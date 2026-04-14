@@ -886,6 +886,48 @@ const SETTINGS_SCHEMA = {
         description: 'Whether to load memory files from include directories.',
         showInDialog: false,
       },
+      clearContextOnIdle: {
+        type: 'object',
+        label: 'Clear Context On Idle',
+        category: 'Context',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for clearing stale context after idle periods. Use -1 to disable a threshold.',
+        showInDialog: false,
+        properties: {
+          thinkingThresholdMinutes: {
+            type: 'number',
+            label: 'Thinking Idle Threshold (minutes)',
+            category: 'Context',
+            requiresRestart: false,
+            default: 5 as number,
+            description:
+              'Minutes of inactivity before clearing old thinking blocks. Use -1 to disable.',
+            showInDialog: false,
+          },
+          toolResultsThresholdMinutes: {
+            type: 'number',
+            label: 'Tool Results Idle Threshold (minutes)',
+            category: 'Context',
+            requiresRestart: false,
+            default: 60 as number,
+            description:
+              'Minutes of inactivity before clearing old tool result content. Use -1 to disable.',
+            showInDialog: false,
+          },
+          toolResultsNumToKeep: {
+            type: 'number',
+            label: 'Tool Results Number To Keep',
+            category: 'Context',
+            requiresRestart: false,
+            default: 5 as number,
+            description:
+              'Number of most-recent compactable tool results to preserve when clearing. Floor at 1.',
+            showInDialog: false,
+          },
+        },
+      },
       fileFiltering: {
         type: 'object',
         label: 'File Filtering',
@@ -932,16 +974,6 @@ const SETTINGS_SCHEMA = {
             showInDialog: true,
           },
         },
-      },
-      gapThresholdMinutes: {
-        type: 'number',
-        label: 'Thinking Block Idle Threshold (minutes)',
-        category: 'Context',
-        requiresRestart: false,
-        default: 5,
-        description:
-          'Minutes of inactivity after which retained thinking blocks are cleared to free context tokens. Aligns with provider prompt-cache TTL.',
-        showInDialog: false,
       },
     },
   },

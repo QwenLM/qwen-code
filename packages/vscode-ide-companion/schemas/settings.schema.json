@@ -369,6 +369,27 @@
           "type": "boolean",
           "default": false
         },
+        "clearContextOnIdle": {
+          "description": "Settings for clearing stale context after idle periods. Use -1 to disable a threshold.",
+          "type": "object",
+          "properties": {
+            "thinkingThresholdMinutes": {
+              "description": "Minutes of inactivity before clearing old thinking blocks. Use -1 to disable.",
+              "type": "number",
+              "default": 5
+            },
+            "toolResultsThresholdMinutes": {
+              "description": "Minutes of inactivity before clearing old tool result content. Use -1 to disable.",
+              "type": "number",
+              "default": 60
+            },
+            "toolResultsNumToKeep": {
+              "description": "Number of most-recent compactable tool results to preserve when clearing. Floor at 1.",
+              "type": "number",
+              "default": 5
+            }
+          }
+        },
         "fileFiltering": {
           "description": "Settings for git-aware file filtering.",
           "type": "object",
@@ -394,11 +415,6 @@
               "default": true
             }
           }
-        },
-        "gapThresholdMinutes": {
-          "description": "Minutes of inactivity after which retained thinking blocks are cleared to free context tokens. Aligns with provider prompt-cache TTL.",
-          "type": "number",
-          "default": 5
         }
       }
     },
