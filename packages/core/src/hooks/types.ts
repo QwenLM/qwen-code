@@ -46,6 +46,8 @@ export enum HookEventName {
   PermissionRequest = 'PermissionRequest',
   // StopFailure - When the turn ends due to an API error (instead of Stop)
   StopFailure = 'StopFailure',
+  // PostTurn - After each model turn completes (at tool_call boundary or end of response)
+  PostTurn = 'PostTurn',
 }
 
 /**
@@ -141,6 +143,8 @@ export function createHookOutput(
       return new StopHookOutput(data);
     case HookEventName.PermissionRequest:
       return new PermissionRequestHookOutput(data);
+    case HookEventName.PostTurn:
+      return new PostTurnHookOutput(data);
     default:
       return new DefaultHookOutput(data);
   }
@@ -359,6 +363,30 @@ export class StopHookOutput extends DefaultHookOutput {
       return undefined;
     }
     return `Stop hook feedback:\n${this.stopReason}`;
+  }
+}
+
+/**
+ * Specific hook output class for PostTurn events.
+ * Supports ACP message injection via acpMessage field.
+ */
+export class PostTurnHookOutput extends DefaultHookOutput {
+  constructor(data: Partial<HookOutput> = {}) {
+    super(data);
+  }
+
+  /**
+   * Get the ACP message to inject (with _meta.rewritten), if any.
+   */
+  getAcpMessage(): string | undefined {
+    const specific = this.hookSpecificOutput as
+      | { acpMessage?: string }
+      | undefined;
+    const msg = specific?.acpMessage;
+    if (!msg || typeof msg !== 'string' || msg.trim().length < 5) {
+      return undefined;
+    }
+    return msg.trim();
   }
 }
 
@@ -787,6 +815,30 @@ export interface StopFailureInput extends HookInput {
  * This type alias is used instead of an empty interface to satisfy ESLint rules
  */
 export type StopFailureOutput = HookOutput;
+
+/**
+ * PostTurn hook input
+ * Fired after each model turn completes (at tool_call boundary or end of response).
+ * Receives accumulated thoughts and messages from the turn.
+ */
+export interface PostTurnInput extends HookInput {
+  turn_index: number;
+  thoughts: string[];
+  messages: string[];
+  has_tool_calls: boolean;
+}
+
+/**
+ * PostTurn hook output
+ * Supports ACP message injection via hookSpecificOutput.acpMessage.
+ * Fire-and-forget: does not block agent execution.
+ */
+export interface PostTurnOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'PostTurn';
+    acpMessage?: string;
+  };
+}
 
 /**
  * Hook execution result

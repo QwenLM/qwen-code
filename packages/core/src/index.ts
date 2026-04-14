@@ -273,9 +273,11 @@ export * from './hooks/types.js';
 export { HookSystem, HookRegistry } from './hooks/index.js';
 export type { HookRegistryEntry } from './hooks/index.js';
 
-// Export hook triggers for notification hooks
+// Export hook triggers for notification and PostTurn hooks
 export {
   fireNotificationHook,
   firePermissionRequestHook,
+  firePostTurnHook,
   type NotificationHookResult,
+  type PostTurnHookResult,
 } from './core/toolHookTriggers.js';

@@ -35,6 +35,7 @@ import type {
   SubagentStopInput,
   StopFailureInput,
   StopFailureErrorType,
+  PostTurnInput,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -101,6 +102,29 @@ export class HookEventHandler {
     };
 
     return this.executeHooks(HookEventName.Stop, input, undefined, signal);
+  }
+
+  /**
+   * Fire a PostTurn event
+   * Called after each model turn completes (at tool_call boundary or end of response).
+   * Fire-and-forget: does not block agent execution.
+   */
+  async firePostTurnEvent(
+    turnIndex: number,
+    thoughts: string[],
+    messages: string[],
+    hasToolCalls: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: PostTurnInput = {
+      ...this.createBaseInput(HookEventName.PostTurn),
+      turn_index: turnIndex,
+      thoughts,
+      messages,
+      has_tool_calls: hasToolCalls,
+    };
+
+    return this.executeHooks(HookEventName.PostTurn, input, undefined, signal);
   }
 
   /**

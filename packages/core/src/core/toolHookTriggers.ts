@@ -18,6 +18,7 @@ import {
   type NotificationType,
   type PermissionRequestHookOutput,
   type PermissionSuggestion,
+  type PostTurnHookOutput,
 } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { Part, PartListUnion } from '@google/genai';
@@ -485,4 +486,70 @@ export function appendAdditionalContext(
 
   // For non-array content that's still PartListUnion, return as-is
   return content;
+}
+
+/**
+ * Result of PostTurn hook execution
+ */
+export interface PostTurnHookResult {
+  /** ACP message to inject with _meta.rewritten: true */
+  acpMessage?: string;
+}
+
+/**
+ * Fire a PostTurn hook event.
+ * Fire-and-forget: errors are silently ignored, never blocks agent execution.
+ *
+ * @returns PostTurnHookResult with optional acpMessage to inject
+ */
+export async function firePostTurnHook(
+  messageBus: MessageBus | undefined,
+  turnIndex: number,
+  thoughts: string[],
+  messages: string[],
+  hasToolCalls: boolean,
+  signal?: AbortSignal,
+): Promise<PostTurnHookResult> {
+  if (!messageBus) {
+    return {};
+  }
+
+  try {
+    const response = await messageBus.request<
+      HookExecutionRequest,
+      HookExecutionResponse
+    >(
+      {
+        type: MessageBusType.HOOK_EXECUTION_REQUEST,
+        eventName: 'PostTurn',
+        input: {
+          turn_index: turnIndex,
+          thoughts,
+          messages,
+          has_tool_calls: hasToolCalls,
+        },
+        signal,
+      },
+      MessageBusType.HOOK_EXECUTION_RESPONSE,
+    );
+
+    if (!response.success || !response.output) {
+      return {};
+    }
+
+    const postTurnOutput = createHookOutput(
+      'PostTurn',
+      response.output,
+    ) as PostTurnHookOutput;
+
+    return {
+      acpMessage: postTurnOutput.getAcpMessage(),
+    };
+  } catch (error) {
+    // PostTurn hook errors must not affect agent execution
+    debugLogger.warn(
+      `PostTurn hook error: ${error instanceof Error ? error.message : String(error)}`,
+    );
+    return {};
+  }
 }

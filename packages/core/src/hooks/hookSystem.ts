@@ -126,6 +126,22 @@ export class HookSystem {
     );
   }
 
+  async firePostTurnEvent(
+    turnIndex: number,
+    thoughts: string[],
+    messages: string[],
+    hasToolCalls: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.firePostTurnEvent(
+      turnIndex,
+      thoughts,
+      messages,
+      hasToolCalls,
+      signal,
+    );
+  }
+
   async fireSessionStartEvent(
     source: SessionStartSource,
     model: string,

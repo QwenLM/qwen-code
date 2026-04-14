@@ -40,7 +40,7 @@ export class HookAggregator {
     results: HookExecutionResult[],
     eventName: HookEventName,
   ): AggregatedHookResult {
-    // StopFailure special handling: fire-and-forget, ignore all outputs and errors
+    // StopFailure: fire-and-forget, ignore all outputs and errors
     if (eventName === HookEventName.StopFailure) {
       let totalDuration = 0;
       for (const result of results) {
@@ -52,6 +52,26 @@ export class HookAggregator {
         errors: [], // Ignore errors
         totalDuration,
         finalOutput: undefined,
+      };
+    }
+
+    // PostTurn: fire-and-forget but preserve outputs (needed for acpMessage extraction).
+    // Ignore errors — hook failures must not block agent execution.
+    if (eventName === HookEventName.PostTurn) {
+      const allOutputs: HookOutput[] = [];
+      let totalDuration = 0;
+      for (const result of results) {
+        totalDuration += result.duration;
+        if (result.output) {
+          allOutputs.push(result.output);
+        }
+      }
+      return {
+        success: true,
+        allOutputs,
+        errors: [],
+        totalDuration,
+        finalOutput: allOutputs.length > 0 ? allOutputs[0] : undefined,
       };
     }
 

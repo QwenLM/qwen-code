@@ -40,6 +40,7 @@ import {
   evaluatePermissionRules,
   fireNotificationHook,
   firePermissionRequestHook,
+  firePostTurnHook,
   injectPermissionRulesIfMissing,
   NotificationType,
   persistPermissionOutcome,
@@ -318,6 +319,15 @@ export class Session implements SessionContext {
 
         let nextMessage: Content | null = { role: 'user', parts };
 
+        const hooksEnabled = !this.config.getDisableAllHooks?.();
+        const messageBus = this.config.getMessageBus?.();
+        const hasPostTurnHook =
+          hooksEnabled &&
+          messageBus &&
+          this.config.hasHooksForEvent?.('PostTurn');
+        let postTurnIndex = 0;
+        const pendingPostTurnHooks: Array<Promise<void>> = [];
+
         while (nextMessage !== null) {
           if (pendingSend.signal.aborted) {
             chat.addHistory(nextMessage);
@@ -327,6 +337,10 @@ export class Session implements SessionContext {
           const functionCalls: FunctionCall[] = [];
           let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
           const streamStartTime = Date.now();
+
+          // Accumulate turn content for PostTurn hook
+          const turnThoughts: string[] = [];
+          const turnMessages: string[] = [];
 
           try {
             const responseStream = await chat.sendMessageStream(
@@ -362,6 +376,15 @@ export class Session implements SessionContext {
                     'assistant',
                     part.thought,
                   );
+
+                  // Accumulate for PostTurn hook
+                  if (hasPostTurnHook) {
+                    if (part.thought) {
+                      turnThoughts.push(part.text);
+                    } else {
+                      turnMessages.push(part.text);
+                    }
+                  }
                 }
               }
 
@@ -390,6 +413,35 @@ export class Session implements SessionContext {
             throw error;
           }
 
+          // Fire PostTurn hook (fire-and-forget, does not block agent loop)
+          if (
+            hasPostTurnHook &&
+            (turnThoughts.length > 0 || turnMessages.length > 0)
+          ) {
+            postTurnIndex++;
+            const turnIdx = postTurnIndex;
+            const hasToolCalls = functionCalls.length > 0;
+            pendingPostTurnHooks.push(
+              (async () => {
+                const result = await firePostTurnHook(
+                  messageBus,
+                  turnIdx,
+                  turnThoughts,
+                  turnMessages,
+                  hasToolCalls,
+                  pendingSend.signal,
+                );
+                if (result.acpMessage) {
+                  await this.sendUpdate({
+                    sessionUpdate: 'agent_message_chunk',
+                    content: { type: 'text', text: result.acpMessage },
+                    _meta: { rewritten: true, turnIndex: turnIdx },
+                  } as SessionUpdate);
+                }
+              })(),
+            );
+          }
+
           if (usageMetadata) {
             const durationMs = Date.now() - streamStartTime;
             await this.messageEmitter.emitUsageMetadata(
@@ -414,6 +466,12 @@ export class Session implements SessionContext {
             nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
+
+        // Wait for all pending PostTurn hooks before session ends
+        if (pendingPostTurnHooks.length > 0) {
+          await Promise.allSettled(pendingPostTurnHooks);
+        }
+
         return { stopReason: 'end_turn' };
       },
     );
