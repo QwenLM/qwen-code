@@ -94,6 +94,15 @@ export function getHookExitCodes(eventName: string): HookExitCode[] {
       { code: 0, description: t('use hook decision if provided') },
       { code: 'Other', description: t('show stderr to user only') },
     ],
+    [HookEventName.PostTurn]: [
+      {
+        code: 0,
+        description: t(
+          'inject acpMessage into ACP stream if provided in stdout',
+        ),
+      },
+      { code: 'Other', description: t('show stderr to user only') },
+    ],
   };
   return exitCodesMap[eventName] || [];
 }
@@ -120,6 +129,9 @@ export function getHookShortDescription(eventName: string): string {
     [HookEventName.SessionEnd]: t('When a session is ending'),
     [HookEventName.PermissionRequest]: t(
       'When a permission dialog is displayed',
+    ),
+    [HookEventName.PostTurn]: t(
+      'After each model turn completes (at tool call or response end)',
     ),
   };
   return descriptions[eventName] || '';
@@ -163,6 +175,9 @@ export function getHookDescription(eventName: string): string {
     ),
     [HookEventName.PermissionRequest]: t(
       'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.',
+    ),
+    [HookEventName.PostTurn]: t(
+      'Input to command is JSON with turn_index, thoughts, messages, and tool_calls. Output JSON with hookSpecificOutput containing acpMessage (text to inject into ACP stream) and acpMeta (optional metadata).',
     ),
   };
   return descriptions[eventName] || '';

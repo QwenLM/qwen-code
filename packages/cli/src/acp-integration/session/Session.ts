@@ -413,11 +413,9 @@ export class Session implements SessionContext {
             throw error;
           }
 
-          // Fire PostTurn hook (fire-and-forget, does not block agent loop)
-          if (
-            hasPostTurnHook &&
-            (turnThoughts.length > 0 || turnMessages.length > 0)
-          ) {
+          // Fire PostTurn hook at every turn boundary (fire-and-forget).
+          // Hook scripts decide whether to process based on content.
+          if (hasPostTurnHook) {
             postTurnIndex++;
             const turnIdx = postTurnIndex;
             const turnToolCalls = functionCalls.map((fc) => ({

@@ -57,13 +57,22 @@ export class HookAggregator {
 
     // PostTurn: fire-and-forget but preserve outputs (needed for acpMessage extraction).
     // Ignore errors — hook failures must not block agent execution.
+    // When multiple hooks return acpMessage, first non-empty one wins.
     if (eventName === HookEventName.PostTurn) {
       const allOutputs: HookOutput[] = [];
       let totalDuration = 0;
+      let firstAcpOutput: HookOutput | undefined;
       for (const result of results) {
         totalDuration += result.duration;
         if (result.output) {
           allOutputs.push(result.output);
+          if (
+            !firstAcpOutput &&
+            (result.output.hookSpecificOutput as { acpMessage?: string })
+              ?.acpMessage
+          ) {
+            firstAcpOutput = result.output;
+          }
         }
       }
       return {
@@ -71,7 +80,7 @@ export class HookAggregator {
         allOutputs,
         errors: [],
         totalDuration,
-        finalOutput: allOutputs.length > 0 ? allOutputs[0] : undefined,
+        finalOutput: firstAcpOutput ?? allOutputs[0],
       };
     }
 
