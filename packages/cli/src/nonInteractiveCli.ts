@@ -36,6 +36,8 @@ import {
   handleCancellationError,
   handleMaxTurnsExceededError,
 } from './utils/errors.js';
+
+const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -44,7 +46,6 @@ import {
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
-const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
 /**
  * Emits a final message for slash command results.
@@ -284,7 +285,6 @@ export async function runNonInteractive(
           }
           // Use adapter for all event processing
           adapter.processEvent(event);
-
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
@@ -440,7 +440,6 @@ export async function runNonInteractive(
                           return;
                         }
                         adapter.processEvent(event);
-
                         if (event.type === GeminiEventType.ToolCallRequest) {
                           cronToolCallRequests.push(event.value);
                         }
