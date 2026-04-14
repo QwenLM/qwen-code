@@ -686,6 +686,131 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('keeps completed client tools pending and flushes them as one tool group before the next content', async () => {
+    const makeClientTool = (
+      callId: string,
+      description: string,
+    ): TrackedCompletedToolCall =>
+      ({
+        request: {
+          callId,
+          name: callId,
+          args: { callId },
+          isClientInitiated: true,
+          prompt_id: `prompt-${callId}`,
+        },
+        status: 'success',
+        responseSubmittedToGemini: false,
+        response: {
+          callId,
+          responseParts: [{ text: `${callId} done` }],
+          resultDisplay: `${callId} result`,
+          errorType: undefined,
+        },
+        tool: {
+          name: callId,
+          displayName: callId,
+          description,
+          isOutputMarkdown: false,
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => description,
+        } as unknown as AnyToolInvocation,
+      }) satisfies TrackedCompletedToolCall;
+
+    const clientTool1 = makeClientTool('client-1', 'first tool');
+    const clientTool2 = makeClientTool('client-2', 'second tool');
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    mockSendMessageStream.mockReturnValue(
+      (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'assistant reply',
+        };
+        yield {
+          type: ServerGeminiEventType.Finished,
+          value: { reason: 'STOP' },
+        };
+      })(),
+    );
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([clientTool1]);
+      }
+    });
+
+    await act(async () => {
+      if (capturedOnComplete) {
+        await capturedOnComplete([clientTool2]);
+      }
+    });
+
+    await waitFor(() => {
+      const pendingToolGroup = result.current.pendingHistoryItems.find(
+        (item): item is Extract<HistoryItem, { type: 'tool_group' }> =>
+          item?.type === 'tool_group',
+      );
+      expect(pendingToolGroup?.tools.map((tool) => tool.callId)).toEqual([
+        'client-1',
+        'client-2',
+      ]);
+    });
+
+    expect(
+      mockAddItem.mock.calls.filter(([item]) => item?.type === 'tool_group'),
+    ).toHaveLength(0);
+
+    await act(async () => {
+      await result.current.submitQuery('flush pending tools');
+    });
+
+    await waitFor(() => {
+      const toolGroupCalls = mockAddItem.mock.calls.filter(
+        ([item]) => item?.type === 'tool_group',
+      );
+      expect(toolGroupCalls).toHaveLength(1);
+      expect(
+        toolGroupCalls[0][0].tools.map(
+          (tool: { callId: string }) => tool.callId,
+        ),
+      ).toEqual(['client-1', 'client-2']);
+    });
+  });
+
   it('should group multiple cancelled tool call responses into a single history entry', async () => {
     const cancelledToolCall1: TrackedCancelledToolCall = {
       request: {
