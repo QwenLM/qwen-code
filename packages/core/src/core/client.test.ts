@@ -300,7 +300,6 @@ describe('Gemini Client (client.ts)', () => {
       strategy: 'none',
     });
     vi.mocked(scheduleAutoMemoryExtract).mockResolvedValue({
-      patches: [],
       touchedTopics: [],
       cursor: { updatedAt: new Date(0).toISOString() },
     });
@@ -1578,13 +1577,6 @@ hello
 
     it('should run managed auto-memory extraction after a completed user query', async () => {
       vi.mocked(scheduleAutoMemoryExtract).mockResolvedValue({
-        patches: [
-          {
-            topic: 'user',
-            summary: 'I prefer terse responses.',
-            sourceOffset: 0,
-          },
-        ],
         touchedTopics: ['user'],
         cursor: {
           sessionId: 'test-session-id',

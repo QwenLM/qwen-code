@@ -6,18 +6,9 @@
 
 import * as fs from 'node:fs/promises';
 import type { Config } from '../config/config.js';
-import {
-  mergeAutoMemoryEntry,
-  parseAutoMemoryEntries,
-  renderAutoMemoryBody,
-} from './entries.js';
 import { getAutoMemoryMetadataPath } from './paths.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
-import {
-  scanAutoMemoryTopicDocuments,
-  type ScannedAutoMemoryDocument,
-} from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import {
   AUTO_MEMORY_TYPES,
@@ -30,28 +21,6 @@ export interface AutoMemoryDreamResult {
   touchedTopics: AutoMemoryType[];
   dedupedEntries: number;
   systemMessage?: string;
-}
-
-function buildDreamedBody(body: string): {
-  body: string;
-  dedupedEntries: number;
-} {
-  const entries = parseAutoMemoryEntries(body);
-  const mergedEntries = Array.from(
-    entries.reduce((map, entry) => {
-      const key = entry.summary.toLowerCase();
-      const current = map.get(key);
-      map.set(key, current ? mergeAutoMemoryEntry(current, entry) : entry);
-      return map;
-    }, new Map<string, ReturnType<typeof parseAutoMemoryEntries>[number]>()),
-  )
-    .map(([, entry]) => entry)
-    .sort((a, b) => a.summary.localeCompare(b.summary));
-
-  return {
-    body: renderAutoMemoryBody('', mergedEntries),
-    dedupedEntries: Math.max(0, entries.length - mergedEntries.length),
-  };
 }
 
 async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
@@ -74,11 +43,8 @@ async function bumpMetadata(projectRoot: string, now: Date): Promise<void> {
 async function runDreamByAgent(
   projectRoot: string,
   config: Config,
-): Promise<AutoMemoryDreamResult | null> {
+): Promise<AutoMemoryDreamResult> {
   const result = await planManagedAutoMemoryDreamByAgent(config, projectRoot);
-  if (result.filesTouched.length === 0) {
-    return null;
-  }
 
   // Infer which topics were touched from the file paths
   const touchedTopics = new Set<AutoMemoryType>();
@@ -102,19 +68,6 @@ async function runDreamByAgent(
   };
 }
 
-async function writeUpdatedBody(
-  doc: ScannedAutoMemoryDocument,
-  nextBody: string,
-): Promise<boolean> {
-  const current = await fs.readFile(doc.filePath, 'utf-8');
-  const next = current.replace(doc.body, nextBody);
-  if (next === current) {
-    return false;
-  }
-  await fs.writeFile(doc.filePath, next, 'utf-8');
-  return true;
-}
-
 export async function runManagedAutoMemoryDream(
   projectRoot: string,
   now = new Date(),
@@ -123,108 +76,31 @@ export async function runManagedAutoMemoryDream(
   await ensureAutoMemoryScaffold(projectRoot, now);
   const t0 = Date.now();
 
-  if (config) {
-    try {
-      const agentResult = await runDreamByAgent(projectRoot, config);
-      if (agentResult) {
-        if (agentResult.touchedTopics.length > 0) {
-          await bumpMetadata(projectRoot, now);
-          await rebuildManagedAutoMemoryIndex(projectRoot);
-        }
-        await updateDreamMetadataResult(
-          projectRoot,
-          now,
-          agentResult.touchedTopics,
-        );
-        logMemoryDream(
-          config,
-          new MemoryDreamEvent({
-            trigger: 'auto',
-            status: agentResult.touchedTopics.length > 0 ? 'updated' : 'noop',
-            deduped_entries: agentResult.dedupedEntries,
-            touched_topics: agentResult.touchedTopics,
-            duration_ms: Date.now() - t0,
-          }),
-        );
-        return agentResult;
-      }
-    } catch {
-      // Fall back to the existing mechanical dream implementation.
-    }
+  if (!config) {
+    throw new Error(
+      'Managed auto-memory dream requires config for forked-agent execution.',
+    );
   }
 
-  const docs = await scanAutoMemoryTopicDocuments(projectRoot);
-  const touchedTopics = new Set<AutoMemoryType>();
-  let dedupedEntries = 0;
-  const canonicalByKey = new Map<string, ScannedAutoMemoryDocument>();
-
-  for (const doc of docs) {
-    const dreamed = buildDreamedBody(doc.body);
-    if (dreamed.body !== doc.body.trim()) {
-      const wrote = await writeUpdatedBody(doc, dreamed.body);
-      if (wrote) {
-        touchedTopics.add(doc.type);
-      }
-    }
-
-    const [entry] = parseAutoMemoryEntries(dreamed.body);
-    if (!entry) {
-      continue;
-    }
-
-    dedupedEntries += dreamed.dedupedEntries;
-    const dedupeKey = `${doc.type}:${entry.summary.toLowerCase()}`;
-    const canonical = canonicalByKey.get(dedupeKey);
-
-    if (!canonical) {
-      canonicalByKey.set(dedupeKey, doc);
-      continue;
-    }
-
-    const [canonicalEntry] = parseAutoMemoryEntries(canonical.body);
-    const mergedEntry = mergeAutoMemoryEntry(canonicalEntry ?? entry, entry);
-    const mergedBody = renderAutoMemoryBody('', [mergedEntry]);
-
-    if (mergedBody !== canonical.body.trim()) {
-      const wrote = await writeUpdatedBody(canonical, mergedBody);
-      if (wrote) {
-        touchedTopics.add(canonical.type);
-      }
-    }
-
-    await fs.unlink(doc.filePath);
-    touchedTopics.add(doc.type);
-    dedupedEntries += 1;
-  }
-
-  if (touchedTopics.size > 0) {
+  const agentResult = await runDreamByAgent(projectRoot, config);
+  if (agentResult.touchedTopics.length > 0) {
     await bumpMetadata(projectRoot, now);
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }
 
-  await updateDreamMetadataResult(projectRoot, now, [...touchedTopics]);
+  await updateDreamMetadataResult(projectRoot, now, agentResult.touchedTopics);
 
-  const result: AutoMemoryDreamResult = {
-    touchedTopics: [...touchedTopics],
-    dedupedEntries,
-    systemMessage:
-      touchedTopics.size > 0
-        ? `Managed auto-memory dream updated: ${[...touchedTopics].map((topic) => `${topic}.md`).join(', ')}`
-        : undefined,
-  };
-  if (config) {
-    logMemoryDream(
-      config,
-      new MemoryDreamEvent({
-        trigger: 'auto',
-        status: touchedTopics.size > 0 ? 'updated' : 'noop',
-        deduped_entries: dedupedEntries,
-        touched_topics: [...touchedTopics],
-        duration_ms: Date.now() - t0,
-      }),
-    );
-  }
-  return result;
+  logMemoryDream(
+    config,
+    new MemoryDreamEvent({
+      trigger: 'auto',
+      status: agentResult.touchedTopics.length > 0 ? 'updated' : 'noop',
+      deduped_entries: agentResult.dedupedEntries,
+      touched_topics: agentResult.touchedTopics,
+      duration_ms: Date.now() - t0,
+    }),
+  );
+  return agentResult;
 }
 
 async function updateDreamMetadataResult(

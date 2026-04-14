@@ -24,6 +24,7 @@ describe('managed auto-memory extraction runtime', () => {
   let tempDir: string;
   let projectRoot: string;
   let mockConfig: Config;
+  let extractionCount: number;
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(
@@ -37,43 +38,37 @@ describe('managed auto-memory extraction runtime', () => {
       getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
     } as unknown as Config;
     vi.clearAllMocks();
+    extractionCount = 0;
     vi.mocked(runAutoMemoryExtractionByAgent).mockImplementation(
-      async (_config, root, messages) => {
-        const lastUserText = messages
-          .filter((message) => message.role === 'user')
-          .at(-1)?.text;
-        const topic = lastUserText?.includes('grafana.example/d/api')
-          ? 'reference'
-          : 'user';
+      async (_config: Config, root: string) => {
+        extractionCount += 1;
+        const topic = extractionCount > 1 ? 'reference' : 'user';
         const relativePath =
           topic === 'reference'
             ? path.join('reference', 'latency-dashboard.md')
             : path.join('user', 'terse-responses.md');
         const filePath = getAutoMemoryFilePath(root, relativePath);
         await fs.mkdir(path.dirname(filePath), { recursive: true });
+        const description =
+          topic === 'reference'
+            ? 'https://grafana.example/d/api'
+            : 'User prefers terse responses.';
         await fs.writeFile(
           filePath,
           [
             '---',
             `type: ${topic}`,
             `name: ${topic === 'reference' ? 'Latency Dashboard' : 'Terse Responses'}`,
-            `description: ${lastUserText ?? 'User prefers terse responses.'}`,
+            `description: ${description}`,
             '---',
             '',
-            lastUserText ?? 'User prefers terse responses.',
+            description,
             '',
           ].join('\n'),
           'utf-8',
         );
 
         return {
-          patches: [
-            {
-              topic,
-              summary: lastUserText ?? 'User prefers terse responses.',
-              sourceOffset: messages.at(-1)?.offset ?? 0,
-            },
-          ],
           touchedTopics: [topic],
           systemMessage: undefined,
         };
@@ -98,7 +93,9 @@ describe('managed auto-memory extraction runtime', () => {
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
-      history: [{ role: 'user', parts: [{ text: 'I prefer terse responses.' }] }],
+      history: [
+        { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+      ],
     });
 
     const queued = await runtime.schedule({
@@ -110,7 +107,9 @@ describe('managed auto-memory extraction runtime', () => {
         { role: 'model', parts: [{ text: 'Done.' }] },
         {
           role: 'user',
-          parts: [{ text: 'The latency dashboard is https://grafana.example/d/api' }],
+          parts: [
+            { text: 'The latency dashboard is https://grafana.example/d/api' },
+          ],
         },
       ],
     });
@@ -130,7 +129,9 @@ describe('managed auto-memory extraction runtime', () => {
 
     const tasks = runtime.listTasks(projectRoot);
     expect(tasks.some((task) => task.status === 'completed')).toBe(true);
-    expect(tasks.some((task) => task.metadata?.['trailing'] === true)).toBe(true);
+    expect(tasks.some((task) => task.metadata?.['trailing'] === true)).toBe(
+      true,
+    );
   });
 
   it('returns already_running when extraction state is externally locked', async () => {
@@ -141,7 +142,9 @@ describe('managed auto-memory extraction runtime', () => {
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
-      history: [{ role: 'user', parts: [{ text: 'I prefer terse responses.' }] }],
+      history: [
+        { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+      ],
     });
 
     expect(result.skippedReason).toBe('already_running');

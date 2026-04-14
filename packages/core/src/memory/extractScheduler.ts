@@ -44,7 +44,6 @@ function buildSkippedExtractResult(
   skippedReason: AutoMemoryExtractResult['skippedReason'],
 ): AutoMemoryExtractResult {
   return {
-    patches: [],
     touchedTopics: [],
     skippedReason,
     cursor: {
@@ -209,11 +208,10 @@ export class ManagedAutoMemoryExtractRuntime {
         status: result.skippedReason ? 'skipped' : 'completed',
         progressText:
           result.systemMessage ??
-          (result.patches.length > 0
-            ? `Planned ${result.patches.length} managed auto-memory patch${result.patches.length === 1 ? '' : 'es'}.`
+          (result.touchedTopics.length > 0
+            ? `Managed auto-memory updated: ${result.touchedTopics.join(', ')}.`
             : 'Managed auto-memory extraction completed without durable changes.'),
         metadata: {
-          patchCount: result.patches.length,
           touchedTopics: result.touchedTopics,
           processedOffset: result.cursor.processedOffset,
           skippedReason: result.skippedReason,
@@ -225,7 +223,7 @@ export class ManagedAutoMemoryExtractRuntime {
           new MemoryExtractEvent({
             trigger: 'auto',
             status: 'completed',
-            patches_count: result.patches.length,
+            patches_count: result.touchedTopics.length,
             touched_topics: result.touchedTopics,
             duration_ms: durationMs,
           }),

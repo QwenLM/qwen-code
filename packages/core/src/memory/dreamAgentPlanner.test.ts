@@ -66,11 +66,12 @@ describe('dreamAgentPlanner', () => {
         maxTimeMinutes: 5,
         tools: [
           'read_file',
+          'grep_search',
+          'glob',
+          'list_directory',
+          'run_shell_command',
           'write_file',
           'edit',
-          'list_directory',
-          'glob',
-          'grep_search',
         ],
       }),
     );

@@ -1002,6 +1002,26 @@ export class GeminiClient {
     }
 
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
+      // Save cache-safe params here — before any early return — so that
+      // background extract/dream agents calling getCacheSafeParams() always
+      // see the current turn's history regardless of which path exits below.
+      try {
+        const chat = this.getChat();
+        const fullHistory = chat.getHistory(true);
+        const maxHistoryForCache = 40;
+        const cachedHistory =
+          fullHistory.length > maxHistoryForCache
+            ? fullHistory.slice(-maxHistoryForCache)
+            : fullHistory;
+        saveCacheSafeParams(
+          chat.getGenerationConfig(),
+          cachedHistory,
+          this.config.getModel(),
+        );
+      } catch {
+        // Best-effort — don't block the main flow
+      }
+
       if (this.config.getSkipNextSpeakerCheck()) {
         this.runManagedAutoMemoryBackgroundTasks(messageType);
         // Report completed before returning — agent has no more work to do
@@ -1049,27 +1069,6 @@ export class GeminiClient {
     // Report cancelled to arena when user cancelled mid-stream
     if (signal?.aborted && arenaAgentClient) {
       await arenaAgentClient.reportCancelled();
-    }
-
-    // Save cache-safe params on successful completion (non-abort) for forked queries
-    if (!signal?.aborted && this.isInitialized()) {
-      try {
-        const chat = this.getChat();
-        // Clone history then truncate to last 40 entries to avoid full-session deep copy overhead
-        const fullHistory = chat.getHistory(true);
-        const maxHistoryForCache = 40;
-        const cachedHistory =
-          fullHistory.length > maxHistoryForCache
-            ? fullHistory.slice(-maxHistoryForCache)
-            : fullHistory;
-        saveCacheSafeParams(
-          chat.getGenerationConfig(),
-          cachedHistory,
-          this.config.getModel(),
-        );
-      } catch {
-        // Best-effort — don't block the main flow
-      }
     }
 
     return turn;

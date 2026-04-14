@@ -238,6 +238,17 @@ export interface AgentPathParams {
    * Pass an empty array to deny all tools (single-turn text output only).
    */
   tools?: string[];
+  /**
+   * Optional parent conversation history to inject for richer context.
+   * Ensures the agent sees the conversation without re-serializing it.
+   * Must end with a `model` role entry; call buildAgentHistory() to enforce this.
+   */
+  extraHistory?: Content[];
+  /**
+   * Skip env bootstrap injection in createChat() when extraHistory already
+   * contains the env context from the parent conversation.
+   */
+  skipEnvHistory?: boolean;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
 }
@@ -407,7 +418,10 @@ export async function runForkedAgent(
 
   const context = new ContextState();
   context.set('task_prompt', params.taskPrompt);
-  await headless.execute(context, params.abortSignal);
+  await headless.execute(context, params.abortSignal, {
+    extraHistory: params.extraHistory,
+    skipEnvHistory: params.skipEnvHistory,
+  });
 
   const terminateReason = headless.getTerminateMode();
   const finalText = headless.getFinalText() || undefined;

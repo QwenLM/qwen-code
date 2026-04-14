@@ -23,7 +23,6 @@ import {
   type AutoMemoryType,
 } from './types.js';
 
-const MIN_CANDIDATE_LENGTH = 12;
 const debugLogger = createDebugLogger('AUTO_MEMORY_EXTRACT');
 
 export interface AutoMemoryTranscriptMessage {
@@ -32,78 +31,11 @@ export interface AutoMemoryTranscriptMessage {
   text: string;
 }
 
-export interface AutoMemoryExtractPatch {
-  topic: AutoMemoryType;
-  summary: string;
-  why?: string;
-  howToApply?: string;
-  sourceOffset: number;
-}
-
 export interface AutoMemoryExtractResult {
-  patches: AutoMemoryExtractPatch[];
   touchedTopics: AutoMemoryType[];
   skippedReason?: 'already_running' | 'queued' | 'memory_tool';
   systemMessage?: string;
   cursor: AutoMemoryExtractCursor;
-}
-
-function normalizeSummary(text: string): string {
-  return text.replace(/\s+/g, ' ').trim();
-}
-
-function isTemporaryTask(text: string): boolean {
-  return /\b(today|now|currently|for this task|this session|temporary|temporarily)\b/i.test(
-    text,
-  );
-}
-
-function normalizeExtractPatch(
-  patch: AutoMemoryExtractPatch,
-): AutoMemoryExtractPatch | null {
-  const summary = normalizeSummary(
-    patch.summary.replace(/^[-*]\s+/, '').trim(),
-  );
-  if (
-    summary.length < MIN_CANDIDATE_LENGTH ||
-    summary.endsWith('?') ||
-    isTemporaryTask(summary)
-  ) {
-    return null;
-  }
-
-  return {
-    topic: patch.topic,
-    summary,
-    why: patch.why ? normalizeSummary(patch.why) : undefined,
-    howToApply: patch.howToApply
-      ? normalizeSummary(patch.howToApply)
-      : undefined,
-    sourceOffset: patch.sourceOffset,
-  };
-}
-
-function dedupeExtractPatches(
-  patches: AutoMemoryExtractPatch[],
-): AutoMemoryExtractPatch[] {
-  const seen = new Set<string>();
-  const deduped: AutoMemoryExtractPatch[] = [];
-
-  for (const patch of patches) {
-    const normalizedPatch = normalizeExtractPatch(patch);
-    if (!normalizedPatch) {
-      continue;
-    }
-
-    const dedupeKey = `${normalizedPatch.topic}:${normalizedPatch.summary.toLowerCase()}`;
-    if (seen.has(dedupeKey)) {
-      continue;
-    }
-    seen.add(dedupeKey);
-    deduped.push(normalizedPatch);
-  }
-
-  return deduped;
 }
 
 export function buildTranscriptMessages(
@@ -113,7 +45,9 @@ export function buildTranscriptMessages(
     .map((message, index) => ({
       offset: index,
       role: message.role,
-      text: normalizeSummary(partToString(message.parts ?? [])),
+      text: partToString(message.parts ?? [])
+        .replace(/\s+/g, ' ')
+        .trim(),
     }))
     .filter(
       (message): message is AutoMemoryTranscriptMessage =>
@@ -128,7 +62,7 @@ export function loadUnprocessedTranscriptSlice(
   cursor: AutoMemoryExtractCursor,
 ): { messages: AutoMemoryTranscriptMessage[]; nextProcessedOffset: number } {
   const startOffset =
-    cursor.sessionId === sessionId ? cursor.processedOffset ?? 0 : 0;
+    cursor.sessionId === sessionId ? (cursor.processedOffset ?? 0) : 0;
   return {
     messages: messages.filter((message) => message.offset >= startOffset),
     nextProcessedOffset: messages.length,
@@ -180,7 +114,8 @@ async function bumpMetadata(
     metadata.lastExtractionAt = now.toISOString();
     metadata.lastExtractionSessionId = sessionId;
     metadata.lastExtractionTouchedTopics = touchedTopics;
-    metadata.lastExtractionStatus = touchedTopics.length > 0 ? 'updated' : 'noop';
+    metadata.lastExtractionStatus =
+      touchedTopics.length > 0 ? 'updated' : 'noop';
     await fs.writeFile(
       getAutoMemoryMetadataPath(projectRoot),
       `${JSON.stringify(metadata, null, 2)}\n`,
@@ -215,12 +150,22 @@ export async function runAutoMemoryExtract(params: {
     );
   }
 
+  // Skip if no new user messages in the unprocessed slice.
+  const hasNewUserMessages = slice.messages.some((m) => m.role === 'user');
+  if (!hasNewUserMessages) {
+    const cursor: AutoMemoryExtractCursor = {
+      sessionId: params.sessionId,
+      processedOffset: slice.nextProcessedOffset,
+      updatedAt: now.toISOString(),
+    };
+    await writeExtractCursor(params.projectRoot, cursor);
+    return { touchedTopics: [], cursor };
+  }
+
   const agentResult = await runAutoMemoryExtractionByAgent(
     params.config,
     params.projectRoot,
-    slice.messages,
   );
-  const patches = dedupeExtractPatches(agentResult.patches);
 
   if (agentResult.touchedTopics.length > 0) {
     await bumpMetadata(
@@ -240,11 +185,10 @@ export async function runAutoMemoryExtract(params: {
   await writeExtractCursor(params.projectRoot, cursor);
 
   debugLogger.debug(
-    `Managed auto-memory extract completed with ${patches.length} patch(es) and ${agentResult.touchedTopics.length} touched topic(s).`,
+    `Managed auto-memory extract completed with ${agentResult.touchedTopics.length} touched topic(s).`,
   );
 
   return {
-    patches,
     touchedTopics: agentResult.touchedTopics,
     cursor,
     systemMessage: agentResult.systemMessage,

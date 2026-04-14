@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { runManagedAutoMemoryDream } from './dream.js';
+import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import {
   drainManagedAutoMemoryExtractTasks,
   resetManagedAutoMemoryExtractRuntimeForTests,
@@ -27,10 +28,15 @@ vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
 }));
 
+vi.mock('./dreamAgentPlanner.js', () => ({
+  planManagedAutoMemoryDreamByAgent: vi.fn(),
+}));
+
 describe('managed auto-memory lifecycle integration', () => {
   let tempDir: string;
   let projectRoot: string;
   let mockConfig: Config;
+  let extractionCount: number;
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-lifecycle-int-'));
@@ -45,48 +51,56 @@ describe('managed auto-memory lifecycle integration', () => {
       getModel: () => 'qwen3-coder-plus',
     } as Config;
     vi.clearAllMocks();
+    extractionCount = 0;
     vi.mocked(runAutoMemoryExtractionByAgent).mockImplementation(
-      async (_config, root, messages) => {
-        const lastUserText = messages
-          .filter((message) => message.role === 'user')
-          .at(-1)?.text;
-        const topic = lastUserText?.includes('grafana.example/d/api-latency')
-          ? 'reference'
-          : 'user';
+      async (_config, root: string) => {
+        extractionCount += 1;
+        const topic = extractionCount > 1 ? 'reference' : 'user';
         const relativePath =
           topic === 'reference'
             ? path.join('reference', 'latency-dashboard.md')
             : path.join('user', 'terse-responses.md');
         const filePath = getAutoMemoryFilePath(root, relativePath);
         await fs.mkdir(path.dirname(filePath), { recursive: true });
+        const description =
+          topic === 'reference'
+            ? 'https://grafana.example/d/api-latency'
+            : 'I prefer terse responses.';
         await fs.writeFile(
           filePath,
           [
             '---',
             `type: ${topic}`,
             `name: ${topic === 'reference' ? 'Latency Dashboard' : 'Terse Responses'}`,
-            `description: ${lastUserText ?? 'I prefer terse responses.'}`,
+            `description: ${description}`,
             '---',
             '',
-            lastUserText ?? 'I prefer terse responses.',
+            description,
             '',
           ].join('\n'),
           'utf-8',
         );
 
         return {
-          patches: [
-            {
-              topic,
-              summary: lastUserText ?? 'I prefer terse responses.',
-              sourceOffset: messages.at(-1)?.offset ?? 0,
-            },
-          ],
           touchedTopics: [topic],
           systemMessage: undefined,
         };
       },
     );
+    vi.mocked(planManagedAutoMemoryDreamByAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Consolidated memory files and updated the index.',
+      filesTouched: [
+        getAutoMemoryFilePath(
+          projectRoot,
+          path.join('user', 'terse-responses.md'),
+        ),
+        getAutoMemoryFilePath(
+          projectRoot,
+          path.join('reference', 'latency-dashboard.md'),
+        ),
+      ],
+    });
   });
 
   afterEach(async () => {
@@ -185,9 +199,10 @@ describe('managed auto-memory lifecycle integration', () => {
     const dreamResult = await runManagedAutoMemoryDream(
       projectRoot,
       new Date('2026-04-01T03:00:00.000Z'),
+      mockConfig,
     );
     expect(dreamResult.touchedTopics).toContain('user');
-    expect(dreamResult.dedupedEntries).toBeGreaterThan(0);
+    expect(dreamResult.dedupedEntries).toBe(0);
 
     const indexContent = await fs.readFile(
       getAutoMemoryIndexPath(projectRoot),

@@ -57,65 +57,19 @@ describe('auto-memory extraction', () => {
       { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
     ]);
 
-    const slice = loadUnprocessedTranscriptSlice(
-      'session-1',
-      transcript,
-      {
-        sessionId: 'session-1',
-        processedOffset: 2,
-        updatedAt: new Date().toISOString(),
-      },
-    );
+    const slice = loadUnprocessedTranscriptSlice('session-1', transcript, {
+      sessionId: 'session-1',
+      processedOffset: 2,
+      updatedAt: new Date().toISOString(),
+    });
 
     expect(slice.messages).toHaveLength(1);
     expect(slice.messages[0]?.text).toBe('I prefer terse responses.');
     expect(slice.nextProcessedOffset).toBe(3);
   });
 
-  it('dedupes agent-reported patches while preserving touched topics', async () => {
-    vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
-      patches: [
-        {
-          topic: 'user',
-          summary: 'User prefers terse responses.',
-          sourceOffset: 0,
-        },
-        {
-          topic: 'user',
-          summary: 'User prefers terse responses.',
-          sourceOffset: 0,
-        },
-      ],
-      touchedTopics: ['user'],
-      systemMessage: 'Managed auto-memory updated: user.md',
-    });
-
-    const result = await runAutoMemoryExtract({
-      projectRoot,
-      sessionId: 'session-1',
-      config: mockConfig,
-      history: [{ role: 'user', parts: [{ text: 'I prefer terse responses.' }] }],
-    });
-
-    expect(result.patches).toEqual([
-      {
-        topic: 'user',
-        summary: 'User prefers terse responses.',
-        sourceOffset: 0,
-      },
-    ]);
-    expect(result.touchedTopics).toEqual(['user']);
-  });
-
   it('updates cursor and avoids duplicate writes for repeated extraction', async () => {
     vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue({
-      patches: [
-        {
-          topic: 'user',
-          summary: 'User prefers terse responses.',
-          sourceOffset: 0,
-        },
-      ],
       touchedTopics: [],
       systemMessage: undefined,
     });
@@ -154,7 +108,9 @@ describe('auto-memory extraction', () => {
       runAutoMemoryExtract({
         projectRoot,
         sessionId: 'session-1',
-        history: [{ role: 'user', parts: [{ text: 'I prefer terse responses.' }] }],
+        history: [
+          { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+        ],
       }),
     ).rejects.toThrow('Managed auto-memory extraction requires config');
   });

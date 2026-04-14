@@ -26,7 +26,9 @@ describe('auto-memory extraction with agent planner', () => {
   const mockConfig = {} as Config;
 
   beforeEach(async () => {
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'auto-memory-extract-agent-'));
+    tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'auto-memory-extract-agent-'),
+    );
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
     await ensureAutoMemoryScaffold(projectRoot);
@@ -64,13 +66,6 @@ describe('auto-memory extraction with agent planner', () => {
       );
 
       return {
-        patches: [
-          {
-            topic: 'user',
-            summary: 'User prefers terse responses.',
-            sourceOffset: 0,
-          },
-        ],
         touchedTopics: ['user'],
         systemMessage: 'Managed auto-memory updated: user.md',
       };
@@ -92,7 +87,6 @@ describe('auto-memory extraction with agent planner', () => {
     expect(runAutoMemoryExtractionByAgent).toHaveBeenCalledWith(
       mockConfig,
       projectRoot,
-      expect.any(Array),
     );
 
     const docs = await scanAutoMemoryTopicDocuments(projectRoot);

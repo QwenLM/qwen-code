@@ -8,7 +8,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
-import { runForkedAgent } from '../background/forkedAgent.js';
+import {
+  runForkedAgent,
+  getCacheSafeParams,
+} from '../background/forkedAgent.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./scan.js')>();
@@ -18,8 +21,17 @@ vi.mock('./scan.js', async (importOriginal) => {
   };
 });
 
+vi.mock('./paths.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./paths.js')>();
+  return {
+    ...actual,
+    getAutoMemoryRoot: vi.fn().mockReturnValue('/tmp/auto-memory'),
+  };
+});
+
 vi.mock('../background/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
+  getCacheSafeParams: vi.fn(),
 }));
 
 describe('runAutoMemoryExtractionByAgent', () => {
@@ -31,12 +43,21 @@ describe('runAutoMemoryExtractionByAgent', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
     vi.mocked(scanAutoMemoryTopicDocuments).mockResolvedValue([
       {
         type: 'user',
-        filePath: '/tmp/user.md',
-        relativePath: 'user.md',
-        filename: 'user.md',
+        filePath: '/tmp/auto-memory/user/prefs.md',
+        relativePath: 'user/prefs.md',
+        filename: 'prefs.md',
         title: 'User Memory',
         description: 'User preferences',
         body: '- Existing terse preference.',
@@ -45,38 +66,16 @@ describe('runAutoMemoryExtractionByAgent', () => {
     ]);
   });
 
-  it('returns parsed execution summary and enables write/edit tools', async () => {
+  it('derives touchedTopics from filesTouched and returns systemMessage', async () => {
     vi.mocked(runForkedAgent).mockResolvedValue({
       status: 'completed',
-      finalText: JSON.stringify({
-        patches: [
-          {
-            topic: 'user',
-            summary: 'User prefers terse responses.',
-            sourceOffset: 0,
-          },
-        ],
-        touchedTopics: ['user'],
-      }),
-      filesTouched: ['/tmp/user.md'],
+      finalText: '',
+      filesTouched: ['/tmp/auto-memory/user/prefs.md'],
     });
 
-    const result = await runAutoMemoryExtractionByAgent(
-      mockConfig,
-      '/tmp/project',
-      [{ offset: 0, role: 'user', text: 'I prefer terse responses.' }],
-    );
+    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
 
     expect(result).toEqual({
-      patches: [
-        {
-          topic: 'user',
-          summary: 'User prefers terse responses.',
-          sourceOffset: 0,
-          why: undefined,
-          howToApply: undefined,
-        },
-      ],
       touchedTopics: ['user'],
       systemMessage: 'Managed auto-memory updated: user.md',
     });
@@ -84,16 +83,35 @@ describe('runAutoMemoryExtractionByAgent', () => {
       expect.objectContaining({
         tools: [
           'read_file',
+          'grep_search',
+          'glob',
+          'list_directory',
+          'run_shell_command',
           'write_file',
           'edit',
-          'list_directory',
-          'glob',
-          'grep_search',
         ],
         maxTurns: 5,
         maxTimeMinutes: 2,
       }),
     );
+  });
+
+  it('returns empty touchedTopics when agent touches no files', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+    });
+
+    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    expect(result).toEqual({ touchedTopics: [] });
+  });
+
+  it('throws when getCacheSafeParams returns null', async () => {
+    vi.mocked(getCacheSafeParams).mockReturnValue(null);
+    await expect(
+      runAutoMemoryExtractionByAgent(mockConfig, '/tmp'),
+    ).rejects.toThrow('no cache-safe params');
   });
 
   it('throws when the agent fails to complete', async () => {
@@ -104,29 +122,25 @@ describe('runAutoMemoryExtractionByAgent', () => {
     });
 
     await expect(
-      runAutoMemoryExtractionByAgent(mockConfig, '/tmp/project', [
-        { offset: 0, role: 'user', text: 'I prefer terse.' },
-      ]),
+      runAutoMemoryExtractionByAgent(mockConfig, '/tmp/project'),
     ).rejects.toThrow('timeout');
   });
 
-  it('returns empty result when messages array is empty', async () => {
-    const result = await runAutoMemoryExtractionByAgent(
-      mockConfig,
-      '/tmp/project',
-      [],
-    );
-    expect(result).toEqual({ patches: [], touchedTopics: [] });
-    expect(runForkedAgent).not.toHaveBeenCalled();
-  });
+  it('ignores non-memory file paths in filesTouched', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [
+        '/tmp/auto-memory/project/arch.md',
+        '/tmp/auto-memory/reference/api.md',
+        '/tmp/some/other/file.ts',
+      ],
+    });
 
-  it('returns empty result when there are no user messages', async () => {
-    const result = await runAutoMemoryExtractionByAgent(
-      mockConfig,
-      '/tmp/project',
-      [{ offset: 0, role: 'model', text: 'Sure!' }],
+    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    expect(result.touchedTopics).toEqual(
+      expect.arrayContaining(['project', 'reference']),
     );
-    expect(result).toEqual({ patches: [], touchedTopics: [] });
-    expect(runForkedAgent).not.toHaveBeenCalled();
+    expect(result.touchedTopics).not.toContain('user');
   });
 });
