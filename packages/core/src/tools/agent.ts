@@ -65,10 +65,13 @@ export interface AgentParams {
 
 /**
  * Normalizes AgentParams into an array of task specs. Legacy single-task
- * callers become a one-element array.
+ * callers become a one-element array. The `Array.isArray` guard mirrors
+ * `AgentToolInvocation`'s own isBatch check so a malformed runtime value
+ * (e.g. `tasks: "oops"`) cannot take the batch branch and later throw a
+ * confusing `.map is not a function` from slot construction.
  */
 function normalizeToTasks(params: AgentParams): AgentTaskSpec[] {
-  if (params.tasks && params.tasks.length > 0) {
+  if (Array.isArray(params.tasks) && params.tasks.length > 0) {
     return params.tasks;
   }
   return [
@@ -591,8 +594,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ) {
     super(params);
     this.specs = normalizeToTasks(params);
-    this.isBatch =
-      Array.isArray(params.tasks) && (params.tasks?.length ?? 0) > 0;
+    // Keep the isBatch predicate byte-for-byte identical to normalizeToTasks
+    // so the two cannot disagree on what counts as a batch (see R8N/R11A).
+    this.isBatch = Array.isArray(params.tasks) && params.tasks.length > 0;
 
     this.slots = this.specs.map((spec) => ({
       spec,
@@ -1037,15 +1041,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const finalTexts: string[] = results.map((r, i) => {
       if (r.status === 'fulfilled') return r.value;
       // Should not normally happen (runOneTask catches), but guard anyway.
+      // Route the defensive failure through updateSlotDisplay so live
+      // updateOutput consumers see the terminal state — without this the
+      // live stream would stop at `running` while the returned
+      // batchDisplay says `failed`, which confuses non-interactive JSON
+      // output that only sees the live stream.
       const msg =
         r.reason instanceof Error ? r.reason.message : String(r.reason);
       const slot = this.slots[i];
       if (slot.display.status === 'running') {
-        slot.display = {
-          ...slot.display,
-          status: 'failed',
-          terminateReason: `Unhandled error: ${msg}`,
-        };
+        this.updateSlotDisplay(
+          slot,
+          {
+            status: 'failed',
+            terminateReason: `Unhandled error: ${msg}`,
+          },
+          updateOutput,
+        );
       }
       return `Failed: ${msg}`;
     });

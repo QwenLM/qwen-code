@@ -1114,6 +1114,174 @@ describe('createAgentToolProgressHandler', () => {
     // Should not throw
     expect(() => handler('task-call-id', taskDisplay)).not.toThrow();
   });
+
+  it('processes each child slot independently in a batch update', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    // A task_execution_batch carries two child tasks; each child's tool
+    // calls must be emitted under the parent tool id with its own
+    // previous-state key so one slot's updates cannot shadow the other.
+    const batchDisplay = {
+      type: 'task_execution_batch' as const,
+      status: 'running' as const,
+      tasks: [
+        {
+          type: 'task_execution' as const,
+          subagentName: 'reviewer',
+          taskDescription: 'Slot 0',
+          taskPrompt: 'prompt 0',
+          status: 'running' as const,
+          toolCalls: [
+            {
+              callId: 'slot0-tool',
+              name: 'grep',
+              args: { pattern: 'foo' },
+              status: 'executing' as const,
+            },
+          ],
+        },
+        {
+          type: 'task_execution' as const,
+          subagentName: 'reviewer',
+          taskDescription: 'Slot 1',
+          taskPrompt: 'prompt 1',
+          status: 'running' as const,
+          toolCalls: [
+            {
+              callId: 'slot1-tool',
+              name: 'read',
+              args: { path: 'bar' },
+              status: 'executing' as const,
+            },
+          ],
+        },
+      ],
+    };
+
+    handler('parent-call-id', batchDisplay as unknown as AgentResultDisplay);
+
+    // Each child's tool call must reach the adapter attributed to the
+    // parent tool id.
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledWith(
+      expect.objectContaining({ callId: 'slot0-tool', name: 'grep' }),
+      'parent-tool-id',
+    );
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledWith(
+      expect.objectContaining({ callId: 'slot1-tool', name: 'read' }),
+      'parent-tool-id',
+    );
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledTimes(2);
+
+    // Both slots' initial taskPrompt messages should be emitted since this
+    // is the first update seen for each slot.
+    expect(mockAdapter.emitUserMessage).toHaveBeenCalledWith(
+      [{ text: 'prompt 0' }],
+      'parent-tool-id',
+    );
+    expect(mockAdapter.emitUserMessage).toHaveBeenCalledWith(
+      [{ text: 'prompt 1' }],
+      'parent-tool-id',
+    );
+    expect(mockAdapter.emitUserMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not duplicate batch child tool calls across repeated emits', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const slot0Running = {
+      type: 'task_execution' as const,
+      subagentName: 'reviewer',
+      taskDescription: 'Slot 0',
+      taskPrompt: 'prompt 0',
+      status: 'running' as const,
+      toolCalls: [
+        {
+          callId: 'slot0-tool',
+          name: 'grep',
+          args: {},
+          status: 'executing' as const,
+        },
+      ],
+    };
+    const slot1Running = {
+      type: 'task_execution' as const,
+      subagentName: 'reviewer',
+      taskDescription: 'Slot 1',
+      taskPrompt: 'prompt 1',
+      status: 'running' as const,
+      toolCalls: [
+        {
+          callId: 'slot1-tool',
+          name: 'read',
+          args: {},
+          status: 'executing' as const,
+        },
+      ],
+    };
+
+    const firstEmit = {
+      type: 'task_execution_batch' as const,
+      status: 'running' as const,
+      tasks: [slot0Running, slot1Running],
+    };
+    handler('parent-call-id', firstEmit as unknown as AgentResultDisplay);
+
+    // A second emit with identical slot state must not re-emit the same
+    // tool_use events — the per-slot previous-state cache should suppress
+    // duplicates under distinct `${callId}:${i}` keys.
+    handler('parent-call-id', firstEmit as unknown as AgentResultDisplay);
+
+    expect(mockAdapter.processSubagentToolCall).toHaveBeenCalledTimes(2);
+    expect(mockAdapter.emitUserMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('emits batch child task failures via emitSubagentErrorResult', () => {
+    const { handler } = createAgentToolProgressHandler(
+      mockConfig,
+      'parent-tool-id',
+      mockAdapter,
+    );
+
+    const running = {
+      type: 'task_execution' as const,
+      subagentName: 'reviewer',
+      taskDescription: 'Slot 0',
+      taskPrompt: 'prompt',
+      status: 'running' as const,
+      toolCalls: [],
+    };
+    const failed = {
+      ...running,
+      status: 'failed' as const,
+      terminateReason: 'subagent exploded',
+    };
+
+    // First see the slot running, then transition to failed.
+    handler('parent-call-id', {
+      type: 'task_execution_batch',
+      status: 'running',
+      tasks: [running],
+    } as unknown as AgentResultDisplay);
+    handler('parent-call-id', {
+      type: 'task_execution_batch',
+      status: 'failed',
+      tasks: [failed],
+    } as unknown as AgentResultDisplay);
+
+    expect(mockAdapter.emitSubagentErrorResult).toHaveBeenCalledWith(
+      'subagent exploded',
+      0,
+      'parent-tool-id',
+    );
+  });
 });
 
 describe('functionResponsePartsToString', () => {
