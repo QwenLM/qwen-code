@@ -12,10 +12,46 @@ Subagents are independent AI assistants that:
 - **Work autonomously** - Once given a task, they work independently until completion or failure
 - **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
 
+## Fork Subagent (Implicit Fork)
+
+In addition to named subagents, Qwen Code supports **implicit forking** — when the AI omits the `subagent_type` parameter, it triggers a fork that inherits the parent's full conversation context.
+
+### How Fork Differs from Named Subagents
+
+|               | Named Subagent                    | Fork Subagent                                         |
+| ------------- | --------------------------------- | ----------------------------------------------------- |
+| Context       | Starts fresh, no parent history   | Inherits parent's full conversation history           |
+| System prompt | Uses its own configured prompt    | Uses parent's exact system prompt (for cache sharing) |
+| Execution     | Blocks the parent until done      | Runs in background, parent continues immediately      |
+| Use case      | Specialized tasks (testing, docs) | Parallel tasks that need the current context          |
+
+### When Fork is Used
+
+The AI automatically uses fork when it needs to:
+
+- Run multiple research tasks in parallel (e.g., "investigate module A, B, and C")
+- Perform background work while continuing the main conversation
+- Delegate tasks that require understanding of the current conversation context
+
+### Prompt Cache Sharing
+
+All forks share the parent's exact API request prefix (system prompt, tools, conversation history), enabling DashScope prompt cache hits. When 3 forks run in parallel, the shared prefix is cached once and reused — saving 80%+ token costs compared to independent subagents.
+
+### Recursive Fork Prevention
+
+Fork children cannot create further forks. This is enforced at runtime — if a fork attempts to spawn another fork, it receives an error instructing it to execute tasks directly.
+
+### Current Limitations
+
+- **No result feedback**: Fork results are reflected in the UI progress display but are not automatically fed back into the main conversation. The parent AI sees a placeholder message and cannot act on the fork's output.
+- **No worktree isolation**: Forks share the parent's working directory. Concurrent file modifications from multiple forks may conflict.
+
 ## Key Benefits
 
 - **Task Specialization**: Create agents optimized for specific workflows (testing, documentation, refactoring, etc.)
 - **Context Isolation**: Keep specialized work separate from your main conversation
+- **Context Inheritance**: Fork subagents inherit the full conversation for context-heavy parallel tasks
+- **Prompt Cache Sharing**: Fork subagents share the parent's cache prefix, reducing token costs
 - **Reusability**: Save and reuse agent configurations across projects and sessions
 - **Controlled Access**: Limit which tools each agent can use for security and focus
 - **Progress Visibility**: Monitor agent execution with real-time progress updates
@@ -23,7 +59,7 @@ Subagents are independent AI assistants that:
 ## How Subagents Work
 
 1. **Configuration**: You create Subagents configurations that define their behavior, tools, and system prompts
-2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents
+2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or implicitly fork when no specific subagent type is needed
 3. **Execution**: Subagents work independently, using their configured tools to complete tasks
 4. **Results**: They return results and execution summaries back to the main conversation
 

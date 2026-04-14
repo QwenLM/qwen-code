@@ -22,6 +22,7 @@ import type { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
 import { ContextState } from '../agents/runtime/agent-headless.js';
+import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../agents/runtime/agent-core.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -42,7 +43,7 @@ import { ApprovalMode } from '../config/config.js';
 export interface AgentTaskSpec {
   description: string;
   prompt: string;
-  subagent_type: string;
+  subagent_type?: string;
 }
 
 /**
@@ -213,7 +214,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           description: 'The type of specialized agent to use for this task',
         },
       },
-      required: ['description', 'prompt', 'subagent_type'],
+      required: ['description', 'prompt'],
       additionalProperties: false,
     };
 
@@ -439,8 +440,18 @@ assistant: "I'm going to use the ${ToolNames.AGENT} tool to launch the greeting-
       ) {
         return `Parameter "prompt"${loc} must be a non-empty string.`;
       }
+
+      // subagent_type is optional in single-task mode (omitted = fork from
+      // parent's type). In batch mode it is required per task — fork mode
+      // cannot be combined with batch fan-out because background fork
+      // execution and synchronous slot aggregation are mutually exclusive.
+      if (spec.subagent_type === undefined) {
+        if (hasBatch) {
+          return `Parameter "subagent_type"${loc} is required in batch mode.`;
+        }
+        continue;
+      }
       if (
-        !spec.subagent_type ||
         typeof spec.subagent_type !== 'string' ||
         spec.subagent_type.trim() === ''
       ) {
@@ -603,7 +614,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       emitter: new AgentEventEmitter(),
       display: {
         type: 'task_execution' as const,
-        subagentName: spec.subagent_type,
+        // Fork mode (single-task only) leaves subagent_type undefined; use a
+        // placeholder until executeSubagent loads FORK_AGENT and updates it.
+        subagentName: spec.subagent_type ?? 'fork',
         taskDescription: spec.description,
         taskPrompt: spec.prompt,
         status: 'running' as const,
@@ -613,7 +626,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
     this.eventEmitter = this.slots[0].emitter;
     this.eventEmitters = this.slots.map((s) => s.emitter);
-    this.slotSubagentTypes = this.slots.map((s) => s.spec.subagent_type);
+    this.slotSubagentTypes = this.slots.map(
+      (s) => s.spec.subagent_type ?? 'fork',
+    );
   }
 
   /**
@@ -848,18 +863,122 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<string> {
     try {
-      const subagentConfig = await this.subagentManager.loadSubagent(
-        slot.spec.subagent_type,
-      );
+      let subagentConfig: SubagentConfig;
+      let extraHistory: Array<import('@google/genai').Content> | undefined;
+      let forkPlaceholderResult: string | undefined;
+      let forkTaskPrompt: string | undefined;
+      let forkGenerationConfig:
+        | import('@google/genai').GenerateContentConfig
+        | undefined;
+      let forkToolsOverride:
+        | Array<import('@google/genai').FunctionDeclaration>
+        | undefined;
 
-      if (!subagentConfig) {
-        const msg = `Subagent "${slot.spec.subagent_type}" not found`;
-        this.updateSlotDisplay(
-          slot,
-          { status: 'failed', terminateReason: msg },
-          updateOutput,
+      if (!slot.spec.subagent_type) {
+        const {
+          FORK_AGENT,
+          FORK_PLACEHOLDER_RESULT,
+          buildForkedMessages,
+          buildChildMessage,
+          isInForkChild,
+        } = await import('../agents/runtime/forkSubagent.js');
+        forkPlaceholderResult = FORK_PLACEHOLDER_RESULT;
+        subagentConfig = FORK_AGENT;
+
+        // Retrieve the parent's cached generationConfig (systemInstruction +
+        // tools) so the fork's API requests share the same prefix for
+        // DashScope prompt cache hits.
+        const { getCacheSafeParams } = await import(
+          '../followup/forkedQuery.js'
         );
-        return msg;
+        const cacheSafeParams = getCacheSafeParams();
+        if (cacheSafeParams) {
+          forkGenerationConfig = cacheSafeParams.generationConfig;
+          const tools = cacheSafeParams.generationConfig.tools;
+          if (tools && tools.length > 0) {
+            forkToolsOverride = tools
+              .flatMap(
+                (t) =>
+                  (
+                    t as {
+                      functionDeclarations?: Array<
+                        import('@google/genai').FunctionDeclaration
+                      >;
+                    }
+                  ).functionDeclarations ?? [],
+              )
+              .filter(
+                (decl) =>
+                  !(decl.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(decl.name)),
+              );
+          }
+        }
+
+        const geminiClient = this.config.getGeminiClient();
+        if (geminiClient) {
+          const rawHistory = geminiClient.getHistory(true);
+
+          if (isInForkChild(rawHistory)) {
+            const msg = 'Recursive forking is not allowed';
+            this.updateSlotDisplay(
+              slot,
+              {
+                subagentName: FORK_AGENT.name,
+                status: 'failed',
+                terminateReason: msg,
+              },
+              updateOutput,
+            );
+            return 'Error: Cannot create a fork from within an existing fork child. Please execute tasks directly.';
+          }
+
+          // Build extraHistory ensuring it ends with a model message so
+          // agent-headless can send the task_prompt as a user message
+          // without creating consecutive user messages.
+          if (rawHistory.length > 0) {
+            const lastMessage = rawHistory[rawHistory.length - 1];
+            if (lastMessage.role === 'model') {
+              const forkedMessages = buildForkedMessages(
+                slot.spec.prompt,
+                lastMessage,
+              );
+              if (forkedMessages.length > 0) {
+                extraHistory = [
+                  ...rawHistory.slice(0, -1),
+                  ...forkedMessages,
+                  {
+                    role: 'model' as const,
+                    parts: [{ text: 'Understood. Executing directive now.' }],
+                  },
+                ];
+                forkTaskPrompt = 'Begin.';
+              } else {
+                extraHistory = [...rawHistory];
+              }
+            } else {
+              extraHistory = rawHistory.slice(0, -1);
+            }
+          }
+        }
+
+        if (!forkTaskPrompt) {
+          forkTaskPrompt = buildChildMessage(slot.spec.prompt);
+        }
+      } else {
+        const loadedConfig = await this.subagentManager.loadSubagent(
+          slot.spec.subagent_type,
+        );
+
+        if (!loadedConfig) {
+          const msg = `Subagent "${slot.spec.subagent_type}" not found`;
+          this.updateSlotDisplay(
+            slot,
+            { status: 'failed', terminateReason: msg },
+            updateOutput,
+          );
+          return msg;
+        }
+        subagentConfig = loadedConfig;
       }
 
       this.updateSlotDisplay(
@@ -891,117 +1010,159 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         { eventEmitter: slot.emitter },
       );
 
+      // For fork agents, use the fork directive (with boilerplate) as the
+      // task prompt so it's sent as the first user message by agent-headless.
       const contextState = new ContextState();
-      contextState.set('task_prompt', slot.spec.prompt);
+      contextState.set('task_prompt', forkTaskPrompt || slot.spec.prompt);
 
       const hookSystem = this.config.getHookSystem();
       const agentId = `${subagentConfig.name}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      const agentType = slot.spec.subagent_type;
+      const agentType = slot.spec.subagent_type || subagentConfig.name;
 
-      if (hookSystem) {
+      const executeSubagent = async () => {
         try {
-          const startHookOutput = await hookSystem.fireSubagentStartEvent(
-            agentId,
-            agentType,
-            resolvedMode,
-            signal,
-          );
-          const additionalContext = startHookOutput?.getAdditionalContext();
-          if (additionalContext) {
-            contextState.set('hook_context', additionalContext);
-          }
-        } catch (hookError) {
-          debugLogger.warn(
-            `[Agent] SubagentStart hook failed, continuing execution: ${hookError}`,
-          );
-        }
-      }
-
-      await subagent.execute(contextState, signal);
-
-      if (hookSystem && !signal?.aborted) {
-        const transcriptPath = this.config.getTranscriptPath();
-        let stopHookActive = false;
-        let continueExecution = true;
-        let iterationCount = 0;
-        const maxIterations = 5;
-
-        while (continueExecution) {
-          iterationCount++;
-          if (iterationCount >= maxIterations) {
-            debugLogger.warn(
-              `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
-            );
-            break;
+          if (hookSystem) {
+            try {
+              const startHookOutput = await hookSystem.fireSubagentStartEvent(
+                agentId,
+                agentType,
+                resolvedMode,
+                signal,
+              );
+              const additionalContext = startHookOutput?.getAdditionalContext();
+              if (additionalContext) {
+                contextState.set('hook_context', additionalContext);
+              }
+            } catch (hookError) {
+              debugLogger.warn(
+                `[Agent] SubagentStart hook failed, continuing execution: ${hookError}`,
+              );
+            }
           }
 
-          try {
-            const stopHookOutput = await hookSystem.fireSubagentStopEvent(
-              agentId,
-              agentType,
-              transcriptPath,
-              subagent.getFinalText(),
-              stopHookActive,
-              resolvedMode,
-              signal,
-            );
-            const typedStopOutput = stopHookOutput as
-              | StopHookOutput
-              | undefined;
+          await subagent.execute(contextState, signal, {
+            extraHistory,
+            generationConfigOverride: forkGenerationConfig,
+            toolsOverride: forkToolsOverride,
+            skipEnvHistory: !!extraHistory && extraHistory.length > 0,
+          });
 
-            if (
-              typedStopOutput?.isBlockingDecision() ||
-              typedStopOutput?.shouldStopExecution()
-            ) {
-              const continueReason = typedStopOutput.getEffectiveReason();
-              stopHookActive = true;
-              const continueContext = new ContextState();
-              continueContext.set('task_prompt', continueReason);
-              await subagent.execute(continueContext, signal);
-              if (signal?.aborted) {
+          if (hookSystem && !signal?.aborted) {
+            const transcriptPath = this.config.getTranscriptPath();
+            let stopHookActive = false;
+            let continueExecution = true;
+            let iterationCount = 0;
+            const maxIterations = 5;
+
+            while (continueExecution) {
+              iterationCount++;
+              if (iterationCount >= maxIterations) {
+                debugLogger.warn(
+                  `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
+                );
+                break;
+              }
+
+              try {
+                const stopHookOutput = await hookSystem.fireSubagentStopEvent(
+                  agentId,
+                  agentType,
+                  transcriptPath,
+                  subagent.getFinalText(),
+                  stopHookActive,
+                  resolvedMode,
+                  signal,
+                );
+                const typedStopOutput = stopHookOutput as
+                  | StopHookOutput
+                  | undefined;
+
+                if (
+                  typedStopOutput?.isBlockingDecision() ||
+                  typedStopOutput?.shouldStopExecution()
+                ) {
+                  const continueReason = typedStopOutput.getEffectiveReason();
+                  stopHookActive = true;
+                  const continueContext = new ContextState();
+                  continueContext.set('task_prompt', continueReason);
+                  await subagent.execute(continueContext, signal, {
+                    extraHistory,
+                    generationConfigOverride: forkGenerationConfig,
+                    toolsOverride: forkToolsOverride,
+                    skipEnvHistory: !!extraHistory && extraHistory.length > 0,
+                  });
+                  if (signal?.aborted) {
+                    continueExecution = false;
+                  }
+                } else {
+                  continueExecution = false;
+                }
+              } catch (hookError) {
+                debugLogger.warn(
+                  `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
+                );
                 continueExecution = false;
               }
-            } else {
-              continueExecution = false;
             }
-          } catch (hookError) {
-            debugLogger.warn(
-              `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
-            );
-            continueExecution = false;
           }
+
+          const finalText = subagent.getFinalText();
+          const terminateMode = subagent.getTerminateMode();
+          const success = terminateMode === AgentTerminateMode.GOAL;
+          const executionSummary = subagent.getExecutionSummary();
+
+          if (signal?.aborted) {
+            this.updateSlotDisplay(
+              slot,
+              {
+                status: 'cancelled',
+                terminateReason: 'Agent was cancelled by user',
+                executionSummary,
+              },
+              updateOutput,
+            );
+          } else {
+            this.updateSlotDisplay(
+              slot,
+              {
+                status: success ? 'completed' : 'failed',
+                terminateReason: terminateMode,
+                result: finalText,
+                executionSummary,
+              },
+              updateOutput,
+            );
+          }
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          debugLogger.error(
+            `[AgentTool] Error inside subagent background task: ${errorMessage}`,
+          );
+          this.updateSlotDisplay(
+            slot,
+            {
+              status: 'failed',
+              terminateReason: `Failed to run subagent: ${errorMessage}`,
+            },
+            updateOutput,
+          );
         }
+      };
+
+      if (!slot.spec.subagent_type) {
+        // Background fork execution: kick off the subagent and return the
+        // placeholder immediately so the parent conversation can continue
+        // while the fork runs. Slot display continues to update via the
+        // emitter / updateSlotDisplay calls inside executeSubagent. Only
+        // reachable in single-task mode (validateToolParams forbids
+        // subagent_type === undefined inside batch tasks[]).
+        void executeSubagent();
+        return forkPlaceholderResult!;
       }
 
-      const finalText = subagent.getFinalText();
-      const terminateMode = subagent.getTerminateMode();
-      const success = terminateMode === AgentTerminateMode.GOAL;
-      const executionSummary = subagent.getExecutionSummary();
-
-      if (signal?.aborted) {
-        this.updateSlotDisplay(
-          slot,
-          {
-            status: 'cancelled',
-            terminateReason: 'Agent was cancelled by user',
-            executionSummary,
-          },
-          updateOutput,
-        );
-      } else {
-        this.updateSlotDisplay(
-          slot,
-          {
-            status: success ? 'completed' : 'failed',
-            terminateReason: terminateMode,
-            result: finalText,
-            executionSummary,
-          },
-          updateOutput,
-        );
-      }
-
-      return finalText;
+      await executeSubagent();
+      return subagent.getFinalText();
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
