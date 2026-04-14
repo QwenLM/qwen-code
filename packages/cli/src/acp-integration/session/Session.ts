@@ -435,11 +435,14 @@ export class Session implements SessionContext {
                 );
                 if (result.acpMessage) {
                   hookOutputHistory.push(result.acpMessage);
-                  await this.sendUpdate({
+                  const update: Record<string, unknown> = {
                     sessionUpdate: 'agent_message_chunk',
                     content: { type: 'text', text: result.acpMessage },
-                    _meta: { postTurnHook: true, turnIndex: turnIdx },
-                  } as SessionUpdate);
+                  };
+                  if (result.acpMeta) {
+                    update['_meta'] = result.acpMeta;
+                  }
+                  await this.sendUpdate(update as SessionUpdate);
                 }
               })(),
             );

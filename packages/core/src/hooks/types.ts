@@ -388,6 +388,17 @@ export class PostTurnHookOutput extends DefaultHookOutput {
     }
     return msg.trim();
   }
+
+  /**
+   * Get optional metadata to attach to the injected ACP message.
+   * Hook scripts define this freely; qwen-code passes it through as-is.
+   */
+  getAcpMeta(): Record<string, unknown> | undefined {
+    const specific = this.hookSpecificOutput as
+      | { acpMeta?: Record<string, unknown> }
+      | undefined;
+    return specific?.acpMeta;
+  }
 }
 
 /**
@@ -838,7 +849,10 @@ export interface PostTurnInput extends HookInput {
 export interface PostTurnOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'PostTurn';
+    /** Message text to inject into ACP stream as agent_message_chunk. */
     acpMessage?: string;
+    /** Optional metadata attached to the injected ACP message. Hook scripts define this freely. */
+    acpMeta?: Record<string, unknown>;
   };
 }
 

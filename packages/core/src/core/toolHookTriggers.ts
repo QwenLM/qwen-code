@@ -492,8 +492,10 @@ export function appendAdditionalContext(
  * Result of PostTurn hook execution
  */
 export interface PostTurnHookResult {
-  /** ACP message to inject with _meta.rewritten: true */
+  /** Message text to inject into ACP stream as agent_message_chunk. */
   acpMessage?: string;
+  /** Optional metadata for the injected ACP message. Defined by hook scripts, passed through as-is. */
+  acpMeta?: Record<string, unknown>;
 }
 
 /**
@@ -546,6 +548,7 @@ export async function firePostTurnHook(
 
     return {
       acpMessage: postTurnOutput.getAcpMessage(),
+      acpMeta: postTurnOutput.getAcpMeta(),
     };
   } catch (error) {
     // PostTurn hook errors must not affect agent execution
