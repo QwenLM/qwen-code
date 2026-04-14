@@ -89,13 +89,21 @@ describe('runAcpAgent shutdown cleanup', () => {
   let processExitSpy: any;
   let sigTermListeners: NodeJS.SignalsListener[];
   let sigIntListeners: NodeJS.SignalsListener[];
+  let mockConfig: Config;
 
-  const mockConfig = {} as Config;
   const mockSettings = { merged: {} } as LoadedSettings;
   const mockArgv = {} as CliArgs;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    // Reset mockConfig after clearAllMocks
+    mockConfig = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+    } as unknown as Config;
+
     mockRunExitCleanup.mockResolvedValue(undefined);
     mockConnectionState.reset();
     sigTermListeners = [];
@@ -138,8 +146,12 @@ describe('runAcpAgent shutdown cleanup', () => {
     // Start runAcpAgent (it will await connection.closed)
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
 
+    // Wait for signal handlers to be registered
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
+
     // Simulate SIGTERM from IDE
-    expect(sigTermListeners.length).toBeGreaterThan(0);
     sigTermListeners[0]('SIGTERM');
 
     // runExitCleanup is async, wait for it
@@ -159,7 +171,11 @@ describe('runAcpAgent shutdown cleanup', () => {
   it('calls runExitCleanup and process.exit on SIGINT', async () => {
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
 
-    expect(sigIntListeners.length).toBeGreaterThan(0);
+    // Wait for signal handlers to be registered
+    await vi.waitFor(() => {
+      expect(sigIntListeners.length).toBeGreaterThan(0);
+    });
+
     sigIntListeners[0]('SIGINT');
 
     await vi.waitFor(() => {
@@ -177,6 +193,11 @@ describe('runAcpAgent shutdown cleanup', () => {
   it('only runs shutdown once even if multiple signals arrive', async () => {
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
 
+    // Wait for signal handlers to be registered
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
+
     // Send SIGTERM twice
     sigTermListeners[0]('SIGTERM');
     sigTermListeners[0]('SIGTERM');
@@ -193,6 +214,11 @@ describe('runAcpAgent shutdown cleanup', () => {
     mockRunExitCleanup.mockRejectedValueOnce(new Error('cleanup failed'));
 
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+
+    // Wait for signal handlers to be registered
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
 
     sigTermListeners[0]('SIGTERM');
 

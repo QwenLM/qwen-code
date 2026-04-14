@@ -18,6 +18,8 @@ import {
   type Config,
   type ConversationRecord,
   type DeviceAuthorizationData,
+  SessionStartSource,
+  SessionEndReason,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -74,6 +76,10 @@ export async function runAcpAgent(
   settings: LoadedSettings,
   argv: CliArgs,
 ) {
+  // Initialize config to set up hookSystem (required for SessionStart/SessionEnd hooks)
+  // This is needed because gemini.tsx calls runAcpAgent without calling config.initialize()
+  await config.initialize();
+
   const stdout = Writable.toWeb(process.stdout) as WritableStream;
   const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
 
@@ -94,10 +100,24 @@ export async function runAcpAgent(
   // (e.g., stdin raw mode restoration) override the default exit behavior,
   // causing the ACP process to ignore termination signals.
   let shuttingDown = false;
-  const shutdownHandler = () => {
+  const shutdownHandler = async () => {
     if (shuttingDown) return;
     shuttingDown = true;
     debugLogger.debug('[ACP] Shutdown signal received, closing streams');
+
+    // Fire SessionEnd hook for all active sessions (aligned with core path)
+    const hookSystem = config.getHookSystem?.();
+    const hooksEnabled = !config.getDisableAllHooks?.();
+    if (hooksEnabled && hookSystem && config.hasHooksForEvent?.('SessionEnd')) {
+      try {
+        await hookSystem.fireSessionEndEvent(SessionEndReason.Other);
+      } catch (err) {
+        debugLogger.warn(
+          `SessionEnd hook failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
     try {
       process.stdin.destroy();
     } catch {
@@ -123,6 +143,19 @@ export async function runAcpAgent(
   process.on('SIGINT', shutdownHandler);
 
   await connection.closed;
+  // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
+  const hookSystem = config.getHookSystem?.();
+  const hooksEnabled = !config.getDisableAllHooks?.();
+  if (hooksEnabled && hookSystem && config.hasHooksForEvent?.('SessionEnd')) {
+    process.stderr.write('[ACP DEBUG] Calling fireSessionEndEvent...\n');
+    try {
+      await hookSystem.fireSessionEndEvent(SessionEndReason.PromptInputExit);
+    } catch (err) {
+      debugLogger.warn(
+        `SessionEnd hook failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
 
   process.off('SIGTERM', shutdownHandler);
   process.off('SIGINT', shutdownHandler);
@@ -505,6 +538,23 @@ class QwenAgent implements Agent {
       this.settings,
     );
     this.sessions.set(sessionId, session);
+
+    // Fire SessionStart hook (aligned with core path)
+    const hookSystem = config.getHookSystem();
+    const hooksEnabled = !config.getDisableAllHooks();
+    if (hooksEnabled && hookSystem && config.hasHooksForEvent('SessionStart')) {
+      const source = conversation
+        ? SessionStartSource.Resume
+        : SessionStartSource.Startup;
+      const model = config.getModel();
+      try {
+        await hookSystem.fireSessionStartEvent(source, model);
+      } catch (err) {
+        debugLogger.warn(
+          `SessionStart hook failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
 
     setTimeout(async () => {
       await session.sendAvailableCommandsUpdate();
