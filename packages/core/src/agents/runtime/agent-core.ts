@@ -122,6 +122,17 @@ export interface CreateChatOptions {
   generationConfigOverride?: GenerateContentConfig & {
     systemInstruction?: string | Content;
   };
+  /**
+   * When true, skip injecting the env bootstrap messages from
+   * `getInitialChatHistory()`. Set by fork subagents because their
+   * `extraHistory` is the full parent history that already contains
+   * those env messages — re-injecting would duplicate them.
+   *
+   * Other callers (e.g. arena interactive agents) pass an
+   * env-stripped history and DO need fresh env init for their own
+   * working directory, so they must leave this unset.
+   */
+  skipEnvHistory?: boolean;
 }
 
 /**
@@ -243,11 +254,10 @@ export class AgentCore {
       );
     }
 
-    // When extraHistory is provided (fork path), the parent's history
-    // already contains the env bootstrap messages. Skip getInitialChatHistory
-    // to avoid duplicating env context (also preserves cache prefix match
-    // when generationConfigOverride is present).
-    const envHistory = options?.extraHistory
+    // Skip env bootstrap when the caller (fork) explicitly says its
+    // extraHistory already contains those messages. Other callers that
+    // provide an env-stripped history (e.g. arena) still get fresh env init.
+    const envHistory = options?.skipEnvHistory
       ? []
       : await getInitialChatHistory(this.runtimeContext);
 

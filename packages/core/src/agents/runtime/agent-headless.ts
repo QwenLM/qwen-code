@@ -198,11 +198,14 @@ export class AgentHeadless {
       generationConfigOverride?: import('@google/genai').GenerateContentConfig;
       /** Override tool declarations for cache sharing (fork subagent). */
       toolsOverride?: Array<import('@google/genai').FunctionDeclaration>;
+      /** Skip env bootstrap injection (fork already inherits parent env). */
+      skipEnvHistory?: boolean;
     },
   ): Promise<void> {
     const chat = await this.core.createChat(context, {
       extraHistory: options?.extraHistory,
       generationConfigOverride: options?.generationConfigOverride,
+      skipEnvHistory: options?.skipEnvHistory,
     });
 
     if (!chat) {
