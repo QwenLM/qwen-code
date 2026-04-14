@@ -45,14 +45,15 @@ let checkpoints: Checkpoint[] = [];
 let finalized = false;
 
 export function initStartupProfiler(): void {
+  // Reset any prior state so the function is idempotent.
+  resetStartupProfiler();
+
   if (process.env['QWEN_CODE_PROFILE_STARTUP'] !== '1') {
-    enabled = false;
     return;
   }
   // Skip profiling in the outer (pre-sandbox) process — the child will
   // re-run index.ts inside the sandbox and collect its own profile.
   if (!process.env['SANDBOX']) {
-    enabled = false;
     return;
   }
   enabled = true;
@@ -111,7 +112,7 @@ export function finalizeStartupProfile(sessionId?: string): void {
     const dir = path.join(os.homedir(), '.qwen', 'startup-perf');
     fs.mkdirSync(dir, { recursive: true });
 
-    const filename = `${report.timestamp.replace(/[:.]/g, '-')}-${sessionId || 'unknown'}.json`;
+    const filename = `${report.timestamp.replace(/[:.]/g, '-')}-${report.sessionId}.json`;
     const filepath = path.join(dir, filename);
     fs.writeFileSync(filepath, JSON.stringify(report, null, 2), 'utf-8');
     process.stderr.write(`Startup profile written to: ${filepath}\n`);
