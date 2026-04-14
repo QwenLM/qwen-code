@@ -4,9 +4,9 @@
 
 name: 'NPM Publish'
 
-triggers:
-  push:
-    branches: ['main', 'dev']
+# triggers:
+#   push:
+#     branches: ['main', 'dev']
 
 params:
   skip_tests:
