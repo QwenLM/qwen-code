@@ -27,8 +27,10 @@ import { OutputFormat } from '@qwen-code/qwen-code-core';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockEarlyInput = vi.hoisted(() => ({
+  EARLY_INPUT_ENV_KEY: 'QWEN_CODE_EARLY_INPUT',
   startCapturingEarlyInput: vi.fn(),
   drainEarlyInput: vi.fn(() => [] as Buffer[]),
+  serializeEarlyInputChunks: vi.fn(() => undefined),
 }));
 
 // Custom error to identify mock process.exit calls

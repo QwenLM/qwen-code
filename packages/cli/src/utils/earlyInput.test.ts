@@ -5,7 +5,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { drainEarlyInput, startCapturingEarlyInput } from './earlyInput.js';
+import {
+  drainEarlyInput,
+  EARLY_INPUT_ENV_KEY,
+  serializeEarlyInputChunks,
+  startCapturingEarlyInput,
+} from './earlyInput.js';
 
 describe('earlyInput', () => {
   const originalStdin = process.stdin;
@@ -87,5 +92,20 @@ describe('earlyInput', () => {
     expect(drainEarlyInput()).toEqual([]);
     expect(mockStdin.setRawMode).not.toHaveBeenCalled();
     expect(mockStdin.on).not.toHaveBeenCalled();
+  });
+
+  it('rehydrates early input chunks from the relaunch env payload', () => {
+    process.env[EARLY_INPUT_ENV_KEY] = serializeEarlyInputChunks([
+      Buffer.from('abc'),
+      Buffer.from('\x1b[A'),
+    ]);
+
+    startCapturingEarlyInput();
+
+    expect(drainEarlyInput().map((chunk: Buffer) => chunk.toString())).toEqual([
+      'abc',
+      '\x1b[A',
+    ]);
+    expect(process.env[EARLY_INPUT_ENV_KEY]).toBeUndefined();
   });
 });

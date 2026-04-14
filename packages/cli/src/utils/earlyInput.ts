@@ -11,6 +11,8 @@ type EarlyInputState = {
   changedRawMode: boolean;
 } | null;
 
+export const EARLY_INPUT_ENV_KEY = 'QWEN_CODE_EARLY_INPUT';
+
 let earlyInputState: EarlyInputState = null;
 
 const supportsRawMode = (
@@ -18,6 +20,32 @@ const supportsRawMode = (
 ): stdin is typeof process.stdin & {
   setRawMode: (mode: boolean) => void;
 } => typeof stdin.setRawMode === 'function';
+
+function consumeSerializedEarlyInputFromEnv(): Buffer[] {
+  const serialized = process.env[EARLY_INPUT_ENV_KEY];
+  if (!serialized) {
+    return [];
+  }
+
+  delete process.env[EARLY_INPUT_ENV_KEY];
+
+  try {
+    const encodedChunks = JSON.parse(serialized) as string[];
+    return encodedChunks.map((chunk) => Buffer.from(chunk, 'base64'));
+  } catch {
+    return [];
+  }
+}
+
+export function serializeEarlyInputChunks(
+  chunks: readonly Buffer[],
+): string | undefined {
+  if (chunks.length === 0) {
+    return undefined;
+  }
+
+  return JSON.stringify(chunks.map((chunk) => chunk.toString('base64')));
+}
 
 export function startCapturingEarlyInput(): void {
   if (
@@ -34,7 +62,7 @@ export function startCapturingEarlyInput(): void {
     process.stdin.setRawMode(true);
   }
 
-  const chunks: Buffer[] = [];
+  const chunks = consumeSerializedEarlyInputFromEnv();
   const listener = (chunk: Buffer) => {
     chunks.push(Buffer.from(chunk));
   };

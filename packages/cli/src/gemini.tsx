@@ -63,6 +63,8 @@ import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
 import {
   drainEarlyInput,
+  EARLY_INPUT_ENV_KEY,
+  serializeEarlyInputChunks,
   startCapturingEarlyInput,
 } from './utils/earlyInput.js';
 
@@ -333,8 +335,10 @@ export async function main() {
     } else {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
-      drainEarlyInput();
-      await relaunchAppInChildProcess(memoryArgs, []);
+      const initialInputChunks = drainEarlyInput();
+      await relaunchAppInChildProcess(memoryArgs, [], {
+        [EARLY_INPUT_ENV_KEY]: serializeEarlyInputChunks(initialInputChunks),
+      });
     }
   }
 
