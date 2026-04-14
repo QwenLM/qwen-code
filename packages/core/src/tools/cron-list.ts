@@ -40,9 +40,7 @@ class CronListInvocation extends BaseToolInvocation<
     });
     const llmContent = llmLines.join('\n');
 
-    const displayLines = jobs.map(
-      (job) => `${job.id} ${humanReadableCron(job.cronExpr)}`,
-    );
+    const displayLines = jobs.map((job) => `${job.id} ${humanReadableCron(job.cronExpr)}`);
     const returnDisplay = displayLines.join('\n');
 
     return { llmContent, returnDisplay };

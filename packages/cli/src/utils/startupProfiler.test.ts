@@ -112,7 +112,9 @@ describe('startupProfiler', () => {
     it('should write JSON file on finalize and print path to stderr', () => {
       vi.mocked(fs.mkdirSync).mockReturnValue(undefined);
       vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
-      const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockReturnValue(true);
 
       initStartupProfiler();
       profileCheckpoint('main_entry');
@@ -198,7 +200,9 @@ describe('startupProfiler', () => {
       vi.mocked(fs.mkdirSync).mockImplementation(() => {
         throw new Error('Permission denied');
       });
-      const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockReturnValue(true);
 
       initStartupProfiler();
       profileCheckpoint('test');

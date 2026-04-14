@@ -122,7 +122,9 @@ export function finalizeStartupProfile(sessionId?: string): void {
     fs.writeFileSync(filepath, JSON.stringify(report, null, 2), 'utf-8');
     process.stderr.write(`Startup profile written to: ${filepath}\n`);
   } catch {
-    process.stderr.write('Warning: Failed to write startup profile report\n');
+    process.stderr.write(
+      'Warning: Failed to write startup profile report\n',
+    );
   }
 }
 
