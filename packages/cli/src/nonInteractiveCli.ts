@@ -44,10 +44,6 @@ import {
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
-import { TurnBuffer } from './acp-integration/session/rewrite/TurnBuffer.js';
-import { LlmRewriter } from './acp-integration/session/rewrite/LlmRewriter.js';
-import { loadRewriteConfig } from './acp-integration/session/rewrite/config.js';
-
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
 /**
@@ -253,46 +249,6 @@ export async function runNonInteractive(
       const initialParts = normalizePartList(initialPartList);
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
-      // Initialize message rewriter if configured
-      const rewriteConfig = loadRewriteConfig(settings);
-      const rewriter = rewriteConfig?.enabled
-        ? new LlmRewriter(config, rewriteConfig)
-        : null;
-      const rewriteTarget = rewriteConfig?.target ?? 'all';
-      const turnBuffer = rewriter ? new TurnBuffer() : null;
-      let rewriteTurnIndex = 0;
-      const pendingRewrites: Array<
-        Promise<{ turnIdx: number; text: string } | null>
-      > = [];
-
-      /**
-       * Emit all settled rewrite results via the adapter.
-       * Must be called from the main control flow (not inside async promises)
-       * to avoid concurrent adapter state corruption.
-       */
-      const emitSettledRewrites = async () => {
-        if (pendingRewrites.length === 0) return;
-        const results = await Promise.allSettled(pendingRewrites);
-        pendingRewrites.length = 0;
-        for (const r of results) {
-          if (r.status === 'fulfilled' && r.value) {
-            adapter.startAssistantMessage();
-            adapter.processEvent({
-              type: GeminiEventType.Content,
-              value: r.value.text,
-              _meta: { rewritten: true, turnIndex: r.value.turnIdx },
-            } as unknown as Parameters<
-              JsonOutputAdapterInterface['processEvent']
-            >[0]);
-            adapter.finalizeAssistantMessage();
-          }
-        }
-      };
-
-      if (rewriter) {
-        debugLogger.info('Message rewrite enabled in non-interactive mode');
-      }
-
       let isFirstTurn = true;
       let modelOverride: string | undefined;
       while (true) {
@@ -303,9 +259,6 @@ export async function runNonInteractive(
         ) {
           handleMaxTurnsExceededError(config);
         }
-
-        // Emit any settled rewrites before starting the next turn
-        await emitSettledRewrites();
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
@@ -332,30 +285,8 @@ export async function runNonInteractive(
           // Use adapter for all event processing
           adapter.processEvent(event);
 
-          // Accumulate for turn-end rewriting (respecting target filter)
-          if (turnBuffer) {
-            if (
-              event.type === GeminiEventType.Content &&
-              typeof event.value === 'string' &&
-              (rewriteTarget === 'message' || rewriteTarget === 'all')
-            ) {
-              turnBuffer.appendMessage(event.value);
-            } else if (
-              event.type === GeminiEventType.Thought &&
-              event.value &&
-              (rewriteTarget === 'thought' || rewriteTarget === 'all')
-            ) {
-              const thought = event.value;
-              const thoughtText = thought.subject
-                ? `${thought.subject}: ${thought.description}`
-                : thought.description;
-              if (thoughtText) turnBuffer.appendThought(thoughtText);
-            }
-          }
-
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
-            if (turnBuffer) turnBuffer.markToolCall();
           }
           if (
             outputFormat === OutputFormat.TEXT &&
@@ -374,42 +305,6 @@ export async function runNonInteractive(
         // Finalize assistant message
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
-
-        // Rewrite turn content (async, parallel with tool execution).
-        // Only collects rewritten text — emission happens at safe boundaries
-        // via emitSettledRewrites() to avoid concurrent adapter state corruption.
-        if (rewriter && turnBuffer) {
-          const content = turnBuffer.flush();
-          if (content) {
-            rewriteTurnIndex++;
-            const turnIdx = rewriteTurnIndex;
-            pendingRewrites.push(
-              (async () => {
-                try {
-                  const rewriteSignal = AbortSignal.any([
-                    abortController.signal,
-                    AbortSignal.timeout(30_000),
-                  ]);
-                  const rewritten = await rewriter.rewrite(
-                    content,
-                    rewriteSignal,
-                  );
-                  if (rewritten) {
-                    debugLogger.info(
-                      `Turn ${turnIdx}: rewritten ${rewritten.length} chars`,
-                    );
-                    return { turnIdx, text: rewritten };
-                  }
-                } catch (err) {
-                  debugLogger.warn(
-                    `Turn ${turnIdx}: rewrite failed: ${err instanceof Error ? err.message : String(err)}`,
-                  );
-                }
-                return null;
-              })(),
-            );
-          }
-        }
 
         if (toolCallRequests.length > 0) {
           const toolResponseParts: Part[] = [];
@@ -546,75 +441,13 @@ export async function runNonInteractive(
                         }
                         adapter.processEvent(event);
 
-                        // Accumulate turn content for rewriting (respecting target filter)
-                        if (turnBuffer) {
-                          if (
-                            event.type === GeminiEventType.Content &&
-                            typeof event.value === 'string' &&
-                            (rewriteTarget === 'message' ||
-                              rewriteTarget === 'all')
-                          ) {
-                            turnBuffer.appendMessage(event.value);
-                          } else if (
-                            event.type === GeminiEventType.Thought &&
-                            event.value &&
-                            (rewriteTarget === 'thought' ||
-                              rewriteTarget === 'all')
-                          ) {
-                            const thought = event.value;
-                            const thoughtText = thought.subject
-                              ? `${thought.subject}: ${thought.description}`
-                              : thought.description;
-                            if (thoughtText)
-                              turnBuffer.appendThought(thoughtText);
-                          }
-                        }
-
                         if (event.type === GeminiEventType.ToolCallRequest) {
                           cronToolCallRequests.push(event.value);
-                          if (turnBuffer) turnBuffer.markToolCall();
                         }
                       }
 
                       adapter.finalizeAssistantMessage();
                       totalApiDurationMs += Date.now() - cronApiStartTime;
-
-                      // Flush turn buffer and rewrite for cron path (async, collect only)
-                      if (rewriter && turnBuffer) {
-                        const content = turnBuffer.flush();
-                        if (content) {
-                          rewriteTurnIndex++;
-                          const turnIdx = rewriteTurnIndex;
-                          pendingRewrites.push(
-                            (async () => {
-                              try {
-                                const cronRewriteSignal = AbortSignal.any([
-                                  abortController.signal,
-                                  AbortSignal.timeout(30_000),
-                                ]);
-                                const rewritten = await rewriter.rewrite(
-                                  content,
-                                  cronRewriteSignal,
-                                );
-                                if (rewritten) {
-                                  debugLogger.info(
-                                    `Cron turn ${turnIdx}: rewritten ${rewritten.length} chars`,
-                                  );
-                                  return { turnIdx, text: rewritten };
-                                }
-                              } catch (err) {
-                                debugLogger.warn(
-                                  `Cron turn ${turnIdx}: rewrite failed: ${err instanceof Error ? err.message : String(err)}`,
-                                );
-                              }
-                              return null;
-                            })(),
-                          );
-                        }
-                      }
-
-                      // Emit settled rewrites before next cron turn
-                      await emitSettledRewrites();
 
                       if (cronToolCallRequests.length > 0) {
                         const cronToolResponseParts: Part[] = [];
@@ -685,9 +518,6 @@ export async function runNonInteractive(
               checkDone();
             });
           }
-
-          // Emit all remaining rewrites before emitting result
-          await emitSettledRewrites();
 
           const metrics = uiTelemetryService.getMetrics();
           const usage = computeUsageFromMetrics(metrics);
