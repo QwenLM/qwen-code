@@ -826,6 +826,8 @@ export interface PostTurnInput extends HookInput {
   thoughts: string[];
   messages: string[];
   has_tool_calls: boolean;
+  /** Previous successful rewrite outputs (most recent last), for context coherence. */
+  previous_rewrites: string[];
 }
 
 /**

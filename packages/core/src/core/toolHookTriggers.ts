@@ -508,6 +508,7 @@ export async function firePostTurnHook(
   thoughts: string[],
   messages: string[],
   hasToolCalls: boolean,
+  previousRewrites: string[],
   signal?: AbortSignal,
 ): Promise<PostTurnHookResult> {
   if (!messageBus) {
@@ -527,6 +528,7 @@ export async function firePostTurnHook(
           thoughts,
           messages,
           has_tool_calls: hasToolCalls,
+          previous_rewrites: previousRewrites,
         },
         signal,
       },
