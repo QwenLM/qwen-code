@@ -956,6 +956,22 @@ export class Config {
                   signal,
                 );
                 break;
+              case 'PostTurn': {
+                const postTurnResult = await hookSystem.firePostTurnEvent(
+                  (input['turn_index'] as number) || 0,
+                  (input['thoughts'] as string[]) || [],
+                  (input['messages'] as string[]) || [],
+                  (input['tool_calls'] as Array<{
+                    name: string;
+                    args?: Record<string, unknown>;
+                  }>) || [],
+                  signal,
+                );
+                result = postTurnResult.finalOutput
+                  ? createHookOutput('PostTurn', postTurnResult.finalOutput)
+                  : undefined;
+                break;
+              }
               default:
                 this.debugLogger.warn(
                   `Unknown hook event: ${request.eventName}`,
