@@ -70,6 +70,12 @@ import {
 
 const debugLogger = createDebugLogger('STARTUP');
 
+function getSerializedEarlyInputEnv(chunks: readonly Buffer[]) {
+  return {
+    [EARLY_INPUT_ENV_KEY]: serializeEarlyInputChunks(chunks),
+  };
+}
+
 export function validateDnsResolutionOrder(
   order: string | undefined,
 ): DnsResolutionOrder {
@@ -327,17 +333,23 @@ export async function main() {
 
       const sandboxArgs = injectStdinIntoArgs(process.argv, stdinData);
 
-      drainEarlyInput();
+      const sandboxInitialInputChunks = drainEarlyInput();
       await relaunchOnExitCode(() =>
-        start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+        start_sandbox(
+          sandboxConfig,
+          memoryArgs,
+          partialConfig,
+          sandboxArgs,
+          getSerializedEarlyInputEnv(sandboxInitialInputChunks),
+        ),
       );
       process.exit(0);
-    } else {
+    } else if (!process.env['QWEN_CODE_NO_RELAUNCH']) {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
-      const initialInputChunks = drainEarlyInput();
+      const relaunchInputChunks = drainEarlyInput();
       await relaunchAppInChildProcess(memoryArgs, [], {
-        [EARLY_INPUT_ENV_KEY]: serializeEarlyInputChunks(initialInputChunks),
+        ...getSerializedEarlyInputEnv(relaunchInputChunks),
       });
     }
   }
@@ -393,10 +405,15 @@ export async function main() {
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
-    if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
-      // Set this as early as possible to avoid spurious characters from
-      // input showing up in the output.
-      process.stdin.setRawMode(true);
+    if (config.isInteractive() && process.stdin.isTTY) {
+      // Early input capture may already have enabled raw mode. Keep detection
+      // enabled for that path so we do not lose kitty protocol support while
+      // users type during startup.
+      if (!wasRaw) {
+        // Set this as early as possible to avoid spurious characters from
+        // input showing up in the output.
+        process.stdin.setRawMode(true);
+      }
 
       // This cleanup isn't strictly needed but may help in certain situations.
       process.on('SIGTERM', () => {
