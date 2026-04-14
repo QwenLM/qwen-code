@@ -136,23 +136,37 @@ export class LlmRewriter {
           .filter(Boolean)
           .join('') ?? '';
 
-      // If LLM returns empty or very short, skip
-      if (!rewritten.trim() || rewritten.trim().length < 5) {
-        debugLogger.info(`[REWRITE OUTPUT] empty or too short, skipping`);
+      // If LLM returns empty or very short, skip.
+      // Also catch common LLM literal interpretations of "return empty string"
+      // (e.g. '（空字符串）', '空字符串', '""', "''", '(empty)', etc.)
+      const trimmed0 = rewritten.trim();
+      const EMPTY_PATTERNS = [
+        /^[（(]?空字符串[)）]?$/,
+        /^["'""'']{2}$/,
+        /^[（(]?empty[)）]?$/i,
+        /^[（(]?empty string[)）]?$/i,
+        /^[（(]?无[)）]?$/,
+        /^[（(]?无内容[)）]?$/,
+        /^[（(]?无业务价值[)）]?$/,
+      ];
+      if (
+        !trimmed0 ||
+        trimmed0.length < 5 ||
+        EMPTY_PATTERNS.some((p) => p.test(trimmed0))
+      ) {
+        debugLogger.info(`[REWRITE OUTPUT] empty or no-value, skipping`);
         return null;
       }
 
-      const trimmed = rewritten.trim();
-
       debugLogger.info(
-        `[REWRITE OUTPUT] len=${trimmed.length}\n` +
-          `--- OUTPUT ---\n${trimmed}\n---`,
+        `[REWRITE OUTPUT] len=${trimmed0.length}\n` +
+          `--- OUTPUT ---\n${trimmed0}\n---`,
       );
 
       // Update context for next turn
-      this.lastOutput = trimmed;
+      this.lastOutput = trimmed0;
 
-      return trimmed;
+      return trimmed0;
     } catch (error) {
       debugLogger.warn(
         `LLM rewrite failed, skipping: ${error instanceof Error ? error.message : String(error)}`,
