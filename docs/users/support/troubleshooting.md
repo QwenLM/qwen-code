@@ -121,3 +121,74 @@ The Qwen Code uses specific exit codes to indicate the reason for termination. T
 ## Existing GitHub Issues similar to yours or creating new Issues
 
 If you encounter an issue that was not covered here in this _Troubleshooting guide_, consider searching the Qwen Code [Issue tracker on GitHub](https://github.com/QwenLM/qwen-code/issues). If you can't find an issue similar to yours, consider creating a new GitHub Issue with a detailed description. Pull requests are also welcome!
+
+## PR #3212: Gemini `baseUrl` fix verification (CLI reproduction)
+
+This section documents a full CLI-level reproduction and validation for [PR #3212](https://github.com/QwenLM/qwen-code/pull/3212), which fixes Gemini `baseUrl` forwarding via `httpOptions`.
+
+### What was broken
+
+- Old behavior (`dddb56d88`): even when `modelProviders.gemini[].baseUrl` was configured, requests still went to Google's default endpoint (`generativelanguage.googleapis.com`).
+- New behavior (`5c97b8e8c`): the configured `baseUrl` is forwarded and used for Gemini requests.
+
+### Reproduction environment
+
+- Old version commit: `dddb56d8859274fd86a304e9b13b8b7d61009dd7`
+- New version commit: `5c97b8e8c21451df2d13ae274afd51deed008f9e`
+- Common settings (`~/.qwen/settings.json`):
+
+```json
+{
+  "security": { "auth": { "selectedType": "gemini" } },
+  "model": { "name": "gemini-2.0-flash" },
+  "env": { "GEMINI_API_KEY": "INVALID_KEY_FOR_REPRO" },
+  "modelProviders": {
+    "gemini": [
+      {
+        "id": "gemini-2.0-flash",
+        "envKey": "GEMINI_API_KEY",
+        "baseUrl": "http://127.0.0.1:8787"
+      }
+    ]
+  },
+  "$version": 3
+}
+```
+
+### CLI command used
+
+```bash
+DEBUG=1 npm start -- --yolo -p "ping" --output-format text
+```
+
+### Mock server used for verification
+
+- Local mock Gemini server: `127.0.0.1:8787`
+- For stream endpoint, the server returns SSE payload (`data: {...}\n\n`) for:
+  - `POST /v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse`
+
+### Result A: old version reproduces failure
+
+- CLI output includes:
+  - `API key not valid. Please pass a valid API key.`
+  - `generativelanguage.googleapis.com`
+- Mock server log shows no incoming request, proving old version did not use configured `baseUrl`.
+
+![PR3212 old version CLI error reproduction](./images/pr-3212/old-cli-error.png)
+
+### Result B: new version verifies fix
+
+- CLI output returns mocked text:
+  - `MOCK_OK_FROM_CUSTOM_BASEURL`
+- Mock server log captures:
+  - `POST /v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse`
+- This confirms new version sends Gemini traffic to configured `baseUrl`.
+
+![PR3212 new version CLI success verification](./images/pr-3212/new-cli-success.png)
+
+### Conclusion
+
+PR #3212 is validated at CLI runtime level:
+
+- old commit reproduces the bug
+- new commit resolves it
