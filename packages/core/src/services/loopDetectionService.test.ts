@@ -619,4 +619,185 @@ describe('LoopDetectionService', () => {
       expect(service.addAndCheck(otherEvent)).toBe(false);
     });
   });
+
+  describe('Repetitive Thoughts Detection', () => {
+    it('should detect repetitive thoughts pattern', () => {
+      service.reset('');
+
+      // Simulate repetitive thinking patterns
+      for (let i = 0; i < 3; i++) {
+        service.addAndCheck(
+          createContentEvent('Thinking about the problem...'),
+        );
+      }
+
+      const isLoop = service.addAndCheck(
+        createContentEvent('Still thinking about the same problem...'),
+      );
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'repetitive_thoughts',
+        }),
+      );
+    });
+
+    it('should not detect loop with varied thoughts', () => {
+      service.reset('');
+
+      service.addAndCheck(createContentEvent('Thinking about the problem...'));
+      service.addAndCheck(createContentEvent('Considering the solution...'));
+      service.addAndCheck(createContentEvent('Analyzing the requirements...'));
+
+      const isLoop = service.addAndCheck(
+        createContentEvent('Now evaluating alternatives...'),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Read File Loop Detection', () => {
+    it('should detect excessive file read operations', () => {
+      service.reset('');
+
+      // FILE_READ_THRESHOLD reads in the window trigger the loop. The first
+      // (THRESHOLD - 1) calls must not fire; the THRESHOLD-th does.
+      for (let i = 0; i < 4; i++) {
+        const event = createToolCallRequestEvent('read_file', {
+          path: `file${i}.txt`,
+        });
+        const isLoop = service.addAndCheck(event);
+        expect(isLoop).toBe(false);
+      }
+
+      const event = createToolCallRequestEvent('read_file', {
+        path: 'file4.txt',
+      });
+      const isLoop = service.addAndCheck(event);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'read_file_loop',
+        }),
+      );
+    });
+
+    it('should detect other read-like operations', () => {
+      service.reset('');
+
+      // Mix of different read operations
+      service.addAndCheck(
+        createToolCallRequestEvent('cat_file', { path: 'file1.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('view_file', { path: 'file2.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('list_files', { dir: '.' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file3.txt' }),
+      );
+
+      const isLoop = service.addAndCheck(
+        createToolCallRequestEvent('cat_file', { path: 'file4.txt' }),
+      );
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'read_file_loop',
+        }),
+      );
+    });
+
+    it('should not detect loop with mixed operations', () => {
+      service.reset('');
+
+      // Mix of read and non-read operations
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file1.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'file2.txt',
+          content: 'test',
+        }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file3.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('execute', { command: 'ls' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file4.txt' }),
+      );
+
+      const isLoop = service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file5.txt' }),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('Action Stagnation Detection', () => {
+    // Stagnation fires when the same tool *name* is called STAGNATION_THRESHOLD
+    // times consecutively regardless of arguments. This is distinct from
+    // CONSECUTIVE_IDENTICAL_TOOL_CALLS (same name AND args) and from
+    // READ_FILE_LOOP (high proportion of read-like tools in the window),
+    // so we exercise it with a non-read-like tool and varying args.
+    it('should detect action stagnation when the same tool is repeated with varying args', () => {
+      service.reset('');
+
+      // STAGNATION_THRESHOLD - 1 calls must not fire
+      for (let i = 0; i < 7; i++) {
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent('search_code', { query: `term${i}` }),
+        );
+        expect(isLoop).toBe(false);
+      }
+
+      // THRESHOLD-th consecutive same-name call triggers stagnation
+      const isLoop = service.addAndCheck(
+        createToolCallRequestEvent('search_code', { query: 'term7' }),
+      );
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'action_stagnation' }),
+      );
+    });
+
+    it('should reset stagnation streak when a different tool is called', () => {
+      service.reset('');
+
+      // Accumulate 5 consecutive same-name calls (below threshold)
+      for (let i = 0; i < 5; i++) {
+        service.addAndCheck(
+          createToolCallRequestEvent('search_code', { query: `a${i}` }),
+        );
+      }
+
+      // A different tool resets the streak
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'out.txt',
+          content: 'x',
+        }),
+      );
+
+      // 5 more calls of the original tool: streak only reaches 5, below threshold
+      for (let i = 0; i < 5; i++) {
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent('search_code', { query: `b${i}` }),
+        );
+        expect(isLoop).toBe(false);
+      }
+    });
+  });
 });
