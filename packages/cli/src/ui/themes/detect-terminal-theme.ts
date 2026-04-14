@@ -117,8 +117,9 @@ export function detectOsc11Theme(): Promise<DetectedTheme | undefined> {
       } catch {
         /* ignore */
       }
-      // If stdin was not in flowing mode before, pause it so it does not
-      // keep the event loop alive or consume data meant for later readers.
+      // At startup stdin is paused + non-raw.  We called resume() above, so
+      // pause it again to stop the stream from keeping the event loop alive.
+      // When wasRaw is true another consumer is already managing stdin.
       if (!wasRaw) {
         stdin.pause();
       }
@@ -235,12 +236,24 @@ export function detectTerminalTheme(): DetectedTheme {
 /**
  * Asynchronous theme detection (for startup).
  *
- * Adds an OSC 11 probe that directly reads the terminal's actual background
- * colour.  Falls back to the synchronous methods when OSC 11 is unavailable.
+ * Checks cheap synchronous sources first (COLORFGBG) so we never pay the
+ * ~200 ms OSC 11 timeout when a fast answer is already available.  OSC 11 is
+ * tried only when no synchronous source provides an answer.
  *
- * Order: OSC 11 → COLORFGBG → macOS system appearance → default dark.
+ * Order: COLORFGBG → OSC 11 → macOS system appearance → default dark.
  */
 export async function detectTerminalThemeAsync(): Promise<DetectedTheme> {
+  // Fast path: COLORFGBG is instant and terminal-specific.
+  const colorFgBgResult = detectFromColorFgBg();
+  if (colorFgBgResult) {
+    debugLogger.info(
+      `Detected theme from COLORFGBG (async path): ${colorFgBgResult}`,
+    );
+    return colorFgBgResult;
+  }
+
+  // OSC 11 directly reads the terminal background colour.  It is the most
+  // universal method but requires a TTY and may block up to OSC11_TIMEOUT_MS.
   const osc11Result = await detectOsc11Theme();
   if (osc11Result) {
     debugLogger.info(
@@ -249,5 +262,15 @@ export async function detectTerminalThemeAsync(): Promise<DetectedTheme> {
     return osc11Result;
   }
 
-  return detectTerminalTheme();
+  // Remaining synchronous fallbacks (macOS → default dark).
+  const macResult = detectMacOSTheme();
+  if (macResult) {
+    debugLogger.info(
+      `Detected theme from macOS system appearance: ${macResult}`,
+    );
+    return macResult;
+  }
+
+  debugLogger.info('Could not detect terminal theme, defaulting to dark');
+  return 'dark';
 }
