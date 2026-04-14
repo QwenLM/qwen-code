@@ -124,6 +124,7 @@ describe('BuiltinCommandLoader', () => {
       getFolderTrust: vi.fn().mockReturnValue(true),
       getUseModelRouter: () => false,
       getDisableAllHooks: vi.fn().mockReturnValue(false),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     restoreCommandMock.mockReturnValue({
