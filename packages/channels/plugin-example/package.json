@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-plugin-example",
-  "version": "0.14.4",
+  "version": "0.14.4-nightly.20260414.1486e8538",
   "private": true,
   "type": "module",
   "main": "dist/index.js",
