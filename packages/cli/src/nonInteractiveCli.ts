@@ -261,7 +261,33 @@ export async function runNonInteractive(
       const rewriteTarget = rewriteConfig?.target ?? 'both';
       const turnBuffer = rewriter ? new TurnBuffer() : null;
       let rewriteTurnIndex = 0;
-      const pendingRewrites: Array<Promise<void>> = [];
+      const pendingRewrites: Array<
+        Promise<{ turnIdx: number; text: string } | null>
+      > = [];
+
+      /**
+       * Emit all settled rewrite results via the adapter.
+       * Must be called from the main control flow (not inside async promises)
+       * to avoid concurrent adapter state corruption.
+       */
+      const emitSettledRewrites = async () => {
+        if (pendingRewrites.length === 0) return;
+        const results = await Promise.allSettled(pendingRewrites);
+        pendingRewrites.length = 0;
+        for (const r of results) {
+          if (r.status === 'fulfilled' && r.value) {
+            adapter.startAssistantMessage();
+            adapter.processEvent({
+              type: GeminiEventType.Content,
+              value: r.value.text,
+              _meta: { rewritten: true, turnIndex: r.value.turnIdx },
+            } as unknown as Parameters<
+              JsonOutputAdapterInterface['processEvent']
+            >[0]);
+            adapter.finalizeAssistantMessage();
+          }
+        }
+      };
 
       if (rewriter) {
         debugLogger.info('Message rewrite enabled in non-interactive mode');
@@ -277,6 +303,9 @@ export async function runNonInteractive(
         ) {
           handleMaxTurnsExceededError(config);
         }
+
+        // Emit any settled rewrites before starting the next turn
+        await emitSettledRewrites();
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
         const apiStartTime = Date.now();
@@ -346,7 +375,9 @@ export async function runNonInteractive(
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
 
-        // Rewrite turn content (async, parallel with tool execution)
+        // Rewrite turn content (async, parallel with tool execution).
+        // Only collects rewritten text — emission happens at safe boundaries
+        // via emitSettledRewrites() to avoid concurrent adapter state corruption.
         if (rewriter && turnBuffer) {
           const content = turnBuffer.flush();
           if (content) {
@@ -367,21 +398,14 @@ export async function runNonInteractive(
                     debugLogger.info(
                       `Turn ${turnIdx}: rewritten ${rewritten.length} chars`,
                     );
-                    adapter.startAssistantMessage();
-                    adapter.processEvent({
-                      type: GeminiEventType.Content,
-                      value: rewritten,
-                      _meta: { rewritten: true, turnIndex: turnIdx },
-                    } as unknown as Parameters<
-                      JsonOutputAdapterInterface['processEvent']
-                    >[0]);
-                    adapter.finalizeAssistantMessage();
+                    return { turnIdx, text: rewritten };
                   }
                 } catch (err) {
                   debugLogger.warn(
                     `Turn ${turnIdx}: rewrite failed: ${err instanceof Error ? err.message : String(err)}`,
                   );
                 }
+                return null;
               })(),
             );
           }
@@ -555,7 +579,7 @@ export async function runNonInteractive(
                       adapter.finalizeAssistantMessage();
                       totalApiDurationMs += Date.now() - cronApiStartTime;
 
-                      // Flush turn buffer and rewrite for cron path (async)
+                      // Flush turn buffer and rewrite for cron path (async, collect only)
                       if (rewriter && turnBuffer) {
                         const content = turnBuffer.flush();
                         if (content) {
@@ -576,28 +600,21 @@ export async function runNonInteractive(
                                   debugLogger.info(
                                     `Cron turn ${turnIdx}: rewritten ${rewritten.length} chars`,
                                   );
-                                  adapter.startAssistantMessage();
-                                  adapter.processEvent({
-                                    type: GeminiEventType.Content,
-                                    value: rewritten,
-                                    _meta: {
-                                      rewritten: true,
-                                      turnIndex: turnIdx,
-                                    },
-                                  } as unknown as Parameters<
-                                    JsonOutputAdapterInterface['processEvent']
-                                  >[0]);
-                                  adapter.finalizeAssistantMessage();
+                                  return { turnIdx, text: rewritten };
                                 }
                               } catch (err) {
                                 debugLogger.warn(
                                   `Cron turn ${turnIdx}: rewrite failed: ${err instanceof Error ? err.message : String(err)}`,
                                 );
                               }
+                              return null;
                             })(),
                           );
                         }
                       }
+
+                      // Emit settled rewrites before next cron turn
+                      await emitSettledRewrites();
 
                       if (cronToolCallRequests.length > 0) {
                         const cronToolResponseParts: Part[] = [];
@@ -669,11 +686,8 @@ export async function runNonInteractive(
             });
           }
 
-          // Wait for all pending async rewrites before emitting result
-          if (pendingRewrites.length > 0) {
-            await Promise.allSettled(pendingRewrites);
-            pendingRewrites.length = 0;
-          }
+          // Emit all remaining rewrites before emitting result
+          await emitSettledRewrites();
 
           const metrics = uiTelemetryService.getMetrics();
           const usage = computeUsageFromMetrics(metrics);

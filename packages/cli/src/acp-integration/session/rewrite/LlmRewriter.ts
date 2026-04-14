@@ -41,10 +41,13 @@ export class LlmRewriter {
   /** Last successful rewrite output, used as context for next turn */
   private lastOutput: string | null = null;
 
+  private readonly rewriteModel: string | undefined;
+
   constructor(
     private readonly config: Config,
     rewriteConfig: MessageRewriteConfig,
   ) {
+    this.rewriteModel = rewriteConfig.model || undefined;
     // promptFile takes precedence over inline prompt
     if (rewriteConfig.promptFile) {
       const filePath = resolve(rewriteConfig.promptFile);
@@ -105,7 +108,7 @@ export class LlmRewriter {
         return null;
       }
 
-      const model = this.config.getModel();
+      const model = this.rewriteModel || this.config.getModel();
 
       const result = await contentGenerator.generateContent(
         {
