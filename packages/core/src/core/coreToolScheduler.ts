@@ -818,13 +818,10 @@ export class CoreToolScheduler {
 
           this.validationRetryCounts.set(errorKey, count);
 
-          let finalError = baseError;
-          if (count >= 3) {
-            // Inject strong stop directive after 3 consecutive failures with same error
-            const stopDirective =
-              '\n⚠️ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. STOP retrying the same approach and try a fundamentally different strategy or ask for help.';
-            finalError = new Error(`${baseError.message}${stopDirective}`);
-          }
+          const finalError =
+            count >= VALIDATION_RETRY_LOOP_THRESHOLD
+              ? new Error(`${baseError.message}${RETRY_LOOP_STOP_DIRECTIVE}`)
+              : baseError;
 
           newToolCalls.push({
             status: 'error',
