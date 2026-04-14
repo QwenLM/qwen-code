@@ -106,8 +106,9 @@ export class BuiltinCommandLoader implements ICommandLoader {
       initCommand,
       languageCommand,
       mcpCommand,
-      dreamCommand,
-      forgetCommand,
+      ...(this.config?.getManagedAutoMemoryEnabled()
+        ? [dreamCommand, forgetCommand]
+        : []),
       memoryCommand,
       modelCommand,
       rememberCommand,

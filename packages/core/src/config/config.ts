@@ -1056,16 +1056,20 @@ export class Config {
       this.isTrustedFolder(),
       this.getImportFormat(),
     );
-    const managedAutoMemoryIndex = await readAutoMemoryIndex(
-      this.getProjectRoot(),
-    );
-    this.setUserMemory(
-      appendManagedAutoMemoryToUserMemory(
-        memoryContent,
-        getAutoMemoryRoot(this.getProjectRoot()),
-        managedAutoMemoryIndex,
-      ),
-    );
+    if (this.getManagedAutoMemoryEnabled()) {
+      const managedAutoMemoryIndex = await readAutoMemoryIndex(
+        this.getProjectRoot(),
+      );
+      this.setUserMemory(
+        appendManagedAutoMemoryToUserMemory(
+          memoryContent,
+          getAutoMemoryRoot(this.getProjectRoot()),
+          managedAutoMemoryIndex,
+        ),
+      );
+    } else {
+      this.setUserMemory(memoryContent);
+    }
     this.setGeminiMdFileCount(fileCount);
   }
 

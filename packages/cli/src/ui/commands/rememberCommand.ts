@@ -47,11 +47,12 @@ export const rememberCommand: SlashCommand = {
       };
     }
 
-    // Legacy mode: save_memory tool is registered and handles the write.
+    // Managed auto-memory is disabled: ask the agent to save to QWEN.md
+    // using its native file tools. We do not call save_memory because that
+    // tool was removed.
     return {
-      type: 'tool',
-      toolName: 'save_memory',
-      toolArgs: { fact },
+      type: 'submit_prompt',
+      content: `Please save the following fact to memory (e.g. append to QWEN.md in the project root):\n\n${fact}`,
     };
   },
 };

@@ -231,6 +231,7 @@ async function updateDreamMetadataResult(
   projectRoot: string,
   now: Date,
   touchedTopics: AutoMemoryType[],
+  sessionId?: string,
 ): Promise<void> {
   const metadataPath = getAutoMemoryMetadataPath(projectRoot);
   try {
@@ -240,6 +241,10 @@ async function updateDreamMetadataResult(
     metadata.lastDreamAt = now.toISOString();
     metadata.lastDreamTouchedTopics = touchedTopics;
     metadata.lastDreamStatus = touchedTopics.length > 0 ? 'updated' : 'noop';
+    if (sessionId !== undefined) {
+      metadata.lastDreamSessionId = sessionId;
+      metadata.recentSessionIdsSinceDream = [];
+    }
     await fs.writeFile(
       metadataPath,
       `${JSON.stringify(metadata, null, 2)}\n`,
@@ -253,13 +258,14 @@ async function updateDreamMetadataResult(
 /**
  * Record that the user manually ran /dream. Called from the CLI command's
  * onComplete callback after the main agent turn finishes writing memory files.
- * Writes lastDreamAt (and resets recentSessionIdsSinceDream) so that
- * /memory status reflects the correct "last dream" time.
+ * Writes lastDreamAt, lastDreamSessionId, and resets recentSessionIdsSinceDream
+ * so that the scheduler's same-session dedupe check prevents a redundant
+ * auto-dream from firing in the same session.
  */
 export async function writeDreamManualRunToMetadata(
   projectRoot: string,
   sessionId: string,
   now = new Date(),
 ): Promise<void> {
-  return updateDreamMetadataResult(projectRoot, now, []);
+  return updateDreamMetadataResult(projectRoot, now, [], sessionId);
 }

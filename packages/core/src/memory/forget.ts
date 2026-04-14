@@ -233,6 +233,14 @@ export async function forgetManagedAutoMemoryMatches(
   matches: AutoMemoryForgetMatch[],
   now = new Date(),
 ): Promise<AutoMemoryForgetResult> {
+  if (matches.length === 0) {
+    return {
+      query: '',
+      removedEntries: [],
+      touchedTopics: [],
+      systemMessage: undefined,
+    };
+  }
   await ensureAutoMemoryScaffold(projectRoot, now);
 
   const removedEntries: AutoMemoryForgetMatch[] = [];
