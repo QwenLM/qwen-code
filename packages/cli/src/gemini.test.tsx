@@ -179,6 +179,7 @@ describe('gemini.tsx main function', () => {
         getProjectRoot: () => '/',
         getOutputFormat: () => OutputFormat.TEXT,
         getWarnings: () => [],
+        getSessionId: () => 'test-session-id',
       } as unknown as Config;
     });
     vi.mocked(loadSettings).mockReturnValue({
@@ -448,6 +449,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getGeminiMdFileCount: () => 0,
       getWarnings: () => [],
       getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
