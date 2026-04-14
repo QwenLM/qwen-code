@@ -17,14 +17,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-import { copyFileSync, mkdirSync, statSync, existsSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { glob } from 'glob';
 import fs from 'node:fs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-//const require = createRequire(import.meta.url);
 const root = join(__dirname, '..');
 const distDir = join(root, 'dist');
 const coreVendorDir = join(root, 'packages', 'core', 'vendor');
