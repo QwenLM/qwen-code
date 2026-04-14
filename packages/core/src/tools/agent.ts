@@ -845,6 +845,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                     extraHistory,
                     generationConfigOverride: forkGenerationConfig,
                     toolsOverride: forkToolsOverride,
+                    skipEnvHistory: !!extraHistory && extraHistory.length > 0,
                   });
 
                   if (signal?.aborted) {
