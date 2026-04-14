@@ -791,7 +791,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             extraHistory,
             generationConfigOverride: forkGenerationConfig,
             toolsOverride: forkToolsOverride,
-            skipEnvHistory: extraHistory !== undefined,
+            skipEnvHistory: !!extraHistory && extraHistory.length > 0,
           });
 
           // Fire SubagentStop hook after execution and handle block decisions
