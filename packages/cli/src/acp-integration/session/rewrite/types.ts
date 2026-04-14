@@ -12,7 +12,7 @@ export interface MessageRewriteConfig {
   /** Whether message rewriting is enabled */
   enabled: boolean;
   /** Which message types to rewrite */
-  target: 'message' | 'thought' | 'both';
+  target: 'message' | 'thought' | 'all';
   /** LLM rewrite prompt (system prompt for the rewriter). Inline string. */
   prompt?: string;
   /** Path to a file containing the rewrite prompt. Resolved relative to CWD.

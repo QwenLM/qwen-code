@@ -31,7 +31,7 @@ const { MessageRewriteMiddleware } = await import(
 );
 
 function createMiddleware(
-  target: 'message' | 'thought' | 'both' = 'both',
+  target: 'message' | 'thought' | 'all' = 'all',
   sendUpdate?: ReturnType<typeof vi.fn>,
 ) {
   const mockSendUpdate = sendUpdate ?? vi.fn().mockResolvedValue(undefined);
@@ -111,7 +111,7 @@ describe('MessageRewriteMiddleware', () => {
     });
 
     it('should accumulate both when target is "both"', async () => {
-      const { middleware, mockSendUpdate } = createMiddleware('both');
+      const { middleware, mockSendUpdate } = createMiddleware('all');
 
       await middleware.interceptUpdate({
         sessionUpdate: 'agent_message_chunk',

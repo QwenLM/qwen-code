@@ -79,11 +79,11 @@ export class MessageRewriteMiddleware {
 
     // Accumulate for turn-end rewriting
     if (updateType === 'agent_thought_chunk') {
-      if (this.target === 'thought' || this.target === 'both') {
+      if (this.target === 'thought' || this.target === 'all') {
         this.turnBuffer.appendThought(text);
       }
     } else if (updateType === 'agent_message_chunk') {
-      if (this.target === 'message' || this.target === 'both') {
+      if (this.target === 'message' || this.target === 'all') {
         this.turnBuffer.appendMessage(text);
       }
     }

@@ -42,12 +42,12 @@ describe('loadRewriteConfig', () => {
 
   it('should return user config when only user config is set', () => {
     const settings = makeSettings({
-      userRewrite: { enabled: true, target: 'both', prompt: 'user prompt' },
+      userRewrite: { enabled: true, target: 'all', prompt: 'user prompt' },
     });
     const config = loadRewriteConfig(settings);
     expect(config).toEqual({
       enabled: true,
-      target: 'both',
+      target: 'all',
       prompt: 'user prompt',
     });
   });
@@ -55,7 +55,7 @@ describe('loadRewriteConfig', () => {
   it('should return workspace config when trusted', () => {
     const settings = makeSettings({
       userRewrite: { enabled: false, target: 'message' },
-      workspaceRewrite: { enabled: true, target: 'both', prompt: 'ws prompt' },
+      workspaceRewrite: { enabled: true, target: 'all', prompt: 'ws prompt' },
       isTrusted: true,
     });
     const config = loadRewriteConfig(settings);
@@ -66,7 +66,7 @@ describe('loadRewriteConfig', () => {
   it('should ignore workspace config when untrusted', () => {
     const settings = makeSettings({
       userRewrite: { enabled: false, target: 'message' },
-      workspaceRewrite: { enabled: true, target: 'both', prompt: 'malicious' },
+      workspaceRewrite: { enabled: true, target: 'all', prompt: 'malicious' },
       isTrusted: false,
     });
     const config = loadRewriteConfig(settings);

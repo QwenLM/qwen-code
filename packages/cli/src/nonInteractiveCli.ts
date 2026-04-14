@@ -258,7 +258,7 @@ export async function runNonInteractive(
       const rewriter = rewriteConfig?.enabled
         ? new LlmRewriter(config, rewriteConfig)
         : null;
-      const rewriteTarget = rewriteConfig?.target ?? 'both';
+      const rewriteTarget = rewriteConfig?.target ?? 'all';
       const turnBuffer = rewriter ? new TurnBuffer() : null;
       let rewriteTurnIndex = 0;
       const pendingRewrites: Array<
@@ -337,13 +337,13 @@ export async function runNonInteractive(
             if (
               event.type === GeminiEventType.Content &&
               typeof event.value === 'string' &&
-              (rewriteTarget === 'message' || rewriteTarget === 'both')
+              (rewriteTarget === 'message' || rewriteTarget === 'all')
             ) {
               turnBuffer.appendMessage(event.value);
             } else if (
               event.type === GeminiEventType.Thought &&
               event.value &&
-              (rewriteTarget === 'thought' || rewriteTarget === 'both')
+              (rewriteTarget === 'thought' || rewriteTarget === 'all')
             ) {
               const thought = event.value;
               const thoughtText = thought.subject
@@ -552,14 +552,14 @@ export async function runNonInteractive(
                             event.type === GeminiEventType.Content &&
                             typeof event.value === 'string' &&
                             (rewriteTarget === 'message' ||
-                              rewriteTarget === 'both')
+                              rewriteTarget === 'all')
                           ) {
                             turnBuffer.appendMessage(event.value);
                           } else if (
                             event.type === GeminiEventType.Thought &&
                             event.value &&
                             (rewriteTarget === 'thought' ||
-                              rewriteTarget === 'both')
+                              rewriteTarget === 'all')
                           ) {
                             const thought = event.value;
                             const thoughtText = thought.subject
