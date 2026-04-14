@@ -91,6 +91,7 @@ async function generateSessionTitle(
 
 export const renameCommand: SlashCommand = {
   name: 'rename',
+  altNames: ['tag'],
   kind: CommandKind.BUILT_IN,
   get description() {
     return t('Rename the current conversation');
