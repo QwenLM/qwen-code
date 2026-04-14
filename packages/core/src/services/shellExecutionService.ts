@@ -10,10 +10,13 @@ import { getPty } from '../utils/getPty.js';
 import { spawn as cpSpawn, spawnSync } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import os from 'node:os';
+import path from 'node:path';
+import fs from 'node:fs';
 import type { IPty } from '@lydell/node-pty';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration } from '../utils/shell-utils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import pkg from '@xterm/headless';
 import {
   serializeTerminalToObject,
@@ -21,6 +24,7 @@ import {
 } from '../utils/terminalSerializer.js';
 const { Terminal } = pkg;
 
+const debugLogger = createDebugLogger('SHELL_EXEC');
 const SIGKILL_TIMEOUT_MS = 200;
 const WINDOWS_PATH_DELIMITER = ';';
 let cachedWindowsPathFingerprint: string | undefined;
@@ -301,6 +305,7 @@ const getCleanupStrategy = () =>
 export class ShellExecutionService {
   private static activePtys = new Map<number, ActivePty>();
   private static activeChildProcesses = new Set<number>();
+  private static spawnHelperChecked = false;
 
   static cleanup() {
     const strategy = getCleanupStrategy();
@@ -324,6 +329,53 @@ export class ShellExecutionService {
   }
 
   /**
+   * One-time diagnostic check for the node-pty spawn-helper binary on macOS.
+   * Logs a warning if it's missing or lacks execute permission — a known cause
+   * of silent "exit code 1, no output" failures (microsoft/node-pty#850).
+   */
+  private static checkSpawnHelperOnce(ptyInfo: PtyImplementation): void {
+    if (this.spawnHelperChecked || os.platform() !== 'darwin' || !ptyInfo) {
+      return;
+    }
+    this.spawnHelperChecked = true;
+
+    try {
+      const ptyPackageName = `@lydell/node-pty-darwin-${os.arch()}`;
+      const ptyMainPath = require.resolve(ptyPackageName);
+      const pkgRoot = path.dirname(ptyMainPath);
+      const helperPath = path.join(
+        pkgRoot,
+        'prebuilds',
+        `darwin-${os.arch()}`,
+        'spawn-helper',
+      );
+
+      if (!fs.existsSync(helperPath)) {
+        debugLogger.warn(
+          `spawn-helper not found at ${helperPath} — PTY commands may fail silently`,
+        );
+        return;
+      }
+
+      const stats = fs.statSync(helperPath);
+      const isExecutable = !!(stats.mode & 0o111);
+      if (!isExecutable) {
+        debugLogger.warn(
+          `spawn-helper at ${helperPath} lacks execute permission (mode=${stats.mode.toString(8)}). ` +
+            'This causes PTY commands to exit with code 1 and no output. ' +
+            'Fix: chmod +x "' +
+            helperPath +
+            '"',
+        );
+      } else {
+        debugLogger.debug(`spawn-helper OK: ${helperPath}`);
+      }
+    } catch {
+      // Best-effort diagnostic; don't break execution.
+    }
+  }
+
+  /**
    * Executes a shell command using `node-pty`, capturing all output and lifecycle events.
    *
    * @param commandToExecute The exact command string to run.
@@ -344,6 +396,10 @@ export class ShellExecutionService {
     if (shouldUseNodePty) {
       const ptyInfo = await getPty();
       if (ptyInfo) {
+        debugLogger.debug(
+          `Using ${ptyInfo.name} for shell execution (platform=${os.platform()}, arch=${os.arch()})`,
+        );
+        this.checkSpawnHelperOnce(ptyInfo);
         try {
           return this.executeWithPty(
             commandToExecute,
@@ -353,10 +409,18 @@ export class ShellExecutionService {
             shellExecutionConfig,
             ptyInfo,
           );
-        } catch (_e) {
-          // Fallback to child_process
+        } catch (e) {
+          debugLogger.warn(
+            `PTY execution threw, falling back to child_process: ${e instanceof Error ? e.message : String(e)}`,
+          );
         }
+      } else {
+        debugLogger.debug(
+          'node-pty not available, using child_process fallback',
+        );
       }
+    } else {
+      debugLogger.debug('PTY disabled, using child_process');
     }
 
     return this.childProcessFallback(
@@ -544,6 +608,9 @@ export class ShellExecutionService {
       return { pid: child.pid, result };
     } catch (e) {
       const error = e as Error;
+      debugLogger.warn(
+        `child_process spawn failed: ${error.message} (platform=${os.platform()}, nodeVersion=${process.version})`,
+      );
       return {
         pid: undefined,
         result: Promise.resolve({
@@ -851,6 +918,22 @@ export class ShellExecutionService {
                 } catch {
                   // Ignore fallback rendering errors and resolve with empty text.
                 }
+              }
+
+              if (
+                exitCode !== 0 &&
+                !abortSignal.aborted &&
+                fullOutput.trim().length === 0
+              ) {
+                debugLogger.warn(
+                  `PTY command exited with code ${exitCode} and no output ` +
+                    `(method=${ptyInfo?.name ?? 'node-pty'}, ` +
+                    `rawBytes=${finalBuffer.length}, ` +
+                    `platform=${os.platform()}, ` +
+                    `nodeVersion=${process.version}). ` +
+                    'This may indicate a spawn-helper issue — see ' +
+                    'https://github.com/microsoft/node-pty/issues/850',
+                );
               }
 
               resolve({

@@ -412,6 +412,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
           `Exit Code: ${result.exitCode ?? '(none)'}`,
           `Signal: ${result.signal ?? '(none)'}`,
           `Process Group PGID: ${result.pid ?? '(none)'}`,
+          `Execution Method: ${result.executionMethod}`,
         ].join('\n');
       }
 
@@ -441,6 +442,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
             )}`;
           } else if (result.exitCode !== null && result.exitCode !== 0) {
             returnDisplayMessage = `Command exited with code: ${result.exitCode}`;
+            if (!result.output.trim()) {
+              returnDisplayMessage += `\n(Command produced no output. Execution method: ${result.executionMethod})`;
+            }
           }
           // If output is empty and command succeeded (code 0, no error/signal/abort),
           // returnDisplayMessage will remain empty, which is fine.
