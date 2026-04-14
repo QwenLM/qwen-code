@@ -14,7 +14,6 @@ import { VISIBLE_TOOLS_COUNT } from '../constants.js';
 
 export const ToolListStep: React.FC<ToolListStepProps> = ({
   tools,
-  serverName,
   onSelect,
   onBack,
 }) => {
@@ -78,24 +77,15 @@ export const ToolListStep: React.FC<ToolListStepProps> = ({
 
   const getToolAnnotations = (tool: MCPToolDisplayInfo): string => {
     const hints: string[] = [];
-    if (tool.annotations?.destructiveHint) hints.push(t('destructive'));
-    if (tool.annotations?.readOnlyHint) hints.push(t('read-only'));
-    if (tool.annotations?.openWorldHint) hints.push(t('open-world'));
-    if (tool.annotations?.idempotentHint) hints.push(t('idempotent'));
+    if (tool.annotations?.destructiveHint) hints.push('destructive');
+    if (tool.annotations?.readOnlyHint) hints.push('read-only');
+    if (tool.annotations?.openWorldHint) hints.push('open-world');
+    if (tool.annotations?.idempotentHint) hints.push('idempotent');
     return hints.join(', ');
   };
 
   return (
     <Box flexDirection="column">
-      {/* 标题 */}
-      <Box marginBottom={1}>
-        <Text bold>{t('Tools for {{name}}', { name: serverName })}</Text>
-        <Text color={theme.text.secondary}>
-          {' '}
-          ({tools.length} {tools.length === 1 ? t('tool') : t('tools')})
-        </Text>
-      </Box>
-
       {/* 工具列表 */}
       <Box flexDirection="column">
         {displayTools.map((tool, index) => {
@@ -105,14 +95,13 @@ export const ToolListStep: React.FC<ToolListStepProps> = ({
 
           return (
             <Box key={tool.name}>
-              {/* 选择器和序号 */}
-              <Box minWidth={4}>
+              {/* 选择器 */}
+              <Box minWidth={2}>
                 <Text
                   color={isSelected ? theme.text.accent : theme.text.primary}
                 >
                   {isSelected ? '❯' : ' '}
                 </Text>
-                <Text color={theme.text.secondary}>{actualIndex + 1}.</Text>
               </Box>
               {/* 工具名称 - 固定宽度 */}
               <Box width={toolNameWidth}>

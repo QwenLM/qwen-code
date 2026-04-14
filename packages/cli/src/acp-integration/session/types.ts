@@ -35,9 +35,9 @@ export interface SessionContext extends SessionUpdateSender {
  * Subagent metadata for tracking parent tool call context.
  */
 export interface SubagentMeta {
-  /** ID of the parent TaskTool call that created this subagent */
+  /** ID of the parent AgentTool call that created this subagent */
   parentToolCallId?: string;
-  /** Type of subagent (from TaskParams.subagent_type) */
+  /** Type of subagent (from AgentParams.subagent_type) */
   subagentType?: string;
 }
 

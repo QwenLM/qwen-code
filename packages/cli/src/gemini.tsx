@@ -35,6 +35,7 @@ import { KeypressProvider } from './ui/contexts/KeypressContext.js';
 import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
+import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import { themeManager } from './ui/themes/theme-manager.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
@@ -47,6 +48,10 @@ import {
 import { AppEvent, appEvents } from './utils/events.js';
 import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
+import {
+  profileCheckpoint,
+  finalizeStartupProfile,
+} from './utils/startupProfiler.js';
 import {
   relaunchAppInChildProcess,
   relaunchOnExitCode,
@@ -162,13 +167,15 @@ export async function startInteractiveUI(
         >
           <SessionStatsProvider sessionId={config.getSessionId()}>
             <VimModeProvider settings={settings}>
-              <AppContainer
-                config={config}
-                settings={settings}
-                startupWarnings={startupWarnings}
-                version={version}
-                initializationResult={initializationResult}
-              />
+              <AgentViewProvider config={config}>
+                <AppContainer
+                  config={config}
+                  settings={settings}
+                  startupWarnings={startupWarnings}
+                  version={version}
+                  initializationResult={initializationResult}
+                />
+              </AgentViewProvider>
             </VimModeProvider>
           </SessionStatsProvider>
         </KeypressProvider>
@@ -207,11 +214,14 @@ export async function startInteractiveUI(
 }
 
 export async function main() {
+  profileCheckpoint('main_entry');
   setupUnhandledRejectionHandler();
   const settings = loadSettings();
   await cleanupCheckpoints();
+  profileCheckpoint('after_load_settings');
 
   let argv = await parseArguments();
+  profileCheckpoint('after_parse_arguments');
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
@@ -279,11 +289,13 @@ export async function main() {
           process.exit(1);
         }
       }
-      // For stream-json mode, don't read stdin here - it should be forwarded to the sandbox
-      // and consumed by StreamJsonInputReader inside the container
+      // For stream-json and ACP modes, don't read stdin here — stdin carries
+      // protocol data (not a user prompt) and should be forwarded to the sandbox
+      // intact via stdio: 'inherit'.
       const inputFormat = argv.inputFormat as string | undefined;
+      const isAcpMode = argv.acp || argv.experimentalAcp;
       let stdinData = '';
-      if (!process.stdin.isTTY && inputFormat !== 'stream-json') {
+      if (!process.stdin.isTTY && inputFormat !== 'stream-json' && !isAcpMode) {
         stdinData = await readStdin();
       }
 
@@ -323,8 +335,15 @@ export async function main() {
     }
   }
 
-  // Handle --resume without a session ID by showing the session picker
+  // Handle --resume without a session ID by showing the session picker.
+  // Set the runtime output dir early so the picker can find sessions stored
+  // under a custom runtimeOutputDir (setRuntimeBaseDir is idempotent and will
+  // be called again inside loadCliConfig).
   if (argv.resume === '') {
+    Storage.setRuntimeBaseDir(
+      settings.merged.advanced?.runtimeOutputDir,
+      process.cwd(),
+    );
     const selectedSessionId = await showResumeSessionPicker();
     if (!selectedSessionId) {
       // User cancelled or no sessions available
@@ -338,6 +357,7 @@ export async function main() {
   // We are now past the logic handling potentially launching a child process
   // to run Qwen Code. It is now safe to perform expensive initialization that
   // may have side effects.
+  profileCheckpoint('after_sandbox_check');
 
   // Initialize output language file before config loads to ensure it's included in context
   initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
@@ -349,6 +369,7 @@ export async function main() {
       process.cwd(),
       argv.extensions,
     );
+    profileCheckpoint('after_load_cli_config');
 
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
@@ -395,9 +416,13 @@ export async function main() {
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
     const initializationResult = await initializeApp(config, settings);
+    profileCheckpoint('after_initialize_app');
 
     if (config.getExperimentalZedIntegration()) {
-      return runAcpAgent(config, settings, argv);
+      await runAcpAgent(config, settings, argv);
+      // Clean up child processes and force exit, matching other non-interactive modes
+      await runExitCleanup();
+      process.exit(0);
     }
 
     let input = config.getQuestion();
@@ -415,6 +440,9 @@ export async function main() {
     ];
 
     // Render UI, passing necessary config values. Check that there is no command line question.
+    profileCheckpoint('before_render');
+    finalizeStartupProfile(config.getSessionId());
+
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import path from 'node:path';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
@@ -11,6 +12,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
 import type { PartUnion } from '@google/genai';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
   getSpecificMimeType,
@@ -20,7 +22,7 @@ import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths, isSubpath } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 
 /**
@@ -30,7 +32,7 @@ export interface ReadFileToolParams {
   /**
    * The absolute path to the file to read
    */
-  absolute_path: string;
+  file_path: string;
 
   /**
    * The line number to start reading from (optional)
@@ -56,7 +58,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   getDescription(): string {
     const relativePath = makeRelative(
-      this.params.absolute_path,
+      this.params.file_path,
       this.config.getTargetDir(),
     );
     const shortPath = shortenPath(relativePath);
@@ -74,12 +76,38 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   }
 
   override toolLocations(): ToolLocation[] {
-    return [{ path: this.params.absolute_path, line: this.params.offset }];
+    return [{ path: this.params.file_path, line: this.params.offset }];
+  }
+
+  /**
+   * Returns 'ask' for paths outside the workspace/temp/userSkills directories,
+   * so that external file reads require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    const filePath = path.resolve(this.params.file_path);
+    const workspaceContext = this.config.getWorkspaceContext();
+    const globalTempDir = Storage.getGlobalTempDir();
+    const projectTempDir = this.config.storage.getProjectTempDir();
+    const userSkillsDirs = this.config.storage.getUserSkillsDirs();
+    const userExtensionsDir = Storage.getUserExtensionsDir();
+    const osTempDir = os.tmpdir();
+
+    if (
+      workspaceContext.isPathWithinWorkspace(filePath) ||
+      isSubpath(projectTempDir, filePath) ||
+      isSubpath(globalTempDir, filePath) ||
+      isSubpath(osTempDir, filePath) ||
+      isSubpaths(userSkillsDirs, filePath) ||
+      isSubpath(userExtensionsDir, filePath)
+    ) {
+      return 'allow';
+    }
+    return 'ask';
   }
 
   async execute(): Promise<ToolResult> {
     const result = await processSingleFileContent(
-      this.params.absolute_path,
+      this.params.file_path,
       this.config,
       this.params.offset,
       this.params.limit,
@@ -109,9 +137,9 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       typeof result.llmContent === 'string'
         ? result.llmContent.split('\n').length
         : undefined;
-    const mimetype = getSpecificMimeType(this.params.absolute_path);
+    const mimetype = getSpecificMimeType(this.params.file_path);
     const programming_language = getProgrammingLanguage({
-      absolute_path: this.params.absolute_path,
+      file_path: this.params.file_path,
     });
     logFileOperation(
       this.config,
@@ -120,7 +148,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         FileOperation.READ,
         lines,
         mimetype,
-        path.extname(this.params.absolute_path),
+        path.extname(this.params.file_path),
         programming_language,
       ),
     );
@@ -149,7 +177,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
       Kind.Read,
       {
         properties: {
-          absolute_path: {
+          file_path: {
             description:
               "The absolute path to the file to read (e.g., '/home/user/project/file.txt'). Relative paths are not supported. You must provide an absolute path.",
             type: 'string',
@@ -165,7 +193,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
             type: 'number',
           },
         },
-        required: ['absolute_path'],
+        required: ['file_path'],
         type: 'object',
       },
     );
@@ -174,35 +202,15 @@ export class ReadFileTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: ReadFileToolParams,
   ): string | null {
-    const filePath = params.absolute_path;
-    if (params.absolute_path.trim() === '') {
-      return "The 'absolute_path' parameter must be non-empty.";
+    const filePath = params.file_path;
+    if (params.file_path.trim() === '') {
+      return "The 'file_path' parameter must be non-empty.";
     }
 
     if (!path.isAbsolute(filePath)) {
       return `File path must be absolute, but was relative: ${filePath}. You must provide an absolute path.`;
     }
 
-    const workspaceContext = this.config.getWorkspaceContext();
-    const globalTempDir = Storage.getGlobalTempDir();
-    const projectTempDir = this.config.storage.getProjectTempDir();
-    const userSkillsDir = this.config.storage.getUserSkillsDir();
-    const resolvedFilePath = path.resolve(filePath);
-    const isWithinTempDir =
-      isSubpath(projectTempDir, resolvedFilePath) ||
-      isSubpath(globalTempDir, resolvedFilePath);
-    const isWithinUserSkills = isSubpath(userSkillsDir, resolvedFilePath);
-
-    if (
-      !workspaceContext.isPathWithinWorkspace(filePath) &&
-      !isWithinTempDir &&
-      !isWithinUserSkills
-    ) {
-      const directories = workspaceContext.getDirectories();
-      return `File path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )} or within the project temp directory: ${projectTempDir}`;
-    }
     if (params.offset !== undefined && params.offset < 0) {
       return 'Offset must be a non-negative number';
     }
@@ -211,7 +219,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
     }
 
     const fileService = this.config.getFileService();
-    if (fileService.shouldQwenIgnoreFile(params.absolute_path)) {
+    if (fileService.shouldQwenIgnoreFile(params.file_path)) {
       return `File path '${filePath}' is ignored by .qwenignore pattern(s).`;
     }
 

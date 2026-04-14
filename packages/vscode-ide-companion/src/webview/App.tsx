@@ -18,7 +18,10 @@ import { useFileContext } from './hooks/file/useFileContext.js';
 import { useMessageHandling } from './hooks/message/useMessageHandling.js';
 import { useToolCalls } from './hooks/useToolCalls.js';
 import { useWebViewMessages } from './hooks/useWebViewMessages.js';
-import { useMessageSubmit } from './hooks/useMessageSubmit.js';
+import {
+  shouldSendMessage,
+  useMessageSubmit,
+} from './hooks/useMessageSubmit.js';
 import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
@@ -35,6 +38,9 @@ import {
   InterruptedMessage,
   FileIcon,
   PermissionDrawer,
+  AskUserQuestionDialog,
+  ImageMessageRenderer,
+  ImagePreview,
   // Layout components imported directly from webui
   EmptyState,
   ChatHeader,
@@ -45,10 +51,9 @@ import { ApprovalMode, NEXT_APPROVAL_MODE } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
 import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
-import {
-  DEFAULT_TOKEN_LIMIT,
-  tokenLimit,
-} from '@qwen-code/qwen-code-core/src/core/tokenLimits.js';
+import type { Question } from '../types/acpTypes.js';
+import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
+import { computeContextUsage } from './utils/contextUsage.js';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -70,6 +75,13 @@ export const App: React.FC = () => {
     options: PermissionOption[];
     toolCall: PermissionToolCall;
   } | null>(null);
+  const [askUserQuestionRequest, setAskUserQuestionRequest] = useState<{
+    questions: Question[];
+    sessionId: string;
+    metadata?: {
+      source?: string;
+    };
+  } | null>(null);
   const [planEntries, setPlanEntries] = useState<PlanEntry[]>([]);
   const [isAuthenticated, setIsAuthenticated] = useState<boolean | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(true); // Track if we're still initializing/loading
@@ -80,16 +92,10 @@ export const App: React.FC = () => {
   >([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [showModelSelector, setShowModelSelector] = useState(false);
-  const messagesEndRef = useRef<HTMLDivElement>(
-    null,
-  ) as React.RefObject<HTMLDivElement>;
+  const messagesEndRef = useRef<HTMLDivElement | null>(null);
   // Scroll container for message list; used to keep the view anchored to the latest content
-  const messagesContainerRef = useRef<HTMLDivElement>(
-    null,
-  ) as React.RefObject<HTMLDivElement>;
-  const inputFieldRef = useRef<HTMLDivElement>(
-    null,
-  ) as React.RefObject<HTMLDivElement>;
+  const messagesContainerRef = useRef<HTMLDivElement | null>(null);
+  const inputFieldRef = useRef<HTMLDivElement | null>(null);
 
   const [editMode, setEditMode] = useState<ApprovalModeValue>(
     ApprovalMode.DEFAULT,
@@ -125,18 +131,11 @@ export const App: React.FC = () => {
           }),
         );
 
-        if (query && query.length >= 1) {
-          const lowerQuery = query.toLowerCase();
-          return allItems.filter(
-            (item) =>
-              item.label.toLowerCase().includes(lowerQuery) ||
-              (item.description &&
-                item.description.toLowerCase().includes(lowerQuery)),
-          );
-        }
+        // Fuzzy search is handled by the backend (FileSearchFactory)
+        // No client-side filtering needed - results are already fuzzy-matched
 
         // If first time and still loading, show a placeholder
-        if (allItems.length === 0) {
+        if (allItems.length === 0 && query && query.length >= 1) {
           return [
             {
               id: 'loading-files',
@@ -180,6 +179,7 @@ export const App: React.FC = () => {
             description: cmd.description,
             type: 'command' as const,
             group: 'Slash Commands',
+            value: cmd.name,
           }),
         );
 
@@ -205,52 +205,10 @@ export const App: React.FC = () => {
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
 
-  const contextUsage = useMemo(() => {
-    if (!usageStats && !modelInfo) {
-      return null;
-    }
-
-    const modelName =
-      modelInfo?.modelId && typeof modelInfo.modelId === 'string'
-        ? modelInfo.modelId
-        : modelInfo?.name && typeof modelInfo.name === 'string'
-          ? modelInfo.name
-          : undefined;
-
-    // Note: In the webview context, the contextWindowSize is already reflected in
-    // modelInfo._meta.contextLimit which is computed on the extension side with the proper config.
-    // We only use tokenLimit as a fallback if metaLimit is not available.
-    const derivedLimit =
-      modelName && modelName.length > 0
-        ? tokenLimit(modelName, 'input')
-        : undefined;
-
-    const metaLimitRaw = modelInfo?._meta?.['contextLimit'];
-    const metaLimit =
-      typeof metaLimitRaw === 'number' || metaLimitRaw === null
-        ? metaLimitRaw
-        : undefined;
-
-    const limit =
-      usageStats?.tokenLimit ??
-      metaLimit ??
-      derivedLimit ??
-      DEFAULT_TOKEN_LIMIT;
-
-    const used = usageStats?.usage?.promptTokens ?? 0;
-    if (typeof limit !== 'number' || limit <= 0 || used < 0) {
-      return null;
-    }
-    const percentLeft = Math.max(
-      0,
-      Math.min(100, Math.round(((limit - used) / limit) * 100)),
-    );
-    return {
-      percentLeft,
-      usedTokens: used,
-      tokenLimit: limit,
-    };
-  }, [usageStats, modelInfo]);
+  const contextUsage = useMemo(
+    () => computeContextUsage(usageStats, modelInfo),
+    [usageStats, modelInfo],
+  );
 
   // Track a lightweight signature of workspace files to detect content changes even when length is unchanged
   const workspaceFilesSignature = useMemo(
@@ -281,10 +239,18 @@ export const App: React.FC = () => {
     completion.query,
   ]);
 
-  // Message submission
+  const { attachedImages, handleRemoveImage, clearImages, handlePaste } =
+    useImagePaste({
+      onError: (error) => {
+        console.error('Paste error:', error);
+      },
+    });
+
   const { handleSubmit: submitMessage } = useMessageSubmit({
     inputText,
     setInputText,
+    attachedImages,
+    clearImages,
     messageHandling,
     fileContext,
     skipAutoActiveContext,
@@ -294,26 +260,35 @@ export const App: React.FC = () => {
     isWaitingForResponse: messageHandling.isWaitingForResponse,
   });
 
+  const canSubmit = shouldSendMessage({
+    inputText,
+    attachedImages,
+    isStreaming: messageHandling.isStreaming,
+    isWaitingForResponse: messageHandling.isWaitingForResponse,
+  });
+
   // Handle cancel/stop from the input bar
   // Emit a cancel to the extension and immediately reflect interruption locally.
   const handleCancel = useCallback(() => {
     if (messageHandling.isStreaming || messageHandling.isWaitingForResponse) {
-      // Proactively end local states and add an 'Interrupted' line
-      try {
-        messageHandling.endStreaming?.();
-      } catch {
-        /* no-op */
+      // End streaming state and add an 'Interrupted' line.
+      // IMPORTANT: Do NOT clear isWaitingForResponse here — let the
+      // extension's streamEnd message clear it after the cancel is
+      // properly processed on the backend.  This keeps the submit
+      // guard active and prevents any cached input from being
+      // auto-submitted during the cancel → confirmed window.
+      if (messageHandling.isStreaming) {
+        try {
+          messageHandling.endStreaming?.();
+        } catch {
+          /* no-op */
+        }
+        messageHandling.addMessage({
+          role: 'assistant',
+          content: 'Interrupted',
+          timestamp: Date.now(),
+        });
       }
-      try {
-        messageHandling.clearWaitingForResponse?.();
-      } catch {
-        /* no-op */
-      }
-      messageHandling.addMessage({
-        role: 'assistant',
-        content: 'Interrupted',
-        timestamp: Date.now(),
-      });
     }
     // Notify extension/agent to cancel server-side work
     vscode.postMessage({
@@ -331,6 +306,7 @@ export const App: React.FC = () => {
     clearToolCalls,
     setPlanEntries,
     handlePermissionRequest: setPermissionRequest,
+    handleAskUserQuestion: setAskUserQuestionRequest,
     inputFieldRef,
     setInputText,
     setEditMode,
@@ -460,10 +436,18 @@ export const App: React.FC = () => {
 
   // Set loading state to false after initial mount and when we have authentication info
   useEffect(() => {
-    // If we have determined authentication status, we're done loading
     if (isAuthenticated !== null) {
       setIsLoading(false);
+      return;
     }
+
+    // Safety-net timeout: if initialization takes too long (e.g. CLI crashed
+    // before the error could be surfaced), stop the spinner and let the user
+    // see the onboarding / error UI instead of hanging forever.
+    const timeout = setTimeout(() => {
+      setIsLoading(false);
+    }, 30_000);
+    return () => clearTimeout(timeout);
   }, [isAuthenticated]);
 
   // Handle permission response
@@ -481,9 +465,36 @@ export const App: React.FC = () => {
     [vscode],
   );
 
-  // Handle completion selection
+  // Handle ask user question response
+  const handleAskUserQuestionResponse = useCallback(
+    (answers: Record<string, string>) => {
+      // Forward answers to extension as ACP permission response
+      vscode.postMessage({
+        type: 'askUserQuestionResponse',
+        data: { answers },
+      });
+
+      setAskUserQuestionRequest(null);
+    },
+    [vscode],
+  );
+
+  // Handle ask user question cancel
+  const handleAskUserQuestionCancel = useCallback(() => {
+    // Forward cancel to extension as ACP permission response with cancel option
+    vscode.postMessage({
+      type: 'askUserQuestionResponse',
+      data: { answers: {}, cancelled: true },
+    });
+
+    setAskUserQuestionRequest(null);
+  }, [vscode]);
+
+  // Handle completion selection.
+  // When fillOnly is true (Tab), slash commands are inserted into the input
+  // instead of being sent immediately, so users can append arguments.
   const handleCompletionSelect = useCallback(
-    (item: CompletionItem) => {
+    (item: CompletionItem, fillOnly?: boolean) => {
       // Handle completion selection by inserting the value into the input field
       const inputElement = inputFieldRef.current;
       if (!inputElement) {
@@ -556,13 +567,13 @@ export const App: React.FC = () => {
           }
         };
 
-        // Handle special commands by id
         if (itemId === 'login') {
           clearTriggerText();
           vscode.postMessage({ type: 'login', data: {} });
           completion.closeCompletion();
           return;
         }
+
         if (itemId === 'model') {
           clearTriggerText();
           setShowModelSelector(true);
@@ -570,10 +581,11 @@ export const App: React.FC = () => {
           return;
         }
 
-        // Handle server-provided slash commands by sending them as messages
-        // CLI will detect slash commands in session/prompt and execute them
+        // Handle server-provided slash commands by sending them as messages.
+        // Skip when fillOnly (Tab) — let the generic insertion path fill the
+        // command text so the user can keep typing arguments.
         const serverCmd = availableCommands.find((c) => c.name === itemId);
-        if (serverCmd) {
+        if (serverCmd && !fillOnly) {
           // Clear the trigger text since we're sending the command
           clearTriggerText();
           // Send the slash command as a user message
@@ -641,7 +653,9 @@ export const App: React.FC = () => {
       // Replace from trigger to cursor with selected value
       const textBeforeCursor = text.substring(0, cursorPos);
       const atPos = textBeforeCursor.lastIndexOf('@');
-      const slashPos = textBeforeCursor.lastIndexOf('/');
+      // Only consider slash as trigger if we're in slash command mode
+      const slashPos =
+        completion.triggerChar === '/' ? textBeforeCursor.lastIndexOf('/') : -1;
       const triggerPos = Math.max(atPos, slashPos);
 
       if (triggerPos >= 0) {
@@ -723,7 +737,7 @@ export const App: React.FC = () => {
 
   // When user sends a message after scrolling up, re-pin and jump to the bottom
   const handleSubmitWithScroll = useCallback(
-    (e: React.FormEvent) => {
+    (e: React.FormEvent | React.KeyboardEvent, explicitText?: string) => {
       setPinnedToBottom(true);
 
       const container = messagesContainerRef.current;
@@ -732,7 +746,7 @@ export const App: React.FC = () => {
         container.scrollTo({ top });
       }
 
-      submitMessage(e);
+      submitMessage(e, explicitText);
     },
     [submitMessage],
   );
@@ -777,76 +791,86 @@ export const App: React.FC = () => {
   console.log('[App] Rendering messages:', allMessages);
 
   // Render all messages and tool calls
-  const renderMessages = useCallback<() => React.ReactNode>(
-    () =>
-      allMessages.map((item, index) => {
-        switch (item.type) {
-          case 'message': {
-            const msg = item.data as TextMessage;
-            const handleFileClick = (path: string): void => {
-              vscode.postMessage({
-                type: 'openFile',
-                data: { path },
-              });
-            };
+  const renderMessages = useCallback<() => React.ReactNode>(() => {
+    let imageIndex = 0;
+    return allMessages.map((item, index) => {
+      switch (item.type) {
+        case 'message': {
+          const msg = item.data as TextMessage;
+          const handleFileClick = (path: string): void => {
+            vscode.postMessage({
+              type: 'openFile',
+              data: { path },
+            });
+          };
 
-            if (msg.role === 'thinking') {
-              return (
-                <ThinkingMessage
-                  key={`message-${index}`}
-                  content={msg.content || ''}
-                  timestamp={msg.timestamp || 0}
-                  onFileClick={handleFileClick}
-                />
-              );
-            }
-
-            if (msg.role === 'user') {
-              return (
-                <UserMessage
-                  key={`message-${index}`}
-                  content={msg.content || ''}
-                  timestamp={msg.timestamp || 0}
-                  onFileClick={handleFileClick}
-                  fileContext={msg.fileContext}
-                />
-              );
-            }
-
-            {
-              const content = (msg.content || '').trim();
-              if (content === 'Interrupted' || content === 'Tool interrupted') {
-                return (
-                  <InterruptedMessage key={`message-${index}`} text={content} />
-                );
-              }
-              return (
-                <AssistantMessage
-                  key={`message-${index}`}
-                  content={content}
-                  timestamp={msg.timestamp || 0}
-                  onFileClick={handleFileClick}
-                />
-              );
-            }
-          }
-
-          case 'in-progress-tool-call':
-          case 'completed-tool-call': {
+          if (msg.kind === 'image' && msg.imagePath) {
+            imageIndex += 1;
             return (
-              <ToolCall
-                key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
-                toolCall={item.data as ToolCallData}
+              <ImageMessageRenderer
+                key={`message-${index}`}
+                msg={msg as WebViewImageMessage}
+                imageIndex={imageIndex}
               />
             );
           }
 
-          default:
-            return null;
+          if (msg.role === 'thinking') {
+            return (
+              <ThinkingMessage
+                key={`message-${index}`}
+                content={msg.content || ''}
+                timestamp={msg.timestamp || 0}
+                onFileClick={handleFileClick}
+              />
+            );
+          }
+
+          if (msg.role === 'user') {
+            return (
+              <UserMessage
+                key={`message-${index}`}
+                content={msg.content || ''}
+                timestamp={msg.timestamp || 0}
+                onFileClick={handleFileClick}
+                fileContext={msg.fileContext}
+              />
+            );
+          }
+
+          {
+            const content = (msg.content || '').trim();
+            if (content === 'Interrupted' || content === 'Tool interrupted') {
+              return (
+                <InterruptedMessage key={`message-${index}`} text={content} />
+              );
+            }
+            return (
+              <AssistantMessage
+                key={`message-${index}`}
+                content={content}
+                timestamp={msg.timestamp || 0}
+                onFileClick={handleFileClick}
+              />
+            );
+          }
         }
-      }),
-    [allMessages, vscode],
-  );
+
+        case 'in-progress-tool-call':
+        case 'completed-tool-call': {
+          return (
+            <ToolCall
+              key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
+              toolCall={item.data as ToolCallData}
+            />
+          );
+        }
+
+        default:
+          return null;
+      }
+    });
+  }, [allMessages, vscode]);
 
   const hasContent =
     messageHandling.messages.length > 0 ||
@@ -889,7 +913,9 @@ export const App: React.FC = () => {
       <ChatHeader
         currentSessionTitle={sessionManagement.currentSessionTitle}
         onLoadSessions={sessionManagement.handleLoadQwenSessions}
-        onNewSession={sessionManagement.handleNewQwenSession}
+        onNewSession={() =>
+          sessionManagement.handleNewQwenSession(modelInfo?.modelId ?? null)
+        }
       />
 
       <div
@@ -991,10 +1017,21 @@ export const App: React.FC = () => {
             }
           }}
           onAttachContext={handleAttachContextClick}
+          onPaste={handlePaste}
           completionIsOpen={completion.isOpen}
           completionItems={completion.items}
           onCompletionSelect={handleCompletionSelect}
+          onCompletionFill={(item) => handleCompletionSelect(item, true)}
           onCompletionClose={completion.closeCompletion}
+          canSubmit={canSubmit}
+          extraContent={
+            attachedImages.length > 0 ? (
+              <ImagePreview
+                images={attachedImages}
+                onRemove={handleRemoveImage}
+              />
+            ) : null
+          }
           showModelSelector={showModelSelector}
           availableModels={availableModels}
           currentModelId={modelInfo?.modelId}
@@ -1010,6 +1047,14 @@ export const App: React.FC = () => {
           toolCall={permissionRequest.toolCall}
           onResponse={handlePermissionResponse}
           onClose={() => setPermissionRequest(null)}
+        />
+      )}
+
+      {isAuthenticated && askUserQuestionRequest && (
+        <AskUserQuestionDialog
+          questions={askUserQuestionRequest.questions}
+          onSubmit={handleAskUserQuestionResponse}
+          onCancel={handleAskUserQuestionCancel}
         />
       )}
     </div>

@@ -4,7 +4,10 @@
     "outDir": "dist",
     "lib": ["DOM", "DOM.Iterable", "ES2023"],
     "composite": true,
-    "types": ["node", "vitest/globals"]
+    "types": ["node", "vitest/globals"],
+    "paths": {
+      "@lydell/node-pty": ["../../node_modules/@lydell/node-pty/node-pty.d.ts"]
+    }
   },
   "include": ["index.ts", "src/**/*.ts", "src/**/*.json"],
   "exclude": ["node_modules", "dist"]

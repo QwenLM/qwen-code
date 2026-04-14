@@ -72,11 +72,13 @@ export function resolvePathFromEnv(envVar?: string): {
  *
  * @param customInstruction - Custom system instruction (ContentUnion from @google/genai)
  * @param userMemory - User memory to append
- * @returns Processed custom system instruction with user memory appended
+ * @param appendInstruction - Extra instructions to append after user memory
+ * @returns Processed custom system instruction with user memory and extra append instructions applied
  */
 export function getCustomSystemPrompt(
   customInstruction: GenerateContentConfig['systemInstruction'],
   userMemory?: string,
+  appendInstruction?: string,
 ): string {
   // Extract text from custom instruction
   let instructionText = '';
@@ -100,17 +102,20 @@ export function getCustomSystemPrompt(
   }
 
   // Append user memory using the same pattern as getCoreSystemPrompt
-  const memorySuffix =
-    userMemory && userMemory.trim().length > 0
-      ? `\n\n---\n\n${userMemory.trim()}`
-      : '';
+  const memorySuffix = buildSystemPromptSuffix(userMemory);
 
-  return `${instructionText}${memorySuffix}`;
+  return `${instructionText}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
+}
+
+function buildSystemPromptSuffix(text?: string): string {
+  const trimmed = text?.trim();
+  return trimmed ? `\n\n---\n\n${trimmed}` : '';
 }
 
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
+  appendInstruction?: string,
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md but can be modified via custom path in QWEN_SYSTEM_MD
@@ -200,6 +205,9 @@ I've found some existing telemetry code. Let me mark the first todo as in_progre
 [Assistant continues implementing the feature step by step, marking todos as in_progress and completed as they go]
 </example>
 
+# Asking questions as you work
+
+You have access to the ${ToolNames.ASK_USER_QUESTION} tool to ask the user questions when you need clarification, want to validate assumptions, or need to make a decision you're unsure about. When presenting options or plans, never include time estimates - focus on what each option involves, not how long it takes.
 
 # Primary Workflows
 
@@ -221,7 +229,7 @@ IMPORTANT: Always use the ${ToolNames.TODO_WRITE} tool to plan and track tasks t
 
 **Goal:** Autonomously implement and deliver a visually appealing, substantially complete, and functional prototype. Utilize all tools at your disposal to implement the application. Some tools you may especially find useful are '${ToolNames.WRITE_FILE}', '${ToolNames.EDIT}' and '${ToolNames.SHELL}'.
 
-1. **Understand Requirements:** Analyze the user's request to identify core features, desired user experience (UX), visual aesthetic, application type/platform (web, mobile, desktop, CLI, library, 2D or 3D game), and explicit constraints. If critical information for initial planning is missing or ambiguous, ask concise, targeted clarification questions.
+1. **Understand Requirements:** Analyze the user's request to identify core features, desired user experience (UX), visual aesthetic, application type/platform (web, mobile, desktop, CLI, library, 2D or 3D game), and explicit constraints. If critical information for initial planning is missing or ambiguous, ask concise, targeted clarification questions. Use the ${ToolNames.ASK_USER_QUESTION} tool to ask questions, clarify and gather information as needed.
 2. **Propose Plan:** Formulate an internal development plan. Present a clear, concise, high-level summary to the user. This summary must effectively convey the application's type and core purpose, key technologies to be used, main features and how users will interact with them, and the general approach to the visual design and user experience (UX) with the intention of delivering something beautiful, modern, and polished, especially for UI-based applications. For applications requiring visual assets (like games or rich UIs), briefly describe the strategy for sourcing or generating placeholders (e.g., simple geometric shapes, procedurally generated patterns, or open-source assets if feasible and licenses permit) to ensure a visually complete initial prototype. Ensure this information is presented in a structured and easily digestible manner.
   - When key technologies aren't specified, prefer the following:
   - **Websites (Frontend):** React (JavaScript/TypeScript) with Bootstrap CSS, incorporating Material Design principles for UI/UX.
@@ -258,7 +266,7 @@ IMPORTANT: Always use the ${ToolNames.TODO_WRITE} tool to plan and track tasks t
 - **Background Processes:** Use background processes (via \`&\`) for commands that are unlikely to stop on their own, e.g. \`node server.js &\`. If unsure, ask the user.
 - **Interactive Commands:** Try to avoid shell commands that are likely to require user interaction (e.g. \`git rebase -i\`). Use non-interactive versions of commands (e.g. \`npm init -y\` instead of \`npm init\`) when available, and otherwise remind the user that interactive shell commands are not supported and may cause hangs until canceled by the user.
 - **Task Management:** Use the '${ToolNames.TODO_WRITE}' tool proactively for complex, multi-step tasks to track progress and provide visibility to users. This tool helps organize work systematically and ensures no requirements are missed.
-- **Subagent Delegation:** When doing file search, prefer to use the '${ToolNames.TASK}' tool in order to reduce context usage. You should proactively use the '${ToolNames.TASK}' tool with specialized agents when the task at hand matches the agent's description.
+- **Subagent Delegation:** When doing file search, prefer to use the '${ToolNames.AGENT}' tool in order to reduce context usage. You should proactively use the '${ToolNames.AGENT}' tool with specialized agents when the task at hand matches the agent's description.
 - **Remembering Facts:** Use the '${ToolNames.MEMORY}' tool to remember specific, *user-related* facts or preferences when the user explicitly asks, or when they state a clear, concise piece of information that would help personalize or streamline *your future interactions with them* (e.g., preferred coding style, common project paths they use, personal tool aliases). This tool is for user-specific information that should persist across sessions. Do *not* use it for general project context or information. If unsure whether to save something, you can ask the user, "Should I remember that for you?"
 - **Respect User Confirmations:** Most tool calls (also denoted as 'function calls') will first require confirmation from the user, where they will either approve or cancel the function call. If a user cancels a function call, respect their choice and do _not_ try to make the function call again. It is okay to request the tool call again _only_ if the user requests that same tool call on a subsequent prompt. When a user cancels a function call, assume best intentions from the user and consider inquiring if they prefer any alternative paths forward.
 
@@ -288,6 +296,8 @@ You are running outside of a sandbox container, directly on the user's system. F
 `;
   }
 })()}
+
+${getActionsSection()}
 
 ${(function () {
   if (isGitRepository(process.cwd())) {
@@ -335,10 +345,32 @@ Your core function is efficient and safe assistance. Balance extreme conciseness
 
   const memorySuffix =
     userMemory && userMemory.trim().length > 0
-      ? `\n\n---\n\n${userMemory.trim()}`
+      ? buildSystemPromptSuffix(userMemory)
       : '';
+  const appendSuffix = buildSystemPromptSuffix(appendInstruction);
 
-  return `${basePrompt}${memorySuffix}`;
+  return `${basePrompt}${memorySuffix}${appendSuffix}`;
+}
+
+/**
+ * Returns the "Executing actions with care" system prompt section.
+ * Provides layered guidance for risky operations: general principle,
+ * 4 categories of dangerous operations, behavioral rules, and approval scoping.
+ * Placed between Sandbox and Git Repository sections in the prompt.
+ */
+function getActionsSection(): string {
+  return `
+# Executing actions with care
+
+Carefully consider the reversibility and blast radius of actions. Generally you can freely take local, reversible actions like editing files or running tests. But for actions that are hard to reverse, affect shared systems beyond your local environment, or could otherwise be risky or destructive, check with the user before proceeding. The cost of pausing to confirm is low, while the cost of an unwanted action (lost work, unintended messages sent, deleted branches) can be very high. For actions like these, consider the context, the action, and user instructions, and by default transparently communicate the action and ask for confirmation before proceeding. This default can be changed by user instructions - if explicitly asked to operate more autonomously, then you may proceed without confirmation, but still attend to the risks and consequences when taking actions. A user approving an action (like a git push) once does NOT mean that they approve it in all contexts, so unless actions are authorized in advance in durable instructions like QWEN.md files, always confirm first. Authorization stands for the scope specified, not beyond. Match the scope of your actions to what was actually requested.
+
+Examples of the kind of risky actions that warrant user confirmation:
+- Destructive operations: deleting files/branches, dropping database tables, killing processes, rm -rf, overwriting uncommitted changes
+- Hard-to-reverse operations: force-pushing (can also overwrite upstream), git reset --hard, amending published commits, removing or downgrading packages/dependencies, modifying CI/CD pipelines
+- Actions visible to others or that affect shared state: pushing code, creating/closing/commenting on PRs or issues, sending messages (Slack, email, GitHub), posting to external services, modifying shared infrastructure or permissions
+- Uploading content to third-party web tools (diagram renderers, pastebins, gists) publishes it - consider whether it could be sensitive before sending, since it may be cached or indexed even if later deleted.
+
+When you encounter an obstacle, do not use destructive actions as a shortcut to simply make it go away. For instance, try to identify root causes and fix underlying issues rather than bypassing safety checks (e.g. --no-verify). If you discover unexpected state like unfamiliar files, branches, or configuration, investigate before deleting or overwriting, as it may represent the user's in-progress work. For example, typically resolve merge conflicts rather than discarding changes; similarly, if a lock file exists, investigate what process holds it rather than deleting it. In short: only take risky actions carefully, and when in doubt, ask before acting. Follow both the spirit and letter of these instructions - measure twice, cut once.`;
 }
 
 /**
@@ -823,7 +855,7 @@ function getToolCallExamples(model?: string): string {
  * ```
  */
 export function getSubagentSystemReminder(agentTypes: string[]): string {
-  return `<system-reminder>You have powerful specialized agents at your disposal, available agent types are: ${agentTypes.join(', ')}. PROACTIVELY use the ${ToolNames.TASK} tool to delegate user's task to appropriate agent when user's task matches agent capabilities. Ignore this message if user's task is not relevant to any agent. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
+  return `<system-reminder>You have powerful specialized agents at your disposal, available agent types are: ${agentTypes.join(', ')}. PROACTIVELY use the ${ToolNames.AGENT} tool to delegate user's task to appropriate agent when user's task matches agent capabilities. Ignore this message if user's task is not relevant to any agent. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
 }
 
 /**
@@ -852,8 +884,18 @@ export function getPlanModeSystemReminder(planOnly = false): string {
   return `<system-reminder>
 Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supercedes any other instructions you have received (for example, to make edits). Instead, you should:
 1. Answer the user's query comprehensively
-2. When you're done researching, present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan.
+2. When you're done researching, present your plan ${planOnly ? 'directly' : `by calling the ${ToolNames.EXIT_PLAN_MODE} tool, which will prompt the user to confirm the plan`}. Do NOT make any file changes or run any tools that modify the system state in any way until the user has confirmed the plan. Use ${ToolNames.ASK_USER_QUESTION} if you need to clarify approaches.
 </system-reminder>`;
+}
+
+/**
+ * Generates a system reminder about an active Arena session.
+ *
+ * @param configFilePath - Absolute path to the arena session's `config.json`
+ * @returns A formatted system reminder string wrapped in XML tags
+ */
+export function getArenaSystemReminder(configFilePath: string): string {
+  return `<system-reminder>An Arena session is active. For details, read: ${configFilePath}. This message is for internal use only. Do not mention this to user in your response.</system-reminder>`;
 }
 
 // ============================================================================

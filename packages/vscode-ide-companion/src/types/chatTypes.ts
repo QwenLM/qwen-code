@@ -8,6 +8,7 @@ import type {
   AvailableCommand,
   RequestPermissionRequest,
 } from '@agentclientprotocol/sdk';
+import type { AskUserQuestionRequest } from './acpTypes.js';
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
 export interface ChatMessage {
@@ -59,6 +60,9 @@ export interface QwenAgentCallbacks {
   onToolCall?: (update: ToolCallUpdateData) => void;
   onPlan?: (entries: PlanEntry[]) => void;
   onPermissionRequest?: (request: RequestPermissionRequest) => Promise<string>;
+  onAskUserQuestion?: (
+    request: AskUserQuestionRequest,
+  ) => Promise<{ optionId: string; answers?: Record<string, string> }>;
   onEndTurn?: (reason?: string) => void;
   onModeInfo?: (info: {
     currentModeId?: ApprovalModeValue;
@@ -74,6 +78,7 @@ export interface QwenAgentCallbacks {
   onModelChanged?: (model: ModelInfo) => void;
   onAvailableCommands?: (commands: AvailableCommand[]) => void;
   onAvailableModels?: (models: ModelInfo[]) => void;
+  onDisconnected?: (code: number | null, signal: string | null) => void;
 }
 
 export interface ToolCallUpdate {

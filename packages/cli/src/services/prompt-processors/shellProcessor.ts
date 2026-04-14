@@ -7,13 +7,12 @@
 import {
   ApprovalMode,
   checkCommandPermissions,
-  doesToolInvocationMatch,
   escapeShellArg,
   getShellConfiguration,
   ShellExecutionService,
   flatMapTextParts,
+  checkArgumentSafety,
 } from '@qwen-code/qwen-code-core';
-import type { AnyToolInvocation } from '@qwen-code/qwen-code-core';
 
 import type { CommandContext } from '../../ui/commands/types.js';
 import type { IPromptProcessor, PromptPipelineContent } from './types.js';
@@ -101,6 +100,16 @@ export class ShellProcessor implements IPromptProcessor {
     const { shell } = getShellConfiguration();
     const userArgsEscaped = escapeShellArg(userArgsRaw, shell);
 
+    // Check safety of the value that will be used for $ARGUMENTS (after removing outer quotes)
+    let userArgsForArgumentsPlaceholder = userArgsRaw.replace(
+      /^'([\s\S]*?)'$/,
+      '$1',
+    );
+    const argumentSafety = checkArgumentSafety(userArgsForArgumentsPlaceholder);
+    if (!argumentSafety.isSafe) {
+      userArgsForArgumentsPlaceholder = userArgsEscaped;
+    }
+
     const resolvedInjections: ResolvedShellInjection[] = injections.map(
       (injection) => {
         const command = injection.content;
@@ -109,10 +118,9 @@ export class ShellProcessor implements IPromptProcessor {
           return { ...injection, resolvedCommand: undefined };
         }
 
-        const resolvedCommand = command.replaceAll(
-          SHORTHAND_ARGS_PLACEHOLDER,
-          userArgsEscaped,
-        );
+        const resolvedCommand = command
+          .replaceAll(SHORTHAND_ARGS_PLACEHOLDER, userArgsEscaped) // Replace {{args}}
+          .replaceAll('$ARGUMENTS', userArgsForArgumentsPlaceholder);
         return { ...injection, resolvedCommand };
       },
     );
@@ -125,16 +133,13 @@ export class ShellProcessor implements IPromptProcessor {
 
       // Security check on the final, escaped command string.
       const { allAllowed, disallowedCommands, blockReason, isHardDenial } =
-        checkCommandPermissions(command, config, sessionShellAllowlist);
-      const allowedTools = config.getAllowedTools() || [];
-      const invocation = {
-        params: { command },
-      } as AnyToolInvocation;
-      const isAllowedBySettings = doesToolInvocationMatch(
-        'run_shell_command',
-        invocation,
-        allowedTools,
-      );
+        await checkCommandPermissions(command, config, sessionShellAllowlist);
+
+      // Determine if this command is explicitly auto-approved via PermissionManager
+      const pm = config.getPermissionManager?.();
+      const isAllowedBySettings = pm
+        ? (await pm.isCommandAllowed(command)) === 'allow'
+        : false;
 
       if (!allAllowed) {
         if (isHardDenial) {

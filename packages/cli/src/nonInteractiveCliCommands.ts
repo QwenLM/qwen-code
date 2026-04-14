@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
+import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
 import {
   CommandKind,
@@ -36,12 +37,15 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_COMMANDS');
  * - init: Initialize project configuration
  * - summary: Generate session summary
  * - compress: Compress conversation history
+ * - context: Show context window usage (read-only diagnostic)
  */
 export const ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE = [
   'init',
   'summary',
   'compress',
+  'btw',
   'bug',
+  'context',
 ] as const;
 
 /**
@@ -197,7 +201,7 @@ function filterCommandsForNonInteractive(
   allowedBuiltinCommandNames: Set<string>,
 ): SlashCommand[] {
   return commands.filter((cmd) => {
-    if (cmd.kind === CommandKind.FILE) {
+    if (cmd.kind === CommandKind.FILE || cmd.kind === CommandKind.SKILL) {
       return true;
     }
 
@@ -252,6 +256,7 @@ export const handleSlashCommand = async (
   // Load all commands to check if the command exists but is not allowed
   const allLoaders = [
     new BuiltinCommandLoader(config),
+    new BundledSkillLoader(config),
     new FileCommandLoader(config),
   ];
 
@@ -366,8 +371,12 @@ export const getAvailableCommands = async (
     // Only load BuiltinCommandLoader if there are allowed built-in commands
     const loaders =
       allowedBuiltinSet.size > 0
-        ? [new BuiltinCommandLoader(config), new FileCommandLoader(config)]
-        : [new FileCommandLoader(config)];
+        ? [
+            new BuiltinCommandLoader(config),
+            new BundledSkillLoader(config),
+            new FileCommandLoader(config),
+          ]
+        : [new BundledSkillLoader(config), new FileCommandLoader(config)];
 
     const commandService = await CommandService.create(loaders, abortSignal);
     const commands = commandService.getCommands();

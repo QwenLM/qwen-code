@@ -29,6 +29,7 @@ function createMockConfig(overrides?: Partial<Config>): Config {
   const baseModelsConfig = {
     getModel: vi.fn().mockReturnValue('default-model'),
     getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+    getGenerationConfig: vi.fn().mockReturnValue({}),
   } as unknown as ModelsConfig;
   const baseConfig: Partial<Config> = {
     refreshAuth: vi.fn().mockResolvedValue('refreshed'),
@@ -169,6 +170,7 @@ describe('validateNonInterActiveAuth', () => {
       getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     });
     await validateNonInteractiveAuth(
@@ -185,6 +187,7 @@ describe('validateNonInterActiveAuth', () => {
       getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     });
     await validateNonInteractiveAuth(
@@ -249,6 +252,7 @@ describe('validateNonInterActiveAuth', () => {
       getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     });
     await validateNonInteractiveAuth(
@@ -267,6 +271,7 @@ describe('validateNonInterActiveAuth', () => {
       getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     });
     try {

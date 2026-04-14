@@ -27,7 +27,17 @@ export const Composer = () => {
   const uiActions = useUIActions();
   const { vimEnabled } = useVimMode();
 
-  const { showAutoAcceptIndicator } = uiState;
+  const { showAutoAcceptIndicator, sessionStats, taskStartTokens } = uiState;
+
+  const tokens = Object.values(sessionStats.metrics?.models ?? {}).reduce(
+    (acc, model) => ({
+      prompt: acc.prompt + (model.tokens?.prompt ?? 0),
+      candidates: acc.candidates + (model.tokens?.candidates ?? 0),
+    }),
+    { prompt: 0, candidates: 0 },
+  );
+
+  const taskTokens = tokens.candidates - taskStartTokens;
 
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -64,6 +74,7 @@ export const Composer = () => {
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
+          candidatesTokens={taskTokens}
         />
       )}
 
@@ -99,11 +110,15 @@ export const Composer = () => {
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
               : '  ' + t('Type your message or @path/to/file')
           }
+          promptSuggestion={uiState.promptSuggestion}
+          onPromptSuggestionDismiss={uiState.dismissPromptSuggestion}
         />
       )}
 
       {/* Exclusive area: only one component visible at a time */}
-      {!showSuggestions &&
+      {/* Hide footer when a confirmation dialog (e.g. ask_user_question) is active */}
+      {uiState.isInputActive &&
+        !showSuggestions &&
         (showShortcuts ? (
           <KeyboardShortcuts />
         ) : (

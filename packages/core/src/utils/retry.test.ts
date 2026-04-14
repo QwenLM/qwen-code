@@ -7,7 +7,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { HttpError } from './retry.js';
-import { getErrorStatus, retryWithBackoff } from './retry.js';
+import { retryWithBackoff } from './retry.js';
+import { getErrorStatus } from './errors.js';
 import { setSimulate429 } from './testUtils.js';
 import { AuthType } from '../core/contentGenerator.js';
 
@@ -312,7 +313,10 @@ describe('retryWithBackoff', () => {
     });
 
     it('should throw immediately for Qwen OAuth with insufficient_quota message', async () => {
-      const errorWithInsufficientQuota = new Error('insufficient_quota');
+      const errorWithInsufficientQuota = Object.assign(
+        new Error('Free allocated quota exceeded.'),
+        { status: 429, code: 'insufficient_quota' },
+      );
 
       const fn = vi.fn().mockRejectedValue(errorWithInsufficientQuota);
 
@@ -323,15 +327,18 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen OAuth quota exceeded/);
+      await expect(promise).rejects.toThrow(
+        /Qwen OAuth free tier quota exceeded/,
+      );
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
     });
 
     it('should throw immediately for Qwen OAuth with free allocated quota exceeded message', async () => {
-      const errorWithQuotaExceeded = new Error(
-        'Free allocated quota exceeded.',
+      const errorWithQuotaExceeded = Object.assign(
+        new Error('Free allocated quota exceeded.'),
+        { status: 429, code: 'insufficient_quota' },
       );
 
       const fn = vi.fn().mockRejectedValue(errorWithQuotaExceeded);
@@ -343,7 +350,9 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen OAuth quota exceeded/);
+      await expect(promise).rejects.toThrow(
+        /Qwen OAuth free tier quota exceeded/,
+      );
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
@@ -403,7 +412,10 @@ describe('retryWithBackoff', () => {
     });
 
     it('should throw immediately for Qwen OAuth with quota message', async () => {
-      const errorWithQuota = new Error('quota exceeded');
+      const errorWithQuota = Object.assign(
+        new Error('Free allocated quota exceeded.'),
+        { status: 429, code: 'insufficient_quota' },
+      );
 
       const fn = vi.fn().mockRejectedValue(errorWithQuota);
 
@@ -414,7 +426,9 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen OAuth quota exceeded/);
+      await expect(promise).rejects.toThrow(
+        /Qwen OAuth free tier quota exceeded/,
+      );
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);

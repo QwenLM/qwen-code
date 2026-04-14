@@ -10,6 +10,7 @@
  * Handles Qwen Agent connection establishment, authentication, and session creation
  */
 
+import * as vscode from 'vscode';
 import type { AcpConnection } from './acpConnection.js';
 import { isAuthenticationRequiredError } from '../utils/authErrors.js';
 import { authMethod } from '../types/acpTypes.js';
@@ -18,6 +19,7 @@ import {
   extractSessionModeState,
   extractSessionModelState,
 } from '../utils/acpModelInfo.js';
+import { getErrorMessage } from '../utils/errorMessage.js';
 import type { ModelInfo } from '@agentclientprotocol/sdk';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 
@@ -72,8 +74,41 @@ export class QwenConnectionHandler {
 
     // Build extra CLI arguments (only essential parameters)
     const extraArgs: string[] = [];
+    const httpConfig = vscode.workspace.getConfiguration('http');
+    const proxyUrl =
+      httpConfig.get<string>('proxy') || httpConfig.get<string>('https.proxy');
+    if (proxyUrl) {
+      extraArgs.push('--proxy', proxyUrl);
+      console.log(
+        '[QwenAgentManager] Using proxy from VSCode settings:',
+        proxyUrl,
+      );
+    }
 
-    await connection.connect(cliEntryPath!, workingDir, extraArgs);
+    // Retry loop for connection.connect() to handle transient spawn failures
+    // (e.g., SIGTERM during the 1-second startup grace period)
+    const maxConnectAttempts = 3;
+    for (let attempt = 1; attempt <= maxConnectAttempts; attempt++) {
+      try {
+        console.log(
+          `[QwenAgentManager] Connecting to ACP process (attempt ${attempt}/${maxConnectAttempts})...`,
+        );
+        await connection.connect(cliEntryPath!, workingDir, extraArgs);
+        console.log('[QwenAgentManager] ACP process connected successfully');
+        break;
+      } catch (connectError) {
+        console.error(
+          `[QwenAgentManager] Connect attempt ${attempt} failed:`,
+          getErrorMessage(connectError),
+        );
+        if (attempt === maxConnectAttempts) {
+          throw connectError;
+        }
+        const delay = Math.min(1000 * Math.pow(2, attempt - 1), 4000);
+        console.log(`[QwenAgentManager] Retrying connect in ${delay}ms...`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
 
     // Try to restore existing session or create new session
     // Note: Auto-restore on connect is disabled to avoid surprising loads
@@ -167,6 +202,8 @@ export class QwenConnectionHandler {
     authMethod: string,
     autoAuthenticate: boolean,
   ): Promise<unknown> {
+    let lastError: unknown;
+
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         console.log(
@@ -176,8 +213,8 @@ export class QwenConnectionHandler {
         console.log('[QwenAgentManager] Session created successfully');
         return res;
       } catch (error) {
-        const errorMessage =
-          error instanceof Error ? error.message : String(error);
+        lastError = error;
+        const errorMessage = getErrorMessage(error);
         console.error(
           `[QwenAgentManager] Session creation attempt ${attempt} failed:`,
           errorMessage,
@@ -221,15 +258,17 @@ export class QwenConnectionHandler {
         }
 
         if (attempt === maxRetries) {
-          throw new Error(
-            `Session creation failed after ${maxRetries} attempts: ${errorMessage}`,
-          );
+          throw error;
         }
 
         const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
         console.log(`[QwenAgentManager] Retrying in ${delay}ms...`);
         await new Promise((resolve) => setTimeout(resolve, delay));
       }
+    }
+
+    if (lastError !== undefined) {
+      throw lastError;
     }
 
     throw new Error('Session creation failed unexpectedly');

@@ -27,6 +27,7 @@ export {
 export {
   logStartSession,
   logUserPrompt,
+  logUserRetry,
   logToolCall,
   logApiRequest,
   logApiError,
@@ -48,12 +49,16 @@ export {
   logAuth,
   logSkillLaunch,
   logUserFeedback,
+  logArenaSessionStarted,
+  logArenaAgentCompleted,
+  logArenaSessionEnded,
 } from './loggers.js';
 export type { SlashCommandEvent, ChatCompressionEvent } from './types.js';
 export {
   SlashCommandStatus,
   EndSessionEvent,
   UserPromptEvent,
+  UserRetryEvent,
   ApiRequestEvent,
   ApiErrorEvent,
   ApiResponseEvent,
@@ -70,8 +75,18 @@ export {
   SkillLaunchEvent,
   UserFeedbackEvent,
   UserFeedbackRating,
+  makeArenaSessionStartedEvent,
+  makeArenaAgentCompletedEvent,
+  makeArenaSessionEndedEvent,
 } from './types.js';
 export { makeSlashCommandEvent, makeChatCompressionEvent } from './types.js';
+export type {
+  ArenaSessionStartedEvent,
+  ArenaAgentCompletedEvent,
+  ArenaSessionEndedEvent,
+  ArenaSessionEndedStatus,
+  ArenaAgentCompletedStatus,
+} from './types.js';
 export type { TelemetryEvent } from './types.js';
 export { SpanStatusCode, ValueType } from '@opentelemetry/api';
 export { SemanticAttributes } from '@opentelemetry/semantic-conventions';
@@ -98,6 +113,10 @@ export {
   recordPerformanceRegression,
   recordBaselineComparison,
   isPerformanceMonitoringActive,
+  // Arena metrics functions
+  recordArenaSessionStartedMetrics,
+  recordArenaAgentCompletedMetrics,
+  recordArenaSessionEndedMetrics,
   // Performance monitoring types
   PerformanceMetricType,
   MemoryMetricType,
@@ -106,3 +125,4 @@ export {
   FileOperation,
 } from './metrics.js';
 export { QwenLogger } from './qwen-logger/qwen-logger.js';
+export { sanitizeHookName } from './sanitize.js';

@@ -8,7 +8,7 @@
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useGeminiStream } from './useGeminiStream.js';
+import { useGeminiStream, classifyApiError } from './useGeminiStream.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
 import type {
   TrackedToolCall,
@@ -28,6 +28,7 @@ import {
   ApprovalMode,
   AuthType,
   GeminiEventType as ServerGeminiEventType,
+  SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
 } from '@qwen-code/qwen-code-core';
@@ -202,6 +203,9 @@ describe('useGeminiStream', () => {
         .fn()
         .mockReturnValue(contentGeneratorConfig),
       getMaxSessionTurns: vi.fn(() => 50),
+      getArenaAgentClient: vi.fn(() => null),
+      isCronEnabled: vi.fn(() => false),
+      getCronScheduler: vi.fn(() => null),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
@@ -482,7 +486,7 @@ describe('useGeminiStream', () => {
       expectedMergedResponse,
       expect.any(AbortSignal),
       'prompt-id-2',
-      { isContinuation: true },
+      { type: SendMessageType.ToolResult },
     );
   });
 
@@ -806,7 +810,7 @@ describe('useGeminiStream', () => {
         toolCallResponseParts,
         expect.any(AbortSignal),
         'prompt-id-4',
-        { isContinuation: true },
+        { type: SendMessageType.ToolResult },
       );
     });
 
@@ -832,7 +836,7 @@ describe('useGeminiStream', () => {
 
       // Wait for the first part of the response
       await waitFor(() => {
-        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
 
       // Call cancelOngoingRequest directly
@@ -981,7 +985,7 @@ describe('useGeminiStream', () => {
       });
 
       await waitFor(() => {
-        expect(result.current.streamingState).toBe(StreamingState.Responding);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
       });
 
       // Cancel the request
@@ -1122,7 +1126,7 @@ describe('useGeminiStream', () => {
           'This is the actual prompt from the command file.',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
 
         expect(mockScheduleToolCalls).not.toHaveBeenCalled();
@@ -1149,7 +1153,7 @@ describe('useGeminiStream', () => {
           '',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
       });
     });
@@ -1168,7 +1172,7 @@ describe('useGeminiStream', () => {
           '// This is a line comment',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
       });
     });
@@ -1187,7 +1191,7 @@ describe('useGeminiStream', () => {
           '/* This is a block comment */',
           expect.any(AbortSignal),
           expect.any(String),
-          undefined,
+          { type: SendMessageType.UserQuery },
         );
       });
     });
@@ -2091,7 +2095,7 @@ describe('useGeminiStream', () => {
       processedQueryParts, // Argument 1: The parts array directly
       expect.any(AbortSignal), // Argument 2: An AbortSignal
       expect.any(String), // Argument 3: The prompt_id string
-      undefined, // Argument 4: Options (undefined for normal prompts)
+      { type: SendMessageType.UserQuery }, // Argument 4: The options
     );
   });
 
@@ -2244,6 +2248,7 @@ describe('useGeminiStream', () => {
     it('should show a retry countdown and update pending history over time', async () => {
       vi.useFakeTimers();
       try {
+        let continueToRetryAttempt: (() => void) | undefined;
         let resolveStream: (() => void) | undefined;
         mockSendMessageStream.mockReturnValue(
           (async function* () {
@@ -2256,6 +2261,9 @@ describe('useGeminiStream', () => {
                 delayMs: 3000,
               },
             };
+            await new Promise<void>((resolve) => {
+              continueToRetryAttempt = resolve;
+            });
             yield {
               type: ServerGeminiEventType.Retry,
             };
@@ -2330,6 +2338,12 @@ describe('useGeminiStream', () => {
           '2s',
         );
 
+        continueToRetryAttempt?.();
+
+        await act(async () => {
+          await Promise.resolve();
+        });
+
         resolveStream?.();
 
         await act(async () => {
@@ -2338,6 +2352,103 @@ describe('useGeminiStream', () => {
         });
 
         // Error item (with hint) should be cleared after retry succeeds
+        const remainingError = result.current.pendingHistoryItems.find(
+          (item) => item.type === MessageType.ERROR,
+        );
+        expect(remainingError).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should clear retry errors after auto-retry succeeds once the countdown has elapsed', async () => {
+      vi.useFakeTimers();
+      try {
+        let continueAfterCountdown: (() => void) | undefined;
+        mockSendMessageStream.mockReturnValue(
+          (async function* () {
+            yield {
+              type: ServerGeminiEventType.Retry,
+              retryInfo: {
+                message: '[API Error: Rate limit exceeded]',
+                attempt: 1,
+                maxRetries: 3,
+                delayMs: 1000,
+              },
+            };
+            await new Promise<void>((resolve) => {
+              continueAfterCountdown = resolve;
+            });
+            yield {
+              type: ServerGeminiEventType.Retry,
+            };
+            yield {
+              type: ServerGeminiEventType.Text,
+              value: 'Success after retry',
+            };
+            yield {
+              type: ServerGeminiEventType.Finished,
+              value: { reason: 'STOP', usageMetadata: undefined },
+            };
+          })(),
+        );
+
+        const { result } = renderHook(() =>
+          useGeminiStream(
+            new MockedGeminiClientClass(mockConfig),
+            [],
+            mockAddItem,
+            mockConfig,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+          ),
+        );
+
+        act(() => {
+          void result.current.submitQuery('Trigger retry after countdown');
+        });
+
+        let errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === MessageType.ERROR,
+        ) as { hint?: string } | undefined;
+        for (let attempts = 0; attempts < 5 && !errorItem; attempts++) {
+          await act(async () => {
+            await Promise.resolve();
+          });
+          errorItem = result.current.pendingHistoryItems.find(
+            (item) => item.type === MessageType.ERROR,
+          ) as { hint?: string } | undefined;
+        }
+        expect(errorItem?.hint).toContain('1s');
+
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(1000);
+        });
+
+        const staleErrorBeforeRetryCompletes =
+          result.current.pendingHistoryItems.find(
+            (item) => item.type === MessageType.ERROR,
+          ) as { hint?: string } | undefined;
+        expect(staleErrorBeforeRetryCompletes?.hint).toContain('0s');
+
+        await act(async () => {
+          continueAfterCountdown?.();
+          await Promise.resolve();
+          await Promise.resolve();
+        });
+
         const remainingError = result.current.pendingHistoryItems.find(
           (item) => item.type === MessageType.ERROR,
         );
@@ -2526,9 +2637,183 @@ describe('useGeminiStream', () => {
         expect.any(String),
       );
     });
+
+    it('should clear static error when starting a new query', async () => {
+      // First, mock a stream that yields an error (static error without countdown)
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Error,
+            value: { error: { message: 'First error' } },
+          };
+        })(),
+      );
+
+      const { result } = renderHook(() =>
+        useGeminiStream(
+          new MockedGeminiClientClass(mockConfig),
+          [],
+          mockAddItem,
+          mockConfig,
+          mockLoadedSettings,
+          mockOnDebugMessage,
+          mockHandleSlashCommand,
+          false,
+          () => 'vscode' as EditorType,
+          () => {},
+          () => Promise.resolve(),
+          false,
+          () => {},
+          () => {},
+          () => {},
+          () => {},
+          80,
+          24,
+        ),
+      );
+
+      // Submit first query that will fail
+      await act(async () => {
+        await result.current.submitQuery('First query');
+      });
+
+      // Verify error appears in pending history items
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeDefined();
+      });
+
+      // Now mock a successful stream for the second query
+      mockSendMessageStream.mockReturnValueOnce(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Text,
+            value: 'Success response',
+          };
+        })(),
+      );
+
+      // Submit second query
+      await act(async () => {
+        await result.current.submitQuery('Second query');
+      });
+
+      // Verify the error is cleared (no longer in pending history items)
+      await waitFor(() => {
+        const errorItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'error',
+        );
+        expect(errorItem).toBeUndefined();
+      });
+    });
   });
 
   describe('Concurrent Execution Prevention', () => {
+    it('should allow /btw slash commands while a main response is in progress', async () => {
+      let resolveFirstCall!: () => void;
+
+      const firstCallPromise = new Promise<void>((resolve) => {
+        resolveFirstCall = resolve;
+      });
+
+      const firstStream = (async function* () {
+        yield {
+          type: ServerGeminiEventType.Content,
+          value: 'First call content',
+        };
+        await firstCallPromise;
+      })();
+
+      mockSendMessageStream.mockImplementation(() => firstStream);
+      mockHandleSlashCommand.mockImplementation(async (command) => {
+        if (command === '/btw quick side question') {
+          return { type: 'handled' };
+        }
+        return false;
+      });
+
+      const { result } = renderTestHook();
+
+      let mainRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery('First query');
+      });
+
+      try {
+        await waitFor(() => {
+          expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        });
+
+        await act(async () => {
+          await result.current.submitQuery('/btw quick side question');
+        });
+
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith(
+          '/btw quick side question',
+        );
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      } finally {
+        resolveFirstCall();
+        await mainRequest;
+      }
+    });
+
+    it('should keep the main request cancellable after submitting /btw in parallel', async () => {
+      let resolveFirstCall!: () => void;
+      let mainAbortSignal: AbortSignal | undefined;
+
+      const firstCallPromise = new Promise<void>((resolve) => {
+        resolveFirstCall = resolve;
+      });
+
+      mockSendMessageStream.mockImplementation((_query, signal) => {
+        mainAbortSignal = signal;
+        return (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'First call content',
+          };
+          await firstCallPromise;
+        })();
+      });
+      mockHandleSlashCommand.mockImplementation(async (command) => {
+        if (command === '/btw quick side question') {
+          return { type: 'handled' };
+        }
+        return false;
+      });
+
+      const { result } = renderTestHook();
+
+      let mainRequest!: Promise<void>;
+      await act(async () => {
+        mainRequest = result.current.submitQuery('First query');
+      });
+
+      try {
+        await waitFor(() => {
+          expect(mainAbortSignal).toBeDefined();
+          expect(result.current.streamingState).toBe(StreamingState.Responding);
+        });
+
+        await act(async () => {
+          await result.current.submitQuery('/btw quick side question');
+        });
+
+        act(() => {
+          result.current.cancelOngoingRequest();
+        });
+
+        expect(mainAbortSignal?.aborted).toBe(true);
+      } finally {
+        resolveFirstCall();
+        await mainRequest;
+      }
+    });
+
     it('should prevent concurrent submitQuery calls', async () => {
       let resolveFirstCall!: () => void;
       let resolveSecondCall!: () => void;
@@ -2598,7 +2883,7 @@ describe('useGeminiStream', () => {
         'First query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
 
       // Verify only the first query was added to history
@@ -2650,14 +2935,14 @@ describe('useGeminiStream', () => {
         'First query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
       expect(mockSendMessageStream).toHaveBeenNthCalledWith(
         2,
         'Second query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
     });
 
@@ -2680,7 +2965,7 @@ describe('useGeminiStream', () => {
         'Second query',
         expect.any(AbortSignal),
         expect.any(String),
-        undefined,
+        { type: SendMessageType.UserQuery },
       );
     });
   });
@@ -2942,5 +3227,400 @@ describe('useGeminiStream', () => {
         expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
       });
     });
+  });
+
+  describe('UserPromptSubmitBlocked Event', () => {
+    it('should handle UserPromptSubmitBlocked event and add blocked history item', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.UserPromptSubmitBlocked,
+            value: {
+              reason: 'Hook blocked due to security policy',
+              originalPrompt: 'This is the original user prompt',
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('This is the original user prompt');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'user_prompt_submit_blocked',
+            reason: 'Hook blocked due to security policy',
+            originalPrompt: 'This is the original user prompt',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Verify streaming state transitions correctly
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should move pending history item before adding UserPromptSubmitBlocked event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Partial response before block',
+          };
+          yield {
+            type: ServerGeminiEventType.UserPromptSubmitBlocked,
+            value: {
+              reason: 'Security violation detected',
+              originalPrompt: 'Execute system command',
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Execute system command');
+      });
+
+      // Verify content was added first
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'Partial response before block',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Then verify blocked event was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'user_prompt_submit_blocked',
+            reason: 'Security violation detected',
+            originalPrompt: 'Execute system command',
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+  });
+
+  describe('StopHookLoop Event', () => {
+    it('should handle StopHookLoop event and add stop hook loop history item', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 3,
+              reasons: [
+                'Reason 1: Continue analysis',
+                'Reason 2: More details needed',
+                'Reason 3: Incomplete response',
+              ],
+              stopHookCount: 3,
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test query with stop hooks');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_loop',
+            iterationCount: 3,
+            reasons: [
+              'Reason 1: Continue analysis',
+              'Reason 2: More details needed',
+              'Reason 3: Incomplete response',
+            ],
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Verify streaming state transitions correctly
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should move pending history item before adding StopHookLoop event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Initial response before loop',
+          };
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 5,
+              reasons: ['Hook reason 1', 'Hook reason 2'],
+              stopHookCount: 2,
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('query triggering stop hooks');
+      });
+
+      // Verify content was added first
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'Initial response before loop',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Then verify stop hook loop event was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_loop',
+            iterationCount: 5,
+            reasons: ['Hook reason 1', 'Hook reason 2'],
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+
+    it('should handle single iteration StopHookLoop event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 1,
+              reasons: ['Single hook execution'],
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('single iteration query');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_loop',
+            iterationCount: 1,
+            reasons: ['Single hook execution'],
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+  });
+
+  describe('HookSystemMessage Event', () => {
+    it('should handle HookSystemMessage event and add stop_hook_system_message history item', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.HookSystemMessage,
+            value: '🔄 Ralph iteration 3 | No completion promise set',
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test query with hook system message');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_system_message',
+            message: '🔄 Ralph iteration 3 | No completion promise set',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should display HookSystemMessage after content', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Here is the response',
+          };
+          yield {
+            type: ServerGeminiEventType.HookSystemMessage,
+            value: 'Stop hook feedback message',
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'query with response and hook message',
+        );
+      });
+
+      // Verify content was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'Here is the response',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Verify hook system message was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_system_message',
+            message: 'Stop hook feedback message',
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+  });
+});
+
+describe('classifyApiError', () => {
+  it('should classify rate limit errors by status code 429', () => {
+    expect(classifyApiError({ message: 'error', status: 429 })).toBe(
+      'rate_limit',
+    );
+  });
+
+  it('should classify rate limit errors by message', () => {
+    expect(classifyApiError({ message: 'Rate limit exceeded' })).toBe(
+      'rate_limit',
+    );
+  });
+
+  it('should classify authentication errors by status code 401', () => {
+    expect(classifyApiError({ message: 'error', status: 401 })).toBe(
+      'authentication_failed',
+    );
+  });
+
+  it('should classify authentication errors by message', () => {
+    expect(classifyApiError({ message: 'Unauthorized access' })).toBe(
+      'authentication_failed',
+    );
+  });
+
+  it('should classify billing errors by status code 402', () => {
+    expect(classifyApiError({ message: 'error', status: 402 })).toBe(
+      'billing_error',
+    );
+  });
+
+  it('should classify billing errors by status code 403', () => {
+    expect(classifyApiError({ message: 'error', status: 403 })).toBe(
+      'billing_error',
+    );
+  });
+
+  it('should classify billing errors by message containing billing', () => {
+    expect(classifyApiError({ message: 'Billing issue detected' })).toBe(
+      'billing_error',
+    );
+  });
+
+  it('should classify billing errors by message containing quota', () => {
+    expect(classifyApiError({ message: 'Quota exceeded' })).toBe(
+      'billing_error',
+    );
+  });
+
+  it('should classify invalid request errors by status code 400', () => {
+    expect(classifyApiError({ message: 'error', status: 400 })).toBe(
+      'invalid_request',
+    );
+  });
+
+  it('should classify invalid request errors by message', () => {
+    expect(classifyApiError({ message: 'Invalid request format' })).toBe(
+      'invalid_request',
+    );
+  });
+
+  it('should classify server errors by status code 500', () => {
+    expect(classifyApiError({ message: 'error', status: 500 })).toBe(
+      'server_error',
+    );
+  });
+
+  it('should classify server errors by status code 502', () => {
+    expect(classifyApiError({ message: 'error', status: 502 })).toBe(
+      'server_error',
+    );
+  });
+
+  it('should classify server errors by status code 503', () => {
+    expect(classifyApiError({ message: 'error', status: 503 })).toBe(
+      'server_error',
+    );
+  });
+
+  it('should classify max output tokens errors by message', () => {
+    expect(classifyApiError({ message: 'max_tokens limit reached' })).toBe(
+      'max_output_tokens',
+    );
+  });
+
+  it('should classify token limit errors by message', () => {
+    expect(classifyApiError({ message: 'Token limit exceeded' })).toBe(
+      'max_output_tokens',
+    );
+  });
+
+  it('should return unknown for unrecognized errors', () => {
+    expect(classifyApiError({ message: 'Some random error' })).toBe('unknown');
+  });
+
+  it('should return unknown for empty message', () => {
+    expect(classifyApiError({ message: '' })).toBe('unknown');
+  });
+
+  it('should handle case insensitive matching', () => {
+    expect(classifyApiError({ message: 'RATE LIMIT exceeded' })).toBe(
+      'rate_limit',
+    );
+    expect(classifyApiError({ message: 'UNAUTHORIZED' })).toBe(
+      'authentication_failed',
+    );
+    expect(classifyApiError({ message: 'BILLING error' })).toBe(
+      'billing_error',
+    );
   });
 });

@@ -40,6 +40,7 @@ describe('debugLogger', () => {
 
   beforeEach(() => {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
+    Storage.setRuntimeBaseDir(null);
     vi.clearAllMocks();
     vi.useFakeTimers();
     vi.setSystemTime(new Date('2026-01-24T10:30:00.000Z'));
@@ -50,6 +51,7 @@ describe('debugLogger', () => {
   afterEach(() => {
     vi.useRealTimers();
     setDebugLogSession(null);
+    Storage.setRuntimeBaseDir(null);
     if (previousDebugLogFileEnv === undefined) {
       delete process.env['QWEN_DEBUG_LOG_FILE'];
     } else {
@@ -113,6 +115,27 @@ describe('debugLogger', () => {
       expect(calls[1]?.[1]).toContain('[INFO]');
       expect(calls[2]?.[1]).toContain('[WARN]');
       expect(calls[3]?.[1]).toContain('[ERROR]');
+    });
+
+    it('creates a new debug directory after the runtime base dir changes', async () => {
+      Storage.setRuntimeBaseDir(path.resolve('runtime-a'));
+      const logger = createDebugLogger();
+      logger.debug('first');
+      await vi.runAllTimersAsync();
+
+      Storage.setRuntimeBaseDir(path.resolve('runtime-b'));
+      logger.debug('second');
+      await vi.runAllTimersAsync();
+
+      const mkdirCalls = vi.mocked(fs.mkdir).mock.calls;
+      expect(mkdirCalls).toContainEqual([
+        path.join(path.resolve('runtime-a'), 'debug'),
+        { recursive: true },
+      ]);
+      expect(mkdirCalls).toContainEqual([
+        path.join(path.resolve('runtime-b'), 'debug'),
+        { recursive: true },
+      ]);
     });
 
     it('formats multiple arguments', async () => {

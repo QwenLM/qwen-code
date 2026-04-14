@@ -7,14 +7,37 @@
 import type {
   AgentSideConnection,
   FileSystemCapability,
+  ReadTextFileRequest,
+  WriteTextFileRequest,
+  WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
-  FileReadResult,
   FileSystemService,
+  ReadTextFileResponse,
 } from '@qwen-code/qwen-code-core';
 
 const RESOURCE_NOT_FOUND_CODE = -32002;
+
+function getErrorCode(error: unknown): unknown {
+  if (error instanceof RequestError) {
+    return error.code;
+  }
+
+  if (typeof error === 'object' && error !== null && 'code' in error) {
+    return (error as { code?: unknown }).code;
+  }
+
+  return undefined;
+}
+
+function createEnoentError(filePath: string): NodeJS.ErrnoException {
+  const err = new Error(`File not found: ${filePath}`) as NodeJS.ErrnoException;
+  err.code = 'ENOENT';
+  err.errno = -2;
+  err.path = filePath;
+  return err;
+}
 
 export class AcpFileSystemService implements FileSystemService {
   constructor(
@@ -24,82 +47,50 @@ export class AcpFileSystemService implements FileSystemService {
     private readonly fallback: FileSystemService,
   ) {}
 
-  async readTextFile(filePath: string): Promise<string> {
+  async readTextFile(
+    params: Omit<ReadTextFileRequest, 'sessionId'>,
+  ): Promise<ReadTextFileResponse> {
     if (!this.capabilities.readTextFile) {
-      return this.fallback.readTextFile(filePath);
+      return this.fallback.readTextFile(params);
     }
 
-    let response: { content: string };
+    let response: ReadTextFileResponse;
     try {
       response = await this.connection.readTextFile({
-        path: filePath,
+        ...params,
         sessionId: this.sessionId,
       });
     } catch (error) {
-      const errorCode =
-        error instanceof RequestError
-          ? error.code
-          : typeof error === 'object' && error !== null && 'code' in error
-            ? (error as { code?: unknown }).code
-            : undefined;
+      const errorCode = getErrorCode(error);
 
       if (errorCode === RESOURCE_NOT_FOUND_CODE) {
-        const err = new Error(
-          `File not found: ${filePath}`,
-        ) as NodeJS.ErrnoException;
-        err.code = 'ENOENT';
-        err.errno = -2;
-        err.path = filePath;
-        throw err;
+        throw createEnoentError(params.path);
       }
 
       throw error;
     }
 
-    return response.content;
-  }
-
-  async readTextFileWithInfo(filePath: string): Promise<FileReadResult> {
-    // ACP protocol does not expose encoding metadata; delegate to the local
-    // fallback which performs a single-pass read with encoding detection.
-    return this.fallback.readTextFileWithInfo(filePath);
+    return response;
   }
 
   async writeTextFile(
-    filePath: string,
-    content: string,
-    options?: { bom?: boolean; encoding?: string },
-  ): Promise<void> {
+    params: Omit<WriteTextFileRequest, 'sessionId'>,
+  ): Promise<WriteTextFileResponse> {
     if (!this.capabilities.writeTextFile) {
-      return this.fallback.writeTextFile(filePath, content, options);
+      return this.fallback.writeTextFile(params);
     }
 
-    const finalContent = options?.bom ? '\uFEFF' + content : content;
+    const finalContent = params._meta?.['bom']
+      ? '\uFEFF' + params.content
+      : params.content;
 
     await this.connection.writeTextFile({
-      path: filePath,
+      ...params,
       content: finalContent,
       sessionId: this.sessionId,
     });
-  }
 
-  async detectFileBOM(filePath: string): Promise<boolean> {
-    if (this.capabilities.readTextFile) {
-      try {
-        const response = await this.connection.readTextFile({
-          path: filePath,
-          sessionId: this.sessionId,
-          limit: 1,
-        });
-        return (
-          response.content.length > 0 &&
-          response.content.codePointAt(0) === 0xfeff
-        );
-      } catch {
-        // Fall through to fallback if ACP read fails
-      }
-    }
-    return this.fallback.detectFileBOM(filePath);
+    return { _meta: params._meta };
   }
 
   findFiles(fileName: string, searchPaths: readonly string[]): string[] {

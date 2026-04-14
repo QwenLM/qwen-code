@@ -10,6 +10,10 @@ export interface TextMessage {
   role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
+  kind?: 'image';
+  imagePath?: string;
+  imageSrc?: string;
+  imageMissing?: boolean;
   fileContext?: {
     fileName: string;
     filePath: string;
@@ -161,7 +165,20 @@ export const useMessageHandling = () => {
         if (idx === null) {
           idx = next.length;
           thinkingMessageIndexRef.current = idx;
-          next.push({ role: 'thinking', content: '', timestamp: Date.now() });
+          // Use a timestamp just before the assistant placeholder so thinking
+          // sorts above the response text when messages are ordered by time.
+          const assistantIdx = streamingMessageIndexRef.current;
+          const assistantTs =
+            assistantIdx !== null &&
+            assistantIdx >= 0 &&
+            assistantIdx < next.length
+              ? next[assistantIdx].timestamp
+              : Date.now();
+          next.push({
+            role: 'thinking',
+            content: '',
+            timestamp: assistantTs - 1,
+          });
         }
         if (idx >= 0 && idx < next.length) {
           const target = next[idx];

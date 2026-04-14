@@ -110,6 +110,16 @@ describe('SettingsSchema', () => {
       ).toBeDefined();
     });
 
+    it('should have sandboxImage setting under tools', () => {
+      expect(getSettingsSchema().tools.properties.sandboxImage).toBeDefined();
+      expect(getSettingsSchema().tools.properties.sandboxImage.type).toBe(
+        'string',
+      );
+      expect(getSettingsSchema().tools.properties.sandboxImage.default).toBe(
+        undefined,
+      );
+    });
+
     it('should have unique categories', () => {
       const categories = new Set();
 
@@ -181,9 +191,7 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().security.properties.auth.showInDialog).toBe(
         false,
       );
-      expect(getSettingsSchema().tools.properties.core.showInDialog).toBe(
-        false,
-      );
+      expect(getSettingsSchema().permissions.showInDialog).toBe(false);
       expect(getSettingsSchema().mcpServers.showInDialog).toBe(false);
       expect(getSettingsSchema().telemetry.showInDialog).toBe(false);
 

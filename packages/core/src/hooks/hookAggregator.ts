@@ -8,6 +8,8 @@ import {
   HookEventName,
   DefaultHookOutput,
   PreToolUseHookOutput,
+  PostToolUseHookOutput,
+  PostToolUseFailureHookOutput,
   StopHookOutput,
   PermissionRequestHookOutput,
 } from './types.js';
@@ -38,6 +40,21 @@ export class HookAggregator {
     results: HookExecutionResult[],
     eventName: HookEventName,
   ): AggregatedHookResult {
+    // StopFailure special handling: fire-and-forget, ignore all outputs and errors
+    if (eventName === HookEventName.StopFailure) {
+      let totalDuration = 0;
+      for (const result of results) {
+        totalDuration += result.duration;
+      }
+      return {
+        success: true, // Always return success
+        allOutputs: [],
+        errors: [], // Ignore errors
+        totalDuration,
+        finalOutput: undefined,
+      };
+    }
+
     const allOutputs: HookOutput[] = [];
     const errors: Error[] = [];
     let totalDuration = 0;
@@ -89,7 +106,8 @@ export class HookAggregator {
       case HookEventName.PostToolUseFailure:
       case HookEventName.Stop:
       case HookEventName.UserPromptSubmit:
-        merged = this.mergeWithOrLogic(outputs);
+      case HookEventName.SubagentStop:
+        merged = this.mergeWithOrLogic(outputs, eventName);
         break;
       case HookEventName.PermissionRequest:
         merged = this.mergePermissionRequestOutputs(outputs);
@@ -109,8 +127,12 @@ export class HookAggregator {
    * - Reasons are concatenated with newlines
    * - continue=false takes precedence over continue=true
    * - Additional context is concatenated
+   * - For PostToolUse, decision and reason are required fields
    */
-  private mergeWithOrLogic(outputs: HookOutput[]): HookOutput {
+  private mergeWithOrLogic(
+    outputs: HookOutput[],
+    _eventName?: HookEventName,
+  ): HookOutput {
     const merged: HookOutput = {};
     const reasons: string[] = [];
     const additionalContexts: string[] = [];
@@ -337,7 +359,12 @@ export class HookAggregator {
     switch (eventName) {
       case HookEventName.PreToolUse:
         return new PreToolUseHookOutput(output);
+      case HookEventName.PostToolUse:
+        return new PostToolUseHookOutput(output);
+      case HookEventName.PostToolUseFailure:
+        return new PostToolUseFailureHookOutput(output);
       case HookEventName.Stop:
+      case HookEventName.SubagentStop:
         return new StopHookOutput(output);
       case HookEventName.PermissionRequest:
         return new PermissionRequestHookOutput(output);

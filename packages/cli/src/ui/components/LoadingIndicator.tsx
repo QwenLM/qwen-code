@@ -11,7 +11,7 @@ import { theme } from '../semantic-colors.js';
 import { useStreamingContext } from '../contexts/StreamingContext.js';
 import { StreamingState } from '../types.js';
 import { GeminiRespondingSpinner } from './GeminiRespondingSpinner.js';
-import { formatDuration } from '../utils/formatters.js';
+import { formatDuration, formatTokenCount } from '../utils/formatters.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import { t } from '../../i18n/index.js';
@@ -21,6 +21,7 @@ interface LoadingIndicatorProps {
   elapsedTime: number;
   rightContent?: React.ReactNode;
   thought?: ThoughtSummary | null;
+  candidatesTokens?: number;
 }
 
 export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
@@ -28,6 +29,7 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   elapsedTime,
   rightContent,
   thought,
+  candidatesTokens,
 }) => {
   const streamingState = useStreamingContext();
   const { columns: terminalWidth } = useTerminalSize();
@@ -39,18 +41,26 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
 
   const primaryText = thought?.subject || currentLoadingPhrase;
 
+  const outputTokens = candidatesTokens ?? 0;
+  const showTokens = !isNarrow && outputTokens > 0;
+
+  const timeStr =
+    elapsedTime < 60 ? `${elapsedTime}s` : formatDuration(elapsedTime * 1000);
+
+  const tokenStr = showTokens
+    ? ` · ↓ ${formatTokenCount(outputTokens)} tokens`
+    : '';
+
   const cancelAndTimerContent =
     streamingState !== StreamingState.WaitingForConfirmation
-      ? t('(esc to cancel, {{time}})', {
-          time:
-            elapsedTime < 60
-              ? `${elapsedTime}s`
-              : formatDuration(elapsedTime * 1000),
+      ? t('({{time}}{{tokens}} · esc to cancel)', {
+          time: timeStr,
+          tokens: tokenStr,
         })
       : null;
 
   return (
-    <Box paddingLeft={0} flexDirection="column">
+    <Box paddingLeft={2} flexDirection="column">
       {/* Main loading line */}
       <Box
         width="100%"

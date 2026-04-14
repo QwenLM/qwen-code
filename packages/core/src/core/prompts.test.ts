@@ -50,6 +50,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     const prompt = getCoreSystemPrompt();
     expect(prompt).not.toContain('---\n\n'); // Separator should not be present
     expect(prompt).toContain('You are Qwen Code, an interactive CLI agent'); // Check for core content
+    expect(prompt).toContain('# Executing actions with care');
     expect(prompt).toMatchSnapshot(); // Use snapshot for base prompt structure
   });
 
@@ -78,6 +79,35 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt.endsWith(expectedSuffix)).toBe(true);
     expect(prompt).toContain('You are Qwen Code, an interactive CLI agent'); // Ensure base prompt follows
     expect(prompt).toMatchSnapshot(); // Snapshot the combined prompt
+  });
+
+  it('should append extra system prompt instructions after user memory when provided', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    const memory = 'Remember the project conventions.';
+    const appendInstruction = 'Always answer in exactly one sentence.';
+    const prompt = getCoreSystemPrompt(memory, undefined, appendInstruction);
+
+    expect(prompt).toContain(`\n\n---\n\n${memory}`);
+    expect(prompt).toContain(`\n\n---\n\n${appendInstruction}`);
+    expect(prompt.indexOf(memory)).toBeLessThan(
+      prompt.indexOf(appendInstruction),
+    );
+  });
+
+  it('should append extra instructions after a custom system prompt and user memory', () => {
+    const customInstruction = 'You are a release manager.';
+    const userMemory = 'The repo uses pnpm.';
+    const appendInstruction = 'Only report blocking issues.';
+
+    const result = getCustomSystemPrompt(
+      customInstruction,
+      userMemory,
+      appendInstruction,
+    );
+
+    expect(result).toBe(
+      [customInstruction, userMemory, appendInstruction].join('\n\n---\n\n'),
+    );
   });
 
   it('should include sandbox-specific instructions when SANDBOX env var is set', () => {

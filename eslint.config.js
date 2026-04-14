@@ -28,6 +28,7 @@ export default tseslint.config(
       'dist/**',
       'docs-site/.next/**',
       'docs-site/out/**',
+      '.qwen/**',
     ],
   },
   eslint.configs.recommended,
@@ -59,11 +60,12 @@ export default tseslint.config(
       ...importPlugin.configs.typescript.rules,
       'import/no-default-export': 'warn',
       'import/no-unresolved': 'off', // Disable for now, can be noisy with monorepos/paths
+      'import/namespace': 'off', // Disabled due to https://github.com/import-js/eslint-plugin-import/issues/2866
     },
   },
   {
     // General overrides and rules for the project (TS/TSX files)
-    files: ['packages/*/src/**/*.{ts,tsx}'], // Target only TS/TSX in the cli package
+    files: ['packages/**/src/**/*.{ts,tsx}'], // Target TS/TSX in all packages (including nested)
     plugins: {
       import: importPlugin,
     },

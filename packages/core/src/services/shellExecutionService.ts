@@ -22,6 +22,103 @@ import {
 const { Terminal } = pkg;
 
 const SIGKILL_TIMEOUT_MS = 200;
+const WINDOWS_PATH_DELIMITER = ';';
+let cachedWindowsPathFingerprint: string | undefined;
+let cachedMergedWindowsPath: string | undefined;
+
+function mergeWindowsPathValues(
+  env: NodeJS.ProcessEnv,
+  pathKeys: string[],
+): string | undefined {
+  const mergedEntries: string[] = [];
+  const seenEntries = new Set<string>();
+
+  for (const key of pathKeys) {
+    const value = env[key];
+    if (value === undefined) {
+      continue;
+    }
+
+    for (const entry of value.split(WINDOWS_PATH_DELIMITER)) {
+      if (seenEntries.has(entry)) {
+        continue;
+      }
+      seenEntries.add(entry);
+      mergedEntries.push(entry);
+    }
+  }
+
+  return mergedEntries.length > 0
+    ? mergedEntries.join(WINDOWS_PATH_DELIMITER)
+    : undefined;
+}
+
+function getWindowsPathFingerprint(
+  env: NodeJS.ProcessEnv,
+  pathKeys: string[],
+): string {
+  return pathKeys.map((key) => `${key}=${env[key] ?? ''}`).join('\0');
+}
+
+function normalizePathEnvForWindows(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (os.platform() !== 'win32') {
+    return env;
+  }
+
+  const normalized: NodeJS.ProcessEnv = { ...env };
+  const pathKeys = Object.keys(normalized).filter(
+    (key) => key.toLowerCase() === 'path',
+  );
+
+  if (pathKeys.length === 0) {
+    return normalized;
+  }
+
+  const orderedPathKeys = [...pathKeys].sort((left, right) => {
+    if (left === 'PATH') {
+      return -1;
+    }
+    if (right === 'PATH') {
+      return 1;
+    }
+    return left.localeCompare(right);
+  });
+
+  const fingerprint = getWindowsPathFingerprint(normalized, orderedPathKeys);
+  const canonicalValue =
+    fingerprint === cachedWindowsPathFingerprint
+      ? cachedMergedWindowsPath
+      : mergeWindowsPathValues(normalized, orderedPathKeys);
+
+  if (fingerprint !== cachedWindowsPathFingerprint) {
+    cachedWindowsPathFingerprint = fingerprint;
+    cachedMergedWindowsPath = canonicalValue;
+  }
+
+  for (const key of pathKeys) {
+    if (key !== 'PATH') {
+      delete normalized[key];
+    }
+  }
+
+  if (canonicalValue !== undefined) {
+    normalized['PATH'] = canonicalValue;
+  }
+
+  return normalized;
+}
+
+/**
+ * On Windows with PowerShell, prefix the command with a statement that forces
+ * UTF-8 output encoding so that CJK and other non-ASCII characters are emitted
+ * as UTF-8 regardless of the system codepage.
+ */
+function applyPowerShellUtf8Prefix(command: string, shell: string): string {
+  if (os.platform() === 'win32' && shell === 'powershell') {
+    return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command;
+  }
+  return command;
+}
 
 /** A structured result from a shell command execution. */
 export interface ShellExecutionResult {
@@ -88,15 +185,69 @@ interface ActivePty {
   headlessTerminal: pkg.Terminal;
 }
 
+const getErrnoCode = (error: unknown): string | undefined => {
+  if (!error || typeof error !== 'object' || !('code' in error)) {
+    return undefined;
+  }
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : undefined;
+};
+
+const getErrorMessage = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+const isExpectedPtyReadExitError = (error: unknown): boolean => {
+  const code = getErrnoCode(error);
+  if (code === 'EIO') {
+    return true;
+  }
+
+  const message = getErrorMessage(error);
+  return message.includes('read EIO');
+};
+
+const isExpectedPtyExitRaceError = (error: unknown): boolean => {
+  const code = getErrnoCode(error);
+  if (code === 'ESRCH' || code === 'EBADF') {
+    return true;
+  }
+
+  const message = getErrorMessage(error);
+  return (
+    message.includes('ioctl(2) failed, EBADF') ||
+    message.includes('Cannot resize a pty that has already exited')
+  );
+};
+
 const getFullBufferText = (terminal: pkg.Terminal): string => {
   const buffer = terminal.buffer.active;
   const lines: string[] = [];
   for (let i = 0; i < buffer.length; i++) {
     const line = buffer.getLine(i);
-    const lineContent = line ? line.translateToString() : '';
+    const lineContent = line ? line.translateToString(true) : '';
     lines.push(lineContent);
   }
   return lines.join('\n').trimEnd();
+};
+
+const replayTerminalOutput = async (
+  output: string,
+  cols: number,
+  rows: number,
+): Promise<string> => {
+  const replayTerminal = new Terminal({
+    allowProposedApi: true,
+    cols,
+    rows,
+    scrollback: 10000,
+    convertEol: true,
+  });
+
+  await new Promise<void>((resolve) => {
+    replayTerminal.write(output, () => resolve());
+  });
+
+  return getFullBufferText(replayTerminal);
 };
 
 interface ProcessCleanupStrategy {
@@ -224,19 +375,25 @@ export class ShellExecutionService {
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
-      const { executable, argsPrefix } = getShellConfiguration();
+      const { executable, argsPrefix, shell } = getShellConfiguration();
+      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
       // This is intentional - CLI tool executes user-provided shell commands.
+      //
+      // windowsVerbatimArguments must only be true for cmd.exe: it skips
+      // Node's MSVC CRT escaping, which cmd.exe doesn't understand. For
+      // PowerShell (.NET), we need the default escaping so that args
+      // round-trip correctly through CommandLineToArgvW.
       const child = cpSpawn(executable, shellArgs, {
         cwd,
         stdio: ['ignore', 'pipe', 'pipe'],
-        windowsVerbatimArguments: isWindows,
+        windowsVerbatimArguments: isWindows && shell === 'cmd',
         detached: !isWindows,
         windowsHide: isWindows,
         env: {
-          ...process.env,
+          ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: 'cat',
@@ -418,8 +575,23 @@ export class ShellExecutionService {
     try {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
-      const { executable, argsPrefix } = getShellConfiguration();
-      const args = [...argsPrefix, commandToExecute];
+      const { executable, argsPrefix, shell } = getShellConfiguration();
+      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
+
+      // On Windows with cmd.exe, pass args as a single string instead of
+      // an array. node-pty's argsToCommandLine re-quotes array elements
+      // that contain spaces, which mangles user-provided quoted arguments
+      // for cmd.exe (e.g., `type "hello world"` becomes
+      // `"type \"hello world\""`).
+      //
+      // For PowerShell, keep the array form: argsToCommandLine escapes for
+      // CommandLineToArgvW round-tripping, which .NET correctly parses.
+      // The string form breaks quoted paths ending in \ (e.g., "C:\Temp\")
+      // because CommandLineToArgvW treats \" as an escaped quote.
+      const args: string[] | string =
+        os.platform() === 'win32' && shell === 'cmd'
+          ? [...argsPrefix, commandToExecute].join(' ')
+          : [...argsPrefix, commandToExecute];
 
       const ptyProcess = ptyInfo.module.spawn(executable, args, {
         cwd,
@@ -427,7 +599,7 @@ export class ShellExecutionService {
         cols,
         rows,
         env: {
-          ...process.env,
+          ...normalizePathEnvForWindows(process.env),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           PAGER: shellExecutionConfig.pager ?? 'cat',
@@ -456,6 +628,7 @@ export class ShellExecutionService {
         let isStreamingRawContent = true;
         const MAX_SNIFF_SIZE = 4096;
         let sniffedBytes = 0;
+        let totalBytesReceived = 0;
         let isWriting = false;
         let hasStartedOutput = false;
         let renderTimeout: NodeJS.Timeout | null = null;
@@ -570,21 +743,31 @@ export class ShellExecutionService {
           }
         });
 
+        const ensureDecoder = (data: Buffer) => {
+          if (decoder) {
+            return;
+          }
+
+          const encoding = getCachedEncodingForBuffer(data);
+          try {
+            decoder = new TextDecoder(encoding);
+          } catch {
+            decoder = new TextDecoder('utf-8');
+          }
+        };
+
         const handleOutput = (data: Buffer) => {
+          // Capture raw output immediately. Rendering the headless terminal is
+          // slower than appending a Buffer, and rapid PTY output can otherwise
+          // overrun the render queue before finalize() races on exit.
+          ensureDecoder(data);
+          outputChunks.push(data);
+          totalBytesReceived += data.length;
+          const bytesReceived = totalBytesReceived;
+
           processingChain = processingChain.then(
             () =>
               new Promise<void>((resolve) => {
-                if (!decoder) {
-                  const encoding = getCachedEncodingForBuffer(data);
-                  try {
-                    decoder = new TextDecoder(encoding);
-                  } catch {
-                    decoder = new TextDecoder('utf-8');
-                  }
-                }
-
-                outputChunks.push(data);
-
                 if (isStreamingRawContent && sniffedBytes < MAX_SNIFF_SIZE) {
                   const sniffBuffer = Buffer.concat(outputChunks.slice(0, 20));
                   sniffedBytes = sniffBuffer.length;
@@ -596,7 +779,7 @@ export class ShellExecutionService {
                 }
 
                 if (isStreamingRawContent) {
-                  const decodedChunk = decoder.decode(data, { stream: true });
+                  const decodedChunk = decoder!.decode(data, { stream: true });
                   isWriting = true;
                   headlessTerminal.write(decodedChunk, () => {
                     render();
@@ -604,13 +787,9 @@ export class ShellExecutionService {
                     resolve();
                   });
                 } else {
-                  const totalBytes = outputChunks.reduce(
-                    (sum, chunk) => sum + chunk.length,
-                    0,
-                  );
                   onOutputEvent({
                     type: 'binary_progress',
-                    bytesReceived: totalBytes,
+                    bytesReceived,
                   });
                   resolve();
                 }
@@ -623,19 +802,60 @@ export class ShellExecutionService {
           handleOutput(bufferData);
         });
 
+        // Handle PTY errors - EIO is expected when the PTY process exits
+        // due to race conditions between the exit event and read operations.
+        // This is a normal behavior on macOS/Linux and should not crash the app.
+        // See: https://github.com/microsoft/node-pty/issues/178
+        ptyProcess.on('error', (err: NodeJS.ErrnoException) => {
+          if (isExpectedPtyReadExitError(err)) {
+            // EIO is expected when the PTY process exits - ignore it
+            return;
+          }
+
+          // Surface unexpected PTY errors to preserve existing crash behavior.
+          throw err;
+        });
+
         ptyProcess.onExit(
           ({ exitCode, signal }: { exitCode: number; signal?: number }) => {
             exited = true;
             abortSignal.removeEventListener('abort', abortHandler);
             this.activePtys.delete(ptyProcess.pid);
 
-            const finalize = () => {
+            const finalize = async () => {
               render(true);
               const finalBuffer = Buffer.concat(outputChunks);
+              let fullOutput = '';
+
+              try {
+                if (isStreamingRawContent) {
+                  // Re-decode the full buffer with proper encoding detection.
+                  // The streaming decoder used the first-chunk heuristic which
+                  // can misdetect when early output is ASCII-only but later
+                  // output is in a different encoding (e.g. GBK).
+                  const finalEncoding = getCachedEncodingForBuffer(finalBuffer);
+                  const decodedOutput = new TextDecoder(finalEncoding).decode(
+                    finalBuffer,
+                  );
+                  fullOutput = await replayTerminalOutput(
+                    decodedOutput,
+                    cols,
+                    rows,
+                  );
+                } else {
+                  fullOutput = getFullBufferText(headlessTerminal);
+                }
+              } catch {
+                try {
+                  fullOutput = getFullBufferText(headlessTerminal);
+                } catch {
+                  // Ignore fallback rendering errors and resolve with empty text.
+                }
+              }
 
               resolve({
                 rawOutput: finalBuffer,
-                output: getFullBufferText(headlessTerminal),
+                output: fullOutput,
                 exitCode,
                 signal: signal ?? null,
                 error,
@@ -647,16 +867,20 @@ export class ShellExecutionService {
               });
             };
 
-            // Always try to flush pending terminal writes before
-            // finalizing so result.output is as complete as possible.
-            // Race against abort or a short timeout to avoid hanging.
-            const processingComplete = processingChain.then(() => 'processed');
-            const deadline = new Promise<'timeout'>((res) =>
-              setTimeout(() => res('timeout'), SIGKILL_TIMEOUT_MS),
+            // Give any last onData callbacks a chance to run before finalizing.
+            // onExit can arrive slightly before late PTY data is processed.
+            const flushChain = () => processingChain.then(() => {});
+            const deadline = new Promise<void>((res) =>
+              setTimeout(res, SIGKILL_TIMEOUT_MS),
             );
+            const drain = () =>
+              new Promise<void>((res) => setImmediate(res)).then(flushChain);
 
-            void Promise.race([processingComplete, deadline]).then(() => {
-              finalize();
+            void Promise.race([
+              flushChain().then(drain).then(drain),
+              deadline,
+            ]).then(() => {
+              void finalize();
             });
           },
         );
@@ -762,7 +986,9 @@ export class ShellExecutionService {
       } catch (e) {
         // Ignore errors if the pty has already exited, which can happen
         // due to a race condition between the exit event and this call.
-        if (e instanceof Error && 'code' in e && e.code === 'ESRCH') {
+        // - ESRCH: No such process (process no longer exists)
+        // - EBADF: Bad file descriptor (PTY fd closed, e.g., "ioctl(2) failed, EBADF")
+        if (isExpectedPtyExitRaceError(e)) {
           // ignore
         } else {
           throw e;
@@ -792,7 +1018,9 @@ export class ShellExecutionService {
       } catch (e) {
         // Ignore errors if the pty has already exited, which can happen
         // due to a race condition between the exit event and this call.
-        if (e instanceof Error && 'code' in e && e.code === 'ESRCH') {
+        // - ESRCH: No such process (process no longer exists)
+        // - EBADF: Bad file descriptor (PTY fd closed, e.g., "ioctl(2) failed, EBADF")
+        if (isExpectedPtyExitRaceError(e)) {
           // ignore
         } else {
           throw e;

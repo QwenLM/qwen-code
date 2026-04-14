@@ -34,17 +34,22 @@ if (!existsSync(join(root, 'node_modules'))) {
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
 
 // Build in dependency order:
-// 1. test-utils (no internal dependencies)
-// 2. core (foundation package)
-// 3. web-templates (embeddable web templates - used by cli)
-// 4. cli (depends on core, test-utils, web-templates)
-// 5. webui (shared UI components - used by vscode companion)
-// 6. sdk (no internal dependencies)
-// 7. vscode-ide-companion (depends on webui)
+// 1. core (foundation package, includes test-utils)
+// 2. web-templates (embeddable web templates - used by cli)
+// 3. channel-base (base channel infrastructure - used by channel adapters and cli)
+// 4. channel adapters (depend on channel-base)
+// 5. cli (depends on core, web-templates, channel packages)
+// 6. webui (shared UI components - used by vscode companion)
+// 7. sdk (no internal dependencies)
+// 8. vscode-ide-companion (depends on webui)
 const buildOrder = [
-  'packages/test-utils',
   'packages/core',
   'packages/web-templates',
+  'packages/channels/base',
+  'packages/channels/telegram',
+  'packages/channels/weixin',
+  'packages/channels/dingtalk',
+  'packages/channels/plugin-example',
   'packages/cli',
   'packages/webui',
   'packages/sdk-typescript',

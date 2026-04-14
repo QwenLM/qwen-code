@@ -45,3 +45,24 @@ export const NEXT_APPROVAL_MODE: {
   plan: 'yolo',
   yolo: 'default',
 };
+
+// Ask User Question types
+export interface QuestionOption {
+  label: string;
+  description: string;
+}
+
+export interface Question {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiSelect: boolean;
+}
+
+export interface AskUserQuestionRequest {
+  sessionId: string;
+  questions: Question[];
+  metadata?: {
+    source?: string;
+  };
+}

@@ -128,7 +128,7 @@ export const Header: React.FC<HeaderProps> = ({
       {/* Right side: Info panel (flexible width, max 60 in two-column layout) */}
       <Box
         flexDirection="column"
-        borderStyle="round"
+        borderStyle="single"
         borderColor={theme.border.default}
         paddingX={infoPanelPaddingX}
         flexGrow={showLogo ? 0 : 1}

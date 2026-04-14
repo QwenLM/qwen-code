@@ -22,6 +22,7 @@ import type { Extension, Config } from '@qwen-code/qwen-code-core';
 import { SettingScope, createDebugLogger } from '@qwen-code/qwen-code-core';
 import { ExtensionUpdateState } from '../../state/extensions.js';
 import { getErrorMessage } from '../../../utils/errors.js';
+import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 
 interface ExtensionsManagerDialogProps {
   onClose: () => void;
@@ -46,6 +47,8 @@ export function ExtensionsManagerDialog({
   const [updateError, setUpdateError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const { columns } = useTerminalSize();
+  const boxWidth = columns - 4;
 
   // Load extensions
   const loadExtensions = useCallback(async () => {
@@ -362,10 +365,10 @@ export function ExtensionsManagerDialog({
     const currentStep = getCurrentStep();
     const getNavigationInstructions = () => {
       if (currentStep === MANAGEMENT_STEPS.EXTENSION_LIST) {
-        if (extensions.length === 0) {
+        if (extensions.length === 0 || successMessage) {
           return t('Esc to close');
         }
-        return t('Enter to select, ↑↓ to navigate, Esc to close');
+        return t('↑↓ to navigate · Enter to select · Esc to close');
       }
 
       if (currentStep === MANAGEMENT_STEPS.EXTENSION_DETAIL) {
@@ -373,14 +376,14 @@ export function ExtensionsManagerDialog({
       }
 
       if (currentStep === MANAGEMENT_STEPS.UNINSTALL_CONFIRMATION) {
-        return t('Y/Enter to confirm, N/Esc to cancel');
+        return t('Y/Enter to confirm · N/Esc to cancel');
       }
 
       if (currentStep === MANAGEMENT_STEPS.UPDATE_PROGRESS) {
         return updateInProgress ? t('Updating...') : '';
       }
 
-      return t('Enter to select, ↑↓ to navigate, Esc to go back');
+      return t('↑↓ to navigate · Enter to select · Esc to go back');
     };
 
     return (
@@ -388,7 +391,7 @@ export function ExtensionsManagerDialog({
         <Text color={theme.text.secondary}>{getNavigationInstructions()}</Text>
       </Box>
     );
-  }, [getCurrentStep, extensions.length, updateInProgress]);
+  }, [getCurrentStep, extensions.length, updateInProgress, successMessage]);
 
   const renderStepContent = useCallback(() => {
     const currentStep = getCurrentStep();
@@ -435,7 +438,6 @@ export function ExtensionsManagerDialog({
             selectedExtension={selectedExtension}
             hasUpdateAvailable={hasUpdateAvailable}
             onNavigateToStep={handleNavigateToStep}
-            onNavigateBack={handleNavigateBack}
             onActionSelect={handleActionSelect}
           />
         );
@@ -447,7 +449,6 @@ export function ExtensionsManagerDialog({
             selectedExtension={selectedExtension}
             mode="disable"
             onScopeSelect={handleDisableExtension}
-            onNavigateBack={handleNavigateBack}
           />
         );
       case MANAGEMENT_STEPS.ENABLE_SCOPE_SELECT:
@@ -456,7 +457,6 @@ export function ExtensionsManagerDialog({
             selectedExtension={selectedExtension}
             mode="enable"
             onScopeSelect={handleEnableExtension}
-            onNavigateBack={handleNavigateBack}
           />
         );
       case MANAGEMENT_STEPS.UNINSTALL_CONFIRMATION:
@@ -508,13 +508,14 @@ export function ExtensionsManagerDialog({
   ]);
 
   return (
-    <Box flexDirection="column">
+    <Box flexDirection="column" width={boxWidth}>
       <Box
         borderStyle="single"
         borderColor={theme.border.default}
         flexDirection="column"
-        padding={1}
-        width="100%"
+        paddingLeft={1}
+        paddingRight={1}
+        width={boxWidth}
         gap={1}
       >
         {renderStepHeader()}

@@ -5,18 +5,33 @@
  */
 
 import fs from 'node:fs/promises';
+import os from 'node:os';
 import * as path from 'node:path';
 import { globSync } from 'glob';
-import {
-  readFileWithEncoding,
-  readFileWithEncodingInfo,
-} from '../utils/fileUtils.js';
-import type { FileReadResult } from '../utils/fileUtils.js';
+import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
 import {
   iconvEncode,
   iconvEncodingExists,
   isUtf8CompatibleEncoding,
 } from '../utils/iconvHelper.js';
+import { getSystemEncoding } from '../utils/systemEncoding.js';
+import type {
+  ReadTextFileRequest,
+  WriteTextFileRequest,
+  WriteTextFileResponse,
+} from '@agentclientprotocol/sdk';
+
+export type LineEnding = 'crlf' | 'lf';
+
+export type ReadTextFileResponse = {
+  content: string;
+  _meta?: {
+    bom?: boolean;
+    encoding?: string;
+    originalLineCount?: number;
+    lineEnding?: LineEnding;
+  };
+};
 
 /**
  * Supported file encodings for new files.
@@ -35,43 +50,13 @@ export type FileEncodingType = (typeof FileEncoding)[keyof typeof FileEncoding];
  * Interface for file system operations that may be delegated to different implementations
  */
 export interface FileSystemService {
-  /**
-   * Read text content from a file
-   *
-   * @param filePath - The path to the file to read
-   * @returns The file content as a string
-   */
-  readTextFile(filePath: string): Promise<string>;
+  readTextFile(
+    params: Omit<ReadTextFileRequest, 'sessionId'>,
+  ): Promise<ReadTextFileResponse>;
 
-  /**
-   * Read text content from a file, returning both the content and encoding metadata.
-   * Combines readTextFile + detectFileBOM + detectFileEncoding into a single I/O pass.
-   *
-   * @param filePath - The path to the file to read
-   * @returns The file content, encoding name, and whether a UTF-8 BOM was present
-   */
-  readTextFileWithInfo(filePath: string): Promise<FileReadResult>;
-
-  /**
-   * Write text content to a file
-   *
-   * @param filePath - The path to the file to write
-   * @param content - The content to write
-   * @param options - Optional write options including whether to add BOM
-   */
   writeTextFile(
-    filePath: string,
-    content: string,
-    options?: WriteTextFileOptions,
-  ): Promise<void>;
-
-  /**
-   * Detects if a file has UTF-8 BOM (Byte Order Mark).
-   *
-   * @param filePath - The path to the file to check
-   * @returns True if the file has BOM, false otherwise
-   */
-  detectFileBOM(filePath: string): Promise<boolean>;
+    params: Omit<WriteTextFileRequest, 'sessionId'>,
+  ): Promise<WriteTextFileResponse>;
 
   /**
    * Finds files with a given name within specified search paths.
@@ -104,19 +89,82 @@ export interface WriteTextFileOptions {
 }
 
 /**
- * Detects if a buffer has UTF-8 BOM (Byte Order Mark).
- * UTF-8 BOM is the byte sequence EF BB BF.
- *
- * @param buffer - The buffer to check
- * @returns True if the buffer starts with UTF-8 BOM
+ * File extensions that require CRLF (\r\n) line endings to function correctly.
+ * cmd.exe parses .bat/.cmd files using CRLF delimiters; LF-only endings can
+ * break multi-line constructs, labels, and goto statements.
  */
-function hasUTF8BOM(buffer: Buffer): boolean {
-  return (
-    buffer.length >= 3 &&
-    buffer[0] === 0xef &&
-    buffer[1] === 0xbb &&
-    buffer[2] === 0xbf
-  );
+const CRLF_EXTENSIONS = new Set(['.bat', '.cmd']);
+
+/**
+ * File extensions that need UTF-8 BOM on Windows with a non-UTF-8 code page.
+ * PowerShell 5.1 (the version that ships with Windows) reads BOM-less files
+ * using the system's ANSI code page. Without a BOM, any non-ASCII characters
+ * in the script will be misinterpreted (e.g. on a GBK system). PowerShell 7+
+ * defaults to UTF-8 and handles BOM fine, so adding BOM is always safe.
+ */
+const UTF8_BOM_EXTENSIONS = new Set(['.ps1']);
+
+// Cache so we only call getSystemEncoding() once per process
+let cachedIsNonUtf8Windows: boolean | undefined;
+
+/**
+ * Returns true if a newly created file at the given path should be written
+ * with a UTF-8 BOM. Conditions (all must be true):
+ * 1. Running on Windows
+ * 2. System code page is not UTF-8
+ * 3. File extension is in UTF8_BOM_EXTENSIONS (e.g. .ps1)
+ */
+export function needsUtf8Bom(filePath: string): boolean {
+  const ext = path.extname(filePath).toLowerCase();
+  if (!UTF8_BOM_EXTENSIONS.has(ext)) {
+    return false;
+  }
+  if (cachedIsNonUtf8Windows === undefined) {
+    if (os.platform() !== 'win32') {
+      cachedIsNonUtf8Windows = false;
+    } else {
+      const sysEnc = getSystemEncoding();
+      cachedIsNonUtf8Windows = sysEnc !== 'utf-8';
+    }
+  }
+  return cachedIsNonUtf8Windows;
+}
+
+/**
+ * Reset the UTF-8 BOM cache — useful for testing.
+ */
+export function resetUtf8BomCache(): void {
+  cachedIsNonUtf8Windows = undefined;
+}
+
+/**
+ * Returns true if the file at the given path requires CRLF line endings.
+ * Only applies on Windows where cmd.exe actually parses these files.
+ */
+function needsCrlfLineEndings(filePath: string): boolean {
+  if (os.platform() !== 'win32') {
+    return false;
+  }
+  const ext = path.extname(filePath).toLowerCase();
+  return CRLF_EXTENSIONS.has(ext);
+}
+
+/**
+ * Ensures content uses CRLF line endings. First normalizes any existing
+ * CRLF to LF to avoid double-conversion, then converts all LF to CRLF.
+ */
+export function ensureCrlfLineEndings(content: string): string {
+  // First normalize CRLF to LF to avoid double-conversion, then convert all LF to CRLF
+  return content.split('\r\n').join('\n').split('\n').join('\r\n');
+}
+
+/**
+ * Detects whether the content uses CRLF or LF line endings.
+ * Returns 'crlf' if the content contains at least one CRLF sequence,
+ * 'lf' otherwise (including for content with no line endings).
+ */
+export function detectLineEnding(content: string): LineEnding {
+  return content.includes('\r\n') ? 'crlf' : 'lf';
 }
 
 /**
@@ -148,24 +196,36 @@ function getBOMBytesForEncoding(encoding: string): Buffer | null {
  * Standard file system implementation
  */
 export class StandardFileSystemService implements FileSystemService {
-  async readTextFile(filePath: string): Promise<string> {
+  async readTextFile(
+    params: Omit<ReadTextFileRequest, 'sessionId'>,
+  ): Promise<ReadTextFileResponse> {
+    const { path, limit, line } = params;
     // Use encoding-aware reader that handles BOM and non-UTF-8 encodings (e.g. GBK)
-    return readFileWithEncoding(filePath);
-  }
-
-  async readTextFileWithInfo(filePath: string): Promise<FileReadResult> {
-    // Single I/O pass: returns content, encoding, and BOM flag together,
-    // eliminating the need for separate detectFileEncoding / detectFileBOM calls.
-    return readFileWithEncodingInfo(filePath);
+    const { content, bom, encoding, originalLineCount } =
+      await readFileWithLineAndLimit({
+        path,
+        limit: limit ?? Number.POSITIVE_INFINITY,
+        line: line || 0,
+      });
+    const lineEnding = detectLineEnding(content);
+    return { content, _meta: { bom, encoding, originalLineCount, lineEnding } };
   }
 
   async writeTextFile(
-    filePath: string,
-    content: string,
-    options?: WriteTextFileOptions,
-  ): Promise<void> {
-    const bom = options?.bom ?? false;
-    const encoding = options?.encoding;
+    params: Omit<WriteTextFileRequest, 'sessionId'>,
+  ): Promise<WriteTextFileResponse> {
+    const { path: filePath, _meta } = params;
+    const lineEnding = _meta?.['lineEnding'] as string | undefined;
+    // Convert LF to CRLF when:
+    // 1. The file type requires it (e.g. .bat, .cmd on Windows), OR
+    // 2. The original file used CRLF line endings (preserve original style)
+    const shouldUseCrlf =
+      needsCrlfLineEndings(filePath) || lineEnding === 'crlf';
+    const content = shouldUseCrlf
+      ? ensureCrlfLineEndings(params.content)
+      : params.content;
+    const bom = _meta?.['bom'] ?? (false as boolean);
+    const encoding = _meta?.['encoding'] as string | undefined;
 
     // Check if a non-UTF-8 encoding is specified and supported by iconv-lite
     const isNonUtf8Encoding =
@@ -199,27 +259,7 @@ export class StandardFileSystemService implements FileSystemService {
     } else {
       await fs.writeFile(filePath, content, 'utf-8');
     }
-  }
-
-  async detectFileBOM(filePath: string): Promise<boolean> {
-    let fd: fs.FileHandle | undefined;
-    try {
-      // Read only the first 3 bytes to check for BOM
-      fd = await fs.open(filePath, 'r');
-      const buffer = Buffer.alloc(3);
-      const { bytesRead } = await fd.read(buffer, 0, 3, 0);
-
-      if (bytesRead < 3) {
-        return false;
-      }
-
-      return hasUTF8BOM(buffer);
-    } catch {
-      // File doesn't exist or can't be read - treat as no BOM
-      return false;
-    } finally {
-      await fd?.close();
-    }
+    return { _meta };
   }
 
   findFiles(fileName: string, searchPaths: readonly string[]): string[] {

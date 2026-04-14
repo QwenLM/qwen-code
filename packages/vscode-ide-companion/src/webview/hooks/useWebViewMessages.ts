@@ -15,6 +15,12 @@ import type {
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import type { PlanEntry } from '../../types/chatTypes.js';
 import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
+import type { Question } from '../../types/acpTypes.js';
+import {
+  useImageResolution,
+  type WebViewMessage,
+  type WebViewMessageBase,
+} from './useImage.js';
 
 const FORCE_CLEAR_STREAM_END_REASONS = new Set([
   'user_cancelled',
@@ -65,23 +71,11 @@ interface UseWebViewMessagesProps {
   // Message handling
   messageHandling: {
     setMessages: (
-      messages: Array<{
-        role: 'user' | 'assistant' | 'thinking';
-        content: string;
-        timestamp: number;
-        fileContext?: {
-          fileName: string;
-          filePath: string;
-          startLine?: number;
-          endLine?: number;
-        };
-      }>,
+      messages:
+        | WebViewMessage[]
+        | ((prev: WebViewMessage[]) => WebViewMessage[]),
     ) => void;
-    addMessage: (message: {
-      role: 'user' | 'assistant' | 'thinking';
-      content: string;
-      timestamp: number;
-    }) => void;
+    addMessage: (message: WebViewMessage) => void;
     clearMessages: () => void;
     startStreaming: (timestamp?: number) => void;
     appendStreamChunk: (chunk: string) => void;
@@ -111,8 +105,19 @@ interface UseWebViewMessagesProps {
     } | null,
   ) => void;
 
+  // Ask User Question
+  handleAskUserQuestion: (
+    request: {
+      questions: Question[];
+      sessionId: string;
+      metadata?: {
+        source?: string;
+      };
+    } | null,
+  ) => void;
+
   // Input
-  inputFieldRef: React.RefObject<HTMLDivElement>;
+  inputFieldRef: React.RefObject<HTMLDivElement | null>;
   setInputText: (text: string) => void;
   // Edit mode setter (maps ACP modes to UI modes)
   setEditMode?: (mode: ApprovalModeValue) => void;
@@ -128,6 +133,55 @@ interface UseWebViewMessagesProps {
   setAvailableModels?: (models: ModelInfo[]) => void;
 }
 
+type ConversationResetHandlers = {
+  messageHandling: Pick<
+    UseWebViewMessagesProps['messageHandling'],
+    | 'clearMessages'
+    | 'endStreaming'
+    | 'clearWaitingForResponse'
+    | 'clearThinking'
+  >;
+  clearToolCalls: UseWebViewMessagesProps['clearToolCalls'];
+  clearActiveExecToolCalls: () => void;
+  setPlanEntries: UseWebViewMessagesProps['setPlanEntries'];
+  handlePermissionRequest: UseWebViewMessagesProps['handlePermissionRequest'];
+  handleAskUserQuestion: UseWebViewMessagesProps['handleAskUserQuestion'];
+  sessionManagement: Pick<
+    UseWebViewMessagesProps['sessionManagement'],
+    'setCurrentSessionId' | 'setCurrentSessionTitle'
+  >;
+  setUsageStats?: UseWebViewMessagesProps['setUsageStats'];
+};
+
+export function resetConversationState({
+  handlers,
+  clearImageResolutions,
+  vscode,
+}: {
+  handlers: ConversationResetHandlers;
+  clearImageResolutions: () => void;
+  vscode: { postMessage: (message: unknown) => void };
+}) {
+  handlers.messageHandling.endStreaming();
+  handlers.clearActiveExecToolCalls();
+  handlers.messageHandling.clearWaitingForResponse();
+  handlers.messageHandling.clearThinking();
+  handlers.messageHandling.clearMessages();
+  handlers.clearToolCalls();
+  handlers.setPlanEntries([]);
+  handlers.handlePermissionRequest(null);
+  handlers.handleAskUserQuestion(null);
+  handlers.sessionManagement.setCurrentSessionId(null);
+  clearImageResolutions();
+  handlers.setUsageStats?.(undefined);
+  handlers.sessionManagement.setCurrentSessionTitle('Past Conversations');
+  // Reset the VS Code tab title to default label
+  vscode.postMessage({
+    type: 'updatePanelTitle',
+    data: { title: 'Qwen Code' },
+  });
+}
+
 /**
  * WebView message handling Hook
  * Handles all messages from VSCode Extension uniformly
@@ -140,6 +194,7 @@ export const useWebViewMessages = ({
   clearToolCalls,
   setPlanEntries,
   handlePermissionRequest,
+  handleAskUserQuestion,
   inputFieldRef,
   setInputText,
   setEditMode,
@@ -151,10 +206,24 @@ export const useWebViewMessages = ({
 }: UseWebViewMessagesProps) => {
   // VS Code API for posting messages back to the extension host
   const vscode = useVSCode();
+
+  // Image resolution handling
+  const {
+    materializeMessages,
+    materializeMessage,
+    mergeResolvedImages,
+    clearImageResolutions,
+  } = useImageResolution({
+    vscode,
+  });
+
   // Track active long-running tool calls (execute/bash/command) so we can
   // keep the bottom "waiting" message visible until all of them complete.
   const activeExecToolCallsRef = useRef<Set<string>>(new Set());
   const modelInfoRef = useRef<ModelInfo | null>(null);
+  // Track the active requestId from the latest streamStart so we can
+  // discard stale streamEnd events from cancelled/previous requests.
+  const activeRequestIdRef = useRef<string | null>(null);
   // Use ref to store callbacks to avoid useEffect dependency issues
   const handlersRef = useRef({
     sessionManagement,
@@ -164,6 +233,7 @@ export const useWebViewMessages = ({
     clearToolCalls,
     setPlanEntries,
     handlePermissionRequest,
+    handleAskUserQuestion,
     setIsAuthenticated,
     setUsageStats,
     setModelInfo,
@@ -213,6 +283,7 @@ export const useWebViewMessages = ({
       clearToolCalls,
       setPlanEntries,
       handlePermissionRequest,
+      handleAskUserQuestion,
       setIsAuthenticated,
       setUsageStats,
       setModelInfo,
@@ -404,7 +475,10 @@ export const useWebViewMessages = ({
 
         case 'conversationLoaded': {
           const conversation = message.data as Conversation;
-          handlers.messageHandling.setMessages(conversation.messages);
+          clearImageResolutions();
+          handlers.messageHandling.setMessages(
+            materializeMessages(conversation.messages as WebViewMessageBase[]),
+          );
           break;
         }
 
@@ -413,11 +487,15 @@ export const useWebViewMessages = ({
             role?: 'user' | 'assistant' | 'thinking';
             content?: string;
             timestamp?: number;
+            fileContext?: {
+              fileName: string;
+              filePath: string;
+              startLine?: number;
+              endLine?: number;
+            };
           };
-          handlers.messageHandling.addMessage(
-            msg as unknown as Parameters<
-              typeof handlers.messageHandling.addMessage
-            >[0],
+          materializeMessage(msg as WebViewMessageBase).forEach((entry) =>
+            handlers.messageHandling.addMessage(entry),
           );
           // Robustness: if an assistant message arrives outside the normal stream
           // pipeline (no explicit streamEnd), ensure we clear streaming/waiting states
@@ -446,11 +524,15 @@ export const useWebViewMessages = ({
           break;
         }
 
-        case 'streamStart':
-          handlers.messageHandling.startStreaming(
-            (message.data as { timestamp?: number } | undefined)?.timestamp,
-          );
+        case 'streamStart': {
+          const startData = message.data as
+            | { timestamp?: number; requestId?: string }
+            | undefined;
+          // Store the requestId so we can validate streamEnd events
+          activeRequestIdRef.current = startData?.requestId ?? null;
+          handlers.messageHandling.startStreaming(startData?.timestamp);
           break;
+        }
 
         case 'streamChunk': {
           handlers.messageHandling.appendStreamChunk(message.data.chunk);
@@ -464,6 +546,24 @@ export const useWebViewMessages = ({
         }
 
         case 'streamEnd': {
+          const endData = message.data as
+            | { reason?: string; requestId?: string }
+            | undefined;
+          const endRequestId = endData?.requestId ?? null;
+
+          // Drop stale or untagged streamEnd when a tagged stream is active.
+          if (activeRequestIdRef.current) {
+            if (endRequestId !== activeRequestIdRef.current) {
+              console.log(
+                '[useWebViewMessages] Ignoring stale/untagged streamEnd:',
+                endRequestId,
+                'active:',
+                activeRequestIdRef.current,
+              );
+              break;
+            }
+          }
+
           // Always end local streaming state and clear thinking state
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearThinking();
@@ -473,9 +573,7 @@ export const useWebViewMessages = ({
           // This avoids UI getting stuck with Stop button visible after
           // rejecting a permission request.
           try {
-            const reason = (
-              (message.data as { reason?: string } | undefined)?.reason || ''
-            ).toLowerCase();
+            const reason = (endData?.reason || '').toLowerCase();
 
             /**
              * Handle different types of stream end reasons that require a full reset:
@@ -624,6 +722,19 @@ export const useWebViewMessages = ({
               _error,
             );
           }
+          break;
+        }
+
+        case 'askUserQuestion': {
+          // Handle ask user question request from extension
+          const questionsData = message.data as {
+            questions: Question[];
+            sessionId: string;
+            metadata?: {
+              source?: string;
+            };
+          };
+          handlers.handleAskUserQuestion(questionsData);
           break;
         }
 
@@ -813,7 +924,12 @@ export const useWebViewMessages = ({
             vscode.postMessage({ type: 'updatePanelTitle', data: { title } });
           }
           if (message.data.messages) {
-            handlers.messageHandling.setMessages(message.data.messages);
+            clearImageResolutions();
+            handlers.messageHandling.setMessages(
+              materializeMessages(
+                message.data.messages as WebViewMessageBase[],
+              ),
+            );
           } else {
             handlers.messageHandling.clearMessages();
           }
@@ -847,16 +963,15 @@ export const useWebViewMessages = ({
           break;
 
         case 'conversationCleared':
-          handlers.messageHandling.clearMessages();
-          handlers.clearToolCalls();
-          handlers.sessionManagement.setCurrentSessionId(null);
-          handlers.sessionManagement.setCurrentSessionTitle(
-            'Past Conversations',
-          );
-          // Reset the VS Code tab title to default label
-          vscode.postMessage({
-            type: 'updatePanelTitle',
-            data: { title: 'Qwen Code' },
+          resetConversationState({
+            handlers: {
+              ...handlers,
+              clearActiveExecToolCalls: () => {
+                activeExecToolCallsRef.current.clear();
+              },
+            },
+            clearImageResolutions,
+            vscode,
           });
           lastPlanSnapshotRef.current = null;
           break;
@@ -935,6 +1050,18 @@ export const useWebViewMessages = ({
           break;
         }
 
+        case 'imagePathsResolved': {
+          const resolved =
+            (
+              message.data as
+                | { resolved?: Array<{ path: string; src?: string | null }> }
+                | undefined
+            )?.resolved ?? [];
+          handlers.messageHandling.setMessages((prevMessages) =>
+            mergeResolvedImages(prevMessages, resolved),
+          );
+          break;
+        }
         case 'cancelStreaming':
           // Handle cancel streaming response from extension
           // Note: The "Interrupted" message is already added by handleCancel in App.tsx
@@ -948,7 +1075,16 @@ export const useWebViewMessages = ({
           break;
       }
     },
-    [inputFieldRef, setInputText, vscode, setEditMode],
+    [
+      inputFieldRef,
+      setInputText,
+      vscode,
+      setEditMode,
+      materializeMessages,
+      materializeMessage,
+      mergeResolvedImages,
+      clearImageResolutions,
+    ],
   );
 
   useEffect(() => {

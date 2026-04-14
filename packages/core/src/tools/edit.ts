@@ -14,36 +14,41 @@ import type {
   ToolLocation,
   ToolResult,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, Kind, ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { FileEncoding } from '../services/fileSystemService.js';
+import {
+  FileEncoding,
+  needsUtf8Bom,
+  detectLineEnding,
+} from '../services/fileSystemService.js';
+import type { LineEnding } from '../services/fileSystemService.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ReadFileTool } from './read-file.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { FileOperation } from '../telemetry/metrics.js';
-import { getSpecificMimeType } from '../utils/fileUtils.js';
+import {
+  getSpecificMimeType,
+  fileExists as isFilefileExists,
+} from '../utils/fileUtils.js';
 import { getLanguageFromFilePath } from '../utils/language-detection.js';
 import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
-import { IdeClient } from '../ide/ide-client.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   countOccurrences,
   extractEditSnippet,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
-
-const debugLogger = createDebugLogger('EDIT');
 
 export function applyReplacement(
   currentContent: string | null,
@@ -112,6 +117,8 @@ interface CalculatedEdit {
   encoding: string;
   /** Whether the existing file has a UTF-8 BOM */
   bom: boolean;
+  /** Original line ending style of the existing file */
+  lineEnding: LineEnding;
 }
 
 class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
@@ -133,33 +140,43 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
   private async calculateEdit(params: EditToolParams): Promise<CalculatedEdit> {
     const replaceAll = params.replace_all ?? false;
     let currentContent: string | null = null;
-    let fileExists = false;
+    let fileExists = await isFilefileExists(params.file_path);
     let isNewFile = false;
     let finalNewString = params.new_string;
     let finalOldString = params.old_string;
     let occurrences = 0;
-    let encoding = 'utf-8';
-    let bom = false;
     let error:
       | { display: string; raw: string; type: ToolErrorType }
       | undefined = undefined;
-
-    try {
-      const fileInfo = await this.config
-        .getFileSystemService()
-        .readTextFileWithInfo(params.file_path);
-      // Normalize line endings to LF for consistent processing.
-      currentContent = fileInfo.content.replace(/\r\n/g, '\n');
-      fileExists = true;
-      // Encoding and BOM are returned from the same I/O pass, avoiding redundant reads.
-      encoding = fileInfo.encoding;
-      bom = fileInfo.bom;
-    } catch (err: unknown) {
-      if (!isNodeError(err) || err.code !== 'ENOENT') {
-        // Rethrow unexpected FS errors (permissions, etc.)
-        throw err;
+    let useBOM = false;
+    let detectedEncoding = 'utf-8';
+    let detectedLineEnding: LineEnding = 'lf';
+    if (fileExists) {
+      try {
+        const fileInfo = await this.config
+          .getFileSystemService()
+          .readTextFile({ path: params.file_path });
+        if (fileInfo._meta?.bom !== undefined) {
+          useBOM = fileInfo._meta.bom;
+        } else {
+          useBOM =
+            fileInfo.content.length > 0 &&
+            fileInfo.content.codePointAt(0) === 0xfeff;
+        }
+        detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
+        // Detect original line ending style before normalizing
+        detectedLineEnding = detectLineEnding(fileInfo.content);
+        // Normalize line endings to LF for consistent processing.
+        currentContent = fileInfo.content.replace(/\r\n/g, '\n');
+        fileExists = true;
+        // Encoding and BOM are returned from the same I/O pass, avoiding redundant reads.
+      } catch (err: unknown) {
+        if (!isNodeError(err) || err.code !== 'ENOENT') {
+          // Rethrow unexpected FS errors (permissions, etc.)
+          throw err;
+        }
+        fileExists = false;
       }
-      fileExists = false;
     }
 
     const normalizedStrings = normalizeEditStrings(
@@ -247,22 +264,25 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       occurrences,
       error,
       isNewFile,
-      encoding,
-      bom,
+      bom: useBOM,
+      encoding: detectedEncoding,
+      lineEnding: detectedLineEnding,
     };
   }
 
   /**
-   * Handles the confirmation prompt for the Edit tool in the CLI.
-   * It needs to calculate the diff to show the user.
+   * Edit operations always need user confirmation (unless overridden by PM or ApprovalMode).
    */
-  async shouldConfirmExecute(
-    abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    if (this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT) {
-      return false;
-    }
+  async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
 
+  /**
+   * Constructs the edit diff confirmation details.
+   */
+  async getConfirmationDetails(
+    abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
     let editData: CalculatedEdit;
     try {
       editData = await this.calculateEdit(this.params);
@@ -271,13 +291,11 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         throw error;
       }
       const errorMsg = error instanceof Error ? error.message : String(error);
-      debugLogger.warn(`Error preparing edit: ${errorMsg}`);
-      return false;
+      throw new Error(`Error preparing edit: ${errorMsg}`);
     }
 
     if (editData.error) {
-      debugLogger.warn(`Error: ${editData.error.display}`);
-      return false;
+      throw new Error(`Edit error: ${editData.error.display}`);
     }
 
     const fileName = path.basename(this.params.file_path);
@@ -289,12 +307,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       'Proposed',
       DEFAULT_DIFF_OPTIONS,
     );
-    const ideClient = await IdeClient.getInstance();
-    const ideConfirmation =
-      this.config.getIdeMode() && ideClient.isDiffingEnabled()
-        ? ideClient.openDiff(this.params.file_path, editData.newContent)
-        : undefined;
-
     const confirmationDetails: ToolEditConfirmationDetails = {
       type: 'edit',
       title: `Confirm Edit: ${shortenPath(makeRelative(this.params.file_path, this.config.getTargetDir()))}`,
@@ -307,18 +319,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
         }
-
-        if (ideConfirmation) {
-          const result = await ideConfirmation;
-          if (result.status === 'accepted' && result.content) {
-            // TODO(chrstn): See https://github.com/google-gemini/gemini-cli/pull/5618#discussion_r2255413084
-            // for info on a possible race condition where the file is modified on disk while being edited.
-            this.params.old_string = editData.currentContent ?? '';
-            this.params.new_string = result.content;
-          }
-        }
       },
-      ideConfirmation,
     };
     return confirmationDetails;
   }
@@ -386,20 +387,31 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // For new files, apply default file encoding setting
       // For existing files, preserve the original encoding (BOM and charset)
       if (editData.isNewFile) {
-        const useBOM =
-          this.config.getDefaultFileEncoding() === FileEncoding.UTF8_BOM;
-        await this.config
-          .getFileSystemService()
-          .writeTextFile(this.params.file_path, editData.newContent, {
+        const userEncoding = this.config.getDefaultFileEncoding();
+        let useBOM = false;
+        if (userEncoding === FileEncoding.UTF8_BOM) {
+          useBOM = true;
+        } else if (userEncoding === undefined) {
+          // No explicit setting: auto-detect (e.g. .ps1 on non-UTF-8 Windows)
+          useBOM = needsUtf8Bom(this.params.file_path);
+        }
+        await this.config.getFileSystemService().writeTextFile({
+          path: this.params.file_path,
+          content: editData.newContent,
+          _meta: {
             bom: useBOM,
-          });
+          },
+        });
       } else {
-        await this.config
-          .getFileSystemService()
-          .writeTextFile(this.params.file_path, editData.newContent, {
+        await this.config.getFileSystemService().writeTextFile({
+          path: this.params.file_path,
+          content: editData.newContent,
+          _meta: {
             bom: editData.bom,
             encoding: editData.encoding,
-          });
+            lineEnding: editData.lineEnding,
+          },
+        });
       }
 
       const fileName = path.basename(this.params.file_path);
@@ -562,12 +574,6 @@ Expectation for required parameters:
       return `File path must be absolute: ${params.file_path}`;
     }
 
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (!workspaceContext.isPathWithinWorkspace(params.file_path)) {
-      const directories = workspaceContext.getDirectories();
-      return `File path must be within one of the workspace directories: ${directories.join(', ')}`;
-    }
-
     return null;
   }
 
@@ -581,28 +587,38 @@ Expectation for required parameters:
     return {
       getFilePath: (params: EditToolParams) => params.file_path,
       getCurrentContent: async (params: EditToolParams): Promise<string> => {
-        try {
-          return this.config
-            .getFileSystemService()
-            .readTextFile(params.file_path);
-        } catch (err) {
-          if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+        const fileExists = await isFilefileExists(params.file_path);
+        if (fileExists) {
+          try {
+            const { content } = await this.config
+              .getFileSystemService()
+              .readTextFile({ path: params.file_path });
+            return content;
+          } catch (err) {
+            if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+            return '';
+          }
+        } else {
           return '';
         }
       },
       getProposedContent: async (params: EditToolParams): Promise<string> => {
-        try {
-          const currentContent = await this.config
-            .getFileSystemService()
-            .readTextFile(params.file_path);
-          return applyReplacement(
-            currentContent,
-            params.old_string,
-            params.new_string,
-            params.old_string === '' && currentContent === '',
-          );
-        } catch (err) {
-          if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+        if (fs.existsSync(params.file_path)) {
+          try {
+            const { content: currentContent } = await this.config
+              .getFileSystemService()
+              .readTextFile({ path: params.file_path });
+            return applyReplacement(
+              currentContent,
+              params.old_string,
+              params.new_string,
+              params.old_string === '' && currentContent === '',
+            );
+          } catch (err) {
+            if (!isNodeError(err) || err.code !== 'ENOENT') throw err;
+            return '';
+          }
+        } else {
           return '';
         }
       },

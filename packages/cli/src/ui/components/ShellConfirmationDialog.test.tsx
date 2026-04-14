@@ -33,13 +33,13 @@ describe('ShellConfirmationDialog', () => {
     expect(select).toContain('Yes, allow once');
   });
 
-  it('calls onConfirm with ProceedAlways when "Yes, allow always for this session" is selected', () => {
+  it('calls onConfirm with ProceedAlwaysProject when "Always allow in this project" is selected', () => {
     const { lastFrame } = renderWithProviders(
       <ShellConfirmationDialog request={request} />,
     );
     const select = lastFrame()!.toString();
     // Simulate selecting the second option
-    expect(select).toContain('Yes, allow always for this session');
+    expect(select).toContain('Always allow in this project');
   });
 
   it('calls onConfirm with Cancel when "No (esc)" is selected', () => {

@@ -9,8 +9,9 @@
  * - 'project': Stored in `.qwen/skills/` within the project directory
  * - 'user': Stored in `~/.qwen/skills/` in the user's home directory
  * - 'extension': Provided by an installed extension
+ * - 'bundled': Built-in skills shipped with qwen-code
  */
-export type SkillLevel = 'project' | 'user' | 'extension';
+export type SkillLevel = 'project' | 'user' | 'extension' | 'bundled';
 
 /**
  * Core configuration for a skill as stored in SKILL.md files.
@@ -29,6 +30,14 @@ export interface SkillConfig {
    * For v1, this is informational only (no gating).
    */
   allowedTools?: string[];
+
+  /**
+   * Optional model override for this skill's execution.
+   * Uses the same selector syntax as subagent model selectors:
+   * bare model ID (e.g., `qwen-coder-plus`), `authType:modelId`
+   * for cross-provider, or omitted/`inherit` to use the session model.
+   */
+  model?: string;
 
   /**
    * Storage level - determines where the configuration file is stored
@@ -56,6 +65,27 @@ export interface SkillConfig {
  * Extends SkillConfig with additional runtime-specific fields.
  */
 export type SkillRuntimeConfig = SkillConfig;
+
+/**
+ * Parse the `model` field from skill frontmatter.
+ * Returns `undefined` for omitted, empty, or "inherit" values.
+ */
+export function parseModelField(
+  frontmatter: Record<string, unknown>,
+): string | undefined {
+  const raw = frontmatter['model'];
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (typeof raw !== 'string') {
+    throw new Error('"model" must be a string');
+  }
+  const trimmed = raw.trim();
+  if (trimmed === '' || trimmed === 'inherit') {
+    return undefined;
+  }
+  return trimmed;
+}
 
 /**
  * Result of a validation operation on a skill configuration.

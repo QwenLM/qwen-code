@@ -78,6 +78,21 @@ vi.mock('./hooks/useAutoAcceptIndicator.js');
 vi.mock('./hooks/useGitBranchName.js');
 vi.mock('./contexts/VimModeContext.js');
 vi.mock('./contexts/SessionContext.js');
+vi.mock('./contexts/AgentViewContext.js', () => ({
+  useAgentViewState: vi.fn(() => ({
+    activeView: 'main',
+    agents: new Map(),
+  })),
+  useAgentViewActions: vi.fn(() => ({
+    switchToMain: vi.fn(),
+    switchToAgent: vi.fn(),
+    switchToNext: vi.fn(),
+    switchToPrevious: vi.fn(),
+    registerAgent: vi.fn(),
+    unregisterAgent: vi.fn(),
+    unregisterAll: vi.fn(),
+  })),
+}));
 vi.mock('./components/shared/text-buffer.js');
 vi.mock('./hooks/useLogger.js');
 
@@ -175,6 +190,8 @@ describe('AppContainer State Management', () => {
       isAuthDialogOpen: false,
       isAuthenticating: false,
       handleAuthSelect: vi.fn(),
+      handleCodingPlanSubmit: vi.fn(),
+      handleAlibabaStandardSubmit: vi.fn(),
       openAuthDialog: vi.fn(),
       cancelAuthentication: vi.fn(),
     });
@@ -226,6 +243,8 @@ describe('AppContainer State Management', () => {
       addMessage: vi.fn(),
       clearQueue: vi.fn(),
       getQueuedMessagesText: vi.fn().mockReturnValue(''),
+      popAllMessages: vi.fn().mockReturnValue(null),
+      drainQueue: vi.fn().mockReturnValue([]),
     });
     mockedUseAutoAcceptIndicator.mockReturnValue(false);
     mockedUseGitBranchName.mockReturnValue('main');
@@ -253,7 +272,7 @@ describe('AppContainer State Management', () => {
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
 
-    // Mock GeminiClient to prevent unhandled errors from TaskTool.refreshSubagents
+    // Mock GeminiClient to prevent unhandled errors from AgentTool.refreshSubagents
     const mockGeminiClient: Partial<GeminiClient> = {
       initialize: vi.fn().mockResolvedValue(undefined),
       setTools: vi.fn().mockResolvedValue(undefined),
@@ -263,12 +282,12 @@ describe('AppContainer State Management', () => {
       mockGeminiClient as GeminiClient,
     );
 
-    // Mock SubagentManager to prevent errors during TaskTool initialization
+    // Mock SubagentManager to prevent errors during AgentTool initialization
     const mockSubagentManager: Partial<SubagentManager> = {
       listSubagents: vi.fn().mockResolvedValue([]),
       addChangeListener: vi.fn(),
       loadSubagent: vi.fn(),
-      createSubagentScope: vi.fn(),
+      createSubagent: vi.fn(),
     };
     vi.spyOn(mockConfig, 'getSubagentManager').mockReturnValue(
       mockSubagentManager as SubagentManager,
@@ -418,6 +437,270 @@ describe('AppContainer State Management', () => {
           />,
         );
       }).not.toThrow();
+    });
+
+    it('submits /btw immediately instead of queueing while responding', () => {
+      const mockSubmitQuery = vi.fn();
+      const mockQueueMessage = vi.fn();
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('/btw quick side question');
+
+      expect(mockSubmitQuery).toHaveBeenCalledWith('/btw quick side question');
+      expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it.each(['exit', 'quit', ':q', ':q!', ':wq', ':wq!'])(
+      'routes bare "%s" to /quit instead of sending as a message',
+      (command) => {
+        const mockHandleSlashCommand = vi.fn();
+        const mockQueueMessage = vi.fn();
+
+        mockedUseSlashCommandProcessor.mockReturnValue({
+          handleSlashCommand: mockHandleSlashCommand,
+          slashCommands: [],
+          pendingHistoryItems: [],
+          commandContext: {},
+          shellConfirmationRequest: null,
+          confirmationRequest: null,
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          messageQueue: [],
+          addMessage: mockQueueMessage,
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+        });
+
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+
+        capturedUIActions.handleFinalSubmit(command);
+
+        expect(mockHandleSlashCommand).toHaveBeenCalledWith('/quit');
+        expect(mockQueueMessage).not.toHaveBeenCalled();
+      },
+    );
+  });
+
+  describe('Cancel Handler (issue #3204)', () => {
+    // The cancel handler is wired through useGeminiStream's onCancelSubmit
+    // arg (positional index 14 — see the useGeminiStream call site in
+    // AppContainer.tsx). We capture it via mockImplementation so a future
+    // signature change surfaces as a clear test failure rather than silently
+    // grabbing the wrong callback.
+    const ON_CANCEL_SUBMIT_ARG_INDEX = 14;
+    let capturedOnCancelSubmit: (() => void) | null = null;
+
+    const installCancelCapture = (
+      streamReturnValue: Record<string, unknown>,
+    ) => {
+      capturedOnCancelSubmit = null;
+      mockedUseGeminiStream.mockImplementation((...args: unknown[]) => {
+        const candidate = args[ON_CANCEL_SUBMIT_ARG_INDEX];
+        if (typeof candidate === 'function') {
+          capturedOnCancelSubmit = candidate as () => void;
+        }
+        return streamReturnValue;
+      });
+    };
+
+    const triggerCancel = () => {
+      if (!capturedOnCancelSubmit) {
+        throw new Error(
+          `onCancelSubmit was not captured at arg index ${ON_CANCEL_SUBMIT_ARG_INDEX} — useGeminiStream signature may have changed`,
+        );
+      }
+      capturedOnCancelSubmit();
+    };
+
+    it('does not repopulate the buffer with the previous prompt on ESC cancel', async () => {
+      const mockSetText = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      // Simulate logger returning a previously submitted prompt — this is
+      // what the old buggy handler would read via userMessages.at(-1) and
+      // unconditionally restore into the buffer.
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi
+          .fn()
+          .mockResolvedValue(['the previous prompt']),
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // Let the userMessages-fetching effect resolve.
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      // Regression: the previous prompt must NOT be restored into the buffer.
+      expect(mockSetText).not.toHaveBeenCalledWith('the previous prompt');
+      // With no queued messages and no tool execution, the cancel handler
+      // should leave the buffer untouched (so any in-progress typing the
+      // user did since submitting is preserved).
+      expect(mockSetText).not.toHaveBeenCalled();
+    });
+
+    it('moves queued follow-up messages into an empty buffer on cancel', async () => {
+      const mockSetText = vi.fn();
+      const mockPopAllMessages = vi.fn().mockReturnValue('queued follow-up');
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi
+          .fn()
+          .mockResolvedValue(['the previous prompt']),
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: ['queued follow-up'],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
+        popAllMessages: mockPopAllMessages,
+        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      // The queued message should be moved into the buffer for editing —
+      // and crucially, it should NOT be prefixed with the previous prompt.
+      expect(mockSetText).toHaveBeenCalledWith('queued follow-up');
+      expect(mockSetText).not.toHaveBeenCalledWith(
+        expect.stringContaining('the previous prompt'),
+      );
+      expect(mockPopAllMessages).toHaveBeenCalled();
+    });
+
+    it('preserves an in-progress draft when restoring queued messages on cancel', async () => {
+      // Simulates: user submits P1, queues P2, then types draft P3, then
+      // hits Ctrl+C. The Ctrl+C cancel path (unlike ESC) does NOT pre-clear
+      // the buffer, so P3 must be preserved.
+      const mockSetText = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: 'in-progress draft',
+        setText: mockSetText,
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: ['queued follow-up'],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
+        popAllMessages: vi.fn().mockReturnValue('queued follow-up'),
+        drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel();
+
+      // Queued text is prepended to the existing draft (matches the
+      // popQueueIntoInput convention used elsewhere in the input prompt).
+      expect(mockSetText).toHaveBeenCalledWith(
+        'queued follow-up\nin-progress draft',
+      );
     });
   });
 

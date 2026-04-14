@@ -25,7 +25,7 @@ import type {
   ToolCallResponseInfo,
 } from '../core/turn.js';
 import type { Status } from '../core/coreToolScheduler.js';
-import type { TaskResultDisplay } from '../tools/tools.js';
+import type { AgentResultDisplay } from '../tools/tools.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 
 /**
@@ -81,6 +81,8 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Context window size of the model used for this response */
+  contextWindowSize?: number;
   /**
    * Tool call metadata for UI recovery.
    * Contains enriched info (displayName, status, result, etc.) not in API format.
@@ -299,12 +301,14 @@ export class ChatRecordingService {
    * @param data.message The raw PartListUnion object from the model response
    * @param data.model The model name
    * @param data.tokens Token usage statistics
+   * @param data.contextWindowSize Context window size of the model
    * @param data.toolCallsMetadata Enriched tool call info for UI recovery
    */
   recordAssistantTurn(data: {
     model: string;
     message?: PartListUnion;
     tokens?: GenerateContentResponseUsageMetadata;
+    contextWindowSize?: number;
   }): void {
     try {
       const record: ChatRecord = {
@@ -318,6 +322,10 @@ export class ChatRecordingService {
 
       if (data.tokens) {
         record.usageMetadata = data.tokens;
+      }
+
+      if (data.contextWindowSize !== undefined) {
+        record.contextWindowSize = data.contextWindowSize;
       }
 
       this.appendRecord(record);
@@ -351,7 +359,7 @@ export class ChatRecordingService {
           'type' in toolCallResult.resultDisplay &&
           toolCallResult.resultDisplay.type === 'task_execution'
         ) {
-          const taskResult = toolCallResult.resultDisplay as TaskResultDisplay;
+          const taskResult = toolCallResult.resultDisplay as AgentResultDisplay;
           record.toolCallResult = {
             ...toolCallResult,
             resultDisplay: {

@@ -179,6 +179,7 @@ describe('gemini.tsx main function', () => {
         getProjectRoot: () => '/',
         getOutputFormat: () => OutputFormat.TEXT,
         getWarnings: () => [],
+        getSessionId: () => 'test-session-id',
       } as unknown as Config;
     });
     vi.mocked(loadSettings).mockReturnValue({
@@ -448,6 +449,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getGeminiMdFileCount: () => 0,
       getWarnings: () => [],
       getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -467,6 +469,8 @@ describe('gemini.tsx main function kitty protocol', () => {
       debug: undefined,
       prompt: undefined,
       promptInteractive: undefined,
+      systemPrompt: undefined,
+      appendSystemPrompt: undefined,
       query: undefined,
       yolo: undefined,
       approvalMode: undefined,
@@ -504,7 +508,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       authType: undefined,
       maxSessionTurns: undefined,
       experimentalLsp: undefined,
-      experimentalHooks: undefined,
       channel: undefined,
       chatRecording: undefined,
       sessionId: undefined,

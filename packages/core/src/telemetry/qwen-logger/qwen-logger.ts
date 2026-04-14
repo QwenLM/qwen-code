@@ -42,9 +42,14 @@ import type {
   AuthEvent,
   SkillLaunchEvent,
   UserFeedbackEvent,
+  UserRetryEvent,
   RipgrepFallbackEvent,
   EndSessionEvent,
   ExtensionUpdateEvent,
+  ArenaSessionStartedEvent,
+  ArenaAgentCompletedEvent,
+  ArenaSessionEndedEvent,
+  HookCallEvent,
 } from '../types.js';
 import type {
   RumEvent,
@@ -61,6 +66,7 @@ import {
   type DebugLogger,
 } from '../../utils/debugLogger.js';
 import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
+import { sanitizeHookName } from '../sanitize.js';
 import { InstallationManager } from '../../utils/installationManager.js';
 import { FixedDeque } from 'mnemonist';
 import { AuthType } from '../../core/contentGenerator.js';
@@ -415,20 +421,20 @@ export class QwenLogger {
 
     const applicationEvent = this.createViewEvent('session', 'session_start', {
       properties: {
-        model: event.model,
         approval_mode: event.approval_mode,
-        embedding_model: event.embedding_model,
-        sandbox_enabled: event.sandbox_enabled,
         core_tools_enabled: event.core_tools_enabled,
-        api_key_enabled: event.api_key_enabled,
-        vertex_ai_enabled: event.vertex_ai_enabled,
         debug_enabled: event.debug_enabled,
+        hooks: event.hooks,
+        ide_enabled: event.ide_enabled,
+        interactive_shell_enabled: event.interactive_shell_enabled,
         mcp_servers: event.mcp_servers,
-        telemetry_enabled: event.telemetry_enabled,
-        telemetry_log_user_prompts_enabled:
-          event.telemetry_log_user_prompts_enabled,
+        model: event.model,
+        sandbox_enabled: event.sandbox_enabled,
         skills: event.skills,
         subagents: event.subagents,
+        telemetry_enabled: event.telemetry_enabled,
+        truncate_tool_output_lines: event.truncate_tool_output_lines,
+        truncate_tool_output_threshold: event.truncate_tool_output_threshold,
       },
     });
 
@@ -465,9 +471,19 @@ export class QwenLogger {
   logNewPromptEvent(event: UserPromptEvent): void {
     const rumEvent = this.createActionEvent('user', 'new_prompt', {
       properties: {
-        auth_type: event.auth_type,
         prompt_id: event.prompt_id,
         prompt_length: event.prompt_length,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logRetryEvent(event: UserRetryEvent): void {
+    const rumEvent = this.createActionEvent('user', 'retry', {
+      properties: {
+        prompt_id: event.prompt_id,
       },
     });
 
@@ -631,12 +647,13 @@ export class QwenLogger {
       status_code: event.status_code?.toString() ?? '',
       duration: event.duration_ms,
       success: 0,
-      message: event.error,
+      message: event.error_message,
       trace_id: event.response_id,
       properties: {
         auth_type: event.auth_type,
         model: event.model,
         prompt_id: event.prompt_id,
+        error_message: event.error_message,
         error_type: event.error_type,
       },
     });
@@ -920,6 +937,92 @@ export class QwenLogger {
         retry_delay_ms: event.retry_delay_ms,
       },
     });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // arena events
+  logArenaSessionStartedEvent(event: ArenaSessionStartedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_session_started', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        model_ids: JSON.stringify(event.model_ids),
+        task_length: event.task_length,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logArenaAgentCompletedEvent(event: ArenaAgentCompletedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_agent_completed', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        agent_session_id: event.agent_session_id,
+        agent_model_id: event.agent_model_id,
+        status: event.status,
+        duration_ms: event.duration_ms,
+        rounds: event.rounds,
+        total_tokens: event.total_tokens,
+        input_tokens: event.input_tokens,
+        output_tokens: event.output_tokens,
+        tool_calls: event.tool_calls,
+        successful_tool_calls: event.successful_tool_calls,
+        failed_tool_calls: event.failed_tool_calls,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logArenaSessionEndedEvent(event: ArenaSessionEndedEvent): void {
+    const rumEvent = this.createActionEvent('arena', 'arena_session_ended', {
+      properties: {
+        arena_session_id: event.arena_session_id,
+        status: event.status,
+        duration_ms: event.duration_ms,
+        display_backend: event.display_backend,
+        agent_count: event.agent_count,
+        completed_agents: event.completed_agents,
+        failed_agents: event.failed_agents,
+        cancelled_agents: event.cancelled_agents,
+        winner_model_id: event.winner_model_id,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  /**
+   * Log a hook call event
+   * Records hook execution telemetry for observability
+   */
+  logHookCallEvent(event: HookCallEvent): void {
+    // Sanitize hook name to remove potentially sensitive information
+    const sanitizedHookName = sanitizeHookName(event.hook_name);
+
+    const properties: Record<string, unknown> = {
+      hook_event_name: event.hook_event_name,
+      hook_type: event.hook_type,
+      hook_name: sanitizedHookName,
+      duration_ms: event.duration_ms,
+      success: event.success ? 1 : 0,
+      exit_code: event.exit_code,
+    };
+
+    if (event.error && this.config?.getTelemetryLogPromptsEnabled()) {
+      properties['error'] = event.error;
+    }
+
+    const rumEvent = this.createActionEvent(
+      'hook',
+      `hook_call#${event.hook_event_name}`,
+      { properties },
+    );
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();

@@ -10,10 +10,9 @@ import type { FunctionDeclaration } from '@google/genai';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
-import * as process from 'process';
 
-import { QWEN_DIR } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
@@ -247,9 +246,7 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
 const TODO_SUBDIR = 'todos';
 
 function getTodoFilePath(sessionId?: string): string {
-  const homeDir =
-    process.env['HOME'] || process.env['USERPROFILE'] || process.cwd();
-  const todoDir = path.join(homeDir, QWEN_DIR, TODO_SUBDIR);
+  const todoDir = path.join(Storage.getRuntimeBaseDir(), TODO_SUBDIR);
 
   // Use sessionId if provided, otherwise fall back to 'default'
   const filename = `${sessionId || 'default'}.json`;
@@ -311,13 +308,6 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
   getDescription(): string {
     return this.operationType === 'create' ? 'Create todos' : 'Update todos';
-  }
-
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<false> {
-    // Todo operations should execute automatically without user confirmation
-    return false;
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
@@ -406,9 +396,7 @@ export async function readTodosForSession(
  */
 export async function listTodoSessions(): Promise<string[]> {
   try {
-    const homeDir =
-      process.env['HOME'] || process.env['USERPROFILE'] || process.cwd();
-    const todoDir = path.join(homeDir, QWEN_DIR, TODO_SUBDIR);
+    const todoDir = path.join(Storage.getRuntimeBaseDir(), TODO_SUBDIR);
     const files = await fs.readdir(todoDir);
     return files
       .filter((file: string) => file.endsWith('.json'))

@@ -232,6 +232,50 @@ describe('parseInstallSource', () => {
     });
   });
 
+  describe('scoped npm package parsing', () => {
+    it('should parse scoped npm package without version', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('@ali/openclaw-tmcp-dingtalk');
+
+      expect(result.source).toBe('@ali/openclaw-tmcp-dingtalk');
+      expect(result.type).toBe('npm');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should parse scoped npm package with version', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        '@ali/openclaw-tmcp-dingtalk@1.2.0',
+      );
+
+      expect(result.source).toBe('@ali/openclaw-tmcp-dingtalk@1.2.0');
+      expect(result.type).toBe('npm');
+    });
+
+    it('should parse scoped npm package with latest tag', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('@scope/my-extension@latest');
+
+      expect(result.source).toBe('@scope/my-extension@latest');
+      expect(result.type).toBe('npm');
+    });
+
+    it('should parse scoped npm package with plugin name', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        '@ali/openclaw-tmcp-dingtalk:my-plugin',
+      );
+
+      expect(result.source).toBe('@ali/openclaw-tmcp-dingtalk');
+      expect(result.type).toBe('npm');
+      expect(result.pluginName).toBe('my-plugin');
+    });
+  });
+
   describe('marketplace config detection', () => {
     it('should detect marketplace type when config exists', async () => {
       // Mock stat to fail (not a local path)

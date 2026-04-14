@@ -12,6 +12,7 @@ import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
+import { CompactModeProvider } from '../../contexts/CompactModeContext.js';
 import type {
   AnsiOutput,
   AnsiOutputDisplay,
@@ -101,18 +102,21 @@ const mockSettings: LoadedSettings = {
   },
 } as LoadedSettings;
 
-// Helper to render with context
+// Helper to render with context (compactMode=false by default to show tool output)
 const renderWithContext = (
   ui: React.ReactElement,
   streamingState: StreamingState,
+  compactMode = false,
 ) => {
   const contextValue: StreamingState = streamingState;
   return render(
-    <SettingsContext.Provider value={mockSettings}>
-      <StreamingContext.Provider value={contextValue}>
-        {ui}
-      </StreamingContext.Provider>
-    </SettingsContext.Provider>,
+    <CompactModeProvider value={{ compactMode, frozenSnapshot: null }}>
+      <SettingsContext.Provider value={mockSettings}>
+        <StreamingContext.Provider value={contextValue}>
+          {ui}
+        </StreamingContext.Provider>
+      </SettingsContext.Provider>
+    </CompactModeProvider>,
   );
 };
 
@@ -141,6 +145,18 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('test-tool');
     expect(output).toContain('A tool for testing');
     expect(output).toContain('MockMarkdown:Test result');
+  });
+
+  it('hides result output in compact mode (compactMode=true)', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage {...baseProps} />,
+      StreamingState.Idle,
+      true, // compact mode
+    );
+    const output = lastFrame();
+    expect(output).toContain('✓'); // status indicator still visible
+    expect(output).toContain('test-tool'); // tool name still visible
+    expect(output).not.toContain('MockMarkdown:Test result'); // result hidden
   });
 
   describe('ToolStatusIndicator rendering', () => {
@@ -299,5 +315,56 @@ describe('<ToolMessage />', () => {
       StreamingState.Idle,
     );
     expect(lastFrame()).toContain('MockAnsiOutput:hello');
+  });
+
+  it('renders rejected plan content with plan text still visible', () => {
+    const planResultDisplay = {
+      type: 'plan_summary' as const,
+      message: 'Plan was rejected. Remaining in plan mode.',
+      plan: '# My Plan\n- Step 1: Do something\n- Step 2: Do another thing',
+      rejected: true,
+    };
+
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ExitPlanMode"
+        description="Plan:"
+        status={ToolCallStatus.Canceled}
+        resultDisplay={planResultDisplay}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Plan was rejected. Remaining in plan mode.');
+    expect(output).toContain('MockMarkdown:# My Plan');
+    expect(output).toContain('- Step 1: Do something');
+    expect(output).toContain('- Step 2: Do another thing');
+  });
+
+  it('renders approved plan content with approval message', () => {
+    const planResultDisplay = {
+      type: 'plan_summary' as const,
+      message: 'User approved the plan.',
+      plan: '# My Plan\n- Step 1\n- Step 2',
+    };
+
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ExitPlanMode"
+        description="Plan:"
+        status={ToolCallStatus.Success}
+        resultDisplay={planResultDisplay}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('User approved the plan.');
+    expect(output).toContain('MockMarkdown:# My Plan');
+    expect(output).toContain('- Step 1');
+    expect(output).toContain('- Step 2');
   });
 });

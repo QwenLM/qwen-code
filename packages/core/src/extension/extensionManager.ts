@@ -11,6 +11,7 @@ import type {
   SubagentConfig,
   ClaudeMarketplaceConfig,
 } from '../index.js';
+import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import {
   Storage,
   Config,
@@ -28,6 +29,8 @@ import {
   EXTENSIONS_CONFIG_FILENAME,
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
+  substituteHookVariables,
+  performVariableReplacement,
 } from './variables.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
@@ -36,6 +39,7 @@ import {
   downloadFromGitHubRelease,
   parseGitHubRepoForReleases,
 } from './github.js';
+import { downloadFromNpmRegistry } from './npm.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 import {
@@ -84,6 +88,15 @@ export enum SettingScope {
   SystemDefaults = 'SystemDefaults',
 }
 
+export interface ExtensionChannelConfig {
+  /** Relative path to JS entry point (must export `plugin: ChannelPlugin`) */
+  entry: string;
+  /** Human-readable name for CLI output */
+  displayName?: string;
+  /** Extra config fields required beyond the shared ChannelConfig fields */
+  requiredConfigFields?: string[];
+}
+
 export interface Extension {
   id: string;
   name: string;
@@ -100,6 +113,8 @@ export interface Extension {
   commands?: string[];
   skills?: SkillConfig[];
   agents?: SubagentConfig[];
+  hooks?: { [K in HookEventName]?: HookDefinition[] };
+  channels?: Record<string, ExtensionChannelConfig>;
 }
 
 export interface ExtensionConfig {
@@ -112,6 +127,8 @@ export interface ExtensionConfig {
   skills?: string | string[];
   agents?: string | string[];
   settings?: ExtensionSetting[];
+  hooks?: { [K in HookEventName]?: HookDefinition[] };
+  channels?: Record<string, ExtensionChannelConfig>;
 }
 
 export interface ExtensionUpdateInfo {
@@ -624,7 +641,10 @@ export class ExtensionManager {
       const extension: Extension = {
         id: getExtensionId(config, installMetadata),
         name: config.name,
-        version: config.version,
+        version:
+          config.version ||
+          installMetadata?.marketplaceConfig?.metadata?.version ||
+          '1.0.0',
         path: effectiveExtensionPath,
         installMetadata,
         isActive: this.isEnabled(config.name, this.workspaceDir),
@@ -640,6 +660,10 @@ export class ExtensionManager {
             filterMcpConfig(value),
           ]),
         );
+      }
+
+      if (config.channels) {
+        extension.channels = config.channels;
       }
 
       extension.commands = await loadCommandsFromDir(
@@ -659,6 +683,64 @@ export class ExtensionManager {
         `${effectiveExtensionPath}/agents`,
       );
 
+      if (config.hooks && typeof config.hooks !== 'string') {
+        // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
+        extension.hooks = this.substituteHookVariables(
+          config.hooks,
+          effectiveExtensionPath,
+        );
+      }
+
+      // Also load hooks from hooks directory or from config.hooks string path if available and not already set
+      if (!extension.hooks) {
+        const hooksDir = path.join(effectiveExtensionPath, 'hooks');
+        const hooksJsonPath = path.join(hooksDir, 'hooks.json');
+
+        const configHooksPath =
+          typeof config.hooks === 'string'
+            ? path.isAbsolute(config.hooks)
+              ? config.hooks
+              : path.join(effectiveExtensionPath, config.hooks)
+            : null;
+
+        if (
+          fs.existsSync(hooksJsonPath) ||
+          (configHooksPath && fs.existsSync(configHooksPath))
+        ) {
+          const hooksFilePath =
+            configHooksPath && fs.existsSync(configHooksPath)
+              ? configHooksPath
+              : hooksJsonPath;
+
+          try {
+            const hooksContent = fs.readFileSync(hooksFilePath, 'utf-8');
+            const parsedHooks = JSON.parse(hooksContent);
+
+            let hooksData;
+            if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
+              hooksData = parsedHooks.hooks as {
+                [K in HookEventName]?: HookDefinition[];
+              };
+            } else {
+              // Assume the entire file content is the hooks object
+              hooksData = parsedHooks as {
+                [K in HookEventName]?: HookDefinition[];
+              };
+            }
+
+            // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
+            extension.hooks = this.substituteHookVariables(
+              hooksData,
+              effectiveExtensionPath,
+            );
+          } catch (error) {
+            debugLogger.warn(
+              `Failed to parse hooks file ${hooksJsonPath}: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          }
+        }
+      }
+
       return extension;
     } catch (e) {
       debugLogger.warn(
@@ -668,6 +750,16 @@ export class ExtensionManager {
       );
       return null;
     }
+  }
+
+  /**
+   * Substitute variables in hook configurations, particularly ${CLAUDE_PLUGIN_ROOT}
+   */
+  private substituteHookVariables(
+    hooks: { [K in HookEventName]?: HookDefinition[] } | undefined,
+    extensionPath: string,
+  ): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    return substituteHookVariables(hooks, extensionPath);
   }
 
   loadInstallMetadata(
@@ -796,6 +888,11 @@ export class ExtensionManager {
             installMetadata.type = 'git';
           }
         }
+        localSourcePath = tempDir;
+      } else if (installMetadata.type === 'npm') {
+        tempDir = await ExtensionStorage.createTmpDir();
+        const result = await downloadFromNpmRegistry(installMetadata, tempDir);
+        installMetadata.releaseTag = result.version;
         localSourcePath = tempDir;
       } else if (
         installMetadata.type === 'local' ||
@@ -926,6 +1023,28 @@ export class ExtensionManager {
           await copyExtension(localSourcePath, destinationPath);
         }
 
+        // Perform variable replacement in extension files (e.g., ${CLAUDE_PLUGIN_ROOT}) for Claude extensions
+        const hooksDir = path.join(destinationPath, 'hooks');
+        const configHooksPath =
+          typeof newExtensionConfig.hooks === 'string'
+            ? path.isAbsolute(newExtensionConfig.hooks)
+              ? newExtensionConfig.hooks
+              : path.join(destinationPath, newExtensionConfig.hooks)
+            : null;
+
+        if (
+          (originSource === 'Claude' && fs.existsSync(hooksDir)) ||
+          (originSource === 'Claude' &&
+            configHooksPath &&
+            fs.existsSync(configHooksPath))
+        ) {
+          try {
+            await performVariableReplacement(destinationPath);
+          } catch (error) {
+            debugLogger.error('Variable replacement failed', error);
+          }
+        }
+
         const metadataString = JSON.stringify(installMetadata, null, 2);
         const metadataPath = path.join(
           destinationPath,
@@ -954,7 +1073,7 @@ export class ExtensionManager {
               'success',
             ),
           );
-          this.refreshTools();
+          await this.refreshTools();
         } else {
           logExtensionInstallEvent(
             telemetryConfig,
@@ -1067,7 +1186,7 @@ export class ExtensionManager {
     if (isUpdate) return;
 
     this.removeEnablementConfig(extension.name);
-    this.refreshTools();
+    await this.refreshTools();
 
     logExtensionUninstall(
       telemetryConfig,
@@ -1113,9 +1232,9 @@ export class ExtensionManager {
       }
       callback(extension.name, ExtensionUpdateState.CHECKING_FOR_UPDATES);
       promises.push(
-        checkForExtensionUpdate(extension, this).then((state) =>
-          callback(extension.name, state),
-        ),
+        checkForExtensionUpdate(extension, this)
+          .then((state) => callback(extension.name, state))
+          .catch(() => callback(extension.name, ExtensionUpdateState.ERROR)),
       );
     }
     await Promise.all(promises);
@@ -1218,7 +1337,7 @@ export class ExtensionManager {
   async refreshMemory(): Promise<void> {
     if (!this.config) return;
     // refresh mcp servers
-    this.config.getToolRegistry().restartMcpServers();
+    await this.config.getToolRegistry().restartMcpServers();
     // refresh skills
     this.config.getSkillManager()?.refreshCache();
     // refresh subagents
@@ -1230,7 +1349,7 @@ export class ExtensionManager {
   async refreshTools(): Promise<void> {
     if (!this.config) return;
     // FIXME: restart all mcp servers now, this can be optimized by only restarting changed ones at here
-    this.refreshMemory();
+    await this.refreshMemory();
   }
 }
 
@@ -1260,12 +1379,18 @@ export function getExtensionId(
   installMetadata?: ExtensionInstallMetadata,
 ): string {
   let idValue = config.name;
-  const githubUrlParts =
+  let githubUrlParts = null;
+  if (
     installMetadata &&
     (installMetadata.type === 'git' ||
       installMetadata.type === 'github-release')
-      ? parseGitHubRepoForReleases(installMetadata.source)
-      : null;
+  ) {
+    try {
+      githubUrlParts = parseGitHubRepoForReleases(installMetadata.source);
+    } catch {
+      // Non-GitHub URL (GitLab, Bitbucket, etc.) - use source as-is
+    }
+  }
   if (githubUrlParts) {
     idValue = `https://github.com/${githubUrlParts.owner}/${githubUrlParts.repo}`;
   } else {

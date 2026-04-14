@@ -19,6 +19,7 @@ import { resolveAndValidatePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
@@ -73,27 +74,85 @@ class GrepToolInvocation extends BaseToolInvocation<
     this.fileExclusions = config.getFileExclusions();
   }
 
+  /**
+   * Returns 'ask' for paths outside the workspace, so that external grep
+   * searches require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (!this.params.path) {
+      return 'allow'; // Default workspace directory
+    }
+    const workspaceContext = this.config.getWorkspaceContext();
+    const resolvedPath = path.resolve(
+      this.config.getTargetDir(),
+      this.params.path,
+    );
+    if (workspaceContext.isPathWithinWorkspace(resolvedPath)) {
+      return 'allow';
+    }
+    return 'ask';
+  }
+
   async execute(signal: AbortSignal): Promise<ToolResult> {
     try {
-      // Default to target directory if no path is provided
-      const searchDirAbs = resolveAndValidatePath(
-        this.config,
-        this.params.path,
-      );
-      const searchDirDisplay = this.params.path || '.';
+      // Determine which directories to search
+      const searchDirs: string[] = [];
+      let searchLocationDescription: string;
 
-      // Perform grep search
-      const rawMatches = await this.performGrepSearch({
-        pattern: this.params.pattern,
-        path: searchDirAbs,
-        glob: this.params.glob,
-        signal,
-      });
+      if (this.params.path) {
+        // User specified a path — search only that directory
+        const searchDirAbs = resolveAndValidatePath(
+          this.config,
+          this.params.path,
+          { allowExternalPaths: true },
+        );
+        searchDirs.push(searchDirAbs);
+        searchLocationDescription = `in path "${this.params.path}"`;
+      } else {
+        // No path specified — search all workspace directories
+        const workspaceDirs = this.config
+          .getWorkspaceContext()
+          .getDirectories();
+        searchDirs.push(...workspaceDirs);
+        searchLocationDescription =
+          workspaceDirs.length > 1
+            ? `across ${workspaceDirs.length} workspace directories`
+            : `in the workspace directory`;
+      }
 
-      // Build search description
-      const searchLocationDescription = this.params.path
-        ? `in path "${searchDirDisplay}"`
-        : `in the workspace directory`;
+      // Perform grep search across all directories
+      let rawMatches: GrepMatch[] = [];
+      for (const searchDir of searchDirs) {
+        const matches = await this.performGrepSearch({
+          pattern: this.params.pattern,
+          path: searchDir,
+          glob: this.params.glob,
+          signal,
+        });
+        // When searching multiple directories, convert relative file paths
+        // to absolute paths so results from different directories are
+        // unambiguous.
+        if (searchDirs.length > 1) {
+          for (const match of matches) {
+            if (!path.isAbsolute(match.filePath)) {
+              match.filePath = path.resolve(searchDir, match.filePath);
+            }
+          }
+        }
+        rawMatches.push(...matches);
+      }
+
+      // Deduplicate matches that might appear from overlapping workspace
+      // directories (e.g. parent + child both in workspace dirs).
+      if (searchDirs.length > 1) {
+        const seen = new Set<string>();
+        rawMatches = rawMatches.filter((match) => {
+          const key = `${match.filePath}:${match.lineNumber}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      }
 
       const filterDescription = this.params.glob
         ? ` (filter: "${this.params.glob}")`
@@ -504,7 +563,7 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
     super(
       GrepTool.Name,
       ToolDisplayNames.GREP,
-      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Task tool for open-ended searches requiring multiple rounds\n',
+      'A powerful search tool for finding patterns in files\n\n  Usage:\n  - ALWAYS use Grep for search tasks. NEVER invoke `grep` or `rg` as a Bash command. The Grep tool has been optimized for correct permissions and access.\n  - Supports full regex syntax (e.g., "log.*Error", "function\\s+\\w+")\n  - Filter files with glob parameter (e.g., "*.js", "**/*.tsx")\n  - Case-insensitive by default\n  - Use Agent tool for open-ended searches requiring multiple rounds\n',
       Kind.Search,
       {
         properties: {
@@ -553,7 +612,9 @@ export class GrepTool extends BaseDeclarativeTool<GrepToolParams, ToolResult> {
     // Only validate path if one is provided
     if (params.path) {
       try {
-        resolveAndValidatePath(this.config, params.path);
+        resolveAndValidatePath(this.config, params.path, {
+          allowExternalPaths: true,
+        });
       } catch (error) {
         return getErrorMessage(error);
       }

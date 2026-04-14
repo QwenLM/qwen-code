@@ -7,6 +7,7 @@
 export const SERVICE_NAME = 'qwen-code';
 
 export const EVENT_USER_PROMPT = 'qwen-code.user_prompt';
+export const EVENT_USER_RETRY = 'qwen-code.user_retry';
 export const EVENT_TOOL_CALL = 'qwen-code.tool_call';
 export const EVENT_API_REQUEST = 'qwen-code.api_request';
 export const EVENT_API_ERROR = 'qwen-code.api_error';
@@ -37,6 +38,15 @@ export const EVENT_SUBAGENT_EXECUTION = 'qwen-code.subagent_execution';
 export const EVENT_SKILL_LAUNCH = 'qwen-code.skill_launch';
 export const EVENT_AUTH = 'qwen-code.auth';
 export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
+
+// Prompt Suggestion Events
+export const EVENT_PROMPT_SUGGESTION = 'qwen-code.prompt_suggestion';
+export const EVENT_SPECULATION = 'qwen-code.speculation';
+
+// Arena Events
+export const EVENT_ARENA_SESSION_STARTED = 'qwen-code.arena_session_started';
+export const EVENT_ARENA_AGENT_COMPLETED = 'qwen-code.arena_agent_completed';
+export const EVENT_ARENA_SESSION_ENDED = 'qwen-code.arena_session_ended';
 
 // Performance Events
 export const EVENT_STARTUP_PERFORMANCE = 'qwen-code.startup.performance';

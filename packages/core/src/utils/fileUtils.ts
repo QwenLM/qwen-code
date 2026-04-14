@@ -18,6 +18,7 @@ import { ToolErrorType } from '../tools/tool-error.js';
 import { BINARY_EXTENSIONS } from './ignorePatterns.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
+import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
@@ -227,7 +228,7 @@ export async function readFileWithEncodingInfo(
     return { content: full.toString('utf8'), encoding: 'utf-8', bom: false };
   }
 
-  // Not valid UTF-8 — try chardet-based encoding detection
+  // Not valid UTF-8 — try chardet statistical detection
   const detected = detectEncodingFromBuffer(full);
   if (detected && !isUtf8CompatibleEncoding(detected)) {
     try {
@@ -258,6 +259,40 @@ export async function readFileWithEncodingInfo(
 export async function readFileWithEncoding(filePath: string): Promise<string> {
   const result = await readFileWithEncodingInfo(filePath);
   return result.content;
+}
+
+export async function countFileLines(filePath: string): Promise<number> {
+  const result = await readFileWithEncodingInfo(filePath);
+  return result.content.split('\n').length;
+}
+
+export async function readFileWithLineAndLimit(params: {
+  path: string;
+  limit: number;
+  line?: number;
+}): Promise<{
+  content: string;
+  bom?: boolean;
+  encoding?: string;
+  originalLineCount: number;
+}> {
+  const { path: filePath, limit, line } = params;
+  const { content, encoding, bom } = await readFileWithEncodingInfo(filePath);
+  const lines = content.split('\n');
+  const originalLineCount = lines.length;
+  const startLine = line || 0;
+  // Ensure endLine does not exceed originalLineCount
+  const endLine = Math.min(startLine + limit, originalLineCount);
+  // Ensure selectedLines doesn't try to slice beyond array bounds if startLine is too high
+  const actualStartLine = Math.min(startLine, originalLineCount);
+  const selectedLines = lines.slice(actualStartLine, endLine);
+
+  return {
+    content: selectedLines.join('\n'),
+    bom,
+    encoding,
+    originalLineCount,
+  };
 }
 
 /**
@@ -468,9 +503,45 @@ export interface ProcessedFileReadResult {
   returnDisplay: string;
   error?: string; // Optional error message for the LLM if file processing failed
   errorType?: ToolErrorType; // Structured error type
+  originalLineCount?: number; // For text files, the total number of lines in the original file
   isTruncated?: boolean; // For text files, indicates if content was truncated
-  originalLineCount?: number; // For text files
   linesShown?: [number, number]; // For text files [startLine, endLine] (1-based for display)
+}
+
+/**
+ * For media file types, returns the corresponding modality key.
+ * Returns undefined for non-media types (text, binary, svg) which are always supported.
+ */
+function mediaModalityKey(
+  fileType: 'image' | 'pdf' | 'audio' | 'video' | 'text' | 'binary' | 'svg',
+): keyof InputModalities | undefined {
+  if (
+    fileType === 'image' ||
+    fileType === 'pdf' ||
+    fileType === 'audio' ||
+    fileType === 'video'
+  ) {
+    return fileType;
+  }
+  return undefined;
+}
+
+/**
+ * Build the same unsupported-modality message used by the converter,
+ * so the LLM sees a consistent hint regardless of where the check fires.
+ */
+function unsupportedModalityMessage(
+  modality: string,
+  displayName: string,
+): string {
+  let hint: string;
+  if (modality === 'pdf') {
+    hint =
+      'This model does not support PDF input directly. The read_file tool cannot extract PDF content either. To extract text from the PDF file, try using skills if applicable, or guide user to install pdf skill by running this slash command:\n/extensions install https://github.com/anthropics/skills:document-skills';
+  } else {
+    hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
+  }
+  return `[Unsupported ${modality} file: "${displayName}". ${hint}]`;
 }
 
 /**
@@ -527,6 +598,26 @@ export async function processSingleFileContent(
       .replace(/\\/g, '/');
 
     const displayName = path.basename(filePath);
+
+    // Check modality support for media files using the resolved config
+    // (same source of truth the converter uses at API-call time).
+    const modality = mediaModalityKey(fileType);
+    if (modality) {
+      const modalities: InputModalities =
+        config.getContentGeneratorConfig()?.modalities ?? {};
+      if (!modalities[modality]) {
+        const message = unsupportedModalityMessage(modality, displayName);
+        debugLogger.warn(
+          `Model '${config.getModel()}' does not support ${modality} input. ` +
+            `Skipping file: ${relativePathForDisplay}`,
+        );
+        return {
+          llmContent: message,
+          returnDisplay: `Skipped ${fileType} file: ${relativePathForDisplay} (model doesn't support ${modality} input)`,
+        };
+      }
+    }
+
     switch (fileType) {
       case 'binary': {
         return {
@@ -550,20 +641,18 @@ export async function processSingleFileContent(
       }
       case 'text': {
         // Use BOM-aware reader to avoid leaving a BOM character in content and to support UTF-16/32 transparently
-        const content = await readFileWithEncoding(filePath);
-        const lines = content.split('\n').map((line) => line.trimEnd());
-        const originalLineCount = lines.length;
-
+        const { content, _meta } = await config
+          .getFileSystemService()
+          .readTextFile({
+            path: filePath,
+            limit: limit ?? config.getTruncateToolOutputLines(),
+            line: offset,
+          });
+        const originalLineCount =
+          _meta?.originalLineCount ?? (await countFileLines(filePath));
+        const selectedLines = content.split('\n').map((line) => line.trimEnd());
         const startLine = offset || 0;
-        const configLineLimit = config.getTruncateToolOutputLines();
         const configCharLimit = config.getTruncateToolOutputThreshold();
-        const effectiveLimit = limit === undefined ? configLineLimit : limit;
-
-        // Ensure endLine does not exceed originalLineCount
-        const endLine = Math.min(startLine + effectiveLimit, originalLineCount);
-        // Ensure selectedLines doesn't try to slice beyond array bounds if startLine is too high
-        const actualStartLine = Math.min(startLine, originalLineCount);
-        const selectedLines = lines.slice(actualStartLine, endLine);
 
         // Apply character limit truncation
         let llmContent = '';
@@ -603,11 +692,7 @@ export async function processSingleFileContent(
           linesIncluded = selectedLines.length;
         }
 
-        // Calculate actual end line shown
-        const actualEndLine = contentLengthTruncated
-          ? actualStartLine + linesIncluded
-          : endLine;
-
+        const actualEndLine = startLine + linesIncluded;
         const contentRangeTruncated =
           startLine > 0 || actualEndLine < originalLineCount;
         const isTruncated = contentRangeTruncated || contentLengthTruncated;
@@ -616,7 +701,7 @@ export async function processSingleFileContent(
         let returnDisplay = '';
         if (isTruncated) {
           returnDisplay = `Read lines ${
-            actualStartLine + 1
+            startLine + 1
           }-${actualEndLine} of ${originalLineCount} from ${relativePathForDisplay}`;
           if (contentLengthTruncated) {
             returnDisplay += ' (truncated)';
@@ -628,7 +713,7 @@ export async function processSingleFileContent(
           returnDisplay,
           isTruncated,
           originalLineCount,
-          linesShown: [actualStartLine + 1, actualEndLine],
+          linesShown: [startLine + 1, actualEndLine],
         };
       }
       case 'image':

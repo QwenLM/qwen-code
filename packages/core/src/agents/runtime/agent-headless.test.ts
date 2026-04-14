@@ -1,0 +1,1197 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import type {
+  Content,
+  FunctionCall,
+  FunctionDeclaration,
+  GenerateContentConfig,
+  Part,
+} from '@google/genai';
+import { Type } from '@google/genai';
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+  type Mock,
+} from 'vitest';
+import { Config, type ConfigParameters } from '../../config/config.js';
+import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
+import {
+  createContentGenerator,
+  createContentGeneratorConfig,
+  resolveContentGeneratorConfigWithSources,
+  AuthType,
+} from '../../core/contentGenerator.js';
+import { GeminiChat } from '../../core/geminiChat.js';
+import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
+import type { ToolRegistry } from '../../tools/tool-registry.js';
+import { type AnyDeclarativeTool } from '../../tools/tools.js';
+import { ContextState, AgentHeadless } from './agent-headless.js';
+import {
+  AgentEventEmitter,
+  AgentEventType,
+  type AgentStreamTextEvent,
+  type AgentToolCallEvent,
+  type AgentToolResultEvent,
+} from './agent-events.js';
+import type {
+  ModelConfig,
+  PromptConfig,
+  RunConfig,
+  ToolConfig,
+} from './agent-types.js';
+import { AgentTerminateMode } from './agent-types.js';
+
+vi.mock('../../core/geminiChat.js');
+vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../../core/contentGenerator.js')>();
+  const { DEFAULT_QWEN_MODEL } = await import('../../config/models.js');
+  return {
+    ...actual,
+    createContentGenerator: vi.fn().mockResolvedValue({
+      generateContent: vi.fn(),
+      generateContentStream: vi.fn(),
+      countTokens: vi.fn().mockResolvedValue({ totalTokens: 100 }),
+      embedContent: vi.fn(),
+      useSummarizedThinking: vi.fn().mockReturnValue(false),
+    }),
+    createContentGeneratorConfig: vi.fn().mockReturnValue({
+      model: DEFAULT_QWEN_MODEL,
+      authType: actual.AuthType.USE_GEMINI,
+    }),
+    resolveContentGeneratorConfigWithSources: vi.fn().mockReturnValue({
+      config: {
+        model: DEFAULT_QWEN_MODEL,
+        authType: actual.AuthType.USE_GEMINI,
+        apiKey: 'test-api-key',
+      },
+      sources: {},
+    }),
+  };
+});
+vi.mock('../../utils/environmentContext.js', () => ({
+  getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
+  getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
+    {
+      role: 'user',
+      parts: [{ text: 'Env Context' }],
+    },
+    {
+      role: 'model',
+      parts: [{ text: 'Got it. Thanks for the context!' }],
+    },
+    ...(extraHistory ?? []),
+  ]),
+}));
+vi.mock('../../core/nonInteractiveToolExecutor.js');
+vi.mock('../../ide/ide-client.js');
+vi.mock('../../core/client.js');
+
+vi.mock('../../skills/skill-manager.js', () => {
+  const SkillManagerMock = vi.fn();
+  SkillManagerMock.prototype.startWatching = vi
+    .fn()
+    .mockResolvedValue(undefined);
+  SkillManagerMock.prototype.stopWatching = vi.fn();
+  SkillManagerMock.prototype.addChangeListener = vi
+    .fn()
+    .mockReturnValue(() => {});
+  return { SkillManager: SkillManagerMock };
+});
+
+vi.mock('../../subagents/subagent-manager.js', () => {
+  const SubagentManagerMock = vi.fn();
+  SubagentManagerMock.prototype.loadSessionSubagents = vi.fn();
+  SubagentManagerMock.prototype.addChangeListener = vi
+    .fn()
+    .mockReturnValue(() => {});
+  SubagentManagerMock.prototype.listSubagents = vi.fn().mockResolvedValue([]);
+  return { SubagentManager: SubagentManagerMock };
+});
+
+async function createMockConfig(
+  toolRegistryMocks = {},
+): Promise<{ config: Config; toolRegistry: ToolRegistry }> {
+  const configParams: ConfigParameters = {
+    model: DEFAULT_QWEN_MODEL,
+    targetDir: '.',
+    debugMode: false,
+    cwd: process.cwd(),
+    // Avoid writing any chat recording records from tests (e.g. via tool-call telemetry).
+    chatRecording: false,
+  };
+  const config = new Config(configParams);
+  await config.initialize();
+  await config.refreshAuth(AuthType.USE_GEMINI);
+
+  // Mock ToolRegistry
+  const mockToolRegistry = {
+    getTool: vi.fn(),
+    getFunctionDeclarations: vi.fn().mockReturnValue([]),
+    getFunctionDeclarationsFiltered: vi.fn().mockReturnValue([]),
+    getAllToolNames: vi.fn().mockReturnValue([]),
+    ...toolRegistryMocks,
+  } as unknown as ToolRegistry;
+
+  vi.spyOn(config, 'getToolRegistry').mockReturnValue(mockToolRegistry);
+
+  // Mock getContentGeneratorConfig to return a valid config
+  vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
+    model: DEFAULT_QWEN_MODEL,
+    authType: AuthType.USE_GEMINI,
+  });
+
+  // Mock setModel method
+  vi.spyOn(config, 'setModel').mockResolvedValue();
+
+  // Mock getSessionId method
+  vi.spyOn(config, 'getSessionId').mockReturnValue('test-session');
+
+  return { config, toolRegistry: mockToolRegistry };
+}
+
+// Helper to simulate LLM responses (sequence of tool calls over multiple turns)
+const createMockStream = (
+  functionCallsList: Array<FunctionCall[] | 'stop'>,
+) => {
+  let index = 0;
+  // This mock now returns a Promise that resolves to the async generator,
+  // matching the new signature for sendMessageStream.
+  return vi.fn().mockImplementation(async () => {
+    const response = functionCallsList[index] || 'stop';
+    index++;
+
+    return (async function* () {
+      if (response === 'stop') {
+        // When stopping, the model might return text, but the subagent logic primarily cares about the absence of functionCalls.
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'Done.' }],
+                },
+              },
+            ],
+          },
+        };
+      } else if (response.length > 0) {
+        yield {
+          type: 'chunk',
+          value: {
+            functionCalls: response,
+          },
+        };
+      } else {
+        yield {
+          type: 'chunk',
+          value: {
+            candidates: [
+              {
+                content: {
+                  parts: [{ text: 'Done.' }],
+                },
+              },
+            ],
+          },
+        }; // Handle empty array also as stop
+      }
+    })();
+  });
+};
+
+describe('subagent.ts', () => {
+  describe('ContextState', () => {
+    it('should set and get values correctly', () => {
+      const context = new ContextState();
+      context.set('key1', 'value1');
+      context.set('key2', 123);
+      expect(context.get('key1')).toBe('value1');
+      expect(context.get('key2')).toBe(123);
+      expect(context.get_keys()).toEqual(['key1', 'key2']);
+    });
+
+    it('should return undefined for missing keys', () => {
+      const context = new ContextState();
+      expect(context.get('missing')).toBeUndefined();
+    });
+  });
+
+  describe('AgentHeadless', () => {
+    let mockSendMessageStream: Mock;
+
+    const defaultModelConfig: ModelConfig = {
+      model: 'qwen3-coder-plus',
+      temp: 0.5, // Specific temp to test override
+      top_p: 1,
+    };
+
+    const defaultRunConfig: RunConfig = {
+      max_time_minutes: 5,
+      max_turns: 10,
+    };
+
+    beforeEach(async () => {
+      vi.clearAllMocks();
+
+      vi.mocked(createContentGenerator).mockResolvedValue({
+        getGenerativeModel: vi.fn(),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
+      vi.mocked(createContentGeneratorConfig).mockReturnValue({
+        model: DEFAULT_QWEN_MODEL,
+        authType: undefined,
+      });
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          model: DEFAULT_QWEN_MODEL,
+          authType: AuthType.USE_GEMINI,
+          apiKey: 'test-api-key',
+        },
+        sources: {},
+      });
+
+      mockSendMessageStream = vi.fn();
+      vi.mocked(GeminiChat).mockImplementation(
+        () =>
+          ({
+            sendMessageStream: mockSendMessageStream,
+          }) as unknown as GeminiChat,
+      );
+
+      // Default mock for executeToolCall
+      vi.mocked(executeToolCall).mockResolvedValue({
+        callId: 'default-call',
+        responseParts: [{ text: 'default response' }],
+        resultDisplay: 'Default tool result',
+        error: undefined,
+        errorType: undefined,
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    // Helper to safely access generationConfig from mock calls
+    const getGenerationConfigFromMock = (
+      callIndex = 0,
+    ): GenerateContentConfig & { systemInstruction?: string | Content } => {
+      const callArgs = vi.mocked(GeminiChat).mock.calls[callIndex];
+      const generationConfig = callArgs?.[1];
+      // Ensure it's defined before proceeding
+      expect(generationConfig).toBeDefined();
+      if (!generationConfig) throw new Error('generationConfig is undefined');
+      return generationConfig as GenerateContentConfig & {
+        systemInstruction?: string | Content;
+      };
+    };
+
+    describe('create (Tool Validation)', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Test prompt' };
+
+      it('should create a AgentHeadless successfully with minimal config', async () => {
+        const { config } = await createMockConfig();
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        expect(scope).toBeInstanceOf(AgentHeadless);
+      });
+
+      it('should not block creation when a tool may require confirmation', async () => {
+        const mockTool = {
+          name: 'risky_tool',
+          schema: { parametersJsonSchema: { type: 'object', properties: {} } },
+          build: vi.fn().mockReturnValue({
+            getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+            getConfirmationDetails: vi.fn().mockResolvedValue({
+              type: 'exec',
+              title: 'Confirm',
+              command: 'rm -rf /',
+            }),
+          }),
+        };
+
+        const { config } = await createMockConfig({
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          getTool: vi.fn().mockReturnValue(mockTool as any),
+        });
+
+        const toolConfig: ToolConfig = { tools: ['risky_tool'] };
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+        expect(scope).toBeInstanceOf(AgentHeadless);
+      });
+
+      it('should succeed if tools do not require confirmation', async () => {
+        const mockTool = {
+          name: 'safe_tool',
+          schema: { parametersJsonSchema: { type: 'object', properties: {} } },
+          build: vi.fn().mockReturnValue({
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          }),
+        };
+        const { config } = await createMockConfig({
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          getTool: vi.fn().mockReturnValue(mockTool as any),
+        });
+
+        const toolConfig: ToolConfig = { tools: ['safe_tool'] };
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+        expect(scope).toBeInstanceOf(AgentHeadless);
+      });
+
+      it('should allow creation regardless of tool parameter requirements', async () => {
+        const mockToolWithParams = {
+          name: 'tool_with_params',
+          schema: {
+            parametersJsonSchema: {
+              type: 'object',
+              properties: {
+                path: { type: 'string' },
+              },
+              required: ['path'],
+            },
+          },
+          build: vi.fn(),
+        };
+
+        const { config } = await createMockConfig({
+          getTool: vi.fn().mockReturnValue(mockToolWithParams),
+          getAllTools: vi.fn().mockReturnValue([mockToolWithParams]),
+        });
+
+        const toolConfig: ToolConfig = { tools: ['tool_with_params'] };
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        expect(scope).toBeInstanceOf(AgentHeadless);
+        // Ensure build was not called during creation
+        expect(mockToolWithParams.build).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('execute - Initialization and Prompting', () => {
+      it('should correctly template the system prompt and initialize GeminiChat', async () => {
+        const { config } = await createMockConfig();
+
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'Hello ${name}, your task is ${task}.',
+        };
+        const context = new ContextState();
+        context.set('name', 'Agent');
+        context.set('task', 'Testing');
+
+        // Model stops immediately
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        // Check if GeminiChat was initialized correctly by the subagent
+        expect(GeminiChat).toHaveBeenCalledTimes(1);
+        const callArgs = vi.mocked(GeminiChat).mock.calls[0];
+
+        // Check Generation Config
+        const generationConfig = getGenerationConfigFromMock();
+
+        // Check temperature override
+        expect(generationConfig.temperature).toBe(defaultModelConfig.temp);
+        expect(generationConfig.systemInstruction).toContain(
+          'Hello Agent, your task is Testing.',
+        );
+        expect(generationConfig.systemInstruction).toContain(
+          'Important Rules:',
+        );
+
+        // Check History (should include environment context)
+        const history = callArgs[2];
+        expect(history).toEqual([
+          { role: 'user', parts: [{ text: 'Env Context' }] },
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the context!' }],
+          },
+        ]);
+      });
+
+      it('should append userMemory to the system prompt when available', async () => {
+        const { config } = await createMockConfig();
+        const userMemoryContent =
+          '# Output language preference: English\nRespond in English.';
+        vi.spyOn(config, 'getUserMemory').mockReturnValue(userMemoryContent);
+
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        expect(generationConfig.systemInstruction).toContain(
+          'You are a test agent.',
+        );
+        expect(generationConfig.systemInstruction).toContain(
+          'Important Rules:',
+        );
+        expect(generationConfig.systemInstruction).toContain(
+          '# Output language preference: English',
+        );
+        expect(generationConfig.systemInstruction).toContain(
+          'Respond in English.',
+        );
+      });
+
+      it('should not append userMemory separator when userMemory is empty', async () => {
+        const { config } = await createMockConfig();
+        vi.spyOn(config, 'getUserMemory').mockReturnValue('');
+
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+        expect(sysPrompt).toContain('You are a test agent.');
+        expect(sysPrompt).not.toContain('---');
+      });
+
+      it('should not append userMemory separator when userMemory is whitespace-only', async () => {
+        const { config } = await createMockConfig();
+        vi.spyOn(config, 'getUserMemory').mockReturnValue('   \n\n  ');
+
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+        expect(sysPrompt).not.toContain('---');
+      });
+
+      it('should use initialMessages instead of systemPrompt if provided', async () => {
+        const { config } = await createMockConfig();
+        vi.mocked(GeminiChat).mockClear();
+
+        const initialMessages: Content[] = [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+        ];
+        const promptConfig: PromptConfig = { initialMessages };
+        const context = new ContextState();
+
+        // Model stops immediately
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const callArgs = vi.mocked(GeminiChat).mock.calls[0];
+        const generationConfig = getGenerationConfigFromMock();
+        const history = callArgs[2];
+
+        expect(generationConfig.systemInstruction).toBeUndefined();
+        expect(history).toEqual([
+          { role: 'user', parts: [{ text: 'Env Context' }] },
+          {
+            role: 'model',
+            parts: [{ text: 'Got it. Thanks for the context!' }],
+          },
+          ...initialMessages,
+        ]);
+      });
+
+      it('should throw an error if template variables are missing', async () => {
+        const { config } = await createMockConfig();
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'Hello ${name}, you are missing ${missing}.',
+        };
+        const context = new ContextState();
+        context.set('name', 'Agent');
+        // 'missing' is not set
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        // The error from templating causes the execute to reject and the terminate_reason to be ERROR.
+        await expect(scope.execute(context)).rejects.toThrow(
+          'Missing context values for the following keys: missing',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+      });
+
+      it('should validate that systemPrompt and initialMessages are mutually exclusive', async () => {
+        const { config } = await createMockConfig();
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'System',
+          initialMessages: [{ role: 'user', parts: [{ text: 'Hi' }] }],
+        };
+        const context = new ContextState();
+
+        const agent = await AgentHeadless.create(
+          'TestAgent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await expect(agent.execute(context)).rejects.toThrow(
+          'PromptConfig cannot have both `systemPrompt` and `initialMessages` defined.',
+        );
+        expect(agent.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+      });
+    });
+
+    describe('execute - Execution and Tool Use', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
+
+      it('should terminate with GOAL if no outputs are expected and model stops', async () => {
+        const { config } = await createMockConfig();
+        // Model stops immediately
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          // No ToolConfig, No OutputConfig
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+        // Check the initial message
+        expect(mockSendMessageStream.mock.calls[0][1].message).toEqual([
+          { text: 'Get Started!' },
+        ]);
+      });
+
+      it('should terminate with GOAL when model provides final text', async () => {
+        const { config } = await createMockConfig();
+
+        // Model stops immediately with text response
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+      });
+
+      it('should execute external tools and provide the response to the model', async () => {
+        const listFilesToolDef: FunctionDeclaration = {
+          name: 'list_files',
+          description: 'Lists files',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([listFilesToolDef]),
+          getTool: vi.fn().mockReturnValue(undefined),
+        });
+        const toolConfig: ToolConfig = { tools: ['list_files'] };
+
+        // Turn 1: Model calls the external tool
+        // Turn 2: Model stops
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_1',
+                name: 'list_files',
+                args: { path: '.' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        // Provide a mock tool via ToolRegistry that returns a successful result
+        const listFilesInvocation = {
+          params: { path: '.' },
+          getDescription: vi.fn().mockReturnValue('List files'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'file1.txt\nfile2.ts',
+            returnDisplay: 'Listed 2 files',
+          }),
+        };
+        const listFilesTool = {
+          name: 'list_files',
+          displayName: 'List Files',
+          description: 'List files in directory',
+          kind: 'READ' as const,
+          schema: listFilesToolDef,
+          build: vi.fn().mockImplementation(() => listFilesInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+        vi.mocked(
+          (config.getToolRegistry() as unknown as ToolRegistry).getTool,
+        ).mockImplementation((name: string) =>
+          name === 'list_files' ? listFilesTool : undefined,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        // Check the response sent back to the model (functionResponse part)
+        const secondCallArgs = mockSendMessageStream.mock.calls[1][1];
+        const parts = secondCallArgs.message as unknown[];
+        expect(Array.isArray(parts)).toBe(true);
+        const firstPart = parts[0] as Part;
+        expect(firstPart.functionResponse?.response?.['output']).toBe(
+          'file1.txt\nfile2.ts',
+        );
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+      });
+    });
+
+    describe('execute - Termination and Recovery', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
+
+      it('should terminate with MAX_TURNS if the limit is reached', async () => {
+        const { config } = await createMockConfig();
+        const runConfig: RunConfig = { ...defaultRunConfig, max_turns: 2 };
+
+        // Model keeps calling tools repeatedly
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                name: 'list_files',
+                args: { path: '/test' },
+              },
+            ],
+            [
+              {
+                name: 'list_files',
+                args: { path: '/test2' },
+              },
+            ],
+            // This turn should not happen
+            [
+              {
+                name: 'list_files',
+                args: { path: '/test3' },
+              },
+            ],
+          ]),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          runConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
+      });
+
+      it.skip('should terminate with TIMEOUT if the time limit is reached during an LLM call', async () => {
+        // Use fake timers to reliably test timeouts
+        vi.useFakeTimers();
+
+        const { config } = await createMockConfig();
+        const runConfig: RunConfig = { max_time_minutes: 5, max_turns: 100 };
+
+        // We need to control the resolution of the sendMessageStream promise to advance the timer during execution.
+        let resolveStream: (
+          value: AsyncGenerator<unknown, void, unknown>,
+        ) => void;
+        const streamPromise = new Promise<
+          AsyncGenerator<unknown, void, unknown>
+        >((resolve) => {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          resolveStream = resolve as any;
+        });
+
+        // The LLM call will hang until we resolve the promise.
+        mockSendMessageStream.mockReturnValue(streamPromise);
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          runConfig,
+        );
+
+        const runPromise = scope.execute(new ContextState());
+
+        // Advance time beyond the limit (6 minutes) while the agent is awaiting the LLM response.
+        await vi.advanceTimersByTimeAsync(6 * 60 * 1000);
+
+        // Now resolve the stream. The model returns 'stop'.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        resolveStream!(createMockStream(['stop'])() as any);
+
+        await runPromise;
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.TIMEOUT);
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+        vi.useRealTimers();
+      });
+
+      it.skip('should terminate with ERROR if the model call throws', async () => {
+        const { config } = await createMockConfig();
+        mockSendMessageStream.mockRejectedValue(new Error('API Failure'));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await expect(scope.execute(new ContextState())).rejects.toThrow(
+          'API Failure',
+        );
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.ERROR);
+      });
+    });
+
+    describe('execute - Streaming and Thought Handling', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
+
+      // Helper to create a mock stream that yields specific parts
+      const createMockStreamWithParts = (parts: Part[]) =>
+        vi.fn().mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    content: { parts },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+      it('should emit STREAM_TEXT events with thought flag', async () => {
+        const { config } = await createMockConfig();
+
+        mockSendMessageStream = createMockStreamWithParts([
+          { text: 'Let me think...' as string, thought: true },
+          { text: 'Here is the answer.' as string },
+        ]);
+        vi.mocked(GeminiChat).mockImplementation(
+          () =>
+            ({
+              sendMessageStream: mockSendMessageStream,
+            }) as unknown as GeminiChat,
+        );
+
+        const eventEmitter = new AgentEventEmitter();
+        const events: AgentStreamTextEvent[] = [];
+        eventEmitter.on(AgentEventType.STREAM_TEXT, (...args: unknown[]) => {
+          events.push(args[0] as AgentStreamTextEvent);
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          undefined,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(events).toHaveLength(2);
+        expect(events[0]!.text).toBe('Let me think...');
+        expect(events[0]!.thought).toBe(true);
+        expect(events[1]!.text).toBe('Here is the answer.');
+        expect(events[1]!.thought).toBe(false);
+      });
+
+      it('should exclude thought text from finalText', async () => {
+        const { config } = await createMockConfig();
+
+        mockSendMessageStream = createMockStreamWithParts([
+          { text: 'Internal reasoning here.' as string, thought: true },
+          { text: 'The final answer.' as string },
+        ]);
+        vi.mocked(GeminiChat).mockImplementation(
+          () =>
+            ({
+              sendMessageStream: mockSendMessageStream,
+            }) as unknown as GeminiChat,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(scope.getFinalText()).toBe('The final answer.');
+      });
+
+      it('should not set finalText from thought-only response', async () => {
+        const { config } = await createMockConfig();
+
+        // First call: only thought text (no regular text → nudge)
+        // Second call: regular text response
+        let callIndex = 0;
+        mockSendMessageStream = vi.fn().mockImplementation(async () => {
+          const idx = callIndex++;
+          return (async function* () {
+            if (idx === 0) {
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          {
+                            text: 'Just thinking...' as string,
+                            thought: true,
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                },
+              };
+            } else {
+              yield {
+                type: 'chunk',
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'Actual output.' as string }],
+                      },
+                    },
+                  ],
+                },
+              };
+            }
+          })();
+        });
+        vi.mocked(GeminiChat).mockImplementation(
+          () =>
+            ({
+              sendMessageStream: mockSendMessageStream,
+            }) as unknown as GeminiChat,
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.GOAL);
+        expect(scope.getFinalText()).toBe('Actual output.');
+        // Should have been called twice: first with thought-only, then nudged
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    describe('execute - Tool Restriction Enforcement (Issue #1121)', () => {
+      const promptConfig: PromptConfig = { systemPrompt: 'Execute task.' };
+
+      it('should NOT execute tools that are not in the allowed tools list', async () => {
+        // Define two tools: one allowed (read_file), one not allowed (edit_file)
+        const readFileToolDef: FunctionDeclaration = {
+          name: 'read_file',
+          description: 'Reads a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+        const editFileToolDef: FunctionDeclaration = {
+          name: 'edit_file',
+          description: 'Edits a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        // Track which tools were executed
+        const executedTools: string[] = [];
+
+        const readFileInvocation = {
+          params: { path: 'test.txt' },
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockImplementation(async () => {
+            executedTools.push('read_file');
+            return {
+              llmContent: 'file contents',
+              returnDisplay: 'Read file contents',
+            };
+          }),
+        };
+
+        const editFileInvocation = {
+          params: { path: 'test.txt', content: 'malicious content' },
+          getDescription: vi.fn().mockReturnValue('Edit file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          execute: vi.fn().mockImplementation(async () => {
+            executedTools.push('edit_file');
+            return {
+              llmContent: 'file edited',
+              returnDisplay: 'Edited file',
+            };
+          }),
+        };
+
+        const readFileTool = {
+          name: 'read_file',
+          displayName: 'Read File',
+          description: 'Read file contents',
+          kind: 'READ' as const,
+          schema: readFileToolDef,
+          build: vi.fn().mockImplementation(() => readFileInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+
+        const editFileTool = {
+          name: 'edit_file',
+          displayName: 'Edit File',
+          description: 'Edit file contents',
+          kind: 'WRITE' as const,
+          schema: editFileToolDef,
+          build: vi.fn().mockImplementation(() => editFileInvocation),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        } as unknown as AnyDeclarativeTool;
+
+        const { config } = await createMockConfig({
+          // Only return read_file in the filtered list (this is what the subagent should see)
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([readFileToolDef]),
+          // But the full registry has both tools (simulating the bug)
+          getFunctionDeclarations: vi
+            .fn()
+            .mockReturnValue([readFileToolDef, editFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === 'read_file') return readFileTool;
+            if (name === 'edit_file') return editFileTool;
+            return undefined;
+          }),
+        });
+
+        // Only allow read_file in the subagent's tool config
+        const toolConfig: ToolConfig = { tools: ['read_file'] };
+
+        // Model calls BOTH read_file (allowed) AND edit_file (NOT allowed)
+        // This simulates the bug where the model hallucinates an unauthorized tool call
+        mockSendMessageStream.mockImplementation(
+          createMockStream([
+            [
+              {
+                id: 'call_read',
+                name: 'read_file',
+                args: { path: 'test.txt' },
+              },
+              {
+                id: 'call_edit',
+                name: 'edit_file', // This tool is NOT in the allowed list!
+                args: { path: 'test.txt', content: 'malicious content' },
+              },
+            ],
+            'stop',
+          ]),
+        );
+
+        // Track emitted events
+        const toolCallEvents: AgentToolCallEvent[] = [];
+        const toolResultEvents: AgentToolResultEvent[] = [];
+
+        // Create event emitter BEFORE the scope and subscribe to events
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_CALL, (event: unknown) => {
+          toolCallEvents.push(event as AgentToolCallEvent);
+        });
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        // 1. Only allowed tool should be executed
+        expect(executedTools).toContain('read_file');
+        expect(executedTools).not.toContain('edit_file');
+        expect(editFileInvocation.execute).not.toHaveBeenCalled();
+
+        // 2. TOOL_CALL events should be emitted for BOTH tools (for visibility)
+        expect(toolCallEvents).toHaveLength(2);
+        expect(toolCallEvents.map((e) => e.name)).toContain('read_file');
+        expect(toolCallEvents.map((e) => e.name)).toContain('edit_file');
+
+        // 3. TOOL_RESULT events should be emitted for both
+        expect(toolResultEvents).toHaveLength(2);
+
+        // 4. Verify blocked tool result has success=false and error message
+        const editResult = toolResultEvents.find((e) => e.name === 'edit_file');
+        expect(editResult).toBeDefined();
+        expect(editResult!.success).toBe(false);
+        expect(editResult!.error).toContain('not found');
+        expect(editResult!.callId).toBe('call_edit');
+
+        // 5. Verify allowed tool result has success=true
+        const readResult = toolResultEvents.find((e) => e.name === 'read_file');
+        expect(readResult).toBeDefined();
+        expect(readResult!.success).toBe(true);
+      });
+    });
+  });
+});

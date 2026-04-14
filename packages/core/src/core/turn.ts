@@ -43,10 +43,6 @@ export interface ServerTool {
     params: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<ToolResult>;
-  shouldConfirmExecute(
-    params: Record<string, unknown>,
-    abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false>;
 }
 
 export enum GeminiEventType {
@@ -65,6 +61,8 @@ export enum GeminiEventType {
   Citation = 'citation',
   Retry = 'retry',
   HookSystemMessage = 'hook_system_message',
+  UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
+  StopHookLoop = 'stop_hook_loop',
 }
 
 export type ServerGeminiRetryEvent = {
@@ -109,8 +107,8 @@ export interface ToolCallResponseInfo {
   resultDisplay: ToolResultDisplay | undefined;
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
-  outputFile?: string | undefined;
   contentLength?: number;
+  modelOverride?: string;
 }
 
 export interface ServerToolCallConfirmationDetails {
@@ -208,6 +206,23 @@ export type ServerGeminiHookSystemMessageEvent = {
   value: string;
 };
 
+export type ServerGeminiUserPromptSubmitBlockedEvent = {
+  type: GeminiEventType.UserPromptSubmitBlocked;
+  value: {
+    reason: string;
+    originalPrompt: string;
+  };
+};
+
+export type ServerGeminiStopHookLoopEvent = {
+  type: GeminiEventType.StopHookLoop;
+  value: {
+    iterationCount: number;
+    reasons: string[];
+    stopHookCount: number;
+  };
+};
+
 // The original union type, now composed of the individual types
 export type ServerGeminiStreamEvent =
   | ServerGeminiChatCompressedEvent
@@ -216,6 +231,8 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiErrorEvent
   | ServerGeminiFinishedEvent
   | ServerGeminiHookSystemMessageEvent
+  | ServerGeminiUserPromptSubmitBlockedEvent
+  | ServerGeminiStopHookLoopEvent
   | ServerGeminiLoopDetectedEvent
   | ServerGeminiMaxSessionTurnsEvent
   | ServerGeminiThoughtEvent
@@ -264,8 +281,13 @@ export class Turn {
           return;
         }
 
-        // Handle the new RETRY event
+        // Handle the new RETRY event: clear accumulated state from the
+        // previous attempt to avoid duplicate tool calls and stale metadata.
         if (streamEvent.type === 'retry') {
+          this.pendingToolCalls.length = 0;
+          this.pendingCitations.clear();
+          this.debugResponses = [];
+          this.finishReason = undefined;
           yield {
             type: GeminiEventType.Retry,
             retryInfo: streamEvent.retryInfo,

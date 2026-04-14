@@ -7,13 +7,25 @@
 import type { Config } from '../config/config.js';
 import { HookRegistry } from './hookRegistry.js';
 import { HookRunner } from './hookRunner.js';
-import { HookAggregator } from './hookAggregator.js';
+import { HookAggregator, type AggregatedHookResult } from './hookAggregator.js';
 import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { DefaultHookOutput } from './types.js';
 import { createHookOutput } from './types.js';
+import type {
+  SessionStartSource,
+  SessionEndReason,
+  AgentType,
+  PermissionMode,
+  PreCompactTrigger,
+  PostCompactTrigger,
+  NotificationType,
+  PermissionSuggestion,
+  HookEventName,
+  StopFailureErrorType,
+} from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -78,11 +90,25 @@ export class HookSystem {
     return this.hookRegistry.getAllHooks();
   }
 
+  /**
+   * Check if there are any enabled hooks registered for a specific event.
+   * This is a fast-path check to avoid expensive MessageBus round-trips
+   * when no hooks are configured for a given event.
+   */
+  hasHooksForEvent(eventName: string): boolean {
+    return (
+      this.hookRegistry.getHooksForEvent(eventName as HookEventName).length > 0
+    );
+  }
+
   async fireUserPromptSubmitEvent(
     prompt: string,
+    signal?: AbortSignal,
   ): Promise<DefaultHookOutput | undefined> {
-    const result =
-      await this.hookEventHandler.fireUserPromptSubmitEvent(prompt);
+    const result = await this.hookEventHandler.fireUserPromptSubmitEvent(
+      prompt,
+      signal,
+    );
     return result.finalOutput
       ? createHookOutput('UserPromptSubmit', result.finalOutput)
       : undefined;
@@ -91,13 +117,258 @@ export class HookSystem {
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
-  ): Promise<DefaultHookOutput | undefined> {
-    const result = await this.hookEventHandler.fireStopEvent(
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireStopEvent(
       stopHookActive,
       lastAssistantMessage,
+      signal,
+    );
+  }
+
+  async fireSessionStartEvent(
+    source: SessionStartSource,
+    model: string,
+    permissionMode?: PermissionMode,
+    agentType?: AgentType,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionStartEvent(
+      source,
+      model,
+      permissionMode,
+      agentType,
+      signal,
     );
     return result.finalOutput
-      ? createHookOutput('Stop', result.finalOutput)
+      ? createHookOutput('SessionStart', result.finalOutput)
+      : undefined;
+  }
+
+  async fireSessionEndEvent(
+    reason: SessionEndReason,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSessionEndEvent(
+      reason,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('SessionEnd', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PreToolUse event - called before tool execution
+   */
+  async firePreToolUseEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolUseId: string,
+    permissionMode: PermissionMode,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePreToolUseEvent(
+      toolName,
+      toolInput,
+      toolUseId,
+      permissionMode,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PreToolUse', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PostToolUse event - called after successful tool execution
+   */
+  async firePostToolUseEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    toolResponse: Record<string, unknown>,
+    toolUseId: string,
+    permissionMode: PermissionMode,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePostToolUseEvent(
+      toolName,
+      toolInput,
+      toolResponse,
+      toolUseId,
+      permissionMode,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PostToolUse', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PostToolUseFailure event - called when tool execution fails
+   */
+  async firePostToolUseFailureEvent(
+    toolUseId: string,
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    errorMessage: string,
+    isInterrupt?: boolean,
+    permissionMode?: PermissionMode,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePostToolUseFailureEvent(
+      toolUseId,
+      toolName,
+      toolInput,
+      errorMessage,
+      isInterrupt,
+      permissionMode,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PostToolUseFailure', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PreCompact event - called before conversation compaction
+   */
+  async firePreCompactEvent(
+    trigger: PreCompactTrigger,
+    customInstructions: string = '',
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePreCompactEvent(
+      trigger,
+      customInstructions,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PreCompact', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a Notification event
+   */
+  async fireNotificationEvent(
+    message: string,
+    notificationType: NotificationType,
+    title?: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireNotificationEvent(
+      message,
+      notificationType,
+      title,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('Notification', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a SubagentStart event - called when a subagent is spawned
+   */
+  async fireSubagentStartEvent(
+    agentId: string,
+    agentType: AgentType | string,
+    permissionMode: PermissionMode,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSubagentStartEvent(
+      agentId,
+      agentType,
+      permissionMode,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('SubagentStart', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a SubagentStop event - called when a subagent finishes
+   */
+  async fireSubagentStopEvent(
+    agentId: string,
+    agentType: AgentType | string,
+    agentTranscriptPath: string,
+    lastAssistantMessage: string,
+    stopHookActive: boolean,
+    permissionMode: PermissionMode,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.fireSubagentStopEvent(
+      agentId,
+      agentType,
+      agentTranscriptPath,
+      lastAssistantMessage,
+      stopHookActive,
+      permissionMode,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('SubagentStop', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a StopFailure event - called when an API error ends the turn
+   * Fire-and-forget: output and exit codes are ignored
+   */
+  async fireStopFailureEvent(
+    error: StopFailureErrorType,
+    errorDetails?: string,
+    lastAssistantMessage?: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireStopFailureEvent(
+      error,
+      errorDetails,
+      lastAssistantMessage,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a PostCompact event - called after conversation compaction completes
+   */
+  async firePostCompactEvent(
+    trigger: PostCompactTrigger,
+    compactSummary: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePostCompactEvent(
+      trigger,
+      compactSummary,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PostCompact', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a PermissionRequest event
+   */
+  async firePermissionRequestEvent(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    permissionMode: PermissionMode,
+    permissionSuggestions?: PermissionSuggestion[],
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePermissionRequestEvent(
+      toolName,
+      toolInput,
+      permissionMode,
+      permissionSuggestions,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PermissionRequest', result.finalOutput)
       : undefined;
   }
 }

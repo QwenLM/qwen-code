@@ -103,8 +103,16 @@ qwen -p "run the test suite"
 
 - **CLI flag**: `--sandbox-image <image>`
 - **Environment variable**: `QWEN_SANDBOX_IMAGE=<image>`
+- **Settings file**: `tools.sandboxImage` in your `settings.json` (e.g., `{"tools": {"sandboxImage": "ghcr.io/qwenlm/qwen-code:0.14.1"}}`)
 
-If you don’t set either, Qwen Code uses the default image configured in the CLI package (for example `ghcr.io/qwenlm/qwen-code:<version>`).
+Priority order (highest to lowest):
+
+1. `--sandbox-image`
+2. `QWEN_SANDBOX_IMAGE`
+3. `tools.sandboxImage`
+4. Built-in default image from the CLI package (for example `ghcr.io/qwenlm/qwen-code:<version>`)
+
+`settings.env.QWEN_SANDBOX_IMAGE` also works as a generic env injection mechanism, but `tools.sandboxImage` is the preferred persistent setting.
 
 ### macOS Seatbelt profiles
 
@@ -180,6 +188,29 @@ export SANDBOX_SET_UID_GID=false  # Disable UID/GID mapping
 
 - Container sandbox: add them via `.qwen/sandbox.Dockerfile` or `.qwen/sandbox.bashrc`.
 - Seatbelt: your host binaries are used, but the sandbox may restrict access to some paths.
+
+**Java not available in Docker sandbox**
+
+The official Qwen Code Docker image is intentionally minimal to keep the image small, secure, and fast to pull. Different users require different language runtimes (Java, Python, Node.js, etc.), and bundling all environments into a single image is not practical. Therefore, Java is **not included by default** in the Docker sandbox.
+
+If your workflow requires Java, you can extend the base image by creating a `.qwen/sandbox.Dockerfile` in your project:
+
+```dockerfile
+FROM ghcr.io/qwenlm/qwen-code:latest
+
+RUN apt-get update && \
+    apt-get install -y openjdk-17-jre && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+```
+
+Then rebuild the sandbox image:
+
+```bash
+QWEN_SANDBOX=docker BUILD_SANDBOX=1 qwen -s
+```
+
+For more details on customizing the sandbox, see [Customizing the sandbox environment](/developers/tools/sandbox).
 
 **Network issues**
 

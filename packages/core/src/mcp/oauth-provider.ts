@@ -22,7 +22,27 @@ import {
 
 export const OAUTH_DISPLAY_MESSAGE_EVENT = 'oauth-display-message' as const;
 
+/**
+ * Structured display message for i18n support.
+ * The `key` is the i18n translation key (English text as key).
+ * The `params` are optional interpolation parameters.
+ */
+export interface OAuthDisplayMessage {
+  key: string;
+  params?: Record<string, string>;
+}
+
+/** Payload type for OAuth display message events: structured i18n message or plain string. */
+export type OAuthDisplayPayload = string | OAuthDisplayMessage;
+
 const debugLogger = createDebugLogger('MCP_OAUTH');
+
+// Module-level reference to the active OAuth callback server.
+// This ensures that if a new authentication is started before the previous one
+// finishes (e.g. user navigated back and re-entered), the old server is closed
+// first to avoid EADDRINUSE errors.
+let activeCallbackServer: http.Server | null = null;
+let activeCallbackTimeout: ReturnType<typeof setTimeout> | null = null;
 
 /**
  * OAuth configuration for an MCP server.
@@ -195,6 +215,20 @@ export class MCPOAuthProvider {
   private async startCallbackServer(
     expectedState: string,
   ): Promise<OAuthAuthorizationResponse> {
+    // Close any previously active callback server to avoid EADDRINUSE
+    if (activeCallbackServer) {
+      try {
+        activeCallbackServer.close();
+      } catch {
+        // Ignore errors when closing stale server
+      }
+      activeCallbackServer = null;
+    }
+    if (activeCallbackTimeout) {
+      clearTimeout(activeCallbackTimeout);
+      activeCallbackTimeout = null;
+    }
+
     return new Promise((resolve, reject) => {
       const server = http.createServer(
         async (req: http.IncomingMessage, res: http.ServerResponse) => {
@@ -226,6 +260,11 @@ export class MCPOAuthProvider {
                 </body>
               </html>
             `);
+              activeCallbackServer = null;
+              if (activeCallbackTimeout) {
+                clearTimeout(activeCallbackTimeout);
+                activeCallbackTimeout = null;
+              }
               server.close();
               reject(new Error(`OAuth error: ${error}`));
               return;
@@ -240,6 +279,11 @@ export class MCPOAuthProvider {
             if (state !== expectedState) {
               res.writeHead(400);
               res.end('Invalid state parameter');
+              activeCallbackServer = null;
+              if (activeCallbackTimeout) {
+                clearTimeout(activeCallbackTimeout);
+                activeCallbackTimeout = null;
+              }
               server.close();
               reject(new Error('State mismatch - possible CSRF attack'));
               return;
@@ -257,9 +301,19 @@ export class MCPOAuthProvider {
             </html>
           `);
 
+            activeCallbackServer = null;
+            if (activeCallbackTimeout) {
+              clearTimeout(activeCallbackTimeout);
+              activeCallbackTimeout = null;
+            }
             server.close();
             resolve({ code, state });
           } catch (error) {
+            activeCallbackServer = null;
+            if (activeCallbackTimeout) {
+              clearTimeout(activeCallbackTimeout);
+              activeCallbackTimeout = null;
+            }
             server.close();
             reject(error);
           }
@@ -273,9 +327,14 @@ export class MCPOAuthProvider {
         );
       });
 
+      // Track the active server so it can be cleaned up if a new auth starts
+      activeCallbackServer = server;
+
       // Timeout after 5 minutes
-      setTimeout(
+      activeCallbackTimeout = setTimeout(
         () => {
+          activeCallbackServer = null;
+          activeCallbackTimeout = null;
           server.close();
           reject(new Error('OAuth callback timeout'));
         },
@@ -603,11 +662,17 @@ export class MCPOAuthProvider {
     events?: EventEmitter,
   ): Promise<OAuthToken> {
     // Helper function to display messages through handler or fallback to debugLogger
-    const displayMessage = (message: string) => {
+    const displayMessage = (message: OAuthDisplayPayload) => {
       if (events) {
         events.emit(OAUTH_DISPLAY_MESSAGE_EVENT, message);
       } else {
-        debugLogger.info(message);
+        if (typeof message === 'string') {
+          debugLogger.info(message);
+        } else {
+          debugLogger.info(
+            `[${message.key}]${message.params ? ` ${JSON.stringify(message.params)}` : ''}`,
+          );
+        }
       }
     };
 
@@ -746,13 +811,13 @@ export class MCPOAuthProvider {
       mcpServerUrl,
     );
 
-    displayMessage(`→ Opening your browser for OAuth sign-in...
-
-If the browser does not open, copy and paste this URL into your browser:
-${authUrl}
-
-💡 TIP: Triple-click to select the entire URL, then copy and paste it into your browser.
-⚠️  Make sure to copy the COMPLETE URL - it may wrap across multiple lines.`);
+    displayMessage({
+      key: 'If the browser does not open, copy and paste this URL into your browser:',
+    });
+    displayMessage(`\n${authUrl.toString()}\n`);
+    displayMessage({
+      key: 'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.',
+    });
 
     // Start callback server
     const callbackPromise = this.startCallbackServer(pkceParams.state);

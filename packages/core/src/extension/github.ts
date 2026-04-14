@@ -21,6 +21,7 @@ import {
   type ExtensionManager,
 } from './extensionManager.js';
 import type { ExtensionInstallMetadata } from '../config/config.js';
+import { checkNpmUpdate } from './npm.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
 
@@ -75,9 +76,12 @@ export async function cloneFromGit(
         // We let git handle the source as is.
       }
     }
+    // On Windows, symlinks require elevated privileges by default, so we
+    // disable them to avoid "Permission denied" errors during checkout.
+    const symlinkValue = os.platform() === 'win32' ? 'false' : 'true';
     await git.clone(sourceUrl, './', [
       '-c',
-      'core.symlinks=true',
+      `core.symlinks=${symlinkValue}`,
       '--depth',
       '1',
     ]);
@@ -169,6 +173,9 @@ export async function checkForExtensionUpdate(
       return ExtensionUpdateState.UPDATE_AVAILABLE;
     }
     return ExtensionUpdateState.UP_TO_DATE;
+  }
+  if (installMetadata?.type === 'npm') {
+    return checkNpmUpdate(installMetadata);
   }
   if (
     !installMetadata ||

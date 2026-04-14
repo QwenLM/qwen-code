@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest';
 import {
   normalize,
   tokenLimit,
+  knownTokenLimit,
   DEFAULT_TOKEN_LIMIT,
   DEFAULT_OUTPUT_TOKEN_LIMIT,
 } from './tokenLimits.js';
@@ -108,11 +109,11 @@ describe('tokenLimit', () => {
   });
 
   describe('OpenAI', () => {
-    it('should return 400K for GPT-5.x (latest)', () => {
-      expect(tokenLimit('gpt-5')).toBe(400000);
-      expect(tokenLimit('gpt-5-mini')).toBe(400000);
-      expect(tokenLimit('gpt-5.2')).toBe(400000);
-      expect(tokenLimit('gpt-5.2-pro')).toBe(400000);
+    it('should return 272K for GPT-5.x (latest)', () => {
+      expect(tokenLimit('gpt-5')).toBe(272000);
+      expect(tokenLimit('gpt-5-mini')).toBe(272000);
+      expect(tokenLimit('gpt-5.2')).toBe(272000);
+      expect(tokenLimit('gpt-5.2-pro')).toBe(272000);
     });
 
     it('should return 128K for legacy GPT (fallback)', () => {
@@ -192,8 +193,8 @@ describe('tokenLimit', () => {
   });
 
   describe('MiniMax', () => {
-    it('should return 1M for MiniMax-M2.5 (latest)', () => {
-      expect(tokenLimit('MiniMax-M2.5')).toBe(1000000);
+    it('should return 196608 for MiniMax-M2.5 (latest)', () => {
+      expect(tokenLimit('MiniMax-M2.5')).toBe(196608);
     });
 
     it('should return 200K for MiniMax fallback', () => {
@@ -234,6 +235,21 @@ describe('tokenLimit', () => {
   });
 });
 
+describe('knownTokenLimit', () => {
+  it('returns a limit for known input models', () => {
+    expect(knownTokenLimit('qwen3-max')).toBe(262144);
+    expect(knownTokenLimit('gpt-5')).toBe(272000);
+  });
+
+  it('returns a limit for known output models', () => {
+    expect(knownTokenLimit('qwen3-max', 'output')).toBe(32768);
+  });
+
+  it('returns undefined for unknown models instead of the default fallback', () => {
+    expect(knownTokenLimit('unknown-model-v1.0')).toBeUndefined();
+  });
+});
+
 describe('tokenLimit with output type', () => {
   describe('latest models output limits', () => {
     it('should return correct output limits for GPT-5.x', () => {
@@ -270,20 +286,19 @@ describe('tokenLimit with output type', () => {
   describe('Qwen output limits', () => {
     it('should return correct output limits for Qwen models', () => {
       expect(tokenLimit('qwen3.5-plus', 'output')).toBe(65536);
-      expect(tokenLimit('qwen3-max', 'output')).toBe(65536);
-      expect(tokenLimit('qwen3-max-2026-01-23', 'output')).toBe(65536);
+      expect(tokenLimit('qwen3.6-plus', 'output')).toBe(65536);
       expect(tokenLimit('coder-model', 'output')).toBe(65536);
-      // Models without specific output limits fall back to default
-      expect(tokenLimit('qwen3-coder-plus', 'output')).toBe(8192);
-      expect(tokenLimit('qwen3-coder-next', 'output')).toBe(8192);
-      expect(tokenLimit('qwen3-vl-plus', 'output')).toBe(8192);
-      expect(tokenLimit('qwen-vl-max-latest', 'output')).toBe(8192);
+      // Models without specific output limits fall back to Qwen default (32K)
+      expect(tokenLimit('qwen3-max', 'output')).toBe(32768);
+      expect(tokenLimit('qwen3-max-2026-01-23', 'output')).toBe(32768);
     });
   });
 
   describe('other output limits', () => {
     it('should return correct output limits for DeepSeek', () => {
       expect(tokenLimit('deepseek-reasoner', 'output')).toBe(65536);
+      expect(tokenLimit('deepseek-r1', 'output')).toBe(65536);
+      expect(tokenLimit('deepseek-r1-0528', 'output')).toBe(65536);
       expect(tokenLimit('deepseek-chat', 'output')).toBe(8192);
     });
 
@@ -312,7 +327,7 @@ describe('tokenLimit with output type', () => {
   describe('input vs output comparison', () => {
     it('should return different limits for input vs output', () => {
       expect(tokenLimit('qwen3-max', 'input')).toBe(262144);
-      expect(tokenLimit('qwen3-max', 'output')).toBe(65536);
+      expect(tokenLimit('qwen3-max', 'output')).toBe(32768);
     });
 
     it('should default to input type when no type is specified', () => {
@@ -323,9 +338,8 @@ describe('tokenLimit with output type', () => {
 
   describe('normalization with output limits', () => {
     it('should handle normalized model names for output limits', () => {
-      expect(tokenLimit('QWEN3-MAX', 'output')).toBe(65536);
-      expect(tokenLimit('qwen3-max-20250601', 'output')).toBe(65536);
-      expect(tokenLimit('QWEN-VL-MAX-LATEST', 'output')).toBe(8192);
+      expect(tokenLimit('QWEN3-MAX', 'output')).toBe(32768);
+      expect(tokenLimit('qwen3-max-20250601', 'output')).toBe(32768);
     });
   });
 });

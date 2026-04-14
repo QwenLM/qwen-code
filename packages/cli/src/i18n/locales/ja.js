@@ -66,6 +66,7 @@ export default {
   'CLI Version': 'CLIバージョン',
   'Git Commit': 'Gitコミット',
   Model: 'モデル',
+  'Fast Model': '高速モデル',
   Sandbox: 'サンドボックス',
   'OS Platform': 'OSプラットフォーム',
   'OS Arch': 'OSアーキテクチャ',
@@ -85,6 +86,7 @@ export default {
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
+  'List available skills.': '利用可能なスキルを一覧表示する。',
   'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
   'No tools available': '利用可能なツールはありません',
   'View or change the approval mode for tool usage':
@@ -328,6 +330,7 @@ export default {
     'ワークスペース内のすべてのディレクトリを表示',
   'set external editor preference': '外部エディタの設定',
   'Manage extensions': '拡張機能を管理',
+  'Manage installed extensions': 'インストール済みの拡張機能を管理する',
   'List active extensions': '有効な拡張機能を一覧表示',
   'Update extensions. Usage: update <extension-names>|--all':
     '拡張機能を更新。使い方: update <拡張機能名>|--all',
@@ -371,6 +374,166 @@ export default {
     '{{terminalName}} の設定に失敗しました',
   'Your terminal is already configured for an optimal experience with multiline input (Shift+Enter and Ctrl+Enter).':
     'ターミナルは複数行入力(Shift+Enter と Ctrl+Enter)に最適化されています',
+  // ============================================================================
+  // Commands - Hooks
+  // ============================================================================
+  'Manage Qwen Code hooks': 'Qwen Code のフックを管理する',
+  'List all configured hooks': '設定済みのフックをすべて表示する',
+  'Enable a disabled hook': '無効なフックを有効にする',
+  'Disable an active hook': '有効なフックを無効にする',
+  // Hooks - Dialog
+  Hooks: 'フック',
+  'Loading hooks...': 'フックを読み込んでいます...',
+  'Error loading hooks:': 'フックの読み込みエラー：',
+  'Press Escape to close': 'Escape キーで閉じる',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Escape、Ctrl+C、Ctrl+D でキャンセル',
+  'Press Space, Enter, or Escape to dismiss': 'Space、Enter、Escape で閉じる',
+  'No hook selected': 'フックが選択されていません',
+  // Hooks - List Step
+  'No hook events found.': 'フックイベントが見つかりません。',
+  '{{count}} hook configured': '{{count}} 件のフックが設定されています',
+  '{{count}} hooks configured': '{{count}} 件のフックが設定されています',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
+    'このメニューは読み取り専用です。フックを追加または変更するには、settings.json を直接編集するか、Qwen Code に尋ねてください。',
+  'Enter to select · Esc to cancel': 'Enter で選択 · Esc でキャンセル',
+  // Hooks - Detail Step
+  'Exit codes:': '終了コード：',
+  'Configured hooks:': '設定済みのフック：',
+  'No hooks configured for this event.':
+    'このイベントにはフックが設定されていません。',
+  'To add hooks, edit settings.json directly or ask Qwen.':
+    'フックを追加するには、settings.json を直接編集するか、Qwen に尋ねてください。',
+  'Enter to select · Esc to go back': 'Enter で選択 · Esc で戻る',
+  // Hooks - Config Detail Step
+  'Hook details': 'フック詳細',
+  'Event:': 'イベント：',
+  'Extension:': '拡張機能：',
+  'Desc:': '説明：',
+  'No hook config selected': 'フック設定が選択されていません',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    'このフックを変更または削除するには、settings.json を直接編集するか、Qwen に尋ねてください。',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'フック設定 - 無効',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'すべてのフックは現在無効です。{{count}} が実行されていません。',
+  '{{count}} configured hook': '{{count}} 個の設定されたフック',
+  '{{count}} configured hooks': '{{count}} 個の設定されたフック',
+  'When hooks are disabled:': 'フックが無効な場合：',
+  'No hook commands will execute': 'フックコマンドは実行されません',
+  'StatusLine will not be displayed': 'StatusLine は表示されません',
+  'Tool operations will proceed without hook validation':
+    'ツール操作はフック検証なしで続行されます',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'フックを再有効化するには、settings.json から "disableAllHooks" を削除するか、Qwen Code に尋ねてください。',
+  // Hooks - Source
+  Project: 'プロジェクト',
+  User: 'ユーザー',
+  System: 'システム',
+  Extension: '拡張機能',
+  'Local Settings': 'ローカル設定',
+  'User Settings': 'ユーザー設定',
+  'System Settings': 'システム設定',
+  Extensions: '拡張機能',
+  // Hooks - Status
+  '✓ Enabled': '✓ 有効',
+  '✗ Disabled': '✗ 無効',
+  // Hooks - Event Descriptions (short)
+  'Before tool execution': 'ツール実行前',
+  'After tool execution': 'ツール実行後',
+  'After tool execution fails': 'ツール実行失敗時',
+  'When notifications are sent': '通知送信時',
+  'When the user submits a prompt': 'ユーザーがプロンプトを送信した時',
+  'When a new session is started': '新しいセッションが開始された時',
+  'Right before Qwen Code concludes its response':
+    'Qwen Code が応答を終了する直前',
+  'When a subagent (Agent tool call) is started':
+    'サブエージェント（Agent ツール呼び出し）が開始された時',
+  'Right before a subagent concludes its response':
+    'サブエージェントが応答を終了する直前',
+  'Before conversation compaction': '会話圧縮前',
+  'When a session is ending': 'セッション終了時',
+  'When a permission dialog is displayed': '権限ダイアログ表示時',
+  // Hooks - Event Descriptions (detailed)
+  'Input to command is JSON of tool call arguments.':
+    'コマンドへの入力はツール呼び出し引数の JSON です。',
+  'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
+    'コマンドへの入力は "inputs"（ツール呼び出し引数）と "response"（ツール呼び出し応答）フィールドを持つ JSON です。',
+  'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
+    'コマンドへの入力は tool_name、tool_input、tool_use_id、error、error_type、is_interrupt、is_timeout を持つ JSON です。',
+  'Input to command is JSON with notification message and type.':
+    'コマンドへの入力は通知メッセージとタイプを持つ JSON です。',
+  'Input to command is JSON with original user prompt text.':
+    'コマンドへの入力は元のユーザープロンプトテキストを持つ JSON です。',
+  'Input to command is JSON with session start source.':
+    'コマンドへの入力はセッション開始ソースを持つ JSON です。',
+  'Input to command is JSON with session end reason.':
+    'コマンドへの入力はセッション終了理由を持つ JSON です。',
+  'Input to command is JSON with agent_id and agent_type.':
+    'コマンドへの入力は agent_id と agent_type を持つ JSON です。',
+  'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
+    'コマンドへの入力は agent_id、agent_type、agent_transcript_path を持つ JSON です。',
+  'Input to command is JSON with compaction details.':
+    'コマンドへの入力は圧縮詳細を持つ JSON です。',
+  'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
+    'コマンドへの入力は tool_name、tool_input、tool_use_id を持つ JSON です。許可または拒否の決定を含む hookSpecificOutput を持つ JSON を出力します。',
+  // Hooks - Exit Code Descriptions
+  'stdout/stderr not shown': 'stdout/stderr は表示されません',
+  'show stderr to model and continue conversation':
+    'stderr をモデルに表示し、会話を続ける',
+  'show stderr to user only': 'stderr をユーザーのみに表示',
+  'stdout shown in transcript mode (ctrl+o)':
+    'stdout はトランスクリプトモードで表示 (ctrl+o)',
+  'show stderr to model immediately': 'stderr をモデルに即座に表示',
+  'show stderr to user only but continue with tool call':
+    'stderr をユーザーのみに表示し、ツール呼び出しを続ける',
+  'block processing, erase original prompt, and show stderr to user only':
+    '処理をブロックし、元のプロンプトを消去し、stderr をユーザーのみに表示',
+  'stdout shown to Qwen': 'stdout をモデルに表示',
+  'show stderr to user only (blocking errors ignored)':
+    'stderr をユーザーのみに表示（ブロッキングエラーは無視）',
+  'command completes successfully': 'コマンドが正常に完了',
+  'stdout shown to subagent': 'stdout をサブエージェントに表示',
+  'show stderr to subagent and continue having it run':
+    'stderr をサブエージェントに表示し、実行を続ける',
+  'stdout appended as custom compact instructions':
+    'stdout をカスタム圧縮指示として追加',
+  'block compaction': '圧縮をブロック',
+  'show stderr to user only but continue with compaction':
+    'stderr をユーザーのみに表示し、圧縮を続ける',
+  'use hook decision if provided': '提供されている場合はフックの決定を使用',
+  // Hooks - Messages
+  'Config not loaded.': '設定が読み込まれていません。',
+  'Hooks are not enabled. Enable hooks in settings to use this feature.':
+    'フックが有効になっていません。この機能を使用するには設定でフックを有効にしてください。',
+  'No hooks configured. Add hooks in your settings.json file.':
+    'フックが設定されていません。settings.json ファイルにフックを追加してください。',
+  'Configured Hooks ({{count}} total)': '設定済みのフック（合計 {{count}} 件）',
+
+  // ============================================================================
+  // Commands - Session Export
+  // ============================================================================
+  'Export current session message history to a file':
+    '現在のセッションのメッセージ履歴をファイルにエクスポートする',
+  'Export session to HTML format': 'セッションを HTML 形式でエクスポートする',
+  'Export session to JSON format': 'セッションを JSON 形式でエクスポートする',
+  'Export session to JSONL format (one message per line)':
+    'セッションを JSONL 形式でエクスポートする（1 行に 1 メッセージ）',
+  'Export session to markdown format':
+    'セッションを Markdown 形式でエクスポートする',
+
+  // ============================================================================
+  // Commands - Insights
+  // ============================================================================
+  'generate personalized programming insights from your chat history':
+    'チャット履歴からパーソナライズされたプログラミングインサイトを生成する',
+
+  // ============================================================================
+  // Commands - Session History
+  // ============================================================================
+  'Resume a previous session': '前のセッションを再開する',
+  'Restore a tool call. This will reset the conversation and file history to the state it was in when the tool call was suggested':
+    'ツール呼び出しを復元します。これにより、会話とファイルの履歴はそのツール呼び出しが提案された時点の状態に戻ります',
   'Could not detect terminal type. Supported terminals: VS Code, Cursor, Windsurf, and Trae.':
     'ターミナルの種類を検出できませんでした。サポートされているターミナル: VS Code、Cursor、Windsurf、Trae',
   'Terminal "{{terminal}}" is not supported yet.':
@@ -446,7 +609,6 @@ export default {
   '(Use Enter to select, Tab to change focus)':
     '(Enter で選択、Tab でフォーカス変更)',
   'Apply To': '適用先',
-  'User Settings': 'ユーザー設定',
   'Workspace Settings': 'ワークスペース設定',
   // Memory
   'Commands for interacting with memory.': 'メモリ操作のコマンド',
@@ -493,7 +655,6 @@ export default {
     '設定済みのMCPサーバーとツールを一覧表示',
   'No MCP servers configured.': 'MCPサーバーが設定されていません',
   'Restarts MCP servers.': 'MCPサーバーを再起動します',
-  'Config not loaded.': '設定が読み込まれていません',
   'Could not retrieve tool registry.': 'ツールレジストリを取得できませんでした',
   'No MCP servers configured with OAuth authentication.':
     'OAuth認証が設定されたMCPサーバーはありません',
@@ -507,6 +668,15 @@ export default {
     "MCPサーバー '{{name}}' での認証に失敗: {{error}}",
   "Re-discovering tools from '{{name}}'...":
     "'{{name}}' からツールを再検出中...",
+  "Discovered {{count}} tool(s) from '{{name}}'.":
+    "'{{name}}' から {{count}} 個のツールを検出しました。",
+  'Authentication complete. Returning to server details...':
+    '認証完了。サーバー詳細に戻ります...',
+  'Authentication successful.': '認証成功。',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'ブラウザが開かない場合は、このURLをコピーしてブラウザに貼り付けてください：',
+  'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
+    '⚠️  URL全体をコピーしてください——複数行にまたがる場合があります。',
   'Configured MCP servers:': '設定済みMCPサーバー:',
   Ready: '準備完了',
   Disconnected: '切断',
@@ -573,7 +743,10 @@ export default {
   'Failed to generate summary - no text content received from LLM response':
     'サマリーの生成に失敗 - LLMレスポンスからテキストコンテンツを受信できませんでした',
   // Model
-  'Switch the model for this session': 'このセッションのモデルを切り替え',
+  'Switch the model for this session (--fast for suggestion model)':
+    'このセッションのモデルを切り替え（--fast で提案モデルを設定）',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'プロンプト提案と投機的実行用の軽量モデルを設定',
   'Content generator configuration not available.':
     'コンテンツジェネレーター設定が利用できません',
   'Authentication type not available.': '認証タイプが利用できません',
@@ -654,6 +827,11 @@ export default {
   'Press Enter to confirm, Esc to cancel': 'Enter で確認、Esc でキャンセル',
   Disable: '無効化',
   Enable: '有効化',
+  Authenticate: '認証',
+  'Re-authenticate': '再認証',
+  'Clear Authentication': '認証をクリア',
+  disabled: '無効',
+  'Server:': 'サーバー:',
   Reconnect: '再接続',
   'View tools': 'ツールを表示',
   'Status:': 'ステータス:',
@@ -664,7 +842,6 @@ export default {
   'No server selected': 'サーバーが選択されていません',
   '(disabled)': '(無効)',
   'Error:': 'エラー:',
-  Extension: '拡張機能',
   tool: 'ツール',
   tools: 'ツール',
   connected: '接続済み',
@@ -683,6 +860,14 @@ export default {
   'Run qwen --debug to see error logs':
     'qwen --debug を実行してエラーログを確認してください',
 
+  // MCP OAuth Authentication
+  'OAuth Authentication': 'OAuth 認証',
+  'Press Enter to start authentication, Esc to go back':
+    'Enter で認証開始、Esc で戻る',
+  'Authenticating... Please complete the login in your browser.':
+    '認証中... ブラウザでログインを完了してください。',
+  'Press Enter or Esc to go back': 'Enter または Esc で戻る',
+
   // MCP Tool List
   'No tools available for this server.':
     'このサーバーには使用可能なツールがありません。',
@@ -691,6 +876,7 @@ export default {
   'open-world': 'オープンワールド',
   idempotent: '冪等',
   'Tools for {{name}}': '{{name}} のツール',
+  'Tools for {{serverName}}': '{{serverName}} のツール',
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
@@ -728,6 +914,13 @@ export default {
   'No, suggest changes (esc)': 'いいえ、変更を提案 (Esc)',
   "Allow execution of: '{{command}}'?": "'{{command}}' の実行を許可しますか?",
   'Yes, allow always ...': 'はい、常に許可...',
+  'Always allow in this project': 'このプロジェクトで常に許可',
+  'Always allow {{action}} in this project':
+    'このプロジェクトで{{action}}を常に許可',
+  'Always allow for this user': 'このユーザーに常に許可',
+  'Always allow {{action}} for this user': 'このユーザーに{{action}}を常に許可',
+  'Yes, restore previous mode ({{mode}})':
+    'はい、以前のモードに戻す ({{mode}})',
   'Yes, and auto-accept edits': 'はい、編集を自動承認',
   'Yes, and manually approve edits': 'はい、編集を手動承認',
   'No, keep planning (esc)': 'いいえ、計画を続ける (Esc)',
@@ -773,8 +966,8 @@ export default {
     '続行するには認証方法を選択してください。Ctrl+C をもう一度押すと終了します',
   'Terms of Services and Privacy Notice': '利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    '無料 \u00B7 1日最大1,000リクエスト \u00B7 Qwen最新モデル',
+  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
+    '無料 \u00B7 1日100リクエスト \u00B7 2026-04-15に終了',
   'Login with QwenChat account to use daily free quota.':
     'QwenChatアカウントでログインして、毎日の無料クォータをご利用ください。',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
@@ -842,12 +1035,79 @@ export default {
   'not set': '未設定',
   none: 'なし',
   unknown: '不明',
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — 効率的なハイブリッドモデル、業界トップクラスのコーディング性能',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Alibaba Cloud ModelStudioの最新Qwen Visionモデル(バージョン: qwen3-vl-plus-2025-09-23)',
   // Dialogs - Permissions
   'Manage folder trust settings': 'フォルダ信頼設定を管理',
+  'Manage permission rules': '権限ルールを管理',
+  Allow: '許可',
+  Ask: '確認',
+  Deny: '拒否',
+  Workspace: 'ワークスペース',
+  "Qwen Code won't ask before using allowed tools.":
+    'Qwen Code は許可されたツールを使用する前に確認しません。',
+  'Qwen Code will ask before using these tools.':
+    'Qwen Code はこれらのツールを使用する前に確認します。',
+  'Qwen Code is not allowed to use denied tools.':
+    'Qwen Code は拒否されたツールを使用できません。',
+  'Manage trusted directories for this workspace.':
+    'このワークスペースの信頼済みディレクトリを管理します。',
+  'Any use of the {{tool}} tool': '{{tool}} ツールのすべての使用',
+  "{{tool}} commands matching '{{pattern}}'":
+    "'{{pattern}}' に一致する {{tool}} コマンド",
+  'From user settings': 'ユーザー設定から',
+  'From project settings': 'プロジェクト設定から',
+  'From session': 'セッションから',
+  'Project settings (local)': 'プロジェクト設定（ローカル）',
+  'Saved in .qwen/settings.local.json': '.qwen/settings.local.json に保存',
+  'Project settings': 'プロジェクト設定',
+  'Checked in at .qwen/settings.json': '.qwen/settings.json にチェックイン',
+  'User settings': 'ユーザー設定',
+  'Saved in at ~/.qwen/settings.json': '~/.qwen/settings.json に保存',
+  'Add a new rule…': '新しいルールを追加…',
+  'Add {{type}} permission rule': '{{type}}権限ルールを追加',
+  'Permission rules are a tool name, optionally followed by a specifier in parentheses.':
+    '権限ルールはツール名で、オプションで括弧内に指定子を付けます。',
+  'e.g.,': '例：',
+  or: 'または',
+  'Enter permission rule…': '権限ルールを入力…',
+  'Enter to submit · Esc to cancel': 'Enter で送信 · Esc でキャンセル',
+  'Where should this rule be saved?': 'このルールをどこに保存しますか？',
+  'Enter to confirm · Esc to cancel': 'Enter で確認 · Esc でキャンセル',
+  'Delete {{type}} rule?': '{{type}}ルールを削除しますか？',
+  'Are you sure you want to delete this permission rule?':
+    'この権限ルールを削除してもよろしいですか？',
+  'Permissions:': '権限：',
+  '(←/→ or tab to cycle)': '（←/→ または Tab で切替）',
+  'Press ↑↓ to navigate · Enter to select · Type to search · Esc to cancel':
+    '↑↓ でナビゲート · Enter で選択 · 入力で検索 · Esc でキャンセル',
+  'Search…': '検索…',
+  'Use /trust to manage folder trust settings for this workspace.':
+    '/trust を使用してこのワークスペースのフォルダ信頼設定を管理します。',
+  // Workspace directory management
+  'Add directory…': 'ディレクトリを追加…',
+  'Add directory to workspace': 'ワークスペースにディレクトリを追加',
+  'Qwen Code can read files in the workspace, and make edits when auto-accept edits is on.':
+    'Qwen Code はワークスペース内のファイルを読み取り、自動編集承認が有効な場合は編集を行えます。',
+  'Qwen Code will be able to read files in this directory and make edits when auto-accept edits is on.':
+    'Qwen Code はこのディレクトリ内のファイルを読み取り、自動編集承認が有効な場合は編集を行えます。',
+  'Enter the path to the directory:': 'ディレクトリのパスを入力してください:',
+  'Enter directory path…': 'ディレクトリパスを入力…',
+  'Tab to complete · Enter to add · Esc to cancel':
+    'Tab で補完 · Enter で追加 · Esc でキャンセル',
+  'Remove directory?': 'ディレクトリを削除しますか？',
+  'Are you sure you want to remove this directory from the workspace?':
+    'このディレクトリをワークスペースから削除してもよろしいですか？',
+  '  (Original working directory)': '  （元の作業ディレクトリ）',
+  '  (from settings)': '  （設定より）',
+  'Directory does not exist.': 'ディレクトリが存在しません。',
+  'Path is not a directory.': 'パスはディレクトリではありません。',
+  'This directory is already in the workspace.':
+    'このディレクトリはすでにワークスペースに含まれています。',
+  'Already covered by existing directory: {{dir}}':
+    '既存のディレクトリによって既にカバーされています: {{dir}}',
   // Status Bar
   'Using:': '使用中:',
   '{{count}} open file': '{{count}} 個のファイルを開いています',
@@ -863,6 +1123,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Ctrl+C をもう一度押すと終了します',
   'Press Ctrl+D again to exit.': 'Ctrl+D をもう一度押すと終了します',
   'Press Esc again to clear.': 'Esc をもう一度押すとクリアします',
+  'Press ↑ to edit queued messages': '↑ を押してキュー内のメッセージを編集',
   // MCP Status
   '⏳ MCP servers are starting up ({{count}} initializing)...':
     '⏳ MCPサーバーを起動中({{count}} 初期化中)...',
@@ -915,6 +1176,16 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'QWEN.md ファイルを追加すると、Qwen Code に永続的なプロジェクトコンテキストを与えられます。',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    '会話を中断せずに /btw でちょっとした横道の質問ができます。',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'コンテキストがもうすぐいっぱいです！今すぐ /compress を実行するか、/new を開始して続けてください。',
+  'Context is getting full. Use /compress to free up space.':
+    'コンテキストが埋まりつつあります。/compress を使って空きを増やしてください。',
+  'Long conversation? /compress summarizes history to free context.':
+    '会話が長くなりましたか？ /compress は履歴を要約してコンテキストを空けます。',
   'Tips for getting started:': '始めるためのヒント:',
   '1. Ask questions, edit files, or run commands.':
     '1. 質問したり、ファイルを編集したり、コマンドを実行したりできます',
@@ -1046,6 +1317,17 @@ export default {
   // ============================================================================
   // Auth Dialog - View Titles and Labels
   // ============================================================================
+  'Coding Plan': 'Coding Plan',
+  "Paste your api key of ModelStudio Coding Plan and you're all set!":
+    'ModelStudio Coding PlanのAPIキーを貼り付けるだけで準備完了です！',
+  Custom: 'カスタム',
+  'More instructions about configuring `modelProviders` manually.':
+    '`modelProviders`を手動で設定する方法の詳細はこちら。',
+  'Select API-KEY configuration mode:': 'API-KEY設定モードを選択してください：',
+  '(Press Escape to go back)': '(Escapeキーで戻る)',
+  '(Press Enter to submit, Escape to cancel)':
+    '(Enterで送信、Escapeでキャンセル)',
+  'More instructions please check:': '詳細な手順はこちらをご確認ください：',
   'Select Region for Coding Plan': 'Coding Planのリージョンを選択',
   'Choose based on where your account is registered':
     'アカウントの登録先に応じて選択してください',
@@ -1058,10 +1340,156 @@ export default {
     '{{region}} の新しいモデル設定が利用可能です。今すぐ更新しますか？',
   '{{region}} configuration updated successfully. Model switched to "{{model}}".':
     '{{region}} の設定が正常に更新されました。モデルが "{{model}}" に切り替わりました。',
+  'Authenticated successfully with {{region}}. API key and model configs saved to settings.json (backed up).':
+    '{{region}} での認証に成功しました。API キーとモデル設定が settings.json に保存されました（バックアップ済み）。',
+
+  // ============================================================================
+  // Context Usage Component
+  // ============================================================================
+  'Context Usage': 'コンテキスト使用量',
+  'No API response yet. Send a message to see actual usage.':
+    'API応答はありません。メッセージを送信して実際の使用量を確認してください。',
+  'Estimated pre-conversation overhead': '推定事前会話オーバーヘッド',
+  'Context window': 'コンテキストウィンドウ',
+  tokens: 'トークン',
+  Used: '使用済み',
+  Free: '空き',
+  'Autocompact buffer': '自動圧縮バッファ',
+  'Usage by category': 'カテゴリ別の使用量',
+  'System prompt': 'システムプロンプト',
+  'Built-in tools': '組み込みツール',
+  'MCP tools': 'MCPツール',
+  'Memory files': 'メモリファイル',
+  Skills: 'スキル',
+  Messages: 'メッセージ',
+  'Show context window usage breakdown.':
+    'コンテキストウィンドウの使用状況を表示します。',
+  'Run /context detail for per-item breakdown.':
+    '/context detail を実行すると項目ごとの内訳を表示します。',
+  active: '有効',
+  'body loaded': '本文読み込み済み',
+  memory: 'メモリ',
   '{{region}} configuration updated successfully.':
     '{{region}} の設定が正常に更新されました。',
   'Authenticated successfully with {{region}}. API key and model configs saved to settings.json.':
     '{{region}} での認証に成功しました。APIキーとモデル設定が settings.json に保存されました。',
   'Tip: Use /model to switch between available Coding Plan models.':
     'ヒント: /model で利用可能な Coding Plan モデルを切り替えられます。',
+
+  // ============================================================================
+  // Ask User Question Tool
+  // ============================================================================
+  'Please answer the following question(s):': '以下の質問に答えてください：',
+  'Cannot ask user questions in non-interactive mode. Please run in interactive mode to use this tool.':
+    '非対話モードではユーザーに質問できません。このツールを使用するには対話モードで実行してください。',
+  'User declined to answer the questions.':
+    'ユーザーは質問への回答を拒否しました。',
+  'User has provided the following answers:':
+    'ユーザーは以下の回答を提供しました：',
+  'Failed to process user answers:': 'ユーザー回答の処理に失敗しました：',
+  'Type something...': '何か入力...',
+  Submit: '送信',
+  'Submit answers': '回答を送信',
+  Cancel: 'キャンセル',
+  'Your answers:': 'あなたの回答：',
+  '(not answered)': '(未回答)',
+  'Ready to submit your answers?': '回答を送信しますか？',
+  '↑/↓: Navigate | ←/→: Switch tabs | Enter: Select':
+    '↑/↓: ナビゲート | ←/→: タブ切り替え | Enter: 選択',
+  '↑/↓: Navigate | ←/→: Switch tabs | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: ナビゲート | ←/→: タブ切り替え | Space/Enter: 切り替え | Esc: キャンセル',
+  '↑/↓: Navigate | Space/Enter: Toggle | Esc: Cancel':
+    '↑/↓: ナビゲート | Space/Enter: 切り替え | Esc: キャンセル',
+  '↑/↓: Navigate | Enter: Select | Esc: Cancel':
+    '↑/↓: ナビゲート | Enter: 選択 | Esc: キャンセル',
+
+  // ============================================================================
+  // Commands - Auth
+  // ============================================================================
+  'Configure Qwen authentication information with Qwen-OAuth or Alibaba Cloud Coding Plan':
+    'Qwen-OAuth または Alibaba Cloud Coding Plan で Qwen 認証情報を設定する',
+  'Authenticate using Qwen OAuth': 'Qwen OAuth で認証する',
+  'Authenticate using Alibaba Cloud Coding Plan':
+    'Alibaba Cloud Coding Plan で認証する',
+  'Region for Coding Plan (china/global)':
+    'Coding Plan のリージョン (china/global)',
+  'API key for Coding Plan': 'Coding Plan の API キー',
+  'Show current authentication status': '現在の認証ステータスを表示',
+  'Authentication completed successfully.': '認証が正常に完了しました。',
+  'Starting Qwen OAuth authentication...': 'Qwen OAuth 認証を開始しています...',
+  'Successfully authenticated with Qwen OAuth.':
+    'Qwen OAuth での認証に成功しました。',
+  'Failed to authenticate with Qwen OAuth: {{error}}':
+    'Qwen OAuth での認証に失敗しました: {{error}}',
+  'Processing Alibaba Cloud Coding Plan authentication...':
+    'Alibaba Cloud Coding Plan 認証を処理しています...',
+  'Successfully authenticated with Alibaba Cloud Coding Plan.':
+    'Alibaba Cloud Coding Plan での認証に成功しました。',
+  'Failed to authenticate with Coding Plan: {{error}}':
+    'Coding Plan での認証に失敗しました: {{error}}',
+  '中国 (China)': '中国 (China)',
+  '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  Global: 'グローバル',
+  'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
+  'Select region for Coding Plan:': 'Coding Plan のリージョンを選択:',
+  'Enter your Coding Plan API key: ':
+    'Coding Plan の API キーを入力してください: ',
+  'Select authentication method:': '認証方法を選択:',
+  '\n=== Authentication Status ===\n': '\n=== 認証ステータス ===\n',
+  '⚠️  No authentication method configured.\n':
+    '⚠️  認証方法が設定されていません。\n',
+  'Run one of the following commands to get started:\n':
+    '以下のコマンドのいずれかを実行して開始してください:\n',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
+    '  qwen auth qwen-oauth     - Qwen OAuth で認証（無料）',
+  '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
+    '  qwen auth coding-plan      - Alibaba Cloud Coding Plan で認証\n',
+  'Or simply run:': 'または以下を実行:',
+  '  qwen auth                - Interactive authentication setup\n':
+    '  qwen auth                - インタラクティブ認証セットアップ\n',
+  '✓ Authentication Method: Qwen OAuth': '✓ 認証方法: Qwen OAuth',
+  '  Type: Free tier (ending 2026-04-15)':
+    '  タイプ: 無料プラン（2026-04-15に終了）',
+  '  Limit: 100 requests/day': '  制限: 1日100リクエスト',
+  '  Models: Qwen latest models\n': '  モデル: Qwen 最新モデル\n',
+  '✓ Authentication Method: Alibaba Cloud Coding Plan':
+    '✓ 認証方法: Alibaba Cloud Coding Plan',
+  '中国 (China) - 阿里云百炼': '中国 (China) - 阿里云百炼',
+  'Global - Alibaba Cloud': 'グローバル - Alibaba Cloud',
+  '  Region: {{region}}': '  リージョン: {{region}}',
+  '  Current Model: {{model}}': '  現在のモデル: {{model}}',
+  '  Config Version: {{version}}': '  設定バージョン: {{version}}',
+  '  Status: API key configured\n': '  ステータス: APIキー設定済み\n',
+  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠️  認証方法: Alibaba Cloud Coding Plan（不完全）',
+  '  Issue: API key not found in environment or settings\n':
+    '  問題: 環境変数または設定にAPIキーが見つかりません\n',
+  '  Run `qwen auth coding-plan` to re-configure.\n':
+    '  `qwen auth coding-plan` を実行して再設定してください。\n',
+  '✓ Authentication Method: {{type}}': '✓ 認証方法: {{type}}',
+  '  Status: Configured\n': '  ステータス: 設定済み\n',
+  'Failed to check authentication status: {{error}}':
+    '認証ステータスの確認に失敗しました: {{error}}',
+  'Select an option:': 'オプションを選択:',
+  'Raw mode not available. Please run in an interactive terminal.':
+    'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
+  '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
+    '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
+  compact: 'コンパクト',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'コンパクトモードでツール出力と思考を非表示にします（Ctrl+O で切り替え）。',
+  'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };
