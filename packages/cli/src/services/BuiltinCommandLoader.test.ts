@@ -86,6 +86,13 @@ vi.mock('../ui/commands/extensionsCommand.js', () => ({
   extensionsCommand: {},
 }));
 vi.mock('../ui/commands/helpCommand.js', () => ({ helpCommand: {} }));
+vi.mock('../ui/commands/historyCommand.js', () => ({
+  historyCommand: {
+    name: 'history',
+    description: 'History command',
+    kind: 'BUILT_IN',
+  },
+}));
 vi.mock('../ui/commands/memoryCommand.js', () => ({ memoryCommand: {} }));
 vi.mock('../ui/commands/modelCommand.js', () => ({
   modelCommand: { name: 'model' },
@@ -182,6 +189,9 @@ describe('BuiltinCommandLoader', () => {
 
     const modelCmd = commands.find((c) => c.name === 'model');
     expect(modelCmd).toBeDefined();
+
+    const historyCmd = commands.find((c) => c.name === 'history');
+    expect(historyCmd).toBeDefined();
   });
 
   it('should include trust command when folder trust is enabled', async () => {

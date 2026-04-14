@@ -23,8 +23,14 @@ These commands help you save, restore, and summarize work progress.
 | `/init`     | Analyze current directory and create initial context file | `/init`                              |
 | `/summary`  | Generate project summary based on conversation history    | `/summary`                           |
 | `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
+| `/history`  | List saved chat history for the current project           | `/history`, `/history list`          |
+| → `clear`   | Delete saved chat history by session ID or with `--all`   | `/history clear <ID>`, `--all`       |
 | `/resume`   | Resume a previous conversation session                    | `/resume`                            |
 | `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
+
+`/history` works on saved session files for the current project. For safety, the
+active session is left untouched by `/history clear --all`, and it cannot be
+deleted by ID until you start a new session.
 
 ### 1.2 Interface and Workspace Control
 

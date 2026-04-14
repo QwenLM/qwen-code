@@ -24,6 +24,7 @@ import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
+import { historyCommand } from '../ui/commands/historyCommand.js';
 import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
@@ -98,6 +99,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       exportCommand,
       extensionsCommand,
       helpCommand,
+      historyCommand,
       hooksCommand,
       resolvedIdeCommand,
       initCommand,
