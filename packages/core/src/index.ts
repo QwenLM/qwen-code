@@ -267,6 +267,7 @@ export {
   type HookExecutionRequest,
   type HookExecutionResponse,
 } from './confirmation-bus/types.js';
+export { MessageBus } from './confirmation-bus/message-bus.js';
 
 // ============================================================================
 // Testing Utilities

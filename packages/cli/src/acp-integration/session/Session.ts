@@ -17,7 +17,12 @@ import type {
   ToolResult,
   ChatRecord,
   AgentEventEmitter,
-
+  StopHookOutput,
+  HookExecutionRequest,
+  HookExecutionResponse,
+  MessageBus,
+} from '@qwen-code/qwen-code-core';
+import {
   AuthType,
   ApprovalMode,
   convertToFunctionResponse,
@@ -47,11 +52,8 @@ import type {
   persistPermissionOutcome,
   createHookOutput,
   generateToolUseId,
-  type StopHookOutput,
-  type StopFailureErrorType,
   MessageBusType,
-  type HookExecutionRequest,
-  type HookExecutionResponse} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
@@ -80,43 +82,7 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
-
-/**
- * Classify API error to StopFailureErrorType
- * (Aligned with useGeminiStream.ts classifyApiError)
- */
-function classifyApiError(error: {
-  message: string;
-  status?: number;
-}): StopFailureErrorType {
-  const status = error.status;
-  const message = error.message?.toLowerCase() ?? '';
-
-  if (status === 429 || message.includes('rate limit')) {
-    return 'rate_limit';
-  }
-  if (status === 401 || message.includes('unauthorized')) {
-    return 'authentication_failed';
-  }
-  if (
-    status === 402 ||
-    status === 403 ||
-    message.includes('billing') ||
-    message.includes('quota')
-  ) {
-    return 'billing_error';
-  }
-  if (status === 400 || message.includes('invalid')) {
-    return 'invalid_request';
-  }
-  if (status !== undefined && status >= 500) {
-    return 'server_error';
-  }
-  if (message.includes('max_tokens') || message.includes('token limit')) {
-    return 'max_output_tokens';
-  }
-  return 'unknown';
-}
+import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 
 // Import modular session components
 import type {
@@ -532,236 +498,258 @@ export class Session implements SessionContext {
           }
         }
 
-        // Fire Stop hook through MessageBus (aligned with core path in client.ts)
+        // Fire Stop hook loop (aligned with core path in client.ts)
         // This is triggered after model response completes with no pending tool calls
-        // Maximum iterations to prevent infinite loops (aligned with MAX_TURNS in core/client.ts)
-        const MAX_STOP_HOOK_ITERATIONS = 100;
+        return this.#handleStopHookLoop(
+          chat,
+          pendingSend,
+          promptId,
+          hooksEnabled,
+          messageBus,
+        );
+      },
+    );
+  }
 
-        // Track Stop hook iterations (aligned with core path's stopHookState)
-        let stopHookIterationCount = 0;
-        let stopHookReasons: string[] = [];
+  /**
+   * Handles the Stop hook iteration loop.
+   * This method processes Stop hooks after a model response completes with no pending tool calls.
+   * If a Stop hook requests continuation, it sends a follow-up message and loops back.
+   * Maximum iterations (100) prevent infinite loops.
+   *
+   * @param chat - The GeminiChat instance
+   * @param pendingSend - The abort controller for the current prompt
+   * @param promptId - The prompt ID for tracking
+   * @param hooksEnabled - Whether hooks are enabled
+   * @param messageBus - The MessageBus for hook communication (may be undefined)
+   * @returns The stop reason ('end_turn' or 'cancelled')
+   */
+  async #handleStopHookLoop(
+    chat: GeminiChat,
+    pendingSend: AbortController,
+    promptId: string,
+    hooksEnabled: boolean,
+    messageBus: MessageBus | undefined,
+  ): Promise<{ stopReason: 'end_turn' | 'cancelled' }> {
+    const MAX_STOP_HOOK_ITERATIONS = 100;
+    let stopHookIterationCount = 0;
+    let stopHookReasons: string[] = [];
 
-        // Loop for Stop hook iterations
-        while (stopHookIterationCount < MAX_STOP_HOOK_ITERATIONS) {
-          if (
-            !hooksEnabled ||
-            !messageBus ||
-            pendingSend.signal.aborted ||
-            !this.config.hasHooksForEvent?.('Stop')
-          ) {
-            return { stopReason: 'end_turn' };
-          }
+    while (stopHookIterationCount < MAX_STOP_HOOK_ITERATIONS) {
+      if (
+        !hooksEnabled ||
+        !messageBus ||
+        pendingSend.signal.aborted ||
+        !this.config.hasHooksForEvent?.('Stop')
+      ) {
+        return { stopReason: 'end_turn' };
+      }
 
-          // Get response text from the chat history
-          const history = chat.getHistory();
-          const lastModelMessage = history
-            .filter((msg) => msg.role === 'model')
-            .pop();
-          const responseText =
-            lastModelMessage?.parts
-              ?.filter((p): p is { text: string } => 'text' in p)
-              .map((p) => p.text)
-              .join('') || '[no response text]';
+      // Get response text from the chat history
+      const history = chat.getHistory();
+      const lastModelMessage = history
+        .filter((msg) => msg.role === 'model')
+        .pop();
+      const responseText =
+        lastModelMessage?.parts
+          ?.filter((p): p is { text: string } => 'text' in p)
+          .map((p) => p.text)
+          .join('') || '[no response text]';
 
-          const response = await messageBus.request<
-            HookExecutionRequest,
-            HookExecutionResponse
-          >(
-            {
-              type: MessageBusType.HOOK_EXECUTION_REQUEST,
-              eventName: 'Stop',
-              input: {
-                stop_hook_active: true,
-                last_assistant_message: responseText,
-              },
-              signal: pendingSend.signal,
-            },
-            MessageBusType.HOOK_EXECUTION_RESPONSE,
+      const response = await messageBus.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Stop',
+          input: {
+            stop_hook_active: true,
+            last_assistant_message: responseText,
+          },
+          signal: pendingSend.signal,
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      // Check if aborted after hook execution
+      if (pendingSend.signal.aborted) {
+        return { stopReason: 'cancelled' };
+      }
+
+      const hookOutput = response.output
+        ? createHookOutput('Stop', response.output)
+        : undefined;
+
+      const stopOutput = hookOutput as StopHookOutput | undefined;
+
+      // Emit system message if provided by hook
+      if (stopOutput?.systemMessage) {
+        await this.messageEmitter.emitAgentMessage(stopOutput.systemMessage);
+      }
+
+      // For Stop hooks, blocking/stop execution should force continuation
+      if (
+        stopOutput?.isBlockingDecision() ||
+        stopOutput?.shouldStopExecution()
+      ) {
+        const continueReason = stopOutput.getEffectiveReason();
+
+        // Track Stop hook iterations
+        stopHookIterationCount++;
+        stopHookReasons = [...stopHookReasons, continueReason];
+
+        // Emit StopHookLoop event for iterations after the first one
+        if (stopHookIterationCount > 1) {
+          await this.messageEmitter.emitStopHookLoop(
+            stopHookIterationCount,
+            stopHookReasons,
+            response.stopHookCount ?? 1,
           );
+        }
 
-          // Check if aborted after hook execution
+        // Continue the conversation with the hook's reason
+        const continueParts: Part[] = [{ text: continueReason }];
+        let nextMessage: Content | null = {
+          role: 'user',
+          parts: continueParts,
+        };
+
+        // Process the follow-up message and any tool calls that result
+        while (nextMessage !== null) {
           if (pendingSend.signal.aborted) {
             return { stopReason: 'cancelled' };
           }
 
-          const hookOutput = response.output
-            ? createHookOutput('Stop', response.output)
-            : undefined;
+          const functionCalls: FunctionCall[] = [];
+          let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+          const streamStartTime = Date.now();
 
-          const stopOutput = hookOutput as StopHookOutput | undefined;
-
-          // Emit system message if provided by hook
-          if (stopOutput?.systemMessage) {
-            await this.messageEmitter.emitAgentMessage(
-              stopOutput.systemMessage,
+          try {
+            const continueResponseStream = await chat.sendMessageStream(
+              this.config.getModel(),
+              {
+                message: nextMessage?.parts ?? [],
+                config: {
+                  abortSignal: pendingSend.signal,
+                },
+              },
+              promptId + '_stop_hook_' + stopHookIterationCount,
             );
-          }
+            nextMessage = null;
 
-          // For Stop hooks, blocking/stop execution should force continuation
-          if (
-            stopOutput?.isBlockingDecision() ||
-            stopOutput?.shouldStopExecution()
-          ) {
-            const continueReason = stopOutput.getEffectiveReason();
-
-            // Track Stop hook iterations
-            stopHookIterationCount++;
-            stopHookReasons = [...stopHookReasons, continueReason];
-
-            // Emit StopHookLoop event for iterations after the first one (aligned with core path)
-            if (stopHookIterationCount > 1) {
-              await this.messageEmitter.emitStopHookLoop(
-                stopHookIterationCount,
-                stopHookReasons,
-                response.stopHookCount ?? 1,
-              );
-            }
-
-            // Continue the conversation with the hook's reason
-            const continueParts: Part[] = [{ text: continueReason }];
-            let nextMessage: Content | null = {
-              role: 'user',
-              parts: continueParts,
-            };
-
-            // Process the follow-up message and any tool calls that result
-            while (nextMessage !== null) {
+            for await (const resp of continueResponseStream) {
               if (pendingSend.signal.aborted) {
                 return { stopReason: 'cancelled' };
               }
 
-              const functionCalls: FunctionCall[] = [];
-              let usageMetadata: GenerateContentResponseUsageMetadata | null =
-                null;
-              const streamStartTime = Date.now();
-
-              try {
-                const continueResponseStream = await chat.sendMessageStream(
-                  this.config.getModel(),
-                  {
-                    message: nextMessage?.parts ?? [],
-                    config: {
-                      abortSignal: pendingSend.signal,
-                    },
-                  },
-                  promptId + '_stop_hook_' + stopHookIterationCount,
-                );
-                nextMessage = null;
-
-                for await (const resp of continueResponseStream) {
-                  if (pendingSend.signal.aborted) {
-                    return { stopReason: 'cancelled' };
-                  }
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.candidates &&
-                    resp.value.candidates.length > 0
-                  ) {
-                    const candidate = resp.value.candidates[0];
-                    for (const part of candidate.content?.parts ?? []) {
-                      if (!part.text) continue;
-                      this.messageEmitter.emitMessage(
-                        part.text,
-                        'assistant',
-                        part.thought,
-                      );
-                    }
-                  }
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.usageMetadata
-                  ) {
-                    usageMetadata = resp.value.usageMetadata;
-                  }
-
-                  if (
-                    resp.type === StreamEventType.CHUNK &&
-                    resp.value.functionCalls
-                  ) {
-                    functionCalls.push(...resp.value.functionCalls);
-                  }
-                }
-              } catch (error) {
-                // Fire StopFailure hook (fire-and-forget)
-                const errorStatus = getErrorStatus(error);
-                const errorMessage =
-                  error instanceof Error ? error.message : String(error);
-                const errorType = classifyApiError({
-                  message: errorMessage,
-                  status: errorStatus,
-                });
-
-                const hookSystem = this.config.getHookSystem?.();
-                const hooksEnabledForStopFailure =
-                  !this.config.getDisableAllHooks?.();
-                if (
-                  hooksEnabledForStopFailure &&
-                  hookSystem &&
-                  this.config.hasHooksForEvent?.('StopFailure')
-                ) {
-                  hookSystem
-                    .fireStopFailureEvent(errorType, errorMessage)
-                    .catch((err) => {
-                      debugLogger.warn(`StopFailure hook failed: ${err}`);
-                    });
-                }
-
-                if (errorStatus === 429) {
-                  throw new RequestError(
-                    429,
-                    'Rate limit exceeded. Try again later.',
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) continue;
+                  this.messageEmitter.emitMessage(
+                    part.text,
+                    'assistant',
+                    part.thought,
                   );
                 }
-
-                throw error;
               }
 
-              if (usageMetadata) {
-                const durationMs = Date.now() - streamStartTime;
-                await this.messageEmitter.emitUsageMetadata(
-                  usageMetadata,
-                  '',
-                  durationMs,
-                );
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
               }
 
-              // Process tool calls from the follow-up message
-              if (functionCalls.length > 0) {
-                const toolResponseParts: Part[] = [];
-
-                for (const fc of functionCalls) {
-                  const toolResponse = await this.runTool(
-                    pendingSend.signal,
-                    promptId,
-                    fc,
-                  );
-                  toolResponseParts.push(...toolResponse);
-                }
-
-                nextMessage = { role: 'user', parts: toolResponseParts };
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
               }
             }
+          } catch (error) {
+            // Fire StopFailure hook (fire-and-forget)
+            const errorStatus = getErrorStatus(error);
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            const errorType = classifyApiError({
+              message: errorMessage,
+              status: errorStatus,
+            });
 
-            // Loop continues to check Stop hook again after processing the follow-up
-            continue;
+            const hookSystem = this.config.getHookSystem?.();
+            const hooksEnabledForStopFailure =
+              !this.config.getDisableAllHooks?.();
+            if (
+              hooksEnabledForStopFailure &&
+              hookSystem &&
+              this.config.hasHooksForEvent?.('StopFailure')
+            ) {
+              hookSystem
+                .fireStopFailureEvent(errorType, errorMessage)
+                .catch((err) => {
+                  debugLogger.warn(`StopFailure hook failed: ${err}`);
+                });
+            }
+
+            if (errorStatus === 429) {
+              throw new RequestError(
+                429,
+                'Rate limit exceeded. Try again later.',
+              );
+            }
+
+            throw error;
           }
 
-          // Stop hook allowed stopping, exit the loop
-          break;
+          if (usageMetadata) {
+            const durationMs = Date.now() - streamStartTime;
+            await this.messageEmitter.emitUsageMetadata(
+              usageMetadata,
+              '',
+              durationMs,
+            );
+          }
+
+          // Process tool calls from the follow-up message
+          if (functionCalls.length > 0) {
+            const toolResponseParts: Part[] = [];
+
+            for (const fc of functionCalls) {
+              const toolResponse = await this.runTool(
+                pendingSend.signal,
+                promptId,
+                fc,
+              );
+              toolResponseParts.push(...toolResponse);
+            }
+
+            nextMessage = { role: 'user', parts: toolResponseParts };
+          }
         }
 
-        // If we exceeded max iterations, log a warning but still end gracefully
-        if (stopHookIterationCount >= MAX_STOP_HOOK_ITERATIONS) {
-          debugLogger.warn(
-            `Stop hook loop reached maximum iterations (${MAX_STOP_HOOK_ITERATIONS}), forcing stop`,
-          );
-        }
+        // Loop continues to check Stop hook again after processing the follow-up
+        continue;
+      }
 
-        return { stopReason: 'end_turn' };
-      },
-    );
+      // Stop hook allowed stopping, exit the loop
+      break;
+    }
+
+    // If we exceeded max iterations, log a warning but still end gracefully
+    if (stopHookIterationCount >= MAX_STOP_HOOK_ITERATIONS) {
+      debugLogger.warn(
+        `Stop hook loop reached maximum iterations (${MAX_STOP_HOOK_ITERATIONS}), forcing stop`,
+      );
+    }
+
+    return { stopReason: 'end_turn' };
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
