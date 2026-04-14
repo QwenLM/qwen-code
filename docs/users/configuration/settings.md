@@ -488,62 +488,6 @@ Here is an example of a `settings.json` file with the nested structure, new as o
 }
 ```
 
-## Message Rewrite
-
-The message rewrite middleware allows you to automatically transform model output using a secondary LLM call. This is useful when the raw model output contains technical details (file paths, tool names, code snippets) that are not suitable for end users, and you want to present a cleaner, business-friendly view.
-
-Rewriting is **async by default** — it runs in the background parallel to tool execution, adding no latency to the session. Original messages are always sent as-is; rewritten versions are appended with a `_meta.rewritten: true` marker, allowing clients to choose which to display.
-
-### Configuration
-
-Add `messageRewrite` to your `settings.json` (user or project level):
-
-```json
-{
-  "messageRewrite": {
-    "enabled": true,
-    "target": "both",
-    "prompt": "Rewrite the agent output into concise user-friendly updates...",
-    "model": "qwen3-plus"
-  }
-}
-```
-
-| Field        | Type    | Description                                                                                     | Default          |
-| ------------ | ------- | ----------------------------------------------------------------------------------------------- | ---------------- |
-| `enabled`    | boolean | Enable/disable the rewrite middleware.                                                          | `false`          |
-| `target`     | string  | Which content to accumulate for rewriting: `"message"`, `"thought"`, or `"both"`.               | `"both"`         |
-| `prompt`     | string  | Inline system prompt for the rewriter LLM.                                                      | Built-in default |
-| `promptFile` | string  | Path to a file containing the rewrite prompt (relative to CWD). Takes precedence over `prompt`. | —                |
-| `model`      | string  | Model to use for rewriting. If empty, uses the same model as the main session.                  | Current model    |
-
-### Using a prompt file
-
-For longer or project-specific prompts, use `promptFile`:
-
-```json
-{
-  "messageRewrite": {
-    "enabled": true,
-    "target": "both",
-    "promptFile": ".qwen/rewrite-prompt.txt"
-  }
-}
-```
-
-### How it works
-
-1. During each model turn, the middleware accumulates `agent_thought_chunk` and/or `agent_message_chunk` content (based on `target`).
-2. At turn boundaries (tool calls, end of response), the accumulated content is sent to the rewriter LLM with your system prompt.
-3. The rewriter's output is emitted as a new `agent_message_chunk` with `_meta.rewritten: true`.
-4. If the rewriter returns an empty string (e.g., for pure technical operations), no rewritten message is emitted.
-5. A 30-second timeout protects against slow rewriter calls — on timeout, the rewrite is silently skipped.
-
-### Security
-
-- **Workspace trust**: In untrusted workspaces, project-level `messageRewrite` settings are ignored. Only user-level settings are applied.
-- **History replay**: The rewriter is installed after session history replay, so historical messages are never re-rewritten.
-
 ## Shell History
 
 The CLI keeps a history of shell commands you run. To avoid conflicts between different projects, this history is stored in a project-specific directory within your user's home folder.
