@@ -302,7 +302,7 @@ please review the project settings (.qwen/settings.json) and remove them.`;
     eventName: HookEventName,
     source: HooksConfigSource,
   ): boolean {
-    if (!config.type || !['command', 'plugin'].includes(config.type)) {
+    if (!config.type || !['command', 'plugin', 'llm'].includes(config.type)) {
       debugLogger.warn(
         `Invalid hook ${eventName} from ${source} type: ${config.type}`,
       );
