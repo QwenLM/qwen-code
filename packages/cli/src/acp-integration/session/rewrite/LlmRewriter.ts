@@ -38,8 +38,10 @@ Output only the rewritten text, or empty string if the input has no user-facing 
  */
 export class LlmRewriter {
   private readonly prompt: string;
-  /** Last successful rewrite output, used as context for next turn */
-  private lastOutput: string | null = null;
+  /** Previous successful rewrite outputs, used as context for coherence */
+  private outputHistory: string[] = [];
+  /** How many previous outputs to include: 0=none, N=last N, Infinity=all */
+  private readonly contextTurns: number;
 
   private readonly rewriteModel: string | undefined;
 
@@ -48,6 +50,10 @@ export class LlmRewriter {
     rewriteConfig: MessageRewriteConfig,
   ) {
     this.rewriteModel = rewriteConfig.model || undefined;
+    this.contextTurns =
+      rewriteConfig.contextTurns === 'all'
+        ? Infinity
+        : (rewriteConfig.contextTurns ?? 1);
     // promptFile takes precedence over inline prompt
     if (rewriteConfig.promptFile) {
       const filePath = resolve(rewriteConfig.promptFile);
@@ -85,9 +91,13 @@ export class LlmRewriter {
       inputParts.push('[回复文本]\n' + turnContent.messages.join('\n'));
     }
 
-    // Prepend last rewrite output as context for coherence
-    if (this.lastOutput) {
-      inputParts.unshift('[上一轮改写结果]\n' + this.lastOutput);
+    // Prepend previous rewrite outputs as context for coherence
+    if (this.contextTurns > 0 && this.outputHistory.length > 0) {
+      const contextSlice =
+        this.contextTurns === Infinity
+          ? this.outputHistory
+          : this.outputHistory.slice(-this.contextTurns);
+      inputParts.unshift('[上一轮改写结果]\n' + contextSlice.join('\n---\n'));
     }
 
     const inputText = inputParts.join('\n\n');
@@ -97,7 +107,7 @@ export class LlmRewriter {
     if (inputText.length < 10) return null;
 
     debugLogger.info(
-      `[REWRITE INPUT] system_prompt_len=${this.prompt.length} input_len=${inputText.length} prev_output=${this.lastOutput ? this.lastOutput.length : 0}\n` +
+      `[REWRITE INPUT] system_prompt_len=${this.prompt.length} input_len=${inputText.length} context_turns=${this.outputHistory.length}\n` +
         `--- INPUT TEXT ---\n${inputText}\n---`,
     );
 
@@ -153,7 +163,7 @@ export class LlmRewriter {
       );
 
       // Update context for next turn
-      this.lastOutput = trimmed;
+      this.outputHistory.push(trimmed);
 
       return trimmed;
     } catch (error) {

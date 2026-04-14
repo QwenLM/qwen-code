@@ -20,6 +20,10 @@ export interface MessageRewriteConfig {
   promptFile?: string;
   /** Model to use for rewriting (empty = use current model) */
   model?: string;
+  /** Number of previous rewrite outputs to include as context.
+   *  1 = last rewrite only (default), "all" = all previous rewrites,
+   *  0 = no context, N = last N rewrites. */
+  contextTurns?: number | 'all';
 }
 
 /**
