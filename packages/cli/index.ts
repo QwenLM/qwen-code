@@ -6,7 +6,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { initStartupProfiler } from './src/utils/startupProfiler.js';
 import { startCapturingEarlyInput } from './src/utils/earlyInput.js';
+
+// Must run before any other imports to capture the earliest possible T0.
+initStartupProfiler();
 
 // --- Global Entry Point ---
 //

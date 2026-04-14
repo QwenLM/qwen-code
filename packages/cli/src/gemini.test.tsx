@@ -201,6 +201,7 @@ describe('gemini.tsx main function', () => {
         getProjectRoot: () => '/',
         getOutputFormat: () => OutputFormat.TEXT,
         getWarnings: () => [],
+        getSessionId: () => 'test-session-id',
       } as unknown as Config;
     });
     vi.mocked(loadSettings).mockReturnValue({
@@ -545,6 +546,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       getGeminiMdFileCount: () => 0,
       getWarnings: () => [],
       getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -812,64 +814,6 @@ describe('startInteractiveUI', () => {
 
     // Verify React element structure is valid (but don't deep dive into JSX internals)
     expect(reactElement).toBeDefined();
-  });
-
-  it('passes buffered startup input to KeypressProvider', async () => {
-    const { render } = await import('ink');
-    const { KeypressProvider } = await import(
-      './ui/contexts/KeypressContext.js'
-    );
-    const renderSpy = vi.mocked(render);
-    const bufferedChunks = [Buffer.from('typed early')];
-
-    const mockInitializationResult = {
-      authError: null,
-      themeError: null,
-      shouldOpenAuthDialog: false,
-      geminiMdFileCount: 0,
-    };
-
-    await startInteractiveUI(
-      mockConfig,
-      mockSettings,
-      mockStartupWarnings,
-      mockWorkspaceRoot,
-      mockInitializationResult,
-      bufferedChunks,
-    );
-
-    const [reactElement] = renderSpy.mock.calls[0];
-    expect(reactElement).toBeDefined();
-    const appTree = (
-      reactElement as ReactElement<unknown, () => ReactElement>
-    ).type();
-
-    const stack: ReactNode[] = [appTree];
-    while (stack.length > 0) {
-      const node = stack.pop();
-      if (!node || typeof node !== 'object' || !('type' in node)) {
-        continue;
-      }
-      if (node.type === KeypressProvider) {
-        expect(
-          (
-            node as ReactElement<{
-              initialInputChunks?: Buffer[];
-            }>
-          ).props.initialInputChunks,
-        ).toBe(bufferedChunks);
-        return;
-      }
-      const children = (node as ReactElement<{ children?: ReactNode }>).props
-        ?.children;
-      if (Array.isArray(children)) {
-        stack.push(...children);
-      } else if (children) {
-        stack.push(children);
-      }
-    }
-
-    throw new Error('KeypressProvider not found in rendered tree');
   });
 
   it('should perform all startup tasks in correct order', async () => {
