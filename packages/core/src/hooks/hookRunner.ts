@@ -253,6 +253,12 @@ export class HookRunner {
   /**
    * Execute an LLM hook — calls the session's content generator directly.
    * No external process, reuses existing connection/retry/auth.
+   *
+   * Generic: sends the full hook input as JSON user message to the LLM,
+   * parses the LLM response as JSON hook output. The system prompt
+   * (from config) controls what the LLM does and what JSON it returns.
+   *
+   * Same contract as command hooks: JSON in → JSON out.
    */
   private async executeLlmHook(
     hookConfig: HookConfig,
@@ -295,34 +301,8 @@ export class HookRunner {
       }
     }
 
-    // Build user message from hook input
-    const inputRecord = input as unknown as Record<string, unknown>;
-    const thoughts = (inputRecord['thoughts'] as string[]) || [];
-    const messages = (inputRecord['messages'] as string[]) || [];
-    const toolCalls =
-      (inputRecord['tool_calls'] as Array<{ name: string }>) || [];
-
-    const parts: string[] = [];
-    if (thoughts.length > 0) {
-      parts.push('[Internal reasoning]\n' + thoughts.join('\n'));
-    }
-    if (messages.length > 0) {
-      parts.push('[Response text]\n' + messages.join('\n'));
-    }
-    if (toolCalls.length > 0) {
-      parts.push('[Tool calls] ' + toolCalls.map((tc) => tc.name).join(', '));
-    }
-
-    const userMessage = parts.join('\n\n');
-    if (!userMessage.trim() || userMessage.trim().length < 10) {
-      return {
-        hookConfig,
-        eventName,
-        success: true,
-        output: { decision: 'allow' } as HookOutput,
-        duration: Date.now() - startTime,
-      };
-    }
+    // Send full hook input as JSON user message — same as command hook stdin
+    const userMessage = JSON.stringify(input);
 
     try {
       const model = hookConfig.model || defaultModel || '';
@@ -342,17 +322,17 @@ export class HookRunner {
       );
 
       // Extract text, filter out thought parts
-      const rewritten =
+      const llmText =
         result.candidates?.[0]?.content?.parts
           ?.filter((p) => !p.thought)
           .map((p) => p.text)
           .filter(Boolean)
           .join('') ?? '';
 
-      const trimmed = rewritten.trim();
+      const trimmed = llmText.trim();
       const duration = Date.now() - startTime;
 
-      if (!trimmed || trimmed.length < 5) {
+      if (!trimmed) {
         return {
           hookConfig,
           eventName,
@@ -363,20 +343,29 @@ export class HookRunner {
       }
 
       debugLogger.info(
-        `LLM hook (${eventName}): rewritten ${trimmed.length}c in ${duration}ms`,
+        `LLM hook (${eventName}): ${trimmed.length}c in ${duration}ms`,
       );
 
-      return {
-        hookConfig,
-        eventName,
-        success: true,
-        output: {
+      // Try to parse LLM output as JSON (same as command hook stdout)
+      let output: HookOutput;
+      try {
+        output = JSON.parse(trimmed) as HookOutput;
+      } catch {
+        // LLM returned plain text — treat as acpMessage for convenience
+        output = {
           decision: 'allow',
           hookSpecificOutput: {
             hookEventName: eventName,
             acpMessage: trimmed,
           },
-        } as HookOutput,
+        } as HookOutput;
+      }
+
+      return {
+        hookConfig,
+        eventName,
+        success: true,
+        output,
         stdout: trimmed,
         duration,
       };
