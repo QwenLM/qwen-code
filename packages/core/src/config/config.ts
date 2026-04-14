@@ -92,7 +92,11 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
-import { HookSystem, createHookOutput } from '../hooks/index.js';
+import {
+  HookSystem,
+  createHookOutput,
+  DefaultHookOutput,
+} from '../hooks/index.js';
 import { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   MessageBusType,
@@ -967,9 +971,11 @@ export class Config {
                   }>) || [],
                   signal,
                 );
-                result = postTurnResult.finalOutput
-                  ? createHookOutput('PostTurn', postTurnResult.finalOutput)
-                  : undefined;
+                // Pass raw HookOutput through — firePostTurnHook reads
+                // hookSpecificOutput directly, no class wrapping needed
+                if (postTurnResult.finalOutput) {
+                  result = new DefaultHookOutput(postTurnResult.finalOutput);
+                }
                 break;
               }
               default:
