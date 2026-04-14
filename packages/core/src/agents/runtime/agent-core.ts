@@ -243,10 +243,11 @@ export class AgentCore {
       );
     }
 
-    // When generationConfigOverride is provided (fork path), the extraHistory
-    // already contains the parent's env context. Skip getInitialChatHistory
-    // to avoid duplicating the env messages and breaking cache prefix match.
-    const envHistory = options?.generationConfigOverride
+    // When extraHistory is provided (fork path), the parent's history
+    // already contains the env bootstrap messages. Skip getInitialChatHistory
+    // to avoid duplicating env context (also preserves cache prefix match
+    // when generationConfigOverride is present).
+    const envHistory = options?.extraHistory
       ? []
       : await getInitialChatHistory(this.runtimeContext);
 
