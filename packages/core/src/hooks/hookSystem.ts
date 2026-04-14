@@ -131,7 +131,7 @@ export class HookSystem {
     thoughts: string[],
     messages: string[],
     hasToolCalls: boolean,
-    previousRewrites: string[],
+    previousHookOutputs: string[],
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     return this.hookEventHandler.firePostTurnEvent(
@@ -139,7 +139,7 @@ export class HookSystem {
       thoughts,
       messages,
       hasToolCalls,
-      previousRewrites,
+      previousHookOutputs,
       signal,
     );
   }

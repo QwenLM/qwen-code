@@ -368,7 +368,7 @@ export class StopHookOutput extends DefaultHookOutput {
 
 /**
  * Specific hook output class for PostTurn events.
- * Supports ACP message injection via acpMessage field.
+ * Supports ACP message injection via hookSpecificOutput.acpMessage.
  */
 export class PostTurnHookOutput extends DefaultHookOutput {
   constructor(data: Partial<HookOutput> = {}) {
@@ -826,8 +826,8 @@ export interface PostTurnInput extends HookInput {
   thoughts: string[];
   messages: string[];
   has_tool_calls: boolean;
-  /** Previous successful rewrite outputs (most recent last), for context coherence. */
-  previous_rewrites: string[];
+  /** Previous acpMessage outputs from earlier PostTurn hooks in this session (most recent last). */
+  previous_hook_outputs: string[];
 }
 
 /**

@@ -327,7 +327,7 @@ export class Session implements SessionContext {
           this.config.hasHooksForEvent?.('PostTurn');
         let postTurnIndex = 0;
         const pendingPostTurnHooks: Array<Promise<void>> = [];
-        const rewriteHistory: string[] = [];
+        const hookOutputHistory: string[] = [];
 
         while (nextMessage !== null) {
           if (pendingSend.signal.aborted) {
@@ -430,15 +430,15 @@ export class Session implements SessionContext {
                   turnThoughts,
                   turnMessages,
                   hasToolCalls,
-                  [...rewriteHistory],
+                  [...hookOutputHistory],
                   pendingSend.signal,
                 );
                 if (result.acpMessage) {
-                  rewriteHistory.push(result.acpMessage);
+                  hookOutputHistory.push(result.acpMessage);
                   await this.sendUpdate({
                     sessionUpdate: 'agent_message_chunk',
                     content: { type: 'text', text: result.acpMessage },
-                    _meta: { rewritten: true, turnIndex: turnIdx },
+                    _meta: { postTurnHook: true, turnIndex: turnIdx },
                   } as SessionUpdate);
                 }
               })(),
