@@ -37,7 +37,7 @@ describe('KeypressProvider replay', () => {
       <TextInputHarness initialInputChunks={[Buffer.from('fast typer')]} />,
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 25));
 
     expect(app.lastFrame()).toContain('fast typer');
   });

@@ -148,12 +148,32 @@ export function KeypressProvider({
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
+  const initialInputReplayScheduled = useRef(false);
+  const initialInputChunksRef = useRef<readonly Buffer[]>(initialInputChunks);
+
+  const scheduleInitialInputReplay = useCallback(() => {
+    if (
+      initialInputReplayScheduled.current ||
+      initialInputChunksRef.current.length === 0
+    ) {
+      return;
+    }
+
+    initialInputReplayScheduled.current = true;
+    setTimeout(() => {
+      for (const chunk of initialInputChunksRef.current) {
+        stdin.emit('data', chunk);
+      }
+      initialInputChunksRef.current = [];
+    }, 0);
+  }, [stdin]);
 
   const subscribe = useCallback(
     (handler: KeypressHandler) => {
       subscribers.add(handler);
+      scheduleInitialInputReplay();
     },
-    [subscribers],
+    [scheduleInitialInputReplay, subscribers],
   );
 
   const unsubscribe = useCallback(
@@ -1098,61 +1118,6 @@ export function KeypressProvider({
       rl = readline.createInterface({ input: stdin, escapeCodeTimeout: 0 });
       readline.emitKeypressEvents(stdin, rl);
       stdin.on('keypress', handleKeypress);
-    }
-
-    if (initialInputChunks.length > 0) {
-      let isMounted = true;
-      queueMicrotask(() => {
-        if (!isMounted) {
-          return;
-        }
-        for (const chunk of initialInputChunks) {
-          stdin.emit('data', chunk);
-        }
-      });
-
-      return () => {
-        isMounted = false;
-        if (usePassthrough) {
-          keypressStream.removeListener('keypress', handleKeypress);
-          stdin.removeListener('data', handleRawKeypress);
-        } else {
-          stdin.removeListener('keypress', handleKeypress);
-        }
-
-        rl.close();
-
-        // Restore the terminal to its original state.
-        if (wasRaw === false) {
-          setRawMode(false);
-        }
-
-        if (backslashTimeout) {
-          clearTimeout(backslashTimeout);
-          backslashTimeout = null;
-        }
-
-        clearKittyBufferAndTimeout();
-        clearPasteIdleTimeout();
-
-        if (rawFlushTimeout) {
-          clearTimeout(rawFlushTimeout);
-          rawFlushTimeout = null;
-        }
-
-        // Flush any pending paste data to avoid data loss on exit.
-        if (isPaste) {
-          broadcast({
-            name: '',
-            ctrl: false,
-            meta: false,
-            shift: false,
-            paste: true,
-            sequence: pasteBuffer.toString(),
-          });
-          pasteBuffer = Buffer.alloc(0);
-        }
-      };
     }
 
     return () => {
