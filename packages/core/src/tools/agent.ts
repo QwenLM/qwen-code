@@ -20,8 +20,17 @@ import type { Config } from '../config/config.js';
 import type { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
-import { ContextState } from '../agents/runtime/agent-headless.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../agents/runtime/agent-core.js';
+import type {
+  PromptConfig,
+  ModelConfig,
+  RunConfig,
+  ToolConfig,
+} from '../agents/runtime/agent-types.js';
+import {
+  AgentHeadless,
+  ContextState,
+} from '../agents/runtime/agent-headless.js';
+import * as forkSubagentModule from '../agents/runtime/forkSubagent.js';
 import {
   AgentEventEmitter,
   AgentEventType,
@@ -578,15 +587,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ): Promise<ToolResult> {
     try {
       let subagentConfig: SubagentConfig;
-      let extraHistory: Array<import('@google/genai').Content> | undefined;
       let forkPlaceholderResult: string | undefined;
       let forkTaskPrompt: string | undefined;
-      let forkGenerationConfig:
-        | import('@google/genai').GenerateContentConfig
-        | undefined;
-      let forkToolsOverride:
-        | Array<import('@google/genai').FunctionDeclaration>
-        | undefined;
+      let forkPromptConfig: PromptConfig | undefined;
+      let forkModelConfig: ModelConfig | undefined;
+      let forkToolConfig: ToolConfig | undefined;
 
       if (!this.params.subagent_type) {
         const {
@@ -594,101 +599,137 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           FORK_PLACEHOLDER_RESULT,
           buildForkedMessages,
           buildChildMessage,
-          isInForkChild,
-        } = await import('../agents/runtime/forkSubagent.js');
+          isInForkExecution,
+        } = forkSubagentModule;
         forkPlaceholderResult = FORK_PLACEHOLDER_RESULT;
         subagentConfig = FORK_AGENT;
 
-        // Retrieve the parent's cached generationConfig (systemInstruction +
-        // tools) so the fork's API requests share the same prefix for
-        // DashScope prompt cache hits.
-        const { getCacheSafeParams } = await import(
-          '../followup/forkedQuery.js'
-        );
-        const cacheSafeParams = getCacheSafeParams();
-        if (cacheSafeParams) {
-          forkGenerationConfig = cacheSafeParams.generationConfig;
-          const tools = cacheSafeParams.generationConfig.tools;
-          if (tools && tools.length > 0) {
-            forkToolsOverride = tools
-              .flatMap(
-                (t) =>
-                  (
-                    t as {
-                      functionDeclarations?: Array<
-                        import('@google/genai').FunctionDeclaration
-                      >;
-                    }
-                  ).functionDeclarations ?? [],
-              )
-              .filter(
-                (decl) =>
-                  !(decl.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(decl.name)),
-              );
-          }
+        // Recursive-fork guard. A fork child's reasoning loop runs inside
+        // an AsyncLocalStorage frame set by `runInForkContext`; when its
+        // model calls the `agent` tool, this check fires before any history
+        // or config is touched. The check must come before dispatch — after
+        // the refactor, the fork child retains the `agent` tool for cache
+        // parity, so the allowed-tools filter in AgentCore no longer rejects
+        // the call on its own.
+        if (isInForkExecution()) {
+          const errorDisplay = {
+            type: 'task_execution' as const,
+            subagentName: FORK_AGENT.name,
+            taskDescription: this.params.description,
+            taskPrompt: this.params.prompt,
+            status: 'failed' as const,
+            terminateReason: 'Recursive forking is not allowed',
+          };
+
+          return {
+            llmContent:
+              'Error: Cannot create a fork from within an existing fork child. Please execute tasks directly.',
+            returnDisplay: errorDisplay,
+          };
         }
 
         const geminiClient = this.config.getGeminiClient();
-        if (geminiClient) {
-          const rawHistory = geminiClient.getHistory(true);
+        const rawHistory = geminiClient ? geminiClient.getHistory(true) : [];
 
-          if (isInForkChild(rawHistory)) {
-            const errorDisplay = {
-              type: 'task_execution' as const,
-              subagentName: FORK_AGENT.name,
-              taskDescription: this.params.description,
-              taskPrompt: this.params.prompt,
-              status: 'failed' as const,
-              terminateReason: 'Recursive forking is not allowed',
-            };
-
-            return {
-              llmContent:
-                'Error: Cannot create a fork from within an existing fork child. Please execute tasks directly.',
-              returnDisplay: errorDisplay,
-            };
-          }
-
-          // Build extraHistory ensuring it ends with a model message so
-          // agent-headless can send the task_prompt as a user message
-          // without creating consecutive user messages.
-          if (rawHistory.length > 0) {
-            const lastMessage = rawHistory[rawHistory.length - 1];
-            if (lastMessage.role === 'model') {
-              const forkedMessages = buildForkedMessages(
-                this.params.prompt,
-                lastMessage,
-              );
-              if (forkedMessages.length > 0) {
-                // Model had function calls: append tool responses + directive,
-                // then a model ack so history ends with model.
-                extraHistory = [
-                  ...rawHistory.slice(0, -1),
-                  ...forkedMessages,
-                  {
-                    role: 'model' as const,
-                    parts: [{ text: 'Understood. Executing directive now.' }],
-                  },
-                ];
-                // task_prompt is a trigger to start execution
-                forkTaskPrompt = 'Begin.';
-              } else {
-                // Model had no function calls: history ends with model,
-                // directive goes via task_prompt.
-                extraHistory = [...rawHistory];
-              }
+        // Build the history that will seed the fork's chat. Must end with a
+        // model message so agent-headless can send the task_prompt as a user
+        // message without creating consecutive user messages.
+        let forkInitialMessages:
+          | Array<import('@google/genai').Content>
+          | undefined;
+        if (rawHistory.length > 0) {
+          const lastMessage = rawHistory[rawHistory.length - 1];
+          if (lastMessage.role === 'model') {
+            const forkedMessages = buildForkedMessages(
+              this.params.prompt,
+              lastMessage,
+            );
+            if (forkedMessages.length > 0) {
+              // Model had function calls: append tool responses + directive,
+              // then a model ack so history ends with model.
+              forkInitialMessages = [
+                ...rawHistory.slice(0, -1),
+                ...forkedMessages,
+                {
+                  role: 'model' as const,
+                  parts: [{ text: 'Understood. Executing directive now.' }],
+                },
+              ];
+              // task_prompt is a trigger to start execution
+              forkTaskPrompt = 'Begin.';
             } else {
-              // History ends with user (unusual) — drop the trailing user
-              // message to avoid consecutive user messages when agent-headless
-              // sends the task_prompt.
-              extraHistory = rawHistory.slice(0, -1);
+              // Model had no function calls: history ends with model,
+              // directive goes via task_prompt.
+              forkInitialMessages = [...rawHistory];
             }
+          } else {
+            // History ends with user (unusual) — drop the trailing user
+            // message to avoid consecutive user messages when agent-headless
+            // sends the task_prompt.
+            forkInitialMessages = rawHistory.slice(0, -1);
           }
         }
 
         // Default: directive with fork boilerplate as task_prompt
         if (!forkTaskPrompt) {
           forkTaskPrompt = buildChildMessage(this.params.prompt);
+        }
+
+        // Retrieve the parent's cached generationConfig (systemInstruction +
+        // tool declarations) so the fork's API requests share the parent's
+        // exact cache prefix for DashScope prompt caching. Missing params
+        // (first turn) falls back to the default system prompt + wildcard
+        // tools — fork still works, just without cache sharing.
+        const { getCacheSafeParams } = await import(
+          '../followup/forkedQuery.js'
+        );
+        const cacheSafeParams = getCacheSafeParams();
+
+        if (cacheSafeParams) {
+          const gen = cacheSafeParams.generationConfig as {
+            systemInstruction?: string | import('@google/genai').Content;
+            temperature?: number;
+            topP?: number;
+            tools?: Array<{
+              functionDeclarations?: Array<
+                import('@google/genai').FunctionDeclaration
+              >;
+            }>;
+          };
+          // Inline FunctionDeclaration[] from the parent — passed verbatim
+          // including `agent` itself so the fork's tool-name set matches the
+          // parent's. prepareTools bypasses the exclusion filter for inline
+          // decls; `isInForkExecution()` (ALS-based) is the sole
+          // recursive-fork block at runtime.
+          const parentToolDecls: Array<
+            import('@google/genai').FunctionDeclaration
+          > = gen.tools?.flatMap((t) => t.functionDeclarations ?? []) ?? [];
+
+          forkPromptConfig = {
+            renderedSystemPrompt: gen.systemInstruction,
+            initialMessages: forkInitialMessages,
+          };
+          forkModelConfig = {
+            temp: gen.temperature,
+            top_p: gen.topP,
+          };
+          forkToolConfig = {
+            tools:
+              parentToolDecls.length > 0
+                ? parentToolDecls
+                : (['*'] as string[]),
+          };
+        } else {
+          // First-turn fork (no cache params captured yet): fall back to
+          // the fork agent's normal system prompt via buildChatSystemPrompt
+          // and wildcard tools. Env bootstrap is still skipped when
+          // initialMessages is non-empty.
+          forkPromptConfig = {
+            systemPrompt: FORK_AGENT.systemPrompt,
+            initialMessages: forkInitialMessages,
+          };
+          forkModelConfig = {};
+          forkToolConfig = { tools: ['*'] };
         }
       } else {
         // Load the subagent configuration
@@ -746,11 +787,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ? createApprovalModeOverride(this.config, resolvedApprovalMode)
           : this.config;
 
-      const subagent = await this.subagentManager.createAgentHeadless(
-        subagentConfig,
-        agentConfig,
-        { eventEmitter: this.eventEmitter },
-      );
+      // Fork bypasses SubagentManager.createAgentHeadless because the runtime
+      // configs are synthesized from the parent's cache-safe params, not from
+      // a file-based SubagentConfig. Named subagents continue through the
+      // manager so per-agent ContentGenerator overrides still apply.
+      const subagent = !this.params.subagent_type
+        ? await AgentHeadless.create(
+            subagentConfig.name,
+            agentConfig,
+            forkPromptConfig!,
+            forkModelConfig!,
+            {} as RunConfig,
+            forkToolConfig,
+            this.eventEmitter,
+          )
+        : await this.subagentManager.createAgentHeadless(
+            subagentConfig,
+            agentConfig,
+            { eventEmitter: this.eventEmitter },
+          );
 
       // Create context state with the task prompt
       // For fork agents, use the fork directive (with boilerplate) as the task
@@ -787,12 +842,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           }
 
           // Execute the subagent (blocking)
-          await subagent.execute(contextState, signal, {
-            extraHistory,
-            generationConfigOverride: forkGenerationConfig,
-            toolsOverride: forkToolsOverride,
-            skipEnvHistory: !!extraHistory && extraHistory.length > 0,
-          });
+          await subagent.execute(contextState, signal);
 
           // Fire SubagentStop hook after execution and handle block decisions
           if (hookSystem && !signal?.aborted) {
@@ -841,12 +891,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
                   const continueContext = new ContextState();
                   continueContext.set('task_prompt', continueReason);
-                  await subagent.execute(continueContext, signal, {
-                    extraHistory,
-                    generationConfigOverride: forkGenerationConfig,
-                    toolsOverride: forkToolsOverride,
-                    skipEnvHistory: !!extraHistory && extraHistory.length > 0,
-                  });
+                  await subagent.execute(continueContext, signal);
 
                   if (signal?.aborted) {
                     continueExecution = false;
@@ -907,8 +952,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
 
       if (!this.params.subagent_type) {
-        // Background fork execution
-        void executeSubagent();
+        // Background fork execution. Run under an AsyncLocalStorage frame so
+        // nested `agent` tool calls by the fork's model can be detected
+        // (see forkSubagent.runInForkContext / isInForkExecution).
+        void forkSubagentModule.runInForkContext(executeSubagent);
         return {
           llmContent: [{ text: forkPlaceholderResult! }],
           returnDisplay: this.currentDisplay!,
