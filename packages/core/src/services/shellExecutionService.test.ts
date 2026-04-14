@@ -31,6 +31,7 @@ const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
+const mockArch = vi.hoisted(() => vi.fn().mockReturnValue('x64'));
 const mockGetPty = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToObject = vi.hoisted(() => vi.fn());
 const mockGetShellConfiguration = vi.hoisted(() =>
@@ -54,6 +55,8 @@ vi.mock('../utils/textUtils.js', () => ({
 vi.mock('os', () => ({
   default: {
     platform: mockPlatform,
+    arch: mockArch,
+    release: vi.fn().mockReturnValue('25.0.0'),
     constants: {
       signals: {
         SIGTERM: 15,
@@ -62,6 +65,8 @@ vi.mock('os', () => ({
     },
   },
   platform: mockPlatform,
+  arch: mockArch,
+  release: vi.fn().mockReturnValue('25.0.0'),
   constants: {
     signals: {
       SIGTERM: 15,
