@@ -6,19 +6,12 @@
 
 import { describe, it, expect } from 'vitest';
 import { loadRewriteConfig } from './config.js';
-import type { LoadedSettings, SettingsFile } from '../../../config/settings.js';
-import type { Settings } from '../../../config/settingsSchema.js';
+import type { LoadedSettings } from '../../../config/settings.js';
 
-function makeSettingsFile(
-  originalSettings: Record<string, unknown>,
-): SettingsFile {
-  return {
-    settings: {} as Settings,
-    originalSettings: originalSettings as unknown as Settings,
-    path: '/tmp/test-settings.json',
-  };
-}
-
+/**
+ * Build a minimal LoadedSettings stub with only the fields
+ * that loadRewriteConfig actually reads (user/workspace originalSettings + isTrusted).
+ */
 function makeSettings(
   overrides: {
     userRewrite?: Record<string, unknown>;
@@ -27,19 +20,18 @@ function makeSettings(
   } = {},
 ): LoadedSettings {
   return {
-    user: makeSettingsFile(
-      overrides.userRewrite ? { messageRewrite: overrides.userRewrite } : {},
-    ),
-    workspace: makeSettingsFile(
-      overrides.workspaceRewrite
+    user: {
+      originalSettings: overrides.userRewrite
+        ? { messageRewrite: overrides.userRewrite }
+        : {},
+    },
+    workspace: {
+      originalSettings: overrides.workspaceRewrite
         ? { messageRewrite: overrides.workspaceRewrite }
         : {},
-    ),
+    },
     isTrusted: overrides.isTrusted ?? true,
-    merged: {} as Settings,
-    migratedInMemorScopes: new Set(),
-    migrationWarnings: [],
-  } as LoadedSettings;
+  } as unknown as LoadedSettings;
 }
 
 describe('loadRewriteConfig', () => {
