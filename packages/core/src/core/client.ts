@@ -47,7 +47,7 @@ import {
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
-import { AgentTool } from '../tools/agent.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
 import {
@@ -209,12 +209,13 @@ export class GeminiClient {
     this.forceFullIdeContext = true;
   }
 
-  setTools(): void {
+  async setTools(): Promise<void> {
     if (!this.isInitialized()) {
       return;
     }
 
     const toolRegistry = this.config.getToolRegistry();
+    await toolRegistry.warmAll();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
@@ -283,7 +284,7 @@ export class GeminiClient {
         uiTelemetryService,
       );
 
-      this.setTools();
+      await this.setTools();
 
       return this.chat;
     } catch (error) {
@@ -702,9 +703,9 @@ export class GeminiClient {
       const systemReminders = [];
 
       // add subagent system reminder if there are subagents
-      const hasAgentTool = this.config
+      const hasAgentTool = await this.config
         .getToolRegistry()
-        .getTool(AgentTool.Name);
+        .ensureTool(ToolNames.AGENT);
       const subagents = (await this.config.getSubagentManager().listSubagents())
         .filter((subagent) => subagent.level !== 'builtin')
         .map((subagent) => subagent.name);

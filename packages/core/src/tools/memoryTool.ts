@@ -75,42 +75,23 @@ Do NOT use this tool:
   - If not specified, the tool will ask the user where they want to save the memory.
 `;
 
-export const QWEN_CONFIG_DIR = '.qwen';
-export const DEFAULT_CONTEXT_FILENAME = 'QWEN.md';
-export const AGENT_CONTEXT_FILENAME = 'AGENTS.md';
-export const MEMORY_SECTION_HEADER = '## Qwen Added Memories';
-
-// This variable will hold the currently configured filename for context files.
-// It defaults to include both QWEN.md and AGENTS.md but can be overridden by setGeminiMdFilename.
-// QWEN.md is first to maintain backward compatibility (used by /init command and save_memory tool).
-let currentGeminiMdFilename: string | string[] = [
+// Re-export memory config from the lightweight module
+// (kept here for backward compatibility with internal imports)
+export {
+  QWEN_CONFIG_DIR,
   DEFAULT_CONTEXT_FILENAME,
   AGENT_CONTEXT_FILENAME,
-];
+  MEMORY_SECTION_HEADER,
+  setGeminiMdFilename,
+  getCurrentGeminiMdFilename,
+  getAllGeminiMdFilenames,
+} from './memory-config.js';
 
-export function setGeminiMdFilename(newFilename: string | string[]): void {
-  if (Array.isArray(newFilename)) {
-    if (newFilename.length > 0) {
-      currentGeminiMdFilename = newFilename.map((name) => name.trim());
-    }
-  } else if (newFilename && newFilename.trim() !== '') {
-    currentGeminiMdFilename = newFilename.trim();
-  }
-}
-
-export function getCurrentGeminiMdFilename(): string {
-  if (Array.isArray(currentGeminiMdFilename)) {
-    return currentGeminiMdFilename[0];
-  }
-  return currentGeminiMdFilename;
-}
-
-export function getAllGeminiMdFilenames(): string[] {
-  if (Array.isArray(currentGeminiMdFilename)) {
-    return currentGeminiMdFilename;
-  }
-  return [currentGeminiMdFilename];
-}
+// Also import for local use within this file
+import {
+  getCurrentGeminiMdFilename,
+  MEMORY_SECTION_HEADER,
+} from './memory-config.js';
 
 interface SaveMemoryParams {
   fact: string;

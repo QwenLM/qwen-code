@@ -290,6 +290,8 @@ describe('Gemini Client (client.ts)', () => {
     // that depends on a fully-formed Config object, we need to mock the
     // entire implementation of Config for these tests.
     const mockToolRegistry = {
+      warmAll: vi.fn().mockResolvedValue(undefined),
+      ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getTool: vi.fn().mockReturnValue(null),
     };

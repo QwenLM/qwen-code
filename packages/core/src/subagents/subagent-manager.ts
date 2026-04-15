@@ -632,7 +632,7 @@ export class SubagentManager {
     },
   ): Promise<AgentHeadless> {
     try {
-      const runtimeConfig = this.convertToRuntimeConfig(config);
+      const runtimeConfig = await this.convertToRuntimeConfig(config);
 
       // When the model selector specifies a different provider, build a
       // per-agent Config with a dedicated ContentGenerator so the subagent
@@ -719,7 +719,9 @@ export class SubagentManager {
    * @param config - File-based subagent configuration
    * @returns Runtime configuration for AgentHeadless
    */
-  convertToRuntimeConfig(config: SubagentConfig): SubagentRuntimeConfig {
+  async convertToRuntimeConfig(
+    config: SubagentConfig,
+  ): Promise<SubagentRuntimeConfig> {
     const promptConfig: PromptConfig = {
       systemPrompt: config.systemPrompt,
     };
@@ -739,13 +741,13 @@ export class SubagentManager {
       (config.disallowedTools && config.disallowedTools.length > 0)
     ) {
       const toolNames = config.tools
-        ? this.transformToToolNames(config.tools)
+        ? await this.transformToToolNames(config.tools)
         : ['*'];
       toolConfig = {
         tools: toolNames,
         ...(config.disallowedTools && config.disallowedTools.length > 0
           ? {
-              disallowedTools: this.transformToToolNames(
+              disallowedTools: await this.transformToToolNames(
                 config.disallowedTools,
               ),
             }
@@ -769,12 +771,13 @@ export class SubagentManager {
    * @returns Array of tool names
    * @private
    */
-  private transformToToolNames(tools: string[]): string[] {
+  private async transformToToolNames(tools: string[]): Promise<string[]> {
     const toolRegistry = this.config.getToolRegistry();
     if (!toolRegistry) {
       return tools;
     }
 
+    await toolRegistry.warmAll();
     const allTools = toolRegistry.getAllTools();
 
     const result: string[] = [];

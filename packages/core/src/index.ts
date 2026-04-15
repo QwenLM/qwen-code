@@ -73,33 +73,18 @@ export * from './tools/tool-names.js';
 export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';
 export * from './tools/tools.js';
+export * from './tools/memory-config.js';
 
-// Individual tools
-export * from './tools/edit.js';
-export * from './tools/exitPlanMode.js';
-export * from './tools/glob.js';
-export * from './tools/grep.js';
-export * from './tools/ls.js';
-export * from './tools/lsp.js';
+// Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
 export * from './tools/mcp-tool.js';
-export * from './tools/memoryTool.js';
-export * from './tools/read-file.js';
-export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
-export * from './tools/shell.js';
-export * from './tools/skill.js';
-export * from './tools/agent.js';
-export * from './tools/todoWrite.js';
-export * from './tools/tool-error.js';
-export * from './tools/tool-registry.js';
-export * from './tools/web-fetch.js';
-export * from './tools/web-search/index.js';
-export * from './tools/write-file.js';
-export * from './tools/cron-create.js';
-export * from './tools/cron-list.js';
-export * from './tools/cron-delete.js';
+export * from './tools/modifiable-tool.js';
+
+// Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
+export type { WebSearchProviderConfig } from './tools/web-search/types.js';
+export { buildSkillLlmContent } from './tools/skill-utils.js';
 
 // ============================================================================
 // Services

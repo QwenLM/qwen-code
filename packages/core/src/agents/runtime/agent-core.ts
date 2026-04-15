@@ -58,7 +58,7 @@ import type {
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
 import { matchesMcpPattern } from '../../permissions/rule-parser.js';
-import { AgentTool } from '../../tools/agent.js';
+
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
@@ -271,14 +271,15 @@ export class AgentCore {
    * If no explicit toolConfig or it contains "*" or is empty,
    * inherits all tools (excluding AgentTool to prevent recursion).
    */
-  prepareTools(): FunctionDeclaration[] {
+  async prepareTools(): Promise<FunctionDeclaration[]> {
     const toolRegistry = this.runtimeContext.getToolRegistry();
+    await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
     // Tools excluded from subagents: AgentTool (prevent recursion) and
     // cron tools (session-scoped, should only be used by the main session).
     const excludedFromSubagents = new Set<string>([
-      AgentTool.Name,
+      ToolNames.AGENT,
       ToolNames.CRON_CREATE,
       ToolNames.CRON_LIST,
       ToolNames.CRON_DELETE,
@@ -916,6 +917,7 @@ export class AgentCore {
   /**
    * Safely retrieves the description of a tool by attempting to build it.
    * Returns an empty string if any error occurs during the process.
+   * Note: Assumes tools are warmed via warmAll() before the reasoning loop.
    */
   getToolDescription(toolName: string, args: Record<string, unknown>): string {
     try {
