@@ -11,26 +11,26 @@ import {
   resolveSubagentApprovalMode,
 } from './agent.js';
 import type { PartListUnion } from '@google/genai';
-import type { ToolResultDisplay, AgentResultDisplay } from './tools.js';
-import { ToolConfirmationOutcome } from './tools.js';
-import { type Config, ApprovalMode } from '../config/config.js';
-import { SubagentManager } from '../subagents/subagent-manager.js';
-import type { SubagentConfig } from '../subagents/types.js';
-import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
+import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
+import { ToolConfirmationOutcome } from '../tools.js';
+import { type Config, ApprovalMode } from '../../config/config.js';
+import { SubagentManager } from '../../subagents/subagent-manager.js';
+import type { SubagentConfig } from '../../subagents/types.js';
+import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import {
   AgentHeadless,
   ContextState,
-} from '../agents/runtime/agent-headless.js';
-import { AgentEventType } from '../agents/runtime/agent-events.js';
+} from '../../agents/runtime/agent-headless.js';
+import { AgentEventType } from '../../agents/runtime/agent-events.js';
 import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentApprovalRequestEvent,
   AgentEventEmitter,
-} from '../agents/runtime/agent-events.js';
-import { partToString } from '../utils/partUtils.js';
-import type { HookSystem } from '../hooks/hookSystem.js';
-import { PermissionMode } from '../hooks/types.js';
+} from '../../agents/runtime/agent-events.js';
+import { partToString } from '../../utils/partUtils.js';
+import type { HookSystem } from '../../hooks/hookSystem.js';
+import { PermissionMode } from '../../hooks/types.js';
 
 // Type for accessing protected methods in tests
 type AgentToolInvocation = {
@@ -50,8 +50,8 @@ type AgentToolWithProtectedMethods = AgentTool & {
 };
 
 // Mock dependencies
-vi.mock('../subagents/subagent-manager.js');
-vi.mock('../agents/runtime/agent-headless.js');
+vi.mock('../../subagents/subagent-manager.js');
+vi.mock('../../agents/runtime/agent-headless.js');
 
 const MockedSubagentManager = vi.mocked(SubagentManager);
 const MockedContextState = vi.mocked(ContextState);
