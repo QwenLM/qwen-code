@@ -137,6 +137,7 @@ export * from './memory/extractScheduler.js';
 export * from './memory/dreamAgentPlanner.js';
 export * from './memory/dream.js';
 export * from './memory/dreamScheduler.js';
+export * from './memory/memoryTaskHub.js';
 export * from './memory/scan.js';
 export * from './memory/relevanceSelector.js';
 export * from './memory/recall.js';

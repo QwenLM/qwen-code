@@ -20,7 +20,8 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import {
   ApprovalMode,
-  getManagedAutoMemoryDreamTaskRegistry,
+  defaultMemoryTaskHub,
+  DREAM_TASK_TYPE,
 } from '@qwen-code/qwen-code-core';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { t } from '../../i18n/index.js';
@@ -33,18 +34,25 @@ function useDreamRunning(projectRoot: string): boolean {
   const [running, setRunning] = useState(false);
 
   useEffect(() => {
-    const registry = getManagedAutoMemoryDreamTaskRegistry();
+    const registry = defaultMemoryTaskHub.registry;
 
     function check() {
       const tasks = registry.list(projectRoot);
       setRunning(
-        tasks.some((t) => t.status === 'pending' || t.status === 'running'),
+        tasks.some(
+          (t) =>
+            t.taskType === DREAM_TASK_TYPE &&
+            (t.status === 'pending' || t.status === 'running'),
+        ),
       );
     }
 
     check();
     return registry.subscribe((task) => {
-      if (task.projectRoot === projectRoot) {
+      if (
+        task.projectRoot === projectRoot &&
+        task.taskType === DREAM_TASK_TYPE
+      ) {
         check();
       }
     });

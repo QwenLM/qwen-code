@@ -8,15 +8,19 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
-import {
+import type {
   BackgroundTaskDrainer,
-  type DrainBackgroundTasksOptions,
+  DrainBackgroundTasksOptions,
 } from '../background/taskDrainer.js';
-import {
+import type {
   BackgroundTaskRegistry,
-  type BackgroundTaskState,
+  BackgroundTaskState,
 } from '../background/taskRegistry.js';
 import { BackgroundTaskScheduler } from '../background/taskScheduler.js';
+import {
+  defaultMemoryTaskHub,
+  MemoryBackgroundTaskHub,
+} from './memoryTaskHub.js';
 import {
   getAutoMemoryConsolidationLockPath,
   getAutoMemoryMetadataPath,
@@ -194,13 +198,18 @@ export type SessionScannerFn = (
 ) => Promise<string[]>;
 
 export class ManagedAutoMemoryDreamRuntime {
-  readonly registry = new BackgroundTaskRegistry();
-  readonly drainer = new BackgroundTaskDrainer();
-  readonly scheduler = new BackgroundTaskScheduler(this.registry, this.drainer);
+  readonly registry: BackgroundTaskRegistry;
+  readonly drainer: BackgroundTaskDrainer;
+  readonly scheduler: BackgroundTaskScheduler;
 
   constructor(
     private readonly sessionScanner: SessionScannerFn = listSessionsTouchedSince,
-  ) {}
+    hub: MemoryBackgroundTaskHub = defaultMemoryTaskHub,
+  ) {
+    this.registry = hub.registry;
+    this.drainer = hub.drainer;
+    this.scheduler = new BackgroundTaskScheduler(this.registry, this.drainer);
+  }
   /**
    * Timestamp (ms) of the last session-count filesystem scan per project root.
    * When the time-gate passes but session-count doesn't, we'd otherwise re-scan
@@ -362,17 +371,20 @@ export async function scheduleManagedAutoMemoryDream(
 }
 
 export function getManagedAutoMemoryDreamTaskRegistry(): BackgroundTaskRegistry {
-  return defaultManagedAutoMemoryDreamRuntime.registry;
+  return defaultMemoryTaskHub.registry;
 }
 
 export async function drainManagedAutoMemoryDreamTasks(
   options?: DrainBackgroundTasksOptions,
 ): Promise<boolean> {
-  return defaultManagedAutoMemoryDreamRuntime.drain(options);
+  return defaultMemoryTaskHub.drain(options);
 }
 
 export function createManagedAutoMemoryDreamRuntimeForTests(
   sessionScanner?: SessionScannerFn,
 ): ManagedAutoMemoryDreamRuntime {
-  return new ManagedAutoMemoryDreamRuntime(sessionScanner);
+  return new ManagedAutoMemoryDreamRuntime(
+    sessionScanner,
+    new MemoryBackgroundTaskHub(),
+  );
 }

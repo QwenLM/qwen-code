@@ -6,14 +6,20 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import type {
+  BackgroundTaskDrainer} from '../background/taskDrainer.js';
 import {
-  BackgroundTaskDrainer,
   type DrainBackgroundTasksOptions,
 } from '../background/taskDrainer.js';
+import type {
+  BackgroundTaskRegistry} from '../background/taskRegistry.js';
 import {
-  BackgroundTaskRegistry,
   type BackgroundTaskState,
 } from '../background/taskRegistry.js';
+import {
+  defaultMemoryTaskHub,
+  MemoryBackgroundTaskHub,
+} from './memoryTaskHub.js';
 import {
   type AutoMemoryExtractResult,
   runAutoMemoryExtract,
@@ -87,11 +93,16 @@ function historySliceUsesMemoryTool(
 }
 
 export class ManagedAutoMemoryExtractRuntime {
-  readonly registry = new BackgroundTaskRegistry();
-  readonly drainer = new BackgroundTaskDrainer();
+  readonly registry: BackgroundTaskRegistry;
+  readonly drainer: BackgroundTaskDrainer;
 
   private readonly currentTaskIdByProject = new Map<string, string>();
   private readonly queuedByProject = new Map<string, QueuedExtractionRequest>();
+
+  constructor(hub: MemoryBackgroundTaskHub = defaultMemoryTaskHub) {
+    this.registry = hub.registry;
+    this.drainer = hub.drainer;
+  }
 
   async schedule(
     params: ScheduleAutoMemoryExtractParams,
@@ -284,17 +295,17 @@ export async function scheduleManagedAutoMemoryExtract(
 }
 
 export function getManagedAutoMemoryExtractTaskRegistry(): BackgroundTaskRegistry {
-  return defaultManagedAutoMemoryExtractRuntime.registry;
+  return defaultMemoryTaskHub.registry;
 }
 
 export async function drainManagedAutoMemoryExtractTasks(
   options?: DrainBackgroundTasksOptions,
 ): Promise<boolean> {
-  return defaultManagedAutoMemoryExtractRuntime.drain(options);
+  return defaultMemoryTaskHub.drain(options);
 }
 
 export function createManagedAutoMemoryExtractRuntimeForTests(): ManagedAutoMemoryExtractRuntime {
-  return new ManagedAutoMemoryExtractRuntime();
+  return new ManagedAutoMemoryExtractRuntime(new MemoryBackgroundTaskHub());
 }
 
 export function resetManagedAutoMemoryExtractRuntimeForTests(): void {
