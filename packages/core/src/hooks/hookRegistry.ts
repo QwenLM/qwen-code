@@ -11,7 +11,6 @@ import {
   HOOKS_CONFIG_FIELDS,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { TrustedHooksManager } from './trustedHooks.js';
 
 const debugLogger = createDebugLogger('HOOK_REGISTRY');
 
@@ -30,7 +29,7 @@ export interface ExtensionWithHooks {
 export interface HookRegistryConfig {
   getProjectRoot(): string;
   isTrustedFolder(): boolean;
-  getHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
+  getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined;
   getExtensions(): ExtensionWithHooks[];
 }
@@ -138,59 +137,23 @@ export class HookRegistry {
   }
 
   /**
-   * Check for untrusted project hooks and warn the user
-   */
-  private checkProjectHooksTrust(): void {
-    const projectHooks = this.config.getProjectHooks();
-    if (!projectHooks) return;
-
-    try {
-      const trustedHooksManager = new TrustedHooksManager();
-      const untrusted = trustedHooksManager.getUntrustedHooks(
-        this.config.getProjectRoot(),
-        projectHooks,
-      );
-
-      if (untrusted.length > 0) {
-        const message = `WARNING: The following project-level hooks have been detected in this workspace:
-${untrusted.map((h: string) => `  - ${h}`).join('\n')}
-
-These hooks will be executed. If you did not configure these hooks or do not trust this project,
-please review the project settings (.qwen/settings.json) and remove them.`;
-        this.feedbackEmitter?.emitFeedback('warning', message);
-
-        // Trust them so we don't warn again
-        trustedHooksManager.trustHooks(
-          this.config.getProjectRoot(),
-          projectHooks,
-        );
-      }
-    } catch {
-      debugLogger.warn('Failed to check project hooks trust');
-    }
-  }
-
-  /**
    * Process hooks from the config that was already loaded by the CLI
    */
   private processHooksFromConfig(): void {
-    if (this.config.isTrustedFolder()) {
-      this.checkProjectHooksTrust();
+    // Load user hooks (always available, regardless of folder trust)
+    const userHooks = this.config.getUserHooks();
+    if (userHooks) {
+      this.processHooksConfiguration(userHooks, HooksConfigSource.User);
     }
 
-    // Get hooks from the main config (this comes from the merged settings)
-    const configHooks = this.config.getHooks();
-    if (configHooks) {
-      if (this.config.isTrustedFolder()) {
-        this.processHooksConfiguration(configHooks, HooksConfigSource.Project);
-      } else {
-        debugLogger.warn(
-          'Project hooks disabled because the folder is not trusted.',
-        );
-      }
+    // Load project hooks (only in trusted folders)
+    // The config.getProjectHooks() already checks trust status internally
+    const projectHooks = this.config.getProjectHooks();
+    if (projectHooks) {
+      this.processHooksConfiguration(projectHooks, HooksConfigSource.Project);
     }
 
-    // Get hooks from extensions
+    // Extension hooks are always loaded
     const extensions = this.config.getExtensions() || [];
     for (const extension of extensions) {
       if (extension.isActive && extension.hooks) {

@@ -26,7 +26,7 @@ describe('HookRegistry', () => {
     mockConfig = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       isTrustedFolder: vi.fn().mockReturnValue(true),
-      getHooks: vi.fn().mockReturnValue(undefined),
+      getUserHooks: vi.fn().mockReturnValue(undefined),
       getProjectHooks: vi.fn().mockReturnValue(undefined),
       getExtensions: vi.fn().mockReturnValue([]),
     };
@@ -57,7 +57,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -65,24 +65,133 @@ describe('HookRegistry', () => {
       const allHooks = registry.getAllHooks();
       expect(allHooks).toHaveLength(1);
       expect(allHooks[0].eventName).toBe(HookEventName.PreToolUse);
-      expect(allHooks[0].source).toBe(HooksConfigSource.Project);
+      expect(allHooks[0].source).toBe(HooksConfigSource.User);
     });
 
-    it('should not process project hooks in untrusted folder', async () => {
+    it('should process user hooks even in untrusted folder', async () => {
       mockConfig.isTrustedFolder = vi.fn().mockReturnValue(false);
-      const hooksConfig = {
+      const userHooksConfig = {
         [HookEventName.PreToolUse]: [
           {
-            hooks: [{ type: HookType.Command, command: 'echo test' }],
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo user',
+                name: 'user-hook',
+              },
+            ],
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooksConfig);
+      mockConfig.getProjectHooks = vi.fn().mockReturnValue(undefined);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
 
-      expect(registry.getAllHooks()).toHaveLength(0);
+      const allHooks = registry.getAllHooks();
+      expect(allHooks).toHaveLength(1);
+      expect(allHooks[0].source).toBe(HooksConfigSource.User);
+    });
+
+    it('should load hooks from getUserHooks regardless of trust', async () => {
+      // In the new design, the CLI filters workspace hooks before passing to core
+      // So core just loads whatever getUserHooks returns
+      const hooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo test',
+                name: 'test-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getProjectHooks = vi.fn().mockReturnValue(undefined);
+      mockConfig.isTrustedFolder = vi.fn().mockReturnValue(false);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      // Hooks should be loaded because CLI already filtered them
+      expect(registry.getAllHooks()).toHaveLength(1);
+      expect(registry.getAllHooks()[0].source).toBe(HooksConfigSource.User);
+    });
+
+    it('should load both user and project hooks in trusted folder', async () => {
+      mockConfig.isTrustedFolder = vi.fn().mockReturnValue(true);
+      const userHooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo user',
+                name: 'user-hook',
+              },
+            ],
+          },
+        ],
+      };
+      const projectHooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo project',
+                name: 'project-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooksConfig);
+      mockConfig.getProjectHooks = vi.fn().mockReturnValue(projectHooksConfig);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      const allHooks = registry.getAllHooks();
+      expect(allHooks).toHaveLength(2);
+      // User hooks should have priority (lower number) over project hooks
+      expect(allHooks[0].source).toBe(HooksConfigSource.User);
+      expect(allHooks[0].config.name).toBe('user-hook');
+      expect(allHooks[1].source).toBe(HooksConfigSource.Project);
+      expect(allHooks[1].config.name).toBe('project-hook');
+    });
+
+    it('should not load project hooks in untrusted folder', async () => {
+      mockConfig.isTrustedFolder = vi.fn().mockReturnValue(false);
+      const userHooksConfig = {
+        [HookEventName.PreToolUse]: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: 'echo user',
+                name: 'user-hook',
+              },
+            ],
+          },
+        ],
+      };
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooksConfig);
+      // getProjectHooks should return undefined in untrusted folder
+      // (this is handled by Config.getProjectHooks() checking trust)
+      mockConfig.getProjectHooks = vi.fn().mockReturnValue(undefined);
+
+      const registry = new HookRegistry(mockConfig);
+      await registry.initialize();
+
+      const allHooks = registry.getAllHooks();
+      expect(allHooks).toHaveLength(1);
+      expect(allHooks[0].source).toBe(HooksConfigSource.User);
+      expect(allHooks[0].config.name).toBe('user-hook');
     });
   });
 
@@ -108,7 +217,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -141,7 +250,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -153,29 +262,49 @@ describe('HookRegistry', () => {
     });
 
     it('should sort hooks by source priority', async () => {
-      // This test requires multiple sources, which would need getUserHooks
-      // For now, we test with extensions which are processed after project hooks
-      const projectHooks = {
+      // Test with user hooks and extension hooks to verify source priority
+      const userHooks = {
         [HookEventName.PreToolUse]: [
           {
             hooks: [
               {
                 type: HookType.Command,
-                command: 'echo project',
-                name: 'project-hook',
+                command: 'echo user',
+                name: 'user-hook',
               },
             ],
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(projectHooks);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(userHooks);
+      mockConfig.getExtensions = vi.fn().mockReturnValue([
+        {
+          isActive: true,
+          hooks: {
+            [HookEventName.PreToolUse]: [
+              {
+                hooks: [
+                  {
+                    type: HookType.Command,
+                    command: 'echo extension',
+                    name: 'extension-hook',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      ]);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
 
       const hooks = registry.getHooksForEvent(HookEventName.PreToolUse);
-      expect(hooks).toHaveLength(1);
-      expect(hooks[0].source).toBe(HooksConfigSource.Project);
+      // Should have both user and extension hooks
+      expect(hooks).toHaveLength(2);
+      // User hooks have higher priority (lower number) than extensions
+      expect(hooks[0].source).toBe(HooksConfigSource.User);
+      expect(hooks[1].source).toBe(HooksConfigSource.Extensions);
     });
   });
 
@@ -194,7 +323,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -223,7 +352,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -258,7 +387,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -296,7 +425,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -312,7 +441,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -328,7 +457,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -344,7 +473,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -366,7 +495,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -391,7 +520,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -408,7 +537,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig, mockFeedbackEmitter);
       await registry.initialize();
@@ -436,7 +565,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -468,7 +597,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -493,7 +622,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -518,7 +647,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -628,7 +757,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -652,7 +781,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
@@ -675,14 +804,14 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();
 
       const hooks = registry.getAllHooks();
       expect((hooks[0].config as { source?: unknown }).source).toBe(
-        HooksConfigSource.Project,
+        HooksConfigSource.User,
       );
     });
   });
@@ -702,7 +831,7 @@ describe('HookRegistry', () => {
           },
         ],
       };
-      mockConfig.getHooks = vi.fn().mockReturnValue(hooksConfig);
+      mockConfig.getUserHooks = vi.fn().mockReturnValue(hooksConfig);
 
       const registry = new HookRegistry(mockConfig);
       await registry.initialize();

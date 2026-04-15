@@ -117,6 +117,11 @@ export async function handleQwenAuth(
       minimalArgv,
       process.cwd(),
       [], // No extensions for auth command
+      // Pass separated hooks for proper source attribution
+      {
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
     );
 
     if (command === 'qwen-oauth') {

@@ -191,6 +191,8 @@ describe('gemini.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
     } as never);
     try {
       await main();
@@ -324,6 +326,8 @@ describe('gemini.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
     } as never);
 
     vi.mocked(parseArguments).mockResolvedValue({
@@ -459,6 +463,8 @@ describe('gemini.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
     } as never);
     vi.mocked(parseArguments).mockResolvedValue({
       model: undefined,
@@ -558,6 +564,8 @@ describe('startInteractiveUI', () => {
         hideWindowTitle: false,
       },
     },
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
   } as LoadedSettings;
   const mockStartupWarnings = ['warning1'];
   const mockWorkspaceRoot = '/root';

@@ -261,6 +261,11 @@ export async function main() {
         argv,
         undefined,
         [],
+        // Pass separated hooks for proper source attribution
+        {
+          userHooks: settings.getUserHooks(),
+          projectHooks: settings.getProjectHooks(),
+        },
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -360,6 +365,11 @@ export async function main() {
       argv,
       process.cwd(),
       argv.extensions,
+      // Pass separated hooks for proper source attribution
+      {
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
     );
 
     // Register cleanup for MCP clients as early as possible

@@ -407,7 +407,17 @@ class QwenAgent implements Agent {
       continue: false,
     };
 
-    const config = await loadCliConfig(settings, argvForSession, cwd, []);
+    const config = await loadCliConfig(
+      settings,
+      argvForSession,
+      cwd,
+      [],
+      // Pass separated hooks for proper source attribution
+      {
+        userHooks: this.settings.getUserHooks(),
+        projectHooks: this.settings.getProjectHooks(),
+      },
+    );
     await config.initialize();
     return config;
   }

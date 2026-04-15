@@ -701,6 +701,14 @@ export async function loadCliConfig(
   argv: CliArgs,
   cwd: string = process.cwd(),
   overrideExtensions?: string[],
+  /**
+   * Optional separated hooks for proper source attribution.
+   * If provided, these override settings.hooks for hook loading.
+   */
+  hooksConfig?: {
+    userHooks?: Record<string, unknown>;
+    projectHooks?: Record<string, unknown>;
+  },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
 
@@ -1120,7 +1128,10 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
-    hooks: settings.hooks,
+    // Use separated hooks if provided, otherwise fall back to merged hooks
+    userHooks: hooksConfig?.userHooks ?? settings.hooks,
+    projectHooks: hooksConfig?.projectHooks,
+    hooks: settings.hooks, // Keep for backward compatibility
     disableAllHooks: settings.disableAllHooks ?? false,
     channel: argv.channel,
     // Precedence: explicit CLI flag > settings file > default(true).
