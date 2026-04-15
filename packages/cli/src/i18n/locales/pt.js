@@ -1251,10 +1251,14 @@ export default {
   'Terms of Services and Privacy Notice':
     'Termos de Serviço e Aviso de Privacidade',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
-    'Gratuito \u00B7 100 solicitações/dia \u00B7 Encerra em 2026-04-15',
-  'Login with QwenChat account to use daily free quota.':
-    'Faça login com sua conta QwenChat para usar a cota gratuita diária.',
+  'Discontinued — switch to Coding Plan or API Key':
+    'Descontinuado — mude para Coding Plan ou API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'O nível gratuito do Qwen OAuth foi descontinuado em 2026-04-15. Execute /auth para trocar de provedor.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'O nível gratuito do Qwen OAuth foi descontinuado em 2026-04-15. Selecione Coding Plan ou API Key.',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ O nível gratuito do Qwen OAuth foi descontinuado em 2026-04-15. Selecione outra opção.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Pago \u00B7 Até 6.000 solicitações/5 hrs \u00B7 Todos os modelos Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
@@ -1939,17 +1943,19 @@ export default {
     '⚠️  Nenhum método de autenticação configurado.\n',
   'Run one of the following commands to get started:\n':
     'Execute um dos seguintes comandos para começar:\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - Autenticar com Qwen OAuth (gratuito)',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - Autenticar com Qwen OAuth (descontinuado)',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - Autenticar com Alibaba Cloud Coding Plan\n',
   'Or simply run:': 'Ou simplesmente execute:',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Configuração interativa de autenticação\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Método de autenticação: Qwen OAuth',
-  '  Type: Free tier (ending 2026-04-15)':
-    '  Tipo: Gratuito (encerra em 2026-04-15)',
-  '  Limit: 100 requests/day': '  Limite: 100 solicitações/dia',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  Tipo: Nível gratuito (descontinuado 2026-04-15)',
+  '  Limit: No longer available': '  Limite: Não mais disponível',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'O nível gratuito do Qwen OAuth foi descontinuado em 2026-04-15. Execute /auth para mudar para Coding Plan, OpenRouter, Fireworks AI ou outro provedor.',
   '  Models: Qwen latest models\n': '  Modelos: Modelos Qwen mais recentes\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Método de autenticação: Alibaba Cloud Coding Plan',

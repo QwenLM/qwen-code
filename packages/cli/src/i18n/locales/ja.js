@@ -966,10 +966,14 @@ export default {
     '続行するには認証方法を選択してください。Ctrl+C をもう一度押すと終了します',
   'Terms of Services and Privacy Notice': '利用規約とプライバシー通知',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
-    '無料 \u00B7 1日100リクエスト \u00B7 2026-04-15に終了',
-  'Login with QwenChat account to use daily free quota.':
-    'QwenChatアカウントでログインして、毎日の無料クォータをご利用ください。',
+  'Discontinued — switch to Coding Plan or API Key':
+    '終了 — Coding Plan または API Key に切り替えてください',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'Qwen OAuth 無料枠は 2026-04-15 に終了しました。/auth を実行してプロバイダーを切り替えてください。',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'Qwen OAuth 無料枠は 2026-04-15 に終了しました。Coding Plan または API Key を選択してください。',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ Qwen OAuth 無料枠は 2026-04-15 に終了しました。他のオプションを選択してください。\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     '有料 \u00B7 5時間最大6,000リクエスト \u00B7 すべての Alibaba Cloud Coding Plan モデル',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
@@ -1440,17 +1444,19 @@ export default {
     '⚠️  認証方法が設定されていません。\n',
   'Run one of the following commands to get started:\n':
     '以下のコマンドのいずれかを実行して開始してください:\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - Qwen OAuth で認証（無料）',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - Qwen OAuth で認証（終了）',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - Alibaba Cloud Coding Plan で認証\n',
   'Or simply run:': 'または以下を実行:',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - インタラクティブ認証セットアップ\n',
   '✓ Authentication Method: Qwen OAuth': '✓ 認証方法: Qwen OAuth',
-  '  Type: Free tier (ending 2026-04-15)':
-    '  タイプ: 無料プラン（2026-04-15に終了）',
-  '  Limit: 100 requests/day': '  制限: 1日100リクエスト',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  タイプ: 無料枠（2026-04-15 終了）',
+  '  Limit: No longer available': '  制限: 利用不可',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'Qwen OAuth 無料枠は 2026-04-15 に終了しました。/auth を実行して Coding Plan、OpenRouter、Fireworks AI、または他のプロバイダーに切り替えてください。',
   '  Models: Qwen latest models\n': '  モデル: Qwen 最新モデル\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ 認証方法: Alibaba Cloud Coding Plan',
