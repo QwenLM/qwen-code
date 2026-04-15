@@ -74,78 +74,49 @@ export const SUPPORTED_CONFIG_SETTINGS: Record<
     },
   },
 
-  // ── Approval Mode ──────────────────────────────────────────────────
+  // ── Approval Mode (read-only) ─────────────────────────────────────
+  // Writing approvalMode is intentionally disabled: allowing the agent to
+  // escalate its own permissions (even with 'ask' confirmation) is a prompt
+  // injection risk. Users must change approval mode via slash command.
   approvalMode: {
     description:
-      'The approval mode for tool calls. Controls how much user confirmation is required.',
+      'The approval mode for tool calls. Controls how much user confirmation is required (read-only).',
     type: 'string',
-    writable: true,
+    writable: false,
     source: 'project',
     getOptions: () => [...APPROVAL_MODES],
     read: (config) => config.getApprovalMode(),
-    write: async (config, value) => {
-      try {
-        config.setApprovalMode(
-          String(value) as ReturnType<Config['getApprovalMode']>,
-        );
-        return null;
-      } catch (e) {
-        return e instanceof Error ? e.message : 'Failed to set approvalMode';
-      }
-    },
+    write: async () => 'approvalMode is read-only',
   },
 
-  // ── Checkpointing ─────────────────────────────────────────────────
+  // ── Checkpointing (read-only) ─────────────────────────────────────
   checkpointing: {
-    description: 'Whether file checkpointing (code rewind) is enabled.',
+    description:
+      'Whether file checkpointing (code rewind) is enabled (read-only).',
     type: 'boolean',
-    writable: true,
+    writable: false,
     source: 'global',
     read: (config) => config.getCheckpointingEnabled(),
-    write: async (config, value) => {
-      try {
-        config.setCheckpointingEnabled(value as boolean);
-        return null;
-      } catch (e) {
-        return e instanceof Error ? e.message : 'Failed to set checkpointing';
-      }
-    },
+    write: async () => 'checkpointing is read-only',
   },
 
-  // ── File Filtering ────────────────────────────────────────────────
+  // ── File Filtering (read-only) ────────────────────────────────────
   respectGitIgnore: {
-    description: 'Whether to respect .gitignore rules when discovering files.',
+    description:
+      'Whether to respect .gitignore rules when discovering files (read-only).',
     type: 'boolean',
-    writable: true,
+    writable: false,
     source: 'project',
     read: (config) => config.getFileFilteringRespectGitIgnore(),
-    write: async (config, value) => {
-      try {
-        config.setFileFilteringRespectGitIgnore(value as boolean);
-        return null;
-      } catch (e) {
-        return e instanceof Error
-          ? e.message
-          : 'Failed to set respectGitIgnore';
-      }
-    },
+    write: async () => 'respectGitIgnore is read-only',
   },
   enableFuzzySearch: {
-    description: 'Whether fuzzy file search is enabled.',
+    description: 'Whether fuzzy file search is enabled (read-only).',
     type: 'boolean',
-    writable: true,
+    writable: false,
     source: 'project',
     read: (config) => config.getFileFilteringEnableFuzzySearch(),
-    write: async (config, value) => {
-      try {
-        config.setFileFilteringEnableFuzzySearch(value as boolean);
-        return null;
-      } catch (e) {
-        return e instanceof Error
-          ? e.message
-          : 'Failed to set enableFuzzySearch';
-      }
-    },
+    write: async () => 'enableFuzzySearch is read-only',
   },
 
   // ── Read-only Settings ────────────────────────────────────────────

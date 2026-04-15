@@ -193,35 +193,6 @@ describe('ConfigTool', () => {
       });
     });
 
-    it('changes approvalMode with options validation', async () => {
-      const invocation = tool.build({
-        action: 'set',
-        setting: 'approvalMode',
-        value: 'yolo',
-      });
-      const result = await invocation.execute(new AbortController().signal);
-      const output = parseOutput(result);
-
-      expect(output.success).toBe(true);
-      expect(output.previousValue).toBe('default');
-      expect(output.newValue).toBe('yolo');
-    });
-
-    it('rejects invalid option for approvalMode', async () => {
-      const invocation = tool.build({
-        action: 'set',
-        setting: 'approvalMode',
-        value: 'invalid-mode',
-      });
-      const result = await invocation.execute(new AbortController().signal);
-      const output = parseOutput(result);
-
-      expect(output.success).toBe(false);
-      expect(output.error).toContain('Invalid value');
-      expect(output.error).toContain('Options:');
-      expect(result.error).toBeDefined();
-    });
-
     it('returns error when setModel throws', async () => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (config as any).setModel = vi.fn(async () => {
@@ -271,26 +242,7 @@ describe('ConfigTool', () => {
     });
   });
 
-  describe('type coercion', () => {
-    it('rejects non-boolean string for boolean setting (via execute)', async () => {
-      // debugMode is read-only, so we test coercion error indirectly.
-      // approvalMode is string type, no coercion needed.
-      // For direct coercion testing, we trust the unit behavior.
-      // This test verifies that the options check catches invalid values.
-      const invocation = tool.build({
-        action: 'set',
-        setting: 'approvalMode',
-        value: 'not-a-mode',
-      });
-      const result = await invocation.execute(new AbortController().signal);
-      const output = parseOutput(result);
-
-      expect(output.success).toBe(false);
-      expect(output.error).toContain('Invalid value');
-    });
-  });
-
-  describe('boolean settings', () => {
+  describe('boolean settings (read-only)', () => {
     it('GET checkpointing returns boolean value', async () => {
       const invocation = tool.build({
         action: 'get',
@@ -304,58 +256,39 @@ describe('ConfigTool', () => {
       expect(output.source).toBe('global');
     });
 
-    it('SET checkpointing with boolean coercion', async () => {
+    it('GET respectGitIgnore returns current value', async () => {
       const invocation = tool.build({
-        action: 'set',
-        setting: 'checkpointing',
-        value: 'true',
-      });
-      const result = await invocation.execute(new AbortController().signal);
-      const output = parseOutput(result);
-
-      expect(output.success).toBe(true);
-      expect(output.previousValue).toBe(false);
-      expect(output.newValue).toBe(true);
-    });
-
-    it('SET checkpointing rejects non-boolean string', async () => {
-      const invocation = tool.build({
-        action: 'set',
-        setting: 'checkpointing',
-        value: 'maybe',
-      });
-      const result = await invocation.execute(new AbortController().signal);
-      const output = parseOutput(result);
-
-      expect(output.success).toBe(false);
-      expect(output.error).toContain("Expected 'true' or 'false'");
-    });
-
-    it('SET respectGitIgnore toggles', async () => {
-      const invocation = tool.build({
-        action: 'set',
+        action: 'get',
         setting: 'respectGitIgnore',
-        value: 'false',
       });
       const result = await invocation.execute(new AbortController().signal);
       const output = parseOutput(result);
 
       expect(output.success).toBe(true);
-      expect(output.previousValue).toBe(true);
-      expect(output.newValue).toBe(false);
+      expect(output.value).toBe(true);
     });
 
-    it('SET enableFuzzySearch toggles', async () => {
+    it('GET enableFuzzySearch returns current value', async () => {
       const invocation = tool.build({
-        action: 'set',
+        action: 'get',
         setting: 'enableFuzzySearch',
-        value: 'false',
       });
       const result = await invocation.execute(new AbortController().signal);
       const output = parseOutput(result);
 
       expect(output.success).toBe(true);
-      expect(output.previousValue).toBe(true);
+      expect(output.value).toBe(true);
+    });
+
+    it.each([
+      ['approvalMode', 'yolo'],
+      ['checkpointing', 'true'],
+      ['respectGitIgnore', 'false'],
+      ['enableFuzzySearch', 'false'],
+    ])('rejects SET %s at build (read-only)', (setting, value) => {
+      expect(() => tool.build({ action: 'set', setting, value })).toThrow(
+        /read-only/,
+      );
     });
   });
 
