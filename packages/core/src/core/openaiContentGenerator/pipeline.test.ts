@@ -327,6 +327,9 @@ describe('ContentGenerationPipeline', () => {
       expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
         expect.objectContaining({
           tools: mockTools,
+          // Always set parallel_tool_calls when tools are present, so Qwen
+          // code models don't default to sequential tool dispatch.
+          parallel_tool_calls: true,
         }),
         expect.objectContaining({
           signal: undefined,
@@ -365,11 +368,15 @@ describe('ContentGenerationPipeline', () => {
       // Act
       await pipeline.execute(request, userPromptId);
 
-      // Assert — tools should NOT be in the request
+      // Assert — tools should NOT be in the request, and parallel_tool_calls
+      // should NOT be set when there are no tools (avoid sending a flag that
+      // has no meaning without tools, and stay compatible with providers that
+      // reject the parameter in tool-less requests).
       expect(mockConverter.convertGeminiToolsToOpenAI).not.toHaveBeenCalled();
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.tools).toBeUndefined();
+      expect(apiCall.parallel_tool_calls).toBeUndefined();
     });
 
     it('should override enable_thinking when thinkingConfig disables it', async () => {

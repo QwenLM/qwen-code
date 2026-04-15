@@ -579,6 +579,10 @@ export class GeminiChat {
         if (error instanceof Error) {
           if (isSchemaDepthError(error.message)) return false;
           if (isInvalidArgumentError(error.message)) return false;
+          // DashScope rejects tool calls whose function.arguments string is
+          // not valid JSON. This is a non-deterministic model output defect,
+          // not a user error — the same request usually succeeds on retry.
+          if (isToolArgumentsJsonError(error.message)) return true;
         }
 
         const status = getErrorStatus(error);
@@ -971,4 +975,25 @@ export function isSchemaDepthError(errorMessage: string): boolean {
 
 export function isInvalidArgumentError(errorMessage: string): boolean {
   return errorMessage.includes('Request contains an invalid argument');
+}
+
+/**
+ * Detects DashScope's server-side tool-call JSON validation error.
+ *
+ * When Qwen code models generate a tool call with malformed `function.arguments`
+ * (unescaped quotes, unterminated strings, etc.), DashScope rejects the response
+ * with a 400 like:
+ *
+ *   InternalError.Algo.InvalidParameter: The "function.arguments" parameter
+ *   of the code model must be in JSON format.
+ *
+ * This is non-deterministic model output corruption, not user input error, so
+ * it is safe to retry the same request — the next generation will usually
+ * produce valid JSON.
+ */
+export function isToolArgumentsJsonError(errorMessage: string): boolean {
+  return (
+    errorMessage.includes('function.arguments') &&
+    errorMessage.includes('JSON format')
+  );
 }

@@ -336,6 +336,14 @@ export class ContentGenerationPipeline {
       baseRequest.tools = await this.converter.convertGeminiToolsToOpenAI(
         request.config.tools,
       );
+      // Explicitly enable parallel tool calling. Some providers and models
+      // — notably Qwen code models on DashScope — default to sequential
+      // tool dispatch when this flag is unset, which serializes multi-agent
+      // flows such as the /review skill's Step 4 (5 review agents in one
+      // turn) into one-agent-per-turn round trips. Providers that do not
+      // recognize this parameter simply ignore it, so the flag is safe to
+      // set unconditionally whenever tools are present.
+      baseRequest.parallel_tool_calls = true;
     }
 
     // Let provider enhance the request (e.g., add metadata, cache control)

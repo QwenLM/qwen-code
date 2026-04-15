@@ -16,6 +16,7 @@ import {
   GeminiChat,
   InvalidStreamError,
   StreamEventType,
+  isToolArgumentsJsonError,
   type StreamEvent,
 } from './geminiChat.js';
 import { StreamContentError } from './openaiContentGenerator/pipeline.js';
@@ -1662,6 +1663,58 @@ describe('GeminiChat', async () => {
         ).toHaveBeenCalledTimes(1);
       });
 
+      it('should retry on DashScope tool-arguments JSON 400 errors', async () => {
+        // DashScope rejects tool calls whose function.arguments string is not
+        // valid JSON with a 400. This is a non-deterministic model output
+        // defect, so the request should be retried rather than failed.
+        const toolArgsJsonError = new ApiError({
+          message:
+            'InternalError.Algo.InvalidParameter: The "function.arguments" ' +
+            'parameter of the code model must be in JSON format.',
+          status: 400,
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(toolArgsJsonError)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Recovered from tool-args JSON error' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-tool-args-json',
+        );
+
+        const events: StreamEvent[] = [];
+        for await (const event of stream) {
+          events.push(event);
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Recovered from tool-args JSON error',
+          ),
+        ).toBe(true);
+      });
+
       it('should retry on 5xx server errors', async () => {
         const error500 = new ApiError({
           message: 'Internal Server Error 500',
@@ -1706,6 +1759,37 @@ describe('GeminiChat', async () => {
       });
     });
   });
+
+  describe('isToolArgumentsJsonError', () => {
+    it('matches the DashScope code-model tool-args error', () => {
+      expect(
+        isToolArgumentsJsonError(
+          'InternalError.Algo.InvalidParameter: The "function.arguments" ' +
+            'parameter of the code model must be in JSON format.',
+        ),
+      ).toBe(true);
+    });
+
+    it('does not match generic errors', () => {
+      expect(isToolArgumentsJsonError('Bad Request')).toBe(false);
+      expect(isToolArgumentsJsonError('maximum schema depth exceeded')).toBe(
+        false,
+      );
+      expect(
+        isToolArgumentsJsonError('Request contains an invalid argument'),
+      ).toBe(false);
+    });
+
+    it('requires both markers to match', () => {
+      expect(isToolArgumentsJsonError('function.arguments is missing')).toBe(
+        false,
+      );
+      expect(isToolArgumentsJsonError('please return in JSON format')).toBe(
+        false,
+      );
+    });
+  });
+
   it('should correctly retry and append to an existing history mid-conversation', async () => {
     // 1. Setup
     const initialHistory: Content[] = [
