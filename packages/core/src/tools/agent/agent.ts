@@ -22,7 +22,6 @@ import type { SubagentConfig } from '../../subagents/types.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import type {
   PromptConfig,
-  ModelConfig,
   RunConfig,
   ToolConfig,
 } from '../../agents/runtime/agent-types.js';
@@ -31,7 +30,6 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { Content, FunctionDeclaration } from '@google/genai';
-import { getCacheSafeParams } from '../../followup/forkedQuery.js';
 import {
   FORK_AGENT,
   FORK_PLACEHOLDER_RESULT,
@@ -644,51 +642,43 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       taskPrompt = buildChildMessage(this.params.prompt);
     }
 
-    // Retrieve the parent's cached generationConfig (systemInstruction +
-    // tool declarations) so the fork's API requests share the parent's
-    // exact cache prefix for DashScope prompt caching. Missing params
-    // (first turn) falls back to the default system prompt + wildcard
-    // tools — fork still works, just without cache sharing.
-    const cacheSafeParams = getCacheSafeParams();
-
+    // Read the parent's live generationConfig (systemInstruction + tool
+    // declarations) so the fork's API requests share the parent's exact
+    // cache prefix for DashScope prompt caching. When the client isn't
+    // available (first turn edge case), fall back to the fork agent's own
+    // system prompt and wildcard tools.
     let promptConfig: PromptConfig;
-    let modelConfig: ModelConfig;
     let toolConfig: ToolConfig;
 
-    if (cacheSafeParams) {
-      const gen = cacheSafeParams.generationConfig as {
-        systemInstruction?: string | Content;
-        tools?: Array<{
-          functionDeclarations?: FunctionDeclaration[];
-        }>;
-      };
+    const generationConfig = geminiClient?.getChat().getGenerationConfig();
+    if (generationConfig?.systemInstruction) {
       // Inline FunctionDeclaration[] from the parent — passed verbatim
       // including `agent` itself so the fork's tool-name set matches the
       // parent's. prepareTools bypasses the exclusion filter for inline
       // decls; `isInForkExecution()` (ALS-based) is the sole
       // recursive-fork block at runtime.
       const parentToolDecls: FunctionDeclaration[] =
-        gen.tools?.flatMap((t) => t.functionDeclarations ?? []) ?? [];
+        (
+          generationConfig.tools as Array<{
+            functionDeclarations?: FunctionDeclaration[];
+          }>
+        )?.flatMap((t) => t.functionDeclarations ?? []) ?? [];
 
       promptConfig = {
-        renderedSystemPrompt: gen.systemInstruction,
+        renderedSystemPrompt: generationConfig.systemInstruction as
+          | string
+          | Content,
         initialMessages,
       };
-      modelConfig = {};
       toolConfig = {
         tools:
           parentToolDecls.length > 0 ? parentToolDecls : (['*'] as string[]),
       };
     } else {
-      // First-turn fork (no cache params captured yet): fall back to
-      // the fork agent's normal system prompt via buildChatSystemPrompt
-      // and wildcard tools. Env bootstrap is still skipped when
-      // initialMessages is non-empty.
       promptConfig = {
         systemPrompt: FORK_AGENT.systemPrompt,
         initialMessages,
       };
-      modelConfig = {};
       toolConfig = { tools: ['*'] };
     }
 
@@ -696,7 +686,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       FORK_AGENT.name,
       agentConfig,
       promptConfig,
-      modelConfig,
+      {},
       {} as RunConfig,
       toolConfig,
       this.eventEmitter,

@@ -598,6 +598,9 @@ describe('AgentTool', () => {
       // cache params have been captured yet).
       vi.mocked(config.getGeminiClient).mockReturnValue({
         getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+        }),
       } as unknown as ReturnType<Config['getGeminiClient']>);
 
       vi.mocked(AgentHeadless.create).mockResolvedValue(mockAgent);
