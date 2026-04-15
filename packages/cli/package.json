@@ -1,6 +1,6 @@
 {
-  "name": "@qwen-code/qwen-code",
-  "version": "0.14.3",
+  "name": "@alife/dataworks-qwen-code",
+  "version": "0.14.4",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -33,7 +33,10 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.3"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.4"
+  },
+  "publishConfig": {
+    "registry": "https://registry.anpm.alibaba-inc.com"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",

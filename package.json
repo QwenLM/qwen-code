@@ -1,12 +1,18 @@
 {
-  "name": "@qwen-code/qwen-code",
-  "version": "0.14.3",
+  "name": "@alife/dataworks-qwen-code",
+  "version": "0.14.4",
   "engines": {
     "node": ">=20.0.0"
   },
   "type": "module",
   "workspaces": [
-    "packages/*",
+    "packages/cli",
+    "packages/core",
+    "packages/sdk-typescript",
+    "packages/test-utils",
+    "packages/vscode-ide-companion",
+    "packages/web-templates",
+    "packages/webui",
     "packages/channels/base",
     "packages/channels/telegram",
     "packages/channels/weixin",
@@ -18,7 +24,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.3"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.4"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
@@ -73,6 +79,12 @@
       "wrap-ansi": "7.0.0"
     },
     "baseline-browser-mapping": "^2.9.19",
+    "@qwen-code/channel-base": "file:packages/channels/base",
+    "@qwen-code/channel-telegram": "file:packages/channels/telegram",
+    "@qwen-code/channel-weixin": "file:packages/channels/weixin",
+    "@qwen-code/channel-dingtalk": "file:packages/channels/dingtalk",
+    "@qwen-code/qwen-code-core": "file:packages/core",
+    "@qwen-code/web-templates": "file:packages/web-templates",
     "normalize-package-data": "^7.0.1"
   },
   "bin": {

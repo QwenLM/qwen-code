@@ -1,0 +1,55 @@
+# .aoneci/workflows/npm-publish.yml
+# 推送到 dev 分支时自动发布 npm beta 包
+# 推送到 main 分支时自动发布 npm 正式包（latest）
+
+name: 'NPM Publish'
+
+# triggers:
+#   push:
+#     branches: ['main', 'dev']
+
+params:
+  skip_tests:
+    description: '是否跳过测试步骤（1=跳过，0=不跳过，默认不跳过）'
+    type: string
+    default: '0'
+
+jobs:
+  npm-build-publish:
+    runs-on:
+      - 32-128Gi
+    name: 'Build, Test & Publish'
+    image: alios-8u
+    steps:
+      - uses: checkout
+      - uses: setup-env
+        inputs:
+          node-version: '20'
+          tnpm-version: '10'
+          python-version: '3.10'
+          rust-toolchain-version: stable
+          tnpm-cache: true
+
+      - name: 'Install dependencies'
+        run: 'npm ci'
+
+      # - name: 'Run tests'
+      #   run: |
+      #     if [ "$SKIP_TESTS" = "1" ]; then
+      #       echo "⏭️ Skipping tests (skip_tests=1)"
+      #     else
+      #       NO_COLOR=true npm run test:ci
+      #     fi
+      #   env:
+      #     SKIP_TESTS: ${{ params.skip_tests }}
+
+      - name: 'Build project'
+        run: 'npm run build'
+
+      - uses: npm-publisher
+        inputs:
+          token: ${{ secrets.inner_npm_publish_token }}
+          innerToken: ${{ secrets.inner_npm_publish_token }}
+          baseBranches: ['main']
+          # beta 版本自动更新版本号
+          autoVersion: true
