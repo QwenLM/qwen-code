@@ -1,6 +1,14 @@
 # Message Rewrite Middleware
 
-ACP message rewrite middleware that transforms raw agent output (internal reasoning + reply text) into user-friendly, business-oriented formats via LLM rewriting.
+> **⚠️ Temporary Solution — subject to change or removal at any time.**
+>
+> This is a stopgap implementation. We are exploring a hook-based approach ([#3266](https://github.com/QwenLM/qwen-code/pull/3266) — PostTurn Hook) that would be more decoupled and extensible. The hook approach still has open issues, so we are using this ACP middleware for now.
+>
+> We welcome discussion on more elegant alternatives, including but not limited to:
+>
+> - Externalizing rewrite logic via PostTurn Hook, with the middleware only handling message routing
+> - Pluggable rewrite strategies (LLM / template / rule engine)
+> - Client-side rewriting (agent provides structured data, frontend decides how to present it)
 
 ## Use Case
 
@@ -28,13 +36,3 @@ Add to `settings.json`:
   }
 }
 ```
-
-## This Is a Temporary Solution
-
-The current implementation lives as an ACP Session-layer middleware, coupling message interception with LLM call logic. We are also exploring a hook-based approach ([#3266](https://github.com/QwenLM/qwen-code/pull/3266) — PostTurn Hook), which would enable more decoupled turn-level post-processing and support use cases beyond rewriting. However, the hook-based approach still has some open issues, so we are using the ACP middleware approach for now.
-
-We welcome discussion on more elegant alternatives, including but not limited to:
-
-- Externalizing rewrite logic via PostTurn Hook, with the middleware only handling message routing
-- Pluggable rewrite strategies (LLM / template / rule engine)
-- Client-side rewriting (agent provides structured data, frontend decides how to present it)
