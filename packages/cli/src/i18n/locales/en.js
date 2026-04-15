@@ -691,11 +691,16 @@ export default {
     'Found existing Alacritty Shift+Enter key binding. Remove it to continue.',
   'Added Shift+Enter and Ctrl+Enter keybindings to Alacritty.':
     'Added Shift+Enter and Ctrl+Enter keybindings to Alacritty.',
+  'Alacritty keybindings already configured.':
+    'Alacritty keybindings already configured.',
   'Failed to configure Alacritty.': 'Failed to configure Alacritty.',
   'Found existing Zed Shift+Enter key binding. Remove it to continue.':
     'Found existing Zed Shift+Enter key binding. Remove it to continue.',
   'Added Shift+Enter keybinding to Zed.':
     'Added Shift+Enter keybinding to Zed.',
+  'Zed keybindings already configured.': 'Zed keybindings already configured.',
+  'Zed keymap.json contains invalid JSON. Please fix it manually.':
+    'Zed keymap.json contains invalid JSON. Please fix it manually.',
   'Failed to configure Zed.': 'Failed to configure Zed.',
   'Failed to read default Terminal.app profile.':
     'Failed to read default Terminal.app profile.',

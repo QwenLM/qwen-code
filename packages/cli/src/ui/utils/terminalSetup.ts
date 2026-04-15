@@ -29,6 +29,7 @@ import { isKittyProtocolEnabled } from './kittyProtocolDetector.js';
 import { VSCODE_SHIFT_ENTER_SEQUENCE } from './platformConstants.js';
 import { t } from '../../i18n/index.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import stripJsonComments from 'strip-json-comments';
 
 const debugLogger = createDebugLogger('TERMINAL_SETUP');
 
@@ -42,15 +43,6 @@ const NATIVE_CSIU_TERMINALS: Record<string, string> = {
   WezTerm: 'WezTerm',
   WarpTerminal: 'Warp',
 };
-
-/**
- * Removes single-line JSON comments (// ...) from a string to allow parsing
- * VS Code style JSON files that may contain comments.
- */
-function stripJsonComments(content: string): string {
-  // Remove single-line comments (// ...)
-  return content.replace(/^\s*\/\/.*$/gm, '');
-}
 
 export interface TerminalSetupResult {
   success: boolean;

@@ -630,6 +630,51 @@ export default {
     '终端 "{{termName}}" 不支持自动配置。',
   'Terminal "{{terminal}}" is not supported yet.':
     '终端 "{{terminal}}" 暂不支持。',
+  'Cannot install keybindings from a remote {{terminalName}} session.':
+    '无法从远程 {{terminalName}} 会话安装按键绑定。',
+  '{{terminalName}} keybindings must be installed on your local machine, not the remote server.':
+    '{{terminalName}} 按键绑定必须安装在本地机器上，而非远程服务器。',
+  'To install the Shift+Enter keybinding:': '要安装 Shift+Enter 按键绑定：',
+  '1. Open {{terminalName}} on your local machine (not connected to remote)':
+    '1. 在本地机器上打开 {{terminalName}}（不要连接到远程）',
+  '2. Open the Command Palette (Cmd/Ctrl+Shift+P) → "Preferences: Open Keyboard Shortcuts (JSON)"':
+    '2. 打开命令面板（Cmd/Ctrl+Shift+P）→"Preferences: Open Keyboard Shortcuts (JSON)"',
+  '3. Add this keybinding (the file must be a JSON array):':
+    '3. 添加以下按键绑定（文件必须是 JSON 数组）：',
+  'You can still use backslash (\\) + Enter to add newlines, or Ctrl+Enter / Ctrl+J.':
+    '您仍可使用反斜杠（\\）+ Enter 来添加换行，或使用 Ctrl+Enter / Ctrl+J。',
+  'Supported terminals:': '支持的终端：',
+  '  IDE: VS Code, Cursor, Windsurf, Trae, Zed':
+    '  IDE：VS Code、Cursor、Windsurf、Trae、Zed',
+  '  Terminal: Alacritty, Apple Terminal': '  终端：Alacritty、Apple Terminal',
+  '  Native support: iTerm2, WezTerm, Ghostty, Kitty, Warp':
+    '  原生支持：iTerm2、WezTerm、Ghostty、Kitty、Warp',
+  'No valid config path found for Alacritty.':
+    '未找到有效的 Alacritty 配置路径。',
+  'Found existing Alacritty Shift+Enter key binding. Remove it to continue.':
+    '发现已有的 Alacritty Shift+Enter 按键绑定。请移除后重试。',
+  'Added Shift+Enter and Ctrl+Enter keybindings to Alacritty.':
+    '已为 Alacritty 添加 Shift+Enter 和 Ctrl+Enter 按键绑定。',
+  'Alacritty keybindings already configured.': 'Alacritty 按键绑定已配置。',
+  'Failed to configure Alacritty.': '配置 Alacritty 失败。',
+  'Found existing Zed Shift+Enter key binding. Remove it to continue.':
+    '发现已有的 Zed Shift+Enter 按键绑定。请移除后重试。',
+  'Added Shift+Enter keybinding to Zed.':
+    '已为 Zed 添加 Shift+Enter 按键绑定。',
+  'Zed keybindings already configured.': 'Zed 按键绑定已配置。',
+  'Zed keymap.json contains invalid JSON. Please fix it manually.':
+    'Zed keymap.json 包含无效的 JSON。请手动修复。',
+  'Failed to configure Zed.': '配置 Zed 失败。',
+  'Failed to read default Terminal.app profile.':
+    '读取 Terminal.app 默认配置文件失败。',
+  'Failed to enable Option as Meta Key for Terminal.app profile: {{profile}}':
+    '无法为 Terminal.app 配置文件 {{profile}} 启用"将 Option 键用作 Meta 键"',
+  'Configured Terminal.app:': '已配置 Terminal.app：',
+  '- Enabled "Use Option as Meta Key"': '- 已启用"将 Option 键用作 Meta 键"',
+  'Option+Enter will now insert a newline.': 'Option+Enter 现在会插入换行。',
+  'Shift+Enter also works via native modifier detection (no restart needed).':
+    'Shift+Enter 也可通过原生修饰键检测使用（无需重启）。',
+  'Failed to configure Terminal.app.': '配置 Terminal.app 失败。',
   // ============================================================================
   // Commands - Hooks
   // ============================================================================

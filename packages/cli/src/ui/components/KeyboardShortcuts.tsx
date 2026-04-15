@@ -27,8 +27,7 @@ const getPasteKey = () => {
   if (process.platform === 'win32') return 'alt+v';
   return process.platform === 'darwin' ? 'cmd+v' : 'ctrl+v';
 };
-const getExternalEditorKey = () =>
-  process.platform === 'darwin' ? 'ctrl+x' : 'ctrl+x';
+const getExternalEditorKey = () => 'ctrl+x';
 
 // Generate shortcuts with translations (called at render time)
 const getShortcuts = (): Shortcut[] => [
