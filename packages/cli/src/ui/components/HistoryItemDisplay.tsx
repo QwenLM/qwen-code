@@ -141,7 +141,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'info' && (
-        <InfoMessage text={itemForDisplay.text} />
+        <InfoMessage
+          text={itemForDisplay.text}
+          linkUrl={itemForDisplay.linkUrl}
+          linkText={itemForDisplay.linkText}
+        />
       )}
       {itemForDisplay.type === 'success' && (
         <SuccessMessage text={itemForDisplay.text} />
