@@ -110,9 +110,11 @@ export class CommandService {
    * Hidden commands are excluded.
    */
   getCommandsForMode(mode: ExecutionMode): readonly SlashCommand[] {
-    return filterCommandsForMode(
-      this.commands.filter((cmd) => !cmd.hidden),
-      mode,
+    return Object.freeze(
+      filterCommandsForMode(
+        this.commands.filter((cmd) => !cmd.hidden),
+        mode,
+      ),
     );
   }
 

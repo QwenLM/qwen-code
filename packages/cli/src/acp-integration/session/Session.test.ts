@@ -172,6 +172,7 @@ describe('Session', () => {
       expect(getAvailableCommandsSpy).toHaveBeenCalledWith(
         mockConfig,
         expect.any(AbortSignal),
+        'acp',
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',
