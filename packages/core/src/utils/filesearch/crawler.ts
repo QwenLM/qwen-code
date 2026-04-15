@@ -34,14 +34,23 @@ function toPosixPath(p: string): string {
 const THROTTLE_MS = 5_000;
 const lastRebuildTime = new Map<string, number>();
 
-function isThrottled(crawlDirectory: string): boolean {
-  const last = lastRebuildTime.get(crawlDirectory);
+function getStateKey(options: CrawlOptions): string {
+  return [
+    normalizePath(options.crawlDirectory),
+    normalizePath(options.cwd),
+    options.ignore.getFingerprint(),
+    options.maxDepth === undefined ? 'undefined' : String(options.maxDepth),
+  ].join('|');
+}
+
+function isThrottled(stateKey: string): boolean {
+  const last = lastRebuildTime.get(stateKey);
   if (last === undefined) return false;
   return Date.now() - last < THROTTLE_MS;
 }
 
-function recordRebuild(crawlDirectory: string): void {
-  lastRebuildTime.set(crawlDirectory, Date.now());
+function recordRebuild(stateKey: string): void {
+  lastRebuildTime.set(stateKey, Date.now());
 }
 
 interface ChangeState {
@@ -72,9 +81,9 @@ function getGitRootMtime(crawlDirectory: string): number | null {
   return null;
 }
 
-function hasFileListChanged(crawlDirectory: string): boolean {
+function hasFileListChanged(stateKey: string, crawlDirectory: string): boolean {
   const currentMtime = getGitRootMtime(crawlDirectory);
-  const state = changeStateMap.get(crawlDirectory);
+  const state = changeStateMap.get(stateKey);
 
   if (!state) return true;
 
@@ -82,12 +91,21 @@ function hasFileListChanged(crawlDirectory: string): boolean {
     return currentMtime > state.gitRootMtimeMs;
   }
 
+  // For non-git paths, we can only rely on time-based throttling.
+  if (currentMtime === null && state.gitRootMtimeMs === null) {
+    return false;
+  }
+
   return true;
 }
 
-function updateChangeState(crawlDirectory: string, fileList: string[]): void {
+function updateChangeState(
+  stateKey: string,
+  crawlDirectory: string,
+  fileList: string[],
+): void {
   const mtime = getGitRootMtime(crawlDirectory);
-  changeStateMap.set(crawlDirectory, { gitRootMtimeMs: mtime, fileList });
+  changeStateMap.set(stateKey, { gitRootMtimeMs: mtime, fileList });
 }
 
 interface CommandResult {
@@ -122,8 +140,80 @@ function runCommand(
   });
 }
 
+type CommandRunner = typeof runCommand;
+let commandRunner: CommandRunner = runCommand;
+
+export function __setCommandRunnerForTests(runner?: CommandRunner): void {
+  commandRunner = runner ?? runCommand;
+}
+
+export function __resetCrawlerStateForTests(): void {
+  lastRebuildTime.clear();
+  changeStateMap.clear();
+}
+
 function normalizePath(p: string): string {
   return toPosixPath(p);
+}
+
+function getEntryDepth(entry: string): number {
+  if (entry === '.') {
+    return -1;
+  }
+
+  const withoutTrailingSlash = entry.endsWith('/') ? entry.slice(0, -1) : entry;
+  if (withoutTrailingSlash.length === 0) {
+    return -1;
+  }
+
+  return withoutTrailingSlash.split('/').length - 1;
+}
+
+function applyMaxDepthLimit(results: string[], maxDepth?: number): string[] {
+  if (maxDepth === undefined) {
+    return results;
+  }
+
+  return results.filter((entry) => {
+    if (entry === '.') {
+      return true;
+    }
+    return getEntryDepth(entry) <= maxDepth;
+  });
+}
+
+function isUnderIgnoredDirectory(
+  filePath: string,
+  dirFilter: (dirPath: string) => boolean,
+): boolean {
+  const parts = filePath.split('/');
+  let current = '';
+
+  for (let i = 0; i < parts.length - 1; i++) {
+    current = current ? `${current}/${parts[i]}` : parts[i];
+    if (dirFilter(`${current}/`)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function applyFilters(results: string[], options: CrawlOptions): string[] {
+  const depthFiltered = applyMaxDepthLimit(results, options.maxDepth);
+  const dirFilter = options.ignore.getDirectoryFilter();
+  const fileFilter = options.ignore.getFileFilter();
+
+  return depthFiltered.filter((p) => {
+    if (p === '.') return true;
+    if (p.endsWith('/')) return !dirFilter(p);
+
+    if (isUnderIgnoredDirectory(p, dirFilter)) {
+      return false;
+    }
+
+    return !fileFilter(p);
+  });
 }
 
 const YIELD_INTERVAL = 1000;
@@ -135,7 +225,7 @@ async function maybeYield(index: number): Promise<void> {
 }
 
 async function findGitRoot(dir: string): Promise<string | null> {
-  const result = await runCommand(
+  const result = await commandRunner(
     'git',
     ['rev-parse', '--show-toplevel'],
     dir,
@@ -146,6 +236,7 @@ async function findGitRoot(dir: string): Promise<string | null> {
 }
 
 async function crawlWithGitLsFiles(
+  stateKey: string,
   crawlDirectory: string,
   cwd: string,
   options: CrawlOptions,
@@ -165,16 +256,21 @@ async function crawlWithGitLsFiles(
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     trackedArgs.push(relativeToGitRoot);
   }
-  const trackedResult = await runCommand('git', trackedArgs, gitRoot, 20_000);
+  const trackedResult = await commandRunner(
+    'git',
+    trackedArgs,
+    gitRoot,
+    20_000,
+  );
   if (!trackedResult.success) {
     return { success: false, files: [], isGitRepo: true };
   }
 
-  const untrackedArgs = ['ls-files', '--others', '--exclude-standard'];
+  const untrackedArgs = ['ls-files', '--others'];
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     untrackedArgs.push(relativeToGitRoot);
   }
-  const untrackedResult = await runCommand(
+  const untrackedResult = await commandRunner(
     'git',
     untrackedArgs,
     gitRoot,
@@ -215,18 +311,10 @@ async function crawlWithGitLsFiles(
   }
 
   const results = buildResultsFromFileSet(fileSet);
+  const filteredResults = applyFilters(results, options);
 
-  const dirFilter = options.ignore.getDirectoryFilter();
-  const fileFilter = options.ignore.getFileFilter();
-
-  const filteredResults = results.filter((p) => {
-    if (p === '.') return true;
-    if (p.endsWith('/')) return !dirFilter(p);
-    return !fileFilter(p);
-  });
-
-  updateChangeState(crawlDirectory, filteredResults);
-  recordRebuild(crawlDirectory);
+  updateChangeState(stateKey, crawlDirectory, filteredResults);
+  recordRebuild(stateKey);
 
   return { success: true, files: filteredResults, isGitRepo: true };
 }
@@ -245,13 +333,14 @@ function buildResultsFromFileSet(files: Set<string>): string[] {
 }
 
 async function crawlWithRipgrep(
+  stateKey: string,
   crawlDirectory: string,
   cwd: string,
   options: CrawlOptions,
 ): Promise<{ success: boolean; files: string[] }> {
-  const rgResult = await runCommand(
+  const rgResult = await commandRunner(
     'rg',
-    ['--files', '--no-require-git'],
+    ['--files', '--no-require-git', '--hidden', '--no-ignore'],
     crawlDirectory,
     20_000,
   );
@@ -275,17 +364,10 @@ async function crawlWithRipgrep(
   }
 
   const results = buildResultsFromFileSet(fileSet);
+  const filteredResults = applyFilters(results, options);
 
-  const dirFilter = options.ignore.getDirectoryFilter();
-  const fileFilter = options.ignore.getFileFilter();
-
-  const filteredResults = results.filter((p) => {
-    if (p === '.') return true;
-    if (p.endsWith('/')) return !dirFilter(p);
-    return !fileFilter(p);
-  });
-
-  recordRebuild(crawlDirectory);
+  updateChangeState(stateKey, crawlDirectory, filteredResults);
+  recordRebuild(stateKey);
   return { success: true, files: filteredResults };
 }
 
@@ -329,6 +411,8 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
 }
 
 export async function crawl(options: CrawlOptions): Promise<string[]> {
+  const stateKey = getStateKey(options);
+
   if (options.cache) {
     const cacheKey = cache.getCacheKey(
       options.crawlDirectory,
@@ -342,23 +426,26 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     }
   }
 
-  if (isThrottled(options.crawlDirectory)) {
-    const state = changeStateMap.get(options.crawlDirectory);
-    if (state) {
-      return applyMaxFilesLimit(state.fileList, options.maxFiles);
+  if (!options.cache) {
+    if (isThrottled(stateKey)) {
+      const state = changeStateMap.get(stateKey);
+      if (state) {
+        return applyMaxFilesLimit(state.fileList, options.maxFiles);
+      }
     }
-  }
 
-  const needReCrawl = hasFileListChanged(options.crawlDirectory);
+    const needReCrawl = hasFileListChanged(stateKey, options.crawlDirectory);
 
-  if (!needReCrawl) {
-    const state = changeStateMap.get(options.crawlDirectory);
-    if (state) {
-      return applyMaxFilesLimit(state.fileList, options.maxFiles);
+    if (!needReCrawl) {
+      const state = changeStateMap.get(stateKey);
+      if (state) {
+        return applyMaxFilesLimit(state.fileList, options.maxFiles);
+      }
     }
   }
 
   const gitResult = await crawlWithGitLsFiles(
+    stateKey,
     options.crawlDirectory,
     options.cwd,
     options,
@@ -381,6 +468,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
 
   if (!gitResult.isGitRepo) {
     const rgResult = await crawlWithRipgrep(
+      stateKey,
       options.crawlDirectory,
       options.cwd,
       options,
@@ -403,6 +491,8 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
   }
 
   const fdirResults = await crawlWithFdir(options);
+  updateChangeState(stateKey, options.crawlDirectory, fdirResults);
+  recordRebuild(stateKey);
   const limitedResults = applyMaxFilesLimit(fdirResults, options.maxFiles);
 
   if (options.cache) {

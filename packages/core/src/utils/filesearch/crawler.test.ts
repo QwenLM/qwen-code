@@ -7,11 +7,42 @@
 import { describe, it, expect, afterEach, vi, beforeEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import * as childProcess from 'node:child_process';
 import * as cache from './crawlCache.js';
-import { crawl } from './crawler.js';
+import {
+  crawl,
+  __setCommandRunnerForTests,
+  __resetCrawlerStateForTests,
+} from './crawler.js';
 import { createTmpDir, cleanupTmpDir } from '@qwen-code/qwen-code-test-utils';
 import type { Ignore } from './ignore.js';
 import { loadIgnoreRules } from './ignore.js';
+
+async function runExecFile(
+  command: string,
+  args: string[],
+  cwd: string,
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    childProcess.execFile(
+      command,
+      args,
+      { cwd, windowsHide: true },
+      (error) => {
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      },
+    );
+  });
+}
+
+async function initGitRepo(dir: string): Promise<void> {
+  await runExecFile('git', ['init'], dir);
+  await runExecFile('git', ['add', '.'], dir);
+}
 
 describe('crawler', () => {
   let tmpDir: string;
@@ -19,6 +50,8 @@ describe('crawler', () => {
     if (tmpDir) {
       await cleanupTmpDir(tmpDir);
     }
+    __setCommandRunnerForTests();
+    __resetCrawlerStateForTests();
     vi.restoreAllMocks();
   });
 
@@ -682,6 +715,7 @@ describe('crawler', () => {
         'file1.js': '',
         src: ['file2.js'],
       });
+      await initGitRepo(tmpDir);
 
       const ignore = loadIgnoreRules({
         projectRoot: tmpDir,
@@ -704,6 +738,13 @@ describe('crawler', () => {
     });
 
     it('should fall back to fdir when not in a git repo and ripgrep unavailable', async () => {
+      __setCommandRunnerForTests(async (command) => {
+        if (command === 'git' || command === 'rg') {
+          return { success: false, lines: [] };
+        }
+        return { success: false, lines: [] };
+      });
+
       tmpDir = await createTmpDir({
         'index.js': '',
         lib: ['util.js'],
@@ -727,6 +768,79 @@ describe('crawler', () => {
       expect(results).toEqual(
         expect.arrayContaining(['.', 'lib/', 'index.js', 'lib/util.js']),
       );
+    });
+
+    it('should respect maxDepth on git ls-files path', async () => {
+      tmpDir = await createTmpDir({
+        root: ['top.js'],
+        nested: {
+          deep: ['file.js'],
+        },
+      });
+      await initGitRepo(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        maxDepth: 0,
+      });
+
+      expect(results).toEqual(
+        expect.arrayContaining(['.', 'root/', 'nested/']),
+      );
+      expect(results).not.toContain('root/top.js');
+      expect(results).not.toContain('nested/deep/');
+      expect(results).not.toContain('nested/deep/file.js');
+    });
+
+    it('should respect useGitignore option on git path', async () => {
+      tmpDir = await createTmpDir({
+        '.gitignore': '*.log',
+        'keep.log': '',
+        'keep.txt': '',
+      });
+      await initGitRepo(tmpDir);
+
+      const withoutGitignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const withoutGitignoreResults = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore: withoutGitignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+      expect(withoutGitignoreResults).toContain('keep.log');
+
+      const withGitignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: true,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const withGitignoreResults = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore: withGitignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+      expect(withGitignoreResults).not.toContain('keep.log');
+      expect(withGitignoreResults).toContain('keep.txt');
     });
   });
 
@@ -756,6 +870,39 @@ describe('crawler', () => {
 
       const results2 = await crawl(options);
       expect(results2).toContain('file1.js');
+    });
+
+    it('should throttle re-crawl on non-git fallback paths', async () => {
+      __setCommandRunnerForTests(async (command) => {
+        if (command === 'git' || command === 'rg') {
+          return { success: false, lines: [] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      tmpDir = await createTmpDir({ 'file1.js': '' });
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      const first = await crawl(options);
+      expect(first).toContain('file1.js');
+
+      await fs.writeFile(path.join(tmpDir, 'file2.js'), '');
+
+      const second = await crawl(options);
+      expect(second).toContain('file1.js');
+      expect(second).not.toContain('file2.js');
     });
   });
 
