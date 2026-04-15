@@ -190,7 +190,9 @@ class PtySession {
   async close() {
     try {
       this.proc.kill();
-    } catch {}
+    } catch (_e) {
+      // Process may have already exited — ignore
+    }
     this.terminal.dispose();
     await sleep(100);
   }
@@ -338,8 +340,10 @@ async function main() {
       } else {
         seq = '`' +
           r.keySeq
+            // eslint-disable-next-line no-control-regex
             .replace(/\x1b/g, '\\x1b')
             .replace(/\r/g, '\\r')
+            // eslint-disable-next-line no-control-regex
             .replace(/\x0a/g, '\\x0a') +
           '`';
       }
