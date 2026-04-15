@@ -182,9 +182,7 @@ export async function persistPermissionOutcome(
   }
 
   const scope =
-    outcome === ToolConfirmationOutcome.ProceedAlwaysUser
-      ? 'user'
-      : 'project';
+    outcome === ToolConfirmationOutcome.ProceedAlwaysUser ? 'user' : 'project';
 
   // Read permissionRules from the stored confirmation details first,
   // falling back to payload for backward compatibility.

@@ -95,6 +95,7 @@ vi.mock('./PanelManager.js', async (importOriginal) => {
       getPanel() {
         return mockGetPanel();
       }
+      setPanel = vi.fn();
     },
   };
 });
@@ -111,7 +112,7 @@ vi.mock('./MessageHandler.js', () => ({
     setPermissionHandler = vi.fn();
     setAskUserQuestionHandler = vi.fn();
     setCurrentConversationId = vi.fn();
-    getCurrentConversationId = vi.fn(() => 'conversation-1');
+    getCurrentConversationId = vi.fn(() => null);
     setupFileWatchers = vi.fn(() => ({ dispose: vi.fn() }));
     appendStreamContent = vi.fn();
     route = vi.fn();
@@ -137,6 +138,10 @@ vi.mock('../../utils/errorMessage.js', () => ({
 }));
 
 import { WebViewProvider } from './WebViewProvider.js';
+import {
+  truncatePanelTitle,
+  MAX_PANEL_TITLE_LENGTH,
+} from '../utils/panelTitleUtils.js';
 
 describe('WebViewProvider.attachToView', () => {
   beforeEach(() => {
@@ -296,6 +301,77 @@ describe('WebViewProvider.attachToView', () => {
       },
     });
     expect(panelPostMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('WebViewProvider.createNewSession', () => {
+  it('forces a fresh ACP session for the sidebar new-session action', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    const agentManager = (
+      provider as unknown as {
+        agentManager: {
+          createNewSession: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).agentManager;
+    const messageHandler = (
+      provider as unknown as {
+        messageHandler: {
+          setCurrentConversationId: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).messageHandler;
+
+    await provider.createNewSession();
+
+    expect(agentManager.createNewSession).toHaveBeenCalledWith(
+      '/workspace-root',
+      { forceNew: true },
+    );
+    expect(messageHandler.setCurrentConversationId).toHaveBeenCalledWith(null);
+  });
+});
+
+describe('truncatePanelTitle', () => {
+  it('passes through a short title unchanged', () => {
+    expect(truncatePanelTitle('Short title')).toBe('Short title');
+  });
+
+  it('passes through an empty string unchanged', () => {
+    expect(truncatePanelTitle('')).toBe('');
+  });
+
+  it(`passes through a title of exactly ${MAX_PANEL_TITLE_LENGTH} code points unchanged`, () => {
+    const title = 'a'.repeat(MAX_PANEL_TITLE_LENGTH);
+    expect(truncatePanelTitle(title)).toBe(title);
+  });
+
+  it('truncates a title of MAX+1 characters to MAX content chars + ellipsis', () => {
+    const title = 'a'.repeat(MAX_PANEL_TITLE_LENGTH + 1);
+    const result = truncatePanelTitle(title);
+    expect(result).toBe('a'.repeat(MAX_PANEL_TITLE_LENGTH) + '…');
+    expect([...result].length).toBe(MAX_PANEL_TITLE_LENGTH + 1);
+  });
+
+  it('truncates a very long title to MAX content code points + ellipsis', () => {
+    const title = 'a'.repeat(200);
+    const result = truncatePanelTitle(title);
+    expect(result).toBe('a'.repeat(MAX_PANEL_TITLE_LENGTH) + '…');
+    expect([...result].length).toBe(MAX_PANEL_TITLE_LENGTH + 1);
+  });
+
+  it('does not split a surrogate pair (emoji) at the truncation boundary', () => {
+    // 49 ASCII chars + emoji (1 code point, 2 UTF-16 code units) + trailing text
+    // Total: 49 + 1 + 5 = 55 code points → needs truncation
+    const emoji = '😀';
+    const title = 'a'.repeat(MAX_PANEL_TITLE_LENGTH - 1) + emoji + 'extra';
+    const result = truncatePanelTitle(title);
+    // First 50 code points: 49 'a's + emoji, then '…' — emoji is not split
+    expect(result).toBe('a'.repeat(MAX_PANEL_TITLE_LENGTH - 1) + emoji + '…');
+    expect([...result].length).toBe(MAX_PANEL_TITLE_LENGTH + 1);
   });
 });
 

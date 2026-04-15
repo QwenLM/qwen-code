@@ -1228,10 +1228,16 @@ export default {
     '您必须选择认证方法才能继续。再次按 Ctrl+C 退出',
   'Terms of Services and Privacy Notice': '服务条款和隐私声明',
   'Qwen OAuth': 'Qwen OAuth (免费)',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    '免费 \u00B7 每天最多 1,000 次请求 \u00B7 Qwen 最新模型',
-  'Login with QwenChat account to use daily free quota.':
-    '使用 QwenChat 账号登录，享受每日免费额度。',
+  'Discontinued — switch to Coding Plan or API Key':
+    '已停用 — 请切换到 Coding Plan 或 API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'Qwen OAuth 免费额度已于 2026-04-15 停用。请运行 /auth 切换服务商。',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'Qwen OAuth 免费额度已于 2026-04-15 停用。请选择 Coding Plan 或 API Key。',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Qwen OAuth免费层已于2026-04-15停止服务。请选择其他提供商的模型或运行 /auth 切换。',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ Qwen OAuth 免费额度已于 2026-04-15 停用。请选择其他选项。\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     '付费 \u00B7 每 5 小时最多 6,000 次请求 \u00B7 支持阿里云百炼 Coding Plan 全部模型',
   'Alibaba Cloud Coding Plan': '阿里云百炼 Coding Plan',
@@ -1410,6 +1416,7 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
+  'Press ↑ to edit queued messages': '按 ↑ 编辑排队消息',
 
   // ============================================================================
   // MCP Status
@@ -1476,6 +1483,16 @@ export default {
     '试试 /insight，从聊天记录中生成个性化洞察。',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     '按 Ctrl+O 切换紧凑模式 ── 隐藏工具输出和思考过程，界面更简洁。',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    '添加 QWEN.md 文件，为 Qwen Code 提供持久的项目上下文。',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    '用 /btw 快速问一个小问题，不会打断当前对话。',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    '上下文即将用满！请立即执行 /compress 或使用 /new 开启新会话。',
+  'Context is getting full. Use /compress to free up space.':
+    '上下文空间不足，用 /compress 释放空间。',
+  'Long conversation? /compress summarizes history to free context.':
+    '对话太长？用 /compress 总结历史，释放上下文。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1787,16 +1804,19 @@ export default {
   '⚠️  No authentication method configured.\n': '⚠️  未配置认证方式。\n',
   'Run one of the following commands to get started:\n':
     '运行以下命令之一开始配置：\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - 使用 Qwen OAuth 认证（免费）',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - 使用 Qwen OAuth 登录（已停用）',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - 使用阿里云百炼 Coding Plan 认证\n',
   'Or simply run:': '或者直接运行：',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - 交互式认证配置\n',
   '✓ Authentication Method: Qwen OAuth': '✓ 认证方式：Qwen OAuth',
-  '  Type: Free tier': '  类型：免费版',
-  '  Limit: Up to 1,000 requests/day': '  限额：每天最多 1,000 次请求',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  类型：免费额度（2026-04-15 已停用）',
+  '  Limit: No longer available': '  限额：已不可用',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'Qwen OAuth 免费额度已于 2026-04-15 停用。请运行 /auth 切换到 Coding Plan、OpenRouter、Fireworks AI 或其他服务商。',
   '  Models: Qwen latest models\n': '  模型：Qwen 最新模型\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ 认证方式：阿里云百炼 Coding Plan',

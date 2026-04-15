@@ -135,6 +135,9 @@ export function SettingsDialog({
           : key,
         value: key,
         type: definition?.type,
+        description: definition?.description
+          ? t(definition.description) || definition.description
+          : undefined,
         toggle: () => {
           if (!TOGGLE_TYPES.has(definition?.type)) {
             return;
@@ -397,10 +400,17 @@ export function SettingsDialog({
     setMode('settings');
   };
 
+  // Get the description for the currently active setting
+  const activeDescription =
+    mode === 'settings' && items[activeSettingIndex]?.description
+      ? items[activeSettingIndex].description
+      : undefined;
+
   // Height constraint calculations similar to ThemeDialog
   const DIALOG_PADDING = 2;
   const SETTINGS_TITLE_HEIGHT = 2; // "Settings" title + spacing
   const SCROLL_ARROWS_HEIGHT = 2; // Up and down arrows
+  const DESCRIPTION_HEIGHT = 2; // Description line + margin
   const BOTTOM_HELP_TEXT_HEIGHT = 1; // Help text
   const RESTART_PROMPT_HEIGHT = showRestartPrompt ? 1 : 0;
 
@@ -413,6 +423,7 @@ export function SettingsDialog({
     DIALOG_PADDING +
     SETTINGS_TITLE_HEIGHT +
     SCROLL_ARROWS_HEIGHT +
+    DESCRIPTION_HEIGHT +
     BOTTOM_HELP_TEXT_HEIGHT +
     RESTART_PROMPT_HEIGHT;
 
@@ -579,6 +590,12 @@ export function SettingsDialog({
             }
             return;
           }
+          if (currentItem?.value === 'fastModel') {
+            if (name === 'return') {
+              onSelect('fastModel', selectedScope);
+            }
+            return;
+          }
           if (
             currentItem?.type === 'number' ||
             currentItem?.type === 'string'
@@ -586,6 +603,16 @@ export function SettingsDialog({
             startEditing(currentItem.value);
           } else {
             currentItem?.toggle();
+          }
+        } else if (name === 'right') {
+          // Right arrow opens sub-dialog settings (like a sub-menu)
+          const currentItem = items[activeSettingIndex];
+          if (
+            currentItem?.value === 'ui.theme' ||
+            currentItem?.value === 'general.preferredEditor' ||
+            currentItem?.value === 'fastModel'
+          ) {
+            onSelect(currentItem.value, selectedScope);
           }
         } else if (/^[0-9]$/.test(key.sequence || '') && !editingKey) {
           const currentItem = items[activeSettingIndex];
@@ -798,6 +825,12 @@ export function SettingsDialog({
                 displayValue = editBuffer;
               }
             } else if (item.type === 'number' || item.type === 'string') {
+              // Settings that open a sub-dialog on Enter
+              const isSubDialogSetting =
+                item.value === 'ui.theme' ||
+                item.value === 'general.preferredEditor' ||
+                item.value === 'fastModel';
+
               // For numbers/strings, get the actual current value from pending settings
               const path = item.value.split('.');
               const currentValue = getNestedValue(pendingSettings, path);
@@ -824,6 +857,11 @@ export function SettingsDialog({
 
               if (isDifferentFromDefault || isModified) {
                 displayValue += '*';
+              }
+
+              // Append ▸ for sub-dialog settings to hint Enter opens a picker
+              if (isSubDialogSetting) {
+                displayValue = displayValue ? displayValue + ' ▸' : '▸';
               }
             } else {
               // For booleans and other types, use existing logic
@@ -893,7 +931,14 @@ export function SettingsDialog({
           initialScope={selectedScope}
         />
       )}
-      <Box marginTop={1}>
+      {activeDescription && mode === 'settings' && (
+        <Box marginTop={1}>
+          <Text color={theme.text.secondary} wrap="truncate-end" italic>
+            {activeDescription}
+          </Text>
+        </Box>
+      )}
+      <Box marginTop={activeDescription && mode === 'settings' ? 0 : 1}>
         <Text color={theme.text.secondary} wrap="truncate">
           {mode === 'settings'
             ? t('(Use Enter to select, Tab to configure scope)')

@@ -19,4 +19,5 @@ export default {
   hooks: 'Hooks',
   'status-line': 'Status Line',
   'scheduled-tasks': 'Scheduled Tasks',
+  tips: 'Contextual Tips',
 };

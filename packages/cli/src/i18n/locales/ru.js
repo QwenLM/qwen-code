@@ -1176,10 +1176,16 @@ export default {
   'Terms of Services and Privacy Notice':
     'Условия обслуживания и уведомление о конфиденциальности',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Бесплатно \u00B7 До 1 000 запросов/день \u00B7 Новейшие модели Qwen',
-  'Login with QwenChat account to use daily free quota.':
-    'Войдите с помощью аккаунта QwenChat, чтобы использовать ежедневную бесплатную квоту.',
+  'Discontinued — switch to Coding Plan or API Key':
+    'Прекращено — переключитесь на Coding Plan или API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выполните /auth для смены провайдера.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выберите Coding Plan или API Key.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Бесплатный уровень Qwen OAuth был прекращен 2026-04-15. Пожалуйста, выберите модель от другого провайдера или выполните /auth для переключения.',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выберите другую опцию.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Платно \u00B7 До 6 000 запросов/5 часов \u00B7 Все модели Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
@@ -1368,6 +1374,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Нажмите Ctrl+C снова для выхода.',
   'Press Ctrl+D again to exit.': 'Нажмите Ctrl+D снова для выхода.',
   'Press Esc again to clear.': 'Нажмите Esc снова для очистки.',
+  'Press ↑ to edit queued messages':
+    'Нажмите ↑ для редактирования сообщений в очереди',
 
   // ============================================================================
   // Статус MCP
@@ -1709,6 +1717,16 @@ export default {
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     'Нажмите Ctrl+O для переключения компактного режима — скрыть вывод инструментов и рассуждения.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Добавьте файл QWEN.md, чтобы предоставить Qwen Code постоянный контекст проекта.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Используйте /btw, чтобы задать короткий побочный вопрос, не прерывая основной разговор.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Контекст почти заполнен! Выполните /compress сейчас или начните /new, чтобы продолжить.',
+  'Context is getting full. Use /compress to free up space.':
+    'Контекст заполняется. Используйте /compress, чтобы освободить место.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Долгий разговор? /compress подведёт итог истории, чтобы освободить контекст.',
 
   // ============================================================================
   // Custom API Key Configuration
@@ -1937,16 +1955,19 @@ export default {
     '⚠️  Метод аутентификации не настроен.\n',
   'Run one of the following commands to get started:\n':
     'Выполните одну из следующих команд для начала:\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - Аутентификация через Qwen OAuth (бесплатно)',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - Аутентификация через Qwen OAuth (прекращено)',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - Аутентификация через Alibaba Cloud Coding Plan\n',
   'Or simply run:': 'Или просто выполните:',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Интерактивная настройка аутентификации\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Метод аутентификации: Qwen OAuth',
-  '  Type: Free tier': '  Тип: Бесплатный',
-  '  Limit: Up to 1,000 requests/day': '  Лимит: До 1 000 запросов/день',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  Тип: Бесплатный уровень (прекращено 2026-04-15)',
+  '  Limit: No longer available': '  Лимит: Больше не доступен',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выполните /auth для переключения на Coding Plan, OpenRouter, Fireworks AI или другого провайдера.',
   '  Models: Qwen latest models\n': '  Модели: Последние модели Qwen\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Метод аутентификации: Alibaba Cloud Coding Plan',

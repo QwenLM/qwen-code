@@ -1299,10 +1299,16 @@ export default {
   'Terms of Services and Privacy Notice':
     'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
-  'Login with QwenChat account to use daily free quota.':
-    'Login with QwenChat account to use daily free quota.',
+  'Discontinued — switch to Coding Plan or API Key':
+    'Discontinued — switch to Coding Plan or API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
@@ -1490,6 +1496,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
+  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
 
   // ============================================================================
   // MCP Status
@@ -1559,6 +1566,16 @@ export default {
     'Try /insight to generate personalized insights from your chat history.',
   'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
     'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Add a QWEN.md file to give Qwen Code persistent project context.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Use /btw to ask a quick side question without disrupting the conversation.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Context is almost full! Run /compress now or start /new to continue.',
+  'Context is getting full. Use /compress to free up space.':
+    'Context is getting full. Use /compress to free up space.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Long conversation? /compress summarizes history to free context.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1981,16 +1998,19 @@ export default {
     '⚠️  No authentication method configured.\n',
   'Run one of the following commands to get started:\n':
     'Run one of the following commands to get started:\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
   'Or simply run:': 'Or simply run:',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Interactive authentication setup\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Authentication Method: Qwen OAuth',
-  '  Type: Free tier': '  Type: Free tier',
-  '  Limit: Up to 1,000 requests/day': '  Limit: Up to 1,000 requests/day',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  Type: Free tier (discontinued 2026-04-15)',
+  '  Limit: No longer available': '  Limit: No longer available',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.',
   '  Models: Qwen latest models\n': '  Models: Qwen latest models\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Authentication Method: Alibaba Cloud Coding Plan',

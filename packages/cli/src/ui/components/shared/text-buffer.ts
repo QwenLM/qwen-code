@@ -32,14 +32,6 @@ export type Direction =
   | 'home'
   | 'end';
 
-// Simple helper for word‑wise ops.
-function isWordChar(ch: string | undefined): boolean {
-  if (ch === undefined) {
-    return false;
-  }
-  return !/[\s,.;!?]/.test(ch);
-}
-
 // Helper functions for line-based word navigation
 export const isWordCharStrict = (char: string): boolean =>
   /[\w\p{L}\p{N}]/u.test(char); // Matches a single character that is any Unicode letter, any Unicode number, or an underscore
@@ -69,6 +61,308 @@ export const isDifferentScript = (char1: string, char2: string): boolean => {
   if (!isWordCharStrict(char1) || !isWordCharStrict(char2)) return false;
   return getCharScript(char1) !== getCharScript(char2);
 };
+
+/** Shared regex for CJK (Chinese/Japanese/Korean) characters */
+const CJK_CHAR_REGEX =
+  /[\u4e00-\u9fff\u3400-\u4dbf\uf900-\ufaff\u3040-\u309f\u30a0-\u30ff\uac00-\ud7af]/;
+
+/** Check if a character is a CJK character */
+const isCjkChar = (char: string): boolean => CJK_CHAR_REGEX.test(char);
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Word segmentation (Intl.Segmenter)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** Max entries in the word boundaries cache before eviction */
+const WORD_BOUNDARIES_CACHE_MAX = 500;
+
+/** Skip segmentation for lines longer than this (in code points) to prevent UI lag on huge pastes */
+const SEGMENTER_LENGTH_LIMIT = 1500;
+
+/** Cache: line content → array of { start: codePointIndex, end: codePointIndex } */
+let wordBoundariesCache: Map<
+  string,
+  Array<{ start: number; end: number }>
+> | null = null;
+
+/** Lazily initialized Intl.Segmenter instance */
+let segmenter: Intl.Segmenter | null | false = null;
+
+/**
+ * Lazily initialize Intl.Segmenter for word segmentation.
+ * Uses `false` as a sentinel to distinguish "not yet tried" from "failed".
+ */
+function ensureSegmenterLoaded(): void {
+  if (segmenter !== null) return; // already loaded or previously marked as failed
+  try {
+    segmenter = new Intl.Segmenter('zh', { granularity: 'word' });
+    debugLogger.info('Intl.Segmenter: initialized successfully');
+  } catch (err) {
+    debugLogger.warn('Intl.Segmenter: failed to initialize', err);
+    segmenter = false; // sentinel: don't retry on every call
+  }
+}
+
+/**
+ * Fallback: build word boundaries character-by-character.
+ * Each CJK character becomes its own word boundary; non-CJK characters are
+ * not emitted here — callers should use outer fallback loops (e.g.,
+ * `findPrevWordStartInLine`, `findNextWordStartInLine`) for pure ASCII text.
+ * Returns an empty array for lines with no CJK characters.
+ */
+function charByCharFallback(
+  line: string,
+): Array<{ start: number; end: number }> {
+  const codePoints = toCodePoints(line);
+  const fallback: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < codePoints.length; i++) {
+    if (isCjkChar(codePoints[i]!)) {
+      fallback.push({ start: i, end: i + 1 });
+    }
+  }
+  return fallback;
+}
+
+/**
+ * Evict oldest entry if cache exceeds the soft cap.
+ * Uses single-entry eviction to preserve hot data.
+ */
+function evictCacheIfNeeded(): void {
+  if (
+    wordBoundariesCache &&
+    wordBoundariesCache.size >= WORD_BOUNDARIES_CACHE_MAX
+  ) {
+    const firstKey = wordBoundariesCache.keys().next().value;
+    if (firstKey !== undefined) {
+      wordBoundariesCache.delete(firstKey);
+    }
+  }
+}
+
+/**
+ * Reset word segmentation state for testing.
+ * Clears the cache and forces re-initialization of Intl.Segmenter.
+ * @internal — only used in tests to ensure test isolation.
+ */
+export function __resetWordSegmenter(): void {
+  wordBoundariesCache = null;
+  segmenter = null;
+}
+
+/**
+ * Get word boundaries (in code-point indices) for a given line.
+ * Uses Intl.Segmenter for all text, not just CJK.
+ * Returns an array of { start, end } where end is exclusive.
+ * @param codePoints - Optional pre-computed code points array to avoid redundant toCodePoints calls.
+ */
+function getWordBoundaries(
+  line: string,
+  codePoints?: string[],
+): Array<{ start: number; end: number }> {
+  const cps = codePoints ?? toCodePoints(line);
+  // Optimization: Fallback to char-by-char for huge lines to prevent UI freeze
+  if (cps.length > SEGMENTER_LENGTH_LIMIT) {
+    if (!wordBoundariesCache) wordBoundariesCache = new Map();
+    if (wordBoundariesCache.has(line)) return wordBoundariesCache.get(line)!;
+    const fallback = charByCharFallback(line);
+    evictCacheIfNeeded();
+    wordBoundariesCache.set(line, fallback);
+    return fallback;
+  }
+
+  // Check cache
+  if (!wordBoundariesCache) wordBoundariesCache = new Map();
+  const cached = wordBoundariesCache.get(line);
+  if (cached) {
+    return cached;
+  }
+
+  // Ensure segmenter is loaded
+  ensureSegmenterLoaded();
+
+  if (!segmenter) {
+    // segmenter unavailable; fall back to char-by-char boundaries
+    const fallback = charByCharFallback(line);
+    evictCacheIfNeeded();
+    wordBoundariesCache.set(line, fallback);
+    return fallback;
+  }
+
+  try {
+    const segments = segmenter.segment(line);
+
+    // Build code-point index mapping
+    const cpToStrIdx: number[] = [];
+    let strIdx = 0;
+    for (let i = 0; i < cps.length; i++) {
+      cpToStrIdx[i] = strIdx;
+      strIdx += cps[i]!.length;
+    }
+
+    // Map segments to code-point boundaries
+    const boundaries: Array<{ start: number; end: number }> = [];
+
+    for (const { index, segment, isWordLike } of segments) {
+      // Skip whitespace-only segments
+      const trimmedSegment = segment.trim();
+      if (!isWordLike && trimmedSegment.length === 0) {
+        continue; // Skip whitespace
+      }
+
+      // For word-like segments that contain '.', split into sub-segments
+      // e.g., "Intl.Segmenter" → ["Intl", ".", "Segmenter"]
+      if (isWordLike && segment.includes('.')) {
+        let currentOffset = index;
+        const parts = segment.split(/(\.)/); // Keep the '.' as separate parts
+        for (const part of parts) {
+          if (part.length === 0) continue;
+
+          const partStartCpIdx = binarySearchCpIndex(cpToStrIdx, currentOffset);
+          const partEndStrPos = currentOffset + part.length;
+          const partEndCpIdxRaw = binarySearchCpIndex(
+            cpToStrIdx,
+            partEndStrPos,
+          );
+          const partEndCpIdx =
+            partEndCpIdxRaw === -1 ? cps.length : partEndCpIdxRaw;
+
+          if (partStartCpIdx >= 0 && partStartCpIdx < partEndCpIdx) {
+            boundaries.push({ start: partStartCpIdx, end: partEndCpIdx });
+          }
+
+          currentOffset += part.length;
+        }
+        continue;
+      }
+
+      // For standalone punctuation, include it as a boundary marker
+      if (!isWordLike && /^[.,;!?，。；！？、]+$/.test(trimmedSegment)) {
+        const startCpIdx = binarySearchCpIndex(cpToStrIdx, index);
+        const endStrPos = index + segment.length;
+        const endCpIdxRaw = binarySearchCpIndex(cpToStrIdx, endStrPos);
+        const endCpIdx = endCpIdxRaw === -1 ? cps.length : endCpIdxRaw;
+        if (startCpIdx >= 0 && startCpIdx < endCpIdx) {
+          boundaries.push({ start: startCpIdx, end: endCpIdx });
+        }
+        continue;
+      }
+
+      // Regular word-like segment
+      const startCpIdx = binarySearchCpIndex(cpToStrIdx, index);
+      const endStrPos = index + segment.length;
+      const endCpIdxRaw = binarySearchCpIndex(cpToStrIdx, endStrPos);
+      const endCpIdx = endCpIdxRaw === -1 ? cps.length : endCpIdxRaw;
+
+      if (startCpIdx >= 0 && startCpIdx < endCpIdx) {
+        boundaries.push({ start: startCpIdx, end: endCpIdx });
+      }
+    }
+
+    evictCacheIfNeeded();
+    wordBoundariesCache.set(line, boundaries);
+    return boundaries;
+  } catch (err) {
+    debugLogger.warn('getWordBoundaries: error, using char fallback', err);
+    const fallback = charByCharFallback(line);
+    evictCacheIfNeeded();
+    wordBoundariesCache.set(line, fallback);
+    return fallback;
+  }
+}
+
+/**
+ * Binary search for the first code-point index with string offset >= target.
+ * cpToStrIdx is monotonically increasing.
+ */
+function binarySearchCpIndex(cpToStrIdx: number[], target: number): number {
+  let lo = 0;
+  let hi = cpToStrIdx.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >>> 1;
+    if (cpToStrIdx[mid]! >= target) hi = mid - 1;
+    else lo = mid + 1;
+  }
+  return lo < cpToStrIdx.length ? lo : -1;
+}
+
+/**
+ * Given word boundaries and a cursor position, find the previous word start.
+ * Returns null if no boundary applies.
+ *
+ * Semantics match browser/editor behavior:
+ * - Cursor inside a word → jump to that word's start
+ * - Cursor exactly at a word's start → jump to previous word's start
+ */
+function findPrevWordStart(
+  boundaries: Array<{ start: number; end: number }>,
+  col: number,
+): number | null {
+  for (let i = boundaries.length - 1; i >= 0; i--) {
+    const b = boundaries[i]!;
+    if (col > b.start && col <= b.end) {
+      // Cursor is inside this word → jump to its start
+      return b.start;
+    }
+    if (col === b.start && i > 0) {
+      // Cursor is exactly at this word's start → jump to previous word's start
+      return boundaries[i - 1]!.start;
+    }
+  }
+  return null;
+}
+
+/**
+ * Given word boundaries and a cursor position, find the next word end.
+ * Returns null if no boundary applies.
+ */
+function findNextWordEnd(
+  boundaries: Array<{ start: number; end: number }>,
+  col: number,
+): number | null {
+  for (const b of boundaries) {
+    if (col >= b.start && col < b.end) {
+      return b.end;
+    }
+    if (col < b.start) {
+      // Cursor is before this word — no applicable boundary
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Fallback: find word end by scanning forward from startPos.
+ * Respects script boundaries and treats each CJK character as its own word.
+ */
+function findWordEndFallback(arr: string[], startPos: number): number {
+  let end = startPos;
+  while (end < arr.length) {
+    const currChar = arr[end];
+    const nextChar = end + 1 < arr.length ? arr[end + 1] : undefined;
+    if (
+      !isWordCharStrict(currChar ?? '') ||
+      (nextChar !== undefined &&
+        isWordCharStrict(currChar ?? '') &&
+        isWordCharStrict(nextChar) &&
+        isDifferentScript(currChar ?? '', nextChar))
+    ) {
+      break;
+    }
+    // If current and next are both CJK (same script), stop here
+    // so each CJK character becomes its own word
+    if (
+      nextChar !== undefined &&
+      isCjkChar(currChar ?? '') &&
+      isCjkChar(nextChar)
+    ) {
+      end++;
+      break;
+    }
+    end++;
+  }
+  return end;
+}
 
 // Find next word start within a line, starting from col
 export const findNextWordStartInLine = (
@@ -1177,24 +1471,58 @@ function textBufferReducerLogic(
           let newCursorCol = cursorCol;
 
           if (cursorCol === 0) {
+            // At start of line, move to end of previous line
             newCursorRow--;
             newCursorCol = cpLen(lines[newCursorRow] ?? '');
           } else {
             const lineContent = lines[cursorRow];
             const arr = toCodePoints(lineContent);
             let start = cursorCol;
-            let onlySpaces = true;
-            for (let i = 0; i < start; i++) {
-              if (isWordChar(arr[i])) {
-                onlySpaces = false;
-                break;
-              }
-            }
-            if (onlySpaces && start > 0) {
-              start--;
+
+            // Try CJK segmentation first for lines containing CJK
+            const boundaries = getWordBoundaries(lineContent, arr);
+            const startBoundary = findPrevWordStart(boundaries, start);
+            if (startBoundary !== null) {
+              start = startBoundary;
             } else {
-              while (start > 0 && !isWordChar(arr[start - 1])) start--;
-              while (start > 0 && isWordChar(arr[start - 1])) start--;
+              // Fallback: word boundary detection
+              // Check if we're in a whitespace-only prefix before any word
+              let onlySpaces = true;
+              for (let i = 0; i < start; i++) {
+                if (isWordCharStrict(arr[i] ?? '')) {
+                  onlySpaces = false;
+                  break;
+                }
+              }
+
+              if (onlySpaces) {
+                // All characters before cursor are whitespace/special
+                // Jump to column 0 (start of line)
+                start = 0;
+              } else {
+                // First: skip backwards over non-word characters (punctuation)
+                while (start > 0 && !isWordCharStrict(arr[start - 1] ?? ''))
+                  start--;
+                // Then: move to the start of the current word
+                // For CJK text (same script), treat each character as a word
+                while (start > 0) {
+                  const prevChar = arr[start - 1];
+                  const currChar = arr[start];
+                  if (
+                    !isWordCharStrict(prevChar ?? '') ||
+                    (isWordCharStrict(currChar ?? '') &&
+                      isDifferentScript(currChar ?? '', prevChar ?? ''))
+                  ) {
+                    break;
+                  }
+                  // If current and previous are both CJK (same script), stop here
+                  // so each CJK character becomes its own word
+                  if (isCjkChar(currChar ?? '') && isCjkChar(prevChar ?? '')) {
+                    break;
+                  }
+                  start--;
+                }
+              }
             }
             newCursorCol = start;
           }
@@ -1222,9 +1550,44 @@ function textBufferReducerLogic(
             newCursorRow++;
             newCursorCol = 0;
           } else {
-            let end = cursorCol;
-            while (end < arr.length && !isWordChar(arr[end])) end++;
-            while (end < arr.length && isWordChar(arr[end])) end++;
+            // Try segmentation first for lines containing CJK
+            const boundaries = getWordBoundaries(lineContent, arr);
+            const endBoundary = findNextWordEnd(boundaries, cursorCol);
+
+            let end: number;
+            if (endBoundary !== null) {
+              end = endBoundary;
+              // Modern editor behavior: skip whitespace to land on next word's start
+              while (end < arr.length && isWhitespace(arr[end] ?? '')) {
+                end++;
+              }
+            } else if (
+              cursorCol < arr.length &&
+              !isWordCharStrict(arr[cursorCol] ?? '')
+            ) {
+              // Cursor is on non-word character (space/punctuation)
+              // Skip over non-word characters first, then find next word end
+              end = cursorCol;
+              while (end < arr.length && !isWordCharStrict(arr[end] ?? ''))
+                end++;
+              // Now find the end of the word we just reached
+              if (end < arr.length) {
+                // Check if boundaries cover this new position
+                const nextEnd = findNextWordEnd(boundaries, end);
+                if (nextEnd !== null) {
+                  end = nextEnd;
+                } else {
+                  end = findWordEndFallback(arr, end);
+                }
+              }
+            } else {
+              // Fallback: word boundary detection
+              end = cursorCol;
+              // Skip over non-word characters (punctuation/whitespace)
+              while (end < arr.length && !isWordCharStrict(arr[end] ?? ''))
+                end++;
+              end = findWordEndFallback(arr, end);
+            }
             newCursorCol = end;
           }
           return {
@@ -1286,11 +1649,20 @@ function textBufferReducerLogic(
 
       if (newCursorCol > 0) {
         const lineContent = currentLine(newCursorRow);
-        const prevWordStart = findPrevWordStartInLine(
-          lineContent,
-          newCursorCol,
-        );
-        const start = prevWordStart === null ? 0 : prevWordStart;
+        const arr = toCodePoints(lineContent);
+        // Try segmentation first
+        const boundaries = getWordBoundaries(lineContent, arr);
+        const startBoundary = findPrevWordStart(boundaries, newCursorCol);
+        let start: number;
+        if (startBoundary !== null) {
+          start = startBoundary;
+        } else {
+          const prevWordStart = findPrevWordStartInLine(
+            lineContent,
+            newCursorCol,
+          );
+          start = prevWordStart === null ? 0 : prevWordStart;
+        }
         newLines[newCursorRow] =
           cpSlice(lineContent, 0, start) + cpSlice(lineContent, newCursorCol);
         newCursorCol = start;
@@ -1332,8 +1704,21 @@ function textBufferReducerLogic(
         newLines[cursorRow] = lineContent + nextLineContent;
         newLines.splice(cursorRow + 1, 1);
       } else {
-        const nextWordStart = findNextWordStartInLine(lineContent, cursorCol);
-        const end = nextWordStart === null ? lineLen : nextWordStart;
+        const arr = toCodePoints(lineContent);
+        // Try segmentation first
+        const boundaries = getWordBoundaries(lineContent, arr);
+        const endBoundary = findNextWordEnd(boundaries, cursorCol);
+        let end: number;
+        if (endBoundary !== null) {
+          end = endBoundary;
+          // Skip over any whitespace after the word to reach next word's start
+          while (end < arr.length && isWhitespace(arr[end] ?? '')) {
+            end++;
+          }
+        } else {
+          const nextWordStart = findNextWordStartInLine(lineContent, cursorCol);
+          end = nextWordStart === null ? lineLen : nextWordStart;
+        }
         newLines[cursorRow] =
           cpSlice(lineContent, 0, cursorCol) + cpSlice(lineContent, end);
       }
@@ -1935,7 +2320,13 @@ export function useTextBuffer({
       else if (key.name === 'delete' || (key.ctrl && key.name === 'd')) del();
       else if (key.ctrl && !key.shift && key.name === 'z') undo();
       else if (key.ctrl && key.shift && key.name === 'z') redo();
-      else if (input && !key.ctrl && !key.meta) {
+      else if (
+        input &&
+        !key.ctrl &&
+        !key.meta &&
+        key.name !== 'tab' &&
+        input !== '\t'
+      ) {
         insert(input, { paste: key.paste });
       }
     },

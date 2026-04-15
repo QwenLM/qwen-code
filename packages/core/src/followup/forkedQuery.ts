@@ -237,9 +237,11 @@ export async function runForkedQuery(
   for await (const event of stream) {
     if (event.type !== StreamEventType.CHUNK) continue;
     const response = event.value;
-    // Extract text from candidates
+    // Extract text from candidates, skipping thought/reasoning parts.
+    // Some providers may return thinking content even with enable_thinking: false.
     const text = response.candidates?.[0]?.content?.parts
-      ?.map((p) => p.text ?? '')
+      ?.filter((p) => !(p as Record<string, unknown>)['thought'])
+      .map((p) => p.text ?? '')
       .join('');
     if (text) {
       fullText += text;
