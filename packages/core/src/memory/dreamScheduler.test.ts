@@ -21,6 +21,7 @@ import { runManagedAutoMemoryDream } from './dream.js';
 import {
   createManagedAutoMemoryDreamRuntimeForTests,
   DEFAULT_AUTO_DREAM_MIN_HOURS,
+  DREAM_TASK_TYPE,
   type SessionScannerFn,
 } from './dreamScheduler.js';
 import { ensureAutoMemoryScaffold } from './store.js';
@@ -208,5 +209,30 @@ describe('managed auto-memory dream scheduler', () => {
     ) as { lastDreamSessionId?: string; lastDreamAt?: string };
     expect(metadata.lastDreamSessionId).toBe('session-1');
     expect(metadata.lastDreamAt).toBe('2026-04-01T10:00:00.000Z');
+  });
+
+  it('test runtimes created by the factory have isolated task registries', async () => {
+    const runtimeA = createManagedAutoMemoryDreamRuntimeForTests(
+      makeSessionScanner(['session-0']),
+    );
+    const runtimeB = createManagedAutoMemoryDreamRuntimeForTests(
+      makeSessionScanner(['session-0']),
+    );
+
+    const result = await runtimeA.schedule({
+      projectRoot,
+      sessionId: 'session-1',
+      now: new Date('2026-04-01T10:00:00.000Z'),
+      minHoursBetweenDreams: 0,
+      minSessionsBetweenDreams: 1,
+    });
+    expect(result.status).toBe('scheduled');
+    await result.promise;
+
+    // runtimeA has the dream task; runtimeB registry is completely empty
+    const tasksA = runtimeA.registry.list();
+    expect(tasksA.length).toBeGreaterThan(0);
+    expect(tasksA.every((t) => t.taskType === DREAM_TASK_TYPE)).toBe(true);
+    expect(runtimeB.registry.list()).toHaveLength(0);
   });
 });

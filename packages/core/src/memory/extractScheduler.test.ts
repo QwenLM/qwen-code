@@ -9,7 +9,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import { createManagedAutoMemoryExtractRuntimeForTests } from './extractScheduler.js';
+import {
+  createManagedAutoMemoryExtractRuntimeForTests,
+  EXTRACT_TASK_TYPE,
+} from './extractScheduler.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { getAutoMemoryFilePath } from './paths.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
@@ -148,5 +151,28 @@ describe('managed auto-memory extraction runtime', () => {
     });
 
     expect(result.skippedReason).toBe('already_running');
+  });
+
+  it('test runtimes created by the factory have isolated task registries', async () => {
+    const runtimeA = createManagedAutoMemoryExtractRuntimeForTests();
+    const runtimeB = createManagedAutoMemoryExtractRuntimeForTests();
+
+    // Schedule a task only in runtimeA
+    await runtimeA.schedule({
+      projectRoot,
+      sessionId: 'session-a',
+      config: mockConfig,
+      history: [{ role: 'user', parts: [{ text: 'Prefer terse responses.' }] }],
+    });
+    await runtimeA.drain({ timeoutMs: 1_000 });
+
+    // runtimeA registry has tasks, runtimeB registry is empty
+    expect(runtimeA.listTasks(projectRoot).length).toBeGreaterThan(0);
+    expect(runtimeB.listTasks(projectRoot)).toHaveLength(0);
+
+    // All tasks in runtimeA belong to the extract type
+    expect(
+      runtimeA.listTasks().every((t) => t.taskType === EXTRACT_TASK_TYPE),
+    ).toBe(true);
   });
 });
