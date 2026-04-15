@@ -43,6 +43,7 @@ import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
+import { pathToFileURL } from 'node:url';
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
@@ -3847,5 +3848,185 @@ describe('CoreToolScheduler IDE interaction', () => {
     // Tool should be awaiting approval but openDiff was never called
     await waitForStatus(onToolCallsUpdate, 'awaiting_approval');
     expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
+  });
+});
+
+describe('LSP Integration', () => {
+  // Helper function to create mock LSP client
+  const createMockLspClient = () => ({
+    notifyDocumentSaved: vi.fn().mockResolvedValue(undefined),
+  });
+
+  // Helper function to create mock config with optional LSP client
+  const createLspMockConfig = (
+    mockToolRegistry: ToolRegistry,
+    mockLspClient?: { notifyDocumentSaved: ReturnType<typeof vi.fn> },
+  ) =>
+    ({
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getTruncateToolOutputThreshold: () => 500,
+      getTruncateToolOutputLines: () => 100,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getLspClient: () => mockLspClient,
+      getChatRecordingService: () => undefined,
+    }) as unknown as Config;
+
+  it('should call notifyDocumentSaved after edit tool execution', async () => {
+    const mockLspClient = createMockLspClient();
+    const mockEditTool = new MockTool({
+      name: 'edit',
+      description: 'Edit a file',
+      kind: Kind.Edit,
+      execute: async (params: { [key: string]: unknown }) => ({
+        llmContent: `File ${params['file_path']} edited successfully.`,
+        returnDisplay: `File edited.`,
+      }),
+    });
+
+    const mockToolRegistry = {
+      getTool: vi.fn((name) => (name === 'edit' ? mockEditTool : null)),
+      getAllToolNames: vi.fn(() => ['edit']),
+      registerTool: vi.fn(),
+    } as unknown as ToolRegistry;
+
+    const mockConfig = createLspMockConfig(mockToolRegistry, mockLspClient);
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const filePath = '/test/workspace/example.ts';
+    const request = {
+      callId: 'edit-1',
+      name: 'edit',
+      args: {
+        file_path: filePath,
+        old_string: 'old',
+        new_string: 'new',
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-edit-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    // Use pathToFileURL to ensure cross-platform compatibility
+    const expectedUri = pathToFileURL(filePath).toString();
+    expect(mockLspClient.notifyDocumentSaved).toHaveBeenCalledTimes(1);
+    expect(mockLspClient.notifyDocumentSaved).toHaveBeenCalledWith(expectedUri);
+  });
+
+  it('should not call notifyDocumentSaved for non-edit tools', async () => {
+    const mockLspClient = createMockLspClient();
+    const mockReadTool = new MockTool({
+      name: 'read_file',
+      description: 'Read a file',
+      kind: Kind.Read,
+      execute: async (params: { [key: string]: unknown }) => ({
+        llmContent: `File ${params['file_path']} content`,
+        returnDisplay: `File read.`,
+      }),
+    });
+
+    const mockToolRegistry = {
+      getTool: vi.fn((name) => (name === 'read_file' ? mockReadTool : null)),
+      getAllToolNames: vi.fn(() => ['read_file']),
+      registerTool: vi.fn(),
+    } as unknown as ToolRegistry;
+
+    const mockConfig = createLspMockConfig(mockToolRegistry, mockLspClient);
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'read-1',
+      name: 'read_file',
+      args: { file_path: '/test/workspace/example.ts' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-read-1',
+    };
+
+    const abortController = new AbortController();
+    await scheduler.schedule([request], abortController.signal);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    expect(mockLspClient.notifyDocumentSaved).not.toHaveBeenCalled();
+  });
+
+  it('should handle missing LSP client gracefully', async () => {
+    const mockEditTool = new MockTool({
+      name: 'edit',
+      description: 'Edit a file',
+      kind: Kind.Edit,
+      execute: async (params: { [key: string]: unknown }) => ({
+        llmContent: `File ${params['file_path']} edited successfully.`,
+        returnDisplay: `File edited.`,
+      }),
+    });
+
+    const mockToolRegistry = {
+      getTool: vi.fn((name) => (name === 'edit' ? mockEditTool : null)),
+      getAllToolNames: vi.fn(() => ['edit']),
+      registerTool: vi.fn(),
+    } as unknown as ToolRegistry;
+
+    // No LSP client
+    const mockConfig = createLspMockConfig(mockToolRegistry);
+    const onAllToolCallsComplete = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    const request = {
+      callId: 'edit-2',
+      name: 'edit',
+      args: {
+        file_path: '/test/workspace/example.ts',
+        old_string: 'old',
+        new_string: 'new',
+      },
+      isClientInitiated: false,
+      prompt_id: 'prompt-edit-2',
+    };
+
+    const abortController = new AbortController();
+    await expect(
+      scheduler.schedule([request], abortController.signal),
+    ).resolves.toBeUndefined();
+
+    await new Promise((resolve) => setTimeout(resolve, 100));
   });
 });

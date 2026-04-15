@@ -27,6 +27,7 @@ import type {
   LspWorkspaceEdit,
 } from './types.js';
 import type { EventEmitter } from 'events';
+import type * as lsp from 'vscode-languageserver-protocol';
 import {
   DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS,
   DEFAULT_LSP_DOCUMENT_RETRY_DELAY_MS,
@@ -1219,6 +1220,81 @@ export class NativeLspService {
       debugLogger.error('Failed to apply workspace edit:', error);
       return false;
     }
+  }
+
+  /**
+   * Notify LSP servers that a document has been saved.
+   * This sends textDocument/didSave to all ready servers that support it,
+   * triggering them to re-read the file from disk and update their internal state.
+   *
+   * @param uri - The document URI (file:// path)
+   * @param serverName - Optional specific server to notify
+   */
+  async notifyDocumentSaved(uri: string, serverName?: string): Promise<void> {
+    const handles = this.getReadyHandles(serverName);
+
+    for (const [name, handle] of handles) {
+      try {
+        // Check if server supports didSave notification
+        const saveCap = this.getSaveCapability(handle);
+        if (!saveCap) {
+          debugLogger.debug(
+            `Server ${name} does not support didSave, skipping`,
+          );
+          continue;
+        }
+
+        const params: lsp.DidSaveTextDocumentParams = {
+          textDocument: { uri },
+        };
+
+        // We don't support saveCap.includeText, because we don't have
+        // the file content at hand (can be modified by hooks).
+        // Let LSP read the file itself.
+        handle.connection.send({
+          jsonrpc: '2.0',
+          method: 'textDocument/didSave',
+          params,
+        });
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to send didSave notification to ${name}:`,
+          error,
+        );
+      }
+    }
+  }
+
+  /**
+   * Get the save capability from server capabilities.
+   * Returns undefined if not supported, SaveOptions if supported.
+   */
+  private getSaveCapability(
+    handle: LspServerHandle,
+  ): lsp.SaveOptions | undefined {
+    const caps = handle.serverCapabilities;
+    if (!caps) {
+      // If we don't have capabilities, assume support (fallback)
+      return {};
+    }
+
+    const sync = caps.textDocumentSync;
+    if (!sync) {
+      return undefined;
+    }
+
+    // TextDocumentSyncKind (number)
+    if (typeof sync === 'number') {
+      // 0 = None already handled above.
+      // Any non-zero value means some form of sync is enabled
+      return {};
+    }
+
+    // sync is TextDocumentSyncOptions (object)
+    if (sync.save && typeof sync.save === 'object') {
+      return sync.save;
+    }
+    return sync.save ? {} : undefined;
   }
 
   /**

@@ -7,6 +7,7 @@
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
+import type * as lsp from 'vscode-languageserver-protocol';
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'path';
@@ -265,7 +266,7 @@ export class LspServerManager {
       handle.process = connection.process;
 
       // Initialize LSP server
-      await this.initializeLspServer(connection, handle.config);
+      await this.initializeLspServer(connection, handle);
 
       handle.status = 'READY';
       this.attachRestartHandler(name, handle);
@@ -449,8 +450,7 @@ export class LspServerManager {
           }
           lspConnection.connection.end();
         },
-        initialize: async (params: unknown) =>
-          lspConnection.connection.initialize(params),
+        initialize: (params) => lspConnection.connection.initialize(params),
       };
     } else if (config.transport === 'tcp' || config.transport === 'socket') {
       if (!config.socket) {
@@ -487,8 +487,7 @@ export class LspServerManager {
           exit: () => {
             lspConnection.connection.end();
           },
-          initialize: async (params: unknown) =>
-            lspConnection.connection.initialize(params),
+          initialize: (params) => lspConnection.connection.initialize(params),
         };
       } catch (error) {
         if (process && process.exitCode === null) {
@@ -506,21 +505,23 @@ export class LspServerManager {
    */
   private async initializeLspServer(
     connection: LspConnectionResult,
-    config: LspServerConfig,
+    handle: LspServerHandle,
   ): Promise<void> {
+    const config = handle.config;
     const workspaceFolderPath = config.workspaceFolder ?? this.workspaceRoot;
     const workspaceFolder = {
       name: path.basename(workspaceFolderPath) || workspaceFolderPath,
       uri: config.rootUri,
     };
 
-    const initializeParams = {
+    const initializeParams: lsp.InitializeParams = {
       processId: process.pid,
       rootUri: config.rootUri,
       rootPath: workspaceFolderPath,
       workspaceFolders: [workspaceFolder],
       capabilities: {
         textDocument: {
+          synchronization: { didSave: true },
           completion: { dynamicRegistration: true },
           hover: { dynamicRegistration: true },
           definition: { dynamicRegistration: true },
@@ -535,7 +536,14 @@ export class LspServerManager {
       initializationOptions: config.initializationOptions,
     };
 
-    await connection.initialize(initializeParams);
+    const result = await connection.initialize(initializeParams);
+
+    // Store server capabilities for later use (e.g., checking didSave support)
+    handle.serverCapabilities = result.capabilities;
+    debugLogger.debug(
+      `Server '${config.name}' capabilities:`,
+      JSON.stringify(result.capabilities, null, 2),
+    );
 
     // Send initialized notification and workspace folders change to help servers (e.g. tsserver)
     // create projects in the correct workspace.

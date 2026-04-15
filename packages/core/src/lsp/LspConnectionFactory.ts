@@ -6,6 +6,7 @@
 
 import * as cp from 'node:child_process';
 import * as net from 'node:net';
+import type * as lsp from 'vscode-languageserver-protocol';
 import { DEFAULT_LSP_REQUEST_TIMEOUT_MS } from './constants.js';
 import type { JsonRpcMessage } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -55,8 +56,11 @@ class JsonRpcConnection {
     this.requestHandlers.push(handler);
   }
 
-  async initialize(params: unknown): Promise<unknown> {
-    return this.sendRequest('initialize', params);
+  async initialize(params: lsp.InitializeParams) {
+    return (await this.sendRequest(
+      'initialize',
+      params,
+    )) as lsp.InitializeResult;
   }
 
   async shutdown(): Promise<void> {
