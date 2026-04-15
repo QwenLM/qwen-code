@@ -87,13 +87,23 @@ All SET operations go through the tool confirmation flow, requiring explicit use
 | Setting             | Type    | Source  | Writable | Description                                           |
 | ------------------- | ------- | ------- | -------- | ----------------------------------------------------- |
 | `model`             | string  | project | Yes      | The active LLM model ID for the current session       |
-| `approvalMode`      | string  | project | Yes      | Tool call approval mode (plan/default/auto-edit/yolo) |
-| `checkpointing`     | boolean | global  | Yes      | Whether file checkpointing (code rewind) is enabled   |
-| `respectGitIgnore`  | boolean | project | Yes      | Whether to respect .gitignore when discovering files  |
-| `enableFuzzySearch` | boolean | project | Yes      | Whether fuzzy file search is enabled                  |
+| `approvalMode`      | string  | project | No       | Tool call approval mode (plan/default/auto-edit/yolo) |
+| `checkpointing`     | boolean | global  | No       | Whether file checkpointing (code rewind) is enabled   |
+| `respectGitIgnore`  | boolean | project | No       | Whether to respect .gitignore when discovering files  |
+| `enableFuzzySearch` | boolean | project | No       | Whether fuzzy file search is enabled                  |
 | `debugMode`         | boolean | global  | No       | Whether debug mode is enabled                         |
 | `targetDir`         | string  | project | No       | The project root directory                            |
 | `outputFormat`      | string  | global  | No       | Output format (text/json/stream-json)                 |
+
+### Scope of writable settings
+
+Only `model` is writable. This is an intentional narrowing:
+
+- **`approvalMode` — security**: Allowing the agent to escalate its own permission level (even with an `ask` confirmation) is a prompt injection risk. A malicious instruction could pressure a fatigued user into approving `SET approvalMode yolo`. Users must change approval mode through a slash command or settings file.
+- **`checkpointing` / `respectGitIgnore` / `enableFuzzySearch` — no clear use case**: These are user preferences, not task-scoped behaviors. Task-scoped behavior changes are better handled via sub-agents or skill-level overrides (#2949) — mechanisms that scope the change to a specific piece of work rather than mutating session state.
+- **`debugMode` / `targetDir` / `outputFormat` — nothing to change**: These reflect how the CLI was started and cannot be meaningfully changed at runtime.
+
+Only `model` has a legitimate agent-driven write case: a multi-stage task may want to switch the session default model durably (rather than override a single call). Other model-switching needs should use sub-agents or skill `model:` frontmatter.
 
 ## Structured Output
 

@@ -495,7 +495,8 @@ Qwen Code includes a built-in `ConfigTool` that allows the AI agent to read and 
 ### How It Works
 
 - **Reading settings**: You can ask the AI questions like "what model am I using?" and it will read the current value directly.
-- **Changing settings**: You can say things like "switch to qwen-max" and the AI will propose the change. **You will always be asked to confirm before any setting is modified.**
+- **Changing the model**: You can say things like "switch to qwen-max" and the AI will propose the change. **You will always be asked to confirm before the change is applied.**
+- All other settings are **read-only** to the AI — you can still change them yourself via slash commands or by editing `settings.json`.
 
 ### Supported Settings
 
@@ -504,17 +505,17 @@ The ConfigTool can only access a curated allowlist of settings. Currently suppor
 | Setting             | Description                                           | Read | Write                   |
 | ------------------- | ----------------------------------------------------- | ---- | ----------------------- |
 | `model`             | The active LLM model ID for this session              | Yes  | Yes (with confirmation) |
-| `approvalMode`      | Tool call approval mode (plan/default/auto-edit/yolo) | Yes  | Yes (with confirmation) |
-| `checkpointing`     | Whether file checkpointing (code rewind) is enabled   | Yes  | Yes (with confirmation) |
-| `respectGitIgnore`  | Whether to respect .gitignore when discovering files  | Yes  | Yes (with confirmation) |
-| `enableFuzzySearch` | Whether fuzzy file search is enabled                  | Yes  | Yes (with confirmation) |
+| `approvalMode`      | Tool call approval mode (plan/default/auto-edit/yolo) | Yes  | No (read-only)          |
+| `checkpointing`     | Whether file checkpointing (code rewind) is enabled   | Yes  | No (read-only)          |
+| `respectGitIgnore`  | Whether to respect .gitignore when discovering files  | Yes  | No (read-only)          |
+| `enableFuzzySearch` | Whether fuzzy file search is enabled                  | Yes  | No (read-only)          |
 | `debugMode`         | Whether debug mode is enabled                         | Yes  | No (read-only)          |
 | `targetDir`         | The project root directory                            | Yes  | No (read-only)          |
 | `outputFormat`      | The output format (text/json/stream-json)             | Yes  | No (read-only)          |
 
 > [!note]
 >
-> Additional settings will be added in future releases. The allowlist ensures the AI agent cannot access or modify arbitrary configuration.
+> Only `model` is writable by design. `approvalMode` is intentionally read-only so the AI cannot escalate its own permissions, even indirectly. The other read-only entries are user preferences without a clear AI-driven use case — for task-scoped behavior changes, prefer sub-agents or skill-level model overrides.
 
 ### Examples
 
@@ -525,13 +526,16 @@ AI:  [reads config] You're currently using qwen3-coder-plus.
 You: Switch to qwen-max.
 AI:  [proposes config change] → Confirmation: Change model from 'qwen3-coder-plus' to 'qwen-max'
      → You approve → Model switched successfully.
+
+You: Turn on yolo mode.
+AI:  approvalMode is read-only to ConfigTool. Please switch modes yourself.
 ```
 
 ### Security
 
 - Only allowlisted settings can be accessed — the AI cannot read or write arbitrary keys
-- All write operations require your explicit confirmation
-- The confirmation dialog shows both the current and proposed values
+- `model` is the only writable setting; all other entries are read-only
+- The one writable operation requires your explicit confirmation, showing both the current and proposed values
 
 ## Shell History
 
@@ -572,7 +576,7 @@ For authentication-related variables (like `OPENAI_*`) and the recommended `.qwe
 | `CODE_ASSIST_ENDPOINT`         | Specifies the endpoint for the code assist server.                                                                                                                                                                                                                             | This is useful for development and testing.                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `QWEN_CODE_MAX_OUTPUT_TOKENS`  | Overrides the default maximum output tokens per response. When not set, Qwen Code uses an adaptive strategy: starts with 8K tokens and automatically retries with 64K if the response is truncated. Set this to a specific value (e.g., `16000`) to use a fixed limit instead. | Takes precedence over the capped default (8K) but is overridden by `samplingParams.max_tokens` in settings. Disables automatic escalation when set. Example: `export QWEN_CODE_MAX_OUTPUT_TOKENS=16000`                                                                                                                                                                                                                                                                            |
 | `TAVILY_API_KEY`               | Your API key for the Tavily web search service.                                                                                                                                                                                                                                | Used to enable the `web_search` tool functionality. Example: `export TAVILY_API_KEY="tvly-your-api-key-here"`                                                                                                                                                                                                                                                                                                                                                                      |
-| `QWEN_CODE_PROFILE_STARTUP`   | Set to `1` to enable startup performance profiling. Writes a JSON timing report to `~/.qwen/startup-perf/` with per-phase durations.                                                                                                                                           | Only active inside the sandbox child process. Zero overhead when not set. Example: `export QWEN_CODE_PROFILE_STARTUP=1`                                                                                                                                                                                                                                                                                                                                                            |
+| `QWEN_CODE_PROFILE_STARTUP`    | Set to `1` to enable startup performance profiling. Writes a JSON timing report to `~/.qwen/startup-perf/` with per-phase durations.                                                                                                                                           | Only active inside the sandbox child process. Zero overhead when not set. Example: `export QWEN_CODE_PROFILE_STARTUP=1`                                                                                                                                                                                                                                                                                                                                                            |
 
 ## Command-Line Arguments
 
