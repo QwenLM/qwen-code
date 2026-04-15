@@ -554,9 +554,9 @@ describe('CoreToolScheduler', () => {
       expect(xlsxMessage).toContain('skill: "xlsx"');
 
       // Test that non-skill names still use standard message with Levenshtein suggestions
-      // @ts-expect-error accessing private method
       const nonSkillMessage =
-        await scheduler.getToolNotFoundMessage('list_fils');
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('list_fils');
       expect(nonSkillMessage).toContain('not found in registry');
       expect(nonSkillMessage).toContain('Did you mean');
       expect(nonSkillMessage).not.toContain('is a skill name');

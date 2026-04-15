@@ -234,7 +234,12 @@ export class ToolRegistry {
    */
   async ensureTool(name: string): Promise<AnyDeclarativeTool | undefined> {
     const cached = this.tools.get(name);
-    if (cached) return cached;
+    if (cached) {
+      // Clean up any stale factory for this name so warmAll() and bulk
+      // accessors don't treat it as still pending.
+      this.factories.delete(name);
+      return cached;
+    }
 
     const existing = this.inflight.get(name);
     if (existing) return existing;
