@@ -972,6 +972,8 @@ export default {
     'Qwen OAuth 無料枠は 2026-04-15 に終了しました。/auth を実行してプロバイダーを切り替えてください。',
   'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
     'Qwen OAuth 無料枠は 2026-04-15 に終了しました。Coding Plan または API Key を選択してください。',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Qwen OAuth無料プランは2026-04-15に終了しました。他のプロバイダーのモデルを選択するか、/authを実行して切り替えてください。',
   '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
     '\n⚠ Qwen OAuth 無料枠は 2026-04-15 に終了しました。他のオプションを選択してください。\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':

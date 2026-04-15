@@ -1181,6 +1181,8 @@ export default {
     'Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выполните /auth для смены провайдера.',
   'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
     'Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выберите Coding Plan или API Key.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Бесплатный уровень Qwen OAuth был прекращен 2026-04-15. Пожалуйста, выберите модель от другого провайдера или выполните /auth для переключения.',
   '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
     '\n⚠ Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выберите другую опцию.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
