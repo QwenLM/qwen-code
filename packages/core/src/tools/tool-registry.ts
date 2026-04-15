@@ -181,8 +181,7 @@ export class ToolRegistry {
   private factories: Map<string, ToolFactory> = new Map();
   // In-flight factory promises — ensures concurrent ensureTool() calls for the
   // same name share one promise instead of running the factory multiple times.
-  private inflight: Map<string, Promise<AnyDeclarativeTool | undefined>> =
-    new Map();
+  private inflight: Map<string, Promise<AnyDeclarativeTool>> = new Map();
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -252,7 +251,7 @@ export class ToolRegistry {
         this.tools.set(name, tool);
         this.factories.delete(name);
         this.inflight.delete(name);
-        return tool as AnyDeclarativeTool | undefined;
+        return tool;
       })
       .catch((err: unknown) => {
         this.inflight.delete(name);
@@ -271,7 +270,14 @@ export class ToolRegistry {
   async warmAll(): Promise<void> {
     const pending = Array.from(this.factories.keys());
     if (pending.length === 0) return;
-    await Promise.all(pending.map((name) => this.ensureTool(name)));
+    const results = await Promise.allSettled(
+      pending.map((name) => this.ensureTool(name)),
+    );
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        debugLogger.warn('Failed to warm tool factory:', result.reason);
+      }
+    }
   }
 
   /**
