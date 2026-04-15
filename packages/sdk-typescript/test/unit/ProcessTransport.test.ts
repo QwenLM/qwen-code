@@ -120,6 +120,32 @@ describe('ProcessTransport', () => {
   });
 
   describe('Construction and Initialization', () => {
+    it('should not add one process exit listener per transport instance', async () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+
+      const transports: ProcessTransport[] = [];
+      const initialExitListeners = process.listeners('exit').length;
+
+      for (let i = 0; i < 12; i++) {
+        mockSpawn.mockReturnValue(createMockChildProcess());
+        transports.push(
+          new ProcessTransport({
+            pathToQwenExecutable: 'qwen',
+          }),
+        );
+      }
+
+      const finalExitListeners = process.listeners('exit').length;
+      expect(finalExitListeners - initialExitListeners).toBeLessThanOrEqual(1);
+
+      await Promise.all(transports.map((transport) => transport.close()));
+    });
+
     it('should create transport with required options', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',
@@ -972,17 +998,19 @@ describe('ProcessTransport', () => {
       });
       mockSpawn.mockReturnValue(mockChildProcess);
 
-      const processOnSpy = vi.spyOn(process, 'on');
+      const initialExitListeners = process.listeners('exit').length;
 
       const options: TransportOptions = {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      const transport = new ProcessTransport(options);
 
-      expect(processOnSpy).toHaveBeenCalledWith('exit', expect.any(Function));
+      const finalExitListeners = process.listeners('exit').length;
+      expect(finalExitListeners).toBeGreaterThanOrEqual(initialExitListeners);
+      expect(finalExitListeners).toBeLessThanOrEqual(initialExitListeners + 1);
 
-      processOnSpy.mockRestore();
+      void transport.close();
     });
 
     it('should remove event listeners on close', async () => {
@@ -994,7 +1022,7 @@ describe('ProcessTransport', () => {
       });
       mockSpawn.mockReturnValue(mockChildProcess);
 
-      const processOffSpy = vi.spyOn(process, 'off');
+      const initialExitListeners = process.listeners('exit').length;
 
       const options: TransportOptions = {
         pathToQwenExecutable: 'qwen',
@@ -1004,9 +1032,7 @@ describe('ProcessTransport', () => {
 
       await transport.close();
 
-      expect(processOffSpy).toHaveBeenCalledWith('exit', expect.any(Function));
-
-      processOffSpy.mockRestore();
+      expect(process.listeners('exit').length).toBe(initialExitListeners);
     });
 
     it('should register abort listener', () => {

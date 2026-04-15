@@ -11,6 +11,14 @@ import { SdkLogger } from '../utils/logger.js';
 const logger = SdkLogger.createLogger('ProcessTransport');
 
 export class ProcessTransport implements Transport {
+  private static activeTransports = new Set<ProcessTransport>();
+  private static hasProcessExitHandler = false;
+  private static readonly globalProcessExitHandler = (): void => {
+    for (const transport of ProcessTransport.activeTransports) {
+      transport.killChildProcess();
+    }
+  };
+
   private childProcess: ChildProcess | null = null;
   private childStdin: Writable | null = null;
   private childStdout: Readable | null = null;
@@ -20,7 +28,6 @@ export class ProcessTransport implements Transport {
   private closed = false;
   private inputClosed = false;
   private abortController: AbortController;
-  private processExitHandler: (() => void) | null = null;
   private abortHandler: (() => void) | null = null;
 
   constructor(options: TransportOptions) {
@@ -159,25 +166,53 @@ export class ProcessTransport implements Transport {
         });
       }
 
-      const cleanup = (): void => {
-        if (this.childProcess && !this.childProcess.killed) {
-          this.childProcess.kill('SIGTERM');
-        }
+      this.abortHandler = () => {
+        this.killChildProcess();
       };
-
-      this.processExitHandler = cleanup;
-      this.abortHandler = cleanup;
-      process.on('exit', this.processExitHandler);
       this.abortController.signal.addEventListener('abort', this.abortHandler);
+      this.registerForProcessExit();
 
       this.setupEventHandlers();
 
       this.ready = true;
       logger.info('CLI process started successfully');
     } catch (error) {
+      this.unregisterForProcessExit();
+      if (this.abortHandler) {
+        this.abortController.signal.removeEventListener(
+          'abort',
+          this.abortHandler,
+        );
+        this.abortHandler = null;
+      }
       this.ready = false;
       logger.error('Failed to initialize CLI process:', error);
       throw error;
+    }
+  }
+
+  private registerForProcessExit(): void {
+    ProcessTransport.activeTransports.add(this);
+    if (!ProcessTransport.hasProcessExitHandler) {
+      process.on('exit', ProcessTransport.globalProcessExitHandler);
+      ProcessTransport.hasProcessExitHandler = true;
+    }
+  }
+
+  private unregisterForProcessExit(): void {
+    ProcessTransport.activeTransports.delete(this);
+    if (
+      ProcessTransport.hasProcessExitHandler &&
+      ProcessTransport.activeTransports.size === 0
+    ) {
+      process.off('exit', ProcessTransport.globalProcessExitHandler);
+      ProcessTransport.hasProcessExitHandler = false;
+    }
+  }
+
+  private killChildProcess(): void {
+    if (this.childProcess && !this.childProcess.killed) {
+      this.childProcess.kill('SIGTERM');
     }
   }
 
@@ -185,6 +220,7 @@ export class ProcessTransport implements Transport {
     if (!this.childProcess) return;
 
     this.childProcess.on('error', (error) => {
+      this.unregisterForProcessExit();
       this.ready = false;
       if (this.abortController.signal.aborted) {
         this._exitError = new AbortError('CLI process aborted by user');
@@ -195,6 +231,7 @@ export class ProcessTransport implements Transport {
     });
 
     this.childProcess.on('close', (code, signal) => {
+      this.unregisterForProcessExit();
       this.ready = false;
       if (this.abortController.signal.aborted) {
         this._exitError = new AbortError('CLI process aborted by user');
@@ -287,10 +324,7 @@ export class ProcessTransport implements Transport {
       this.childStdin = null;
     }
 
-    if (this.processExitHandler) {
-      process.off('exit', this.processExitHandler);
-      this.processExitHandler = null;
-    }
+    this.unregisterForProcessExit();
 
     if (this.abortHandler) {
       this.abortController.signal.removeEventListener(
