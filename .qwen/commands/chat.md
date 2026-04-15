@@ -11,7 +11,7 @@ description: Chat session manager. /chat [-s|-l|-r|-d|-h] [name]
 1. Is `{{args}}` empty? → **Show Help immediately, STOP**
 2. Is `{{args}}` only whitespace? → **Show Help immediately, STOP**
 3. Does the first token look like a valid flag? (`-s`, `--save`, `-l`, `--list`, `-r`, `--resume`, `-d`, `--delete`, `-h`, `--help`)
-   - **NO** → **Show Help immediately, STOP**
+   - **NO** → invalid flag/unrecognized → **Show Help immediately, STOP**
    - **YES** → Continue to Step 1
 
 **⚠️ DO NOT skip this step. DO NOT proceed with any action until you verify `{{args}}`.**
@@ -25,13 +25,15 @@ description: Chat session manager. /chat [-s|-l|-r|-d|-h] [name]
 Read `~/.qwen/settings.json` (Windows: `%USERPROFILE%\.qwen\settings.json`).
 Look for `general.language`. Respond in that language. If not found, match the language the user used in their prompt.
 
-### OS Detection
+### OS Detection (ONLY for `-r`/`--resume`)
 
-Run `echo %OS%` (Windows) or `echo $OSTYPE` (Linux/macOS).
+**Skip this step for other flags.** Only run when `-r` is detected.
 
-- `Windows_NT` → Windows
-- `linux-*` → Linux
-- `darwin*` → macOS
+Run `node -e "console.log(process.platform)"`. Works across all shells.
+
+- `win32` → Windows
+- `linux` → Linux
+- `darwin` → macOS
 
 ---
 
@@ -39,13 +41,13 @@ Run `echo %OS%` (Windows) or `echo $OSTYPE` (Linux/macOS).
 
 Split `{{args}}` by whitespace. First token = flag. Remaining = name.
 
-| Flag              | Action                                    |
-| ----------------- | ----------------------------------------- |
-| `-s` / `--save`   | Go to Step 3                              |
-| `-l` / `--list`   | Read `chat-list.md` and execute its logic |
-| `-r` / `--resume` | Go to Step 3                              |
-| `-d` / `--delete` | Go to Step 3                              |
-| `-h` / `--help`   | **Show Help immediately, STOP**           |
+| Flag              | Action                                    | Sub-Command File |
+| ----------------- | ----------------------------------------- | ---------------- |
+| `-s` / `--save`   | Go to Step 3                              | `chat-save.md`   |
+| `-l` / `--list`   | Read `chat-list.md` and execute its logic | `chat-list.md`   |
+| `-r` / `--resume` | Go to Step 3                              | `chat-resume.md` |
+| `-d` / `--delete` | Go to Step 3                              | `chat-delete.md` |
+| `-h` / `--help`   | **Show Help immediately, STOP**           | —                |
 
 ### Step 3: Validate name (for `-s`, `-r`, `-d`)
 
@@ -62,15 +64,15 @@ Extract the name (everything after the flag).
 
 ## Common Rules
 
-| Rule                  | Value                                                                                                   |
-| --------------------- | ------------------------------------------------------------------------------------------------------- |
-| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                     |
-| **Max length**        | 128 characters                                                                                          |
-| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                      |
-| **Index path**        | `.qwen/chat-index.json` (project root)                                                                  |
-| **Index format**      | `{"name": "sessionId", ...}`                                                                            |
-| **Session ID source** | Filename (no extension) of `.jsonl` in `~/.qwen/projects/<hash>/chats/`                                 |
-| **Hash calculation**  | Full cwd path, replace `\` and `/` with `-`, lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code` |
+| Rule                  | Value                                                                                                                                                                                                |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                                                                                                  |
+| **Max length**        | 128 characters                                                                                                                                                                                       |
+| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                                                                                                   |
+| **Index path**        | `.qwen/chat-index.json` (project root)                                                                                                                                                               |
+| **Index format**      | `{"name": "sessionId", ...}`                                                                                                                                                                         |
+| **Session ID source** | Filename (no extension) of `.jsonl` in `~/.qwen/projects/<hash>/chats/`                                                                                                                              |
+| **Hash calculation**  | Full cwd path, replace all non-alphanumeric characters with `-`. On Windows only, convert to lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code` (Windows), `D--code-qwen-code` (Linux/macOS) |
 
 ---
 

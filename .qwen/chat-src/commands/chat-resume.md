@@ -35,15 +35,37 @@ Same rules as `chat-save.md`:
 
 ### 4. Launch New Window (Platform-Specific)
 
+**IMPORTANT: You MUST execute a shell command to launch a NEW terminal window. DO NOT read the .jsonl file content.**
+
 The command to open a new terminal differs by OS. Use the OS detected in Step 1 of `chat.md`:
 
 | OS            | Terminal       | Command                                                                       |
 | ------------- | -------------- | ----------------------------------------------------------------------------- |
 | Windows       | PowerShell     | `start pwsh -NoExit -Command "qwen --resume <sessionId>"`                     |
-| Windows       | CMD            | `start cmd /k "qwen --resume <sessionId>"`                                    |
+| Windows       | CMD (fallback) | `start cmd /k "qwen --resume <sessionId>"`                                    |
 | macOS         | Terminal.app   | `osascript -e 'tell app "Terminal" to do script "qwen --resume <sessionId>"'` |
 | Linux (GNOME) | gnome-terminal | `gnome-terminal -- qwen --resume <sessionId>`                                 |
 | Linux (other) | xterm          | `xterm -e "qwen --resume <sessionId>"`                                        |
+
+**Windows fallback logic**: Try PowerShell first (`start pwsh`). If that fails (e.g., PowerShell not installed or not in PATH), fall back to CMD (`start cmd /k`). Some Windows machines don't have PowerShell available, so CMD fallback ensures compatibility.
+
+**Linux terminal detection**: Don't hardcode `gnome-terminal`. Use `command -v` to check available terminals:
+
+```bash
+if command -v gnome-terminal &> /dev/null; then
+  gnome-terminal -- qwen --resume <sessionId>
+elif command -v xterm &> /dev/null; then
+  xterm -e "qwen --resume <sessionId>"
+elif command -v alacritty &> /dev/null; then
+  alacritty -- qwen --resume <sessionId>
+elif command -v kitty &> /dev/null; then
+  kitty qwen --resume <sessionId>
+else
+  echo "No supported terminal found. Please run manually: qwen --resume <sessionId>"
+fi
+```
+
+**You MUST run the shell command above using your shell tool. This is the core action of the resume operation.**
 
 - Why `--resume` instead of `--continue`: `--resume` takes a specific session ID; `--continue` resumes the most recent session. We know the exact ID, so `--resume` is precise.
 - Why new window: Preserves the current session context. The user can have multiple sessions open simultaneously.

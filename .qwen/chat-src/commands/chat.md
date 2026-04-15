@@ -36,17 +36,22 @@ language the user used in their prompt.
 **Why not hardcode English?** Users worldwide prefer their native language. The AI
 can respond in any language — we just need to tell it which one.
 
-### OS Detection
+### OS Detection (only needed for `-r`/`--resume`)
 
-Run `echo %OS%` (Windows) or `echo $OSTYPE` (Linux/macOS).
+**Important**: OS detection is ONLY needed when the user runs `/chat -r` (resume).
+For other flags (`-s`, `-l`, `-d`, `-h`), skip this step entirely.
 
-- `Windows_NT` → Windows
-- `linux-*` → Linux
-- `darwin*` → macOS
+When `-r` is detected, run `node -e "console.log(process.platform)"`. This works across all shells (CMD, PowerShell, bash, zsh, fish, nushell).
+
+- `win32` → Windows
+- `linux` → Linux
+- `darwin` → macOS
 
 **Why detect OS?** The `--resume` command needs to open a new terminal window.
 Each OS has different commands for this. We detect once here and pass the result
 to the sub-command.
+
+**Why `node -e`?** `echo %OS%` only works in CMD, not PowerShell. `$OSTYPE` only works in bash/zsh, not fish or nushell. Using Node.js ensures consistent behavior across all shell environments.
 
 ## Step 2: Parse Arguments
 
@@ -68,15 +73,15 @@ Based on the parsed flag, read the corresponding file and execute its logic:
 
 These rules are defined here once and inherited by all sub-commands:
 
-| Rule                  | Value                                                                                                              | Rationale                                                                                                         |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                | Only safe characters; no spaces, no special chars that could break file paths                                     |
-| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                 | `.` and `..` are path traversal risks; `__proto__`/`constructor`/`prototype` cause JavaScript prototype pollution |
-| **Max length**        | 128 characters                                                                                                     | Prevents abuse and keeps index file readable                                                                      |
-| **Index path**        | `.qwen/chat-index.json` (project root, NOT user home)                                                              | Project-scoped isolation; each project has its own session namespace                                              |
-| **Index format**      | `{"name": "sessionId", ...}`                                                                                       | Simple flat key-value; no nested objects to minimize read/write complexity                                        |
-| **Session ID source** | Filename (no extension) of `.jsonl` in `~/.qwen/projects/<hash>/chats/`                                            | The session storage uses JSONL format; the UUID filename IS the session ID                                        |
-| **Hash calculation**  | Full cwd path, replace `\` and `/` with `-`, convert to lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code` | Deterministic mapping from project path to storage directory                                                      |
+| Rule                  | Value                                                                                                                                                                                                | Rationale                                                                                                         |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                                                                                                  | Only safe characters; no spaces, no special chars that could break file paths                                     |
+| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                                                                                                   | `.` and `..` are path traversal risks; `__proto__`/`constructor`/`prototype` cause JavaScript prototype pollution |
+| **Max length**        | 128 characters                                                                                                                                                                                       | Prevents abuse and keeps index file readable                                                                      |
+| **Index path**        | `.qwen/chat-index.json` (project root, NOT user home)                                                                                                                                                | Project-scoped isolation; each project has its own session namespace                                              |
+| **Index format**      | `{"name": "sessionId", ...}`                                                                                                                                                                         | Simple flat key-value; no nested objects to minimize read/write complexity                                        |
+| **Session ID source** | Filename (no extension) of `.jsonl` in `~/.qwen/projects/<hash>/chats/`                                                                                                                              | The session storage uses JSONL format; the UUID filename IS the session ID                                        |
+| **Hash calculation**  | Full cwd path, replace all non-alphanumeric characters with `-`. On Windows only, convert to lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code` (Windows), `D--code-qwen-code` (Linux/macOS) | Deterministic mapping from project path to storage directory                                                      |
 
 **Important**: The index file (`.qwen/chat-index.json`) is stored in the **project root**, NOT in the user's home directory. Session files are stored in the user home (`~/.qwen/projects/<hash>/chats/`). This keeps session names project-scoped.
 

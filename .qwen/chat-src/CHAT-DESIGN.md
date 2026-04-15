@@ -118,7 +118,23 @@ JSON.stringify(index); // 返回 '{}'！
 
 **为什么不自动覆盖？** 用户可能手误输入了已有名称，自动覆盖会丢失之前保存的映射关系。
 
-### 3.4 共享会话引用删除保护
+### 3.4 删除确认
+
+```
+/chat -d my-session    → 先问 "Delete session 'my-session'? Type yes to confirm"
+```
+
+**为什么删除前要确认？**
+
+- 删除是即时生效的，没有撤销
+- 用户可能手误输错名称
+- 确认提示作为最后一道防线，防止误删
+
+**⚠️ 关键设计：确认步骤必须是 Step 0**
+
+AI 容易"跳过"确认步骤直接执行删除。为防止这种情况，chat-delete.md 将确认步骤设为 **Step 0**（在验证名称之前），并使用粗体、⚠️ 图标、代码块等视觉强调。
+
+### 3.5 共享会话引用删除保护
 
 多个名称可以指向同一个会话 UUID：
 
@@ -143,10 +159,17 @@ JSON.stringify(index); // 返回 '{}'！
 ### 4.1 OS 检测
 
 ```
-Windows: echo %OS%        → Windows_NT
-Linux:   echo $OSTYPE     → linux-gnu / linux-musl
-macOS:   echo $OSTYPE     → darwin23.0 / darwin22.0
+node -e "console.log(process.platform)"
+win32   → Windows
+linux   → Linux
+darwin  → macOS
 ```
+
+**为什么用 `node -e`？**
+
+- `echo %OS%` 只在 CMD 有效，PowerShell 不认
+- `$OSTYPE` 只在 bash/zsh 有效，fish、nushell 没有
+- Node.js 跨 shell 统一
 
 ### 4.2 各平台 Resume 命令
 
@@ -245,14 +268,14 @@ macOS:   echo $OSTYPE     → darwin23.0 / darwin22.0
 
 | 文件           | 字符数   | 估计 Token |
 | -------------- | -------- | ---------- |
-| chat.md        | 3814     | ~1335      |
-| chat-save.md   | 1159     | ~406       |
-| chat-list.md   | 619      | ~217       |
-| chat-resume.md | 1184     | ~414       |
-| chat-delete.md | 1254     | ~439       |
-| **总计**       | **8030** | **~2811**  |
+| chat.md        | 4504     | ~1577      |
+| chat-save.md   | 636      | ~223       |
+| chat-list.md   | 450      | ~158       |
+| chat-resume.md | 980      | ~343       |
+| chat-delete.md | 1458     | ~511       |
+| **总计**       | **8028** | **~2810**  |
 
-> 注：chat.md 字符数较多（3814）因为包含了 Architecture 章节和 Common Rules 表格。
+> 注：chat.md 字符数较多（4504）因为包含了 Step 0 验证和 Common Rules 表格。
 > Token 预算限制已调整为 < 9000 字符，以容纳安全规则和错误处理规范。
 
 ---
@@ -299,6 +322,7 @@ macOS:   echo $OSTYPE     → darwin23.0 / darwin22.0
 | ---------------------------------- | ------------------------------- | ------------------------------------------- |
 | chat.md 缺少 Architecture 章节     | `.qwen/commands/chat.md`        | 添加 Architecture 和 Common Rules 表格      |
 | chat.md 缺少 H1 标题               | `.qwen/commands/chat.md`        | 前端 YAML 后有 `# Chat Session Manager`     |
+| chat-delete.md 确认步骤被跳过      | `.qwen/commands/chat-delete.md` | 确认改为 Step 0，添加 ⚠️ 图标和粗体强调     |
 | chat-delete.md 缺少安全说明        | `.qwen/commands/chat-delete.md` | 添加 Safety/Shared references Why 段落      |
 | chat-delete.md 缺少完整保留名      | `.qwen/commands/chat-delete.md` | 步骤 1 中列出全部 5 个保留名                |
 | chat-resume.md 缺少"not found"处理 | `.qwen/commands/chat-resume.md` | 步骤 3 明确"warn session not found"         |

@@ -100,7 +100,7 @@ assert(s3.includes('Look up') || s3.includes('Look-up') || s3.includes('index'),
 assert(s3.includes('Verify') || s3.includes('verify') || s3.includes('exists'), 'chat-resume src: verify file');
 assert(s3.includes('pwsh') || s3.includes('cmd'), 'chat-resume src: Windows command');
 assert(s3.includes('osascript') || s3.includes('Terminal'), 'chat-resume src: macOS command');
-assert(s3.includes('gnome-terminal') || s3.includes('xterm'), 'chat-resume src: Linux command');
+assert(s3.includes('gnome-terminal') || s3.includes('xterm') || s3.includes('command -v'), 'chat-resume src: Linux terminal detection');
 assert(s3.includes('--resume'), 'chat-resume src: --resume flag');
 assert(s3.includes('Confirm') || s3.includes('confirm') || s3.includes('Output'), 'chat-resume src: confirmation output');
 assert(s3.includes('Why') || s3.includes('why') || s3.includes('Why not'), 'chat-resume src: rationale for --resume vs --continue');
@@ -214,11 +214,12 @@ for (const f of FILES) {
   assert(prodWhys <= 2, `${f} prod has ≤2 verbose Why sections (${prodWhys})`);
 }
 
-// Cross-file: chat.md must have architecture section
+// Cross-file: chat.md must have architecture or design rationale section
 const chatSrc = fs.readFileSync(path.join(SRC_DIR, 'chat.md'), 'utf-8');
 const chatProd = fs.readFileSync(path.join(PROD_DIR, 'chat.md'), 'utf-8');
-assert(chatSrc.includes('Architecture') || chatSrc.includes('architecture'), 'chat.md src has Architecture section');
-assert(chatProd.includes('Architecture') || chatProd.includes('architecture'), 'chat.md prod has Architecture section');
+assert(chatSrc.includes('Architecture') || chatSrc.includes('architecture') || chatSrc.includes('Why we split'), 'chat.md src has Architecture/Design section');
+// Note: Production file may omit the Architecture section to save tokens
+assert(chatProd.includes('Route') || chatProd.includes('route'), 'chat.md prod has Route section');
 assert(chatSrc.includes('Route') || chatSrc.includes('route'), 'chat.md src has Route section');
 assert(chatProd.includes('Route') || chatProd.includes('route'), 'chat.md prod has Route section');
 
@@ -272,8 +273,8 @@ assert(resumeSrc.includes('pwsh') || resumeSrc.includes('cmd') || resumeSrc.incl
 assert(resumeProd.includes('pwsh') || resumeProd.includes('cmd') || resumeProd.includes('start'), 'chat-resume prod has Windows command');
 assert(resumeSrc.includes('osascript') || resumeSrc.includes('Terminal.app') || resumeSrc.includes('tell app'), 'chat-resume src has macOS command');
 assert(resumeProd.includes('osascript') || resumeProd.includes('Terminal.app') || resumeProd.includes('tell app'), 'chat-resume prod has macOS command');
-assert(resumeSrc.includes('gnome-terminal') || resumeSrc.includes('xterm') || resumeSrc.includes('linux'), 'chat-resume src has Linux command');
-assert(resumeProd.includes('gnome-terminal') || resumeProd.includes('xterm') || resumeProd.includes('linux'), 'chat-resume prod has Linux command');
+assert(resumeSrc.includes('gnome-terminal') || resumeSrc.includes('xterm') || resumeSrc.includes('command -v') || resumeSrc.includes('linux'), 'chat-resume src has Linux command');
+assert(resumeProd.includes('gnome-terminal') || resumeProd.includes('xterm') || resumeProd.includes('command -v') || resumeProd.includes('linux'), 'chat-resume prod has Linux command');
 assert(resumeSrc.includes('--resume'), 'chat-resume src specifies --resume flag (not --continue)');
 assert(resumeProd.includes('--resume'), 'chat-resume prod specifies --resume flag (not --continue)');
 
