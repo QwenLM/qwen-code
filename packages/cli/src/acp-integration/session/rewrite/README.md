@@ -2,13 +2,7 @@
 
 > **⚠️ Temporary Solution — subject to change or removal at any time.**
 >
-> This is a stopgap implementation. We are exploring a hook-based approach ([#3266](https://github.com/QwenLM/qwen-code/pull/3266) — PostTurn Hook) that would be more decoupled and extensible. The hook approach still has open issues, so we are using this ACP middleware for now.
->
-> We welcome discussion on more elegant alternatives, including but not limited to:
->
-> - Externalizing rewrite logic via PostTurn Hook, with the middleware only handling message routing
-> - Pluggable rewrite strategies (LLM / template / rule engine)
-> - Client-side rewriting (agent provides structured data, frontend decides how to present it)
+> This is a stopgap implementation. We are considering a hook-based approach that would be more decoupled and extensible. Ideas and suggestions for a better design are very welcome.
 
 ## Use Case
 
