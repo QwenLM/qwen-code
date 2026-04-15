@@ -1,23 +1,26 @@
 #!/bin/bash
-# 启动性能 Benchmark 测试
-# 测量 API Preconnect 优化对首次 API 调用延迟的影响
+# Startup Performance Benchmark
+# Measures baseline CLI startup time (module loading, initialization overhead).
+#
+# Note: This uses `--version` which exits before the preconnect code path.
+# To measure the actual preconnect effect on TCP+TLS handshake time,
+# use benchmark-api-latency.sh instead.
 
 set -e
 
 ITERATIONS=${ITERATIONS:-10}
-RESULTS_DIR="./benchmark-results"
+RESULTS_DIR=$(mktemp -d)
+trap "rm -rf $RESULTS_DIR" EXIT
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 CLI_CMD=${CLI_CMD:-"qwen"}
 
-mkdir -p "$RESULTS_DIR"
-
-echo "=== Qwen Code Startup Optimization Benchmark ==="
+echo "=== Qwen Code Startup Time Benchmark ==="
 echo "Iterations: $ITERATIONS"
 echo "Timestamp: $TIMESTAMP"
 echo "CLI Command: $CLI_CMD"
 echo ""
 
-# 计算 stats 的函数
+# Function: calculate statistics
 calculate_stats() {
   local file=$1
   local name=$2
@@ -61,86 +64,23 @@ EOF
   fi
 }
 
-# 测试 1: 冷启动 - 无 Preconnect
-echo "Test 1: Cold start without preconnect..."
-echo "Without Preconnect" > "$RESULTS_DIR/cold_no_preconnect_$TIMESTAMP.txt"
+# Baseline startup time
+echo "Baseline startup time (--version):"
+echo "Startup Time" > "$RESULTS_DIR/startup_$TIMESTAMP.txt"
 
 for i in $(seq 1 $ITERATIONS); do
-  # 强制关闭连接（等待一段时间让连接池过期）
-  sleep 2
-
-  # 测量启动时间
-  start=$(node -e "console.log(Date.now())")
-  QWEN_CODE_DISABLE_PRECONNECT=1 $CLI_CMD --version > /dev/null 2>&1
-  end=$(node -e "console.log(Date.now())")
-
-  elapsed=$((end - start))
-  echo "$elapsed" >> "$RESULTS_DIR/cold_no_preconnect_$TIMESTAMP.txt"
-  echo "  Run $i: ${elapsed}ms"
-done
-
-# 测试 2: 冷启动 - 有 Preconnect
-echo ""
-echo "Test 2: Cold start with preconnect..."
-echo "With Preconnect" > "$RESULTS_DIR/cold_preconnect_$TIMESTAMP.txt"
-
-for i in $(seq 1 $ITERATIONS); do
-  sleep 2
-
   start=$(node -e "console.log(Date.now())")
   $CLI_CMD --version > /dev/null 2>&1
   end=$(node -e "console.log(Date.now())")
 
   elapsed=$((end - start))
-  echo "$elapsed" >> "$RESULTS_DIR/cold_preconnect_$TIMESTAMP.txt"
+  echo "$elapsed" >> "$RESULTS_DIR/startup_$TIMESTAMP.txt"
   echo "  Run $i: ${elapsed}ms"
 done
 
-# 计算统计并输出结果
+# Calculate statistics and output results
 echo ""
 echo "=== Results ==="
 echo ""
 
-calculate_stats "$RESULTS_DIR/cold_no_preconnect_$TIMESTAMP.txt" "Without Preconnect"
-echo ""
-calculate_stats "$RESULTS_DIR/cold_preconnect_$TIMESTAMP.txt" "With Preconnect"
-
-# 计算改进百分比
-echo ""
-echo "=== Improvement Calculation ==="
-
-python3 - <<EOF
-import statistics
-
-def read_data(file):
-    with open(file) as f:
-        lines = f.readlines()[1:]
-        return [float(x.strip()) for x in lines if x.strip() and x.strip().replace('.', '').replace('-', '').isdigit()]
-
-data_without = read_data('$RESULTS_DIR/cold_no_preconnect_$TIMESTAMP.txt')
-data_with = read_data('$RESULTS_DIR/cold_preconnect_$TIMESTAMP.txt')
-
-if data_without and data_with:
-    mean_without = statistics.mean(data_without)
-    mean_with = statistics.mean(data_with)
-    improvement = mean_without - mean_with
-    improvement_percent = (improvement / mean_without) * 100
-
-    print(f"Improvement: {improvement:.2f}ms ({improvement_percent:.1f}%)")
-    print("")
-
-    # 检查是否达到目标
-    if improvement_percent >= 10:
-        print("✅ SUCCESS: Achieved >= 10% improvement!")
-    elif improvement_percent >= 5:
-        print("⚠️  PARTIAL: Achieved 5-10% improvement (below target)")
-    else:
-        print("❌ FAILED: Did not achieve 10% improvement target")
-    print("")
-    print(f"| Metric | Without Preconnect | With Preconnect | Improvement |")
-    print(f"|--------|---------------------|-----------------|-------------|")
-    print(f"| Mean   | {mean_without:.2f}ms | {mean_with:.2f}ms | {improvement:.2f}ms ({improvement_percent:.1f}%) |")
-EOF
-
-echo ""
-echo "Raw data saved to $RESULTS_DIR/"
+calculate_stats "$RESULTS_DIR/startup_$TIMESTAMP.txt" "Startup Time (--version)"

@@ -993,17 +993,17 @@ export function KeypressProvider({
       stdin.on('keypress', handleKeypress);
     }
 
-    // 启动优化：如果有捕获的输入，延迟处理后重放
+    // Startup optimization: replay captured input if available
     if (capturedInput.length > 0) {
       debugLogger.debug(
         `Replaying ${capturedInput.length} bytes of captured input`,
       );
-      // 在下一个事件循环中处理，确保订阅者已准备好
+      // Process in next event loop tick to ensure subscribers are ready
       setImmediate(() => {
         if (usePassthrough) {
           keypressStream.write(capturedInput);
         } else {
-          // 直接触发 stdin 的 data 事件
+          // Emit data event directly on stdin
           stdin.emit('data', capturedInput);
         }
       });

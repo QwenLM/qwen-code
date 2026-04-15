@@ -1,23 +1,24 @@
 #!/bin/bash
-# 首次 API 调用延迟 Benchmark
-# 测量 API Preconnect 对首次 API 调用的影响
+# First API Call Latency Benchmark
+# Measures the impact of API Preconnect on first API call latency
 
 set -e
 
 ITERATIONS=${ITERATIONS:-5}
-CLI_PATH="/Users/jinye.djy/Projects/qwen-code/.claude/worktrees/nested-spinning-diffie/dist/cli.js"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CLI_PATH="${CLI_PATH:-"$SCRIPT_DIR/../dist/cli.js"}"
 
 echo "=== Qwen Code First API Call Latency Benchmark ==="
 echo "This test measures the time for the first API call"
 echo "Iterations: $ITERATIONS"
 echo ""
 
-# 创建临时目录
+# Create temp directory
 RESULTS_DIR=$(mktemp -d)
 trap "rm -rf $RESULTS_DIR" EXIT
 
-# 模拟 API 调用延迟测试
-# 使用 curl 来测量实际的 TCP+TLS 握手时间
+# Simulate API call latency test
+# Use curl to measure actual TCP+TLS handshake time
 TARGET_URL="https://coding.dashscope.aliyuncs.com"
 
 echo "Test: TCP+TLS Handshake Time Comparison"
@@ -26,39 +27,42 @@ echo ""
 echo "1. Without Preconnect (cold connection):"
 echo "Cold Handshake" > "$RESULTS_DIR/cold.txt"
 for i in $(seq 1 $ITERATIONS); do
-  # 等待连接关闭
+  # Wait for connection to close
   sleep 2
 
-  # 测量连接时间
+  # Measure connection time
+  # Note: time_appconnect is the total time from start until TLS handshake is done
+  # (it already includes time_connect), so use it directly as total handshake time.
+  # TLS-only time = time_appconnect - time_connect
   result=$(curl -o /dev/null -s -w "%{time_connect}:%{time_appconnect}" "$TARGET_URL" 2>&1 || echo "0:0")
   connect_time=$(echo "$result" | cut -d: -f1)
   appconnect_time=$(echo "$result" | cut -d: -f2)
-  total_handshake=$(echo "$connect_time + $appconnect_time" | bc)
+  tls_only=$(echo "$appconnect_time - $connect_time" | bc)
 
-  echo "$total_handshake" >> "$RESULTS_DIR/cold.txt"
-  echo "  Run $i: connect=${connect_time}s, tls=${appconnect_time}s, total=${total_handshake}s"
+  echo "$appconnect_time" >> "$RESULTS_DIR/cold.txt"
+  echo "  Run $i: tcp=${connect_time}s, tls_only=${tls_only}s, total=${appconnect_time}s"
 done
 
 echo ""
 echo "2. With Preconnect (warm connection):"
 echo "Warm Handshake" > "$RESULTS_DIR/warm.txt"
 for i in $(seq 1 $ITERATIONS); do
-  # 预连接
+  # Preconnect
   curl -o /dev/null -s -X HEAD "$TARGET_URL" 2>/dev/null || true
 
-  # 测量连接时间（应该复用连接）
+  # Measure connection time (should reuse connection)
   result=$(curl -o /dev/null -s -w "%{time_connect}:%{time_appconnect}" "$TARGET_URL" 2>&1 || echo "0:0")
   connect_time=$(echo "$result" | cut -d: -f1)
   appconnect_time=$(echo "$result" | cut -d: -f2)
-  total_handshake=$(echo "$connect_time + $appconnect_time" | bc)
+  tls_only=$(echo "$appconnect_time - $connect_time" | bc)
 
-  echo "$total_handshake" >> "$RESULTS_DIR/warm.txt"
-  echo "  Run $i: connect=${connect_time}s, tls=${appconnect_time}s, total=${total_handshake}s"
+  echo "$appconnect_time" >> "$RESULTS_DIR/warm.txt"
+  echo "  Run $i: tcp=${connect_time}s, tls_only=${tls_only}s, total=${appconnect_time}s"
 
   sleep 2
 done
 
-# 计算统计
+# Calculate statistics
 echo ""
 echo "=== Results ==="
 echo ""
@@ -89,14 +93,13 @@ if data_cold and data_warm:
     print(f"Improvement: {improvement:.1f}ms ({improvement_percent:.1f}%)")
     print("")
 
-    # 检查目标
     if improvement_percent >= 50:
-        print("✅ SUCCESS: Connection reuse is working effectively!")
+        print("SUCCESS: Connection reuse is working effectively!")
         print("   Preconnect successfully reduces TCP+TLS handshake time")
     elif improvement_percent >= 20:
-        print("✅ GOOD: Significant improvement in connection time")
+        print("GOOD: Significant improvement in connection time")
     else:
-        print("ℹ️  Note: Results may vary based on network conditions")
+        print("Note: Results may vary based on network conditions")
     print("")
     print("| Scenario | Mean Time |")
     print("|----------|-----------|")

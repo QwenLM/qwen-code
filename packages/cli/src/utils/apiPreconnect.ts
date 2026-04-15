@@ -195,25 +195,19 @@ export function preconnectApi(
 
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
 
-  // Use AbortSignal.timeout to prevent long blocking
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 10_000);
-
   // Fire HEAD request to warm connection (fire-and-forget)
   fetch(targetUrl, {
     method: 'HEAD',
-    signal: controller.signal,
+    signal: AbortSignal.timeout(5_000),
     // Don't send any authentication info
     headers: {
       'User-Agent': 'QwenCode-Preconnect/1.0',
     },
   })
     .then(() => {
-      clearTimeout(timeoutId);
       debugLogger.debug('Preconnect completed');
     })
     .catch((error) => {
-      clearTimeout(timeoutId);
       // Preconnect failure doesn't affect main flow
       debugLogger.debug(`Preconnect failed (ignored): ${error}`);
     });
