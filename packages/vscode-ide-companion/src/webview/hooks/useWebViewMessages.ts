@@ -47,6 +47,7 @@ interface UseWebViewMessagesProps {
     setNextCursor: (cursor: number | undefined) => void;
     setHasMore: (hasMore: boolean) => void;
     setIsLoading: (loading: boolean) => void;
+    setIsSwitchingSession: (switching: boolean) => void;
   };
 
   // File context
@@ -636,6 +637,7 @@ export const useWebViewMessages = ({
           handlers.messageHandling.clearThinking();
           activeExecToolCallsRef.current.clear();
           handlers.messageHandling.clearWaitingForResponse();
+          handlers.sessionManagement.setIsSwitchingSession(false);
           // Display error message to user so they know what went wrong
           const errorMessage =
             (message?.data?.message as string) ||
@@ -987,6 +989,11 @@ export const useWebViewMessages = ({
             handlers.setPlanEntries([]);
           }
           lastPlanSnapshotRef.current = null;
+          break;
+
+        case 'sessionLoadComplete':
+        case 'sessionExpired':
+          handlers.sessionManagement.setIsSwitchingSession(false);
           break;
 
         case 'conversationCleared':

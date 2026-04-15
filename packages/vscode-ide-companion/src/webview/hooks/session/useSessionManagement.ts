@@ -23,6 +23,7 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
   const [nextCursor, setNextCursor] = useState<number | undefined>(undefined);
   const [hasMore, setHasMore] = useState<boolean>(true);
   const [isLoading, setIsLoading] = useState<boolean>(false);
+  const [isSwitchingSession, setIsSwitchingSession] = useState<boolean>(false);
 
   const PAGE_SIZE = 20;
 
@@ -98,6 +99,7 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
       }
 
       console.log('[useSessionManagement] Switching to session:', sessionId);
+      setIsSwitchingSession(true);
       vscode.postMessage({
         type: 'switchQwenSession',
         data: { sessionId },
@@ -143,6 +145,7 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     nextCursor,
     hasMore,
     isLoading,
+    isSwitchingSession,
 
     // State setters
     setQwenSessions,
@@ -153,6 +156,7 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
     setNextCursor,
     setHasMore,
     setIsLoading,
+    setIsSwitchingSession,
 
     // Operations
     handleLoadQwenSessions,

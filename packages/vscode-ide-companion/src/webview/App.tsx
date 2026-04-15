@@ -905,12 +905,14 @@ export const App: React.FC = () => {
   return (
     <div className="chat-container relative">
       {/* Top-level loading overlay */}
-      {isLoading && (
+      {(isLoading || sessionManagement.isSwitchingSession) && (
         <div className="bg-background/80 absolute inset-0 z-50 flex items-center justify-center backdrop-blur-sm">
           <div className="text-center">
             <div className="border-primary mx-auto mb-2 h-8 w-8 animate-spin rounded-full border-b-2"></div>
             <p className="text-muted-foreground text-sm">
-              Preparing Qwen Code...
+              {sessionManagement.isSwitchingSession
+                ? 'Loading conversation...'
+                : 'Preparing Qwen Code...'}
             </p>
           </div>
         </div>
@@ -946,7 +948,7 @@ export const App: React.FC = () => {
         ref={messagesContainerRef}
         className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-thumb]:rounded-sm [&::-webkit-scrollbar-thumb]:hover:bg-white/30 [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
       >
-        {!hasContent && !isLoading ? (
+        {!hasContent && !isLoading && !sessionManagement.isSwitchingSession ? (
           isAuthenticated === false ? (
             <Onboarding
               onLogin={() => {

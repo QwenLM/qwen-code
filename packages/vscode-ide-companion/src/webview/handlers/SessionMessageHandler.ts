@@ -680,12 +680,20 @@ export class SessionMessageHandler extends BaseMessageHandler {
             type: 'qwenSessionSwitched',
             data: { sessionId, messages },
           });
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
+          });
           vscode.window.showInformationMessage(
             'Showing cached session content. Login to interact with the AI.',
           );
           return;
         } else if (choice !== 'login') {
-          // User dismissed; do nothing
+          // User dismissed; clear loading state
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
+          });
           return;
         }
       }
@@ -730,6 +738,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // Reset title flag when switching sessions
         this.isTitleSet = false;
 
+        // Notify webview that session history has finished loading
+        this.sendToWebView({
+          type: 'sessionLoadComplete',
+          data: { sessionId },
+        });
+
         // Successfully loaded session, return early to avoid fallback logic
         return;
       } catch (loadError) {
@@ -771,6 +785,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
             this.sendToWebView({
               type: 'qwenSessionSwitched',
               data: { sessionId, messages, session: sessionDetails },
+            });
+            this.sendToWebView({
+              type: 'sessionLoadComplete',
+              data: { sessionId },
             });
 
             // Only show the cache warning if we actually fell back to local cache
@@ -815,6 +833,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
           this.sendToWebView({
             type: 'qwenSessionSwitched',
             data: { sessionId, messages, session: sessionDetails },
+          });
+          this.sendToWebView({
+            type: 'sessionLoadComplete',
+            data: { sessionId },
           });
           vscode.window.showWarningMessage(
             'Showing cached session content. Login to interact with the AI.',
