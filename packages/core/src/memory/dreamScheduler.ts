@@ -8,19 +8,17 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
-import type {
-  BackgroundTaskDrainer,
-  DrainBackgroundTasksOptions,
-} from '../background/taskDrainer.js';
+import type { DrainBackgroundTasksOptions } from '../background/taskDrainer.js';
+import type { BackgroundTaskDrainer } from '../background/taskDrainer.js';
 import type {
   BackgroundTaskRegistry,
   BackgroundTaskState,
 } from '../background/taskRegistry.js';
-import { BackgroundTaskScheduler } from '../background/taskScheduler.js';
+import type { BackgroundTaskScheduler } from '../background/taskScheduler.js';
 import {
-  defaultMemoryTaskHub,
-  MemoryBackgroundTaskHub,
-} from './memoryTaskHub.js';
+  BackgroundTaskHub,
+  globalBackgroundTaskHub,
+} from '../background/taskHub.js';
 import {
   getAutoMemoryConsolidationLockPath,
   getAutoMemoryMetadataPath,
@@ -197,6 +195,8 @@ export type SessionScannerFn = (
   excludeSessionId: string,
 ) => Promise<string[]>;
 
+export const DREAM_TASK_TYPE = 'managed-auto-memory-dream' as const;
+
 export class ManagedAutoMemoryDreamRuntime {
   readonly registry: BackgroundTaskRegistry;
   readonly drainer: BackgroundTaskDrainer;
@@ -204,11 +204,11 @@ export class ManagedAutoMemoryDreamRuntime {
 
   constructor(
     private readonly sessionScanner: SessionScannerFn = listSessionsTouchedSince,
-    hub: MemoryBackgroundTaskHub = defaultMemoryTaskHub,
+    hub: BackgroundTaskHub = globalBackgroundTaskHub,
   ) {
     this.registry = hub.registry;
     this.drainer = hub.drainer;
-    this.scheduler = new BackgroundTaskScheduler(this.registry, this.drainer);
+    this.scheduler = hub.createScheduler();
   }
   /**
    * Timestamp (ms) of the last session-count filesystem scan per project root.
@@ -286,11 +286,11 @@ export class ManagedAutoMemoryDreamRuntime {
     }
 
     const scheduled = this.scheduler.schedule({
-      taskType: 'managed-auto-memory-dream',
+      taskType: DREAM_TASK_TYPE,
       title: 'Managed auto-memory dream',
       projectRoot: params.projectRoot,
       sessionId: params.sessionId,
-      dedupeKey: `managed-auto-memory-dream:${params.projectRoot}`,
+      dedupeKey: `${DREAM_TASK_TYPE}:${params.projectRoot}`,
       metadata: {
         sessionCount: sessionIds.length,
       },
@@ -371,13 +371,13 @@ export async function scheduleManagedAutoMemoryDream(
 }
 
 export function getManagedAutoMemoryDreamTaskRegistry(): BackgroundTaskRegistry {
-  return defaultMemoryTaskHub.registry;
+  return globalBackgroundTaskHub.registry;
 }
 
 export async function drainManagedAutoMemoryDreamTasks(
   options?: DrainBackgroundTasksOptions,
 ): Promise<boolean> {
-  return defaultMemoryTaskHub.drain(options);
+  return globalBackgroundTaskHub.drain(options);
 }
 
 export function createManagedAutoMemoryDreamRuntimeForTests(
@@ -385,6 +385,6 @@ export function createManagedAutoMemoryDreamRuntimeForTests(
 ): ManagedAutoMemoryDreamRuntime {
   return new ManagedAutoMemoryDreamRuntime(
     sessionScanner,
-    new MemoryBackgroundTaskHub(),
+    new BackgroundTaskHub(),
   );
 }

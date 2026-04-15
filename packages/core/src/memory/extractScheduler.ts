@@ -6,20 +6,16 @@
 
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import type { BackgroundTaskDrainer } from '../background/taskDrainer.js';
+import type { DrainBackgroundTasksOptions } from '../background/taskDrainer.js';
 import type {
-  BackgroundTaskDrainer} from '../background/taskDrainer.js';
-import {
-  type DrainBackgroundTasksOptions,
-} from '../background/taskDrainer.js';
-import type {
-  BackgroundTaskRegistry} from '../background/taskRegistry.js';
-import {
-  type BackgroundTaskState,
+  BackgroundTaskRegistry,
+  BackgroundTaskState,
 } from '../background/taskRegistry.js';
 import {
-  defaultMemoryTaskHub,
-  MemoryBackgroundTaskHub,
-} from './memoryTaskHub.js';
+  BackgroundTaskHub,
+  globalBackgroundTaskHub,
+} from '../background/taskHub.js';
 import {
   type AutoMemoryExtractResult,
   runAutoMemoryExtract,
@@ -92,6 +88,8 @@ function historySliceUsesMemoryTool(
   );
 }
 
+export const EXTRACT_TASK_TYPE = 'managed-auto-memory-extraction' as const;
+
 export class ManagedAutoMemoryExtractRuntime {
   readonly registry: BackgroundTaskRegistry;
   readonly drainer: BackgroundTaskDrainer;
@@ -99,7 +97,7 @@ export class ManagedAutoMemoryExtractRuntime {
   private readonly currentTaskIdByProject = new Map<string, string>();
   private readonly queuedByProject = new Map<string, QueuedExtractionRequest>();
 
-  constructor(hub: MemoryBackgroundTaskHub = defaultMemoryTaskHub) {
+  constructor(hub: BackgroundTaskHub = globalBackgroundTaskHub) {
     this.registry = hub.registry;
     this.drainer = hub.drainer;
   }
@@ -109,7 +107,7 @@ export class ManagedAutoMemoryExtractRuntime {
   ): Promise<AutoMemoryExtractResult> {
     if (historySliceUsesMemoryTool(params.history, params.projectRoot)) {
       const task = this.registry.register({
-        taskType: 'managed-auto-memory-extraction',
+        taskType: EXTRACT_TASK_TYPE,
         title: 'Managed auto-memory extraction',
         projectRoot: params.projectRoot,
         sessionId: params.sessionId,
@@ -147,7 +145,7 @@ export class ManagedAutoMemoryExtractRuntime {
         });
       } else {
         const pendingTask = this.registry.register({
-          taskType: 'managed-auto-memory-extraction',
+          taskType: EXTRACT_TASK_TYPE,
           title: 'Managed auto-memory extraction',
           projectRoot: params.projectRoot,
           sessionId: params.sessionId,
@@ -172,7 +170,7 @@ export class ManagedAutoMemoryExtractRuntime {
     }
 
     const task = this.registry.register({
-      taskType: 'managed-auto-memory-extraction',
+      taskType: EXTRACT_TASK_TYPE,
       title: 'Managed auto-memory extraction',
       projectRoot: params.projectRoot,
       sessionId: params.sessionId,
@@ -295,17 +293,17 @@ export async function scheduleManagedAutoMemoryExtract(
 }
 
 export function getManagedAutoMemoryExtractTaskRegistry(): BackgroundTaskRegistry {
-  return defaultMemoryTaskHub.registry;
+  return globalBackgroundTaskHub.registry;
 }
 
 export async function drainManagedAutoMemoryExtractTasks(
   options?: DrainBackgroundTasksOptions,
 ): Promise<boolean> {
-  return defaultMemoryTaskHub.drain(options);
+  return globalBackgroundTaskHub.drain(options);
 }
 
 export function createManagedAutoMemoryExtractRuntimeForTests(): ManagedAutoMemoryExtractRuntime {
-  return new ManagedAutoMemoryExtractRuntime(new MemoryBackgroundTaskHub());
+  return new ManagedAutoMemoryExtractRuntime(new BackgroundTaskHub());
 }
 
 export function resetManagedAutoMemoryExtractRuntimeForTests(): void {

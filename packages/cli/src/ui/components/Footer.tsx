@@ -20,7 +20,7 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import {
   ApprovalMode,
-  defaultMemoryTaskHub,
+  globalBackgroundTaskHub,
   DREAM_TASK_TYPE,
 } from '@qwen-code/qwen-code-core';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
@@ -34,7 +34,7 @@ function useDreamRunning(projectRoot: string): boolean {
   const [running, setRunning] = useState(false);
 
   useEffect(() => {
-    const registry = defaultMemoryTaskHub.registry;
+    const registry = globalBackgroundTaskHub.registry;
 
     function check() {
       const tasks = registry.list(projectRoot);

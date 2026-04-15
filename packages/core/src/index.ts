@@ -122,6 +122,7 @@ export * from './auxiliary/sideQuery.js';
 export * from './background/taskRegistry.js';
 export * from './background/taskDrainer.js';
 export * from './background/taskScheduler.js';
+export * from './background/taskHub.js';
 export * from './background/forkedAgent.js';
 
 export * from './memory/types.js';
@@ -137,7 +138,6 @@ export * from './memory/extractScheduler.js';
 export * from './memory/dreamAgentPlanner.js';
 export * from './memory/dream.js';
 export * from './memory/dreamScheduler.js';
-export * from './memory/memoryTaskHub.js';
 export * from './memory/scan.js';
 export * from './memory/relevanceSelector.js';
 export * from './memory/recall.js';

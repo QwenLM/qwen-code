@@ -5,7 +5,9 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { defaultMemoryTaskHub } from './memoryTaskHub.js';
+import { globalBackgroundTaskHub } from '../background/taskHub.js';
+import { EXTRACT_TASK_TYPE } from './extractScheduler.js';
+import { DREAM_TASK_TYPE } from './dreamScheduler.js';
 import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryIndexPath,
@@ -86,9 +88,11 @@ export async function getManagedAutoMemoryStatus(
     metadata,
     extractionRunning: isExtractRunning(projectRoot),
     topics,
-    extractionTasks: defaultMemoryTaskHub
-      .listExtractTasks(projectRoot)
+    extractionTasks: globalBackgroundTaskHub
+      .listByType(EXTRACT_TASK_TYPE, projectRoot)
       .slice(0, 8),
-    dreamTasks: defaultMemoryTaskHub.listDreamTasks(projectRoot).slice(0, 5),
+    dreamTasks: globalBackgroundTaskHub
+      .listByType(DREAM_TASK_TYPE, projectRoot)
+      .slice(0, 5),
   };
 }
