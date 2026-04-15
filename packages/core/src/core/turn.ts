@@ -108,6 +108,7 @@ export interface ToolCallResponseInfo {
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
   contentLength?: number;
+  modelOverride?: string;
 }
 
 export interface ServerToolCallConfirmationDetails {

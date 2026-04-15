@@ -186,6 +186,7 @@ describe('validateAuthMethod', () => {
     const mockConfig = {
       getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('cli-model'),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     } as unknown as import('@qwen-code/qwen-code-core').Config;
 
@@ -219,6 +220,7 @@ describe('validateAuthMethod', () => {
     const mockConfig = {
       getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('cli-model'),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     } as unknown as import('@qwen-code/qwen-code-core').Config;
 
@@ -226,5 +228,55 @@ describe('validateAuthMethod', () => {
     const result = validateAuthMethod(AuthType.USE_OPENAI, mockConfig);
     expect(result).not.toBeNull();
     expect(result).toContain('CLI_API_KEY');
+  });
+
+  // Regression test for #3171: validation must accept the API key resolved
+  // into generationConfig.apiKey (e.g. from --openai-api-key) instead of
+  // requiring an OPENAI_API_KEY env var.
+  it('should accept API key resolved into generationConfig from CLI flag', () => {
+    delete process.env['OPENAI_API_KEY'];
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {},
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    const mockConfig = {
+      getModelsConfig: vi.fn().mockReturnValue({
+        getModel: vi.fn().mockReturnValue('gpt-4'),
+        getGenerationConfig: vi
+          .fn()
+          .mockReturnValue({ apiKey: 'cli-provided-key' }),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const result = validateAuthMethod(AuthType.USE_OPENAI, mockConfig);
+    expect(result).toBeNull();
+  });
+
+  // Regression test for #3171: when a modelProvider has a custom envKey but
+  // the user passes --openai-api-key on the CLI, the resolver picks the CLI
+  // value. Validation should match the resolver and accept it instead of
+  // demanding the env var.
+  it('should accept CLI-resolved key even when modelProvider declares a custom envKey', () => {
+    delete process.env['CUSTOM_API_KEY'];
+    vi.mocked(settings.loadSettings).mockReturnValue({
+      merged: {
+        model: { name: 'custom-model' },
+        modelProviders: {
+          openai: [{ id: 'custom-model', envKey: 'CUSTOM_API_KEY' }],
+        },
+      },
+    } as unknown as ReturnType<typeof settings.loadSettings>);
+
+    const mockConfig = {
+      getModelsConfig: vi.fn().mockReturnValue({
+        getModel: vi.fn().mockReturnValue('custom-model'),
+        getGenerationConfig: vi
+          .fn()
+          .mockReturnValue({ apiKey: 'cli-provided-key' }),
+      }),
+    } as unknown as import('@qwen-code/qwen-code-core').Config;
+
+    const result = validateAuthMethod(AuthType.USE_OPENAI, mockConfig);
+    expect(result).toBeNull();
   });
 });

@@ -47,13 +47,17 @@ import {
   SessionSelector,
 } from '@qwen-code/webui';
 import { InputForm } from './components/layout/InputForm.js';
+import {
+  AccountInfoDialog,
+  type AccountInfo,
+} from './components/AccountInfoDialog.js';
 import { ApprovalMode, NEXT_APPROVAL_MODE } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { PlanEntry, UsageStatsPayload } from '../types/chatTypes.js';
 import type { ModelInfo, AvailableCommand } from '@agentclientprotocol/sdk';
 import type { Question } from '../types/acpTypes.js';
-import { DEFAULT_TOKEN_LIMIT, tokenLimit } from '../utils/tokenLimits.js';
 import { useImagePaste, type WebViewImageMessage } from './hooks/useImage.js';
+import { computeContextUsage } from './utils/contextUsage.js';
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -92,6 +96,7 @@ export const App: React.FC = () => {
   >([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
   const [showModelSelector, setShowModelSelector] = useState(false);
+  const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   // Scroll container for message list; used to keep the view anchored to the latest content
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
@@ -169,6 +174,13 @@ export const App: React.FC = () => {
             type: 'command',
             group: 'Account',
           },
+          {
+            id: 'account',
+            label: 'Account',
+            description: 'Show current account and authentication info',
+            type: 'command',
+            group: 'Account',
+          },
         ];
 
         // Slash Commands group - commands from server (available_commands_update)
@@ -205,52 +217,10 @@ export const App: React.FC = () => {
 
   const completion = useCompletionTrigger(inputFieldRef, getCompletionItems);
 
-  const contextUsage = useMemo(() => {
-    if (!usageStats && !modelInfo) {
-      return null;
-    }
-
-    const modelName =
-      modelInfo?.modelId && typeof modelInfo.modelId === 'string'
-        ? modelInfo.modelId
-        : modelInfo?.name && typeof modelInfo.name === 'string'
-          ? modelInfo.name
-          : undefined;
-
-    // Note: In the webview context, the contextWindowSize is already reflected in
-    // modelInfo._meta.contextLimit which is computed on the extension side with the proper config.
-    // We only use tokenLimit as a fallback if metaLimit is not available.
-    const derivedLimit =
-      modelName && modelName.length > 0
-        ? tokenLimit(modelName, 'input')
-        : undefined;
-
-    const metaLimitRaw = modelInfo?._meta?.['contextLimit'];
-    const metaLimit =
-      typeof metaLimitRaw === 'number' || metaLimitRaw === null
-        ? metaLimitRaw
-        : undefined;
-
-    const limit =
-      usageStats?.tokenLimit ??
-      metaLimit ??
-      derivedLimit ??
-      DEFAULT_TOKEN_LIMIT;
-
-    const used = usageStats?.usage?.promptTokens ?? 0;
-    if (typeof limit !== 'number' || limit <= 0 || used < 0) {
-      return null;
-    }
-    const percentLeft = Math.max(
-      0,
-      Math.min(100, Math.round(((limit - used) / limit) * 100)),
-    );
-    return {
-      percentLeft,
-      usedTokens: used,
-      tokenLimit: limit,
-    };
-  }, [usageStats, modelInfo]);
+  const contextUsage = useMemo(
+    () => computeContextUsage(usageStats, modelInfo),
+    [usageStats, modelInfo],
+  );
 
   // Track a lightweight signature of workspace files to detect content changes even when length is unchanged
   const workspaceFilesSignature = useMemo(
@@ -362,6 +332,9 @@ export const App: React.FC = () => {
     },
     setAvailableModels: (models) => {
       setAvailableModels(models);
+    },
+    setAccountInfo: (info) => {
+      setAccountInfo(info);
     },
   });
 
@@ -612,6 +585,13 @@ export const App: React.FC = () => {
         if (itemId === 'login') {
           clearTriggerText();
           vscode.postMessage({ type: 'login', data: {} });
+          completion.closeCompletion();
+          return;
+        }
+
+        if (itemId === 'account') {
+          clearTriggerText();
+          vscode.postMessage({ type: 'getAccountInfo', data: {} });
           completion.closeCompletion();
           return;
         }
@@ -1099,6 +1079,13 @@ export const App: React.FC = () => {
           questions={askUserQuestionRequest.questions}
           onSubmit={handleAskUserQuestionResponse}
           onCancel={handleAskUserQuestionCancel}
+        />
+      )}
+
+      {accountInfo && (
+        <AccountInfoDialog
+          info={accountInfo}
+          onClose={() => setAccountInfo(null)}
         />
       )}
     </div>

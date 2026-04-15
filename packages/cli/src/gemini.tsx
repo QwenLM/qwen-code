@@ -50,6 +50,10 @@ import { AppEvent, appEvents } from './utils/events.js';
 import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
 import {
+  profileCheckpoint,
+  finalizeStartupProfile,
+} from './utils/startupProfiler.js';
+import {
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -211,11 +215,14 @@ export async function startInteractiveUI(
 }
 
 export async function main() {
+  profileCheckpoint('main_entry');
   setupUnhandledRejectionHandler();
   const settings = loadSettings();
   await cleanupCheckpoints();
+  profileCheckpoint('after_load_settings');
 
   let argv = await parseArguments();
+  profileCheckpoint('after_parse_arguments');
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
@@ -380,6 +387,7 @@ export async function main() {
   // We are now past the logic handling potentially launching a child process
   // to run Qwen Code. It is now safe to perform expensive initialization that
   // may have side effects.
+  profileCheckpoint('after_sandbox_check');
 
   // Initialize output language file before config loads to ensure it's included in context
   initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
@@ -391,6 +399,7 @@ export async function main() {
       process.cwd(),
       argv.extensions,
     );
+    profileCheckpoint('after_load_cli_config');
 
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
@@ -437,6 +446,7 @@ export async function main() {
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
     const initializationResult = await initializeApp(config, settings);
+    profileCheckpoint('after_initialize_app');
 
     if (config.getExperimentalZedIntegration()) {
       await runAcpAgent(config, settings, argv);
@@ -460,6 +470,9 @@ export async function main() {
     ];
 
     // Render UI, passing necessary config values. Check that there is no command line question.
+    profileCheckpoint('before_render');
+    finalizeStartupProfile(config.getSessionId());
+
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;

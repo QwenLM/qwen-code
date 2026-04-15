@@ -82,6 +82,7 @@ interface AgentConnectOptions {
 }
 interface AgentSessionOptions {
   autoAuthenticate?: boolean;
+  forceNew?: boolean;
 }
 
 export class QwenAgentManager {
@@ -422,6 +423,15 @@ export class QwenAgentManager {
       console.error('[QwenAgentManager] Failed to set model:', err);
       throw err;
     }
+  }
+
+  async getAccountInfo(): Promise<{
+    authType: string | null;
+    model: string | null;
+    baseUrl: string | null;
+    apiKeyEnvKey: string | null;
+  }> {
+    return this.connection.getAccountInfo();
   }
 
   /**
@@ -1216,8 +1226,10 @@ export class QwenAgentManager {
     options?: AgentSessionOptions,
   ): Promise<string | null> {
     const autoAuthenticate = options?.autoAuthenticate ?? true;
-    // Reuse existing session if present
-    if (this.connection.currentSessionId) {
+    const forceNew = options?.forceNew ?? false;
+    // Reuse the current session for implicit session bootstrap paths.
+    // Explicit "new session" actions must bypass this and call session/new.
+    if (!forceNew && this.connection.currentSessionId) {
       console.log(
         '[QwenAgentManager] createNewSession: reusing existing session',
         this.connection.currentSessionId,
@@ -1229,7 +1241,10 @@ export class QwenAgentManager {
       console.log(
         '[QwenAgentManager] createNewSession: session creation already in flight',
       );
-      return this.sessionCreateInFlight;
+      if (!forceNew) {
+        return this.sessionCreateInFlight;
+      }
+      await this.sessionCreateInFlight;
     }
 
     console.log('[QwenAgentManager] Creating new session...');

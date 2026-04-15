@@ -145,7 +145,7 @@ class QwenAgent implements Agent {
     private settings: LoadedSettings,
     private argv: CliArgs,
     private connection: AgentSideConnection,
-  ) {}
+  ) { }
 
   async initialize(args: InitializeRequest): Promise<InitializeResponse> {
     this.clientCapabilities = args.clientCapabilities;
@@ -424,6 +424,18 @@ class QwenAgent implements Agent {
         );
         return { success };
       }
+      case 'getAccountInfo': {
+        const sessionId = params['sessionId'] as string | undefined;
+        const session = sessionId ? this.sessions.get(sessionId) : undefined;
+        const config = session ? session.getConfig() : this.config;
+        const cfg = config.getContentGeneratorConfig();
+        return {
+          authType: cfg?.authType ?? config.getAuthType() ?? null,
+          model: cfg?.model ?? config.getModel() ?? null,
+          baseUrl: cfg?.baseUrl ?? null,
+          apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
+        };
+      }
       default:
         throw RequestError.methodNotFound(method);
     }
@@ -585,9 +597,9 @@ class QwenAgent implements Agent {
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
     const currentModelId = activeRuntimeSnapshot
       ? formatAcpModelId(
-          activeRuntimeSnapshot.id,
-          activeRuntimeSnapshot.authType,
-        )
+        activeRuntimeSnapshot.id,
+        activeRuntimeSnapshot.authType,
+      )
       : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
 
     const mappedAvailableModels = allConfiguredModels.map((model) => {
@@ -636,9 +648,9 @@ class QwenAgent implements Agent {
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
     const currentModelId = activeRuntimeSnapshot
       ? formatAcpModelId(
-          activeRuntimeSnapshot.id,
-          activeRuntimeSnapshot.authType,
-        )
+        activeRuntimeSnapshot.id,
+        activeRuntimeSnapshot.authType,
+      )
       : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
 
     const modeOptions = APPROVAL_MODES.map((mode) => ({

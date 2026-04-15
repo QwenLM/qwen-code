@@ -255,6 +255,8 @@ export interface SlashCommand {
   altNames?: string[];
   description: string;
   hidden?: boolean;
+  /** Higher values win when slash completion candidates have comparable match quality. */
+  completionPriority?: number;
 
   kind: CommandKind;
 

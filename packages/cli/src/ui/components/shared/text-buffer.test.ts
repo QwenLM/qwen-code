@@ -21,6 +21,7 @@ import {
   findWordEndInLine,
   findNextWordStartInLine,
   isWordCharStrict,
+  __resetWordSegmenter,
 } from './text-buffer.js';
 import { cpLen } from '../../utils/textUtils.js';
 
@@ -36,6 +37,10 @@ const initialState: TextBufferState = {
 };
 
 describe('textBufferReducer', () => {
+  beforeEach(() => {
+    __resetWordSegmenter();
+  });
+
   it('should return the initial state if state is undefined', () => {
     const action = { type: 'unknown_action' } as unknown as TextBufferAction;
     const state = textBufferReducer(initialState, action);
@@ -200,7 +205,7 @@ describe('textBufferReducer', () => {
       expect(state.cursorCol).toBe(8);
     });
 
-    it('should delete variable_name parts', () => {
+    it('should delete a variable name as a single word (Intl.Segmenter behavior)', () => {
       const stateWithText: TextBufferState = {
         ...initialState,
         lines: ['variable_name'],
@@ -209,8 +214,9 @@ describe('textBufferReducer', () => {
       };
       const action: TextBufferAction = { type: 'delete_word_left' };
       const state = textBufferReducer(stateWithText, action);
-      expect(state.lines).toEqual(['variable_']);
-      expect(state.cursorCol).toBe(9);
+      // Intl.Segmenter treats 'variable_name' as a single word
+      expect(state.lines).toEqual(['']);
+      expect(state.cursorCol).toBe(0);
     });
 
     it('should act like backspace at the beginning of a line', () => {
@@ -256,7 +262,7 @@ describe('textBufferReducer', () => {
       expect(state.lines).toEqual(['to/file']);
     });
 
-    it('should delete variable_name parts', () => {
+    it('should delete variable_name as a single word (Intl.Segmenter behavior)', () => {
       const stateWithText: TextBufferState = {
         ...initialState,
         lines: ['variable_name'],
@@ -265,7 +271,8 @@ describe('textBufferReducer', () => {
       };
       const action: TextBufferAction = { type: 'delete_word_right' };
       const state = textBufferReducer(stateWithText, action);
-      expect(state.lines).toEqual(['_name']);
+      // Intl.Segmenter treats 'variable_name' as a single word
+      expect(state.lines).toEqual(['']);
       expect(state.cursorCol).toBe(0);
     });
 
@@ -305,6 +312,7 @@ describe('useTextBuffer', () => {
 
   beforeEach(() => {
     viewport = { width: 10, height: 3 }; // Default viewport for tests
+    __resetWordSegmenter();
   });
 
   describe('Initialization', () => {
@@ -1946,6 +1954,381 @@ describe('Unicode helper functions', () => {
     it('should handle Chinese and Arabic text', () => {
       expect(cpLen('hello 你好 world')).toBe(14); // 5 + 1 + 2 + 1 + 5 = 14
       expect(cpLen('hello مرحبا world')).toBe(17);
+    });
+  });
+});
+
+describe('CJK word navigation', () => {
+  beforeEach(() => {
+    __resetWordSegmenter();
+  });
+
+  describe('delete_word_left with CJK', () => {
+    it('should delete CJK word to the left', () => {
+      const state: TextBufferState = {
+        lines: ['你好世界'],
+        cursorRow: 0,
+        cursorCol: 4, // At end
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, { type: 'delete_word_left' });
+      expect(newState).toHaveOnlyValidCharacters();
+      // '世界' is one word, deletes from col 4 to col 2
+      expect(newState.cursorCol).toBe(2);
+      expect(newState.lines[0]).toBe('你好');
+    });
+
+    it('should delete mixed CJK/Latin word to the left', () => {
+      const state: TextBufferState = {
+        lines: ['hello你好'],
+        cursorRow: 0,
+        cursorCol: 7, // After 你好
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, { type: 'delete_word_left' });
+      expect(newState).toHaveOnlyValidCharacters();
+      // '你好' is one word at col 5-7, deletes to col 5
+      expect(newState.cursorCol).toBe(5);
+      expect(newState.lines[0]).toBe('hello');
+    });
+  });
+
+  describe('delete_word_right with CJK', () => {
+    it('should delete CJK word to the right', () => {
+      const state: TextBufferState = {
+        lines: ['你好世界'],
+        cursorRow: 0,
+        cursorCol: 2, // In middle (after 你好)
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, { type: 'delete_word_right' });
+      expect(newState).toHaveOnlyValidCharacters();
+      // '世界' is one word at col 2-4, deletes it
+      expect(newState.lines[0]).toBe('你好');
+    });
+
+    it('should delete mixed CJK/Latin word to the right', () => {
+      const state: TextBufferState = {
+        lines: ['你好world'],
+        cursorRow: 0,
+        cursorCol: 2, // After 你好
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, { type: 'delete_word_right' });
+      expect(newState).toHaveOnlyValidCharacters();
+      // 'world' is one word at col 2-7, deletes it
+      expect(newState.cursorCol).toBe(2);
+      expect(newState.lines[0]).toBe('你好');
+    });
+  });
+
+  describe('wordLeft/wordRight navigation with CJK', () => {
+    it('should navigate wordLeft through CJK text', () => {
+      const state: TextBufferState = {
+        lines: ['hello你好world'],
+        cursorRow: 0,
+        cursorCol: 14, // At end
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordLeft' },
+      });
+      expect(newState).toHaveOnlyValidCharacters();
+      // 'world' ends at 14, wordLeft skips whitespace and lands at '你好' end = 7
+      expect(newState.cursorCol).toBe(7);
+    });
+
+    it('should navigate wordRight through CJK text', () => {
+      const state: TextBufferState = {
+        lines: ['hello你好world'],
+        cursorRow: 0,
+        cursorCol: 5, // After 'hello'
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordRight' },
+      });
+      expect(newState).toHaveOnlyValidCharacters();
+      // '你好' ends at 7, skips whitespace (none) → lands at 'world' start = 7
+      // Then skips whitespace → lands at 'world' start = 7
+      // Actually: cjkEnd = 7, then while whitespace → no whitespace → end = 7
+      expect(newState.cursorCol).toBe(7);
+    });
+
+    it('should handle pure CJK text navigation with wordLeft', () => {
+      const state: TextBufferState = {
+        lines: ['你好世界'],
+        cursorRow: 0,
+        cursorCol: 4, // At end
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordLeft' },
+      });
+      expect(newState).toHaveOnlyValidCharacters();
+      // '世界' is one word at col 2-4, wordLeft lands at its start = 2
+      expect(newState.cursorCol).toBe(2);
+    });
+
+    it('should handle pure CJK text navigation with wordRight', () => {
+      const state: TextBufferState = {
+        lines: ['你好世界'],
+        cursorRow: 0,
+        cursorCol: 0, // At start
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordRight' },
+      });
+      expect(newState).toHaveOnlyValidCharacters();
+      // '你好' ends at 2, skips whitespace (none) → end = 2
+      expect(newState.cursorCol).toBe(2);
+    });
+  });
+
+  describe('fallback and edge cases', () => {
+    it('should use char-by-char fallback for long lines (>1500 chars)', () => {
+      const longText = '你'.repeat(2000);
+      const state: TextBufferState = {
+        lines: [longText],
+        cursorRow: 0,
+        cursorCol: 2000,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordLeft' },
+      });
+      expect(newState).toHaveOnlyValidCharacters();
+      // Each CJK char is its own "word" in fallback mode
+      expect(newState.cursorCol).toBe(1999);
+    });
+
+    it('should handle word navigation on empty line', () => {
+      const state: TextBufferState = {
+        lines: [''],
+        cursorRow: 0,
+        cursorCol: 0,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const leftState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordLeft' },
+      });
+      expect(leftState).toHaveOnlyValidCharacters();
+      expect(leftState.cursorCol).toBe(0); // No movement at start
+
+      const rightState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordRight' },
+      });
+      expect(rightState).toHaveOnlyValidCharacters();
+      expect(rightState.cursorCol).toBe(0); // No movement on empty line
+    });
+
+    it('should handle word navigation on single character', () => {
+      const state: TextBufferState = {
+        lines: ['a'],
+        cursorRow: 0,
+        cursorCol: 0,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const rightState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordRight' },
+      });
+      expect(rightState).toHaveOnlyValidCharacters();
+      expect(rightState.cursorCol).toBe(1); // Jump to end of single char word
+
+      const fromEnd = textBufferReducer(
+        { ...state, cursorCol: 1 },
+        { type: 'move', payload: { dir: 'wordLeft' } },
+      );
+      expect(fromEnd).toHaveOnlyValidCharacters();
+      expect(fromEnd.cursorCol).toBe(0); // Jump to start of single char word
+    });
+
+    it('should handle wordLeft at absolute start of document', () => {
+      const state: TextBufferState = {
+        lines: ['hello'],
+        cursorRow: 0,
+        cursorCol: 0,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordLeft' },
+      });
+      expect(newState).toHaveOnlyValidCharacters();
+      expect(newState.cursorCol).toBe(0); // No movement at start
+    });
+
+    it('should handle wordRight at absolute end of document', () => {
+      const state: TextBufferState = {
+        lines: ['hello'],
+        cursorRow: 0,
+        cursorCol: 5,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordRight' },
+      });
+      expect(newState).toHaveOnlyValidCharacters();
+      expect(newState.cursorCol).toBe(5); // No movement at end
+    });
+
+    it('should handle word navigation across multiple empty lines', () => {
+      const state: TextBufferState = {
+        lines: ['', ''],
+        cursorRow: 0,
+        cursorCol: 0,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const rightState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordRight' },
+      });
+      expect(rightState).toHaveOnlyValidCharacters();
+      // Should move to next line start
+      expect(rightState.cursorRow).toBe(1);
+      expect(rightState.cursorCol).toBe(0);
+    });
+  });
+
+  describe('word navigation edge cases', () => {
+    it('should skip whitespace after word in wordRight', () => {
+      const state: TextBufferState = {
+        lines: ['hello world'],
+        cursorRow: 0,
+        cursorCol: 0,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordRight' },
+      });
+      expect(newState).toHaveOnlyValidCharacters();
+      expect(newState.cursorCol).toBe(6);
+    });
+
+    it('should navigate consistently through dotted identifiers', () => {
+      const state: TextBufferState = {
+        lines: ['Intl.Segmenter'],
+        cursorRow: 0,
+        cursorCol: 14,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const leftState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordLeft' },
+      });
+      expect(leftState).toHaveOnlyValidCharacters();
+      expect(leftState.cursorCol).toBe(5);
+
+      const dotState: TextBufferState = {
+        lines: ['Intl.Segmenter'],
+        cursorRow: 0,
+        cursorCol: 4,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const rightState = textBufferReducer(dotState, {
+        type: 'move',
+        payload: { dir: 'wordRight' },
+      });
+      expect(rightState).toHaveOnlyValidCharacters();
+      expect(rightState.cursorCol).toBe(5);
+    });
+
+    it('should navigate through repeated identical words', () => {
+      const state: TextBufferState = {
+        lines: ['variable_name variable_name'],
+        cursorRow: 0,
+        cursorCol: 0,
+        preferredCol: null,
+        undoStack: [],
+        redoStack: [],
+        clipboard: null,
+        selectionAnchor: null,
+      };
+      const newState = textBufferReducer(state, {
+        type: 'move',
+        payload: { dir: 'wordRight' },
+      });
+      expect(newState).toHaveOnlyValidCharacters();
+      expect(newState.cursorCol).toBe(14);
     });
   });
 });
