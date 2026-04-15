@@ -674,17 +674,25 @@ export function replayUiTelemetryFromConversation(
 }
 
 /**
- * Returns the best available prompt token count for resuming telemetry:
- * - If a chat compression checkpoint exists, use its new token count.
- * - Otherwise, use the last assistant usageMetadata input (fallback to total).
+ * Returns the best available prompt token count for resuming telemetry.
+ * Walks backward through messages and returns the first valid value:
+ * - The latest assistant's non-zero usage (totalTokenCount ?? promptTokenCount).
+ * - The most recent chat compression checkpoint's newTokenCount.
  */
 export function getResumePromptTokenCount(
   conversation: ConversationRecord,
 ): number | undefined {
-  let fallback: number | undefined;
-
   for (let i = conversation.messages.length - 1; i >= 0; i--) {
     const record = conversation.messages[i];
+
+    if (record.type === 'assistant') {
+      const usage = record.usageMetadata;
+      const candidate = usage?.totalTokenCount ?? usage?.promptTokenCount;
+      if (candidate) {
+        return candidate;
+      }
+    }
+
     if (record.type === 'system' && record.subtype === 'chat_compression') {
       const payload = record.systemPayload as
         | ChatCompressionRecordPayload
@@ -693,14 +701,7 @@ export function getResumePromptTokenCount(
         return payload.info.newTokenCount;
       }
     }
-
-    if (fallback === undefined && record.type === 'assistant') {
-      const usage = record.usageMetadata;
-      if (usage) {
-        fallback = usage.totalTokenCount ?? usage.promptTokenCount;
-      }
-    }
   }
 
-  return fallback;
+  return undefined;
 }

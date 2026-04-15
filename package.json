@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.14.2",
+  "version": "0.14.4",
   "engines": {
     "node": ">=20.0.0"
   },
@@ -18,7 +18,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.2"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.4"
   },
   "scripts": {
     "start": "cross-env node scripts/start.js",
@@ -72,7 +72,8 @@
     "cliui": {
       "wrap-ansi": "7.0.0"
     },
-    "baseline-browser-mapping": "^2.9.19"
+    "baseline-browser-mapping": "^2.9.19",
+    "normalize-package-data": "^7.0.1"
   },
   "bin": {
     "qwen": "dist/cli.js"

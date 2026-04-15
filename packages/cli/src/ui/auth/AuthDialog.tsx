@@ -106,9 +106,7 @@ export function AuthDialog(): React.JSX.Element {
       key: AuthType.QWEN_OAUTH,
       title: t('Qwen OAuth'),
       label: t('Qwen OAuth'),
-      description: t(
-        'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
-      ),
+      description: t('Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15'),
       value: AuthType.QWEN_OAUTH as MainOption,
     },
     {

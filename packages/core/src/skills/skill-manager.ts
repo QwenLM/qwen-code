@@ -17,7 +17,7 @@ import type {
   ListSkillsOptions,
   SkillValidationResult,
 } from './types.js';
-import { SkillError, SkillErrorCode } from './types.js';
+import { SkillError, SkillErrorCode, parseModelField } from './types.js';
 import type { Config } from '../config/config.js';
 import { validateConfig } from './skill-load.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -396,10 +396,14 @@ export class SkillManager {
         }
       }
 
+      // Extract optional model field
+      const model = parseModelField(frontmatter);
+
       const config: SkillConfig = {
         name,
         description,
         allowedTools,
+        model,
         level,
         filePath,
         body: body.trim(),

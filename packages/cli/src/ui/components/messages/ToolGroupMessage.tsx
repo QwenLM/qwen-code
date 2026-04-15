@@ -15,7 +15,7 @@ import { CompactToolGroupDisplay } from './CompactToolGroupDisplay.js';
 import { theme } from '../../semantic-colors.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
-import { useVerboseMode } from '../../contexts/VerboseModeContext.js';
+import { useCompactMode } from '../../contexts/CompactModeContext.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
 
 function isAgentWithPendingConfirmation(
@@ -53,7 +53,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   isUserInitiated,
 }) => {
   const config = useConfig();
-  const { verboseMode } = useVerboseMode();
+  const { compactMode } = useCompactMode();
 
   const hasConfirmingTool = toolCalls.some(
     (t) => t.status === ToolCallStatus.Confirming,
@@ -103,7 +103,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // Force-expand when: user must interact (Confirming), tool errored,
   // shell is focused, or user-initiated
   const showCompact =
-    !verboseMode &&
+    compactMode &&
     !hasConfirmingTool &&
     !hasErrorTool &&
     !isEmbeddedShellFocused &&

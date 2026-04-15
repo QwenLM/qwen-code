@@ -17,6 +17,7 @@ import type {
   ThoughtSummary,
   ToolCallRequestInfo,
   GeminiErrorEventValue,
+  StopFailureErrorType,
 } from '@qwen-code/qwen-code-core';
 import {
   GeminiEventType as ServerGeminiEventType,
@@ -77,6 +78,43 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
+
+/**
+ * Classify API error to StopFailureErrorType
+ * @internal Exported for testing purposes
+ */
+export function classifyApiError(error: {
+  message: string;
+  status?: number;
+}): StopFailureErrorType {
+  const status = error.status;
+  const message = error.message?.toLowerCase() ?? '';
+
+  if (status === 429 || message.includes('rate limit')) {
+    return 'rate_limit';
+  }
+  if (status === 401 || message.includes('unauthorized')) {
+    return 'authentication_failed';
+  }
+  if (
+    status === 402 ||
+    status === 403 ||
+    message.includes('billing') ||
+    message.includes('quota')
+  ) {
+    return 'billing_error';
+  }
+  if (status === 400 || message.includes('invalid')) {
+    return 'invalid_request';
+  }
+  if (status !== undefined && status >= 500) {
+    return 'server_error';
+  }
+  if (message.includes('max_tokens') || message.includes('token limit')) {
+    return 'max_output_tokens';
+  }
+  return 'unknown';
+}
 
 /**
  * Checks if image parts have supported formats and returns unsupported ones
@@ -199,6 +237,7 @@ export const useGeminiStream = (
     null,
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
+  const modelOverrideRef = useRef<string | undefined>(undefined);
   const {
     startNewPrompt,
     getPromptCount,
@@ -795,6 +834,12 @@ export const useGeminiStream = (
       // (auto-retry countdown is shown when retryCountdownTimerRef is active)
       const isShowingAutoRetry = retryCountdownTimerRef.current !== null;
       clearRetryCountdown();
+
+      const formattedErrorText = parseAndFormatApiError(
+        eventValue.error,
+        config.getContentGeneratorConfig()?.authType,
+      );
+
       if (!isShowingAutoRetry) {
         const retryHint = t('Press Ctrl+Y to retry');
         // Store error with hint as a pending item (not in history).
@@ -802,14 +847,24 @@ export const useGeminiStream = (
         // since pending items are in the dynamic rendering area (not <Static>).
         setPendingRetryErrorItem({
           type: 'error' as const,
-          text: parseAndFormatApiError(
-            eventValue.error,
-            config.getContentGeneratorConfig()?.authType,
-          ),
+          text: formattedErrorText,
           hint: retryHint,
         });
       }
       setThought(null); // Reset thought when there's an error
+
+      // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+      const errorType = classifyApiError(eventValue.error);
+      config
+        .getHookSystem()
+        ?.fireStopFailureEvent(
+          errorType,
+          eventValue.error.message,
+          formattedErrorText,
+        )
+        .catch((err) => {
+          debugLogger.warn(`StopFailure hook failed: ${err}`);
+        });
     },
     [
       addItem,
@@ -1201,6 +1256,11 @@ export const useGeminiStream = (
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
+        // Clear model override for new user turns, but preserve it on retry
+        // so the same skill-selected model is used again.
+        if (submitType !== SendMessageType.Retry) {
+          modelOverrideRef.current = undefined;
+        }
         // Commit any pending retry error to history (without hint) since the
         // user is starting a new conversation turn.
         // Clear both countdown-based errors AND static errors (those without
@@ -1302,7 +1362,7 @@ export const useGeminiStream = (
             finalQueryToSend,
             abortSignal,
             prompt_id!,
-            { type: submitType },
+            { type: submitType, modelOverride: modelOverrideRef.current },
           );
 
           const processingStatus = await processGeminiStreamEvents(
@@ -1567,6 +1627,15 @@ export const useGeminiStream = (
       const prompt_ids = geminiTools.map(
         (toolCall) => toolCall.request.prompt_id,
       );
+
+      // Persist model override from skill tool results (last one wins).
+      // Uses `in` so that undefined (from inherit/no-model skills) clears a
+      // prior override, while non-skill tools (field absent) leave it intact.
+      for (const toolCall of geminiTools) {
+        if ('modelOverride' in toolCall.response) {
+          modelOverrideRef.current = toolCall.response.modelOverride;
+        }
+      }
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 

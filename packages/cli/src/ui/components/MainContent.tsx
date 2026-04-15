@@ -13,7 +13,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useAppContext } from '../contexts/AppContext.js';
 import { AppHeader } from './AppHeader.js';
 import { DebugModeNotification } from './DebugModeNotification.js';
-import { useVerboseMode } from '../contexts/VerboseModeContext.js';
+import { useCompactMode } from '../contexts/CompactModeContext.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -24,7 +24,7 @@ const MAX_GEMINI_MESSAGE_LINES = 65536;
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
-  const { frozenSnapshot } = useVerboseMode();
+  const { frozenSnapshot } = useCompactMode();
   const {
     pendingHistoryItems,
     terminalWidth,
