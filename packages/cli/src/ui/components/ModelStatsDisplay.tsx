@@ -82,8 +82,6 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
     );
   }
 
-  const columnLabels = entries.map(({ label }) => label);
-
   const getModelValues = (
     getter: (metrics: ModelMetricsCore) => string | React.ReactElement,
   ) => entries.map(({ metrics }) => getter(metrics));
@@ -115,8 +113,8 @@ export const ModelStatsDisplay: React.FC<ModelStatsDisplayProps> = ({
             {t('Metric')}
           </Text>
         </Box>
-        {columnLabels.map((label) => (
-          <Box width={MODEL_COL_WIDTH} key={label}>
+        {entries.map(({ key, label }) => (
+          <Box width={MODEL_COL_WIDTH} key={key}>
             <Text bold color={theme.text.primary}>
               {label}
             </Text>

@@ -17,8 +17,15 @@ import {
  */
 export interface ModelSourceEntry {
   /**
-   * Display label. Either the bare model name (single-source collapse case)
-   * or `${modelName} (${source})` when the model has any non-main source.
+   * Stable React key built from the raw model name + source. Guaranteed
+   * unique across the returned array, even when two raw model names
+   * normalize to the same display label (e.g. `foo` and `foo-001`).
+   */
+  key: string;
+  /**
+   * Display label. Either the bare (possibly normalized) model name for
+   * the single-source collapse case, or `${modelName} (${source})` when
+   * the model has any non-main source.
    */
   label: string;
   /** Backing metrics — either the model aggregate or one source bucket. */
@@ -60,7 +67,11 @@ export function flattenModelsBySource(
     const sourceNames = Object.keys(modelMetrics.bySource);
 
     if (sourceNames.length === 0) {
-      result.push({ label: displayName, metrics: modelMetrics });
+      result.push({
+        key: modelName,
+        label: displayName,
+        metrics: modelMetrics,
+      });
       continue;
     }
 
@@ -68,6 +79,7 @@ export function flattenModelsBySource(
       // Collapse session-wide: only main sources exist, render aggregate
       // with plain model names so the existing UX is preserved.
       result.push({
+        key: modelName,
         label: displayName,
         metrics: modelMetrics.bySource[MAIN_SOURCE] ?? modelMetrics,
       });
@@ -77,6 +89,7 @@ export function flattenModelsBySource(
     const sortedSources = sortSources(sourceNames);
     for (const source of sortedSources) {
       result.push({
+        key: `${modelName}::${source}`,
         label: `${displayName} (${source})`,
         metrics: modelMetrics.bySource[source],
       });

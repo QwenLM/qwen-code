@@ -883,8 +883,12 @@ export class SubagentManager {
         try {
           const config = await this.parseSubagentFile(filePath, level);
           subagents.push(config);
-        } catch (_error) {
-          // Ignore invalid files
+        } catch (error) {
+          // Skip invalid files but surface the reason. Before this warning
+          // was added, invalid subagent files failed silently — a user who
+          // mistyped frontmatter or used a reserved name had no way to see
+          // why their agent wasn't loading.
+          warnInvalidSubagentFile(filePath, error);
           continue;
         }
       }
@@ -963,8 +967,8 @@ export async function loadSubagentFromDir(
           new SubagentValidator(),
         );
         subagents.push(config);
-      } catch (_error) {
-        // Ignore invalid files
+      } catch (error) {
+        warnInvalidSubagentFile(filePath, error);
         continue;
       }
     }
@@ -1056,4 +1060,15 @@ function parseSubagentContent(
       SubagentErrorCode.INVALID_CONFIG,
     );
   }
+}
+
+/**
+ * Log an invalid-subagent-file error via the debug logger. Before this was
+ * added, the loader swallowed these errors entirely — users running with
+ * debug logging enabled had no way to tell why their subagent wasn't loading.
+ * Kept on the debug channel so the TUI stays quiet during normal startup.
+ */
+function warnInvalidSubagentFile(filePath: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  debugLogger.debug(`Skipped invalid file ${filePath}: ${message}`);
 }

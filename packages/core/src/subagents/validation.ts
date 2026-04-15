@@ -124,7 +124,10 @@ export class SubagentValidator {
       errors.push('Name cannot end with a hyphen or underscore');
     }
 
-    // Check for reserved names
+    // Check for reserved names. `main` is the sentinel used by the /stats
+    // attribution pipeline to label the main (non-subagent) conversation;
+    // a subagent named `main` would collide with that sentinel and be
+    // silently merged into the main bucket.
     const reservedNames = [
       'self',
       'system',
@@ -133,6 +136,7 @@ export class SubagentValidator {
       'tool',
       'config',
       'default',
+      'main',
     ];
     if (reservedNames.includes(trimmedName.toLowerCase())) {
       errors.push(`"${trimmedName}" is a reserved name and cannot be used`);

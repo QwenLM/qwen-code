@@ -101,6 +101,7 @@ describe('SubagentValidator', () => {
         'tool',
         'config',
         'default',
+        'main',
       ];
 
       for (const name of reservedNames) {

@@ -124,8 +124,8 @@ const ModelUsageTable: React.FC<{
       ></Box>
 
       {/* Rows */}
-      {entries.map(({ label, metrics }) => (
-        <Box key={label}>
+      {entries.map(({ key, label, metrics }) => (
+        <Box key={key}>
           <Box width={nameWidth}>
             <Text color={theme.text.primary}>{label}</Text>
           </Box>
