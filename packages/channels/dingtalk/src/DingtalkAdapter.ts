@@ -532,9 +532,13 @@ export class DingtalkChannel extends ChannelBase {
 
       const chatId = conversationId || sessionWebhook;
 
+      process.stderr.write(
+        `[DingTalk:${this.name}] DEBUG raw IDs: senderId=${data.senderId} senderStaffId=${data.senderStaffId} senderNick=${data.senderNick}\n`,
+      );
+
       const envelope: Envelope = {
         channelName: this.name,
-        senderId: data.senderId || data.senderStaffId || '',
+        senderId: data.senderStaffId || data.senderId || '',
         senderName: data.senderNick || 'Unknown',
         chatId,
         text: cleanText || content.text,
