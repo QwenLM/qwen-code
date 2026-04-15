@@ -124,6 +124,14 @@ export class BuiltinCommandLoader implements ICommandLoader {
       statuslineCommand,
     ];
 
-    return allDefinitions.filter((cmd): cmd is SlashCommand => cmd !== null);
+    return allDefinitions
+      .filter((cmd): cmd is SlashCommand => cmd !== null)
+      .map((cmd) => ({
+        ...cmd,
+        source: 'builtin-command' as const,
+        sourceLabel: 'Built-in',
+        modelInvocable: false,
+        userInvocable: cmd.userInvocable ?? true,
+      }));
   }
 }

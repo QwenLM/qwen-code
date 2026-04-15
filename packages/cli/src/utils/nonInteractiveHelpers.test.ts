@@ -40,27 +40,40 @@ vi.mock('../nonInteractiveCliCommands.js', () => ({
   getAvailableCommands: vi
     .fn()
     .mockImplementation(
-      async (
-        _config: unknown,
-        _signal: AbortSignal,
-        allowedBuiltinCommandNames?: string[],
-      ) => {
-        const allowedSet = new Set(allowedBuiltinCommandNames ?? []);
+      async (_config: unknown, _signal: AbortSignal, mode: string = 'acp') => {
+        // Simulate capability-based filtering with commandType / supportedModes
         const allCommands = [
-          { name: 'help', kind: 'built-in' },
-          { name: 'commit', kind: 'file' },
-          { name: 'memory', kind: 'built-in' },
-          { name: 'init', kind: 'built-in' },
-          { name: 'summary', kind: 'built-in' },
-          { name: 'compress', kind: 'built-in' },
-        ];
+          { name: 'help', commandType: 'local-jsx' },
+          { name: 'commit', commandType: 'prompt' },
+          { name: 'memory', commandType: 'local' },
+          {
+            name: 'init',
+            commandType: 'local',
+            supportedModes: ['interactive', 'non_interactive', 'acp'],
+          },
+          {
+            name: 'summary',
+            commandType: 'local',
+            supportedModes: ['interactive', 'non_interactive', 'acp'],
+          },
+          {
+            name: 'compress',
+            commandType: 'local',
+            supportedModes: ['interactive', 'non_interactive', 'acp'],
+          },
+        ] as const;
 
-        // Filter commands: always include file commands, only include allowed built-in commands
-        return allCommands.filter(
-          (cmd) =>
-            cmd.kind === 'file' ||
-            (cmd.kind === 'built-in' && allowedSet.has(cmd.name)),
-        );
+        return allCommands.filter((cmd) => {
+          if (cmd.commandType === 'prompt') return true;
+          if (cmd.commandType === 'local-jsx') return mode === 'interactive';
+          if (cmd.commandType === 'local') {
+            if ('supportedModes' in cmd) {
+              return (cmd.supportedModes as readonly string[]).includes(mode);
+            }
+            return mode === 'interactive';
+          }
+          return true;
+        });
       },
     ),
 }));
@@ -520,12 +533,10 @@ describe('buildSystemMessage', () => {
   });
 
   it('should build system message with all fields', async () => {
-    const allowedBuiltinCommands = ['init', 'summary', 'compress'];
     const result = await buildSystemMessage(
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
-      allowedBuiltinCommands,
     );
 
     expect(result).toEqual({
@@ -557,7 +568,6 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
-      ['init', 'summary'],
     );
 
     expect(result.tools).toEqual([]);
@@ -573,7 +583,6 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
-      ['init', 'summary'],
     );
 
     expect(result.mcp_servers).toEqual([]);
@@ -589,36 +598,38 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
-      ['init', 'summary'],
     );
 
     expect(result.qwen_code_version).toBe('unknown');
   });
 
-  it('should only include allowed built-in commands and all file commands', async () => {
-    const allowedBuiltinCommands = ['init', 'summary'];
+  it('should include local commands with ACP supportedModes and prompt commands', async () => {
     const result = await buildSystemMessage(
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
-      allowedBuiltinCommands,
     );
 
-    // Should include: 'commit' (FILE), 'init' (BUILT_IN, allowed), 'summary' (BUILT_IN, allowed)
-    // Should NOT include: 'help', 'memory', 'compress' (BUILT_IN but not in allowed set)
-    expect(result.slash_commands).toEqual(['commit', 'init', 'summary']);
+    // Should include: 'commit' (prompt), 'compress', 'init', 'summary' (local+ACP)
+    // Should NOT include: 'help' (local-jsx), 'memory' (local without ACP supportedModes)
+    expect(result.slash_commands).toEqual([
+      'commit',
+      'compress',
+      'init',
+      'summary',
+    ]);
   });
 
-  it('should include only file commands when no built-in commands are allowed', async () => {
+  it('should exclude interactive-only commands from system message', async () => {
     const result = await buildSystemMessage(
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
-      [], // Empty array - no built-in commands allowed
     );
 
-    // Should only include 'commit' (FILE command)
-    expect(result.slash_commands).toEqual(['commit']);
+    // 'help' (local-jsx) and 'memory' (local without ACP) should be excluded
+    expect(result.slash_commands).not.toContain('help');
+    expect(result.slash_commands).not.toContain('memory');
   });
 });
 

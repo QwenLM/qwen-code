@@ -71,6 +71,7 @@ export const directoryCommand: SlashCommand = {
     return t('Manage workspace directories');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   subCommands: [
     {
       name: 'add',
@@ -80,6 +81,7 @@ export const directoryCommand: SlashCommand = {
         );
       },
       kind: CommandKind.BUILT_IN,
+      commandType: 'local-jsx',
       completion: async (_context: CommandContext, partialArg: string) =>
         getDirPathCompletions(partialArg),
       action: async (context: CommandContext, args: string) => {
@@ -215,6 +217,7 @@ export const directoryCommand: SlashCommand = {
         return t('Show all directories in the workspace');
       },
       kind: CommandKind.BUILT_IN,
+      commandType: 'local-jsx',
       action: async (context: CommandContext) => {
         const {
           ui: { addItem },

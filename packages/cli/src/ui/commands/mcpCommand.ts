@@ -14,6 +14,7 @@ export const mcpCommand: SlashCommand = {
     return t('Open MCP management dialog');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: async (): Promise<OpenDialogActionReturn> => ({
     type: 'dialog',
     dialog: 'mcp',
