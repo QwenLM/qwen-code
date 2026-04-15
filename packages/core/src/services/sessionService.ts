@@ -77,6 +77,23 @@ export interface ListSessionsResult {
 }
 
 /**
+ * Selectable history node within a session.
+ * Each node corresponds to a previously submitted user message.
+ */
+export interface SessionHistoryNode {
+  /** UUID of the user-message record. */
+  uuid: string;
+  /** Parent UUID to branch from when rewinding to this node. */
+  parentUuid: string | null;
+  /** Session identifier that owns this node. */
+  sessionId: string;
+  /** ISO timestamp when the node was created. */
+  timestamp: string;
+  /** User-visible prompt preview. */
+  prompt: string;
+}
+
+/**
  * Complete conversation reconstructed from ChatRecords.
  * Used for resuming sessions and API compatibility.
  */
@@ -436,6 +453,7 @@ export class SessionService {
    */
   async loadSession(
     sessionId: string,
+    options?: { leafUuid?: string | null },
   ): Promise<ResumedSessionData | undefined> {
     const chatsDir = this.getChatsDir();
     const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
@@ -452,9 +470,14 @@ export class SessionService {
       return;
     }
 
-    // Reconstruct linear history
-    const messages = this.reconstructHistory(records);
-    if (messages.length === 0) {
+    const hasExplicitLeaf = options && 'leafUuid' in options;
+    const leafUuid = hasExplicitLeaf ? options.leafUuid : undefined;
+
+    // Reconstruct linear history.
+    // `leafUuid: null` is a valid state for "rewind to before the first turn".
+    const messages =
+      leafUuid === null ? [] : this.reconstructHistory(records, leafUuid);
+    if (messages.length === 0 && leafUuid !== null) {
       return;
     }
 
@@ -472,8 +495,60 @@ export class SessionService {
     return {
       conversation,
       filePath,
-      lastCompletedUuid: lastMessage.uuid,
+      lastCompletedUuid: lastMessage?.uuid ?? null,
     };
+  }
+
+  /**
+   * Lists selectable history nodes for the given session.
+   * Nodes correspond to previously submitted user messages.
+   */
+  async listSessionHistoryNodes(
+    sessionId: string,
+  ): Promise<SessionHistoryNode[]> {
+    const chatsDir = this.getChatsDir();
+    const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+
+    const records = await this.readAllRecords(filePath);
+    if (records.length === 0) {
+      return [];
+    }
+
+    const firstRecord = records[0];
+    const recordProjectHash = getProjectHash(firstRecord.cwd);
+    if (recordProjectHash !== this.projectHash) {
+      return [];
+    }
+
+    const nodes: SessionHistoryNode[] = [];
+    const branchRecords = this.reconstructHistory(records);
+    for (const record of branchRecords) {
+      if (record.type !== 'user') {
+        continue;
+      }
+
+      const prompt = this.extractPromptText(record.message).trim();
+      if (!prompt) {
+        continue;
+      }
+
+      nodes.push({
+        uuid: record.uuid,
+        parentUuid: record.parentUuid,
+        sessionId: record.sessionId,
+        timestamp: record.timestamp,
+        prompt,
+      });
+    }
+
+    nodes.sort((a, b) => {
+      if (a.timestamp === b.timestamp) {
+        return a.uuid.localeCompare(b.uuid);
+      }
+      return b.timestamp.localeCompare(a.timestamp);
+    });
+
+    return nodes;
   }
 
   /**

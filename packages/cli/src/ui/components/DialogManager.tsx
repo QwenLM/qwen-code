@@ -44,6 +44,8 @@ import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
 import { MemoryDialog } from './MemoryDialog.js';
+import { ConversationHistoryPicker } from './ConversationHistoryPicker.js';
+import { RewindConfirmationDialog } from './RewindConfirmationDialog.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -379,6 +381,27 @@ export const DialogManager = ({
         currentBranch={uiState.branchName}
         onSelect={uiActions.handleResume}
         onCancel={uiActions.closeResumeDialog}
+      />
+    );
+  }
+
+  if (uiState.rewindTarget) {
+    return (
+      <RewindConfirmationDialog
+        entry={uiState.rewindTarget}
+        onConfirm={uiActions.handleRewindAction}
+        onCancel={uiActions.closeRewindConfirmation}
+      />
+    );
+  }
+
+  if (uiState.isRewindDialogOpen) {
+    return (
+      <ConversationHistoryPicker
+        config={config}
+        sessionId={config.getSessionId()}
+        onSelect={uiActions.handleRewind}
+        onCancel={uiActions.closeRewindDialog}
       />
     );
   }

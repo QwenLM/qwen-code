@@ -19,6 +19,7 @@ import { type CodingPlanRegion } from '../../constants/codingPlan.js';
 import { type AlibabaStandardRegion } from '../../constants/alibabaStandardApiKey.js';
 import type { AuthState } from '../types.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { RewindAction, RewindHistoryEntry } from '../types/rewind.js';
 // OpenAICredentials type (previously imported from OpenAIKeyPrompt)
 export interface OpenAICredentials {
   apiKey: string;
@@ -101,6 +102,12 @@ export interface UIActions {
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
   handleResume: (sessionId: string) => void;
+  // Rewind current conversation dialog
+  openRewindDialog: () => void;
+  closeRewindDialog: () => void;
+  closeRewindConfirmation: () => void;
+  handleRewind: (entry: RewindHistoryEntry) => void;
+  handleRewindAction: (action: RewindAction) => void;
   // Feedback dialog
   openFeedbackDialog: () => void;
   closeFeedbackDialog: () => void;

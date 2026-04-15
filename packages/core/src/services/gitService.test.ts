@@ -174,6 +174,7 @@ describe('GitService', () => {
 
     it('should initialize git repo in historyDir if not already initialized', async () => {
       hoistedMockCheckIsRepo.mockResolvedValue(false);
+      hoistedMockRaw.mockResolvedValueOnce('');
       const service = new GitService(projectRoot, storage);
       await service.setupShadowGitRepository();
       expect(hoistedMockSimpleGit).toHaveBeenCalledWith(repoDir);
@@ -189,13 +190,34 @@ describe('GitService', () => {
       hoistedMockCheckIsRepo.mockRejectedValueOnce(
         new Error('fatal: not a git repository'),
       );
+      hoistedMockRaw.mockResolvedValueOnce('');
       const service = new GitService(projectRoot, storage);
       await expect(service.setupShadowGitRepository()).resolves.toBeUndefined();
       expect(hoistedMockInit).toHaveBeenCalled();
     });
 
+    it('should fall back to plain init when git does not support --initial-branch', async () => {
+      hoistedMockCheckIsRepo.mockResolvedValue(false);
+      hoistedMockInit
+        .mockRejectedValueOnce(
+          new Error("error: unknown option `initial-branch=main'"),
+        )
+        .mockResolvedValueOnce(undefined);
+      hoistedMockRaw.mockResolvedValueOnce('');
+
+      const service = new GitService(projectRoot, storage);
+      await service.setupShadowGitRepository();
+
+      expect(hoistedMockInit).toHaveBeenNthCalledWith(1, false, {
+        '--initial-branch': 'main',
+      });
+      expect(hoistedMockInit).toHaveBeenNthCalledWith(2, false);
+      expect(hoistedMockCommit).toHaveBeenCalledWith('Initial snapshot');
+    });
+
     it('should not initialize git repo if already initialized', async () => {
       hoistedMockCheckIsRepo.mockResolvedValue(true);
+      hoistedMockRaw.mockResolvedValueOnce('tracked.txt\n');
       const service = new GitService(projectRoot, storage);
       await service.setupShadowGitRepository();
       expect(hoistedMockInit).not.toHaveBeenCalled();
@@ -239,6 +261,14 @@ describe('GitService', () => {
 
     it('should make an initial commit if no commits exist in history repo', async () => {
       hoistedMockCheckIsRepo.mockResolvedValue(false);
+      hoistedMockRaw.mockResolvedValueOnce('');
+      hoistedMockCommit
+        .mockRejectedValueOnce(
+          new Error('nothing to commit, working tree clean'),
+        )
+        .mockResolvedValueOnce({
+          commit: 'initial',
+        });
       const service = new GitService(projectRoot, storage);
       await service.setupShadowGitRepository();
       expect(hoistedMockCommit).toHaveBeenCalledWith('Initial commit', {
@@ -248,9 +278,107 @@ describe('GitService', () => {
 
     it('should not make an initial commit if commits already exist', async () => {
       hoistedMockCheckIsRepo.mockResolvedValue(true);
+      hoistedMockRaw.mockResolvedValueOnce('tracked.txt\n');
       const service = new GitService(projectRoot, storage);
       await service.setupShadowGitRepository();
       expect(hoistedMockCommit).not.toHaveBeenCalled();
+    });
+
+    it('should create an initial baseline snapshot when repository tree is empty', async () => {
+      hoistedMockCheckIsRepo.mockResolvedValue(true);
+      hoistedMockRaw.mockResolvedValueOnce('');
+
+      const service = new GitService(projectRoot, storage);
+      await service.setupShadowGitRepository();
+
+      expect(hoistedMockAdd).toHaveBeenCalledWith('.');
+      expect(hoistedMockCommit).toHaveBeenCalledWith('Initial snapshot');
+    });
+  });
+
+  describe('getSnapshotDiffSummary', () => {
+    it('parses diff output and untracked files', async () => {
+      hoistedMockRaw
+        .mockResolvedValueOnce('3\t1\tsrc/app.ts\n10\t0\tREADME.md\n')
+        .mockResolvedValueOnce('new-file.ts\n');
+      await fs.writeFile(
+        path.join(projectRoot, 'new-file.ts'),
+        'line 1\nline 2\nline 3\n',
+      );
+
+      const service = new GitService(projectRoot, storage);
+      const result = await service.getSnapshotDiffSummary('abc123');
+
+      expect(result).toEqual([
+        {
+          path: 'new-file.ts',
+          additions: 3,
+          deletions: 0,
+        },
+        {
+          path: 'README.md',
+          additions: 10,
+          deletions: 0,
+        },
+        {
+          path: 'src/app.ts',
+          additions: 3,
+          deletions: 1,
+        },
+      ]);
+      expect(hoistedMockRaw).toHaveBeenNthCalledWith(
+        1,
+        'diff',
+        '--numstat',
+        'abc123',
+        '--',
+      );
+      expect(hoistedMockRaw).toHaveBeenNthCalledWith(
+        2,
+        'ls-files',
+        '--others',
+        '--exclude-standard',
+      );
+    });
+
+    it('treats binary changes as zero line counts', async () => {
+      hoistedMockRaw
+        .mockResolvedValueOnce('-\t-\timage.png\n')
+        .mockResolvedValueOnce('');
+
+      const service = new GitService(projectRoot, storage);
+      const result = await service.getSnapshotDiffSummary('abc123');
+
+      expect(result).toEqual([
+        {
+          path: 'image.png',
+          additions: 0,
+          deletions: 0,
+        },
+      ]);
+    });
+
+    it('can diff between two snapshots without reading untracked files', async () => {
+      hoistedMockRaw.mockResolvedValueOnce('7\t0\thello_qwen.py\n');
+
+      const service = new GitService(projectRoot, storage);
+      const result = await service.getSnapshotDiffSummary('base123', 'next456');
+
+      expect(result).toEqual([
+        {
+          path: 'hello_qwen.py',
+          additions: 7,
+          deletions: 0,
+        },
+      ]);
+      expect(hoistedMockRaw).toHaveBeenCalledTimes(1);
+      expect(hoistedMockRaw).toHaveBeenCalledWith(
+        'diff',
+        '--numstat',
+        'base123',
+        'next456',
+        '--',
+      );
     });
   });
 });

@@ -18,14 +18,15 @@ Slash commands are used to manage Qwen Code sessions, interface, and basic behav
 
 These commands help you save, restore, and summarize work progress.
 
-| Command     | Description                                               | Usage Examples                       |
-| ----------- | --------------------------------------------------------- | ------------------------------------ |
-| `/init`     | Analyze current directory and create initial context file | `/init`                              |
-| `/summary`  | Generate project summary based on conversation history    | `/summary`                           |
-| `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
-| `/resume`   | Resume a previous conversation session                    | `/resume`                            |
-| `/recap`    | Show a 1-3 sentence "where you left off" summary          | `/recap`                             |
-| `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
+| Command     | Description                                                                                             | Usage Examples                       |
+| ----------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `/init`     | Analyze current directory and create initial context file                                               | `/init`                              |
+| `/summary`  | Generate project summary based on conversation history                                                  | `/summary`                           |
+| `/compress` | Replace chat history with summary to save Tokens                                                        | `/compress`                          |
+| `/resume`   | Resume a previous conversation session                                                                  | `/resume`                            |
+| `/recap`    | Show a 1-3 sentence "where you left off" summary                                                        | `/recap`                             |
+| `/rewind`   | Browse prompts in the current conversation and restore conversation, code, or a summary from that point | `/rewind`                            |
+| `/restore`  | Restore files to state before tool execution                                                            | `/restore` (list) or `/restore <ID>` |
 
 ### 1.2 Interface and Workspace Control
 

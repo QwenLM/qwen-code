@@ -35,6 +35,7 @@ import { type UseHistoryManagerReturn } from '../hooks/useHistoryManager.js';
 import { type RestartReason } from '../hooks/useIdeTrustListener.js';
 import { type CodingPlanUpdateRequest } from '../hooks/useCodingPlanUpdates.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
+import type { RewindHistoryEntry } from '../types/rewind.js';
 
 export interface UIState {
   history: HistoryItem[];
@@ -61,6 +62,8 @@ export interface UIState {
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
   isResumeDialogOpen: boolean;
+  isRewindDialogOpen: boolean;
+  rewindTarget: RewindHistoryEntry | null;
   slashCommands: readonly SlashCommand[];
   pendingSlashCommandHistoryItems: HistoryItemWithoutId[];
   commandContext: CommandContext;
@@ -93,6 +96,7 @@ export interface UIState {
   ctrlCPressedOnce: boolean;
   ctrlDPressedOnce: boolean;
   showEscapePrompt: boolean;
+  showHistoryPrompt: boolean;
   elapsedTime: number;
   currentLoadingPhrase: string;
   historyRemountKey: number;

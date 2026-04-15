@@ -10,6 +10,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
 import { useGeminiStream, classifyApiError } from './useGeminiStream.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type {
   TrackedToolCall,
   TrackedCompletedToolCall,
@@ -28,6 +31,7 @@ import {
   ApprovalMode,
   AuthType,
   GeminiEventType as ServerGeminiEventType,
+  GitService,
   SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
@@ -391,6 +395,102 @@ describe('useGeminiStream', () => {
 
     expect(mockMarkToolsAsSubmitted).not.toHaveBeenCalled();
     expect(mockSendMessageStream).not.toHaveBeenCalled(); // submitQuery uses this
+  });
+
+  it('creates a rewind checkpoint for scheduled edit tools in auto-edit flows', async () => {
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-rewind-checkpoint-'),
+    );
+    const checkpointsDir = path.join(tempDir, 'checkpoints');
+    await fs.mkdir(checkpointsDir, { recursive: true });
+
+    const mockGitService = {
+      createFileSnapshot: vi.fn().mockResolvedValue('snapshot-1'),
+      getCurrentCommitHash: vi.fn().mockResolvedValue('head-1'),
+    };
+    vi.mocked(GitService).mockImplementation(
+      () => mockGitService as unknown as GitService,
+    );
+
+    mockConfig.getCheckpointingEnabled = vi.fn(() => true);
+    (mockConfig as unknown as { storage: unknown }).storage = {
+      getProjectTempCheckpointsDir: () => checkpointsDir,
+    };
+
+    const scheduledEditToolCall: TrackedToolCall[] = [
+      {
+        request: {
+          callId: 'call-write-1',
+          name: 'write_file',
+          args: {
+            file_path: '/test/dir/sample.py',
+            content: 'print("hi")\n',
+          },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-1',
+        },
+        status: 'scheduled',
+        responseSubmittedToGemini: false,
+        tool: {
+          name: 'write_file',
+          displayName: 'write_file',
+          description: 'Write file',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => 'Mock description',
+        } as unknown as AnyToolInvocation,
+      } as TrackedToolCall,
+    ];
+
+    const client = {
+      ...mockConfig.getGeminiClient(),
+      getHistory: vi
+        .fn()
+        .mockResolvedValue([
+          { role: 'user', parts: [{ text: 'create a sample file' }] },
+        ]),
+    };
+
+    try {
+      const { rerender } = renderTestHook(scheduledEditToolCall, client);
+
+      await waitFor(async () => {
+        const files = await fs.readdir(checkpointsDir);
+        expect(files).toHaveLength(1);
+      });
+
+      const [checkpointName] = await fs.readdir(checkpointsDir);
+      const checkpoint = JSON.parse(
+        await fs.readFile(path.join(checkpointsDir, checkpointName), 'utf8'),
+      ) as Record<string, unknown>;
+
+      expect(checkpoint['sessionId']).toBe('test-session-id');
+      expect(checkpoint['commitHash']).toBe('snapshot-1');
+      expect(checkpoint['filePath']).toBe('/test/dir/sample.py');
+      expect(mockGitService.createFileSnapshot).toHaveBeenCalledWith(
+        'Snapshot for write_file',
+      );
+
+      rerender({
+        client,
+        history: [],
+        addItem: mockAddItem as unknown as UseHistoryManagerReturn['addItem'],
+        config: mockConfig,
+        onDebugMessage: mockOnDebugMessage,
+        handleSlashCommand: mockHandleSlashCommand as unknown as (
+          cmd: PartListUnion,
+        ) => Promise<SlashCommandProcessorResult | false>,
+        shellModeActive: false,
+        loadedSettings: mockLoadedSettings,
+        toolCalls: scheduledEditToolCall,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(mockGitService.createFileSnapshot).toHaveBeenCalledTimes(1);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('should submit tool responses when all tool calls are completed and ready', async () => {

@@ -72,6 +72,7 @@ import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
+import { useRewindCommand } from './hooks/useRewindCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
@@ -576,6 +577,21 @@ export const AppContainer = (props: AppContainerProps) => {
     startNewSession,
     remount: refreshStatic,
   });
+  const {
+    isRewindDialogOpen,
+    rewindTarget,
+    openRewindDialog,
+    closeRewindDialog,
+    closeRewindConfirmation,
+    handleRewind,
+    handleRewindAction,
+  } = useRewindCommand({
+    config,
+    historyManager,
+    startNewSession,
+    setInputText: buffer.setText,
+    remount: refreshStatic,
+  });
 
   const { toggleVimEnabled } = useVimMode();
 
@@ -626,6 +642,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
+      openRewindDialog,
     }),
     [
       openAuthDialog,
@@ -647,6 +664,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
+      openRewindDialog,
     ],
   );
 
@@ -1484,6 +1502,7 @@ export const AppContainer = (props: AppContainerProps) => {
     IdeContext | undefined
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
+  const [showHistoryPrompt, setShowHistoryPrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
@@ -1792,6 +1811,10 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
+        if (dialogsVisibleRef.current) {
+          return;
+        }
+
         // If input has content, use double-press to clear
         if (buffer.text.length > 0) {
           if (escapePressedOnce) {
@@ -1801,8 +1824,10 @@ export const AppContainer = (props: AppContainerProps) => {
           }
           // First press: set flag and show prompt
           setEscapePressedOnce(true);
+          setShowHistoryPrompt(false);
           escapeTimerRef.current = setTimeout(() => {
             setEscapePressedOnce(false);
+            setShowHistoryPrompt(false);
             escapeTimerRef.current = null;
           }, CTRL_EXIT_PROMPT_DURATION_MS);
           return;
@@ -1816,15 +1841,29 @@ export const AppContainer = (props: AppContainerProps) => {
           }
           cancelOngoingRequest?.();
           setEscapePressedOnce(false);
+          setShowHistoryPrompt(false);
           return;
         }
 
-        // No action available, reset the flag
-        if (escapeTimerRef.current) {
-          clearTimeout(escapeTimerRef.current);
-          escapeTimerRef.current = null;
+        if (escapePressedOnce) {
+          if (escapeTimerRef.current) {
+            clearTimeout(escapeTimerRef.current);
+            escapeTimerRef.current = null;
+          }
+          setEscapePressedOnce(false);
+          setShowHistoryPrompt(false);
+          openRewindDialog();
+          return;
         }
-        setEscapePressedOnce(false);
+
+        // First press on empty input: arm rewind/history prompt
+        setEscapePressedOnce(true);
+        setShowHistoryPrompt(true);
+        escapeTimerRef.current = setTimeout(() => {
+          setEscapePressedOnce(false);
+          setShowHistoryPrompt(false);
+          escapeTimerRef.current = null;
+        }, CTRL_EXIT_PROMPT_DURATION_MS);
         return;
       }
 
@@ -1915,6 +1954,7 @@ export const AppContainer = (props: AppContainerProps) => {
       compactMode,
       setCompactMode,
       refreshStatic,
+      openRewindDialog,
     ],
   );
 
@@ -1987,6 +2027,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isHooksDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
+    isRewindDialogOpen ||
+    rewindTarget !== null ||
     isExtensionsManagerDialogOpen;
   dialogsVisibleRef.current = dialogsVisible;
 
@@ -2030,6 +2072,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
+      isRewindDialogOpen,
+      rewindTarget,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -2062,6 +2106,7 @@ export const AppContainer = (props: AppContainerProps) => {
       ctrlCPressedOnce,
       ctrlDPressedOnce,
       showEscapePrompt,
+      showHistoryPrompt,
       isFocused,
       elapsedTime,
       currentLoadingPhrase,
@@ -2137,6 +2182,8 @@ export const AppContainer = (props: AppContainerProps) => {
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
       isResumeDialogOpen,
+      isRewindDialogOpen,
+      rewindTarget,
       slashCommands,
       pendingSlashCommandHistoryItems,
       commandContext,
@@ -2169,6 +2216,7 @@ export const AppContainer = (props: AppContainerProps) => {
       ctrlCPressedOnce,
       ctrlDPressedOnce,
       showEscapePrompt,
+      showHistoryPrompt,
       isFocused,
       elapsedTime,
       currentLoadingPhrase,
@@ -2281,6 +2329,12 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Rewind current conversation dialog
+      openRewindDialog,
+      closeRewindDialog,
+      closeRewindConfirmation,
+      handleRewind,
+      handleRewindAction,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,
@@ -2341,6 +2395,12 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Rewind current conversation dialog
+      openRewindDialog,
+      closeRewindDialog,
+      closeRewindConfirmation,
+      handleRewind,
+      handleRewindAction,
       // Feedback dialog
       openFeedbackDialog,
       closeFeedbackDialog,

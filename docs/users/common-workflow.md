@@ -137,6 +137,35 @@ run tests for the refactored code
 > - Request that changes maintain backward compatibility when needed
 > - Do refactoring in small, testable increments
 
+## Rewind a conversation
+
+Suppose you realize a previous prompt sent the session down the wrong path, but you want to keep the old branch for reference.
+
+**1. Open conversation history**
+
+- Press `Esc` twice with an empty composer, or run:
+
+```text
+/rewind
+```
+
+**2. Select the earlier prompt**
+
+Use `↑` and `↓` to highlight the prompt you want to return to, then press `Enter`.
+
+**3. Choose how to rewind**
+
+Depending on whether files changed after that prompt, Qwen Code can offer:
+
+- `Restore conversation` to fork the chat while keeping the current files
+- `Restore code` to restore the file snapshot while keeping the current chat
+- `Restore code and conversation` to do both
+- `Summarize from here` to compact the later messages into a summary before you continue
+
+**4. Continue from that point**
+
+Qwen Code keeps the later branch available for reference, restores the selected state you asked for, and puts that prompt back into the composer so you can continue from there.
+
 ## Use specialized subagents
 
 Suppose you want to use specialized AI subagents to handle specific tasks more effectively.

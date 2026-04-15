@@ -87,6 +87,10 @@ export const Footer: React.FC = () => {
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+D again to exit.')}</Text>
+  ) : uiState.showHistoryPrompt ? (
+    <Text color={theme.text.secondary}>
+      {t('Press Esc again to browse conversation history.')}
+    </Text>
   ) : uiState.showEscapePrompt ? (
     <Text color={theme.text.secondary}>{t('Press Esc again to clear.')}</Text>
   ) : vimEnabled && vimMode === 'INSERT' ? (

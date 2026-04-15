@@ -499,6 +499,171 @@ describe('SessionService', () => {
       expect(assistantMsg?.usageMetadata?.totalTokenCount).toBe(30);
       expect(assistantMsg?.model).toBe('gemini-pro');
     });
+
+    it('should load a specific branch when leafUuid is provided', async () => {
+      const records: ChatRecord[] = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Start' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+        {
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:01:00Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'First path' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'a1',
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:02:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Older branch' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+        {
+          uuid: 'u3',
+          parentUuid: 'a1',
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:03:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Current branch' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+      ];
+
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue(records);
+
+      const loaded = await sessionService.loadSession('test', {
+        leafUuid: 'u2',
+      });
+
+      expect(loaded?.conversation.messages.map((m) => m.uuid)).toEqual([
+        'u1',
+        'a1',
+        'u2',
+      ]);
+      expect(loaded?.lastCompletedUuid).toBe('u2');
+    });
+
+    it('should support rewinding to before the first turn', async () => {
+      statSyncSpy.mockReturnValue({
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordA1, recordB2]);
+
+      const loaded = await sessionService.loadSession(sessionIdA, {
+        leafUuid: null,
+      });
+
+      expect(loaded?.conversation.messages).toEqual([]);
+      expect(loaded?.lastCompletedUuid).toBeNull();
+    });
+  });
+
+  describe('listSessionHistoryNodes', () => {
+    it('should list user-message nodes from the current branch only in reverse chronological order', async () => {
+      const records: ChatRecord[] = [
+        {
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:00:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'First prompt' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+        {
+          uuid: 'a1',
+          parentUuid: 'u1',
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:01:00Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Assistant reply' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+        {
+          uuid: 'sys1',
+          parentUuid: 'a1',
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:01:30Z',
+          type: 'system',
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'invocation',
+            rawCommand: '/help',
+          },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+        {
+          uuid: 'u2',
+          parentUuid: 'a1',
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:02:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Second prompt' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+        {
+          uuid: 'a2',
+          parentUuid: 'u2',
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:02:10Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Second reply' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+        {
+          uuid: 'u3',
+          parentUuid: 'a1',
+          sessionId: 'test',
+          timestamp: '2024-01-01T00:03:00Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Forked prompt' }] },
+          cwd: '/test/project/root',
+          version: '1.0.0',
+        },
+      ];
+
+      vi.mocked(jsonl.read).mockResolvedValue(records);
+
+      const nodes = await sessionService.listSessionHistoryNodes('test');
+
+      expect(nodes).toEqual([
+        expect.objectContaining({
+          uuid: 'u3',
+          parentUuid: 'a1',
+          prompt: 'Forked prompt',
+        }),
+        expect.objectContaining({
+          uuid: 'u1',
+          parentUuid: null,
+          prompt: 'First prompt',
+        }),
+      ]);
+    });
   });
 
   describe('removeSession', () => {

@@ -13,6 +13,20 @@ import type { Storage } from '../config/storage.js';
 import { isNodeError } from '../utils/errors.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
 
+export interface SnapshotFileChange {
+  path: string;
+  additions: number;
+  deletions: number;
+}
+
+function countTextLines(content: string): number {
+  if (content.length === 0) {
+    return 0;
+  }
+  const lines = content.split(/\r?\n/).length;
+  return content.endsWith('\n') ? lines - 1 : lines;
+}
+
 export class GitService {
   private projectRoot: string;
   private storage: Storage;
@@ -77,6 +91,8 @@ export class GitService {
       await repo.commit('Initial commit', { '--allow-empty': null });
     }
 
+    await this.ensureBaselineSnapshot();
+
     const userGitIgnorePath = path.join(this.projectRoot, '.gitignore');
     const shadowGitIgnorePath = path.join(repoDir, '.gitignore');
 
@@ -90,6 +106,34 @@ export class GitService {
     }
 
     await fs.writeFile(shadowGitIgnorePath, userGitIgnoreContent);
+  }
+
+  private async ensureBaselineSnapshot(): Promise<void> {
+    const repo = this.shadowGitRepository;
+
+    let headTreeEntries = '';
+    try {
+      headTreeEntries = await repo.raw('ls-tree', '-r', '--name-only', 'HEAD');
+    } catch {
+      headTreeEntries = '';
+    }
+
+    if (headTreeEntries.trim().length > 0) {
+      return;
+    }
+
+    await repo.add('.');
+    try {
+      await repo.commit('Initial snapshot');
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      if (errorMessage.includes('nothing to commit')) {
+        await repo.commit('Initial commit', { '--allow-empty': null });
+      } else {
+        throw error;
+      }
+    }
   }
 
   private get shadowGitRepository(): SimpleGit {
@@ -126,5 +170,73 @@ export class GitService {
     await repo.raw(['restore', '--source', commitHash, '.']);
     // Removes any untracked files that were introduced post snapshot.
     await repo.clean('f', ['-d']);
+  }
+
+  async getSnapshotDiffSummary(
+    commitHash: string,
+    targetCommitHash?: string,
+  ): Promise<SnapshotFileChange[]> {
+    const repo = this.shadowGitRepository;
+    const diffArgs = ['diff', '--numstat', commitHash];
+    if (targetCommitHash) {
+      diffArgs.push(targetCommitHash);
+    }
+    diffArgs.push('--');
+    const diffOutput = await repo.raw(...diffArgs);
+    const changes = new Map<string, SnapshotFileChange>();
+
+    for (const line of diffOutput.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        continue;
+      }
+
+      const [rawAdditions, rawDeletions, ...pathParts] = trimmed.split('\t');
+      const filePath = pathParts.join('\t').trim();
+      if (!filePath) {
+        continue;
+      }
+
+      changes.set(filePath, {
+        path: filePath,
+        additions: rawAdditions === '-' ? 0 : Number(rawAdditions) || 0,
+        deletions: rawDeletions === '-' ? 0 : Number(rawDeletions) || 0,
+      });
+    }
+
+    if (!targetCommitHash) {
+      const untrackedOutput = await repo.raw(
+        'ls-files',
+        '--others',
+        '--exclude-standard',
+      );
+      for (const relativePath of untrackedOutput
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)) {
+        if (changes.has(relativePath)) {
+          continue;
+        }
+
+        const absolutePath = path.join(this.projectRoot, relativePath);
+        let additions = 0;
+        try {
+          const content = await fs.readFile(absolutePath, 'utf8');
+          additions = countTextLines(content);
+        } catch (error) {
+          if (!isNodeError(error) || error.code !== 'ENOENT') {
+            throw error;
+          }
+        }
+
+        changes.set(relativePath, {
+          path: relativePath,
+          additions,
+          deletions: 0,
+        });
+      }
+    }
+
+    return [...changes.values()].sort((a, b) => a.path.localeCompare(b.path));
   }
 }

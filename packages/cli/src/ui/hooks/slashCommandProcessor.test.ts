@@ -113,6 +113,7 @@ describe('useSlashCommandProcessor', () => {
   const mockOpenAuthDialog = vi.fn();
   const mockOpenMemoryDialog = vi.fn();
   const mockOpenModelDialog = vi.fn();
+  const mockOpenRewindDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
 
   const mockConfig = makeFakeConfig({});
@@ -165,12 +166,16 @@ describe('useSlashCommandProcessor', () => {
           openPermissionsDialog: vi.fn(),
           openApprovalModeDialog: vi.fn(),
           openResumeDialog: vi.fn(),
+          openRewindDialog: mockOpenRewindDialog,
           quit: mockSetQuittingMessages,
           setDebugMessage: vi.fn(),
           dispatchExtensionStateUpdate: vi.fn(),
           addConfirmUpdateExtensionRequest: vi.fn(),
           openSubagentCreateDialog: vi.fn(),
           openAgentsManagerDialog: vi.fn(),
+          openExtensionsManagerDialog: vi.fn(),
+          openMcpDialog: vi.fn(),
+          openHooksDialog: vi.fn(),
         },
         new Map(), // extensionsUpdateState
         true, // isConfigInitialized
@@ -447,6 +452,24 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockOpenMemoryDialog).toHaveBeenCalled();
+    });
+
+    it('should handle "dialog: rewind" action', async () => {
+      const command = createTestCommand({
+        name: 'rewindcmd',
+        action: vi.fn().mockResolvedValue({
+          type: 'dialog',
+          dialog: 'rewind',
+        }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/rewindcmd');
+      });
+
+      expect(mockOpenRewindDialog).toHaveBeenCalled();
     });
 
     it('should pass interactive execution mode to command actions', async () => {
@@ -979,12 +1002,16 @@ describe('useSlashCommandProcessor', () => {
             openPermissionsDialog: vi.fn(),
             openApprovalModeDialog: vi.fn(),
             openResumeDialog: vi.fn(),
+            openRewindDialog: vi.fn(),
             quit: mockSetQuittingMessages,
             setDebugMessage: vi.fn(),
             dispatchExtensionStateUpdate: vi.fn(),
             addConfirmUpdateExtensionRequest: vi.fn(),
             openSubagentCreateDialog: vi.fn(),
             openAgentsManagerDialog: vi.fn(),
+            openExtensionsManagerDialog: vi.fn(),
+            openMcpDialog: vi.fn(),
+            openHooksDialog: vi.fn(),
           },
           new Map(), // extensionsUpdateState
           true, // isConfigInitialized

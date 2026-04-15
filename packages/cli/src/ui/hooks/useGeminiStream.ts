@@ -178,6 +178,11 @@ enum StreamProcessingStatus {
 }
 
 const EDIT_TOOL_NAMES = new Set(['replace', 'write_file']);
+const CHECKPOINTABLE_EDIT_STATUSES = new Set([
+  'awaiting_approval',
+  'scheduled',
+  'validating',
+]);
 
 function showCitations(settings: LoadedSettings): boolean {
   const enabled = settings?.merged?.ui?.showCitations;
@@ -240,6 +245,7 @@ export const useGeminiStream = (
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
+  const checkpointedToolCallIdsRef = useRef<Set<string>>(new Set());
   const modelOverrideRef = useRef<string | undefined>(undefined);
   const {
     startNewPrompt,
@@ -1788,7 +1794,8 @@ export const useGeminiStream = (
       const restorableToolCalls = toolCalls.filter(
         (toolCall) =>
           EDIT_TOOL_NAMES.has(toolCall.request.name) &&
-          toolCall.status === 'awaiting_approval',
+          CHECKPOINTABLE_EDIT_STATUSES.has(toolCall.status) &&
+          !checkpointedToolCallIdsRef.current.has(toolCall.request.callId),
       );
 
       if (restorableToolCalls.length > 0) {
@@ -1810,7 +1817,8 @@ export const useGeminiStream = (
         }
 
         for (const toolCall of restorableToolCalls) {
-          const filePath = toolCall.request.args['file_path'] as string;
+          const filePath = (toolCall.request.args['file_path'] ??
+            toolCall.request.args['path']) as string | undefined;
           if (!filePath) {
             onDebugMessage(
               `Skipping restorable tool call due to missing file_path: ${toolCall.request.name}`,
@@ -1865,6 +1873,8 @@ export const useGeminiStream = (
               toolCallWithSnapshotFilePath,
               JSON.stringify(
                 {
+                  createdAt: new Date().toISOString(),
+                  sessionId: config.getSessionId(),
                   history,
                   clientHistory,
                   toolCall: {
@@ -1878,6 +1888,7 @@ export const useGeminiStream = (
                 2,
               ),
             );
+            checkpointedToolCallIdsRef.current.add(toolCall.request.callId);
           } catch (error) {
             onDebugMessage(
               `Failed to create checkpoint for ${filePath}: ${getErrorMessage(

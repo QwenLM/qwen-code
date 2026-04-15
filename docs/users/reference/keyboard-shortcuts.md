@@ -6,7 +6,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 | Shortcut                       | Description                                                                                                           |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
-| `Esc`                          | Close dialogs and suggestions.                                                                                        |
+| `Esc`                          | Close dialogs and suggestions. When the composer is empty, press twice to open Rewind for the current conversation.   |
 | `Ctrl+C`                       | Cancel the ongoing request and clear the input. Press twice to exit the application.                                  |
 | `Ctrl+D`                       | Exit the application if the input is empty. Press twice to confirm.                                                   |
 | `Ctrl+L`                       | Clear the screen.                                                                                                     |
@@ -30,7 +30,8 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+A` / `Home`                                  | Move the cursor to the beginning of the line.                                                                                       |
 | `Ctrl+B` / `Left Arrow`                            | Move the cursor one character to the left.                                                                                          |
 | `Ctrl+C`                                           | Clear the input prompt                                                                                                              |
-| `Esc` (double press)                               | Clear the input prompt.                                                                                                             |
+| `Esc` (double press, empty prompt)                 | Open Rewind so you can restore conversation, code, or summarize from an earlier prompt.                                             |
+| `Esc` (double press, with input)                   | Clear the input prompt.                                                                                                             |
 | `Ctrl+D` / `Delete`                                | Delete the character to the right of the cursor.                                                                                    |
 | `Ctrl+E` / `End`                                   | Move the cursor to the end of the line.                                                                                             |
 | `Ctrl+F` / `Right Arrow`                           | Move the cursor one character to the right.                                                                                         |
