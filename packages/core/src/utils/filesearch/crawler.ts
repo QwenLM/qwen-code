@@ -93,7 +93,7 @@ function hasFileListChanged(stateKey: string, crawlDirectory: string): boolean {
 
   // For non-git paths, we can only rely on time-based throttling.
   if (currentMtime === null && state.gitRootMtimeMs === null) {
-    return false;
+    return !isThrottled(stateKey);
   }
 
   return true;

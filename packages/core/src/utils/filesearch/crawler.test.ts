@@ -875,7 +875,7 @@ describe('crawler', () => {
       expect(results2).toContain('file1.js');
     });
 
-    it('should throttle re-crawl on non-git fallback paths', async () => {
+    it('should throttle re-crawl on non-git fallback paths until the window expires', async () => {
       __setCommandRunnerForTests(async (command) => {
         if (command === 'git' || command === 'rg') {
           return { success: false, lines: [] };
@@ -898,14 +898,25 @@ describe('crawler', () => {
         cacheTtl: 0,
       };
 
-      const first = await crawl(options);
-      expect(first).toContain('file1.js');
+      vi.useFakeTimers();
+      try {
+        const first = await crawl(options);
+        expect(first).toContain('file1.js');
 
-      await fs.writeFile(path.join(tmpDir, 'file2.js'), '');
+        await fs.writeFile(path.join(tmpDir, 'file2.js'), '');
 
-      const second = await crawl(options);
-      expect(second).toContain('file1.js');
-      expect(second).not.toContain('file2.js');
+        const second = await crawl(options);
+        expect(second).toContain('file1.js');
+        expect(second).not.toContain('file2.js');
+
+        await vi.advanceTimersByTimeAsync(6000);
+
+        const third = await crawl(options);
+        expect(third).toContain('file1.js');
+        expect(third).toContain('file2.js');
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 
