@@ -858,7 +858,10 @@ describe('Session', () => {
               eventName: 'PostToolUse',
               input: expect.objectContaining({
                 tool_name: 'read_file',
-                tool_response: expect.objectContaining({ success: true }),
+                tool_response: expect.objectContaining({
+                  llmContent: 'file contents',
+                  returnDisplay: 'success',
+                }),
               }),
             }),
             expect.anything(),

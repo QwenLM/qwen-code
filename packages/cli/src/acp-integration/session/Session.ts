@@ -1458,9 +1458,10 @@ export class Session implements SessionContext {
 
       // Fire PostToolUse hook on successful execution (aligned with core path)
       if (hooksEnabledForTool && messageBusForTool && !toolResult.error) {
+        // Use the same response shape as core (llmContent/returnDisplay)
         const toolResponse = {
-          success: true,
-          resultDisplay: toolResult.returnDisplay,
+          llmContent: toolResult.llmContent,
+          returnDisplay: toolResult.returnDisplay,
         };
         const postHookResult = await firePostToolUseHook(
           messageBusForTool,
@@ -1488,6 +1489,25 @@ export class Session implements SessionContext {
           // Append additional context to the tool response
           const contextPart = { text: postHookResult.additionalContext };
           responseParts.push(contextPart);
+        }
+      } else if (hooksEnabledForTool && messageBusForTool && toolResult.error) {
+        // Fire PostToolUseFailure hook when tool returns an error (aligned with core path)
+        const failureHookResult = await firePostToolUseFailureHook(
+          messageBusForTool,
+          toolUseId,
+          fc.name ?? 'unknown_tool',
+          args,
+          toolResult.error.message,
+          false, // not an interrupt
+          permissionMode,
+          abortSignal,
+        );
+
+        // Log additional context if provided
+        if (failureHookResult.additionalContext) {
+          debugLogger.debug(
+            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
+          );
         }
       }
 

@@ -453,4 +453,30 @@ describe('runAcpAgent SessionEnd hooks', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it('fires SessionEnd hook only once when SIGTERM triggers before connection.closed', async () => {
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+
+    await vi.waitFor(() => {
+      expect(sigTermListeners.length).toBeGreaterThan(0);
+    });
+
+    // Trigger SIGTERM first
+    sigTermListeners[0]('SIGTERM');
+
+    await vi.waitFor(() => {
+      expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
+        SessionEndReason.Other,
+      );
+    });
+
+    // Now resolve connection.closed - this should NOT trigger another SessionEnd
+    mockConnectionState.resolve();
+
+    // Wait for the agent to complete
+    await agentPromise;
+
+    // SessionEnd should have been called exactly once
+    expect(mockHookSystem.fireSessionEndEvent).toHaveBeenCalledTimes(1);
+  });
 });

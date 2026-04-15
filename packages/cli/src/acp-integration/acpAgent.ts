@@ -20,6 +20,7 @@ import {
   type DeviceAuthorizationData,
   SessionStartSource,
   SessionEndReason,
+  type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import {
   AgentSideConnection,
@@ -100,23 +101,33 @@ export async function runAcpAgent(
   // (e.g., stdin raw mode restoration) override the default exit behavior,
   // causing the ACP process to ignore termination signals.
   let shuttingDown = false;
-  const shutdownHandler = async () => {
-    if (shuttingDown) return;
-    shuttingDown = true;
-    debugLogger.debug('[ACP] Shutdown signal received, closing streams');
+  let sessionEndFired = false;
 
-    // Fire SessionEnd hook for all active sessions (aligned with core path)
+  // Helper to fire SessionEnd hook once, preventing double-fire from both
+  // shutdown handler path and connection.closed path.
+  const fireSessionEndOnce = async (reason: SessionEndReason) => {
+    if (sessionEndFired) return;
+    sessionEndFired = true;
     const hookSystem = config.getHookSystem?.();
     const hooksEnabled = !config.getDisableAllHooks?.();
     if (hooksEnabled && hookSystem && config.hasHooksForEvent?.('SessionEnd')) {
       try {
-        await hookSystem.fireSessionEndEvent(SessionEndReason.Other);
+        await hookSystem.fireSessionEndEvent(reason);
       } catch (err) {
         debugLogger.warn(
           `SessionEnd hook failed: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }
+  };
+
+  const shutdownHandler = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    debugLogger.debug('[ACP] Shutdown signal received, closing streams');
+
+    // Fire SessionEnd hook for all active sessions (aligned with core path)
+    await fireSessionEndOnce(SessionEndReason.Other);
 
     try {
       process.stdin.destroy();
@@ -144,17 +155,7 @@ export async function runAcpAgent(
 
   await connection.closed;
   // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
-  const hookSystem = config.getHookSystem?.();
-  const hooksEnabled = !config.getDisableAllHooks?.();
-  if (hooksEnabled && hookSystem && config.hasHooksForEvent?.('SessionEnd')) {
-    try {
-      await hookSystem.fireSessionEndEvent(SessionEndReason.PromptInputExit);
-    } catch (err) {
-      debugLogger.warn(
-        `SessionEnd hook failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  }
+  await fireSessionEndOnce(SessionEndReason.PromptInputExit);
 
   process.off('SIGTERM', shutdownHandler);
   process.off('SIGINT', shutdownHandler);
@@ -546,8 +547,9 @@ class QwenAgent implements Agent {
         ? SessionStartSource.Resume
         : SessionStartSource.Startup;
       const model = config.getModel();
+      const permissionMode = String(config.getApprovalMode()) as PermissionMode;
       try {
-        await hookSystem.fireSessionStartEvent(source, model);
+        await hookSystem.fireSessionStartEvent(source, model, permissionMode);
       } catch (err) {
         debugLogger.warn(
           `SessionStart hook failed: ${err instanceof Error ? err.message : String(err)}`,
