@@ -52,10 +52,6 @@ export interface ModelConfig {
    * TODO: In the future, this needs to support 'auto' or some other string to support routing use cases.
    */
   model?: string;
-  /** The temperature for the model's sampling process. */
-  temp?: number;
-  /** The top-p value for nucleus sampling. */
-  top_p?: number;
 }
 
 /**

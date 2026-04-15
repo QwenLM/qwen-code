@@ -231,8 +231,6 @@ describe('subagent.ts', () => {
 
     const defaultModelConfig: ModelConfig = {
       model: 'qwen3-coder-plus',
-      temp: 0.5, // Specific temp to test override
-      top_p: 1,
     };
 
     const defaultRunConfig: RunConfig = {
@@ -439,8 +437,6 @@ describe('subagent.ts', () => {
         // Check Generation Config
         const generationConfig = getGenerationConfigFromMock();
 
-        // Check temperature override
-        expect(generationConfig.temperature).toBe(defaultModelConfig.temp);
         expect(generationConfig.systemInstruction).toContain(
           'Hello Agent, your task is Testing.',
         );

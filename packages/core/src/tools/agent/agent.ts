@@ -658,8 +658,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     if (cacheSafeParams) {
       const gen = cacheSafeParams.generationConfig as {
         systemInstruction?: string | Content;
-        temperature?: number;
-        topP?: number;
         tools?: Array<{
           functionDeclarations?: FunctionDeclaration[];
         }>;
@@ -676,7 +674,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         renderedSystemPrompt: gen.systemInstruction,
         initialMessages,
       };
-      modelConfig = { temp: gen.temperature, top_p: gen.topP };
+      modelConfig = {};
       toolConfig = {
         tools:
           parentToolDecls.length > 0 ? parentToolDecls : (['*'] as string[]),

@@ -264,10 +264,7 @@ export class AgentCore {
     // outside the try/catch so template errors surface to the caller).
     const generationConfig: GenerateContentConfig & {
       systemInstruction?: string | Content;
-    } = {
-      temperature: this.modelConfig.temp,
-      topP: this.modelConfig.top_p,
-    };
+    } = {};
     if (this.promptConfig.renderedSystemPrompt !== undefined) {
       generationConfig.systemInstruction =
         this.promptConfig.renderedSystemPrompt;
