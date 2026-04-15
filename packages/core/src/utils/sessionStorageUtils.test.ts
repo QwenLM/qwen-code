@@ -89,6 +89,39 @@ describe('sessionStorageUtils', () => {
       );
     });
 
+    it('should return globally last match when mixed patterns interleave', () => {
+      // Bug fix: previously returned "middle" because the second pattern
+      // ("key": "value") scan overwrote the result from the first pattern.
+      const text =
+        '{"customTitle":"old"}\n{"customTitle": "middle"}\n{"customTitle":"newest"}';
+      expect(extractLastJsonStringField(text, 'customTitle')).toBe('newest');
+    });
+
+    it('should filter by lineContains when provided', () => {
+      const text = [
+        '{"type":"user","content":"I set customTitle to \\"customTitle\\":\\"fake\\""}',
+        '{"subtype":"custom_title","customTitle":"real-title"}',
+      ].join('\n');
+      expect(
+        extractLastJsonStringField(text, 'customTitle', 'custom_title'),
+      ).toBe('real-title');
+    });
+
+    it('should ignore matches on lines without lineContains marker', () => {
+      const text =
+        '{"role":"assistant","customTitle":"spoofed"}\n{"subtype":"custom_title","customTitle":"legit"}';
+      expect(
+        extractLastJsonStringField(text, 'customTitle', 'custom_title'),
+      ).toBe('legit');
+    });
+
+    it('should return undefined when lineContains excludes all matches', () => {
+      const text = '{"customTitle":"no-subtype-here"}';
+      expect(
+        extractLastJsonStringField(text, 'customTitle', 'custom_title'),
+      ).toBeUndefined();
+    });
+
     it('should not confuse different field names', () => {
       const text = '{"otherField":"other-value"}\n{"customTitle":"user-name"}';
       expect(extractLastJsonStringField(text, 'customTitle')).toBe('user-name');

@@ -67,18 +67,35 @@ export function extractJsonStringField(
  * Like extractJsonStringField but finds the LAST occurrence.
  * Useful for fields that are appended (customTitle, aiTitle, etc.)
  * where the most recent entry should win.
+ *
+ * When `lineContains` is provided, only matches on lines that also contain
+ * the given substring are considered. This prevents false matches from user
+ * content that happens to contain the same key pattern.
  */
 export function extractLastJsonStringField(
   text: string,
   key: string,
+  lineContains?: string,
 ): string | undefined {
   const patterns = [`"${key}":"`, `"${key}": "`];
   let lastValue: string | undefined;
+  let lastOffset = -1;
   for (const pattern of patterns) {
     let searchFrom = 0;
     while (true) {
       const idx = text.indexOf(pattern, searchFrom);
       if (idx < 0) break;
+
+      // If lineContains is specified, verify the current line contains it
+      if (lineContains) {
+        const lineStart = text.lastIndexOf('\n', idx) + 1;
+        const lineEnd = text.indexOf('\n', idx);
+        const line = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd);
+        if (!line.includes(lineContains)) {
+          searchFrom = idx + pattern.length;
+          continue;
+        }
+      }
 
       const valueStart = idx + pattern.length;
       let i = valueStart;
@@ -88,7 +105,10 @@ export function extractLastJsonStringField(
           continue;
         }
         if (text[i] === '"') {
-          lastValue = unescapeJsonString(text.slice(valueStart, i));
+          if (idx > lastOffset) {
+            lastValue = unescapeJsonString(text.slice(valueStart, i));
+            lastOffset = idx;
+          }
           break;
         }
         i++;

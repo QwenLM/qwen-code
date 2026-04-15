@@ -172,9 +172,11 @@ export class SessionService {
     if (!head) return undefined;
 
     // Tail (most recent) wins over head (oldest).
+    // Only match on lines containing "custom_title" subtype to avoid false
+    // matches from user content that happens to include a "customTitle" field.
     return (
-      extractLastJsonStringField(tail, 'customTitle') ??
-      extractLastJsonStringField(head, 'customTitle')
+      extractLastJsonStringField(tail, 'customTitle', 'custom_title') ??
+      extractLastJsonStringField(head, 'customTitle', 'custom_title')
     );
   }
 
