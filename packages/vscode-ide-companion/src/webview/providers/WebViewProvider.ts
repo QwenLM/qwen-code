@@ -20,6 +20,7 @@ import { PanelManager, getLocalResourceRoots } from './PanelManager.js';
 import { MessageHandler } from './MessageHandler.js';
 import { WebViewContent } from './WebViewContent.js';
 import { getFileName } from '../utils/webviewUtils.js';
+import { truncatePanelTitle } from '../utils/panelTitleUtils.js';
 import { createImagePathResolver } from '../utils/imageHandler.js';
 import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
@@ -667,7 +668,7 @@ export class WebViewProvider {
           ).trim();
           const panelRef = this.panelManager.getPanel();
           if (panelRef) {
-            panelRef.title = title || 'Qwen Code';
+            panelRef.title = title ? truncatePanelTitle(title) : 'Qwen Code';
           }
           return;
         }
@@ -1503,7 +1504,7 @@ export class WebViewProvider {
           ).trim();
           const panelRef = this.panelManager.getPanel();
           if (panelRef) {
-            panelRef.title = title || 'Qwen Code';
+            panelRef.title = title ? truncatePanelTitle(title) : 'Qwen Code';
           }
           return;
         }

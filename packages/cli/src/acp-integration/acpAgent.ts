@@ -368,8 +368,20 @@ class QwenAgent implements Agent {
 
   async extMethod(
     method: string,
-    _params: Record<string, unknown>,
+    params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    if (method === 'getAccountInfo') {
+      const sessionId = params['sessionId'] as string | undefined;
+      const session = sessionId ? this.sessions.get(sessionId) : undefined;
+      const config = session ? session.getConfig() : this.config;
+      const cfg = config.getContentGeneratorConfig();
+      return {
+        authType: cfg?.authType ?? config.getAuthType() ?? null,
+        model: cfg?.model ?? config.getModel() ?? null,
+        baseUrl: cfg?.baseUrl ?? null,
+        apiKeyEnvKey: cfg?.apiKeyEnvKey ?? null,
+      };
+    }
     throw RequestError.methodNotFound(method);
   }
 
@@ -513,6 +525,9 @@ class QwenAgent implements Agent {
     if (conversation && conversation.messages) {
       await session.replayHistory(conversation.messages);
     }
+
+    // Install rewriter AFTER history replay to avoid rewriting historical messages
+    session.installRewriter();
 
     return session;
   }

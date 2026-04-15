@@ -933,12 +933,16 @@ export class GeminiChat {
 
     // Stream validation logic: A stream is considered successful if:
     // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
-    // 2. There's a finish reason AND we have non-empty response text
+    // 2. There's a finish reason AND we have non-empty response text or thought text
     //
     // We throw an error only when there's no tool call AND:
     // - No finish reason, OR
-    // - Empty response text (e.g., only thoughts with no actual content)
-    if (!hasToolCall && (!hasFinishReason || !contentText)) {
+    // - Empty response text (e.g., no actual content and no thoughts)
+    //
+    // Note: Thoughts-only responses are valid for models that use thinking modes
+    // These models may send only reasoning content without explicit text output.
+    const hasAnyContent = contentText || thoughtText;
+    if (!hasToolCall && (!hasFinishReason || !hasAnyContent)) {
       if (!hasFinishReason) {
         throw new InvalidStreamError(
           'Model stream ended without a finish reason.',
