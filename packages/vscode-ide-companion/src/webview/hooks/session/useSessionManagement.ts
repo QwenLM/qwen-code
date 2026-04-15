@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useMemo } from 'react';
+import { useState, useCallback, useMemo, useRef } from 'react';
 import type { VSCodeAPI } from '../../hooks/useVSCode.js';
 
 /**
@@ -23,9 +23,29 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
   const [nextCursor, setNextCursor] = useState<number | undefined>(undefined);
   const [hasMore, setHasMore] = useState<boolean>(true);
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [isSwitchingSession, setIsSwitchingSession] = useState<boolean>(false);
+  const [isSwitchingSession, setIsSwitchingSessionRaw] =
+    useState<boolean>(false);
+  const switchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  const SWITCH_TIMEOUT_MS = 15000;
   const PAGE_SIZE = 20;
+
+  const setIsSwitchingSession = useCallback((value: boolean) => {
+    setIsSwitchingSessionRaw(value);
+    if (switchTimeoutRef.current) {
+      clearTimeout(switchTimeoutRef.current);
+      switchTimeoutRef.current = null;
+    }
+    if (value) {
+      switchTimeoutRef.current = setTimeout(() => {
+        console.warn(
+          '[useSessionManagement] Switch session timed out, clearing loading state',
+        );
+        setIsSwitchingSessionRaw(false);
+        switchTimeoutRef.current = null;
+      }, SWITCH_TIMEOUT_MS);
+    }
+  }, []);
 
   /**
    * Filter session list
@@ -105,7 +125,7 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
         data: { sessionId },
       });
     },
-    [currentSessionId, vscode],
+    [currentSessionId, vscode, setIsSwitchingSession],
   );
 
   /**
