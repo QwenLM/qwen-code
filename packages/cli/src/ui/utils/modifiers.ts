@@ -12,6 +12,32 @@
 export type ModifierKey = 'shift' | 'command' | 'control' | 'option';
 
 let prewarmed = false;
+let cachedNativeModule: {
+  isModifierPressed: (m: string) => boolean;
+  prewarm: () => void;
+} | null = null;
+
+/**
+ * Load and cache the native module. Returns null if unavailable.
+ */
+function getNativeModule(): {
+  isModifierPressed: (m: string) => boolean;
+  prewarm: () => void;
+} | null {
+  if (process.platform !== 'darwin') return null;
+  if (cachedNativeModule) return cachedNativeModule;
+  try {
+    // Dynamic require is intentional — native addon cannot be statically imported
+    // eslint-disable-next-line @typescript-eslint/no-require-imports, no-restricted-syntax
+    cachedNativeModule = require('@qwen-code/modifiers-napi') as {
+      isModifierPressed: (m: string) => boolean;
+      prewarm: () => void;
+    };
+    return cachedNativeModule;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Pre-warm the native module by loading it in advance.
@@ -22,15 +48,9 @@ export function prewarmModifiers(): void {
     return;
   }
   prewarmed = true;
-  try {
-    // Dynamic require is intentional — native addon cannot be statically imported
-    // eslint-disable-next-line @typescript-eslint/no-require-imports, no-restricted-syntax
-    const { prewarm } = require('@qwen-code/modifiers-napi') as {
-      prewarm: () => void;
-    };
-    prewarm();
-  } catch {
-    // Ignore errors during prewarm - native module may not be available
+  const mod = getNativeModule();
+  if (mod) {
+    mod.prewarm();
   }
 }
 
@@ -39,17 +59,7 @@ export function prewarmModifiers(): void {
  * Only works on macOS; returns false on other platforms or if native module unavailable.
  */
 export function isModifierPressed(modifier: ModifierKey): boolean {
-  if (process.platform !== 'darwin') {
-    return false;
-  }
-  try {
-    const { isModifierPressed: nativeIsModifierPressed } =
-      // eslint-disable-next-line @typescript-eslint/no-require-imports, no-restricted-syntax
-      require('@qwen-code/modifiers-napi') as {
-        isModifierPressed: (m: string) => boolean;
-      };
-    return nativeIsModifierPressed(modifier);
-  } catch {
-    return false;
-  }
+  const mod = getNativeModule();
+  if (!mod) return false;
+  return mod.isModifierPressed(modifier);
 }

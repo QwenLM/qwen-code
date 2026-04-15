@@ -23,7 +23,7 @@
 import { promises as fs } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { exec, execFile } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { isKittyProtocolEnabled } from './kittyProtocolDetector.js';
 import { VSCODE_SHIFT_ENTER_SEQUENCE } from './platformConstants.js';
@@ -32,7 +32,6 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('TERMINAL_SETUP');
 
-const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
 // Terminals that natively support CSI-u / Kitty keyboard protocol
@@ -128,7 +127,12 @@ async function detectTerminal(): Promise<SupportedTerminal | null> {
   // Check parent process name
   if (os.platform() !== 'win32') {
     try {
-      const { stdout } = await execAsync('ps -o comm= -p $PPID');
+      const { stdout } = await execFileAsync('ps', [
+        '-o',
+        'comm=',
+        '-p',
+        String(process.ppid),
+      ]);
       const parentName = stdout.trim();
 
       if (parentName.includes('windsurf') || parentName.includes('Windsurf'))
@@ -301,41 +305,7 @@ async function configureVSCodeStyle(
       args: { text: VSCODE_SHIFT_ENTER_SEQUENCE },
     };
 
-    // Check if ANY shift+enter or ctrl+enter bindings already exist
-    const existingShiftEnter = keybindings.find((kb) => {
-      const binding = kb as { key?: string };
-      return binding.key === 'shift+enter';
-    });
-
-    const existingCtrlEnter = keybindings.find((kb) => {
-      const binding = kb as { key?: string };
-      return binding.key === 'ctrl+enter';
-    });
-
-    if (existingShiftEnter || existingCtrlEnter) {
-      const messages: string[] = [];
-      if (existingShiftEnter) {
-        messages.push('- ' + t('Shift+Enter binding already exists'));
-      }
-      if (existingCtrlEnter) {
-        messages.push('- ' + t('Ctrl+Enter binding already exists'));
-      }
-      return {
-        success: false,
-        message:
-          t(
-            'Existing keybindings detected. Will not modify to avoid conflicts.',
-          ) +
-          '\n' +
-          messages.join('\n') +
-          '\n' +
-          t('Please check and modify manually if needed: {{file}}', {
-            file: keybindingsFile,
-          }),
-      };
-    }
-
-    // Check if our specific bindings already exist
+    // Check if our specific bindings already exist (idempotency)
     const hasOurShiftEnter = keybindings.some((kb) => {
       const binding = kb as {
         command?: string;
@@ -362,25 +332,7 @@ async function configureVSCodeStyle(
       );
     });
 
-    if (!hasOurShiftEnter || !hasOurCtrlEnter) {
-      if (!hasOurShiftEnter) keybindings.unshift(shiftEnterBinding);
-      if (!hasOurCtrlEnter) keybindings.unshift(ctrlEnterBinding);
-
-      await fs.writeFile(keybindingsFile, JSON.stringify(keybindings, null, 4));
-      return {
-        success: true,
-        message:
-          t(
-            'Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.',
-            {
-              terminalName,
-            },
-          ) +
-          '\n' +
-          t('Modified: {{file}}', { file: keybindingsFile }),
-        requiresRestart: true,
-      };
-    } else {
+    if (hasOurShiftEnter && hasOurCtrlEnter) {
       return {
         success: true,
         message: t('{{terminalName}} keybindings already configured.', {
@@ -388,6 +340,59 @@ async function configureVSCodeStyle(
         }),
       };
     }
+
+    // Check if DIFFERENT shift+enter or ctrl+enter bindings already exist (conflict)
+    const existingShiftEnter =
+      !hasOurShiftEnter &&
+      keybindings.find((kb) => {
+        const binding = kb as { key?: string };
+        return binding.key === 'shift+enter';
+      });
+
+    const existingCtrlEnter =
+      !hasOurCtrlEnter &&
+      keybindings.find((kb) => {
+        const binding = kb as { key?: string };
+        return binding.key === 'ctrl+enter';
+      });
+
+    if (existingShiftEnter || existingCtrlEnter) {
+      const messages: string[] = [];
+      if (existingShiftEnter) {
+        messages.push('- ' + t('Shift+Enter binding already exists'));
+      }
+      if (existingCtrlEnter) {
+        messages.push('- ' + t('Ctrl+Enter binding already exists'));
+      }
+      return {
+        success: false,
+        message:
+          t(
+            'Existing keybindings detected. Will not modify to avoid conflicts.',
+          ) +
+          '\n' +
+          messages.join('\n') +
+          '\n' +
+          t('Please check and modify manually if needed: {{file}}', {
+            file: keybindingsFile,
+          }),
+      };
+    }
+
+    if (!hasOurShiftEnter) keybindings.unshift(shiftEnterBinding);
+    if (!hasOurCtrlEnter) keybindings.unshift(ctrlEnterBinding);
+
+    await fs.writeFile(keybindingsFile, JSON.stringify(keybindings, null, 4));
+    return {
+      success: true,
+      message:
+        t('Added Shift+Enter and Ctrl+Enter keybindings to {{terminalName}}.', {
+          terminalName,
+        }) +
+        '\n' +
+        t('Modified: {{file}}', { file: keybindingsFile }),
+      requiresRestart: true,
+    };
   } catch (error) {
     return {
       success: false,
@@ -458,6 +463,18 @@ chars = "\\u001B\\r"`;
 
   try {
     if (configExists) {
+      // Check if our own binding is already present (idempotency)
+      if (
+        configContent.includes('chars = "\\u001B\\r"') &&
+        configContent.includes('mods = "Shift"') &&
+        configContent.includes('key = "Return"')
+      ) {
+        return {
+          success: true,
+          message: t('Alacritty keybindings already configured.'),
+        };
+      }
+      // Check for a different existing Shift+Return binding (conflict)
       if (
         configContent.includes('mods = "Shift"') &&
         configContent.includes('key = "Return"')
@@ -521,6 +538,17 @@ async function configureZed(): Promise<TerminalSetupResult> {
     }
 
     if (fileExists) {
+      // Check if our own binding is already present (idempotency)
+      if (
+        keymapContent.includes('shift-enter') &&
+        keymapContent.includes('terminal::SendText')
+      ) {
+        return {
+          success: true,
+          message: t('Zed keybindings already configured.'),
+        };
+      }
+      // Check for a different existing shift-enter binding (conflict)
       if (keymapContent.includes('shift-enter')) {
         return {
           success: false,
@@ -545,6 +573,18 @@ async function configureZed(): Promise<TerminalSetupResult> {
         keymap = [];
       }
     } catch {
+      // Invalid JSON in existing keymap — don't overwrite, return an error
+      if (fileExists) {
+        return {
+          success: false,
+          message:
+            t(
+              'Zed keymap.json contains invalid JSON. Please fix it manually.',
+            ) +
+            '\n' +
+            t('File: {{file}}', { file: keymapPath }),
+        };
+      }
       keymap = [];
     }
 
