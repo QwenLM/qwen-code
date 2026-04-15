@@ -370,7 +370,7 @@ export async function runInteractiveAuth() {
       {
         value: 'qwen-oauth' as const,
         label: t('Qwen OAuth'),
-        description: t('Free · Up to 1,000 requests/day · Qwen latest models'),
+        description: t('Free · 100 requests/day · Ending 2026-04-15'),
       },
       {
         value: 'coding-plan' as const,
@@ -428,8 +428,8 @@ export async function showAuthStatus(): Promise<void> {
     // Display status based on auth type
     if (selectedType === AuthType.QWEN_OAUTH) {
       writeStdoutLine(t('✓ Authentication Method: Qwen OAuth'));
-      writeStdoutLine(t('  Type: Free tier'));
-      writeStdoutLine(t('  Limit: Up to 1,000 requests/day'));
+      writeStdoutLine(t('  Type: Free tier (ending 2026-04-15)'));
+      writeStdoutLine(t('  Limit: 100 requests/day'));
       writeStdoutLine(t('  Models: Qwen latest models\n'));
     } else if (selectedType === AuthType.USE_OPENAI) {
       // Check for Coding Plan configuration

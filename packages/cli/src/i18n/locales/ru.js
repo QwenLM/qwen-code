@@ -1175,8 +1175,8 @@ export default {
   'Terms of Services and Privacy Notice':
     'Условия обслуживания и уведомление о конфиденциальности',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Бесплатно \u00B7 До 1 000 запросов/день \u00B7 Новейшие модели Qwen',
+  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
+    'Бесплатно \u00B7 100 запросов/день \u00B7 Завершение 2026-04-15',
   'Login with QwenChat account to use daily free quota.':
     'Войдите с помощью аккаунта QwenChat, чтобы использовать ежедневную бесплатную квоту.',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
@@ -1708,6 +1708,16 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Добавьте файл QWEN.md, чтобы предоставить Qwen Code постоянный контекст проекта.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Используйте /btw, чтобы задать короткий побочный вопрос, не прерывая основной разговор.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Контекст почти заполнен! Выполните /compress сейчас или начните /new, чтобы продолжить.',
+  'Context is getting full. Use /compress to free up space.':
+    'Контекст заполняется. Используйте /compress, чтобы освободить место.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Долгий разговор? /compress подведёт итог истории, чтобы освободить контекст.',
 
   // ============================================================================
   // Custom API Key Configuration
@@ -1944,8 +1954,9 @@ export default {
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Интерактивная настройка аутентификации\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Метод аутентификации: Qwen OAuth',
-  '  Type: Free tier': '  Тип: Бесплатный',
-  '  Limit: Up to 1,000 requests/day': '  Лимит: До 1 000 запросов/день',
+  '  Type: Free tier (ending 2026-04-15)':
+    '  Тип: Бесплатный (завершение 2026-04-15)',
+  '  Limit: 100 requests/day': '  Лимит: 100 запросов/день',
   '  Models: Qwen latest models\n': '  Модели: Последние модели Qwen\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Метод аутентификации: Alibaba Cloud Coding Plan',
