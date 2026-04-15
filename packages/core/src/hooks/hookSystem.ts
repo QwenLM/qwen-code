@@ -20,9 +20,11 @@ import type {
   AgentType,
   PermissionMode,
   PreCompactTrigger,
+  PostCompactTrigger,
   NotificationType,
   PermissionSuggestion,
   HookEventName,
+  StopFailureErrorType,
 } from './types.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -309,6 +311,42 @@ export class HookSystem {
     );
     return result.finalOutput
       ? createHookOutput('SubagentStop', result.finalOutput)
+      : undefined;
+  }
+
+  /**
+   * Fire a StopFailure event - called when an API error ends the turn
+   * Fire-and-forget: output and exit codes are ignored
+   */
+  async fireStopFailureEvent(
+    error: StopFailureErrorType,
+    errorDetails?: string,
+    lastAssistantMessage?: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireStopFailureEvent(
+      error,
+      errorDetails,
+      lastAssistantMessage,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a PostCompact event - called after conversation compaction completes
+   */
+  async firePostCompactEvent(
+    trigger: PostCompactTrigger,
+    compactSummary: string,
+    signal?: AbortSignal,
+  ): Promise<DefaultHookOutput | undefined> {
+    const result = await this.hookEventHandler.firePostCompactEvent(
+      trigger,
+      compactSummary,
+      signal,
+    );
+    return result.finalOutput
+      ? createHookOutput('PostCompact', result.finalOutput)
       : undefined;
   }
 

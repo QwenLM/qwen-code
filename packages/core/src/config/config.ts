@@ -210,6 +210,19 @@ export interface ChatCompressionSettings {
   contextPercentageThreshold?: number;
 }
 
+/**
+ * Settings for clearing stale context after idle periods.
+ * Threshold values of -1 mean "never clear" (disabled).
+ */
+export interface ClearContextOnIdleSettings {
+  /** Minutes idle before clearing old thinking blocks. Default 5. Use -1 to disable. */
+  thinkingThresholdMinutes?: number;
+  /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
+  toolResultsThresholdMinutes?: number;
+  /** Number of most-recent tool results to preserve. Default 5. */
+  toolResultsNumToKeep?: number;
+}
+
 export interface TelemetrySettings {
   enabled?: boolean;
   target?: TelemetryTarget;
@@ -372,8 +385,7 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
-  /** Minutes of inactivity before clearing retained thinking blocks. */
-  thinkingIdleThresholdMinutes?: number;
+  clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
@@ -562,7 +574,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
-  private readonly thinkingIdleThresholdMs: number;
+  private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
   private readonly overrideExtensions?: string[];
@@ -689,8 +701,14 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
-    this.thinkingIdleThresholdMs =
-      (params.thinkingIdleThresholdMinutes ?? 5) * 60 * 1000;
+    this.clearContextOnIdle = {
+      thinkingThresholdMinutes:
+        params.clearContextOnIdle?.thinkingThresholdMinutes ?? 5,
+      toolResultsThresholdMinutes:
+        params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
+      toolResultsNumToKeep:
+        params.clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+    };
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
@@ -1337,8 +1355,8 @@ export class Config {
     return this.maxSessionTurns;
   }
 
-  getThinkingIdleThresholdMs(): number {
-    return this.thinkingIdleThresholdMs;
+  getClearContextOnIdle(): ClearContextOnIdleSettings {
+    return this.clearContextOnIdle;
   }
 
   getSessionTokenLimit(): number {

@@ -996,9 +996,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': 'Trocar o modelo para esta sessão',
-  'Set fast model for background tasks':
-    'Definir modelo rápido para tarefas em segundo plano',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Trocar o modelo para esta sessão (--fast para modelo de sugestões)',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Definir modelo mais leve para sugestões de prompt e execução especulativa',
   'Content generator configuration not available.':
     'Configuração do gerador de conteúdo não disponível.',
   'Authentication type not available.': 'Tipo de autenticação não disponível.',
@@ -1250,8 +1251,8 @@ export default {
   'Terms of Services and Privacy Notice':
     'Termos de Serviço e Aviso de Privacidade',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Gratuito \u00B7 Até 1.000 solicitações/dia \u00B7 Modelos Qwen mais recentes',
+  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
+    'Gratuito \u00B7 100 solicitações/dia \u00B7 Encerra em 2026-04-15',
   'Login with QwenChat account to use daily free quota.':
     'Faça login com sua conta QwenChat para usar a cota gratuita diária.',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
@@ -1444,6 +1445,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Pressione Ctrl+C novamente para sair.',
   'Press Ctrl+D again to exit.': 'Pressione Ctrl+D novamente para sair.',
   'Press Esc again to clear.': 'Pressione Esc novamente para limpar.',
+  'Press ↑ to edit queued messages':
+    'Pressione ↑ para editar mensagens na fila',
 
   // ============================================================================
   // MCP Status
@@ -1511,6 +1514,16 @@ export default {
     'Você pode alternar o modo de permissão rapidamente com Shift+Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Experimente /insight para gerar insights personalizados do seu histórico de conversas.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Adicione um arquivo QWEN.md para dar ao Qwen Code um contexto persistente do projeto.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Use /btw para fazer uma pergunta lateral rápida sem interromper a conversa.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'O contexto está quase cheio! Execute /compress agora ou inicie /new para continuar.',
+  'Context is getting full. Use /compress to free up space.':
+    'O contexto está ficando cheio. Use /compress para liberar espaço.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Conversa longa? /compress resume o histórico para liberar contexto.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1934,8 +1947,9 @@ export default {
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Configuração interativa de autenticação\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Método de autenticação: Qwen OAuth',
-  '  Type: Free tier': '  Tipo: Gratuito',
-  '  Limit: Up to 1,000 requests/day': '  Limite: Até 1.000 solicitações/dia',
+  '  Type: Free tier (ending 2026-04-15)':
+    '  Tipo: Gratuito (encerra em 2026-04-15)',
+  '  Limit: 100 requests/day': '  Limite: 100 solicitações/dia',
   '  Models: Qwen latest models\n': '  Modelos: Modelos Qwen mais recentes\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Método de autenticação: Alibaba Cloud Coding Plan',
@@ -1960,9 +1974,9 @@ export default {
     'Modo raw não disponível. Execute em um terminal interativo.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
-  verbose: 'detalhado',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    'Mostrar saída completa da ferramenta e raciocínio no modo detalhado (alternar com Ctrl+O).',
+  compact: 'compacto',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Ocultar saída da ferramenta e raciocínio para uma visualização mais limpa (alternar com Ctrl+O).',
   'Press Ctrl+O to show full tool output':
     'Pressione Ctrl+O para exibir a saída completa da ferramenta',
 

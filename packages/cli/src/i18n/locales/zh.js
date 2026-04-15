@@ -1092,8 +1092,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': '切换此会话的模型',
-  'Set fast model for background tasks': '设置后台任务的快速模型',
+  'Switch the model for this session (--fast for suggestion model)':
+    '切换此会话的模型（--fast 可设置建议模型）',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    '设置用于输入建议和推测执行的轻量模型',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1225,8 +1227,8 @@ export default {
     '您必须选择认证方法才能继续。再次按 Ctrl+C 退出',
   'Terms of Services and Privacy Notice': '服务条款和隐私声明',
   'Qwen OAuth': 'Qwen OAuth (免费)',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    '免费 \u00B7 每天最多 1,000 次请求 \u00B7 Qwen 最新模型',
+  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
+    '免费 \u00B7 每天 100 次请求 \u00B7 将于 2026-04-15 停止',
   'Login with QwenChat account to use daily free quota.':
     '使用 QwenChat 账号登录，享受每日免费额度。',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
@@ -1407,6 +1409,7 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
+  'Press ↑ to edit queued messages': '按 ↑ 编辑排队消息',
 
   // ============================================================================
   // MCP Status
@@ -1471,6 +1474,16 @@ export default {
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '试试 /insight，从聊天记录中生成个性化洞察。',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    '添加 QWEN.md 文件，为 Qwen Code 提供持久的项目上下文。',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    '用 /btw 快速问一个小问题，不会打断当前对话。',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    '上下文即将用满！请立即执行 /compress 或使用 /new 开启新会话。',
+  'Context is getting full. Use /compress to free up space.':
+    '上下文空间不足，用 /compress 释放空间。',
+  'Long conversation? /compress summarizes history to free context.':
+    '对话太长？用 /compress 总结历史，释放上下文。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1714,6 +1727,8 @@ export default {
   'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
   'Run /context detail for per-item breakdown.':
     '运行 /context detail 查看详细分解。',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    '显示上下文窗口使用情况分解。输入 "/context detail" 查看详细分解。',
   'body loaded': '内容已加载',
   memory: '记忆',
   '{{region}} configuration updated successfully.': '{{region}} 配置更新成功。',
@@ -1788,8 +1803,9 @@ export default {
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - 交互式认证配置\n',
   '✓ Authentication Method: Qwen OAuth': '✓ 认证方式：Qwen OAuth',
-  '  Type: Free tier': '  类型：免费版',
-  '  Limit: Up to 1,000 requests/day': '  限额：每天最多 1,000 次请求',
+  '  Type: Free tier (ending 2026-04-15)':
+    '  类型：免费版（将于 2026-04-15 停止）',
+  '  Limit: 100 requests/day': '  限额：每天 100 次请求',
   '  Models: Qwen latest models\n': '  模型：Qwen 最新模型\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ 认证方式：阿里云百炼 Coding Plan',
@@ -1814,9 +1830,9 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
-  verbose: '详细',
-  'Show full tool output and thinking in verbose mode (toggle with Ctrl+O).':
-    '详细模式下显示完整工具输出和思考过程（Ctrl+O 切换）。',
+  compact: '紧凑',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
 
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',

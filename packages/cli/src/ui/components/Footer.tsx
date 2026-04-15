@@ -17,7 +17,7 @@ import { useStatusLine } from '../hooks/useStatusLine.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
-import { useVerboseMode } from '../contexts/VerboseModeContext.js';
+import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
@@ -26,7 +26,7 @@ export const Footer: React.FC = () => {
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
   const { text: statusLineText } = useStatusLine();
-  const { verboseMode } = useVerboseMode();
+  const { compactMode } = useCompactMode();
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -101,10 +101,10 @@ export const Footer: React.FC = () => {
       ),
     });
   }
-  if (verboseMode) {
+  if (compactMode) {
     rightItems.push({
-      key: 'verbose',
-      node: <Text color={theme.text.accent}>{t('verbose')}</Text>,
+      key: 'compact',
+      node: <Text color={theme.text.accent}>{t('compact')}</Text>,
     });
   }
 
