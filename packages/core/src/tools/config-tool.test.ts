@@ -40,8 +40,8 @@ function makeConfig(currentModel = 'qwen-coder-plus') {
   } as unknown as Config;
 }
 
-function parseOutput(result: { llmContent: string }): ConfigToolOutput {
-  return JSON.parse(result.llmContent) as ConfigToolOutput;
+function parseOutput(result: { llmContent: unknown }): ConfigToolOutput {
+  return JSON.parse(result.llmContent as string) as ConfigToolOutput;
 }
 
 describe('ConfigTool', () => {

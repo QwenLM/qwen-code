@@ -81,7 +81,7 @@ export const SUPPORTED_CONFIG_SETTINGS: Record<
     type: 'string',
     writable: true,
     source: 'project',
-    options: APPROVAL_MODES,
+    getOptions: () => [...APPROVAL_MODES],
     read: (config) => config.getApprovalMode(),
     write: async (config, value) => {
       try {
