@@ -11,6 +11,7 @@ import React, {
   useCallback,
   useMemo,
   useLayoutEffect,
+  useTransition,
 } from 'react';
 import { useVSCode } from './hooks/useVSCode.js';
 import { useSessionManagement } from './hooks/session/useSessionManagement.js';
@@ -75,6 +76,18 @@ export const App: React.FC = () => {
 
   // UI state
   const [inputText, setInputText] = useState('');
+  // Defer input state updates so the contentEditable div stays responsive.
+  // A ref mirrors the latest value so submitMessage reads the correct text
+  // even if the transition hasn't committed yet.
+  const inputTextRef = useRef(inputText);
+  inputTextRef.current = inputText;
+  const [, startInputTransition] = useTransition();
+  const deferredSetInputText = useCallback((text: string) => {
+    inputTextRef.current = text;
+    startInputTransition(() => {
+      setInputText(text);
+    });
+  }, []);
   const [permissionRequest, setPermissionRequest] = useState<{
     options: PermissionOption[];
     toolCall: PermissionToolCall;
@@ -260,6 +273,7 @@ export const App: React.FC = () => {
 
   const { handleSubmit: submitMessage } = useMessageSubmit({
     inputText,
+    inputTextRef,
     setInputText,
     attachedImages,
     clearImages,
@@ -338,69 +352,69 @@ export const App: React.FC = () => {
     },
   });
 
-  // Auto-scroll handling: keep the view pinned to bottom when new content arrives,
-  // but don't interrupt the user if they scrolled up.
-  // We track whether the user is currently "pinned" to the bottom (near the end).
-  const [pinnedToBottom, setPinnedToBottom] = useState(true);
-  const prevCountsRef = useRef({ msgLen: 0, inProgLen: 0, doneLen: 0 });
+  // Auto-scroll: keep the view pinned to bottom when new content arrives,
+  // but don't interrupt the user if they scrolled up. See: #3253
+  const pinnedToBottomRef = useRef(true);
 
-  // Observe scroll position to know if user has scrolled away from the bottom.
+  const scrollToBottom = useCallback((container: HTMLElement) => {
+    const top = container.scrollHeight - container.clientHeight;
+    container.scrollTo({ top });
+  }, []);
+
+  // Track whether user has scrolled away from bottom.
+  // Only upward scrolls (user-initiated) can unpin; downward scrolls
+  // (programmatic or content pushing) re-pin when near the bottom.
   useEffect(() => {
     const container = messagesContainerRef.current;
     if (!container) {
       return;
     }
 
+    let lastScrollTop = container.scrollTop;
     const onScroll = () => {
-      // Use a small threshold so slight deltas don't flip the state.
-      // Note: there's extra bottom padding for the input area, so keep this a bit generous.
-      const threshold = 80; // px tolerance
+      const currentScrollTop = container.scrollTop;
+      const scrolledUp = currentScrollTop < lastScrollTop - 2;
+      lastScrollTop = currentScrollTop;
+
       const distanceFromBottom =
-        container.scrollHeight - (container.scrollTop + container.clientHeight);
-      setPinnedToBottom(distanceFromBottom <= threshold);
+        container.scrollHeight - (currentScrollTop + container.clientHeight);
+
+      if (scrolledUp && distanceFromBottom > 80) {
+        // User scrolled up and is away from bottom — unpin.
+        pinnedToBottomRef.current = false;
+      } else if (distanceFromBottom <= 80) {
+        // Near bottom (user scrolled back down or programmatic) — re-pin.
+        pinnedToBottomRef.current = true;
+      }
     };
 
-    // Initialize once mounted so first render is correct
     onScroll();
     container.addEventListener('scroll', onScroll, { passive: true });
     return () => container.removeEventListener('scroll', onScroll);
   }, []);
 
-  // When content changes, if the user is pinned to bottom, keep it anchored there.
-  // Only smooth-scroll when new items are appended; do not smooth for streaming chunk updates.
+  // When content changes, if pinned to bottom, scroll down.
+  // Scroll both synchronously (before paint) AND via a fire-and-forget rAF
+  // (after paint). The sync scroll covers most cases; the rAF catches any
+  // layout changes the browser finalizes after commit. The rAF is intentionally
+  // NOT cancelled in cleanup — even if the effect re-runs, each pending rAF
+  // reads the latest scrollHeight and scrolls to the correct position.
   useLayoutEffect(() => {
+    if (!pinnedToBottomRef.current) {
+      return;
+    }
     const container = messagesContainerRef.current;
     if (!container) {
       return;
     }
-
-    // Detect whether new items were appended (vs. streaming chunk updates)
-    const prev = prevCountsRef.current;
-    const newMsg = messageHandling.messages.length > prev.msgLen;
-    const newInProg = inProgressToolCalls.length > prev.inProgLen;
-    const newDone = completedToolCalls.length > prev.doneLen;
-    prevCountsRef.current = {
-      msgLen: messageHandling.messages.length,
-      inProgLen: inProgressToolCalls.length,
-      doneLen: completedToolCalls.length,
-    };
-
-    if (!pinnedToBottom) {
-      // Do nothing if user scrolled away; avoid stealing scroll.
-      return;
-    }
-
-    const smooth = newMsg || newInProg || newDone; // avoid smooth on streaming chunks
-
-    // Anchor to the bottom on next frame to avoid layout thrash.
-    const raf = requestAnimationFrame(() => {
-      const top = container.scrollHeight - container.clientHeight;
-      // Use scrollTo to avoid cross-context issues with scrollIntoView.
-      container.scrollTo({ top, behavior: smooth ? 'smooth' : 'auto' });
+    scrollToBottom(container);
+    requestAnimationFrame(() => {
+      if (pinnedToBottomRef.current) {
+        scrollToBottom(container);
+      }
     });
-    return () => cancelAnimationFrame(raf);
   }, [
-    pinnedToBottom,
+    scrollToBottom,
     messageHandling.messages,
     inProgressToolCalls,
     completedToolCalls,
@@ -410,40 +424,31 @@ export const App: React.FC = () => {
     planEntries,
   ]);
 
-  // When the last rendered item resizes (e.g., images/code blocks load/expand),
-  // if we're pinned to bottom, keep it anchored there.
+  // When any child resizes (images loading, code blocks expanding, tool call
+  // cards rendering content), scroll to bottom if pinned.
+  // Observes ALL children so batch tool call completions are covered.
   useEffect(() => {
     const container = messagesContainerRef.current;
-    const endEl = messagesEndRef.current;
-    if (!container || !endEl) {
+    if (!container) {
       return;
     }
 
-    const lastItem = endEl.previousElementSibling as HTMLElement | null;
-    if (!lastItem) {
-      return;
-    }
-
-    let frame = 0;
     const ro = new ResizeObserver(() => {
-      if (!pinnedToBottom) {
+      if (!pinnedToBottomRef.current) {
         return;
       }
-      // Defer to next frame to avoid thrash during rapid size changes
-      cancelAnimationFrame(frame);
-      frame = requestAnimationFrame(() => {
-        const top = container.scrollHeight - container.clientHeight;
-        container.scrollTo({ top });
-      });
+      scrollToBottom(container);
     });
-    ro.observe(lastItem);
+
+    for (const child of Array.from(container.children)) {
+      ro.observe(child);
+    }
 
     return () => {
-      cancelAnimationFrame(frame);
       ro.disconnect();
     };
   }, [
-    pinnedToBottom,
+    scrollToBottom,
     messageHandling.messages,
     inProgressToolCalls,
     completedToolCalls,
@@ -991,7 +996,7 @@ export const App: React.FC = () => {
           activeSelection={fileContext.activeSelection}
           skipAutoActiveContext={skipAutoActiveContext}
           contextUsage={contextUsage}
-          onInputChange={setInputText}
+          onInputChange={deferredSetInputText}
           onCompositionStart={() => setIsComposing(true)}
           onCompositionEnd={() => setIsComposing(false)}
           onKeyDown={() => {}}
