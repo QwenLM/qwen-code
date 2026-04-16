@@ -79,6 +79,7 @@ export default {
   'CLI Version': 'CLI-Version',
   'Git Commit': 'Git-Commit',
   Model: 'Modell',
+  'Fast Model': 'Schnelles Modell',
   Sandbox: 'Sandbox',
   'OS Platform': 'Betriebssystem',
   'OS Arch': 'OS-Architektur',
@@ -594,6 +595,139 @@ export default {
   'List all configured hooks': 'Alle konfigurierten Hooks auflisten',
   'Enable a disabled hook': 'Einen deaktivierten Hook aktivieren',
   'Disable an active hook': 'Einen aktiven Hook deaktivieren',
+  // Hooks - Dialog
+  Hooks: 'Hooks',
+  'Loading hooks...': 'Hooks werden geladen...',
+  'Error loading hooks:': 'Fehler beim Laden der Hooks:',
+  'Press Escape to close': 'Escape zum Schließen drücken',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Escape, Ctrl+C oder Ctrl+D zum Abbrechen',
+  'Press Space, Enter, or Escape to dismiss':
+    'Leertaste, Enter oder Escape zum Schließen',
+  'No hook selected': 'Kein Hook ausgewählt',
+  // Hooks - List Step
+  'No hook events found.': 'Keine Hook-Ereignisse gefunden.',
+  '{{count}} hook configured': '{{count}} Hook konfiguriert',
+  '{{count}} hooks configured': '{{count}} Hooks konfiguriert',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
+    'Dieses Menü ist schreibgeschützt. Um Hooks hinzuzufügen oder zu ändern, bearbeiten Sie settings.json direkt oder fragen Sie Qwen Code.',
+  'Enter to select · Esc to cancel': 'Enter zum Auswählen · Esc zum Abbrechen',
+  // Hooks - Detail Step
+  'Exit codes:': 'Exit-Codes:',
+  'Configured hooks:': 'Konfigurierte Hooks:',
+  'No hooks configured for this event.':
+    'Für dieses Ereignis sind keine Hooks konfiguriert.',
+  'To add hooks, edit settings.json directly or ask Qwen.':
+    'Um Hooks hinzuzufügen, bearbeiten Sie settings.json direkt oder fragen Sie Qwen.',
+  'Enter to select · Esc to go back': 'Enter zum Auswählen · Esc zum Zurück',
+  // Hooks - Config Detail Step
+  'Hook details': 'Hook-Details',
+  'Event:': 'Ereignis:',
+  'Extension:': 'Erweiterung:',
+  'Desc:': 'Beschreibung:',
+  'No hook config selected': 'Keine Hook-Konfiguration ausgewählt',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    'Um diesen Hook zu ändern oder zu entfernen, bearbeiten Sie settings.json direkt oder fragen Sie Qwen.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook-Konfiguration - Deaktiviert',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'Alle Hooks sind derzeit deaktiviert. Sie haben {{count}} die nicht ausgeführt werden.',
+  '{{count}} configured hook': '{{count}} konfigurierter Hook',
+  '{{count}} configured hooks': '{{count}} konfigurierte Hooks',
+  'When hooks are disabled:': 'Wenn Hooks deaktiviert sind:',
+  'No hook commands will execute': 'Keine Hook-Befehle werden ausgeführt',
+  'StatusLine will not be displayed': 'StatusLine wird nicht angezeigt',
+  'Tool operations will proceed without hook validation':
+    'Tool-Operationen werden ohne Hook-Validierung fortgesetzt',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'Um Hooks wieder zu aktivieren, entfernen Sie "disableAllHooks" aus settings.json oder fragen Sie Qwen Code.',
+  // Hooks - Source
+  Project: 'Projekt',
+  User: 'Benutzer',
+  System: 'System',
+  Extension: 'Erweiterung',
+  'Local Settings': 'Lokale Einstellungen',
+  'User Settings': 'Benutzereinstellungen',
+  'System Settings': 'Systemeinstellungen',
+  Extensions: 'Erweiterungen',
+  'Session (temporary)': 'Sitzung (temporär)',
+  // Hooks - Status
+  '✓ Enabled': '✓ Aktiviert',
+  '✗ Disabled': '✗ Deaktiviert',
+  // Hooks - Event Descriptions (short)
+  'Before tool execution': 'Vor der Tool-Ausführung',
+  'After tool execution': 'Nach der Tool-Ausführung',
+  'After tool execution fails': 'Wenn die Tool-Ausführung fehlschlägt',
+  'When notifications are sent': 'Wenn Benachrichtigungen gesendet werden',
+  'When the user submits a prompt': 'Wenn der Benutzer einen Prompt absendet',
+  'When a new session is started': 'Wenn eine neue Sitzung gestartet wird',
+  'Right before Qwen Code concludes its response':
+    'Direkt bevor Qwen Code seine Antwort abschließt',
+  'When a subagent (Agent tool call) is started':
+    'Wenn ein Subagent (Agent-Tool-Aufruf) gestartet wird',
+  'Right before a subagent concludes its response':
+    'Direkt bevor ein Subagent seine Antwort abschließt',
+  'Before conversation compaction': 'Vor der Gesprächskomprimierung',
+  'When a session is ending': 'Wenn eine Sitzung endet',
+  'When a permission dialog is displayed':
+    'Wenn ein Berechtigungsdialog angezeigt wird',
+  // Hooks - Event Descriptions (detailed)
+  'Input to command is JSON of tool call arguments.':
+    'Die Eingabe an den Befehl ist JSON der Tool-Aufruf-Argumente.',
+  'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
+    'Die Eingabe an den Befehl ist JSON mit den Feldern "inputs" (Tool-Aufruf-Argumente) und "response" (Tool-Aufruf-Antwort).',
+  'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
+    'Die Eingabe an den Befehl ist JSON mit tool_name, tool_input, tool_use_id, error, error_type, is_interrupt und is_timeout.',
+  'Input to command is JSON with notification message and type.':
+    'Die Eingabe an den Befehl ist JSON mit Benachrichtigungsnachricht und -typ.',
+  'Input to command is JSON with original user prompt text.':
+    'Die Eingabe an den Befehl ist JSON mit dem ursprünglichen Benutzer-Prompt-Text.',
+  'Input to command is JSON with session start source.':
+    'Die Eingabe an den Befehl ist JSON mit der Sitzungsstart-Quelle.',
+  'Input to command is JSON with session end reason.':
+    'Die Eingabe an den Befehl ist JSON mit dem Sitzungsende-Grund.',
+  'Input to command is JSON with agent_id and agent_type.':
+    'Die Eingabe an den Befehl ist JSON mit agent_id und agent_type.',
+  'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
+    'Die Eingabe an den Befehl ist JSON mit agent_id, agent_type und agent_transcript_path.',
+  'Input to command is JSON with compaction details.':
+    'Die Eingabe an den Befehl ist JSON mit Komprimierungsdetails.',
+  'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
+    'Die Eingabe an den Befehl ist JSON mit tool_name, tool_input und tool_use_id. Ausgabe ist JSON mit hookSpecificOutput, das die Entscheidung zum Zulassen oder Ablehnen enthält.',
+  // Hooks - Exit Code Descriptions
+  'stdout/stderr not shown': 'stdout/stderr nicht angezeigt',
+  'show stderr to model and continue conversation':
+    'stderr dem Modell anzeigen und Konversation fortsetzen',
+  'show stderr to user only': 'stderr nur dem Benutzer anzeigen',
+  'stdout shown in transcript mode (ctrl+o)':
+    'stdout im Transkriptmodus angezeigt (ctrl+o)',
+  'show stderr to model immediately': 'stderr sofort dem Modell anzeigen',
+  'show stderr to user only but continue with tool call':
+    'stderr nur dem Benutzer anzeigen, aber mit Tool-Aufruf fortfahren',
+  'block processing, erase original prompt, and show stderr to user only':
+    'Verarbeitung blockieren, ursprünglichen Prompt löschen und stderr nur dem Benutzer anzeigen',
+  'stdout shown to Qwen': 'stdout dem Qwen anzeigen',
+  'show stderr to user only (blocking errors ignored)':
+    'stderr nur dem Benutzer anzeigen (Blockierungsfehler ignoriert)',
+  'command completes successfully': 'Befehl erfolgreich abgeschlossen',
+  'stdout shown to subagent': 'stdout dem Subagenten anzeigen',
+  'show stderr to subagent and continue having it run':
+    'stderr dem Subagenten anzeigen und ihn weiterlaufen lassen',
+  'stdout appended as custom compact instructions':
+    'stdout als benutzerdefinierte Komprimierungsanweisungen angehängt',
+  'block compaction': 'Komprimierung blockieren',
+  'show stderr to user only but continue with compaction':
+    'stderr nur dem Benutzer anzeigen, aber mit Komprimierung fortfahren',
+  'use hook decision if provided':
+    'Hook-Entscheidung verwenden, falls bereitgestellt',
+  // Hooks - Messages
+  'Config not loaded.': 'Konfiguration nicht geladen.',
+  'Hooks are not enabled. Enable hooks in settings to use this feature.':
+    'Hooks sind nicht aktiviert. Aktivieren Sie Hooks in den Einstellungen, um diese Funktion zu nutzen.',
+  'No hooks configured. Add hooks in your settings.json file.':
+    'Keine Hooks konfiguriert. Fügen Sie Hooks in Ihrer settings.json-Datei hinzu.',
+  'Configured Hooks ({{count}} total)':
+    'Konfigurierte Hooks ({{count}} insgesamt)',
 
   // ============================================================================
   // Commands - Session Export
@@ -708,7 +842,6 @@ export default {
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Arbeitsbereich-Genehmigungsmodus existiert und hat Vorrang. Benutzerebene-Änderung hat keine Wirkung.',
   'Apply To': 'Anwenden auf',
-  'User Settings': 'Benutzereinstellungen',
   'Workspace Settings': 'Arbeitsbereich-Einstellungen',
 
   // ============================================================================
@@ -763,7 +896,6 @@ export default {
   'List configured MCP servers and tools':
     'Konfigurierte MCP-Server und Werkzeuge auflisten',
   'Restarts MCP servers.': 'MCP-Server neu starten.',
-  'Config not loaded.': 'Konfiguration nicht geladen.',
   'Could not retrieve tool registry.':
     'Werkzeugregister konnte nicht abgerufen werden.',
   'No MCP servers configured with OAuth authentication.':
@@ -858,7 +990,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': 'Modell für diese Sitzung wechseln',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Modell für diese Sitzung wechseln (--fast für Vorschlagsmodell)',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Leichteres Modell für Eingabevorschläge und spekulative Ausführung festlegen',
   'Content generator configuration not available.':
     'Inhaltsgenerator-Konfiguration nicht verfügbar.',
   'Authentication type not available.':
@@ -972,7 +1107,6 @@ export default {
   'No server selected': 'Kein Server ausgewählt',
   '(disabled)': '(deaktiviert)',
   'Error:': 'Fehler:',
-  Extension: 'Erweiterung',
   tool: 'Werkzeug',
   tools: 'Werkzeuge',
   connected: 'verbunden',
@@ -1047,7 +1181,13 @@ export default {
     "Ausführung erlauben von: '{{command}}'?",
   'Yes, allow always ...': 'Ja, immer erlauben ...',
   'Always allow in this project': 'In diesem Projekt immer erlauben',
+  'Always allow {{action}} in this project':
+    '{{action}} in diesem Projekt immer erlauben',
   'Always allow for this user': 'Für diesen Benutzer immer erlauben',
+  'Always allow {{action}} for this user':
+    '{{action}} für diesen Benutzer immer erlauben',
+  'Yes, restore previous mode ({{mode}})':
+    'Ja, vorherigen Modus wiederherstellen ({{mode}})',
   'Yes, and auto-accept edits': 'Ja, und Änderungen automatisch akzeptieren',
   'Yes, and manually approve edits': 'Ja, und Änderungen manuell genehmigen',
   'No, keep planning (esc)': 'Nein, weiter planen (Esc)',
@@ -1106,10 +1246,16 @@ export default {
   'Terms of Services and Privacy Notice':
     'Nutzungsbedingungen und Datenschutzhinweis',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Kostenlos \u00B7 Bis zu 1.000 Anfragen/Tag \u00B7 Qwen neueste Modelle',
-  'Login with QwenChat account to use daily free quota.':
-    'Melden Sie sich mit Ihrem QwenChat-Konto an, um das tägliche kostenlose Kontingent zu nutzen.',
+  'Discontinued — switch to Coding Plan or API Key':
+    'Eingestellt — wechseln Sie zu Coding Plan oder API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'Das kostenlose Qwen OAuth-Kontingent wurde am 2026-04-15 eingestellt. Führen Sie /auth aus, um den Anbieter zu wechseln.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'Das kostenlose Qwen OAuth-Kontingent wurde am 2026-04-15 eingestellt. Bitte wählen Sie Coding Plan oder API Key.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Das kostenlose Qwen OAuth-Angebot wurde am 2026-04-15 eingestellt. Bitte wählen Sie ein Modell eines anderen Anbieter oder führen Sie /auth aus, um zu wechseln.',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ Das kostenlose Qwen OAuth-Kontingent wurde am 2026-04-15 eingestellt. Bitte wählen Sie eine andere Option.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Kostenpflichtig \u00B7 Bis zu 6.000 Anfragen/5 Std. \u00B7 Alle Alibaba Cloud Coding Plan Modelle',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
@@ -1207,8 +1353,8 @@ export default {
   unknown: 'unbekannt',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Modell konnte nicht auf '{{modelId}}' umgestellt werden.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — effizientes Hybridmodell mit führender Programmierleistung',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — effizientes Hybridmodell mit führender Programmierleistung',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'Das neueste Qwen Vision Modell von Alibaba Cloud ModelStudio (Version: qwen3-vl-plus-2025-09-23)',
 
@@ -1303,6 +1449,8 @@ export default {
   'Press Ctrl+C again to exit.': 'Drücken Sie erneut Strg+C zum Beenden.',
   'Press Ctrl+D again to exit.': 'Drücken Sie erneut Strg+D zum Beenden.',
   'Press Esc again to clear.': 'Drücken Sie erneut Esc zum Löschen.',
+  'Press ↑ to edit queued messages':
+    'Drücken Sie ↑, um Nachrichten in der Warteschlange zu bearbeiten',
 
   // ============================================================================
   // MCP Status
@@ -1640,6 +1788,18 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Strg+O drücken, um den Kompaktmodus umzuschalten — Tool-Ausgabe und Denkprozess ausblenden.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Fügen Sie eine QWEN.md-Datei hinzu, um Qwen Code dauerhaften Projektkontext zu geben.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Verwenden Sie /btw, um eine kurze Nebenfrage zu stellen, ohne die Unterhaltung zu unterbrechen.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Der Kontext ist fast voll! Führen Sie jetzt /compress aus oder starten Sie /new, um fortzufahren.',
+  'Context is getting full. Use /compress to free up space.':
+    'Der Kontext füllt sich. Verwenden Sie /compress, um Platz freizugeben.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Lange Unterhaltung? /compress fasst den Verlauf zusammen, um Kontext freizugeben.',
 
   // ============================================================================
   // Custom API Key Configuration
@@ -1668,8 +1828,8 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    'Fügen Sie Ihren Bailian Coding Plan API-Schlüssel ein und Sie sind bereit!',
+  "Paste your api key of ModelStudio Coding Plan and you're all set!":
+    'Fügen Sie Ihren ModelStudio Coding Plan API-Schlüssel ein und Sie sind bereit!',
   Custom: 'Benutzerdefiniert',
   'More instructions about configuring `modelProviders` manually.':
     'Weitere Anweisungen zur manuellen Konfiguration von `modelProviders`.',
@@ -1797,8 +1957,8 @@ export default {
     '⚠️  Keine Authentifizierungsmethode konfiguriert.\n',
   'Run one of the following commands to get started:\n':
     'Führen Sie einen der folgenden Befehle aus, um zu beginnen:\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - Mit Qwen OAuth authentifizieren (kostenlos)',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - Mit Qwen OAuth authentifizieren (eingestellt)',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - Mit Alibaba Cloud Coding Plan authentifizieren\n',
   'Or simply run:': 'Oder einfach ausführen:',
@@ -1806,8 +1966,11 @@ export default {
     '  qwen auth                - Interaktive Authentifizierungseinrichtung\n',
   '✓ Authentication Method: Qwen OAuth':
     '✓ Authentifizierungsmethode: Qwen OAuth',
-  '  Type: Free tier': '  Typ: Kostenlos',
-  '  Limit: Up to 1,000 requests/day': '  Limit: Bis zu 1.000 Anfragen/Tag',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  Typ: Kostenloses Kontingent (eingestellt 2026-04-15)',
+  '  Limit: No longer available': '  Limit: Nicht mehr verfügbar',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'Das kostenlose Qwen OAuth-Kontingent wurde am 2026-04-15 eingestellt. Führen Sie /auth aus, um zu Coding Plan, OpenRouter, Fireworks AI oder einem anderen Anbieter zu wechseln.',
   '  Models: Qwen latest models\n': '  Modelle: Qwen neueste Modelle\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Authentifizierungsmethode: Alibaba Cloud Coding Plan',
@@ -1832,4 +1995,24 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
+  compact: 'kompakt',
+  'compact mode: on (Ctrl+O off)': 'Kompaktmodus: ein (Strg+O aus)',
+  'to toggle compact mode': 'Kompaktmodus umschalten',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Strg+O umschalten).',
+  'Press Ctrl+O to show full tool output':
+    'Strg+O für vollständige Tool-Ausgabe drücken',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

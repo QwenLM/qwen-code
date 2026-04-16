@@ -49,6 +49,7 @@ vi.mock('./config/config.js', () => ({
     getQuestion: vi.fn(() => ''),
     isInteractive: () => false,
     getWarnings: vi.fn(() => []),
+    getModelsConfig: vi.fn(() => ({ getCurrentAuthType: () => null })),
   } as unknown as Config),
   parseArguments: vi.fn().mockResolvedValue({}),
   isDebugMode: vi.fn(() => false),
@@ -179,6 +180,8 @@ describe('gemini.tsx main function', () => {
         getProjectRoot: () => '/',
         getOutputFormat: () => OutputFormat.TEXT,
         getWarnings: () => [],
+        getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+        getSessionId: () => 'test-session-id',
       } as unknown as Config;
     });
     vi.mocked(loadSettings).mockReturnValue({
@@ -191,6 +194,8 @@ describe('gemini.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
     } as never);
     try {
       await main();
@@ -324,6 +329,8 @@ describe('gemini.tsx main function', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
     } as never);
 
     vi.mocked(parseArguments).mockResolvedValue({
@@ -346,6 +353,7 @@ describe('gemini.tsx main function', () => {
       getInputFormat: () => 'stream-json',
       getContentGeneratorConfig: () => ({ authType: 'test-auth' }),
       getWarnings: () => [],
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
       getSessionId: () => 'test-session-id',
       getOutputFormat: () => OutputFormat.TEXT,
@@ -447,7 +455,9 @@ describe('gemini.tsx main function kitty protocol', () => {
       getScreenReader: () => false,
       getGeminiMdFileCount: () => 0,
       getWarnings: () => [],
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
       getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
     } as unknown as Config);
     vi.mocked(loadSettings).mockReturnValue({
       errors: [],
@@ -459,6 +469,8 @@ describe('gemini.tsx main function kitty protocol', () => {
       setValue: vi.fn(),
       forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
       migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
     } as never);
     vi.mocked(parseArguments).mockResolvedValue({
       model: undefined,
@@ -506,7 +518,6 @@ describe('gemini.tsx main function kitty protocol', () => {
       authType: undefined,
       maxSessionTurns: undefined,
       experimentalLsp: undefined,
-      experimentalHooks: undefined,
       channel: undefined,
       chatRecording: undefined,
       sessionId: undefined,
@@ -559,6 +570,8 @@ describe('startInteractiveUI', () => {
         hideWindowTitle: false,
       },
     },
+    getUserHooks: () => undefined,
+    getProjectHooks: () => undefined,
   } as LoadedSettings;
   const mockStartupWarnings = ['warning1'];
   const mockWorkspaceRoot = '/root';

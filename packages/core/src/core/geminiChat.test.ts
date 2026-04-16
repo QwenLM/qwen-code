@@ -617,17 +617,17 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('should throw InvalidStreamError when no tool call and empty response text', async () => {
+    it('should throw InvalidStreamError when there is finish reason but truly empty response (no text, no thought)', async () => {
       vi.useFakeTimers();
       try {
-        // Setup: Stream with finish reason but empty response (only thoughts)
+        // Setup: Stream with finish reason but completely empty parts
         const streamWithEmptyResponse = (async function* () {
           yield {
             candidates: [
               {
                 content: {
                   role: 'model',
-                  parts: [{ thought: 'thinking...' }],
+                  parts: [],
                 },
                 finishReason: 'STOP',
               },
@@ -648,6 +648,58 @@ describe('GeminiChat', async () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('should succeed when there is finish reason and only thought content (reasoning models)', async () => {
+      // This test verifies that responses containing only thought/reasoning content
+      // are accepted as valid.
+      const thoughtOnlyStream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    thought: true,
+                    text: 'Let me think through this problem step by step...',
+                  },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        thoughtOnlyStream,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-thought-only',
+      );
+
+      // Should NOT throw - thought-only responses are valid
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })(),
+      ).resolves.not.toThrow();
+
+      // Verify history contains the thought content
+      const history = chat.getHistory();
+      expect(history.length).toBe(2); // user turn + model turn
+      const modelTurn = history[1]!;
+      expect(modelTurn.parts?.length).toBe(1);
+      expect(modelTurn.parts![0]).toEqual({
+        thought: true,
+        text: 'Let me think through this problem step by step...',
+      });
     });
 
     it('should succeed when there is finish reason and response text', async () => {
@@ -730,6 +782,109 @@ describe('GeminiChat', async () => {
       ).resolves.not.toThrow();
     });
 
+    it('should succeed for thought-only content when finish reason arrives in a later chunk', async () => {
+      const streamWithDelayedFinishReason = (async function* () {
+        // First chunk contains only thought content.
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ thought: true, text: 'Thinking through options...' }],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+
+        // Second chunk carries only finishReason.
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamWithDelayedFinishReason,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-thought-delayed-finish',
+      );
+
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })(),
+      ).resolves.not.toThrow();
+
+      const history = chat.getHistory();
+      expect(history.length).toBe(2);
+      expect(history[1]!.parts).toEqual([
+        { thought: true, text: 'Thinking through options...' },
+      ]);
+    });
+
+    it('should succeed for thought-only responses with finish reason followed by usage-only chunk', async () => {
+      const thoughtThenUsageOnlyStream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ thought: true, text: 'Let me reason this out...' }],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+
+        // Provider can emit trailing usage-only chunk after finish.
+        yield {
+          candidates: [],
+          usageMetadata: {
+            promptTokenCount: 12,
+            candidatesTokenCount: 4,
+            totalTokenCount: 16,
+          },
+        } as unknown as GenerateContentResponse;
+      })();
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        thoughtThenUsageOnlyStream,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-thought-usage-tail',
+      );
+
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })(),
+      ).resolves.not.toThrow();
+
+      const history = chat.getHistory();
+      expect(history.length).toBe(2);
+      expect(history[1]!.parts).toEqual([
+        { thought: true, text: 'Let me reason this out...' },
+      ]);
+    });
+
     it('should call generateContentStream with the correct parameters', async () => {
       const response = (async function* () {
         yield {
@@ -786,6 +941,48 @@ describe('GeminiChat', async () => {
       expect(uiTelemetryService.setLastPromptTokenCount).toHaveBeenCalledTimes(
         1,
       );
+    });
+
+    it('should not update global telemetry when no telemetryService is provided (subagent isolation)', async () => {
+      // Simulate a subagent GeminiChat: created without a telemetryService
+      const subagentChat = new GeminiChat(mockConfig, config, []);
+
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'subagent response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+              index: 0,
+              safetyRatings: [],
+            },
+          ],
+          text: () => 'subagent response',
+          usageMetadata: {
+            promptTokenCount: 12000,
+            candidatesTokenCount: 500,
+            totalTokenCount: 12500,
+          },
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await subagentChat.sendMessageStream(
+        'test-model',
+        { message: 'subagent task' },
+        'prompt-id-subagent',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      // The global uiTelemetryService must NOT be called by subagent chats
+      expect(uiTelemetryService.setLastPromptTokenCount).not.toHaveBeenCalled();
     });
 
     it('should keep parts with thoughtSignature when consolidating history', async () => {
@@ -1099,6 +1296,162 @@ describe('GeminiChat', async () => {
           ),
         ).toBe(true);
         expect(mockLogContentRetry).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should retry immediately when skipDelay is called during rate-limit wait', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const tpmError = new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        );
+        const successStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Success after skip' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw tpmError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          )
+          .mockResolvedValueOnce(successStream);
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-skip-delay',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        // First event: RETRY with retryInfo containing skipDelay
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+        const skipDelay = first.value.retryInfo!.skipDelay!;
+
+        // Resume generator — it's now awaiting the 60s delay.
+        // Call skipDelay() to resolve it immediately instead of advancing timers.
+        const secondPromise = iterator.next();
+        skipDelay();
+        const second = await secondPromise;
+
+        // The generator should have continued to the next attempt immediately
+        expect(second.done).toBe(false);
+        expect(second.value.type).toBe(StreamEventType.RETRY); // retry-start marker
+
+        // Consume remaining events
+        const events: StreamEvent[] = [first.value, second.value];
+        for (;;) {
+          const next = await iterator.next();
+          if (next.done) break;
+          events.push(next.value);
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Success after skip',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should exit retry loop when aborted during rate-limit delay', async () => {
+      vi.useFakeTimers();
+
+      try {
+        const tpmError = new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        );
+        async function* failingStreamGenerator() {
+          throw tpmError;
+
+          yield {} as GenerateContentResponse;
+        }
+
+        const abortController = new AbortController();
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(failingStreamGenerator())
+          // Should never be called — abort should prevent the second attempt
+          .mockResolvedValueOnce(failingStreamGenerator());
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test', config: { abortSignal: abortController.signal } },
+          'prompt-id-abort-delay',
+        );
+
+        const iterator = stream[Symbol.asyncIterator]();
+        // First event: RETRY with retryInfo
+        const first = await iterator.next();
+        expect(first.value.type).toBe(StreamEventType.RETRY);
+
+        // Abort while the generator is awaiting the 60s delay
+        const nextPromise = iterator.next();
+        abortController.abort();
+
+        // The generator should throw the abort error
+        await expect(nextPromise).rejects.toThrow();
+
+        // Only one API call should have been made (no retry after abort)
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+
+        // Verify the next sendMessageStream is not blocked by the old delay.
+        // If sendPromise were still pending, this would hang until the 60s
+        // timer fires — which never happens under fake timers, causing a timeout.
+        const nextStream = (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { parts: [{ text: 'Next request OK' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })();
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockReset()
+          .mockResolvedValueOnce(nextStream);
+
+        const stream2 = await chat.sendMessageStream(
+          'test-model',
+          { message: 'follow-up' },
+          'prompt-id-after-abort',
+        );
+        const events: StreamEvent[] = [];
+        for await (const e of stream2) {
+          events.push(e);
+        }
+        expect(
+          events.some(
+            (e) =>
+              e.type === StreamEventType.CHUNK &&
+              e.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Next request OK',
+          ),
+        ).toBe(true);
       } finally {
         vi.useRealTimers();
       }
@@ -1722,6 +2075,150 @@ describe('GeminiChat', async () => {
           parts: [{ text: 'hi' }, { text: 'hidden metadata' }],
         },
       ]);
+    });
+  });
+
+  describe('stripThoughtsFromHistoryKeepRecent', () => {
+    it('should keep the most recent N model turns with thoughts', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'old thinking', thought: true },
+            { text: 'response1' },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'msg2' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'mid thinking', thought: true },
+            { text: 'response2' },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'recent thinking', thought: true },
+            { text: 'response3' },
+          ],
+        },
+      ]);
+
+      chat.stripThoughtsFromHistoryKeepRecent(1);
+
+      const history = chat.getHistory();
+      // First two model turns should have thoughts stripped
+      expect(history[1]!.parts).toEqual([{ text: 'response1' }]);
+      expect(history[3]!.parts).toEqual([{ text: 'response2' }]);
+      // Last model turn should keep thoughts
+      expect(history[5]!.parts).toEqual([
+        { text: 'recent thinking', thought: true },
+        { text: 'response3' },
+      ]);
+    });
+
+    it('should not strip anything when keepTurns >= model turns with thoughts', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'thinking', thought: true }, { text: 'response' }],
+        },
+      ]);
+
+      chat.stripThoughtsFromHistoryKeepRecent(1);
+
+      const history = chat.getHistory();
+      expect(history[1]!.parts).toEqual([
+        { text: 'thinking', thought: true },
+        { text: 'response' },
+      ]);
+    });
+
+    it('should remove model content objects that become empty after stripping', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'only thinking', thought: true }],
+        },
+        { role: 'user', parts: [{ text: 'msg2' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'recent thinking', thought: true },
+            { text: 'response' },
+          ],
+        },
+      ]);
+
+      chat.stripThoughtsFromHistoryKeepRecent(1);
+
+      const history = chat.getHistory();
+      // The first model turn (only thoughts) should be removed entirely
+      expect(history).toHaveLength(3);
+      expect(history[0]!.parts).toEqual([{ text: 'msg1' }]);
+      expect(history[1]!.parts).toEqual([{ text: 'msg2' }]);
+      expect(history[2]!.parts).toEqual([
+        { text: 'recent thinking', thought: true },
+        { text: 'response' },
+      ]);
+    });
+
+    it('should also strip thoughtSignature from stripped turns', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'old thinking', thought: true },
+            {
+              text: 'with sig',
+              thoughtSignature: 'sig1',
+            } as unknown as { text: string; thoughtSignature: string },
+            { text: 'response1' },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'msg2' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'recent thinking', thought: true },
+            { text: 'response2' },
+          ],
+        },
+      ]);
+
+      chat.stripThoughtsFromHistoryKeepRecent(1);
+
+      const history = chat.getHistory();
+      // First model turn: thought stripped, thoughtSignature stripped
+      expect(history[1]!.parts).toEqual([
+        { text: 'with sig' },
+        { text: 'response1' },
+      ]);
+      expect(
+        (history[1]!.parts![0] as { thoughtSignature?: string })
+          .thoughtSignature,
+      ).toBeUndefined();
+    });
+
+    it('should handle keepTurns=0 by stripping all thoughts', () => {
+      chat.setHistory([
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        {
+          role: 'model',
+          parts: [{ text: 'thinking', thought: true }, { text: 'response' }],
+        },
+      ]);
+
+      chat.stripThoughtsFromHistoryKeepRecent(0);
+
+      const history = chat.getHistory();
+      expect(history[1]!.parts).toEqual([{ text: 'response' }]);
     });
   });
 

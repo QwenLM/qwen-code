@@ -17,7 +17,11 @@ import type {
   Config,
   EditorType,
 } from '@qwen-code/qwen-code-core';
-import { IdeClient, ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
+import {
+  IdeClient,
+  ToolConfirmationOutcome,
+  buildHumanReadableRuleLabel,
+} from '@qwen-code/qwen-code-core';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
@@ -74,6 +78,12 @@ export const ToolConfirmationMessage: React.FC<
   }, [config]);
 
   const handleConfirm = async (outcome: ToolConfirmationOutcome) => {
+    // Call onConfirm before resolving the IDE diff so that the CLI outcome
+    // (e.g. ProceedAlways) is processed first.  resolveDiffFromCli would
+    // otherwise trigger the scheduler's ideConfirmation .then() handler
+    // with ProceedOnce, racing with the intended CLI outcome.
+    onConfirm(outcome);
+
     if (confirmationDetails.type === 'edit') {
       if (config.getIdeMode() && isDiffingEnabled) {
         const cliOutcome =
@@ -84,7 +94,6 @@ export const ToolConfirmationMessage: React.FC<
         );
       }
     }
-    onConfirm(outcome);
   };
 
   const isTrustedFolder = config.isTrustedFolder();
@@ -243,16 +252,24 @@ export const ToolConfirmationMessage: React.FC<
       key: 'Yes, allow once',
     });
     if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
-      const rulesLabel = executionProps.permissionRules?.length
-        ? ` [${executionProps.permissionRules.join(', ')}]`
+      const friendlyLabel = executionProps.permissionRules?.length
+        ? ` ${buildHumanReadableRuleLabel(executionProps.permissionRules)}`
         : '';
       options.push({
-        label: t('Always allow in this project') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} in this project', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow in this project'),
         value: ToolConfirmationOutcome.ProceedAlwaysProject,
         key: 'Always allow in this project',
       });
       options.push({
-        label: t('Always allow for this user') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} for this user', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow for this user'),
         value: ToolConfirmationOutcome.ProceedAlwaysUser,
         key: 'Always allow for this user',
       });
@@ -285,6 +302,13 @@ export const ToolConfirmationMessage: React.FC<
     const planProps = confirmationDetails;
 
     question = planProps.title;
+    options.push({
+      key: 'restore-previous',
+      label: t('Yes, restore previous mode ({{mode}})', {
+        mode: planProps.prePlanMode ?? 'default',
+      }),
+      value: ToolConfirmationOutcome.RestorePrevious,
+    });
     options.push({
       key: 'proceed-always',
       label: t('Yes, and auto-accept edits'),
@@ -324,18 +348,26 @@ export const ToolConfirmationMessage: React.FC<
       key: 'Yes, allow once',
     });
     if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
-      const rulesLabel =
+      const friendlyLabel =
         'permissionRules' in infoProps &&
         (infoProps as { permissionRules?: string[] }).permissionRules?.length
-          ? ` [${(infoProps as { permissionRules?: string[] }).permissionRules!.join(', ')}]`
+          ? ` ${buildHumanReadableRuleLabel((infoProps as { permissionRules?: string[] }).permissionRules!)}`
           : '';
       options.push({
-        label: t('Always allow in this project') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} in this project', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow in this project'),
         value: ToolConfirmationOutcome.ProceedAlwaysProject,
         key: 'Always allow in this project',
       });
       options.push({
-        label: t('Always allow for this user') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} for this user', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow for this user'),
         value: ToolConfirmationOutcome.ProceedAlwaysUser,
         key: 'Always allow for this user',
       });
@@ -401,16 +433,24 @@ export const ToolConfirmationMessage: React.FC<
       key: 'Yes, allow once',
     });
     if (isTrustedFolder && !confirmationDetails.hideAlwaysAllow) {
-      const rulesLabel = mcpProps.permissionRules?.length
-        ? ` [${mcpProps.permissionRules.join(', ')}]`
+      const friendlyLabel = mcpProps.permissionRules?.length
+        ? ` ${buildHumanReadableRuleLabel(mcpProps.permissionRules)}`
         : '';
       options.push({
-        label: t('Always allow in this project') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} in this project', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow in this project'),
         value: ToolConfirmationOutcome.ProceedAlwaysProject,
         key: 'Always allow in this project',
       });
       options.push({
-        label: t('Always allow for this user') + rulesLabel,
+        label: friendlyLabel
+          ? t('Always allow {{action}} for this user', {
+              action: friendlyLabel.trim(),
+            })
+          : t('Always allow for this user'),
         value: ToolConfirmationOutcome.ProceedAlwaysUser,
         key: 'Always allow for this user',
       });

@@ -367,6 +367,13 @@ describe('QwenOAuth2Client', () => {
     it('should successfully refresh access token', async () => {
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            resource_url: 'https://new-endpoint.com',
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',
@@ -394,6 +401,11 @@ describe('QwenOAuth2Client', () => {
     it('should handle refresh error', async () => {
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            error: 'INVALID_GRANT',
+            error_description: 'The refresh token is invalid',
+          }),
         json: async () => ({
           error: 'INVALID_GRANT',
           error_description: 'The refresh token is invalid',
@@ -413,6 +425,13 @@ describe('QwenOAuth2Client', () => {
 
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            resource_url: 'https://new-endpoint.com',
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',
@@ -450,6 +469,14 @@ describe('QwenOAuth2Client', () => {
 
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            refresh_token: 'new-refresh-token',
+            resource_url: 'https://new-endpoint.com',
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',
@@ -713,6 +740,49 @@ describe('QwenOAuth2Client', () => {
 
       await expect(client.refreshAccessToken()).rejects.toThrow(
         'Token refresh failed: 500 Internal Server Error',
+      );
+    });
+
+    it('should NOT clear credentials on malformed 200 response (e.g. proxy HTML)', async () => {
+      const { CredentialsClearRequiredError } = await import('./qwenOAuth2.js');
+
+      const mockResponse = {
+        ok: true,
+        status: 200,
+        text: async () => '<html><body>Proxy Error</body></html>',
+      };
+
+      vi.mocked(global.fetch).mockResolvedValue(mockResponse as Response);
+
+      // Should throw a retryable Error, NOT CredentialsClearRequiredError
+      // (CredentialsClearRequiredError implies credentials were cleared)
+      await expect(client.refreshAccessToken()).rejects.toBeInstanceOf(Error);
+      await expect(client.refreshAccessToken()).rejects.not.toBeInstanceOf(
+        CredentialsClearRequiredError,
+      );
+      await expect(client.refreshAccessToken()).rejects.toThrow(
+        'Qwen OAuth refresh returned invalid JSON:',
+      );
+    });
+
+    it('should clear credentials and throw CredentialsClearRequiredError on 401 response', async () => {
+      const { CredentialsClearRequiredError } = await import('./qwenOAuth2.js');
+
+      const mockResponse = {
+        ok: false,
+        status: 401,
+        statusText: 'Unauthorized',
+        text: async () => 'Unauthorized',
+      };
+
+      vi.mocked(global.fetch).mockResolvedValue(mockResponse as Response);
+
+      await expect(client.refreshAccessToken()).rejects.toBeInstanceOf(
+        CredentialsClearRequiredError,
+      );
+
+      await expect(client.refreshAccessToken()).rejects.toThrow(
+        "Refresh token expired or invalid. Please use '/auth' to re-authenticate.",
       );
     });
   });
@@ -1620,6 +1690,12 @@ describe('Credential Caching Functions', () => {
 
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+          }),
         json: async () => ({
           access_token: 'new-token',
           token_type: 'Bearer',
@@ -1965,6 +2041,13 @@ describe('Enhanced Error Handling and Edge Cases', () => {
 
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            // No refresh_token in response
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',
@@ -1988,6 +2071,13 @@ describe('Enhanced Error Handling and Edge Cases', () => {
 
       const mockResponse = {
         ok: true,
+        text: async () =>
+          JSON.stringify({
+            access_token: 'new-access-token',
+            token_type: 'Bearer',
+            expires_in: 3600,
+            resource_url: 'https://new-resource-url.com',
+          }),
         json: async () => ({
           access_token: 'new-access-token',
           token_type: 'Bearer',

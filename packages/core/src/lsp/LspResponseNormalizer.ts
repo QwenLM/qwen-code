@@ -522,12 +522,21 @@ export class LspResponseNormalizer {
       itemObj['range'] ??
       undefined) as { start?: unknown; end?: unknown } | undefined;
 
-    if (!locationObj['uri'] || !range?.start || !range?.end) {
+    // Only require uri; range is optional per LSP 3.17 WorkspaceSymbol spec
+    // where location may be { uri } without a range.
+    if (!locationObj['uri']) {
       return null;
     }
 
-    const start = range.start as { line?: number; character?: number };
-    const end = range.end as { line?: number; character?: number };
+    // LSP 3.17 WorkspaceSymbol format may have location with only uri (no range).
+    // Servers like jdtls use this format, requiring a workspaceSymbol/resolve call
+    // for the full range. Default to file start when range is absent.
+    const start = (range?.start as
+      | { line?: number; character?: number }
+      | undefined) ?? { line: 0, character: 0 };
+    const end = (range?.end as
+      | { line?: number; character?: number }
+      | undefined) ?? { line: 0, character: 0 };
 
     return {
       name: (itemObj['name'] ?? itemObj['label'] ?? 'symbol') as string,

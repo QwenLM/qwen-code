@@ -5,10 +5,15 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { AgentTool, type AgentParams } from './agent.js';
+import {
+  AgentTool,
+  type AgentParams,
+  resolveSubagentApprovalMode,
+} from './agent.js';
 import type { PartListUnion } from '@google/genai';
 import type { ToolResultDisplay, AgentResultDisplay } from './tools.js';
-import type { Config } from '../config/config.js';
+import { ToolConfirmationOutcome } from './tools.js';
+import { type Config, ApprovalMode } from '../config/config.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
@@ -16,22 +21,32 @@ import {
   type AgentHeadless,
   ContextState,
 } from '../agents/runtime/agent-headless.js';
+import { AgentEventType } from '../agents/runtime/agent-events.js';
+import type {
+  AgentToolCallEvent,
+  AgentToolResultEvent,
+  AgentApprovalRequestEvent,
+  AgentEventEmitter,
+} from '../agents/runtime/agent-events.js';
 import { partToString } from '../utils/partUtils.js';
 import type { HookSystem } from '../hooks/hookSystem.js';
 import { PermissionMode } from '../hooks/types.js';
 
 // Type for accessing protected methods in tests
+type AgentToolInvocation = {
+  execute: (
+    signal?: AbortSignal,
+    updateOutput?: (output: ToolResultDisplay) => void,
+  ) => Promise<{
+    llmContent: PartListUnion;
+    returnDisplay: ToolResultDisplay;
+  }>;
+  getDescription: () => string;
+  eventEmitter: AgentEventEmitter;
+};
+
 type AgentToolWithProtectedMethods = AgentTool & {
-  createInvocation: (params: AgentParams) => {
-    execute: (
-      signal?: AbortSignal,
-      liveOutputCallback?: (chunk: string) => void,
-    ) => Promise<{
-      llmContent: PartListUnion;
-      returnDisplay: ToolResultDisplay;
-    }>;
-    getDescription: () => string;
-  };
+  createInvocation: (params: AgentParams) => AgentToolInvocation;
 };
 
 // Mock dependencies
@@ -76,6 +91,8 @@ describe('AgentTool', () => {
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     changeListeners = [];
@@ -381,12 +398,18 @@ describe('AgentTool', () => {
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
         mockSubagents[0],
-        config,
+        expect.any(Object), // config (may be approval-mode override)
         expect.any(Object), // eventEmitter parameter
       );
       expect(mockAgent.execute).toHaveBeenCalledWith(
         mockContextState,
         undefined, // signal parameter (undefined when not provided)
+        {
+          extraHistory: undefined,
+          generationConfigOverride: undefined,
+          toolsOverride: undefined,
+          skipEnvHistory: false,
+        },
       );
 
       const llmText = partToString(result.llmContent);
@@ -616,7 +639,7 @@ describe('AgentTool', () => {
       expect(mockHookSystem.fireSubagentStartEvent).toHaveBeenCalledWith(
         expect.stringContaining('file-search-'),
         'file-search',
-        PermissionMode.Default,
+        PermissionMode.AutoEdit,
         undefined,
       );
     });
@@ -798,7 +821,7 @@ describe('AgentTool', () => {
         '/test/transcript',
         'Task completed successfully',
         false,
-        PermissionMode.Default,
+        PermissionMode.AutoEdit,
         undefined,
       );
     });
@@ -843,7 +866,7 @@ describe('AgentTool', () => {
         '/test/transcript',
         'Task completed successfully',
         true,
-        PermissionMode.Default,
+        PermissionMode.AutoEdit,
         undefined,
       );
     });
@@ -1000,5 +1023,373 @@ describe('AgentTool', () => {
       expect(startAgentId).toBe(stopAgentId);
       expect(startAgentId).toMatch(/^file-search-\d+$/);
     });
+  });
+
+  describe('IDE diff-tab confirmation clears pendingConfirmation', () => {
+    let mockAgent: AgentHeadless;
+    let mockContextState: ContextState;
+
+    // We capture the eventEmitter from the invocation so we can simulate
+    // events during subagent execution.
+    let capturedInvocation: AgentToolInvocation;
+
+    beforeEach(() => {
+      mockContextState = {
+        set: vi.fn(),
+      } as unknown as ContextState;
+
+      MockedContextState.mockImplementation(() => mockContextState);
+
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockSubagents[0],
+      );
+    });
+
+    function createInvocationWithEventDrivenAgent(
+      emitDuringExecute: (emitter: AgentEventEmitter) => void,
+    ) {
+      // Create a mock agent whose execute() emits events on the invocation's
+      // eventEmitter, simulating a real subagent lifecycle.
+      mockAgent = {
+        execute: vi.fn(),
+        result: 'Done',
+        terminateMode: AgentTerminateMode.GOAL,
+        getFinalText: vi.fn().mockReturnValue('Done'),
+        formatCompactResult: vi.fn().mockReturnValue('✅ Success'),
+        getExecutionSummary: vi.fn().mockReturnValue({
+          rounds: 1,
+          totalDurationMs: 100,
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          failedToolCalls: 0,
+          successRate: 100,
+          inputTokens: 10,
+          outputTokens: 5,
+          totalTokens: 15,
+          toolUsage: [],
+        }),
+        getStatistics: vi.fn().mockReturnValue({
+          rounds: 1,
+          totalDurationMs: 100,
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+          failedToolCalls: 0,
+        }),
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+      } as unknown as AgentHeadless;
+
+      vi.mocked(mockAgent.execute).mockImplementation(async () => {
+        emitDuringExecute(capturedInvocation.eventEmitter);
+      });
+
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
+        mockAgent,
+      );
+
+      const params: AgentParams = {
+        description: 'Edit files',
+        prompt: 'Fix the bug',
+        subagent_type: 'file-search',
+      };
+
+      capturedInvocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+
+      return capturedInvocation;
+    }
+
+    it('should clear pendingConfirmation when TOOL_RESULT arrives for the pending tool (IDE accept path)', async () => {
+      // Track whether pendingConfirmation was set then cleared, using
+      // snapshots that safely handle function properties (structuredClone
+      // can't serialize functions).
+      const snapshots: Array<{
+        hasPendingConfirmation: boolean;
+        toolStatuses: Array<{ callId: string; status: string }>;
+      }> = [];
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-edit-1',
+          name: 'edit_file',
+          args: { path: '/test.ts' },
+          description: 'Editing test.ts',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        // Tool needs approval → pendingConfirmation is set
+        emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-edit-1',
+          name: 'edit_file',
+          description: 'Editing test.ts',
+          timestamp: Date.now(),
+          confirmationDetails: {
+            type: 'edit' as const,
+            title: 'Edit file',
+            fileName: 'test.ts',
+            filePath: '/test.ts',
+            fileDiff: '',
+            originalContent: 'old',
+            newContent: 'new',
+          },
+          respond: vi.fn(),
+        } as unknown as AgentApprovalRequestEvent);
+
+        // IDE diff-tab accepted → TOOL_RESULT arrives without onConfirm
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-edit-1',
+          name: 'edit_file',
+          success: true,
+          timestamp: Date.now(),
+        } satisfies AgentToolResultEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        const display = output as AgentResultDisplay;
+        snapshots.push({
+          hasPendingConfirmation: display.pendingConfirmation !== undefined,
+          toolStatuses: (display.toolCalls ?? []).map((tc) => ({
+            callId: tc.callId,
+            status: tc.status,
+          })),
+        });
+      });
+
+      // Should have at least one snapshot with pendingConfirmation set
+      const hasApproval = snapshots.some((s) => s.hasPendingConfirmation);
+      expect(hasApproval).toBe(true);
+
+      // The final snapshot after TOOL_RESULT should have cleared it
+      const resultSnapshot = snapshots.find(
+        (s) =>
+          !s.hasPendingConfirmation &&
+          s.toolStatuses.some(
+            (tc) => tc.callId === 'call-edit-1' && tc.status === 'success',
+          ),
+      );
+      expect(resultSnapshot).toBeDefined();
+    });
+
+    it('should NOT clear pendingConfirmation when TOOL_RESULT is for a different tool', async () => {
+      const snapshots: Array<{
+        hasPendingConfirmation: boolean;
+        toolStatuses: Array<{ callId: string; status: string }>;
+      }> = [];
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        // Tool A starts
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          args: {},
+          description: 'Reading',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        // Tool B starts
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-edit-1',
+          name: 'edit_file',
+          args: {},
+          description: 'Editing',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        // Tool B needs approval
+        emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-edit-1',
+          name: 'edit_file',
+          description: 'Editing',
+          timestamp: Date.now(),
+          confirmationDetails: {
+            type: 'edit' as const,
+            title: 'Edit',
+            fileName: 'test.ts',
+            filePath: '/test.ts',
+            fileDiff: '',
+            originalContent: '',
+            newContent: 'new',
+          },
+          respond: vi.fn(),
+        } as unknown as AgentApprovalRequestEvent);
+
+        // Tool A finishes (different callId)
+        emitter.emit(AgentEventType.TOOL_RESULT, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-read-1',
+          name: 'read_file',
+          success: true,
+          timestamp: Date.now(),
+        } satisfies AgentToolResultEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        const display = output as AgentResultDisplay;
+        snapshots.push({
+          hasPendingConfirmation: display.pendingConfirmation !== undefined,
+          toolStatuses: (display.toolCalls ?? []).map((tc) => ({
+            callId: tc.callId,
+            status: tc.status,
+          })),
+        });
+      });
+
+      // The snapshot for read_file's TOOL_RESULT should still have
+      // pendingConfirmation because the result was for a different tool.
+      const readResultSnapshot = snapshots.find((s) =>
+        s.toolStatuses.some(
+          (tc) => tc.callId === 'call-read-1' && tc.status === 'success',
+        ),
+      );
+      expect(readResultSnapshot).toBeDefined();
+      expect(readResultSnapshot!.hasPendingConfirmation).toBe(true);
+    });
+
+    it('should clear pendingConfirmation via onConfirm callback (terminal UI path)', async () => {
+      let capturedOnConfirm:
+        | ((outcome: ToolConfirmationOutcome) => Promise<void>)
+        | undefined;
+      const snapshots: Array<{ hasPendingConfirmation: boolean }> = [];
+
+      const invocation = createInvocationWithEventDrivenAgent((emitter) => {
+        emitter.emit(AgentEventType.TOOL_CALL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-edit-1',
+          name: 'edit_file',
+          args: {},
+          description: 'Editing',
+          timestamp: Date.now(),
+        } satisfies AgentToolCallEvent);
+
+        emitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
+          subagentId: 'sub-1',
+          round: 1,
+          callId: 'call-edit-1',
+          name: 'edit_file',
+          description: 'Editing',
+          timestamp: Date.now(),
+          confirmationDetails: {
+            type: 'edit' as const,
+            title: 'Edit',
+            fileName: 'test.ts',
+            filePath: '/test.ts',
+            fileDiff: '',
+            originalContent: '',
+            newContent: 'new',
+          },
+          respond: vi.fn(),
+        } as unknown as AgentApprovalRequestEvent);
+      });
+
+      await invocation.execute(undefined, (output) => {
+        const display = output as AgentResultDisplay;
+        snapshots.push({
+          hasPendingConfirmation: display.pendingConfirmation !== undefined,
+        });
+        if (display.pendingConfirmation?.onConfirm) {
+          capturedOnConfirm = display.pendingConfirmation.onConfirm;
+        }
+      });
+
+      expect(capturedOnConfirm).toBeDefined();
+
+      // Call onConfirm as if the user pressed "accept" in the terminal UI
+      snapshots.length = 0;
+      await capturedOnConfirm!(ToolConfirmationOutcome.ProceedOnce);
+
+      // The onConfirm callback should have cleared pendingConfirmation
+      expect(snapshots.some((s) => !s.hasPendingConfirmation)).toBe(true);
+    });
+  });
+});
+
+describe('resolveSubagentApprovalMode', () => {
+  it('should return yolo when parent is yolo, regardless of agent config', () => {
+    expect(resolveSubagentApprovalMode(ApprovalMode.YOLO, 'plan', true)).toBe(
+      PermissionMode.Yolo,
+    );
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.YOLO, undefined, false),
+    ).toBe(PermissionMode.Yolo);
+  });
+
+  it('should return auto-edit when parent is auto-edit, regardless of agent config', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.AUTO_EDIT, 'plan', true),
+    ).toBe(PermissionMode.AutoEdit);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.AUTO_EDIT, 'default', false),
+    ).toBe(PermissionMode.AutoEdit);
+  });
+
+  it('should respect agent-declared mode when parent is default and folder is trusted', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'plan', true),
+    ).toBe(PermissionMode.Plan);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'auto-edit', true),
+    ).toBe(PermissionMode.AutoEdit);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'yolo', true),
+    ).toBe(PermissionMode.Yolo);
+  });
+
+  it('should block privileged agent-declared modes in untrusted folders', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'auto-edit', false),
+    ).toBe(PermissionMode.Default);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'yolo', false),
+    ).toBe(PermissionMode.Default);
+  });
+
+  it('should allow non-privileged agent-declared modes in untrusted folders', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'plan', false),
+    ).toBe(PermissionMode.Plan);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, 'default', false),
+    ).toBe(PermissionMode.Default);
+  });
+
+  it('should default to plan when parent is plan and no agent config', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.PLAN, undefined, true),
+    ).toBe(PermissionMode.Plan);
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.PLAN, undefined, false),
+    ).toBe(PermissionMode.Plan);
+  });
+
+  it('should allow agent-declared mode to override plan parent', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.PLAN, 'auto-edit', true),
+    ).toBe(PermissionMode.AutoEdit);
+  });
+
+  it('should default to auto-edit when parent is default and folder is trusted', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, undefined, true),
+    ).toBe(PermissionMode.AutoEdit);
+  });
+
+  it('should default to parent mode when parent is default and folder is untrusted', () => {
+    expect(
+      resolveSubagentApprovalMode(ApprovalMode.DEFAULT, undefined, false),
+    ).toBe(PermissionMode.Default);
   });
 });

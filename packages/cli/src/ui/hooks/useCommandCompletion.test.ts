@@ -84,7 +84,6 @@ const setupMocks = ({
 describe('useCommandCompletion', () => {
   const mockCommandContext = {} as CommandContext;
   const mockConfig = {} as Config;
-  const testDirs: string[] = [];
   const testRootDir = '/';
 
   // Helper to create real TextBuffer objects within renderHook
@@ -114,7 +113,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest(''),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -139,7 +137,6 @@ describe('useCommandCompletion', () => {
           const textBuffer = useTextBufferForTest('@file');
           const completion = useCommandCompletion(
             textBuffer,
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -172,7 +169,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('@files'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -200,7 +196,6 @@ describe('useCommandCompletion', () => {
         renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest(text),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -226,7 +221,6 @@ describe('useCommandCompletion', () => {
         renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest(text, cursorOffset),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -265,7 +259,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -286,7 +279,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -306,7 +298,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -332,7 +323,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -361,7 +351,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -398,7 +387,6 @@ describe('useCommandCompletion', () => {
         const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest('/'),
-            testDirs,
             testRootDir,
             [],
             mockCommandContext,
@@ -417,6 +405,92 @@ describe('useCommandCompletion', () => {
     });
   });
 
+  describe('Completion mode detection', () => {
+    it('should switch to AT mode when typing @ after a slash command (#2518)', async () => {
+      setupMocks({
+        atSuggestions: [{ label: 'src/file.txt', value: 'src/file.txt' }],
+      });
+
+      const text = '/qc:create-issue @file';
+      renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest(text),
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(useAtCompletion).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            enabled: true,
+            pattern: 'file',
+          }),
+        );
+      });
+    });
+
+    it('should remain in SLASH mode when no @ is typed after slash command', async () => {
+      setupMocks({
+        slashSuggestions: [{ label: 'help', value: 'help' }],
+      });
+
+      const text = '/help';
+      renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest(text),
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(useSlashCompletion).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            enabled: true,
+            query: '/help',
+          }),
+        );
+      });
+    });
+
+    it('should complete a file path when @ appears after a slash command', async () => {
+      setupMocks({
+        atSuggestions: [{ label: 'src/index.ts', value: 'src/index.ts' }],
+      });
+
+      const text = '/review @src/ind';
+      const { result } = renderHook(() => {
+        const textBuffer = useTextBufferForTest(text);
+        const completion = useCommandCompletion(
+          textBuffer,
+          testRootDir,
+          [],
+          mockCommandContext,
+          false,
+          mockConfig,
+        );
+        return { ...completion, textBuffer };
+      });
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBe(1);
+      });
+
+      act(() => {
+        result.current.handleAutocomplete(0);
+      });
+
+      expect(result.current.textBuffer.text).toBe('/review @src/index.ts ');
+    });
+  });
+
   describe('handleAutocomplete', () => {
     it('should complete a partial command', async () => {
       setupMocks({
@@ -428,7 +502,6 @@ describe('useCommandCompletion', () => {
         const textBuffer = useTextBufferForTest('/mem');
         const completion = useCommandCompletion(
           textBuffer,
-          testDirs,
           testRootDir,
           [],
           mockCommandContext,
@@ -458,7 +531,6 @@ describe('useCommandCompletion', () => {
         const textBuffer = useTextBufferForTest('@src/fi');
         const completion = useCommandCompletion(
           textBuffer,
-          testDirs,
           testRootDir,
           [],
           mockCommandContext,
@@ -491,7 +563,6 @@ describe('useCommandCompletion', () => {
         const textBuffer = useTextBufferForTest(text, cursorOffset);
         const completion = useCommandCompletion(
           textBuffer,
-          testDirs,
           testRootDir,
           [],
           mockCommandContext,

@@ -640,6 +640,46 @@ export class TerminalCapture {
     return this.rawOutput;
   }
 
+  /**
+   * Get the current rendered terminal screen text from xterm.js.
+   *
+   * Unlike getOutput() which returns the accumulated raw PTY stream (with
+   * duplicates from Ink TUI redraws), this returns the actual screen content
+   * as rendered by xterm.js — what a user would see right now.
+   *
+   * Includes scrollback buffer content.
+   */
+  async getScreenText(): Promise<string> {
+    if (!this.page) throw new Error('Not initialized');
+    await this.flush();
+    return this.page.evaluate(() => {
+      const W = window as unknown as Record<string, unknown>;
+      const term = W['term'] as {
+        buffer: {
+          active: {
+            length: number;
+            getLine: (
+              i: number,
+            ) =>
+              | { translateToString: (trimRight?: boolean) => string }
+              | undefined;
+          };
+        };
+      };
+      const buf = term.buffer.active;
+      const lines: string[] = [];
+      for (let i = 0; i < buf.length; i++) {
+        const line = buf.getLine(i);
+        lines.push(line ? line.translateToString(true) : '');
+      }
+      // Trim trailing empty lines
+      while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
+        lines.pop();
+      }
+      return lines.join('\n');
+    });
+  }
+
   // ── Cleanup ──────────────────────────────
 
   /**

@@ -21,7 +21,12 @@ import { makeRelative, shortenPath } from '../utils/paths.js';
 import { isNodeError } from '../utils/errors.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { FileEncoding, needsUtf8Bom } from '../services/fileSystemService.js';
+import {
+  FileEncoding,
+  needsUtf8Bom,
+  detectLineEnding,
+} from '../services/fileSystemService.js';
+import type { LineEnding } from '../services/fileSystemService.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
 import { ReadFileTool } from './read-file.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
@@ -37,7 +42,6 @@ import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
-import { IdeClient } from '../ide/ide-client.js';
 import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
@@ -113,6 +117,8 @@ interface CalculatedEdit {
   encoding: string;
   /** Whether the existing file has a UTF-8 BOM */
   bom: boolean;
+  /** Original line ending style of the existing file */
+  lineEnding: LineEnding;
 }
 
 class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
@@ -144,6 +150,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       | undefined = undefined;
     let useBOM = false;
     let detectedEncoding = 'utf-8';
+    let detectedLineEnding: LineEnding = 'lf';
     if (fileExists) {
       try {
         const fileInfo = await this.config
@@ -157,6 +164,8 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
             fileInfo.content.codePointAt(0) === 0xfeff;
         }
         detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
+        // Detect original line ending style before normalizing
+        detectedLineEnding = detectLineEnding(fileInfo.content);
         // Normalize line endings to LF for consistent processing.
         currentContent = fileInfo.content.replace(/\r\n/g, '\n');
         fileExists = true;
@@ -257,6 +266,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       isNewFile,
       bom: useBOM,
       encoding: detectedEncoding,
+      lineEnding: detectedLineEnding,
     };
   }
 
@@ -297,12 +307,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       'Proposed',
       DEFAULT_DIFF_OPTIONS,
     );
-    const ideClient = await IdeClient.getInstance();
-    const ideConfirmation =
-      this.config.getIdeMode() && ideClient.isDiffingEnabled()
-        ? ideClient.openDiff(this.params.file_path, editData.newContent)
-        : undefined;
-
     const confirmationDetails: ToolEditConfirmationDetails = {
       type: 'edit',
       title: `Confirm Edit: ${shortenPath(makeRelative(this.params.file_path, this.config.getTargetDir()))}`,
@@ -315,16 +319,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
         }
-
-        if (ideConfirmation) {
-          const result = await ideConfirmation;
-          if (result.status === 'accepted' && result.content) {
-            this.params.old_string = editData.currentContent ?? '';
-            this.params.new_string = result.content;
-          }
-        }
       },
-      ideConfirmation,
     };
     return confirmationDetails;
   }
@@ -414,6 +409,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           _meta: {
             bom: editData.bom,
             encoding: editData.encoding,
+            lineEnding: editData.lineEnding,
           },
         });
       }

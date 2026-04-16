@@ -35,7 +35,7 @@ describe('substituteHookVariables', () => {
           description: 'Setup before start',
           hooks: [
             {
-              type: HookType.Command,
+              type: HookType.Command as const,
               command: '${CLAUDE_PLUGIN_ROOT}/scripts/setup.sh',
             },
           ],
@@ -47,9 +47,9 @@ describe('substituteHookVariables', () => {
 
     expect(result).toBeDefined();
     expect(result!['PreToolUse']).toHaveLength(1);
-    expect(result!['PreToolUse']![0].hooks![0].command).toBe(
-      '/path/to/plugin/scripts/setup.sh',
-    );
+    expect(
+      (result!['PreToolUse']![0].hooks![0] as { command: string }).command,
+    ).toBe('/path/to/plugin/scripts/setup.sh');
   });
 
   it('should handle multiple hooks with variables', () => {
@@ -61,7 +61,7 @@ describe('substituteHookVariables', () => {
           description: 'Post install hook 1',
           hooks: [
             {
-              type: HookType.Command,
+              type: HookType.Command as const,
               command: '${CLAUDE_PLUGIN_ROOT}/bin/init.sh',
             },
           ],
@@ -70,7 +70,7 @@ describe('substituteHookVariables', () => {
           description: 'Post install hook 2',
           hooks: [
             {
-              type: HookType.Command,
+              type: HookType.Command as const,
               command: 'chmod +x ${CLAUDE_PLUGIN_ROOT}/bin/executable.sh',
             },
           ],
@@ -82,12 +82,12 @@ describe('substituteHookVariables', () => {
 
     expect(result).toBeDefined();
     expect(result!['PostToolUse']).toHaveLength(2);
-    expect(result!['PostToolUse']![0].hooks![0].command).toBe(
-      '/project/plugins/my-plugin/bin/init.sh',
-    );
-    expect(result!['PostToolUse']![1].hooks![0].command).toBe(
-      'chmod +x /project/plugins/my-plugin/bin/executable.sh',
-    );
+    expect(
+      (result!['PostToolUse']![0].hooks![0] as { command: string }).command,
+    ).toBe('/project/plugins/my-plugin/bin/init.sh');
+    expect(
+      (result!['PostToolUse']![1].hooks![0] as { command: string }).command,
+    ).toBe('chmod +x /project/plugins/my-plugin/bin/executable.sh');
   });
 
   it('should handle multiple event types with hooks', () => {
@@ -101,7 +101,7 @@ describe('substituteHookVariables', () => {
           hooks: [
             // HookConfig[] array inside HookDefinition
             {
-              type: HookType.Command, // HookType.Command
+              type: HookType.Command as const, // HookType.Command
               command: '${CLAUDE_PLUGIN_ROOT}/scripts/pre-start.sh',
             },
           ],
@@ -114,7 +114,7 @@ describe('substituteHookVariables', () => {
           hooks: [
             // HookConfig[] array inside HookDefinition
             {
-              type: HookType.Command, // HookType.Command
+              type: HookType.Command as const, // HookType.Command
               command: '${CLAUDE_PLUGIN_ROOT}/setup/install.py',
             },
           ],
@@ -126,13 +126,14 @@ describe('substituteHookVariables', () => {
 
     expect(result).toBeDefined();
     expect(result!['PreToolUse']).toHaveLength(1);
-    expect(result!['PreToolUse']![0].hooks![0].command).toBe(
-      '/home/user/.qwen/extensions/my-extension/scripts/pre-start.sh',
-    );
+    expect(
+      (result!['PreToolUse']![0].hooks![0] as { command: string }).command,
+    ).toBe('/home/user/.qwen/extensions/my-extension/scripts/pre-start.sh');
     expect(result!['UserPromptSubmit']).toHaveLength(1);
-    expect(result!['UserPromptSubmit']![0].hooks![0].command).toBe(
-      '/home/user/.qwen/extensions/my-extension/setup/install.py',
-    );
+    expect(
+      (result!['UserPromptSubmit']![0].hooks![0] as { command: string })
+        .command,
+    ).toBe('/home/user/.qwen/extensions/my-extension/setup/install.py');
   });
 
   it('should not modify non-command hooks', () => {
@@ -146,7 +147,7 @@ describe('substituteHookVariables', () => {
           hooks: [
             // This is the HookConfig[] array inside HookDefinition
             {
-              type: HookType.Command, // This is part of HookConfig
+              type: HookType.Command as const, // This is part of HookConfig
               command: '${CLAUDE_PLUGIN_ROOT}/scripts/run.sh', // This is part of HookConfig
             },
             {
@@ -162,12 +163,12 @@ describe('substituteHookVariables', () => {
 
     expect(result).toBeDefined();
     expect(result!['SessionStart']).toHaveLength(1);
-    expect(result!['SessionStart']![0].hooks![0].command).toBe(
-      '/path/to/extension/scripts/run.sh',
-    );
-    expect(result!['SessionStart']![0].hooks![1].command).toBe(
-      '${CLAUDE_PLUGIN_ROOT}/not-affected',
-    ); // Non-command type won't be processed
+    expect(
+      (result!['SessionStart']![0].hooks![0] as { command: string }).command,
+    ).toBe('/path/to/extension/scripts/run.sh');
+    expect(
+      (result!['SessionStart']![0].hooks![1] as { command: string }).command,
+    ).toBe('${CLAUDE_PLUGIN_ROOT}/not-affected'); // Non-command type won't be processed
   });
 
   it('should return undefined when hooks is undefined', () => {
@@ -186,7 +187,7 @@ describe('substituteHookVariables', () => {
           hooks: [
             // This is the HookConfig[] array inside HookDefinition
             {
-              type: HookType.Command, // This is part of CommandHookConfig
+              type: HookType.Command as const, // This is part of CommandHookConfig
               command: 'echo "hello world"', // This is part of CommandHookConfig
             },
           ],
@@ -198,7 +199,9 @@ describe('substituteHookVariables', () => {
 
     expect(result).toBeDefined();
     expect(result).toEqual(hooks); // Should be equal but not the same object (deep clone)
-    expect(result!['Stop']![0].hooks![0].command).toBe('echo "hello world"');
+    expect((result!['Stop']![0].hooks![0] as { command: string }).command).toBe(
+      'echo "hello world"',
+    );
   });
 });
 
@@ -261,6 +264,34 @@ describe('performVariableReplacement', () => {
     expect(result).toContain('npm install');
     expect(result).toContain('npm run build');
     expect(result).not.toContain('```!');
+  });
+
+  it('should replace .claude with .qwen in markdown files', () => {
+    const extDir = path.join(testDir, 'ext');
+    fs.mkdirSync(extDir, { recursive: true });
+
+    const mdContent = [
+      '---',
+      'description: "Cancel active loop"',
+      '---',
+      '',
+      '# Cancel',
+      '',
+      'Check if `.claude/loop.local.md` exists.',
+      'Remove the file: `rm .claude/loop.local.md`',
+      'Path: `$HOME/.claude/cache`',
+      'Local: `./.claude/local`',
+    ].join('\n');
+    fs.writeFileSync(path.join(extDir, 'cancel.md'), mdContent, 'utf-8');
+
+    performVariableReplacement(extDir);
+
+    const result = fs.readFileSync(path.join(extDir, 'cancel.md'), 'utf-8');
+    expect(result).toContain('.qwen/loop.local.md');
+    expect(result).toContain('rm .qwen/loop.local.md');
+    expect(result).toContain('$HOME/.qwen/cache');
+    expect(result).toContain('./.qwen/local');
+    expect(result).not.toContain('.claude/');
   });
 
   it('should replace "role":"assistant" with "type":"assistant" in shell scripts', () => {

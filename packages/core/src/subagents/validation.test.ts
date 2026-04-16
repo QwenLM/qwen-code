@@ -22,6 +22,11 @@ describe('SubagentValidator', () => {
         'code_reviewer',
         'agent123',
         'my-helper',
+        '项目管理',
+        'コードレビュー',
+        '코드리뷰',
+        '项目-manager',
+        'проект_менеджер',
       ];
 
       for (const name of validNames) {
@@ -116,6 +121,14 @@ describe('SubagentValidator', () => {
       const result = validator.validateName('TestAgent');
       expect(result.isValid).toBe(true);
       expect(result.warnings).toContain(
+        'Consider using lowercase names for consistency',
+      );
+    });
+
+    it('should not warn about case for non-Latin names', () => {
+      const result = validator.validateName('项目管理');
+      expect(result.isValid).toBe(true);
+      expect(result.warnings).not.toContain(
         'Consider using lowercase names for consistency',
       );
     });
@@ -224,54 +237,53 @@ describe('SubagentValidator', () => {
     });
   });
 
-  describe('validateModelConfig', () => {
-    it('should accept valid model configurations', () => {
-      const validConfigs = [
-        { model: 'gemini-1.5-pro', temp: 0.7, top_p: 0.9 },
-        { temp: 0.5 },
-        { top_p: 1.0 },
-        {},
+  describe('validateModel', () => {
+    it('should accept valid model selectors', () => {
+      const validModels = [
+        'inherit',
+        'glm-5',
+        'claude-sonnet-4-6',
+        'openai:glm-5',
+        'anthropic:sonnet',
       ];
 
-      for (const config of validConfigs) {
-        const result = validator.validateModelConfig(config);
+      for (const model of validModels) {
+        const result = validator.validateModel(model);
         expect(result.isValid).toBe(true);
         expect(result.errors).toHaveLength(0);
       }
     });
 
-    it('should reject invalid model names', () => {
-      const result = validator.validateModelConfig({ model: '' });
+    it('should reject empty model selectors', () => {
+      const result = validator.validateModel('');
       expect(result.isValid).toBe(false);
-      expect(result.errors).toContain('Model name must be a non-empty string');
+      expect(result.errors).toContain('Model must be a non-empty string');
     });
 
-    it('should reject invalid temperature values', () => {
-      const invalidTemps = [-0.1, 2.1, 'not-a-number'];
-
-      for (const temp of invalidTemps) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const result = validator.validateModelConfig({ temp: temp as any });
-        expect(result.isValid).toBe(false);
-      }
-    });
-
-    it('should warn about high temperature', () => {
-      const result = validator.validateModelConfig({ temp: 1.5 });
+    it('should accept model IDs containing colons with unknown prefix', () => {
+      const result = validator.validateModel('invalid:glm-5');
       expect(result.isValid).toBe(true);
-      expect(result.warnings).toContain(
-        'High temperature (>1) may produce very creative but unpredictable results',
+    });
+
+    it('should accept model IDs with colons (e.g. gpt-4o:online)', () => {
+      const result = validator.validateModel('gpt-4o:online');
+      expect(result.isValid).toBe(true);
+    });
+
+    it('should reject missing model IDs after valid authType prefixes', () => {
+      const result = validator.validateModel('openai:');
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain(
+        'Model selector must include a model ID after the authType',
       );
     });
 
-    it('should reject invalid top_p values', () => {
-      const invalidTopP = [-0.1, 1.1, 'not-a-number'];
-
-      for (const top_p of invalidTopP) {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const result = validator.validateModelConfig({ top_p: top_p as any });
-        expect(result.isValid).toBe(false);
-      }
+    it('should warn when inherit is explicit', () => {
+      const result = validator.validateModel('inherit');
+      expect(result.isValid).toBe(true);
+      expect(result.warnings).toContain(
+        'Explicit "inherit" is optional because omitting the model uses the main conversation model',
+      );
     });
   });
 
@@ -343,6 +355,36 @@ describe('SubagentValidator', () => {
       const result = validator.validateConfig(validConfig);
       expect(result.isValid).toBe(true);
       expect(result.errors).toHaveLength(0);
+    });
+
+    it('should accept valid disallowedTools', () => {
+      const result = validator.validateConfig({
+        ...validConfig,
+        disallowedTools: ['write_file', 'mcp__slack'],
+      });
+      expect(result.isValid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('should reject non-string entries in disallowedTools', () => {
+      const result = validator.validateConfig({
+        ...validConfig,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        disallowedTools: [123, 'write_file'] as any,
+      });
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain(
+        'Tool name must be a string, got: number',
+      );
+    });
+
+    it('should reject empty strings in disallowedTools', () => {
+      const result = validator.validateConfig({
+        ...validConfig,
+        disallowedTools: ['', 'write_file'],
+      });
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain('Tool name cannot be empty');
     });
 
     it('should collect errors from all validation steps', () => {

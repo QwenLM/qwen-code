@@ -18,18 +18,26 @@
 
 </div>
 
-> 🎉 **News (2026-02-16)**: Qwen3.5-Plus is now live! Sign in via Qwen OAuth to use it directly, or get an API key from [Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com?tab=doc#/doc/?type=model&url=2840914_2&modelId=group-qwen3.5-plus) to access it through the OpenAI-compatible API.
+## 🎉 News
 
-Qwen Code is an open-source AI agent for the terminal, optimized for [Qwen3-Coder](https://github.com/QwenLM/Qwen3-Coder). It helps you understand large codebases, automate tedious work, and ship faster.
+- **2026-04-15**: Qwen OAuth free tier has been discontinued. To continue using Qwen Code, switch to [Alibaba Cloud Coding Plan](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index), [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or bring your own API key. Run `qwen auth` to configure.
 
-![](https://gw.alicdn.com/imgextra/i1/O1CN01D2DviS1wwtEtMwIzJ_!!6000000006373-2-tps-1600-900.png)
+- **2026-04-13**: Qwen OAuth free tier policy update: daily quota adjusted to 100 requests/day (from 1,000).
+
+- **2026-04-02**: Qwen3.6-Plus is now live! Sign in via Qwen OAuth to use it directly, or get an API key from [Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3.6-plus) to access it through the OpenAI-compatible API.
+
+- **2026-02-16**: Qwen3.5-Plus is now live!
 
 ## Why Qwen Code?
 
-- **Multi-protocol, OAuth free tier**: use OpenAI / Anthropic / Gemini-compatible APIs, or sign in with Qwen OAuth for 1,000 free requests/day.
+Qwen Code is an open-source AI agent for the terminal, optimized for Qwen series models. It helps you understand large codebases, automate tedious work, and ship faster.
+
+- **Multi-protocol, flexible providers**: use OpenAI / Anthropic / Gemini-compatible APIs, [Alibaba Cloud Coding Plan](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index), [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or bring your own API key.
 - **Open-source, co-evolving**: both the framework and the Qwen3-Coder model are open-source—and they ship and evolve together.
 - **Agentic workflow, feature-rich**: rich built-in tools (Skills, SubAgents) for a full agentic workflow and a Claude Code-like experience.
 - **Terminal-first, IDE-friendly**: built for developers who live in the command line, with optional integration for VS Code, Zed, and JetBrains IDEs.
+
+![](https://gw.alicdn.com/imgextra/i1/O1CN01D2DviS1wwtEtMwIzJ_!!6000000006373-2-tps-1600-900.png)
 
 ## Installation
 
@@ -98,12 +106,22 @@ Your browser does not support the video tag.
 
 </details>
 
+## 🦞 Use Qwen Code for Coding Tasks in Claw
+
+Copy the prompt below and paste it into your agent:
+
+```
+Use Qwen Code as a coding agent. First, fetch and read this skill reference:
+https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/.qwen/skills/qwen-code-claw/SKILL.md
+Then follow the instructions inside to install, authenticate, and use Qwen Code via acpx for all coding tasks.
+```
+
 ## Authentication
 
 Qwen Code supports two authentication methods:
 
 - **Qwen OAuth (recommended & free)**: sign in with your `qwen.ai` account in a browser.
-- **API-KEY**: use an API key to connect to any supported provider (OpenAI, Anthropic, Google GenAI, Alibaba Cloud Bailian, and other compatible endpoints).
+- **API-KEY**: use an API key to connect to any supported provider (OpenAI, Anthropic, Google GenAI, Alibaba Cloud ModelStudio, and other compatible endpoints).
 
 #### Qwen OAuth (recommended)
 
@@ -121,7 +139,7 @@ Choose **Qwen OAuth** and complete the browser flow. Your credentials are cached
 
 Use this if you want more flexibility over which provider and model to use. Supports multiple protocols:
 
-- **OpenAI-compatible**: Alibaba Cloud Bailian, ModelScope, OpenAI, OpenRouter, and other OpenAI-compatible providers
+- **OpenAI-compatible**: Alibaba Cloud ModelStudio, ModelScope, OpenAI, OpenRouter, and other OpenAI-compatible providers
 - **Anthropic**: Claude models
 - **Google GenAI**: Gemini models
 
@@ -138,8 +156,8 @@ Here is a complete example:
   "modelProviders": {
     "openai": [
       {
-        "id": "qwen3-coder-plus",
-        "name": "qwen3-coder-plus",
+        "id": "qwen3.6-plus",
+        "name": "qwen3.6-plus",
         "baseUrl": "https://dashscope.aliyuncs.com/compatible-mode/v1",
         "description": "Qwen3-Coder via Dashscope",
         "envKey": "DASHSCOPE_API_KEY"
@@ -155,7 +173,7 @@ Here is a complete example:
     }
   },
   "model": {
-    "name": "qwen3-coder-plus"
+    "name": "qwen3.6-plus"
   }
 }
 ```
@@ -165,7 +183,7 @@ Here is a complete example:
 | Field                        | What it does                                                                                                                          |
 | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `modelProviders`             | Declares which models are available and how to connect to them. Keys like `openai`, `anthropic`, `gemini` represent the API protocol. |
-| `modelProviders[].id`        | The model ID sent to the API (e.g. `qwen3-coder-plus`, `gpt-4o`).                                                                     |
+| `modelProviders[].id`        | The model ID sent to the API (e.g. `qwen3.6-plus`, `gpt-4o`).                                                                         |
 | `modelProviders[].envKey`    | The name of the environment variable that holds your API key.                                                                         |
 | `modelProviders[].baseUrl`   | The API endpoint URL (required for non-default endpoints).                                                                            |
 | `env`                        | A fallback place to store API keys (lowest priority; prefer `.env` files or `export` for sensitive keys).                             |
@@ -183,36 +201,24 @@ Use the `/model` command at any time to switch between all configured models.
 ##### More Examples
 
 <details>
-<summary>Coding Plan (Alibaba Cloud Bailian) — fixed monthly fee, higher quotas</summary>
+<summary>Coding Plan (Alibaba Cloud ModelStudio) — fixed monthly fee, higher quotas</summary>
 
 ```json
 {
   "modelProviders": {
     "openai": [
       {
-        "id": "qwen3.5-plus",
-        "name": "qwen3.5-plus (Coding Plan)",
+        "id": "qwen3.6-plus",
+        "name": "qwen3.6-plus (Coding Plan)",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "qwen3.5-plus with thinking enabled from Bailian Coding Plan",
-        "envKey": "BAILIAN_CODING_PLAN_API_KEY",
-        "generationConfig": {
-          "extra_body": {
-            "enable_thinking": true
-          }
-        }
-      },
-      {
-        "id": "qwen3-coder-plus",
-        "name": "qwen3-coder-plus (Coding Plan)",
-        "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "qwen3-coder-plus from Bailian Coding Plan",
+        "description": "qwen3.6-plus from ModelStudio Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY"
       },
       {
-        "id": "qwen3-coder-next",
-        "name": "qwen3-coder-next (Coding Plan)",
+        "id": "qwen3.5-plus",
+        "name": "qwen3.5-plus (Coding Plan)",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "qwen3-coder-next with thinking enabled from Bailian Coding Plan",
+        "description": "qwen3.5-plus with thinking enabled from ModelStudio Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY",
         "generationConfig": {
           "extra_body": {
@@ -224,7 +230,7 @@ Use the `/model` command at any time to switch between all configured models.
         "id": "glm-4.7",
         "name": "glm-4.7 (Coding Plan)",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "glm-4.7 with thinking enabled from Bailian Coding Plan",
+        "description": "glm-4.7 with thinking enabled from ModelStudio Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY",
         "generationConfig": {
           "extra_body": {
@@ -236,7 +242,7 @@ Use the `/model` command at any time to switch between all configured models.
         "id": "kimi-k2.5",
         "name": "kimi-k2.5 (Coding Plan)",
         "baseUrl": "https://coding.dashscope.aliyuncs.com/v1",
-        "description": "kimi-k2.5 with thinking enabled from Bailian Coding Plan",
+        "description": "kimi-k2.5 with thinking enabled from ModelStudio Coding Plan",
         "envKey": "BAILIAN_CODING_PLAN_API_KEY",
         "generationConfig": {
           "extra_body": {
@@ -255,12 +261,12 @@ Use the `/model` command at any time to switch between all configured models.
     }
   },
   "model": {
-    "name": "qwen3-coder-plus"
+    "name": "qwen3.6-plus"
   }
 }
 ```
 
-> Subscribe to the Coding Plan and get your API key at [Alibaba Cloud Bailian](https://modelstudio.console.aliyun.com/?tab=dashboard#/efm/coding_plan).
+> Subscribe to the Coding Plan and get your API key at [Alibaba Cloud ModelStudio(Beijing)](https://bailian.console.aliyun.com/cn-beijing?tab=coding-plan#/efm/coding-plan-index) or [Alibaba Cloud ModelStudio(intl)](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index).
 
 </details>
 

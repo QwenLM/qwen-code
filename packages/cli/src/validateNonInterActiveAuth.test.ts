@@ -29,6 +29,7 @@ function createMockConfig(overrides?: Partial<Config>): Config {
   const baseModelsConfig = {
     getModel: vi.fn().mockReturnValue('default-model'),
     getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+    getGenerationConfig: vi.fn().mockReturnValue({}),
   } as unknown as ModelsConfig;
   const baseConfig: Partial<Config> = {
     refreshAuth: vi.fn().mockResolvedValue('refreshed'),
@@ -169,6 +170,7 @@ describe('validateNonInterActiveAuth', () => {
       getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     });
     await validateNonInteractiveAuth(
@@ -179,20 +181,21 @@ describe('validateNonInterActiveAuth', () => {
     expect(refreshAuthMock).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 
-  it('uses configured QWEN_OAUTH if provided', async () => {
+  it('exits with error for QWEN_OAUTH (free tier discontinued)', async () => {
     const nonInteractiveConfig = createMockConfig({
       refreshAuth: refreshAuthMock,
       getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     });
-    await validateNonInteractiveAuth(
-      undefined,
-      nonInteractiveConfig,
-      mockSettings,
+    await expect(
+      validateNonInteractiveAuth(undefined, nonInteractiveConfig, mockSettings),
+    ).rejects.toThrow('process.exit(1)');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('discontinued'),
     );
-    expect(refreshAuthMock).toHaveBeenCalledWith(AuthType.QWEN_OAUTH);
   });
 
   it('exits if validateAuthMethod returns error', async () => {
@@ -249,6 +252,7 @@ describe('validateNonInterActiveAuth', () => {
       getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     });
     await validateNonInteractiveAuth(
@@ -267,6 +271,7 @@ describe('validateNonInterActiveAuth', () => {
       getModelsConfig: vi.fn().mockReturnValue({
         getModel: vi.fn().mockReturnValue('default-model'),
         getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     });
     try {

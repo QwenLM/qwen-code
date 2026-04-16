@@ -39,6 +39,7 @@ import {
   downloadFromGitHubRelease,
   parseGitHubRepoForReleases,
 } from './github.js';
+import { downloadFromNpmRegistry } from './npm.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 import {
@@ -87,6 +88,15 @@ export enum SettingScope {
   SystemDefaults = 'SystemDefaults',
 }
 
+export interface ExtensionChannelConfig {
+  /** Relative path to JS entry point (must export `plugin: ChannelPlugin`) */
+  entry: string;
+  /** Human-readable name for CLI output */
+  displayName?: string;
+  /** Extra config fields required beyond the shared ChannelConfig fields */
+  requiredConfigFields?: string[];
+}
+
 export interface Extension {
   id: string;
   name: string;
@@ -104,6 +114,7 @@ export interface Extension {
   skills?: SkillConfig[];
   agents?: SubagentConfig[];
   hooks?: { [K in HookEventName]?: HookDefinition[] };
+  channels?: Record<string, ExtensionChannelConfig>;
 }
 
 export interface ExtensionConfig {
@@ -117,6 +128,7 @@ export interface ExtensionConfig {
   agents?: string | string[];
   settings?: ExtensionSetting[];
   hooks?: { [K in HookEventName]?: HookDefinition[] };
+  channels?: Record<string, ExtensionChannelConfig>;
 }
 
 export interface ExtensionUpdateInfo {
@@ -650,6 +662,10 @@ export class ExtensionManager {
         );
       }
 
+      if (config.channels) {
+        extension.channels = config.channels;
+      }
+
       extension.commands = await loadCommandsFromDir(
         `${effectiveExtensionPath}/commands`,
       );
@@ -873,6 +889,11 @@ export class ExtensionManager {
           }
         }
         localSourcePath = tempDir;
+      } else if (installMetadata.type === 'npm') {
+        tempDir = await ExtensionStorage.createTmpDir();
+        const result = await downloadFromNpmRegistry(installMetadata, tempDir);
+        installMetadata.releaseTag = result.version;
+        localSourcePath = tempDir;
       } else if (
         installMetadata.type === 'local' ||
         installMetadata.type === 'link'
@@ -1052,7 +1073,7 @@ export class ExtensionManager {
               'success',
             ),
           );
-          this.refreshTools();
+          await this.refreshTools();
         } else {
           logExtensionInstallEvent(
             telemetryConfig,
@@ -1165,7 +1186,7 @@ export class ExtensionManager {
     if (isUpdate) return;
 
     this.removeEnablementConfig(extension.name);
-    this.refreshTools();
+    await this.refreshTools();
 
     logExtensionUninstall(
       telemetryConfig,
@@ -1211,9 +1232,9 @@ export class ExtensionManager {
       }
       callback(extension.name, ExtensionUpdateState.CHECKING_FOR_UPDATES);
       promises.push(
-        checkForExtensionUpdate(extension, this).then((state) =>
-          callback(extension.name, state),
-        ),
+        checkForExtensionUpdate(extension, this)
+          .then((state) => callback(extension.name, state))
+          .catch(() => callback(extension.name, ExtensionUpdateState.ERROR)),
       );
     }
     await Promise.all(promises);
@@ -1316,7 +1337,7 @@ export class ExtensionManager {
   async refreshMemory(): Promise<void> {
     if (!this.config) return;
     // refresh mcp servers
-    this.config.getToolRegistry().restartMcpServers();
+    await this.config.getToolRegistry().restartMcpServers();
     // refresh skills
     this.config.getSkillManager()?.refreshCache();
     // refresh subagents
@@ -1328,7 +1349,7 @@ export class ExtensionManager {
   async refreshTools(): Promise<void> {
     if (!this.config) return;
     // FIXME: restart all mcp servers now, this can be optimized by only restarting changed ones at here
-    this.refreshMemory();
+    await this.refreshMemory();
   }
 }
 
@@ -1358,12 +1379,18 @@ export function getExtensionId(
   installMetadata?: ExtensionInstallMetadata,
 ): string {
   let idValue = config.name;
-  const githubUrlParts =
+  let githubUrlParts = null;
+  if (
     installMetadata &&
     (installMetadata.type === 'git' ||
       installMetadata.type === 'github-release')
-      ? parseGitHubRepoForReleases(installMetadata.source)
-      : null;
+  ) {
+    try {
+      githubUrlParts = parseGitHubRepoForReleases(installMetadata.source);
+    } catch {
+      // Non-GitHub URL (GitLab, Bitbucket, etc.) - use source as-is
+    }
+  }
   if (githubUrlParts) {
     idValue = `https://github.com/${githubUrlParts.owner}/${githubUrlParts.repo}`;
   } else {

@@ -251,6 +251,7 @@ export async function runNonInteractive(
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
       let isFirstTurn = true;
+      let modelOverride: string | undefined;
       while (true) {
         turnCount++;
         if (
@@ -270,6 +271,7 @@ export async function runNonInteractive(
             type: isFirstTurn
               ? SendMessageType.UserQuery
               : SendMessageType.ToolResult,
+            modelOverride,
           },
         );
         isFirstTurn = false;
@@ -368,9 +370,154 @@ export async function runNonInteractive(
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
             }
+
+            // Capture model override from skill tool results.
+            // Use `in` so that undefined (from inherit/no-model skills) clears a prior override,
+            // while non-skill tools (field absent) leave the current override intact.
+            if ('modelOverride' in toolResponse) {
+              modelOverride = toolResponse.modelOverride;
+            }
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
+          // No more tool calls — check if cron jobs are keeping us alive
+          const scheduler = !config.isCronEnabled()
+            ? null
+            : config.getCronScheduler();
+          if (scheduler && scheduler.size > 0) {
+            // Start the scheduler and wait for all jobs to complete or be deleted.
+            // Each fired prompt is processed as a new turn through the same loop.
+            await new Promise<void>((resolve) => {
+              const cronQueue: string[] = [];
+              let processing = false;
+
+              const checkDone = () => {
+                if (scheduler.size === 0 && !processing) {
+                  scheduler.stop();
+                  resolve();
+                }
+              };
+
+              const drainQueue = async () => {
+                if (processing) return;
+                processing = true;
+                try {
+                  while (cronQueue.length > 0) {
+                    const cronPrompt = cronQueue.shift()!;
+                    turnCount++;
+                    let cronMessages: Content[] = [
+                      { role: 'user', parts: [{ text: cronPrompt }] },
+                    ];
+                    let cronIsFirstTurn = true;
+                    let cronModelOverride: string | undefined;
+
+                    while (true) {
+                      const cronToolCallRequests: ToolCallRequestInfo[] = [];
+                      const cronApiStartTime = Date.now();
+                      const cronStream = geminiClient.sendMessageStream(
+                        cronMessages[0]?.parts || [],
+                        abortController.signal,
+                        prompt_id,
+                        {
+                          type: cronIsFirstTurn
+                            ? SendMessageType.Cron
+                            : SendMessageType.ToolResult,
+                          modelOverride: cronModelOverride,
+                        },
+                      );
+                      cronIsFirstTurn = false;
+
+                      adapter.startAssistantMessage();
+
+                      for await (const event of cronStream) {
+                        if (abortController.signal.aborted) {
+                          const summary = scheduler.getExitSummary();
+                          scheduler.stop();
+                          if (summary) {
+                            process.stderr.write(summary + '\n');
+                          }
+                          resolve();
+                          return;
+                        }
+                        adapter.processEvent(event);
+                        if (event.type === GeminiEventType.ToolCallRequest) {
+                          cronToolCallRequests.push(event.value);
+                        }
+                      }
+
+                      adapter.finalizeAssistantMessage();
+                      totalApiDurationMs += Date.now() - cronApiStartTime;
+
+                      if (cronToolCallRequests.length > 0) {
+                        const cronToolResponseParts: Part[] = [];
+
+                        for (const requestInfo of cronToolCallRequests) {
+                          const isAgentTool = requestInfo.name === 'agent';
+                          const { handler: outputUpdateHandler } = isAgentTool
+                            ? createAgentToolProgressHandler(
+                                config,
+                                requestInfo.callId,
+                                adapter,
+                              )
+                            : createToolProgressHandler(requestInfo, adapter);
+
+                          const toolResponse = await executeToolCall(
+                            config,
+                            requestInfo,
+                            abortController.signal,
+                            { outputUpdateHandler },
+                          );
+
+                          if (toolResponse.error) {
+                            handleToolError(
+                              requestInfo.name,
+                              toolResponse.error,
+                              config,
+                              toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
+                              typeof toolResponse.resultDisplay === 'string'
+                                ? toolResponse.resultDisplay
+                                : undefined,
+                            );
+                          }
+
+                          adapter.emitToolResult(requestInfo, toolResponse);
+
+                          if (toolResponse.responseParts) {
+                            cronToolResponseParts.push(
+                              ...toolResponse.responseParts,
+                            );
+                          }
+
+                          if ('modelOverride' in toolResponse) {
+                            cronModelOverride = toolResponse.modelOverride;
+                          }
+                        }
+                        cronMessages = [
+                          { role: 'user', parts: cronToolResponseParts },
+                        ];
+                      } else {
+                        break;
+                      }
+                    }
+                  }
+                } catch (error) {
+                  debugLogger.error('Error processing cron prompt:', error);
+                } finally {
+                  processing = false;
+                  checkDone();
+                }
+              };
+
+              scheduler.start((job: { prompt: string }) => {
+                cronQueue.push(job.prompt);
+                void drainQueue();
+              });
+
+              // Also check immediately in case jobs were already deleted
+              checkDone();
+            });
+          }
+
           const metrics = uiTelemetryService.getMetrics();
           const usage = computeUsageFromMetrics(metrics);
           // Get stats for JSON format output

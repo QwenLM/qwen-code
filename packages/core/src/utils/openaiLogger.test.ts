@@ -387,4 +387,86 @@ describe('OpenAILogger', () => {
       expect(logPath).toContain(specialPath);
     });
   });
+
+  describe('cwd parameter', () => {
+    it('should use provided cwd for default log directory instead of process.cwd()', async () => {
+      const customCwd = path.join(testTempDir, 'project-root');
+      await fs.mkdir(customCwd, { recursive: true });
+      const logger = new OpenAILogger(undefined, customCwd);
+      await logger.initialize();
+
+      const request = { test: 'request' };
+      const response = { test: 'response' };
+
+      const logPath = await logger.logInteraction(request, response);
+      const expectedDir = path.join(customCwd, 'logs', 'openai');
+      createdDirs.push(expectedDir);
+
+      expect(logPath).toContain(expectedDir);
+    });
+
+    it('should resolve relative customLogDir against provided cwd', async () => {
+      const customCwd = path.join(testTempDir, 'project-root-2');
+      await fs.mkdir(customCwd, { recursive: true });
+      const relativeDir = 'my-logs';
+      const logger = new OpenAILogger(relativeDir, customCwd);
+      await logger.initialize();
+
+      const request = { test: 'request' };
+      const response = { test: 'response' };
+
+      const logPath = await logger.logInteraction(request, response);
+      const expectedDir = path.resolve(customCwd, relativeDir);
+      createdDirs.push(expectedDir);
+
+      expect(logPath).toContain(expectedDir);
+    });
+
+    it('should not use cwd when customLogDir is an absolute path', async () => {
+      const customCwd = path.join(testTempDir, 'project-root-3');
+      const absoluteLogDir = path.join(testTempDir, 'absolute-logs');
+      const logger = new OpenAILogger(absoluteLogDir, customCwd);
+      await logger.initialize();
+
+      const request = { test: 'request' };
+      const response = { test: 'response' };
+
+      const logPath = await logger.logInteraction(request, response);
+      createdDirs.push(absoluteLogDir);
+
+      expect(logPath).toContain(absoluteLogDir);
+      expect(logPath).not.toContain(customCwd);
+    });
+
+    it('should not use cwd when customLogDir starts with ~', async () => {
+      const customCwd = path.join(testTempDir, 'project-root-4');
+      const logger = new OpenAILogger('~/test-openai-logs', customCwd);
+      await logger.initialize();
+
+      const request = { test: 'request' };
+      const response = { test: 'response' };
+
+      const logPath = await logger.logInteraction(request, response);
+      const expectedDir = path.join(os.homedir(), 'test-openai-logs');
+      createdDirs.push(expectedDir);
+
+      expect(logPath).toContain(expectedDir);
+      expect(logPath).not.toContain(customCwd);
+    });
+
+    it('should fall back to process.cwd() when cwd is not provided', async () => {
+      const relativeDir = 'test-relative-logs';
+      const logger = new OpenAILogger(relativeDir);
+      await logger.initialize();
+
+      const request = { test: 'request' };
+      const response = { test: 'response' };
+
+      const logPath = await logger.logInteraction(request, response);
+      const expectedDir = path.resolve(process.cwd(), relativeDir);
+      createdDirs.push(expectedDir);
+
+      expect(logPath).toContain(expectedDir);
+    });
+  });
 });

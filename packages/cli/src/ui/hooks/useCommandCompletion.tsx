@@ -39,7 +39,6 @@ export interface UseCommandCompletionReturn {
 
 export function useCommandCompletion(
   buffer: TextBuffer,
-  dirs: readonly string[],
   cwd: string,
   slashCommands: readonly SlashCommand[],
   commandContext: CommandContext,
@@ -74,15 +73,9 @@ export function useCommandCompletion(
   const { completionMode, query, completionStart, completionEnd } =
     useMemo(() => {
       const currentLine = buffer.lines[cursorRow] || '';
-      if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
-        return {
-          completionMode: CompletionMode.SLASH,
-          query: currentLine,
-          completionStart: 0,
-          completionEnd: currentLine.length,
-        };
-      }
 
+      // Check for @ completion first, so that typing @ after a slash command
+      // still triggers file search (see #2518).
       const codePoints = toCodePoints(currentLine);
       for (let i = cursorCol - 1; i >= 0; i--) {
         const char = codePoints[i];
@@ -119,6 +112,15 @@ export function useCommandCompletion(
             completionEnd: end,
           };
         }
+      }
+
+      if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
+        return {
+          completionMode: CompletionMode.SLASH,
+          query: currentLine,
+          completionStart: 0,
+          completionEnd: currentLine.length,
+        };
       }
 
       return {
