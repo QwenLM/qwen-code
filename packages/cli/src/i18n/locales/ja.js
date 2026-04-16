@@ -438,6 +438,7 @@ export default {
   'User Settings': 'ユーザー設定',
   'System Settings': 'システム設定',
   Extensions: '拡張機能',
+  'Session (temporary)': 'セッション（一時）',
   // Hooks - Status
   '✓ Enabled': '✓ 有効',
   '✗ Disabled': '✗ 無効',
@@ -651,6 +652,45 @@ export default {
     '使い方: /memory add [--global|--project] <記憶するテキスト>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'メモリ {{scope}} への保存を試行中: "{{fact}}"',
+  'Open auto-memory folder': '自動メモリフォルダを開く',
+  'Auto-memory: {{status}}': '自動メモリ: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    '自動統合: {{status}} · {{lastDream}} · /dream で実行',
+  never: '未実行',
+  on: 'オン',
+  off: 'オフ',
+  '❆ dreaming': '❆ 整理中',
+  'Remove matching entries from managed auto-memory.':
+    'マネージド自動メモリから一致するエントリを削除する。',
+  'Usage: /forget <memory text to remove>':
+    '使い方: /forget <削除するメモリテキスト>',
+  'No managed auto-memory entries matched: {{query}}':
+    '一致するマネージド自動メモリエントリなし: {{query}}',
+  'Show managed auto-memory status.':
+    'マネージド自動メモリのステータスを表示する。',
+  'Run managed auto-memory extraction for the current session.':
+    '現在のセッションのマネージド自動メモリ抽出を実行する。',
+  'Managed auto-memory root: {{root}}':
+    'マネージド自動メモリのルート: {{root}}',
+  'Managed auto-memory topics:': 'マネージド自動メモリのトピック:',
+  'No extraction cursor found yet.': 'まだ抽出カーソルが見つかりません。',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'カーソル: セッション={{sessionId}}, オフセット={{offset}}, 更新={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'メモリを抽出できるチャットクライアントがありません。',
+  'Managed auto-memory extraction is already running.':
+    'マネージド自動メモリ抽出はすでに実行中です。',
+  'Managed auto-memory extraction found no new durable memories.':
+    'マネージド自動メモリ抽出で新しい永続メモリは見つかりませんでした。',
+  'Consolidate managed auto-memory topic files.':
+    'マネージド自動メモリトピックファイルを統合する。',
+  'Managed auto-memory dream found nothing to improve.':
+    '自動メモリ統合で改善するものは見つかりませんでした。',
+  'Deduplicated entries: {{count}}': '重複除去したエントリ: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'save_memoryツールを使用して永続メモリを保存する。',
+  'Usage: /remember [--global|--project] <text to remember>':
+    '使い方: /remember [--global|--project] <覚えておくテキスト>',
   // MCP
   'Authenticate with an OAuth-enabled MCP server':
     'OAuth対応のMCPサーバーで認証',
@@ -1185,6 +1225,8 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Ctrl+O でコンパクトモードを切り替え — ツール出力と思考を非表示にしてすっきり表示。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'QWEN.md ファイルを追加すると、Qwen Code に永続的なプロジェクトコンテキストを与えられます。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1487,6 +1529,8 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
   compact: 'コンパクト',
+  'compact mode: on (Ctrl+O off)': 'コンパクトモード: オン (Ctrl+O でオフ)',
+  'to toggle compact mode': 'コンパクトモードの切り替え',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'コンパクトモードでツール出力と思考を非表示にします（Ctrl+O で切り替え）。',
   'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',

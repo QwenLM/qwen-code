@@ -60,6 +60,7 @@ export default {
   'to search history': '搜索历史',
   'to paste images': '粘贴图片',
   'for external editor': '外部编辑器',
+  'to toggle compact mode': '切换紧凑模式',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':
     '关闭对话框、取消请求或退出应用程序',
@@ -752,6 +753,7 @@ export default {
   'User Settings': '用户设置',
   'System Settings': '系统设置',
   Extensions: '扩展',
+  'Session (temporary)': '会话（临时）',
   // Hooks - Status
   '✓ Enabled': '✓ 已启用',
   '✗ Disabled': '✗ 已禁用',
@@ -984,6 +986,41 @@ export default {
     '用法：/memory add [--global|--project] <要记住的文本>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     '正在尝试保存到记忆 {{scope}}："{{fact}}"',
+  'Open auto-memory folder': '打开自动记忆文件夹',
+  'Auto-memory: {{status}}': '自动记忆：{{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    '自动整理：{{status}} · {{lastDream}} · /dream 立即运行',
+  never: '从未',
+  on: '开',
+  off: '关',
+  '✦ dreaming': '✦ 整理中',
+  'Remove matching entries from managed auto-memory.':
+    '从托管自动记忆中删除匹配的条目。',
+  'Usage: /forget <memory text to remove>': '用法：/forget <要删除的记忆文本>',
+  'No managed auto-memory entries matched: {{query}}':
+    '没有匹配的托管自动记忆条目：{{query}}',
+  'Show managed auto-memory status.': '显示托管自动记忆状态',
+  'Run managed auto-memory extraction for the current session.':
+    '为当前会话运行托管自动记忆提炼',
+  'Managed auto-memory root: {{root}}': '托管自动记忆根目录：{{root}}',
+  'Managed auto-memory topics:': '托管自动记忆主题：',
+  'No extraction cursor found yet.': '尚未找到提炼游标。',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    '游标：session={{sessionId}}，offset={{offset}}，updated={{updatedAt}}',
+  'No chat client available to extract memory.':
+    '没有可用于提炼记忆的聊天客户端。',
+  'Managed auto-memory extraction is already running.':
+    '托管自动记忆提炼已在运行中。',
+  'Managed auto-memory extraction found no new durable memories.':
+    '托管自动记忆提炼未发现新的持久记忆。',
+  'Consolidate managed auto-memory topic files.': '整理托管自动记忆主题文件',
+  'Managed auto-memory dream found nothing to improve.':
+    '托管自动记忆 dream 未发现可改进内容。',
+  'Deduplicated entries: {{count}}': '去重条目数：{{count}}',
+  'Save a durable memory using the save_memory tool.':
+    '使用 save_memory 工具保存一条持久记忆',
+  'Usage: /remember [--global|--project] <text to remember>':
+    '用法：/remember [--global|--project] <要记住的文本>',
 
   // ============================================================================
   // Commands - MCP
@@ -1569,6 +1606,8 @@ export default {
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '试试 /insight，从聊天记录中生成个性化洞察。',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    '按 Ctrl+O 切换紧凑模式 ── 隐藏工具输出和思考过程，界面更简洁。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     '添加 QWEN.md 文件，为 Qwen Code 提供持久的项目上下文。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1929,6 +1968,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
   compact: '紧凑',
+  'compact mode: on (Ctrl+O off)': '紧凑模式：开（Ctrl+O 关闭）',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',

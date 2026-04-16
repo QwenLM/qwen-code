@@ -59,6 +59,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
+  'to toggle compact mode': 'to toggle compact mode',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -948,6 +949,43 @@ export default {
     'Usage: /memory add [--global|--project] <text to remember>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Attempting to save to memory {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Open auto-memory folder',
+  'Auto-memory: {{status}}': 'Auto-memory: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Auto-dream: {{status}} · {{lastDream}} · /dream to run',
+  never: 'never',
+  on: 'on',
+  off: 'off',
+  '✦ dreaming': '✦ dreaming',
+  'Remove matching entries from managed auto-memory.':
+    'Remove matching entries from managed auto-memory.',
+  'Usage: /forget <memory text to remove>':
+    'Usage: /forget <memory text to remove>',
+  'No managed auto-memory entries matched: {{query}}':
+    'No managed auto-memory entries matched: {{query}}',
+  'Show managed auto-memory status.': 'Show managed auto-memory status.',
+  'Run managed auto-memory extraction for the current session.':
+    'Run managed auto-memory extraction for the current session.',
+  'Managed auto-memory root: {{root}}': 'Managed auto-memory root: {{root}}',
+  'Managed auto-memory topics:': 'Managed auto-memory topics:',
+  'No extraction cursor found yet.': 'No extraction cursor found yet.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'No chat client available to extract memory.',
+  'Managed auto-memory extraction is already running.':
+    'Managed auto-memory extraction is already running.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Managed auto-memory extraction found no new durable memories.',
+  'Consolidate managed auto-memory topic files.':
+    'Consolidate managed auto-memory topic files.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Managed auto-memory dream found nothing to improve.',
+  'Deduplicated entries: {{count}}': 'Deduplicated entries: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Save a durable memory using the save_memory tool.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Usage: /remember [--global|--project] <text to remember>',
 
   // ============================================================================
   // Commands - MCP
@@ -1563,6 +1601,8 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Add a QWEN.md file to give Qwen Code persistent project context.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -2033,6 +2073,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
   compact: 'compact',
+  'compact mode: on (Ctrl+O off)': 'compact mode: on (Ctrl+O off)',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
   'Press Ctrl+O to show full tool output':

@@ -11,11 +11,13 @@ import * as os from 'os';
 import { fileURLToPath } from 'url';
 import { watch as watchFs, type FSWatcher } from 'chokidar';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
+import * as yaml from 'yaml';
 import type {
   SkillConfig,
   SkillLevel,
   ListSkillsOptions,
   SkillValidationResult,
+  SkillHooksSettings,
 } from './types.js';
 import { SkillError, SkillErrorCode, parseModelField } from './types.js';
 import type { Config } from '../config/config.js';
@@ -23,6 +25,13 @@ import { validateConfig } from './skill-load.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { SKILL_PROVIDER_CONFIG_DIRS } from '../config/storage.js';
+import {
+  HookEventName,
+  HookType,
+  type HookDefinition,
+  type CommandHookConfig,
+  type HttpHookConfig,
+} from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 
@@ -396,6 +405,25 @@ export class SkillManager {
         }
       }
 
+      // Extract hooks configuration
+      // Use full YAML parser for hooks as they have nested structures
+      let hooks: SkillHooksSettings | undefined;
+      if (frontmatterYaml.includes('hooks:')) {
+        // Re-parse with full YAML parser to get nested hooks structure
+        const fullFrontmatter = yaml.parse(frontmatterYaml) as Record<
+          string,
+          unknown
+        >;
+        const hooksRaw = fullFrontmatter['hooks'] as
+          | Record<string, unknown>
+          | undefined;
+        if (hooksRaw !== undefined) {
+          hooks = this.parseHooksConfig(hooksRaw);
+        }
+      }
+
+      // Set skillRoot to the directory containing SKILL.md
+      const skillRoot = path.dirname(filePath);
       // Extract optional model field
       const model = parseModelField(frontmatter);
 
@@ -403,6 +431,8 @@ export class SkillManager {
         name,
         description,
         allowedTools,
+        hooks,
+        skillRoot,
         model,
         level,
         filePath,
@@ -427,6 +457,116 @@ export class SkillManager {
       this.parseErrors.set(filePath, skillError);
       throw skillError;
     }
+  }
+
+  /**
+   * Parses hooks configuration from frontmatter.
+   *
+   * @param hooksRaw - Raw hooks object from frontmatter
+   * @returns Parsed SkillHooksSettings
+   */
+  private parseHooksConfig(
+    hooksRaw: Record<string, unknown>,
+  ): SkillHooksSettings {
+    const hooks: SkillHooksSettings = {};
+
+    // Get valid hook event names
+    const validEvents = Object.values(HookEventName);
+
+    for (const [eventName, matchersRaw] of Object.entries(hooksRaw)) {
+      // Validate event name
+      if (!validEvents.includes(eventName as HookEventName)) {
+        debugLogger.warn(`Unknown hook event: ${eventName}, skipping`);
+        continue;
+      }
+
+      // Parse matchers array
+      if (!Array.isArray(matchersRaw)) {
+        debugLogger.warn(`Hooks for ${eventName} must be an array, skipping`);
+        continue;
+      }
+
+      const matchers: HookDefinition[] = [];
+      for (const matcherRaw of matchersRaw) {
+        if (typeof matcherRaw !== 'object' || matcherRaw === null) {
+          debugLogger.warn(`Invalid matcher in ${eventName}, skipping`);
+          continue;
+        }
+
+        const matcher = matcherRaw as Record<string, unknown>;
+        const hookDef = this.parseHookMatcher(matcher);
+        if (hookDef) {
+          matchers.push(hookDef);
+        }
+      }
+
+      if (matchers.length > 0) {
+        hooks[eventName as HookEventName] = matchers;
+      }
+    }
+
+    return hooks;
+  }
+
+  /**
+   * Parses a single hook matcher configuration.
+   *
+   * @param matcher - Raw matcher object
+   * @returns HookDefinition or null if invalid
+   */
+  private parseHookMatcher(
+    matcher: Record<string, unknown>,
+  ): HookDefinition | null {
+    const matcherPattern = matcher['matcher'] as string | undefined;
+    const hooksRaw = matcher['hooks'] as unknown[] | undefined;
+
+    if (!hooksRaw || !Array.isArray(hooksRaw)) {
+      debugLogger.warn('Matcher missing hooks array, skipping');
+      return null;
+    }
+
+    const hooks: Array<CommandHookConfig | HttpHookConfig> = [];
+
+    for (const hookRaw of hooksRaw) {
+      if (typeof hookRaw !== 'object' || hookRaw === null) {
+        continue;
+      }
+
+      const hook = hookRaw as Record<string, unknown>;
+      const hookType = hook['type'] as string;
+
+      if (hookType === 'command') {
+        const commandHook: CommandHookConfig = {
+          type: HookType.Command,
+          command: hook['command'] as string,
+          timeout: hook['timeout'] as number | undefined,
+          statusMessage: hook['statusMessage'] as string | undefined,
+          shell: hook['shell'] as 'bash' | 'powershell' | undefined,
+        };
+        hooks.push(commandHook);
+      } else if (hookType === 'http') {
+        const httpHook: HttpHookConfig = {
+          type: HookType.Http,
+          url: hook['url'] as string,
+          headers: hook['headers'] as Record<string, string> | undefined,
+          allowedEnvVars: hook['allowedEnvVars'] as string[] | undefined,
+          timeout: hook['timeout'] as number | undefined,
+          statusMessage: hook['statusMessage'] as string | undefined,
+        };
+        hooks.push(httpHook);
+      } else {
+        debugLogger.warn(`Unknown hook type: ${hookType}, skipping`);
+      }
+    }
+
+    if (hooks.length === 0) {
+      return null;
+    }
+
+    return {
+      matcher: matcherPattern,
+      hooks,
+    };
   }
 
   /**

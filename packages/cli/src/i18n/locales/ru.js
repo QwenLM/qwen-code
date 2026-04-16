@@ -91,6 +91,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
+  'to toggle compact mode': 'переключить компактный режим',
 
   // ============================================================================
   // Поля системной информации
@@ -664,6 +665,7 @@ export default {
   'User Settings': 'Пользовательские настройки',
   'System Settings': 'Системные настройки',
   Extensions: 'Расширения',
+  'Session (temporary)': 'Сессия (временно)',
   // Hooks - Status
   '✓ Enabled': '✓ Включен',
   '✗ Disabled': '✗ Отключен',
@@ -897,6 +899,44 @@ export default {
     'Использование: /memory add [--global|--project] <текст для запоминания>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Попытка сохранить в память {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Открыть папку автопамяти',
+  'Auto-memory: {{status}}': 'Автопамять: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Автоконсолидация: {{status}} · {{lastDream}} · /dream для запуска',
+  never: 'никогда',
+  on: 'вкл',
+  off: 'выкл',
+  '❆ dreaming': '❆ консолидация',
+  'Remove matching entries from managed auto-memory.':
+    'Удалить совпадающие записи из управляемой автопамяти.',
+  'Usage: /forget <memory text to remove>':
+    'Использование: /forget <текст воспоминания для удаления>',
+  'No managed auto-memory entries matched: {{query}}':
+    'Не найдено совпадающих записей автопамяти: {{query}}',
+  'Show managed auto-memory status.': 'Показать статус управляемой автопамяти.',
+  'Run managed auto-memory extraction for the current session.':
+    'Запустить извлечение управляемой автопамяти для текущей сессии.',
+  'Managed auto-memory root: {{root}}':
+    'Корневая директория управляемой автопамяти: {{root}}',
+  'Managed auto-memory topics:': 'Темы управляемой автопамяти:',
+  'No extraction cursor found yet.': 'Курсор извлечения ещё не найден.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Курсор: сессия={{sessionId}}, смещение={{offset}}, обновлено={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'Нет доступного чат-клиента для извлечения памяти.',
+  'Managed auto-memory extraction is already running.':
+    'Извлечение управляемой автопамяти уже выполняется.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Извлечение управляемой автопамяти не нашло новых долгосрочных воспоминаний.',
+  'Consolidate managed auto-memory topic files.':
+    'Консолидировать файлы тем управляемой автопамяти.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Консолидация автопамяти не нашла чего улучшать.',
+  'Deduplicated entries: {{count}}': 'Удалено дубликатов: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Сохранить долгосрочную память с помощью инструмента save_memory.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Использование: /remember [--global|--project] <текст для запоминания>',
 
   // ============================================================================
   // Команды - MCP
@@ -1717,6 +1757,8 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Нажмите Ctrl+O для переключения компактного режима — скрыть вывод инструментов и рассуждения.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Добавьте файл QWEN.md, чтобы предоставить Qwen Code постоянный контекст проекта.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1993,6 +2035,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
   compact: 'компактный',
+  'compact mode: on (Ctrl+O off)': 'компактный режим: вкл (Ctrl+O выкл)',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'Скрывать вывод инструментов и процесс рассуждений для более чистого вида (переключить с помощью Ctrl+O).',
   'Press Ctrl+O to show full tool output':

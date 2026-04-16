@@ -653,6 +653,7 @@ export default {
   'User Settings': 'Benutzereinstellungen',
   'System Settings': 'Systemeinstellungen',
   Extensions: 'Erweiterungen',
+  'Session (temporary)': 'Sitzung (temporär)',
   // Hooks - Status
   '✓ Enabled': '✓ Aktiviert',
   '✗ Disabled': '✗ Deaktiviert',
@@ -889,6 +890,45 @@ export default {
     'Verwendung: /memory add [--global|--project] <zu merkender Text>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Versuche im Speicher {{scope}} zu speichern: "{{fact}}"',
+  'Open auto-memory folder': 'Auto-Speicher-Ordner öffnen',
+  'Auto-memory: {{status}}': 'Auto-Speicher: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Auto-Konsolidierung: {{status}} · {{lastDream}} · /dream zum Ausführen',
+  never: 'nie',
+  on: 'ein',
+  off: 'aus',
+  '❆ dreaming': '❆ konsolidiert',
+  'Remove matching entries from managed auto-memory.':
+    'Passende Einträge aus dem verwalteten Auto-Speicher entfernen.',
+  'Usage: /forget <memory text to remove>':
+    'Verwendung: /forget <zu entfernender Erinnerungstext>',
+  'No managed auto-memory entries matched: {{query}}':
+    'Keine verwalteten Auto-Speicher-Einträge gefunden: {{query}}',
+  'Show managed auto-memory status.':
+    'Status des verwalteten Auto-Speichers anzeigen.',
+  'Run managed auto-memory extraction for the current session.':
+    'Verwaltete Auto-Speicher-Extraktion für die aktuelle Sitzung ausführen.',
+  'Managed auto-memory root: {{root}}':
+    'Verwalteter Auto-Speicher-Stamm: {{root}}',
+  'Managed auto-memory topics:': 'Verwaltete Auto-Speicher-Themen:',
+  'No extraction cursor found yet.': 'Noch kein Extraktions-Cursor gefunden.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Cursor: Sitzung={{sessionId}}, Offset={{offset}}, Aktualisiert={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'Kein Chat-Client verfügbar, um Erinnerungen zu extrahieren.',
+  'Managed auto-memory extraction is already running.':
+    'Verwaltete Auto-Speicher-Extraktion läuft bereits.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Verwaltete Auto-Speicher-Extraktion hat keine neuen dauerhaften Erinnerungen gefunden.',
+  'Consolidate managed auto-memory topic files.':
+    'Verwaltete Auto-Speicher-Themendateien konsolidieren.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Auto-Speicher-Konsolidierung hat nichts zu verbessern gefunden.',
+  'Deduplicated entries: {{count}}': 'Deduplizierte Einträge: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Eine dauerhafte Erinnerung mit dem save_memory-Tool speichern.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Verwendung: /remember [--global|--project] <zu merkender Text>',
 
   // ============================================================================
   // Commands - MCP
@@ -1790,6 +1830,8 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Strg+O drücken, um den Kompaktmodus umzuschalten — Tool-Ausgabe und Denkprozess ausblenden.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Fügen Sie eine QWEN.md-Datei hinzu, um Qwen Code dauerhaften Projektkontext zu geben.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1996,6 +2038,8 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Strg+C zum Beenden)\n',
   compact: 'kompakt',
+  'compact mode: on (Ctrl+O off)': 'Kompaktmodus: ein (Strg+O aus)',
+  'to toggle compact mode': 'Kompaktmodus umschalten',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Strg+O umschalten).',
   'Press Ctrl+O to show full tool output':

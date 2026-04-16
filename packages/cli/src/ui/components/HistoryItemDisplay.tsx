@@ -48,6 +48,7 @@ import { ContextUsage } from './views/ContextUsage.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
+import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 
 interface HistoryItemDisplayProps {
@@ -189,6 +190,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isFocused={isFocused}
           activeShellPtyId={activeShellPtyId}
           embeddedShellFocused={embeddedShellFocused}
+          memoryWriteCount={itemForDisplay.memoryWriteCount}
+          memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
         />
       )}
@@ -267,6 +270,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
             />
           </Box>
         </Box>
+      )}
+      {itemForDisplay.type === 'memory_saved' && (
+        <MemorySavedMessage item={itemForDisplay} />
       )}
     </Box>
   );
