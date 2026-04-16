@@ -58,6 +58,7 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
+import { preconnectApi } from './utils/apiPreconnect.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
@@ -212,6 +213,7 @@ export async function startInteractiveUI(
 export async function main() {
   setupUnhandledRejectionHandler();
   const settings = loadSettings();
+
   await cleanupCheckpoints();
 
   let argv = await parseArguments();
@@ -365,6 +367,19 @@ export async function main() {
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
+
+    // Startup optimization: preconnect API to warm TCP+TLS connection
+    // Only fire for flows that will make API calls
+    try {
+      const authType = config.getModelsConfig().getCurrentAuthType();
+      preconnectApi(authType, {
+        settingsBaseUrl: settings.merged.security?.auth?.baseUrl as
+          | string
+          | undefined,
+      });
+    } catch {
+      // If we can't get authType, skip preconnect - it's optional optimization
+    }
 
     // FIXME: list extensions after the config initialize
     // if (config.getListExtensions()) {
