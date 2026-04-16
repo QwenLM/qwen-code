@@ -244,6 +244,28 @@ describe('useStatusLine', () => {
       expect(result.current.lines).toEqual(['line1', 'line2']);
     });
 
+    it('handles \\r\\n line endings', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'line1\r\nline2\r\n', '');
+      });
+
+      expect(result.current.lines).toEqual(['line1', 'line2']);
+    });
+
+    it('returns empty when stdout is only newlines', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, '\n\n', '');
+      });
+
+      expect(result.current.lines).toEqual([]);
+    });
+
     it('returns null when command fails', async () => {
       setStatusLineConfig({ type: 'command', command: 'bad-cmd' });
       const { result } = renderHook(() => useStatusLine());
