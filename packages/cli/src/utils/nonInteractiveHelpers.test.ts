@@ -41,39 +41,36 @@ vi.mock('../nonInteractiveCliCommands.js', () => ({
     .fn()
     .mockImplementation(
       async (_config: unknown, _signal: AbortSignal, mode: string = 'acp') => {
-        // Simulate capability-based filtering with commandType / supportedModes
         const allCommands = [
-          { name: 'help', commandType: 'local-jsx' },
-          { name: 'commit', commandType: 'prompt' },
-          { name: 'memory', commandType: 'local' },
+          {
+            name: 'help',
+            supportedModes: ['interactive'] as const,
+          },
+          {
+            name: 'commit',
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+          },
+          {
+            name: 'memory',
+            supportedModes: ['interactive'] as const,
+          },
           {
             name: 'init',
-            commandType: 'local',
-            supportedModes: ['interactive', 'non_interactive', 'acp'],
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
           },
           {
             name: 'summary',
-            commandType: 'local',
-            supportedModes: ['interactive', 'non_interactive', 'acp'],
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
           },
           {
             name: 'compress',
-            commandType: 'local',
-            supportedModes: ['interactive', 'non_interactive', 'acp'],
+            supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
           },
         ] as const;
 
-        return allCommands.filter((cmd) => {
-          if (cmd.commandType === 'prompt') return true;
-          if (cmd.commandType === 'local-jsx') return mode === 'interactive';
-          if (cmd.commandType === 'local') {
-            if ('supportedModes' in cmd) {
-              return (cmd.supportedModes as readonly string[]).includes(mode);
-            }
-            return mode === 'interactive';
-          }
-          return true;
-        });
+        return allCommands.filter((cmd) =>
+          (cmd.supportedModes as readonly string[]).includes(mode),
+        );
       },
     ),
 }));

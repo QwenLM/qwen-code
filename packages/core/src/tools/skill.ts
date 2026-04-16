@@ -39,6 +39,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
   private skillManager: SkillManager;
   private availableSkills: SkillConfig[] = [];
+  private modelInvocableCommands: ReadonlyArray<{
+    name: string;
+    description: string;
+  }> = [];
   private loadedSkillNames: Set<string> = new Set();
 
   constructor(private readonly config: Config) {
@@ -86,10 +90,14 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   async refreshSkills(): Promise<void> {
     try {
       this.availableSkills = await this.skillManager.listSkills();
+      // Merge in model-invocable commands from CommandService (injected via Config)
+      const provider = this.config.getModelInvocableCommandsProvider();
+      this.modelInvocableCommands = provider ? provider() : [];
       this.updateDescriptionAndSchema();
     } catch (error) {
       debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
+      this.modelInvocableCommands = [];
       this.updateDescriptionAndSchema();
     } finally {
       // Update the client with the new tools
@@ -101,7 +109,8 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }
 
   /**
-   * Updates the tool's description and schema based on available skills.
+   * Updates the tool's description and schema based on available skills and
+   * model-invocable commands (e.g. bundled skills, file commands, MCP prompts).
    */
   private updateDescriptionAndSchema(): void {
     let skillDescriptions = '';
@@ -124,6 +133,17 @@ ${skill.level}
 </skill>`,
         )
         .join('\n');
+    }
+
+    // Model-invocable commands section (bundled skills, file commands, MCP prompts)
+    let commandDescriptions = '';
+    if (this.modelInvocableCommands.length > 0) {
+      commandDescriptions =
+        '\n<available_commands>\n' +
+        this.modelInvocableCommands
+          .map((cmd) => `/${cmd.name} — ${cmd.description}`)
+          .join('\n') +
+        '\n</available_commands>\n';
     }
 
     const baseDescription = `Execute a skill within the main conversation
@@ -154,7 +174,7 @@ Important:
 <available_skills>
 ${skillDescriptions}
 </available_skills>
-`;
+${commandDescriptions}`;
     // Update description using object property assignment
     (this as { description: string }).description = baseDescription;
   }

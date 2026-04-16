@@ -76,6 +76,9 @@ describe('Session', () => {
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockImplementation(() => currentAuthType),
       isCronEnabled: vi.fn().mockReturnValue(false),
+      getGeminiClient: vi
+        .fn()
+        .mockReturnValue({ getChat: vi.fn().mockReturnValue(mockChat) }),
     } as unknown as Config;
 
     mockClient = {
@@ -96,7 +99,6 @@ describe('Session', () => {
 
     session = new Session(
       'test-session-id',
-      mockChat,
       mockConfig,
       mockClient,
       mockSettings,
@@ -252,7 +254,6 @@ describe('Session', () => {
       core.Storage.setRuntimeBaseDir(runtimeDir);
       session = new Session(
         'test-session-id',
-        mockChat,
         mockConfig,
         mockClient,
         mockSettings,

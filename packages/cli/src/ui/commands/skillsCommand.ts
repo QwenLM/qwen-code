@@ -24,7 +24,7 @@ export const skillsCommand: SlashCommand = {
     return t('List available skills.');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   action: async (context: CommandContext, args?: string) => {
     const rawArgs = args?.trim() ?? '';
     const [skillName = ''] = rawArgs.split(/\s+/);

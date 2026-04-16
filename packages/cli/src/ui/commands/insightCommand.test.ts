@@ -63,4 +63,69 @@ describe('insightCommand', () => {
       expect.any(Function),
     );
   });
+
+  describe('non-interactive mode', () => {
+    it('should return file path without opening browser', async () => {
+      if (!insightCommand.action)
+        throw new Error('insight command must have action');
+
+      const outputPath = path.resolve(
+        'runtime-output',
+        'insights',
+        'insight-2026-03-05.html',
+      );
+      mockGenerateStaticInsight.mockResolvedValue(outputPath);
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {} as CommandContext['services']['config'],
+        },
+        ui: {
+          addItem: vi.fn(),
+          setPendingItem: vi.fn(),
+          setDebugMessage: vi.fn(),
+        },
+      } as unknown as CommandContext);
+
+      const result = await insightCommand.action(nonInteractiveContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: `Insight report generated: ${outputPath}`,
+      });
+      expect(open).not.toHaveBeenCalled();
+      expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+      expect(nonInteractiveContext.ui.setPendingItem).not.toHaveBeenCalled();
+    });
+
+    it('should return error message when generation fails in non-interactive mode', async () => {
+      if (!insightCommand.action)
+        throw new Error('insight command must have action');
+
+      const genError = new Error('disk full');
+      mockGenerateStaticInsight.mockRejectedValue(genError);
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: {} as CommandContext['services']['config'],
+        },
+        ui: {
+          addItem: vi.fn(),
+          setPendingItem: vi.fn(),
+          setDebugMessage: vi.fn(),
+        },
+      } as unknown as CommandContext);
+
+      const result = await insightCommand.action(nonInteractiveContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('disk full'),
+      });
+    });
+  });
 });

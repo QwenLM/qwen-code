@@ -507,11 +507,8 @@ class QwenAgent implements Agent {
       await geminiClient.initialize();
     }
 
-    const chat = geminiClient.getChat();
-
     const session = new Session(
       sessionId,
-      chat,
       config,
       this.connection,
       this.settings,

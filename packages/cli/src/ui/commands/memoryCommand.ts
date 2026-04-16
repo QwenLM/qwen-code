@@ -46,7 +46,7 @@ export const memoryCommand: SlashCommand = {
     return t('Commands for interacting with memory.');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local',
+  supportedModes: ['interactive'] as const,
   subCommands: [
     {
       name: 'show',
@@ -54,7 +54,7 @@ export const memoryCommand: SlashCommand = {
         return t('Show the current memory contents.');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local',
+      supportedModes: ['interactive'] as const,
       action: async (context) => {
         const memoryContent = context.services.config?.getUserMemory() || '';
         const fileCount = context.services.config?.getGeminiMdFileCount() || 0;
@@ -79,7 +79,7 @@ export const memoryCommand: SlashCommand = {
             return t('Show project-level memory contents.');
           },
           kind: CommandKind.BUILT_IN,
-          commandType: 'local',
+          supportedModes: ['interactive'] as const,
           action: async (context) => {
             const workingDir =
               context.services.config?.getWorkingDir?.() ?? process.cwd();
@@ -120,7 +120,7 @@ export const memoryCommand: SlashCommand = {
             return t('Show global memory contents.');
           },
           kind: CommandKind.BUILT_IN,
-          commandType: 'local',
+          supportedModes: ['interactive'] as const,
           action: async (context) => {
             const globalDir = path.join(os.homedir(), QWEN_DIR);
             const results = await findAllExistingMemoryFiles(globalDir);
@@ -163,7 +163,7 @@ export const memoryCommand: SlashCommand = {
         );
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local',
+      supportedModes: ['interactive'] as const,
       action: (context, args): SlashCommandActionReturn | void => {
         if (!args || args.trim() === '') {
           return {
@@ -235,7 +235,7 @@ export const memoryCommand: SlashCommand = {
             return t('Add content to project-level memory.');
           },
           kind: CommandKind.BUILT_IN,
-          commandType: 'local',
+          supportedModes: ['interactive'] as const,
           action: (context, args): SlashCommandActionReturn | void => {
             if (!args || args.trim() === '') {
               return {
@@ -268,7 +268,7 @@ export const memoryCommand: SlashCommand = {
             return t('Add content to global memory.');
           },
           kind: CommandKind.BUILT_IN,
-          commandType: 'local',
+          supportedModes: ['interactive'] as const,
           action: (context, args): SlashCommandActionReturn | void => {
             if (!args || args.trim() === '') {
               return {
@@ -303,7 +303,7 @@ export const memoryCommand: SlashCommand = {
         return t('Refresh the memory from the source.');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local',
+      supportedModes: ['interactive'] as const,
       action: async (context) => {
         context.ui.addItem(
           {

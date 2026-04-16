@@ -252,4 +252,63 @@ describe('restoreCommand', () => {
       ]);
     });
   });
+
+  describe('non-interactive mode', () => {
+    let nonInteractiveContext: CommandContext;
+
+    beforeEach(() => {
+      nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        services: {
+          config: mockConfig,
+          git: mockGitService,
+        },
+      });
+    });
+
+    it('should return message instead of type:tool when restoring in non-interactive mode', async () => {
+      const toolCallData = {
+        history: [{ type: 'user', text: 'do a thing' }],
+        clientHistory: [{ role: 'user', parts: [{ text: 'do a thing' }] }],
+        commitHash: 'abc123',
+        toolCall: { name: 'run_shell_command', args: 'ls' },
+      };
+      await fs.writeFile(
+        path.join(checkpointsDir, 'my-checkpoint.json'),
+        JSON.stringify(toolCallData),
+      );
+      const command = restoreCommand(mockConfig);
+
+      const result = await command?.action?.(
+        nonInteractiveContext,
+        'my-checkpoint',
+      );
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('my-checkpoint'),
+      });
+      // Side effects should still execute
+      expect(mockSetHistory).toHaveBeenCalledWith(toolCallData.clientHistory);
+      expect(mockGitService.restoreProjectFromSnapshot).toHaveBeenCalledWith(
+        toolCallData.commitHash,
+      );
+    });
+
+    it('should not call addItem in non-interactive mode when restoring', async () => {
+      const toolCallData = {
+        toolCall: { name: 'run_shell_command', args: 'ls' },
+      };
+      await fs.writeFile(
+        path.join(checkpointsDir, 'cp.json'),
+        JSON.stringify(toolCallData),
+      );
+      const command = restoreCommand(mockConfig);
+
+      await command?.action?.(nonInteractiveContext, 'cp');
+
+      expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+  });
 });

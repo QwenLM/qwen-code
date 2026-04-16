@@ -507,6 +507,9 @@ export class Config {
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
+  private modelInvocableCommandsProvider:
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -2193,6 +2196,28 @@ export class Config {
 
   getSkillManager(): SkillManager | null {
     return this.skillManager;
+  }
+
+  /**
+   * Registers a provider that returns model-invocable commands (e.g., bundled
+   * skills, user/project file commands, MCP prompts). Called by the CLI's
+   * CommandService after initialisation so that SkillTool can merge these into
+   * its tool description.
+   */
+  setModelInvocableCommandsProvider(
+    provider: () => ReadonlyArray<{ name: string; description: string }>,
+  ): void {
+    this.modelInvocableCommandsProvider = provider;
+  }
+
+  /**
+   * Returns the registered model-invocable commands provider, or null if none
+   * has been registered (e.g., in SDK mode).
+   */
+  getModelInvocableCommandsProvider():
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null {
+    return this.modelInvocableCommandsProvider;
   }
 
   getPermissionManager(): PermissionManager | null {

@@ -207,6 +207,15 @@ export const handleSlashCommand = async (
     allLoaders,
     abortController.signal,
   );
+  // Register model-invocable commands provider so SkillTool description stays
+  // up-to-date in non-interactive / ACP mode.
+  config.setModelInvocableCommandsProvider(() =>
+    commandService.getModelInvocableCommands().map((cmd) => ({
+      name: cmd.name,
+      description:
+        typeof cmd.description === 'string' ? cmd.description : cmd.description,
+    })),
+  );
   const allCommands = commandService.getCommands();
   const filteredCommands = commandService.getCommandsForMode(executionMode);
 

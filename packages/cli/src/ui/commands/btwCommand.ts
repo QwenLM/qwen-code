@@ -114,15 +114,12 @@ export const btwCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local',
-  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  supportedModes: ['interactive'] as const,
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<void | SlashCommandActionReturn> => {
     const question = args.trim();
-    const executionMode = context.executionMode ?? 'interactive';
-    const abortSignal = context.abortSignal ?? new AbortController().signal;
 
     if (!question) {
       return {
@@ -155,67 +152,8 @@ export const btwCommand: SlashCommand = {
       };
     }
 
-    // ACP mode: return a stream_messages async generator
-    if (executionMode === 'acp') {
-      const btwPromptId = makeBtwPromptId(sessionId);
-      const messages = async function* () {
-        try {
-          yield {
-            messageType: 'info' as const,
-            content: t('Thinking...'),
-          };
-
-          const answer = await askBtw(
-            geminiClient,
-            model,
-            question,
-            abortSignal,
-            btwPromptId,
-          );
-
-          yield {
-            messageType: 'info' as const,
-            content: `btw> ${question}\n${answer}`,
-          };
-        } catch (error) {
-          yield {
-            messageType: 'error' as const,
-            content: formatBtwError(error),
-          };
-        }
-      };
-
-      return { type: 'stream_messages', messages: messages() };
-    }
-
-    // Non-interactive mode: return a simple message result
-    if (executionMode === 'non_interactive') {
-      try {
-        const btwPromptId = makeBtwPromptId(sessionId);
-        const answer = await askBtw(
-          geminiClient,
-          model,
-          question,
-          abortSignal,
-          btwPromptId,
-        );
-        return {
-          type: 'message',
-          messageType: 'info',
-          content: `btw> ${question}\n${answer}`,
-        };
-      } catch (error) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: formatBtwError(error),
-        };
-      }
-    }
-
     // Interactive mode: use dedicated btwItem state for the fixed bottom area.
     // This does NOT occupy pendingItem, so the main conversation is never blocked.
-
     // Cancel any previous in-flight btw before starting a new one.
     ui.cancelBtw();
 

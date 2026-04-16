@@ -152,6 +152,7 @@ describe('runNonInteractive', () => {
       isInteractive: vi.fn().mockReturnValue(false),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getCronScheduler: vi.fn().mockReturnValue(null),
+      setModelInvocableCommandsProvider: vi.fn(),
     } as unknown as Config;
 
     mockSettings = {

@@ -24,18 +24,38 @@ export const insightCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext) => {
     try {
       context.ui.setDebugMessage(t('Generating insights...'));
 
       const projectsDir = join(Storage.getRuntimeBaseDir(), 'projects');
       if (!context.services.config) {
+        if (context.executionMode !== 'interactive') {
+          return {
+            type: 'message' as const,
+            messageType: 'error' as const,
+            content: 'Config service is not available.',
+          };
+        }
         throw new Error('Config service is not available');
       }
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
       );
+
+      // Non-interactive/ACP: generate without progress UI, skip browser
+      if (context.executionMode !== 'interactive') {
+        const outputPath = await insightGenerator.generateStaticInsight(
+          projectsDir,
+          () => {}, // no-op progress callback
+        );
+        return {
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: `Insight report generated: ${outputPath}`,
+        };
+      }
 
       const updateProgress = (
         stage: string,
@@ -116,6 +136,14 @@ export const insightCommand: SlashCommand = {
       // Clear pending item on error
       context.ui.setPendingItem(null);
 
+      if (context.executionMode !== 'interactive') {
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content: `Failed to generate insights: ${(error as Error).message}`,
+        };
+      }
+
       context.ui.addItem(
         {
           type: MessageType.ERROR,
@@ -127,6 +155,8 @@ export const insightCommand: SlashCommand = {
       );
 
       logger.error('Insight generation error:', error);
+      return;
     }
+    return;
   },
 };

@@ -29,6 +29,7 @@ export const createMockCommandContext = (
   overrides: DeepPartial<CommandContext> = {},
 ): CommandContext => {
   const defaultMocks: CommandContext = {
+    executionMode: 'interactive',
     invocation: {
       raw: '',
       name: '',

@@ -282,6 +282,7 @@ export const useSlashCommandProcessor = (
         sessionShellAllowlist,
         startNewSession,
       },
+      executionMode: 'interactive' as const,
     }),
     [
       config,
@@ -344,6 +345,19 @@ export const useSlashCommandProcessor = (
           loaders,
           controller.signal,
         );
+        // Register model-invocable commands provider so SkillTool can include
+        // bundled skills, file commands, and MCP prompts in its description.
+        if (config) {
+          config.setModelInvocableCommandsProvider(() =>
+            commandService.getModelInvocableCommands().map((cmd) => ({
+              name: cmd.name,
+              description:
+                typeof cmd.description === 'string'
+                  ? cmd.description
+                  : cmd.description,
+            })),
+          );
+        }
         // Avoid overwriting newer results from a subsequent effect run
         if (!controller.signal.aborted) {
           setCommands(commandService.getCommandsForMode('interactive'));

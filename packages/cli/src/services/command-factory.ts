@@ -116,7 +116,6 @@ export function createSlashCommandFromDefinition(
       ? 'plugin-command'
       : 'skill-dir-command') as CommandSource,
     sourceLabel: extensionName ? `Plugin: ${extensionName}` : 'Custom',
-    commandType: 'prompt' as const,
     modelInvocable: !extensionName,
     action: async (
       context: CommandContext,

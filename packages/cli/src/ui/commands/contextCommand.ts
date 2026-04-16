@@ -307,6 +307,166 @@ export async function collectContextData(
   };
 }
 
+/**
+ * Format token count for display (e.g. 1234 -> "1.2k", 123456 -> "123.5k")
+ */
+function fmtTokens(tokens: number): string {
+  if (tokens >= 1000) {
+    return `${(tokens / 1000).toFixed(1)}k`;
+  }
+  return `${tokens}`;
+}
+
+/**
+ * Format a category row as text: "  label .............. 1.2k tokens (3.4%)"
+ */
+function fmtCategoryRow(
+  label: string,
+  tokens: number,
+  contextWindowSize: number,
+  indent = '  ',
+): string {
+  const percentage = ((tokens / contextWindowSize) * 100).toFixed(1);
+  const right = `${fmtTokens(tokens)} tokens (${percentage}%)`;
+  const leftPart = `${indent}${label}`;
+  const totalWidth = 56;
+  const dots = Math.max(1, totalWidth - leftPart.length - right.length);
+  return `${leftPart}${' '.repeat(dots)}${right}`;
+}
+
+/**
+ * Convert a HistoryItemContextUsage to a human-readable text string,
+ * mirroring the layout of the interactive ContextUsage component.
+ */
+export function formatContextUsageText(data: HistoryItemContextUsage): string {
+  const {
+    modelName,
+    totalTokens,
+    contextWindowSize,
+    breakdown,
+    builtinTools,
+    mcpTools,
+    memoryFiles,
+    skills,
+    isEstimated,
+    showDetails,
+  } = data;
+
+  const lines: string[] = [];
+  lines.push('## Context Usage');
+  lines.push('');
+
+  if (isEstimated) {
+    lines.push('*No API response yet. Send a message to see actual usage.*');
+    lines.push('');
+    lines.push('**Estimated pre-conversation overhead**');
+    lines.push(
+      `Model: ${modelName}  Context window: ${fmtTokens(contextWindowSize)} tokens`,
+    );
+    lines.push('');
+  } else {
+    lines.push(
+      `Model: ${modelName}  Context window: ${fmtTokens(contextWindowSize)} tokens`,
+    );
+    lines.push('');
+    lines.push(fmtCategoryRow('Used', totalTokens, contextWindowSize));
+    lines.push(fmtCategoryRow('Free', breakdown.freeSpace, contextWindowSize));
+    lines.push(
+      fmtCategoryRow(
+        'Autocompact buffer',
+        breakdown.autocompactBuffer,
+        contextWindowSize,
+      ),
+    );
+    lines.push('');
+    lines.push('**Usage by category**');
+  }
+
+  lines.push(
+    fmtCategoryRow('System prompt', breakdown.systemPrompt, contextWindowSize),
+  );
+  lines.push(
+    fmtCategoryRow('Built-in tools', breakdown.builtinTools, contextWindowSize),
+  );
+  if (breakdown.mcpTools > 0) {
+    lines.push(
+      fmtCategoryRow('MCP tools', breakdown.mcpTools, contextWindowSize),
+    );
+  }
+  lines.push(
+    fmtCategoryRow('Memory files', breakdown.memoryFiles, contextWindowSize),
+  );
+  lines.push(fmtCategoryRow('Skills', breakdown.skills, contextWindowSize));
+  if (!isEstimated) {
+    lines.push(
+      fmtCategoryRow('Messages', breakdown.messages, contextWindowSize),
+    );
+  }
+
+  if (showDetails) {
+    const sortedBuiltin = [...builtinTools].sort((a, b) => b.tokens - a.tokens);
+    const sortedMcp = [...mcpTools].sort((a, b) => b.tokens - a.tokens);
+    const sortedMemory = [...memoryFiles].sort((a, b) => b.tokens - a.tokens);
+    const sortedSkills = [...skills].sort((a, b) => {
+      if (a.loaded !== b.loaded) return a.loaded ? -1 : 1;
+      return b.tokens + (b.bodyTokens ?? 0) - (a.tokens + (a.bodyTokens ?? 0));
+    });
+
+    if (sortedBuiltin.length > 0) {
+      lines.push('');
+      lines.push('**Built-in tools**');
+      for (const tool of sortedBuiltin) {
+        lines.push(
+          fmtCategoryRow(tool.name, tool.tokens, contextWindowSize, '  └ '),
+        );
+      }
+    }
+    if (sortedMcp.length > 0) {
+      lines.push('');
+      lines.push('**MCP tools**');
+      for (const tool of sortedMcp) {
+        lines.push(
+          fmtCategoryRow(tool.name, tool.tokens, contextWindowSize, '  └ '),
+        );
+      }
+    }
+    if (sortedMemory.length > 0) {
+      lines.push('');
+      lines.push('**Memory files**');
+      for (const file of sortedMemory) {
+        lines.push(
+          fmtCategoryRow(file.path, file.tokens, contextWindowSize, '  └ '),
+        );
+      }
+    }
+    if (sortedSkills.length > 0) {
+      lines.push('');
+      lines.push('**Skills**');
+      for (const skill of sortedSkills) {
+        const label = skill.loaded ? `${skill.name} (active)` : skill.name;
+        lines.push(
+          fmtCategoryRow(label, skill.tokens, contextWindowSize, '  └ '),
+        );
+        if (skill.loaded && skill.bodyTokens && skill.bodyTokens > 0) {
+          lines.push(
+            fmtCategoryRow(
+              'body loaded',
+              skill.bodyTokens,
+              contextWindowSize,
+              '    └ ',
+            ),
+          );
+        }
+      }
+    }
+  } else {
+    lines.push('');
+    lines.push('*Run /context detail for per-item breakdown.*');
+  }
+
+  return lines.join('\n');
+}
+
 export const contextCommand: SlashCommand = {
   name: 'context',
   get description() {
@@ -315,7 +475,6 @@ export const contextCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local',
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext, args?: string) => {
     const showDetails =
@@ -350,7 +509,7 @@ export const contextCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: JSON.stringify(contextUsageItem, null, 2),
+        content: formatContextUsageText(contextUsageItem),
       };
     }
   },
@@ -361,7 +520,6 @@ export const contextCommand: SlashCommand = {
         return t('Show per-item context usage breakdown.');
       },
       kind: CommandKind.BUILT_IN,
-      commandType: 'local',
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: async (context: CommandContext) => {
         // Delegate to main action with 'detail' arg to show detailed view

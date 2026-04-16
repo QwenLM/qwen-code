@@ -43,6 +43,7 @@ describe('handleSlashCommand', () => {
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      setModelInvocableCommandsProvider: vi.fn(),
       storage: {},
     } as unknown as Config;
 
@@ -85,7 +86,7 @@ describe('handleSlashCommand', () => {
       name: 'help',
       description: 'Show help',
       kind: CommandKind.BUILT_IN,
-      // No commandType → falls back to BUILT_IN → interactive only
+      // No supportedModes → BUILT_IN fallback → interactive only
       action: vi.fn(),
     };
     mockGetCommands.mockReturnValue([mockHelpCommand]);
@@ -134,7 +135,6 @@ describe('handleSlashCommand', () => {
       name: 'init',
       description: 'Initialize project',
       kind: CommandKind.BUILT_IN,
-      commandType: 'local' as const,
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: vi.fn().mockResolvedValue({
         type: 'message',
@@ -162,7 +162,6 @@ describe('handleSlashCommand', () => {
       name: 'btw',
       description: 'Ask a side question',
       kind: CommandKind.BUILT_IN,
-      commandType: 'local' as const,
       supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: vi.fn().mockResolvedValue({
         type: 'message',

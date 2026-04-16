@@ -21,7 +21,7 @@ export const modelCommand: SlashCommand = {
     return t('Switch the model for this session (--fast for suggestion model)');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (_context, partialArg) => {
     if (partialArg && '--fast'.startsWith(partialArg)) {
       return [
@@ -54,7 +54,16 @@ export const modelCommand: SlashCommand = {
     if (args.startsWith('--fast')) {
       const modelName = args.replace('--fast', '').trim();
       if (!modelName) {
-        // Open model dialog in fast-model mode
+        // Open model dialog in fast-model mode (interactive) or return current fast model (non-interactive)
+        if (context.executionMode !== 'interactive') {
+          const fastModel =
+            context.services.settings?.merged?.fastModel ?? 'not set';
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: `Current fast model: ${fastModel}\nUse "/model --fast <model-id>" to set fast model.`,
+          };
+        }
         return {
           type: 'dialog',
           dialog: 'fast-model',
@@ -95,6 +104,16 @@ export const modelCommand: SlashCommand = {
         type: 'message',
         messageType: 'error',
         content: t('Authentication type not available.'),
+      };
+    }
+
+    // Non-interactive/ACP: return current model info instead of opening dialog
+    if (context.executionMode !== 'interactive') {
+      const currentModel = config.getModel() ?? 'unknown';
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: `Current model: ${currentModel}\nUse "/model --fast <model-id>" to set fast model.`,
       };
     }
 

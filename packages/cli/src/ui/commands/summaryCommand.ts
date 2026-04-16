@@ -23,7 +23,6 @@ export const summaryCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local',
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context): Promise<SlashCommandActionReturn> => {
     const { config } = context.services;
