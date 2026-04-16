@@ -72,11 +72,13 @@ Choose your preferred authentication method:
 - **API Key (recommended)**: Select `API Key`, then enter your API key from [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/) or another supported provider. See the [API setup guide](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) for details.
 - **Local Inference**: Configure Ollama or vLLM in `~/.qwen/settings.json` to run models locally — completely free and private.
 
-> ⚠️ **Note**: Qwen OAuth was discontinued on April 15, 2026. If you were previously using Qwen OAuth, please switch to one of the methods above.
+> [!warning]
+
+> Qwen OAuth was discontinued on April 15, 2026. If you were previously using Qwen OAuth, please switch to one of the methods above.
 
 > [!note]
 >
-> When you first authenticate Qwen Code with your Qwen account, a workspace called ".qwen" is automatically created for you. This workspace provides centralized cost tracking and management for all Qwen Code usage in your organization.
+> When you first set up Qwen Code, a workspace called ".qwen" is automatically created in your home directory. This workspace stores your authentication credentials, configuration, and session data.
 
 > [!tip]
 >
