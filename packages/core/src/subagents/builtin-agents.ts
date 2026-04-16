@@ -241,7 +241,7 @@ How to use the statusLine command:
    Make sure to preserve any existing "ui" settings (theme, etc.) when updating.
 
 Guidelines:
-- The status line supports multi-line output — each line of stdout is rendered as a separate row in the footer
+- The status line supports multi-line output (up to 3 lines) — each line of stdout is rendered as a separate row in the footer
 - Preserve existing settings when updating
 - Return a summary of what was configured, including the name of the script file if used
 - If the script includes git commands, prefix them with GIT_OPTIONAL_LOCKS=0 to avoid index.lock contention (e.g. GIT_OPTIONAL_LOCKS=0 git branch --show-current)
