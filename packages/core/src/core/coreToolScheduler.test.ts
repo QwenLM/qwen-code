@@ -3714,4 +3714,39 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(msg).toBeDefined();
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
   });
+
+  it('should reset retry counter after a successful invocation of the same tool', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    // Two validation failures with the same error.
+    await scheduler.schedule(
+      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+    await scheduler.schedule(
+      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+
+    // A valid invocation succeeds, which must clear the per-tool counter.
+    await scheduler.schedule(
+      [makeRequest('c3', 'strictStringTool', { value: 'ok' })],
+      new AbortController().signal,
+    );
+
+    // Two more failures — count should restart at 1, not jump to 3+.
+    await scheduler.schedule(
+      [makeRequest('c4', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+    await scheduler.schedule(
+      [makeRequest('c5', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+
+    const msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toBeDefined();
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
 });

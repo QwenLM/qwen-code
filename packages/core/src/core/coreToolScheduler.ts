@@ -419,7 +419,7 @@ export class CoreToolScheduler {
       switch (newStatus) {
         case 'success': {
           // Successful execution only resets retry state for this tool
-          this.validationRetryCounts.delete(currentCall.request.name);
+          this.clearRetryCountsForTool(currentCall.request.name);
           const durationMs = existingStartTime
             ? Date.now() - existingStartTime
             : undefined;
@@ -699,6 +699,20 @@ export class CoreToolScheduler {
     return this._schedule(request, signal);
   }
 
+  /**
+   * Removes all validation retry counters for the given tool. Keys are
+   * "<toolName>:<errorMessage>", so a plain `Map.delete(toolName)` would not
+   * match anything.
+   */
+  private clearRetryCountsForTool(toolName: string): void {
+    const prefix = `${toolName}:`;
+    for (const key of this.validationRetryCounts.keys()) {
+      if (key.startsWith(prefix)) {
+        this.validationRetryCounts.delete(key);
+      }
+    }
+  }
+
   private async _schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
@@ -713,12 +727,16 @@ export class CoreToolScheduler {
       const requestsToProcess = Array.isArray(request) ? request : [request];
 
       // Check if this batch continues a validation retry loop.
-      // If the same tool name that previously failed validation appears again,
-      // keep tracking; otherwise reset.
+      // Keys are "<toolName>:<errorMessage>"; if no request reuses a tool name
+      // that previously failed validation, reset the tracker.
       if (this.validationRetryCounts.size > 0) {
-        const prevTool = this.validationRetryCounts.keys().next().value;
-        const hasPrevFailingTool = requestsToProcess.some(
-          (r) => r.name === prevTool,
+        const prevTools = new Set<string>();
+        for (const key of this.validationRetryCounts.keys()) {
+          const sep = key.indexOf(':');
+          prevTools.add(sep === -1 ? key : key.slice(0, sep));
+        }
+        const hasPrevFailingTool = requestsToProcess.some((r) =>
+          prevTools.has(r.name),
         );
         if (!hasPrevFailingTool) {
           this.validationRetryCounts.clear();
@@ -805,17 +823,16 @@ export class CoreToolScheduler {
               )
             : invocationOrError;
 
-          // Track validation retry for loop detection
+          // Track validation retry for loop detection. Counts accumulate per
+          // (tool, error message) pair so a different validation mistake on
+          // the same tool starts fresh rather than tripping the threshold.
           const errorKey = `${reqInfo.name}:${baseError.message}`;
           const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
-
-          // Only clear other validation counts for the same tool, preserve other tools' counts
-          for (const [key, _] of this.validationRetryCounts) {
+          for (const key of this.validationRetryCounts.keys()) {
             if (key.startsWith(`${reqInfo.name}:`) && key !== errorKey) {
               this.validationRetryCounts.delete(key);
             }
           }
-
           this.validationRetryCounts.set(errorKey, count);
 
           const finalError =
@@ -838,11 +855,7 @@ export class CoreToolScheduler {
         }
 
         // Reset all validation retry counters for this tool since it passed validation
-        for (const [key, _] of this.validationRetryCounts) {
-          if (key.startsWith(`${reqInfo.name}:`)) {
-            this.validationRetryCounts.delete(key);
-          }
-        }
+        this.clearRetryCountsForTool(reqInfo.name);
 
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content.
