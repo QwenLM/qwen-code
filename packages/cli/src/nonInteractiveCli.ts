@@ -251,6 +251,7 @@ export async function runNonInteractive(
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
       let isFirstTurn = true;
+      let modelOverride: string | undefined;
       while (true) {
         turnCount++;
         if (
@@ -270,6 +271,7 @@ export async function runNonInteractive(
             type: isFirstTurn
               ? SendMessageType.UserQuery
               : SendMessageType.ToolResult,
+            modelOverride,
           },
         );
         isFirstTurn = false;
@@ -368,6 +370,13 @@ export async function runNonInteractive(
             if (toolResponse.responseParts) {
               toolResponseParts.push(...toolResponse.responseParts);
             }
+
+            // Capture model override from skill tool results.
+            // Use `in` so that undefined (from inherit/no-model skills) clears a prior override,
+            // while non-skill tools (field absent) leave the current override intact.
+            if ('modelOverride' in toolResponse) {
+              modelOverride = toolResponse.modelOverride;
+            }
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
@@ -400,6 +409,7 @@ export async function runNonInteractive(
                       { role: 'user', parts: [{ text: cronPrompt }] },
                     ];
                     let cronIsFirstTurn = true;
+                    let cronModelOverride: string | undefined;
 
                     while (true) {
                       const cronToolCallRequests: ToolCallRequestInfo[] = [];
@@ -412,6 +422,7 @@ export async function runNonInteractive(
                           type: cronIsFirstTurn
                             ? SendMessageType.Cron
                             : SendMessageType.ToolResult,
+                          modelOverride: cronModelOverride,
                         },
                       );
                       cronIsFirstTurn = false;
@@ -475,6 +486,10 @@ export async function runNonInteractive(
                             cronToolResponseParts.push(
                               ...toolResponse.responseParts,
                             );
+                          }
+
+                          if ('modelOverride' in toolResponse) {
+                            cronModelOverride = toolResponse.modelOverride;
                           }
                         }
                         cronMessages = [

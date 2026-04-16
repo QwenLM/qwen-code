@@ -125,6 +125,8 @@ import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import { useStableHeight } from './hooks/useStableHeight.js';
+import { useContextualTips } from './hooks/useContextualTips.js';
+import { getTipHistory } from '../services/tips/index.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
@@ -748,6 +750,26 @@ export const AppContainer = (props: AppContainerProps) => {
     midTurnDrainRef,
   );
 
+  // Contextual tips — show tips based on context usage after model responses
+  // Defer TipHistory loading when tips are disabled to avoid side effects
+  // (sessionCount increment + disk write) when the user has opted out.
+  const tipsDisabled = !!(
+    settings.merged.ui?.hideTips || config.getScreenReader()
+  );
+  const tipHistory = useMemo(
+    () => (tipsDisabled ? null : getTipHistory()),
+    [tipsDisabled],
+  );
+  useContextualTips({
+    streamingState,
+    lastPromptTokenCount: sessionStats.lastPromptTokenCount,
+    sessionPromptCount: sessionStats.promptCount,
+    config,
+    tipHistory,
+    addItem: historyManager.addItem,
+    hideTips: tipsDisabled,
+  });
+
   // Track whether suggestions are visible for Tab key handling
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
 
@@ -777,21 +799,16 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const {
-    messageQueue,
-    addMessage,
-    clearQueue,
-    getQueuedMessagesText,
-    drainQueue,
-  } = useMessageQueue({
-    isConfigInitialized,
-    streamingState,
-    submitQuery,
-  });
+  const { messageQueue, addMessage, popAllMessages, drainQueue } =
+    useMessageQueue({
+      isConfigInitialized,
+      streamingState,
+      submitQuery,
+    });
 
   // Bridge message queue to mid-turn drain via ref.
-  // drainQueue reads from the synchronous queueRef inside useMessageQueue,
-  // so it always sees the latest state even between renders.
+  // drainQueue reads the synchronous queueRef inside the hook, so it
+  // stays consistent with popAllMessages even before React re-renders.
   midTurnDrainRef.current = drainQueue;
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
@@ -810,6 +827,16 @@ export const AppContainer = (props: AppContainerProps) => {
         isBtwCommand(submittedValue)
       ) {
         void submitQuery(submittedValue);
+        return;
+      }
+
+      // Handle bare exit/quit commands (without the / prefix)
+      if (
+        ['exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
+          submittedValue.trim(),
+        )
+      ) {
+        void handleSlashCommand('/quit');
         return;
       }
 
@@ -938,6 +965,7 @@ export const AppContainer = (props: AppContainerProps) => {
       agentViewState,
       streamingState,
       submitQuery,
+      handleSlashCommand,
       config,
       geminiClient,
       historyManager,
@@ -977,23 +1005,24 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
 
-    const lastUserMessage = userMessages.at(-1);
-    let textToSet = lastUserMessage || '';
-
-    const queuedText = getQueuedMessagesText();
-    if (queuedText) {
-      textToSet = textToSet ? `${textToSet}\n\n${queuedText}` : queuedText;
-      clearQueue();
-    }
-
-    if (textToSet) {
-      buffer.setText(textToSet);
+    // Move any queued follow-up messages back into the buffer so the user
+    // can edit or resubmit them. Otherwise leave the buffer alone — in
+    // particular, do NOT repopulate it with the previous prompt; the user
+    // can still recall it via history navigation (Up/Ctrl+P).
+    //
+    // popAllMessages is atomic via the queue's synchronous ref, matching
+    // the drain behavior used during tool completion.
+    const popped = popAllMessages();
+    if (popped) {
+      const currentText = buffer.text;
+      // Preserve any in-progress draft the user typed since submitting (this
+      // is reachable via Ctrl+C cancel, which fires regardless of buffer
+      // content). Mirrors the popQueueIntoInput convention in InputPrompt.
+      buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
     }
   }, [
     buffer,
-    userMessages,
-    getQueuedMessagesText,
-    clearQueue,
+    popAllMessages,
     pendingSlashCommandHistoryItems,
     pendingGeminiHistoryItems,
   ]);
@@ -1122,6 +1151,24 @@ export const AppContainer = (props: AppContainerProps) => {
   const followupSuggestionsEnabled =
     settings.merged.ui?.enableFollowupSuggestions === true;
 
+  // Resolve fastModel, validating it belongs to the current authType.
+  // If the configured fastModel is from a different provider, the API call
+  // would fail silently (DashScope/Qwen client rejects unknown model IDs),
+  // so fall back to the main model instead.
+  const resolveFastModel = useCallback((): string | undefined => {
+    const fastModel = settings.merged.fastModel;
+    if (!fastModel) return undefined;
+    const currentAuthType = config.getContentGeneratorConfig()?.authType;
+    if (!currentAuthType) return undefined;
+    const availableModels = config
+      .getModelsConfig()
+      .getAvailableModelsForAuthType(currentAuthType);
+    const belongsToCurrentAuth = availableModels.some(
+      (m) => m.id === fastModel,
+    );
+    return belongsToCurrentAuth ? fastModel : undefined;
+  }, [settings.merged.fastModel, config]);
+
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
     if (!followupSuggestionsEnabled) {
@@ -1173,9 +1220,10 @@ export const AppContainer = (props: AppContainerProps) => {
       const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+      const fastModel = resolveFastModel();
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
-        model: settings.merged.fastModel || undefined,
+        model: fastModel,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
@@ -1184,7 +1232,7 @@ export const AppContainer = (props: AppContainerProps) => {
             // Start speculation if enabled (runs in background)
             if (settings.merged.ui?.enableSpeculation) {
               startSpeculation(config, result.suggestion, ac.signal, {
-                model: settings.merged.fastModel || undefined,
+                model: fastModel,
               })
                 .then((state) => {
                   speculationRef.current = state;
@@ -1275,10 +1323,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
-  const [frozenSnapshot, setFrozenSnapshot] = useState<
-    HistoryItemWithoutId[] | null
-  >(null);
-
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -1292,18 +1336,6 @@ export const AppContainer = (props: AppContainerProps) => {
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
-
-  useEffect(() => {
-    // Clear frozen snapshot when streaming ends OR when entering confirmation
-    // state. During WaitingForConfirmation, the user needs to see the latest
-    // pending items (including the confirmation message) rather than a stale snapshot.
-    if (
-      streamingState === StreamingState.Idle ||
-      streamingState === StreamingState.WaitingForConfirmation
-    ) {
-      setFrozenSnapshot(null);
-    }
-  }, [streamingState]);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
@@ -1696,13 +1728,6 @@ export const AppContainer = (props: AppContainerProps) => {
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
-        // Only freeze during the actual responding phase. WaitingForConfirmation
-        // must keep focus so the user can approve/cancel tool confirmation UI.
-        if (streamingState === StreamingState.Responding) {
-          setFrozenSnapshot([...pendingHistoryItems]);
-        } else {
-          setFrozenSnapshot(null);
-        }
       }
     },
     [
@@ -1738,8 +1763,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
-      setFrozenSnapshot,
-      pendingHistoryItems,
       refreshStatic,
     ],
   );
@@ -2064,6 +2087,7 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openModelDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2082,6 +2106,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
+      popAllQueuedMessages: popAllMessages,
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
@@ -2122,6 +2147,7 @@ export const AppContainer = (props: AppContainerProps) => {
       exitEditorDialog,
       closeSettingsDialog,
       closeModelDialog,
+      openModelDialog,
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
@@ -2139,6 +2165,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleFinalSubmit,
       retryLastPrompt,
       handleClearScreen,
+      popAllMessages,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       // Subagent dialogs
@@ -2165,8 +2192,8 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const compactModeValue = useMemo(
-    () => ({ compactMode, frozenSnapshot }),
-    [compactMode, frozenSnapshot],
+    () => ({ compactMode, setCompactMode }),
+    [compactMode, setCompactMode],
   );
 
   return (

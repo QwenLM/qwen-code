@@ -8,6 +8,7 @@ import type { AcpBridge, ToolCallEvent } from './AcpBridge.js';
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
+  proxy?: string;
 }
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
@@ -20,6 +21,8 @@ export abstract class ChannelBase {
   protected gate: SenderGate;
   protected router: SessionRouter;
   protected name: string;
+  /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
+  protected proxy?: string;
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
@@ -45,6 +48,7 @@ export abstract class ChannelBase {
     this.name = name;
     this.config = config;
     this.bridge = bridge;
+    this.proxy = options?.proxy;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
 

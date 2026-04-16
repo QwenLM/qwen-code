@@ -617,17 +617,17 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('should throw InvalidStreamError when no tool call and empty response text', async () => {
+    it('should throw InvalidStreamError when there is finish reason but truly empty response (no text, no thought)', async () => {
       vi.useFakeTimers();
       try {
-        // Setup: Stream with finish reason but empty response (only thoughts)
+        // Setup: Stream with finish reason but completely empty parts
         const streamWithEmptyResponse = (async function* () {
           yield {
             candidates: [
               {
                 content: {
                   role: 'model',
-                  parts: [{ thought: 'thinking...' }],
+                  parts: [],
                 },
                 finishReason: 'STOP',
               },
@@ -648,6 +648,58 @@ describe('GeminiChat', async () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('should succeed when there is finish reason and only thought content (reasoning models)', async () => {
+      // This test verifies that responses containing only thought/reasoning content
+      // are accepted as valid.
+      const thoughtOnlyStream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [
+                  {
+                    thought: true,
+                    text: 'Let me think through this problem step by step...',
+                  },
+                ],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        thoughtOnlyStream,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-thought-only',
+      );
+
+      // Should NOT throw - thought-only responses are valid
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })(),
+      ).resolves.not.toThrow();
+
+      // Verify history contains the thought content
+      const history = chat.getHistory();
+      expect(history.length).toBe(2); // user turn + model turn
+      const modelTurn = history[1]!;
+      expect(modelTurn.parts?.length).toBe(1);
+      expect(modelTurn.parts![0]).toEqual({
+        thought: true,
+        text: 'Let me think through this problem step by step...',
+      });
     });
 
     it('should succeed when there is finish reason and response text', async () => {
@@ -728,6 +780,109 @@ describe('GeminiChat', async () => {
           }
         })(),
       ).resolves.not.toThrow();
+    });
+
+    it('should succeed for thought-only content when finish reason arrives in a later chunk', async () => {
+      const streamWithDelayedFinishReason = (async function* () {
+        // First chunk contains only thought content.
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ thought: true, text: 'Thinking through options...' }],
+              },
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+
+        // Second chunk carries only finishReason.
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+      })();
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamWithDelayedFinishReason,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-thought-delayed-finish',
+      );
+
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })(),
+      ).resolves.not.toThrow();
+
+      const history = chat.getHistory();
+      expect(history.length).toBe(2);
+      expect(history[1]!.parts).toEqual([
+        { thought: true, text: 'Thinking through options...' },
+      ]);
+    });
+
+    it('should succeed for thought-only responses with finish reason followed by usage-only chunk', async () => {
+      const thoughtThenUsageOnlyStream = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                role: 'model',
+                parts: [{ thought: true, text: 'Let me reason this out...' }],
+              },
+              finishReason: 'STOP',
+            },
+          ],
+        } as unknown as GenerateContentResponse;
+
+        // Provider can emit trailing usage-only chunk after finish.
+        yield {
+          candidates: [],
+          usageMetadata: {
+            promptTokenCount: 12,
+            candidatesTokenCount: 4,
+            totalTokenCount: 16,
+          },
+        } as unknown as GenerateContentResponse;
+      })();
+
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        thoughtThenUsageOnlyStream,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-id-thought-usage-tail',
+      );
+
+      await expect(
+        (async () => {
+          for await (const _ of stream) {
+            // consume stream
+          }
+        })(),
+      ).resolves.not.toThrow();
+
+      const history = chat.getHistory();
+      expect(history.length).toBe(2);
+      expect(history[1]!.parts).toEqual([
+        { thought: true, text: 'Let me reason this out...' },
+      ]);
     });
 
     it('should call generateContentStream with the correct parameters', async () => {

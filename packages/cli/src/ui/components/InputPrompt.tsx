@@ -514,6 +514,26 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         }
       }
 
+      // Helper: pop all queued messages into the input buffer,
+      // preserving cursor position relative to existing text.
+      const popQueueIntoInput = (): boolean => {
+        const popped = uiActions.popAllQueuedMessages();
+        if (!popped) return false;
+        const currentText = buffer.text;
+        if (currentText) {
+          const currentCursorOffset = logicalPosToOffset(
+            buffer.lines,
+            buffer.cursor[0],
+            buffer.cursor[1],
+          );
+          buffer.setText(`${popped}\n${currentText}`);
+          buffer.moveToOffset(popped.length + 1 + currentCursorOffset);
+        } else {
+          buffer.setText(popped);
+        }
+        return true;
+      };
+
       // Reset ESC count and hide prompt on any non-ESC key
       if (key.name !== 'escape') {
         if (escPressCount > 0 || showEscapePrompt) {
@@ -594,6 +614,15 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           setExpandedSuggestionIndex(-1);
           resetEscapeState();
           return true;
+        }
+
+        // Pop queued messages into input on ESC (before double-ESC clear)
+        if (!isAttachmentMode && uiState.messageQueue.length > 0) {
+          if (popQueueIntoInput()) {
+            resetEscapeState();
+            return true;
+          }
+          // returned false (queue already cleared) — fall through
         }
 
         // Handle double ESC for clearing input
@@ -719,6 +748,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // because ACCEPT_SUGGESTION also matches Enter which must fall through to SUBMIT.
       if (
         key.name === 'tab' &&
+        !key.paste &&
         !key.shift &&
         buffer.text.length === 0 &&
         !completion.showSuggestions &&
@@ -758,7 +788,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           }
         }
 
-        if (keyMatchers[Command.ACCEPT_SUGGESTION](key)) {
+        if (keyMatchers[Command.ACCEPT_SUGGESTION](key) && !key.paste) {
           if (completion.suggestions.length > 0) {
             const targetIndex =
               completion.activeSuggestionIndex === -1
@@ -828,6 +858,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
           setTextBeforeReverseSearch(buffer.text);
           setCursorPosition(buffer.cursor);
           return true;
+        }
+
+        // Pop all queued messages into input when pressing Up arrow at top of input
+        if (
+          !isAttachmentMode &&
+          uiState.messageQueue.length > 0 &&
+          keyMatchers[Command.NAVIGATION_UP](key) &&
+          (buffer.allVisualLines.length === 1 ||
+            (buffer.visualCursor[0] === 0 && buffer.visualScrollRow === 0))
+        ) {
+          if (popQueueIntoInput()) return true;
+          // returned false (queue already cleared) — fall through to history
         }
 
         if (keyMatchers[Command.HISTORY_UP](key)) {
