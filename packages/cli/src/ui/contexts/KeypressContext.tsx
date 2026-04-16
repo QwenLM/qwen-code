@@ -851,9 +851,6 @@ export function KeypressProvider({
         }
       }
 
-      if (key.name === 'return' && key.sequence === `${ESC}\r`) {
-        key.meta = true;
-      }
       broadcast({ ...key, paste: isPaste });
     };
 
