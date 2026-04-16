@@ -164,9 +164,17 @@ export async function startInteractiveUI(
   const jsonFile = config.getJsonFile?.();
   try {
     if (jsonFd != null) {
-      dualOutputBridge = new DualOutputBridge(config, { fd: jsonFd });
+      dualOutputBridge = new DualOutputBridge(
+        config,
+        { fd: jsonFd },
+        { version },
+      );
     } else if (jsonFile != null) {
-      dualOutputBridge = new DualOutputBridge(config, { filePath: jsonFile });
+      dualOutputBridge = new DualOutputBridge(
+        config,
+        { filePath: jsonFile },
+        { version },
+      );
     }
   } catch (err) {
     debugLogger.error('Failed to initialize dual output bridge:', err);

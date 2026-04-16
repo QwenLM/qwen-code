@@ -448,6 +448,44 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  dualOutput: {
+    type: 'object',
+    label: 'Dual Output',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Dual-output sidecar mode: emit structured JSON events to a ' +
+      'second channel while the TUI renders normally on stdout. See ' +
+      'docs/users/features/dual-output.md. CLI flags take precedence ' +
+      'over these settings.',
+    showInDialog: false,
+    properties: {
+      jsonFile: {
+        type: 'string',
+        label: 'JSON Event File',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'File path for structured JSON event output. Equivalent to ' +
+          '--json-file. Ignored if --json-fd or --json-file is also set.',
+        showInDialog: false,
+      },
+      inputFile: {
+        type: 'string',
+        label: 'Remote Input File',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'File path for remote input commands (JSONL). Equivalent to ' +
+          '--input-file. Ignored if --input-file is also set.',
+        showInDialog: false,
+      },
+    },
+  },
+
   ui: {
     type: 'object',
     label: 'UI',

@@ -884,20 +884,41 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [dualOutput, pendingToolCalls]);
 
   // Route confirmation_response commands written to --input-file back into
-  // the tool's onConfirm handler.
+  // the tool's onConfirm handler. When the request_id is unknown or the
+  // underlying tool call has already resolved, reply with a control_error
+  // on the output channel so the consumer can surface or retry rather than
+  // waiting forever for an implicit ack.
   useEffect(() => {
     if (!remoteInput) return;
     remoteInput.setConfirmationHandler(
       (requestId: string, allowed: boolean) => {
         const callId = confirmRequestMap.current.get(requestId);
-        if (!callId) return;
+        if (!callId) {
+          dualOutput?.emitControlError(
+            requestId,
+            'unknown request_id (already resolved, cancelled, or never issued)',
+          );
+          return;
+        }
         const tc = pendingToolCalls.find(
           (t) =>
             t.request.callId === callId && t.status === 'awaiting_approval',
         );
-        if (!tc) return;
+        if (!tc) {
+          dualOutput?.emitControlError(
+            requestId,
+            'tool call is no longer awaiting approval',
+          );
+          return;
+        }
         const waitingTc = tc as WaitingToolCall;
-        if (!waitingTc.confirmationDetails?.onConfirm) return;
+        if (!waitingTc.confirmationDetails?.onConfirm) {
+          dualOutput?.emitControlError(
+            requestId,
+            'tool call has no onConfirm handler',
+          );
+          return;
+        }
         void waitingTc.confirmationDetails.onConfirm(
           allowed
             ? ToolConfirmationOutcome.ProceedOnce
@@ -912,7 +933,7 @@ export const AppContainer = (props: AppContainerProps) => {
     return () => {
       remoteInput.setConfirmationHandler(() => {});
     };
-  }, [remoteInput, pendingToolCalls]);
+  }, [remoteInput, pendingToolCalls, dualOutput]);
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(

@@ -127,5 +127,23 @@ describe('StreamJsonOutputAdapter — dual-output extensions', () => {
       const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
       expect(parsed.request.blocked_path).toBeNull();
     });
+
+    it('emitControlError produces a control_response with subtype error', () => {
+      const adapter = new StreamJsonOutputAdapter(mockConfig, false);
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitControlError('req-x', 'unknown request_id');
+
+      expect(stdoutWriteSpy).toHaveBeenCalledTimes(1);
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+      expect(parsed).toEqual({
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: 'req-x',
+          error: 'unknown request_id',
+        },
+      });
+    });
   });
 });

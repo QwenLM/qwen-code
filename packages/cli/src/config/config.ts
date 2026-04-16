@@ -1159,9 +1159,13 @@ export async function loadCliConfig(
     hooks: settings.hooks, // Keep for backward compatibility
     disableAllHooks: settings.disableAllHooks ?? false,
     channel: argv.channel,
+    // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
+    // equivalent — fd passing is a spawn-time concern). `--json-file` and
+    // `--input-file` fall back to settings.dualOutput.* when the flag is
+    // absent.
     jsonFd: argv.jsonFd,
-    jsonFile: argv.jsonFile,
-    inputFile: argv.inputFile,
+    jsonFile: argv.jsonFile ?? settings.dualOutput?.jsonFile,
+    inputFile: argv.inputFile ?? settings.dualOutput?.inputFile,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
     // always be true and the settings file can never disable recording.

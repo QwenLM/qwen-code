@@ -9,7 +9,11 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
-import { DualOutputBridge } from './DualOutputBridge.js';
+import {
+  DualOutputBridge,
+  DUAL_OUTPUT_PROTOCOL_VERSION,
+  SUPPORTED_EVENTS,
+} from './DualOutputBridge.js';
 
 function createMockConfig(): Config {
   return {
@@ -72,6 +76,77 @@ describe('DualOutputBridge', () => {
         type: 'system',
         subtype: 'session_start',
         data: { session_id: 'test-session' },
+      });
+    });
+
+    it('session_start carries a capability handshake (version, protocol_version, supported_events)', async () => {
+      bridge = new DualOutputBridge(
+        config,
+        { filePath: target },
+        { version: '1.2.3' },
+      );
+      bridge.shutdown();
+      await new Promise((r) => setTimeout(r, 10));
+
+      const lines = readJsonl(target);
+      const start = lines.find(
+        (l) => l['type'] === 'system' && l['subtype'] === 'session_start',
+      );
+      expect(start).toBeDefined();
+      const data = (start as { data: Record<string, unknown> }).data;
+      expect(data['version']).toBe('1.2.3');
+      expect(data['protocol_version']).toBe(DUAL_OUTPUT_PROTOCOL_VERSION);
+      expect(data['supported_events']).toEqual([...SUPPORTED_EVENTS]);
+    });
+
+    it('emits session_end on shutdown for a clean termination signal', async () => {
+      bridge = new DualOutputBridge(config, { filePath: target });
+      bridge.shutdown();
+      await new Promise((r) => setTimeout(r, 10));
+
+      const lines = readJsonl(target);
+      const end = lines.find(
+        (l) => l['type'] === 'system' && l['subtype'] === 'session_end',
+      );
+      expect(end).toMatchObject({
+        type: 'system',
+        subtype: 'session_end',
+        data: { session_id: 'test-session' },
+      });
+    });
+
+    it('shutdown is idempotent — calling it twice emits session_end only once', async () => {
+      bridge = new DualOutputBridge(config, { filePath: target });
+      bridge.shutdown();
+      bridge.shutdown();
+      await new Promise((r) => setTimeout(r, 10));
+
+      const lines = readJsonl(target);
+      const endEvents = lines.filter(
+        (l) => l['type'] === 'system' && l['subtype'] === 'session_end',
+      );
+      expect(endEvents).toHaveLength(1);
+    });
+
+    it('emitControlError routes through the adapter as a control_response error', async () => {
+      bridge = new DualOutputBridge(config, { filePath: target });
+      bridge.emitControlError('req-missing', 'unknown request_id');
+      bridge.shutdown();
+      await new Promise((r) => setTimeout(r, 10));
+
+      const lines = readJsonl(target);
+      const errorResponse = lines.find(
+        (l) =>
+          l['type'] === 'control_response' &&
+          (l['response'] as { subtype?: string })?.subtype === 'error',
+      );
+      expect(errorResponse).toMatchObject({
+        type: 'control_response',
+        response: {
+          subtype: 'error',
+          request_id: 'req-missing',
+          error: 'unknown request_id',
+        },
       });
     });
 

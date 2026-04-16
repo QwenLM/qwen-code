@@ -24,6 +24,43 @@ import { StreamJsonOutputAdapter } from '../nonInteractive/io/index.js';
 const debugLogger = createDebugLogger('DUAL_OUTPUT');
 
 /**
+ * Structured-event kinds this bridge version is known to emit. Exposed to
+ * consumers in `session_start.data.supported_events` so they can
+ * feature-detect rather than sniffing the stream or hard-coding a minimum
+ * CLI version.
+ *
+ * When adding a new event kind, append it here and bump the handshake
+ * `protocol_version` below so consumers can gate on the combination.
+ */
+export const SUPPORTED_EVENTS = [
+  'system',
+  'user',
+  'assistant',
+  'stream_event',
+  'result',
+  'control_request',
+  'control_response',
+] as const;
+
+/**
+ * Monotonically-increasing integer bumped whenever the wire protocol
+ * changes in a way consumers might care about (new event types,
+ * new payload fields that are not purely additive, etc.).
+ *
+ * History:
+ *   1 — initial release (session_start, session_end, full stream-json).
+ */
+export const DUAL_OUTPUT_PROTOCOL_VERSION = 1;
+
+/**
+ * Optional metadata wired into the `session_start` capability handshake.
+ */
+export interface DualOutputBridgeOptions {
+  /** CLI version string (e.g. "0.14.5"). Surfaced in session_start. */
+  version?: string;
+}
+
+/**
  * Bridges TUI-mode events to a sidecar StreamJsonOutputAdapter that writes
  * structured JSON events to a secondary output channel (fd or file).
  *
@@ -38,9 +75,16 @@ const debugLogger = createDebugLogger('DUAL_OUTPUT');
 export class DualOutputBridge {
   private readonly adapter: StreamJsonOutputAdapter;
   private readonly stream: WriteStream;
+  private readonly sessionId: string;
   private active = true;
+  private shutdownCalled = false;
 
-  constructor(config: Config, target: { fd: number } | { filePath: string }) {
+  constructor(
+    config: Config,
+    target: { fd: number } | { filePath: string },
+    options: DualOutputBridgeOptions = {},
+  ) {
+    this.sessionId = config.getSessionId();
     if ('fd' in target) {
       // Reject stdin/stdout/stderr to prevent corrupting TUI output
       if (target.fd <= 2) {
@@ -100,11 +144,16 @@ export class DualOutputBridge {
     );
 
     // Announce the session immediately so consumers can correlate the channel
-    // with a session before any other event arrives.
+    // with a session before any other event arrives. The data payload also
+    // serves as a capability handshake: consumers can read `protocol_version`
+    // and `supported_events` to feature-detect without sniffing the stream.
     try {
       this.adapter.emitSystemMessage('session_start', {
-        session_id: config.getSessionId(),
+        session_id: this.sessionId,
         cwd: process.cwd(),
+        protocol_version: DUAL_OUTPUT_PROTOCOL_VERSION,
+        version: options.version,
+        supported_events: [...SUPPORTED_EVENTS],
       });
     } catch (err) {
       debugLogger.error('DualOutput session_start error:', err);
@@ -210,7 +259,23 @@ export class DualOutputBridge {
     }
   }
 
-  /** Reserved for future lifecycle events (e.g. session_end). */
+  /**
+   * Emits a `control_response` with subtype `error` — used when an external
+   * `confirmation_response` cannot be satisfied (unknown request_id, the
+   * tool call already resolved, stream already closed, etc.). Lets
+   * consumers retry or surface the error instead of silently hanging.
+   */
+  emitControlError(requestId: string, message: string): void {
+    if (!this.active) return;
+    try {
+      this.adapter.emitControlError(requestId, message);
+    } catch (err) {
+      debugLogger.error('DualOutput emitControlError error:', err);
+      this.active = false;
+    }
+  }
+
+  /** General-purpose system event escape hatch. */
   emitSystemMessage(subtype: string, data?: unknown): void {
     if (!this.active) return;
     try {
@@ -222,6 +287,21 @@ export class DualOutputBridge {
   }
 
   shutdown(): void {
+    if (this.shutdownCalled) return;
+    this.shutdownCalled = true;
+    // Try to emit session_end before tearing the stream down so consumers
+    // get a definitive termination signal rather than inferring it from
+    // EPIPE. Failures here are swallowed — the stream may already be in an
+    // error state if the consumer disconnected first.
+    if (this.active) {
+      try {
+        this.adapter.emitSystemMessage('session_end', {
+          session_id: this.sessionId,
+        });
+      } catch {
+        // ignore — stream likely already closed
+      }
+    }
     this.active = false;
     try {
       this.stream.end();

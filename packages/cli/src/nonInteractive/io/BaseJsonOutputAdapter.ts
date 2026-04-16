@@ -1115,6 +1115,24 @@ export abstract class BaseJsonOutputAdapter {
   }
 
   /**
+   * Emits a control_response with subtype `error`. Used to reject an
+   * external confirmation_response that cannot be honored (unknown
+   * request_id, tool call already resolved, etc.) so the consumer can
+   * surface or retry, instead of waiting forever for an implicit ack.
+   */
+  emitControlError(requestId: string, errorMessage: string): void {
+    const message: ControlMessage = {
+      type: 'control_response',
+      response: {
+        subtype: 'error',
+        request_id: requestId,
+        error: errorMessage,
+      },
+    };
+    this.emitControlMessageImpl(message);
+  }
+
+  /**
    * Emits a tool progress stream event.
    * Default implementation is a no-op. StreamJsonOutputAdapter overrides this
    * to emit stream events when includePartialMessages is enabled.
