@@ -227,6 +227,24 @@ describe('earlyInputCapture', () => {
       expect(input.length).toBe(0);
     });
 
+    it('should drop incomplete DEC private response on capture end', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b[?1004'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
+    it('should drop incomplete OSC sequence on capture end', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b]0;title'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
     it('should keep arrow key sequence split across chunks', () => {
       startEarlyInputCapture();
       mockStdin.write(Buffer.from('\x1b['));
@@ -235,6 +253,15 @@ describe('earlyInputCapture', () => {
 
       const input = getAndClearCapturedInput();
       expect(input.toString()).toBe('\x1b[A');
+    });
+
+    it('should keep ESC[ prefix on capture end', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b['));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.toString()).toBe('\x1b[');
     });
 
     it('should keep standalone ESC on capture end', () => {
