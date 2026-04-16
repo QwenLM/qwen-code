@@ -186,6 +186,65 @@ describe('earlyInputCapture', () => {
       const input = getAndClearCapturedInput();
       expect(input.toString()).toBe('\x1bOP');
     });
+
+    it('should filter terminal responses split across chunks', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b[?1004'));
+      mockStdin.write(Buffer.from('h'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
+    it('should keep user input around split terminal responses', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('a\x1b[?100'));
+      mockStdin.write(Buffer.from('4hbc'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.toString()).toBe('abc');
+    });
+
+    it('should filter terminal responses split at ESC[ prefix', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b['));
+      mockStdin.write(Buffer.from('?1004h'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
+    it('should filter terminal responses split at ESC prefix', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b'));
+      mockStdin.write(Buffer.from('[?1004h'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.length).toBe(0);
+    });
+
+    it('should keep arrow key sequence split across chunks', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b['));
+      mockStdin.write(Buffer.from('A'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.toString()).toBe('\x1b[A');
+    });
+
+    it('should keep standalone ESC on capture end', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('\x1b'));
+      stopEarlyInputCapture();
+
+      const input = getAndClearCapturedInput();
+      expect(input.toString()).toBe('\x1b');
+    });
   });
 
   describe('UTF-8 handling', () => {

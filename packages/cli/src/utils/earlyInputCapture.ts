@@ -40,24 +40,32 @@ let inputBuffer: InputBuffer = {
 let captureHandler: ((data: Buffer) => void) | null = null;
 let captureStdin: NodeJS.ReadStream | null = null;
 let isCapturing = false;
+let pendingTerminalResponse = Buffer.alloc(0);
+
+type EscapeSequenceClassification = 'terminal' | 'user' | 'incomplete';
 
 /**
- * Check if this is a terminal response sequence
- * Terminal responses typically start with specific prefixes
+ * Classify ESC sequences seen during startup capture.
+ * - terminal: known terminal response/query payloads that should be filtered
+ * - user: known user key sequences that should be preserved
+ * - incomplete: prefix too short to classify yet, buffer for next chunk
  *
  * Note: User input function key sequences should be preserved:
  * - ESC [ A/B/C/D - Arrow keys
  * - ESC O P/Q/R/S - F1-F4 (SS3 sequences)
  * - ESC [ 1;5A - Ctrl+arrow and other modified keys
  */
-function isTerminalResponse(data: Buffer, startIdx: number): boolean {
+function classifyEscapeSequence(
+  data: Buffer,
+  startIdx: number,
+): EscapeSequenceClassification {
   if (startIdx >= data.length || data[startIdx] !== 0x1b) {
-    return false;
+    return 'user';
   }
 
   const nextIdx = startIdx + 1;
   if (nextIdx >= data.length) {
-    return false;
+    return 'incomplete';
   }
 
   const nextByte = data[nextIdx];
@@ -71,7 +79,7 @@ function isTerminalResponse(data: Buffer, startIdx: number): boolean {
     nextByte === 0x5e || // ^ (PM)
     nextByte === 0x5d // ] (OSC)
   ) {
-    return true;
+    return 'terminal';
   }
 
   // Check for terminal responses in CSI sequences
@@ -80,30 +88,35 @@ function isTerminalResponse(data: Buffer, startIdx: number): boolean {
   if (nextByte === 0x5b) {
     // CSI sequence, check third character
     const thirdIdx = startIdx + 2;
-    if (thirdIdx < data.length) {
-      const thirdByte = data[thirdIdx];
-      if (thirdByte === 0x3f || thirdByte === 0x3e) {
-        // ESC [ ? or ESC [ > - this is a terminal response
-        return true;
-      }
+    if (thirdIdx >= data.length) {
+      return 'incomplete';
     }
+    const thirdByte = data[thirdIdx];
+    if (thirdByte === 0x3f || thirdByte === 0x3e) {
+      // ESC [ ? or ESC [ > - this is a terminal response
+      return 'terminal';
+    }
+    return 'user';
   }
 
-  return false;
+  return 'user';
 }
 
 /**
  * Skip terminal response sequence
  * Returns the index position after skipping
  */
-function skipTerminalResponse(data: Buffer, startIdx: number): number {
+function skipTerminalResponse(
+  data: Buffer,
+  startIdx: number,
+): { nextIndex: number; complete: boolean } {
   if (startIdx >= data.length || data[startIdx] !== 0x1b) {
-    return startIdx + 1;
+    return { nextIndex: startIdx + 1, complete: true };
   }
 
   const nextIdx = startIdx + 1;
   if (nextIdx >= data.length) {
-    return nextIdx;
+    return { nextIndex: nextIdx, complete: false };
   }
 
   const nextByte = data[nextIdx];
@@ -114,14 +127,14 @@ function skipTerminalResponse(data: Buffer, startIdx: number): number {
     while (i < data.length) {
       // BEL (0x07) or ST (ESC \)
       if (data[i] === 0x07) {
-        return i + 1;
+        return { nextIndex: i + 1, complete: true };
       }
       if (data[i] === 0x1b && i + 1 < data.length && data[i + 1] === 0x5c) {
-        return i + 2;
+        return { nextIndex: i + 2, complete: true };
       }
       i++;
     }
-    return data.length;
+    return { nextIndex: data.length, complete: false };
   }
 
   // DCS/APC/PM sequences: ESC P/_/^ ... ST
@@ -130,11 +143,11 @@ function skipTerminalResponse(data: Buffer, startIdx: number): number {
     while (i < data.length) {
       // ST (ESC \)
       if (data[i] === 0x1b && i + 1 < data.length && data[i + 1] === 0x5c) {
-        return i + 2;
+        return { nextIndex: i + 2, complete: true };
       }
       i++;
     }
-    return data.length;
+    return { nextIndex: data.length, complete: false };
   }
 
   // CSI sequence: ESC [ ... (ends with 0x40-0x7E)
@@ -144,25 +157,24 @@ function skipTerminalResponse(data: Buffer, startIdx: number): number {
       const byte = data[i];
       // CSI sequences end with 0x40-0x7E
       if (byte >= 0x40 && byte <= 0x7e) {
-        return i + 1;
+        return { nextIndex: i + 1, complete: true };
       }
       i++;
     }
-    return data.length;
+    return { nextIndex: data.length, complete: false };
   }
 
-  return startIdx + 1;
+  return { nextIndex: startIdx + 1, complete: true };
 }
 
 /**
  * Filter terminal response sequences (like Kitty protocol responses, device attributes, etc.)
  * Preserve user input (including function keys like arrow keys)
- *
- * Note: This filter operates on a single data chunk. Terminal response sequences
- * split across multiple data events will not be detected and may leak into the
- * buffer. In practice this is rare since terminal responses arrive as complete chunks.
  */
-function filterTerminalResponses(data: Buffer): Buffer {
+function filterTerminalResponses(data: Buffer): {
+  filtered: Buffer;
+  trailingPartialTerminalResponse: Buffer;
+} {
   const result = Buffer.allocUnsafe(data.length);
   let writeIdx = 0;
   let i = 0;
@@ -170,10 +182,24 @@ function filterTerminalResponses(data: Buffer): Buffer {
   while (i < data.length) {
     // Detect ESC sequences
     if (data[i] === 0x1b) {
+      const sequenceType = classifyEscapeSequence(data, i);
+      if (sequenceType === 'incomplete') {
+        return {
+          filtered: result.subarray(0, writeIdx),
+          trailingPartialTerminalResponse: data.subarray(i),
+        };
+      }
       // Check if this is a terminal response (should be filtered out)
-      if (isTerminalResponse(data, i)) {
+      if (sequenceType === 'terminal') {
         // Skip the terminal response sequence
-        i = skipTerminalResponse(data, i);
+        const skipResult = skipTerminalResponse(data, i);
+        if (!skipResult.complete) {
+          return {
+            filtered: result.subarray(0, writeIdx),
+            trailingPartialTerminalResponse: data.subarray(i),
+          };
+        }
+        i = skipResult.nextIndex;
         continue;
       }
       // User input function keys (like arrow keys ESC [A), preserve
@@ -183,7 +209,10 @@ function filterTerminalResponses(data: Buffer): Buffer {
     i++;
   }
 
-  return result.subarray(0, writeIdx);
+  return {
+    filtered: result.subarray(0, writeIdx),
+    trailingPartialTerminalResponse: Buffer.alloc(0),
+  };
 }
 
 /**
@@ -210,6 +239,7 @@ export function startEarlyInputCapture(): void {
     totalBytes: 0,
     captured: false,
   };
+  pendingTerminalResponse = Buffer.alloc(0);
 
   debugLogger.debug('Starting early input capture');
 
@@ -227,8 +257,19 @@ export function startEarlyInputCapture(): void {
       return;
     }
 
+    const dataToFilter =
+      pendingTerminalResponse.length > 0
+        ? Buffer.concat([pendingTerminalResponse, data])
+        : data;
+    pendingTerminalResponse = Buffer.alloc(0);
+
     // Filter out terminal response sequences (like Kitty protocol responses)
-    const filtered = filterTerminalResponses(data);
+    const { filtered, trailingPartialTerminalResponse } =
+      filterTerminalResponses(dataToFilter);
+    if (trailingPartialTerminalResponse.length > 0) {
+      pendingTerminalResponse = Buffer.from(trailingPartialTerminalResponse);
+    }
+
     if (filtered.length > 0) {
       // Limit buffer size
       const newLength = inputBuffer.totalBytes + filtered.length;
@@ -279,12 +320,14 @@ export function stopEarlyInputCapture(): void {
  * For use by KeypressContext
  */
 export function getAndClearCapturedInput(): Buffer {
-  const buffer =
-    inputBuffer.chunks.length > 0
-      ? Buffer.concat(inputBuffer.chunks)
-      : Buffer.alloc(0);
+  const parts = [...inputBuffer.chunks];
+  if (pendingTerminalResponse.length > 0) {
+    parts.push(Buffer.from(pendingTerminalResponse));
+  }
+  const buffer = parts.length > 0 ? Buffer.concat(parts) : Buffer.alloc(0);
   inputBuffer.chunks = [];
   inputBuffer.totalBytes = 0;
+  pendingTerminalResponse = Buffer.alloc(0);
   // Keep captured=true — capture has completed, don't re-arm
   return buffer;
 }
@@ -322,4 +365,5 @@ export function resetCaptureState(): void {
     totalBytes: 0,
     captured: false,
   };
+  pendingTerminalResponse = Buffer.alloc(0);
 }
