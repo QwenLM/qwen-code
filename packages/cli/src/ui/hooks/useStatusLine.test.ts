@@ -329,6 +329,61 @@ describe('useStatusLine', () => {
       expect(input.context_window.remaining_percentage).toBe(50);
       expect(input.context_window.current_usage).toBe(65536);
     });
+
+    it('includes per-model metrics and aggregated token counts', () => {
+      mockUIState.sessionStats.metrics.models = {
+        'test-model': {
+          api: { totalRequests: 5, totalErrors: 1, totalLatencyMs: 2000 },
+          tokens: {
+            prompt: 1000,
+            candidates: 500,
+            total: 1500,
+            cached: 200,
+            thoughts: 100,
+          },
+        },
+      } as never;
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.metrics.models['test-model'].api.total_requests).toBe(5);
+      expect(input.metrics.models['test-model'].api.total_errors).toBe(1);
+      expect(input.metrics.models['test-model'].tokens.prompt).toBe(1000);
+      expect(input.metrics.models['test-model'].tokens.completion).toBe(500);
+      expect(input.metrics.models['test-model'].tokens.cached).toBe(200);
+      expect(input.metrics.models['test-model'].tokens.thoughts).toBe(100);
+      expect(input.context_window.total_input_tokens).toBe(1000);
+      expect(input.context_window.total_output_tokens).toBe(500);
+    });
+
+    it('falls back to zero when contextWindowSize is unavailable', () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValueOnce(null);
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.context_window.context_window_size).toBe(0);
+      expect(input.context_window.used_percentage).toBe(0);
+    });
+
+    it('falls back to "unknown" when getCliVersion returns empty', () => {
+      mockConfig.getCliVersion.mockReturnValueOnce('');
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.version).toBe('unknown');
+    });
+
+    it('falls back to model from config when currentModel is empty', () => {
+      mockUIState.currentModel = '';
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.model.display_name).toBe('test-model');
+    });
   });
 
   // --- Stale generation handling ---
@@ -416,6 +471,29 @@ describe('useStatusLine', () => {
 
       expect(result.current.text).toBeNull();
     });
+
+    it('cancels pending debounce and kills child when config is removed', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo hello' });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Trigger a debounced update (timer is pending)
+      mockUIState.currentModel = 'new-model';
+      rerender();
+
+      // Remove config before debounce fires
+      setStatusLineConfig(undefined);
+      rerender();
+
+      expect(mockKill).toHaveBeenCalled();
+
+      // Advancing past debounce should not trigger another exec
+      const callsBefore = vi.mocked(child_process.exec).mock.calls.length;
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(vi.mocked(child_process.exec).mock.calls.length).toBe(callsBefore);
+    });
   });
 
   // --- Cleanup on unmount ---
@@ -499,6 +577,29 @@ describe('useStatusLine', () => {
       // Should re-execute immediately (not debounced)
       expect(child_process.exec).toHaveBeenCalledTimes(2);
       expect(lastExecCommand).toBe('echo second');
+    });
+
+    it('cancels pending debounce when command changes', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo first' });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Trigger a debounced update
+      mockUIState.currentModel = 'new-model';
+      rerender();
+
+      // Change command before debounce fires
+      setStatusLineConfig({ type: 'command', command: 'echo second' });
+      rerender();
+
+      // Immediate re-exec from command change (mount + command change = 2)
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+
+      // Debounce fires but should not cause a third exec (was cleared)
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
     });
   });
 
