@@ -84,7 +84,7 @@ export * from './tools/lsp.js';
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
 export * from './tools/mcp-tool.js';
-export * from './tools/memoryTool.js';
+export * from './memory/const.js';
 export * from './tools/read-file.js';
 export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
@@ -119,6 +119,22 @@ export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
 export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
+
+// ============================================================================
+// Managed Auto-Memory
+// ============================================================================
+
+// MemoryManager is the single public API for all memory operations.
+// Production code: config.getMemoryManager().method(...)
+// Tests: new MemoryManager()
+export * from './memory/manager.js';
+
+// Foundational utilities (paths, storage scaffold, type definitions, constants)
+// that are legitimately needed by UI code (MemoryDialog, commands, etc.)
+export * from './memory/types.js';
+export * from './memory/paths.js';
+export * from './memory/store.js';
+export * from './memory/const.js';
 
 // ============================================================================
 // IDE Support
@@ -257,12 +273,25 @@ export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/tool-utils.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
+export * from './utils/forkedAgent.js';
+export * from './utils/sideQuery.js';
 
 // ============================================================================
 // OAuth & Authentication
 // ============================================================================
 
 export * from './qwen/qwenOAuth2.js';
+
+// ============================================================================
+// Message Bus Types
+// ============================================================================
+
+export {
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from './confirmation-bus/types.js';
+export { MessageBus } from './confirmation-bus/message-bus.js';
 
 // ============================================================================
 // Testing Utilities
@@ -277,11 +306,20 @@ export * from './test-utils/index.js';
 
 export * from './hooks/types.js';
 export { HookSystem, HookRegistry } from './hooks/index.js';
-export type { HookRegistryEntry } from './hooks/index.js';
+export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
+export { type StopFailureErrorType } from './hooks/types.js';
 
-// Export hook triggers for notification hooks
+// Export hook triggers for all hook events
 export {
   fireNotificationHook,
   firePermissionRequestHook,
+  firePreToolUseHook,
+  firePostToolUseHook,
+  firePostToolUseFailureHook,
   type NotificationHookResult,
+  type PermissionRequestHookResult,
+  type PreToolUseHookResult,
+  type PostToolUseHookResult,
+  type PostToolUseFailureHookResult,
+  generateToolUseId,
 } from './core/toolHookTriggers.js';

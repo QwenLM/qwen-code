@@ -103,13 +103,6 @@ export function AuthDialog(): React.JSX.Element {
   // Main authentication entries (flat three-option layout)
   const mainItems = [
     {
-      key: AuthType.QWEN_OAUTH,
-      title: t('Qwen OAuth'),
-      label: t('Qwen OAuth'),
-      description: t('Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15'),
-      value: AuthType.QWEN_OAUTH as MainOption,
-    },
-    {
       key: 'CODING_PLAN',
       title: t('Alibaba Cloud Coding Plan'),
       label: t('Alibaba Cloud Coding Plan'),
@@ -124,6 +117,13 @@ export function AuthDialog(): React.JSX.Element {
       label: t('API Key'),
       description: t('Bring your own API key'),
       value: 'API_KEY' as MainOption,
+    },
+    {
+      key: AuthType.QWEN_OAUTH,
+      title: t('Qwen OAuth'),
+      label: t('Qwen OAuth'),
+      description: t('Discontinued — switch to Coding Plan or API Key'),
+      value: AuthType.QWEN_OAUTH as MainOption,
     },
   ];
 
@@ -289,7 +289,16 @@ export function AuthDialog(): React.JSX.Element {
       return;
     }
 
-    // For Qwen OAuth, proceed directly
+    // Qwen OAuth free tier discontinued — show warning instead of proceeding
+    if (value === AuthType.QWEN_OAUTH) {
+      setErrorMessage(
+        t(
+          'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
+        ),
+      );
+      return;
+    }
+
     await onAuthSelect(value);
   };
 
