@@ -8,10 +8,11 @@ import type { CommandContext, SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
 import type { HistoryItemInsightProgress } from '../types.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 import { join } from 'path';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import { createDebugLogger, Storage } from '@qwen-code/qwen-code-core';
+import { resolveOutputLanguage } from '../../utils/languageUtils.js';
 import open from 'open';
 
 const logger = createDebugLogger('DataProcessor');
@@ -32,8 +33,28 @@ export const insightCommand: SlashCommand = {
       if (!context.services.config) {
         throw new Error('Config service is not available');
       }
+
+      // Get user's language settings
+      const uiLanguage = getCurrentLanguage();
+      const outputLanguageSetting =
+        context.services.settings?.merged?.general?.outputLanguage;
+      const outputLanguage = resolveOutputLanguage(outputLanguageSetting);
+
+      // Display language-aware message
+      context.ui.addItem(
+        {
+          type: MessageType.INFO,
+          text: t('Generating insights in {{language}}...', {
+            language: outputLanguage,
+          }),
+        },
+        Date.now(),
+      );
+
       const insightGenerator = new StaticInsightGenerator(
         context.services.config,
+        uiLanguage,
+        outputLanguage,
       );
 
       const updateProgress = (
@@ -51,14 +72,6 @@ export const insightCommand: SlashCommand = {
         };
         context.ui.setPendingItem(progressItem);
       };
-
-      context.ui.addItem(
-        {
-          type: MessageType.INFO,
-          text: t('This may take a couple minutes. Sit tight!'),
-        },
-        Date.now(),
-      );
 
       // Initial progress
       updateProgress(t('Starting insight generation...'), 0);

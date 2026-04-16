@@ -18,10 +18,16 @@ import { updateSymlink, Storage, type Config } from '@qwen-code/qwen-code-core';
 export class StaticInsightGenerator {
   private dataProcessor: DataProcessor;
   private templateRenderer: TemplateRenderer;
+  private uiLanguage: string;
 
-  constructor(config: Config) {
-    this.dataProcessor = new DataProcessor(config);
+  constructor(
+    config: Config,
+    uiLanguage: string = 'en',
+    outputLanguage: string = 'English',
+  ) {
+    this.dataProcessor = new DataProcessor(config, outputLanguage);
     this.templateRenderer = new TemplateRenderer();
+    this.uiLanguage = uiLanguage;
   }
 
   // Ensure the output directory exists
@@ -76,8 +82,14 @@ export class StaticInsightGenerator {
       onProgress,
     );
 
+    // Set the language for the report
+    insights.language = this.uiLanguage;
+
     // Render HTML
-    const html = await this.templateRenderer.renderInsightHTML(insights);
+    const html = await this.templateRenderer.renderInsightHTML(
+      insights,
+      this.uiLanguage,
+    );
 
     // Generate timestamped output path
     const outputPath = await this.generateOutputPath(outputDir);

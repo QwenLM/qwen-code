@@ -1859,4 +1859,148 @@ export default {
     '未处于计划模式。请先使用 "/plan" 进入计划模式。',
 
   "Set up Qwen Code's status line UI": '配置 Qwen Code 的状态栏',
+
+  // ============================================================================
+  // Insight Report - CLI Messages
+  // ============================================================================
+  'Generating insights...': '正在生成洞察...',
+  'This may take a couple minutes. Sit tight!':
+    '这可能需要几分钟时间，请耐心等待！',
+  'Starting insight generation...': '开始生成洞察...',
+  'Insight report generated successfully!': '洞察报告生成成功！',
+  'Insights ready.': '洞察已就绪。',
+  'Failed to generate insights: {{error}}': '生成洞察失败：{{error}}',
+  'Opening insights in your browser: {{path}}':
+    '正在浏览器中打开洞察：{{path}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    '洞察已生成于：{{path}}。请在浏览器中打开此文件。',
+  'Generating insights in {{language}}...': '正在使用 {{language}} 生成洞察...',
+
+  // ============================================================================
+  // Insight Report - HTML Report Static Text
+  // ============================================================================
+  // Header
+  insight_title: 'Qwen Code 洞察',
+  insight_messages_across_sessions:
+    '{{messages}} 条消息，共 {{sessions}} 个会话',
+  insight_personalized_journey: '您的个性化编程旅程与模式',
+
+  // Stats
+  insight_stat_messages: '消息',
+  insight_stat_lines: '代码行',
+  insight_stat_files: '文件',
+  insight_stat_days: '天数',
+  insight_stat_msgs_per_day: '日均消息',
+
+  // Charts
+  insight_active_hours: '活跃时段',
+  insight_morning: '上午',
+  insight_afternoon: '下午',
+  insight_evening: '傍晚',
+  insight_night: '夜间',
+  insight_time_morning: '06:00 - 12:00',
+  insight_time_afternoon: '12:00 - 18:00',
+  insight_time_evening: '18:00 - 22:00',
+  insight_time_night: '22:00 - 06:00',
+  insight_activity_heatmap: '活动热力图',
+  insight_heatmap_subtitle: '显示过去一年的活动',
+  insight_less: '较少',
+  insight_more: '较多',
+  insight_activities: '次活动',
+  insight_month_jan: '1月',
+  insight_month_feb: '2月',
+  insight_month_mar: '3月',
+  insight_month_apr: '4月',
+  insight_month_may: '5月',
+  insight_month_jun: '6月',
+  insight_month_jul: '7月',
+  insight_month_aug: '8月',
+  insight_month_sep: '9月',
+  insight_month_oct: '10月',
+  insight_month_nov: '11月',
+  insight_month_dec: '12月',
+
+  // Qualitative - At a Glance
+  insight_at_a_glance: '快速概览',
+  insight_whats_working: '进展顺利的：',
+  insight_whats_hindering: '阻碍你的：',
+  insight_quick_wins: '可以尝试的快速方法：',
+  insight_ambitious_workflows: '雄心勃勃的工作流：',
+  insight_see_more_wins: '你做的令人印象深刻的事 →',
+  insight_see_more_friction: '出现问题的地方 →',
+  insight_see_more_features: '可以尝试的功能 →',
+  insight_see_more_horizon: '未来展望 →',
+
+  // Qualitative - Navigation TOC
+  insight_nav_work: '你的工作内容',
+  insight_nav_usage: '你如何使用 Qwen Code',
+  insight_nav_wins: '令人印象深刻的事',
+  insight_nav_friction: '出现问题的地方',
+  insight_nav_features: '可以尝试的功能',
+  insight_nav_patterns: '新的使用模式',
+  insight_nav_horizon: '未来展望',
+
+  // Qualitative - Project Areas
+  insight_what_you_work_on: '你的工作内容',
+  insight_sessions_count: '约 {{count}} 个会话',
+  insight_what_you_wanted: '你的目标',
+  insight_top_tools_used: '常用工具',
+
+  // Qualitative - Interaction Style
+  insight_how_you_use: '你如何使用 Qwen Code',
+  insight_key_pattern: '关键模式：',
+
+  // Qualitative - Impressive Workflows
+  insight_impressive_things: '你做的令人印象深刻的事',
+  insight_what_helped_most: '最有帮助的（Qwen 的能力）',
+  insight_outcomes: '结果',
+
+  // Qualitative - Friction Points
+  insight_where_things_go_wrong: '出现问题的地方',
+  insight_primary_friction_types: '主要摩擦类型',
+  insight_inferred_satisfaction: '推断满意度（模型估计）',
+  insight_unclear: '不明确',
+
+  // Qualitative - Improvements
+  insight_features_to_try: '可以尝试的 Qwen Code 功能',
+  insight_suggested_qwen_md: '建议的 QWEN.md 补充',
+  insight_qwen_md_hint: '只需将此复制到 Qwen Code 即可添加到你的 QWEN.md。',
+  insight_copy_all_checked: '复制所有已选中 ({{count}})',
+  insight_copied_all: '已全部复制！',
+  insight_why_for_you: '为什么适合你：',
+  insight_features_hint: '只需将此复制到 Qwen Code，它就会为你设置好。',
+  insight_new_ways_to_use: '使用 Qwen Code 的新方式',
+  insight_patterns_hint: '只需将此复制到 Qwen Code，它就会引导你完成。',
+  insight_paste_into_qwen: '粘贴到 Qwen Code：',
+
+  // Qualitative - Future Opportunities
+  insight_on_the_horizon: '未来展望',
+  insight_getting_started: '入门方法：',
+
+  // Buttons & UI
+  insight_no_data: '暂无洞察数据',
+  insight_export_card: '导出卡片',
+  insight_light_theme: '浅色主题',
+  insight_dark_theme: '深色主题',
+  insight_export_not_available: '导出功能不可用。',
+  insight_export_failed: '导出卡片失败，请重试。',
+  insight_copy: '复制',
+  insight_copied: '已复制！',
+
+  // Share Card
+  insight_share_sessions: '会话',
+  insight_share_lines_changed: '代码变更',
+  insight_share_streak: '连续天数',
+  insight_share_best_streak: '最佳连续',
+  insight_share_activity: '活动 · {{days}} 个活跃日',
+  insight_share_generated: '由 Qwen Code 生成 ·',
+  insight_share_github: 'github.com/QwenLM/qwen-code',
+  insight_share_brand: 'qwen.ai',
+
+  // DataProcessor progress messages
+  insight_scanning_chat_history: '正在扫描聊天历史...',
+  insight_crunching_numbers: '正在处理数据',
+  insight_preparing_sessions: '正在准备会话...',
+  insight_generating_personalized: '正在生成个性化洞察...',
+  insight_assembling_report: '正在组装报告...',
 };

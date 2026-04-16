@@ -1,8 +1,9 @@
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 import type { InsightData } from './types';
+import { ti } from './i18n';
 
-// Header Component
+// Header component
 export function Header({
   data,
   dateRangeStr,
@@ -15,12 +16,15 @@ export function Header({
   return (
     <header className="mb-8 space-y-3 text-center">
       <h1 className="text-3xl font-semibold text-slate-900 md:text-4xl">
-        Qwen Code Insights
+        {ti('insight_title')}
       </h1>
       <p className="text-sm text-slate-600">
         {totalMessages
-          ? `${totalMessages} messages across ${totalSessions} sessions`
-          : 'Your personalized coding journey and patterns'}
+          ? ti('insight_messages_across_sessions', {
+              messages: String(totalMessages),
+              sessions: String(totalSessions),
+            })
+          : ti('insight_personalized_journey')}
         {dateRangeStr && ` | ${dateRangeStr}`}
       </p>
     </header>
@@ -33,8 +37,6 @@ export function StatsRow({ data }: { data: InsightData }) {
     totalLinesAdded = 0,
     totalLinesRemoved = 0,
     totalFiles = 0,
-    // totalSessions = 0,
-    // totalHours = 0,
   } = data;
 
   const heatmapKeys = Object.keys(data.heatmap || {});
@@ -54,25 +56,25 @@ export function StatsRow({ data }: { data: InsightData }) {
     <div className="stats-row">
       <div className="stat">
         <div className="stat-value">{totalMessages}</div>
-        <div className="stat-label">Messages</div>
+        <div className="stat-label">{ti('insight_stat_messages')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">
           +{totalLinesAdded}/-{totalLinesRemoved}
         </div>
-        <div className="stat-label">Lines</div>
+        <div className="stat-label">{ti('insight_stat_lines')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{totalFiles}</div>
-        <div className="stat-label">Files</div>
+        <div className="stat-label">{ti('insight_stat_files')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{daysSpan}</div>
-        <div className="stat-label">Days</div>
+        <div className="stat-label">{ti('insight_stat_days')}</div>
       </div>
       <div className="stat">
         <div className="stat-value">{msgsPerDay}</div>
-        <div className="stat-label">Msgs/Day</div>
+        <div className="stat-label">{ti('insight_stat_msgs_per_day')}</div>
       </div>
     </div>
   );

@@ -31,6 +31,8 @@ export interface InsightData {
   primarySuccess?: Record<string, number>;
   outcomes?: Record<string, number>;
   topGoals?: Record<string, number>;
+  /** The UI language code used for localizing the HTML report (e.g., 'en', 'zh', 'ja'). */
+  language?: string;
 }
 
 export interface StreakData {

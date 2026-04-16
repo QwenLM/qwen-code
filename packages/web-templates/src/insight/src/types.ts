@@ -9,6 +9,10 @@ declare global {
     Chart: any;
     html2canvas: any;
     INSIGHT_DATA: InsightData;
+    /** The UI language code for the insight report (e.g., 'en', 'zh', 'ja'). */
+    INSIGHT_LANGUAGE: string;
+    /** Translation dictionary for the insight report static text. */
+    INSIGHT_TRANSLATIONS: Record<string, string>;
   }
 }
 

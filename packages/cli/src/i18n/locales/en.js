@@ -2054,4 +2054,157 @@ export default {
     'Not in plan mode. Use "/plan" to enter plan mode first.',
 
   "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+
+  // ============================================================================
+  // Insight Report - CLI Messages
+  // ============================================================================
+  'Generating insights...': 'Generating insights...',
+  'This may take a couple minutes. Sit tight!':
+    'This may take a couple minutes. Sit tight!',
+  'Starting insight generation...': 'Starting insight generation...',
+  'Insight report generated successfully!':
+    'Insight report generated successfully!',
+  'Insights ready.': 'Insights ready.',
+  'Failed to generate insights: {{error}}':
+    'Failed to generate insights: {{error}}',
+  'Opening insights in your browser: {{path}}':
+    'Opening insights in your browser: {{path}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    'Insights generated at: {{path}}. Please open this file in your browser.',
+  'Generating insights in {{language}}...':
+    'Generating insights in {{language}}...',
+
+  // ============================================================================
+  // Insight Report - HTML Report Static Text
+  // ============================================================================
+  // Header
+  insight_title: 'Qwen Code Insights',
+  insight_messages_across_sessions:
+    '{{messages}} messages across {{sessions}} sessions',
+  insight_personalized_journey: 'Your personalized coding journey and patterns',
+
+  // Stats
+  insight_stat_messages: 'Messages',
+  insight_stat_lines: 'Lines',
+  insight_stat_files: 'Files',
+  insight_stat_days: 'Days',
+  insight_stat_msgs_per_day: 'Msgs/Day',
+
+  // Charts
+  insight_active_hours: 'Active Hours',
+  insight_morning: 'Morning',
+  insight_afternoon: 'Afternoon',
+  insight_evening: 'Evening',
+  insight_night: 'Night',
+  insight_time_morning: '06:00 - 12:00',
+  insight_time_afternoon: '12:00 - 18:00',
+  insight_time_evening: '18:00 - 22:00',
+  insight_time_night: '22:00 - 06:00',
+  insight_activity_heatmap: 'Activity Heatmap',
+  insight_heatmap_subtitle: 'Showing past year of activity',
+  insight_less: 'Less',
+  insight_more: 'More',
+  insight_activities: 'activities',
+  insight_month_jan: 'Jan',
+  insight_month_feb: 'Feb',
+  insight_month_mar: 'Mar',
+  insight_month_apr: 'Apr',
+  insight_month_may: 'May',
+  insight_month_jun: 'Jun',
+  insight_month_jul: 'Jul',
+  insight_month_aug: 'Aug',
+  insight_month_sep: 'Sep',
+  insight_month_oct: 'Oct',
+  insight_month_nov: 'Nov',
+  insight_month_dec: 'Dec',
+
+  // Qualitative - At a Glance
+  insight_at_a_glance: 'At a Glance',
+  insight_whats_working: "What's working:",
+  insight_whats_hindering: "What's hindering you:",
+  insight_quick_wins: 'Quick wins to try:',
+  insight_ambitious_workflows: 'Ambitious workflows:',
+  insight_see_more_wins: 'Impressive Things You Did →',
+  insight_see_more_friction: 'Where Things Go Wrong →',
+  insight_see_more_features: 'Features to Try →',
+  insight_see_more_horizon: 'On the Horizon →',
+
+  // Qualitative - Navigation TOC
+  insight_nav_work: 'What You Work On',
+  insight_nav_usage: 'How You Use Qwen Code',
+  insight_nav_wins: 'Impressive Things',
+  insight_nav_friction: 'Where Things Go Wrong',
+  insight_nav_features: 'Features to Try',
+  insight_nav_patterns: 'New Usage Patterns',
+  insight_nav_horizon: 'On the Horizon',
+
+  // Qualitative - Project Areas
+  insight_what_you_work_on: 'What You Work On',
+  insight_sessions_count: '~{{count}} sessions',
+  insight_what_you_wanted: 'What You Wanted',
+  insight_top_tools_used: 'Top Tools Used',
+
+  // Qualitative - Interaction Style
+  insight_how_you_use: 'How You Use Qwen Code',
+  insight_key_pattern: 'Key pattern:',
+
+  // Qualitative - Impressive Workflows
+  insight_impressive_things: 'Impressive Things You Did',
+  insight_what_helped_most: "What Helped Most (Qwen's Capabilities)",
+  insight_outcomes: 'Outcomes',
+
+  // Qualitative - Friction Points
+  insight_where_things_go_wrong: 'Where Things Go Wrong',
+  insight_primary_friction_types: 'Primary Friction Types',
+  insight_inferred_satisfaction: 'Inferred Satisfaction (model-estimated)',
+  insight_unclear: 'Unclear',
+
+  // Qualitative - Improvements
+  insight_features_to_try: 'Existing Qwen Code Features to Try',
+  insight_suggested_qwen_md: 'Suggested QWEN.md Additions',
+  insight_qwen_md_hint:
+    'Just copy this into Qwen Code to add it to your QWEN.md.',
+  insight_copy_all_checked: 'Copy All Checked ({{count}})',
+  insight_copied_all: 'Copied All!',
+  insight_why_for_you: 'Why for you:',
+  insight_features_hint:
+    "Just copy this into Qwen Code and it'll set it up for you.",
+  insight_new_ways_to_use: 'New Ways to Use Qwen Code',
+  insight_patterns_hint:
+    "Just copy this into Qwen Code and it'll walk you through it.",
+  insight_paste_into_qwen: 'Paste into Qwen Code:',
+
+  // Qualitative - Future Opportunities
+  insight_on_the_horizon: 'On the Horizon',
+  insight_getting_started: 'Getting started:',
+
+  // Qualitative - Memorable Moment
+  // (no static text, just displays LLM content)
+
+  // Buttons & UI
+  insight_no_data: 'No insight data available',
+  insight_export_card: 'Export Card',
+  insight_light_theme: 'Light Theme',
+  insight_dark_theme: 'Dark Theme',
+  insight_export_not_available: 'Export functionality is not available.',
+  insight_export_failed: 'Failed to export card. Please try again.',
+  insight_copy: 'Copy',
+  insight_copied: 'Copied!',
+
+  // Share Card
+  insight_share_sessions: 'Sessions',
+  insight_share_lines_changed: 'Lines Changed',
+  insight_share_streak: 'Streak',
+  insight_share_best_streak: 'Best Streak',
+  insight_share_activity: 'Activity · {{days}} active days',
+  insight_share_generated: 'Generated by Qwen Code ·',
+  insight_share_github: 'github.com/QwenLM/qwen-code',
+  insight_share_brand: 'qwen.ai',
+
+  // DataProcessor progress messages
+  insight_scanning_chat_history: 'Scanning chat history...',
+  insight_crunching_numbers: 'Crunching the numbers',
+  insight_preparing_sessions: 'Preparing sessions...',
+  insight_generating_personalized: 'Generating personalized insights...',
+  insight_assembling_report: 'Assembling report...',
 };
