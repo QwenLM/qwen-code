@@ -51,7 +51,16 @@ export enum StreamEventType {
 
 export type StreamEvent =
   | { type: StreamEventType.CHUNK; value: GenerateContentResponse }
-  | { type: StreamEventType.RETRY; retryInfo?: RetryInfo };
+  | {
+      type: StreamEventType.RETRY;
+      retryInfo?: RetryInfo;
+      /**
+       * When true, the retry is a continuation (multi-turn recovery) rather
+       * than a fresh restart. The UI should keep the accumulated text buffer
+       * so the continuation appends to the existing partial output.
+       */
+      isContinuation?: boolean;
+    };
 
 /**
  * Options for retrying due to invalid content from the model.
@@ -76,19 +85,24 @@ const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
 const INVALID_STREAM_RETRY_CONFIG = {
   /**
    * Maximum number of retries for transient stream errors (NO_FINISH_REASON,
-   * NO_RESPONSE_TEXT).
+   * NO_RESPONSE_TEXT, EMPTY_STREAM).
    *
    * Raised from 2 → 3 after production traces (sessions 188c5d3e, 934160dd)
-   * showed DashScope NO_FINISH_REASON storms lasting 2–3 minutes. With
-   * linear back-off (3 s + 6 s + 9 s = 18 s total wait), three retries give
-   * the provider a meaningful recovery window — and for subagents there is
-   * an additional outer retry layer in AgentToolInvocation that multiplies
-   * coverage to ~2 minutes.
+   * showed DashScope NO_FINISH_REASON storms lasting 2–3 minutes.
+   *
+   * Raised from 3 → 5 after observing EMPTY_STREAM cases in DataWorks /
+   * PAI / glm-5 (session bb9759c4) where the first few attempts may all
+   * return zero chunks but later attempts can recover. With linear back-off
+   * (3+6+9+12+15s = 45 s total wait), five retries cover ~45 s of provider
+   * recovery window. Beyond that, the user can press Ctrl+Y for manual
+   * retry on the surfaced error — manual retries are the right tool for
+   * "stable empty" failures (auth/quota/filter) where the cause likely
+   * needs out-of-band intervention.
    */
-  maxRetries: 3,
+  maxRetries: 5,
   /**
    * Initial delay in milliseconds; multiplied by (retryCount) for linear
-   * back-off: 3 s → 6 s → 9 s.
+   * back-off: 3 s → 6 s → 9 s → 12 s → 15 s.
    *
    * Raised from 2 s after production traces showed DashScope
    * NO_FINISH_REASON bursts lasting 2–3 minutes under /review fan-out.
@@ -105,6 +119,27 @@ const RATE_LIMIT_RETRY_OPTIONS = {
   maxRetries: 10,
   delayMs: 60000,
 };
+
+/**
+ * Maximum multi-turn recovery attempts for the mid-stream cut-off path.
+ * Each attempt keeps the partial response in history and injects a recovery
+ * user message so the model can continue from where it left off.
+ *
+ * Triggered when a stream closes without a finishReason while text is
+ * already being produced (e.g. DataWorks gateway idle timeout mid-response,
+ * seen in prod session ca35fb55).
+ */
+const MAX_OUTPUT_RECOVERY_ATTEMPTS = 3;
+
+/**
+ * Recovery message for the "stream cut off mid-response" scenario (no
+ * finishReason, no tool call, but text already delivered). Injected as a
+ * user turn so the model resumes the response it was about to complete.
+ */
+const CUTOFF_RECOVERY_MESSAGE =
+  'Your previous response ended unexpectedly before you finished. ' +
+  'Continue directly from where you left off — no apology, no recap. ' +
+  'If you were about to call a tool, emit it now.';
 
 /**
  * Creates a promise that resolves after the specified delay, but can be
@@ -272,11 +307,26 @@ function extractCuratedHistory(comprehensiveHistory: Content[]): Content[] {
 /**
  * Custom error to signal that a stream completed with invalid content,
  * which should trigger a retry.
+ *
+ * Three subtypes distinguish the failure mode for diagnostics and retry
+ * strategy selection (e.g. non-streaming fallback for OpenAI providers):
+ *
+ * - `EMPTY_STREAM`: zero chunks received from the provider. Typically a
+ *   backend issue (auth/quota/filter) rather than a transport glitch.
+ * - `NO_FINISH_REASON`: chunks arrived but the stream closed without a
+ *   finishReason AND without usable content. Suggests mid-stream cut-off.
+ * - `NO_RESPONSE_TEXT`: finishReason arrived but there is no usable
+ *   content — model explicitly finished with nothing useful.
  */
-export class InvalidStreamError extends Error {
-  readonly type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT';
+export type InvalidStreamErrorType =
+  | 'NO_FINISH_REASON'
+  | 'NO_RESPONSE_TEXT'
+  | 'EMPTY_STREAM';
 
-  constructor(message: string, type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT') {
+export class InvalidStreamError extends Error {
+  readonly type: InvalidStreamErrorType;
+
+  constructor(message: string, type: InvalidStreamErrorType) {
     super(message);
     this.name = 'InvalidStreamError';
     this.type = type;
@@ -294,6 +344,17 @@ export class GeminiChat {
   // A promise to represent the current state of the message being sent to the
   // model.
   private sendPromise: Promise<void> = Promise.resolve();
+
+  /**
+   * Set by `processStreamResponse` when a stream ended without a finishReason
+   * and without a tool call, but text content had already been delivered —
+   * i.e. the model was cut off mid-response. Consumed by `sendMessageStream`
+   * to decide whether to trigger multi-turn recovery (auto-continue).
+   *
+   * Reset to false at the start of every stream so stale cut-off flags from
+   * a prior turn never leak into the next one.
+   */
+  private lastTurnCutOff = false;
 
   /**
    * Creates a new GeminiChat instance.
@@ -602,6 +663,76 @@ export class GeminiChat {
           }
         }
 
+        // ---------------------------------------------------------------
+        // Mid-stream cut-off recovery (auto-continue).
+        //
+        // Triggered when processStreamResponse set `lastTurnCutOff` —
+        // i.e. a stream closed without a finishReason and without a tool
+        // call, but text content was already delivered. The most likely
+        // cause is an upstream gateway idle timeout that severed the SSE
+        // mid-response (see prod session ca35fb55 — "让我更新合并方案：")
+        // before the model could emit its planned tool call.
+        //
+        // We keep the partial in history and inject a CUTOFF_RECOVERY_MESSAGE
+        // user turn so the model continues from where it left off, up to
+        // MAX_OUTPUT_RECOVERY_ATTEMPTS rounds. Trigger condition is purely
+        // structural — no content pattern matching.
+        // ---------------------------------------------------------------
+        if (lastError === null && self.lastTurnCutOff) {
+          let cutOffRecoveryCount = 0;
+          let cutOffFinishReason: string | undefined;
+          let stillCutOff = true;
+          while (
+            stillCutOff &&
+            cutOffRecoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
+          ) {
+            cutOffRecoveryCount++;
+            debugLogger.info(
+              `Stream cut off mid-response. ` +
+                `Recovery attempt ${cutOffRecoveryCount}/${MAX_OUTPUT_RECOVERY_ATTEMPTS}.`,
+            );
+            self.history.push(
+              createUserContent([{ text: CUTOFF_RECOVERY_MESSAGE }]),
+            );
+            yield { type: StreamEventType.RETRY, isContinuation: true };
+            const recoveryContents = self.getHistory(true);
+            // Reset before the recovery stream; processStreamResponse will
+            // set it again if the stream is also cut.
+            self.lastTurnCutOff = false;
+            cutOffFinishReason = undefined;
+            try {
+              const recoveryStream = await self.makeApiCallAndProcessStream(
+                model,
+                recoveryContents,
+                params,
+                prompt_id,
+              );
+              for await (const chunk of recoveryStream) {
+                const fr = chunk.candidates?.[0]?.finishReason;
+                if (fr) cutOffFinishReason = fr;
+                yield { type: StreamEventType.CHUNK, value: chunk };
+              }
+            } catch (recoveryError) {
+              if (
+                self.history.length > 0 &&
+                self.history[self.history.length - 1].role === 'user'
+              ) {
+                self.history.pop();
+              }
+              debugLogger.warn(
+                'Cut-off recovery attempt failed; stopping recovery loop.',
+                recoveryError,
+              );
+              break;
+            }
+            // Continue looping only if the recovery stream was also cut
+            // off the same way. A real finishReason, a tool call, or any
+            // other terminal condition exits the loop.
+            stillCutOff =
+              self.lastTurnCutOff && cutOffFinishReason === undefined;
+          }
+        }
+
         if (lastError) {
           if (lastError instanceof InvalidStreamError) {
             const totalAttempts = invalidStreamRetryCount + 1;
@@ -712,9 +843,15 @@ export class GeminiChat {
   private shouldAttemptNonStreamingFallback(
     error: InvalidStreamError,
   ): boolean {
+    // Non-streaming fallback is useful when the streaming path is broken but
+    // the completion API may still work (e.g. gateway mis-buffering an SSE
+    // stream). Applies to both mid-stream cut-offs (NO_FINISH_REASON) and
+    // truly empty streams (EMPTY_STREAM) — at worst it fails identically, at
+    // best it recovers the turn without a user-visible error.
     return (
       this.config.getContentGeneratorConfig()?.authType ===
-        AuthType.USE_OPENAI && error.type === 'NO_FINISH_REASON'
+        AuthType.USE_OPENAI &&
+      (error.type === 'NO_FINISH_REASON' || error.type === 'EMPTY_STREAM')
     );
   }
 
@@ -951,8 +1088,14 @@ export class GeminiChat {
 
     let hasToolCall = false;
     let hasFinishReason = false;
+    let chunkCount = 0;
+    // Clear any cut-off flag left behind by a previous turn. Set later in
+    // this method if the stream ends with text but no finishReason / tool
+    // call.
+    this.lastTurnCutOff = false;
 
     for await (const chunk of streamResponse) {
+      chunkCount++;
       // Use ||= to avoid later usage-only chunks (no candidates) overwriting
       // a finishReason that was already seen in an earlier chunk.
       hasFinishReason ||=
@@ -1054,50 +1197,45 @@ export class GeminiChat {
     }
 
     // ---------------------------------------------------------------------------
-    // Stream validation — why this matters and what can go wrong
+    // Stream validation
     // ---------------------------------------------------------------------------
     //
-    // ROOT CAUSE (observed in production via DashScope pipeline):
-    //   Some model providers / gateways terminate the SSE stream WITHOUT sending
-    //   a `finishReason` field (e.g. "STOP", "SAFETY"). This violates the
-    //   streaming protocol contract. Known triggers include:
-    //     - Transient network interruptions between gateway and model backend
-    //     - Model refusing to respond to nonsensical / policy-violating input
-    //       but not emitting a proper SAFETY finish reason
-    //     - Provider-side timeout or internal error that silently closes the
-    //       connection instead of sending an error frame
-    //
-    //   The absence of `finishReason` is the ONLY signal we have — the HTTP
-    //   status is 200, the SSE stream closes cleanly, and no error is thrown
-    //   by the transport layer.
-    //
-    // IMPACT (before this fix):
-    //   ALL missing-finishReason cases were treated identically: the already-
-    //   streamed content (visible to the user in the TUI) was silently
-    //   discarded, the request was retried up to 2 times, and if still failing
-    //   the user saw "[API Error: Model stream ended without a finish reason.]"
-    //   This was especially bad when the model had already delivered useful
-    //   partial content (e.g. half a code block) — the user saw it disappear
-    //   and then got an error.
-    //
-    // FIX — three-way validation:
-    //   1. Tool call present → always accept (tool calls may lack finishReason)
-    //   2. No tool call, no content, no finishReason → throw NO_FINISH_REASON
-    //      (genuinely broken / empty stream, retry is appropriate)
-    //   3. No tool call, has finishReason, but no content → throw NO_RESPONSE_TEXT
-    //      (model explicitly finished but gave nothing useful, retry is appropriate)
-    //   4. No tool call, has content, but no finishReason → ACCEPT with warning
-    //      (content was already streamed to user; discarding it is worse than
-    //       accepting a potentially truncated response)
-    //
-    // Additionally, `hasAnyContent` now includes thought/reasoning text so that
-    // thinking-mode models (which may emit only thought parts) are not
-    // incorrectly rejected as "empty".
+    // Providers occasionally violate the streaming protocol contract. Observed
+    // failure modes, all surfaced as plain SSE closure with HTTP 200:
+    //   - EMPTY_STREAM:       no semantic chunks delivered to this validator.
+    //                         Typically a backend issue (auth/quota/content-
+    //                         filter), but could also be a provider stream made
+    //                         entirely of keepalives / filtered-empty chunks.
+    //                         Seen in prod session bb9759c4 on glm-5.
+    //   - NO_FINISH_REASON:   some chunks arrived but the stream closed without
+    //                         a finishReason AND without usable content. Rare;
+    //                         worth retrying as a transient glitch.
+    //   - NO_RESPONSE_TEXT:   finishReason arrived but content is empty.
+    //   - CUT-OFF (no error): chunks arrived, text was streamed, but no
+    //                         finishReason AND no tool call. Gateway idle
+    //                         timeout or mid-stream network cut-off. The
+    //                         partial is preserved in history and the
+    //                         `lastTurnCutOff` flag is set so the outer
+    //                         sendMessageStream loop can trigger multi-turn
+    //                         recovery (auto-continue). See session
+    //                         ca35fb55.
     // ---------------------------------------------------------------------------
     const hasAnyContent = contentText || thoughtText;
     if (!hasToolCall) {
+      if (chunkCount === 0) {
+        // No semantic chunks reached this validator — distinct from
+        // NO_FINISH_REASON so diagnostics and UX can hint at provider-side
+        // root causes without over-claiming what happened on the wire.
+        throw new InvalidStreamError(
+          'Model returned no usable stream content. ' +
+            'This typically indicates a backend issue — check provider ' +
+            'auth, quota, content filter, or stream gateway behavior.',
+          'EMPTY_STREAM',
+        );
+      }
       if (!hasFinishReason && !hasAnyContent) {
-        // Genuinely broken stream — no content delivered, no finish signal.
+        // Chunks came through but the stream closed without a finish signal
+        // or any usable content.
         throw new InvalidStreamError(
           'Model stream ended without a finish reason.',
           'NO_FINISH_REASON',
@@ -1108,16 +1246,25 @@ export class GeminiChat {
           'Model stream ended with empty response text.',
           'NO_RESPONSE_TEXT',
         );
-      } else if (!hasFinishReason && hasAnyContent) {
-        // Stream was cut off but useful content has already been delivered.
-        // Accept the partial response to preserve user-visible output rather
-        // than discarding it and showing an error.
+      } else if (!hasFinishReason && contentText) {
+        // Stream cut off mid-response but text was already delivered. Do NOT
+        // silently accept as a final turn — the model may have been about to
+        // emit a tool call when the connection was cut (e.g. DataWorks
+        // gateway idle timeout at ~60s while the model was still thinking).
+        // Keep the partial in history and set a flag so sendMessageStream can
+        // trigger the recovery loop (auto-continue). This replaces the old
+        // `e0841ec0b` silent-accept fallback with a structural signal that
+        // doesn't require content pattern matching.
         debugLogger.warn(
-          'Stream ended without a finish reason but has content ' +
+          'Stream ended without a finish reason but has text ' +
             `(${contentText.length} chars text, ${thoughtText.length} chars thought). ` +
-            'Accepting partial response to preserve user-visible output.',
+            'Flagging for multi-turn recovery (auto-continue).',
         );
+        this.lastTurnCutOff = true;
       }
+      // Note: thought-only + no finish is accepted as-is (no recovery). Thinking
+      // models legitimately emit only thought parts before being cut; continuing
+      // on a thought-only turn risks the model thrashing with no visible output.
     }
 
     this.history.push({

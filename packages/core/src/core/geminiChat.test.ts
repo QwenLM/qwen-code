@@ -156,7 +156,8 @@ describe('GeminiChat', async () => {
       await expect(collecting).rejects.toThrow(InvalidStreamError);
     })();
     await vi.advanceTimersByTimeAsync(0);
-    await vi.advanceTimersByTimeAsync(35_000);
+    // 5 retries with linear back-off (3+6+9+12+15s = 45s) plus buffer.
+    await vi.advanceTimersByTimeAsync(60_000);
     await resultPromise;
   }
 
@@ -228,59 +229,6 @@ describe('GeminiChat', async () => {
       const modelTurn = history[1]!;
       expect(modelTurn?.parts?.length).toBe(1); // The empty part is discarded
       expect(modelTurn?.parts![0]!.functionCall).toBeDefined();
-    });
-
-    it('should accept content when stream ends with an empty part and has no finishReason but had prior content', async () => {
-      // Scenario: Stream delivered valid content, then an empty trailing chunk, but
-      // never sent a finishReason. Since there is meaningful content, we accept
-      // the partial response (graceful degradation) instead of retrying.
-      const streamWithNoFinish = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: {
-                role: 'model',
-                parts: [{ text: 'Initial content...' }],
-              },
-            },
-          ],
-        } as unknown as GenerateContentResponse;
-        yield {
-          candidates: [
-            {
-              content: {
-                role: 'model',
-                parts: [{ text: '' }],
-              },
-            },
-          ],
-        } as unknown as GenerateContentResponse;
-      })();
-
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        streamWithNoFinish,
-      );
-
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test message' },
-        'prompt-id-no-finish-empty-end',
-      );
-
-      // Should NOT throw — partial content is accepted gracefully
-      await expect(
-        (async () => {
-          for await (const _ of stream) {
-            // consume stream
-          }
-        })(),
-      ).resolves.not.toThrow();
-
-      // Verify partial content preserved in history
-      const history = chat.getHistory();
-      expect(history.length).toBe(2);
-      const modelTurn = history[1]!;
-      expect(modelTurn.parts![0]!.text).toBe('Initial content...');
     });
 
     it('should succeed if the stream ends with an invalid part but has a finishReason and contained a valid part', async () => {
@@ -596,48 +544,255 @@ describe('GeminiChat', async () => {
       ).resolves.not.toThrow();
     });
 
-    it('should accept partial content when stream has text but no finish reason (graceful degradation)', async () => {
-      // Scenario: Model streamed valid text but the connection was cut off before
-      // sending a finishReason. The CLI should accept the partial response rather
-      // than discarding it, since the content is already visible to the user.
-      const streamWithContentButNoFinish = (async function* () {
-        yield {
-          candidates: [
-            {
-              content: {
-                role: 'model',
-                parts: [{ text: 'some response' }],
-              },
-              // No finishReason — simulates a transient network cut-off
-            },
-          ],
-        } as unknown as GenerateContentResponse;
-      })();
+    it('should auto-continue when stream is cut mid-response (no finish + text + no tool call), and succeed if the continuation emits a tool call', async () => {
+      // Regression for production session ca35fb55. Stream 1 delivers
+      // plain text without a finishReason and without a tool call — this
+      // is the structural signature of a mid-stream cut-off (e.g. gateway
+      // idle timeout while the model was about to emit a tool call). The
+      // recovery loop should inject a CUTOFF_RECOVERY_MESSAGE user turn
+      // and re-query; stream 2 delivers the intended tool call and the
+      // overall turn succeeds without the user seeing an error.
+      vi.mocked(mockContentGenerator.generateContentStream)
+        .mockImplementationOnce(async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: 'Let me update the plan' }],
+                  },
+                  // No finishReason — simulates gateway cut-off
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        )
+        .mockImplementationOnce(async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [
+                      { functionCall: { name: 'update_plan', args: {} } },
+                    ],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+        );
 
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        streamWithContentButNoFinish,
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'please update the plan' },
+        'prompt-id-cutoff-auto-continue',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      // Exactly one recovery round happened → 2 provider calls total.
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+
+      // One RETRY event with isContinuation=true was surfaced to the UI.
+      const continuationRetries = events.filter(
+        (e) =>
+          e.type === StreamEventType.RETRY &&
+          (e as { isContinuation?: boolean }).isContinuation === true,
+      );
+      expect(continuationRetries.length).toBe(1);
+
+      // The tool call from stream 2 reached the consumer.
+      const toolCallEvents = events.filter(
+        (e) =>
+          e.type === StreamEventType.CHUNK &&
+          (
+            e as { value: GenerateContentResponse }
+          ).value.candidates?.[0]?.content?.parts?.some((p) => p.functionCall),
+      );
+      expect(toolCallEvents.length).toBe(1);
+
+      // History has: user prompt + partial model turn + recovery user turn
+      // + second model turn with the tool call.
+      const history = chat.getHistory();
+      expect(history.length).toBe(4);
+      expect(history[0]!.role).toBe('user');
+      expect(history[1]!.role).toBe('model');
+      expect(history[1]!.parts![0]!.text).toBe('Let me update the plan');
+      expect(history[2]!.role).toBe('user'); // recovery message injected by CLI
+      expect(history[3]!.role).toBe('model');
+      expect(history[3]!.parts![0]!.functionCall).toBeDefined();
+    });
+
+    it('should bound cut-off recovery at MAX_OUTPUT_RECOVERY_ATTEMPTS and leave partial history intact', async () => {
+      // If every recovery round is also cut off, stop after the configured
+      // max attempts. Validates that the recovery loop is bounded and does
+      // not leave dangling user-role history entries on exit.
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: 'still cut off' }],
+                  },
+                  // No finishReason every time
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
       );
 
       const stream = await chat.sendMessageStream(
         'test-model',
         { message: 'test' },
-        'prompt-id-partial-accept',
+        'prompt-id-cutoff-recovery-bounded',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // 1 initial call + MAX_OUTPUT_RECOVERY_ATTEMPTS (3) recovery calls
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        4,
       );
 
-      // Should NOT throw — partial content is accepted gracefully
-      await expect(
-        (async () => {
-          for await (const _ of stream) {
-            // consume stream
-          }
-        })(),
-      ).resolves.not.toThrow();
-
-      // Verify the partial content was preserved in history
+      // Last entry in history must be a model turn, not a dangling user
+      // recovery message.
       const history = chat.getHistory();
-      expect(history.length).toBe(2); // user turn + model turn
-      const modelTurn = history[1]!;
-      expect(modelTurn.parts![0]!.text).toBe('some response');
+      expect(history[history.length - 1]!.role).toBe('model');
+    });
+
+    it('should NOT trigger cut-off recovery when stream ends normally with a finish reason', async () => {
+      // Normal completion must not invoke the recovery loop even once.
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: 'done' }],
+                  },
+                  finishReason: 'STOP',
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-id-normal-no-recovery',
+      );
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      // Exactly one API call, no continuation retries.
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+      const continuationRetries = events.filter(
+        (e) =>
+          e.type === StreamEventType.RETRY &&
+          (e as { isContinuation?: boolean }).isContinuation === true,
+      );
+      expect(continuationRetries.length).toBe(0);
+    });
+
+    it('should NOT trigger cut-off recovery when only thought content is present (no visible text)', async () => {
+      // Thinking-mode models may emit only a thought chunk and then get
+      // cut. The existing "accept thought-only" behavior is intentional —
+      // continuing on a turn with no visible output risks the model
+      // thrashing. The cut-off recovery trigger deliberately checks
+      // `contentText` (visible text), not `thoughtText`, so this case is
+      // accepted as-is without a recovery round.
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () =>
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [
+                      { thought: true, text: 'Analyzing the problem...' },
+                    ],
+                  },
+                  // No finishReason, no text, no tool call
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+          })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hi' },
+        'prompt-id-thought-only-no-recovery',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // No recovery round — only the initial call.
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        1,
+      );
+    });
+
+    it('should throw EMPTY_STREAM error type when the stream yields zero chunks', async () => {
+      // Regression for production session bb9759c4: GLM-5 endpoint
+      // returned status 200 with an SSE body containing zero chunks
+      // (duration ~17–78 ms, tokens=0, empty response_id). Before this
+      // fix, this was classified identically to "content streamed but
+      // finish_reason missing" (NO_FINISH_REASON), making it impossible
+      // to distinguish a truly-empty provider response (usually a
+      // backend auth/quota/filter issue) from a cut-off mid-stream.
+      vi.useFakeTimers();
+      try {
+        // A generator that yields nothing — not even a usage chunk.
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () => (async function* () {})());
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-id-zero-chunks',
+        );
+
+        const collecting = (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })();
+        const resultPromise = (async () => {
+          await expect(collecting).rejects.toMatchObject({
+            name: 'InvalidStreamError',
+            type: 'EMPTY_STREAM',
+          });
+        })();
+        await vi.advanceTimersByTimeAsync(0);
+        // 5 retries × linear backoff (3+6+9+12+15s = 45s) + buffer.
+        await vi.advanceTimersByTimeAsync(60_000);
+        await resultPromise;
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should throw InvalidStreamError when stream is truly empty with no finish reason', async () => {
@@ -1159,11 +1314,11 @@ describe('GeminiChat', async () => {
         );
         await expectStreamExhaustion(stream);
 
-        // Should be called 4 times (1 initial + 3 transient retries)
+        // Should be called 6 times (1 initial + 5 transient retries)
         expect(
           mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(4);
-        expect(mockLogContentRetry).toHaveBeenCalledTimes(3);
+        ).toHaveBeenCalledTimes(6);
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(5);
         expect(mockLogContentRetryFailure).toHaveBeenCalledTimes(1);
 
         // History should still contain the user message.
@@ -1271,11 +1426,12 @@ describe('GeminiChat', async () => {
           { message: 'hi' },
           'prompt-id-openai-empty-stream-fallback',
         );
-        const events = await collectStreamWithFakeTimers(stream, 35_000);
+        // 5 retries × linear backoff (3+6+9+12+15s = 45s) + buffer.
+        const events = await collectStreamWithFakeTimers(stream, 60_000);
 
         expect(
           mockContentGenerator.generateContentStream,
-        ).toHaveBeenCalledTimes(4);
+        ).toHaveBeenCalledTimes(6);
         expect(mockContentGenerator.generateContent).toHaveBeenCalledTimes(1);
         expect(
           events.some(
@@ -1286,8 +1442,8 @@ describe('GeminiChat', async () => {
           ),
         ).toBe(true);
 
-        // Verify telemetry: 3 stream retries + 1 non-stream fallback event
-        expect(mockLogContentRetry).toHaveBeenCalledTimes(4);
+        // Verify telemetry: 5 stream retries + 1 non-stream fallback event
+        expect(mockLogContentRetry).toHaveBeenCalledTimes(6);
         const lastRetryCall =
           mockLogContentRetry.mock.calls[
             mockLogContentRetry.mock.calls.length - 1
@@ -1295,7 +1451,7 @@ describe('GeminiChat', async () => {
         expect(lastRetryCall?.[1]).toMatchObject({
           'event.name': 'content_retry',
           error_type: 'NON_STREAM_FALLBACK',
-          attempt_number: 4,
+          attempt_number: 6,
           retry_delay_ms: 0,
           model: 'glm-5',
         });
