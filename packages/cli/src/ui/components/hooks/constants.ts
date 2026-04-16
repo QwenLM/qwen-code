@@ -180,6 +180,7 @@ export function getTranslatedSourceDisplayMap(): Record<
     [HooksConfigSource.User]: t('User Settings'),
     [HooksConfigSource.System]: t('System Settings'),
     [HooksConfigSource.Extensions]: t('Extensions'),
+    [HooksConfigSource.Session]: t('Session (temporary)'),
   };
 }
 

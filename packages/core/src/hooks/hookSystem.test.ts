@@ -11,6 +11,7 @@ import { HookRunner } from './hookRunner.js';
 import { HookAggregator } from './hookAggregator.js';
 import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
+import { SessionHooksManager } from './sessionHooksManager.js';
 import {
   HookType,
   HooksConfigSource,
@@ -59,6 +60,7 @@ describe('HookSystem', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
       getWorkingDir: vi.fn().mockReturnValue('/test/cwd'),
+      getAllowedHttpHookUrls: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
     mockHookRegistry = {
@@ -94,6 +96,7 @@ describe('HookSystem', () => {
       firePermissionRequestEvent: vi.fn(),
       fireSubagentStartEvent: vi.fn(),
       fireSubagentStopEvent: vi.fn(),
+      setMessagesProvider: vi.fn(),
     } as unknown as HookEventHandler;
 
     vi.mocked(HookRegistry).mockImplementation(() => mockHookRegistry);
@@ -116,6 +119,7 @@ describe('HookSystem', () => {
         mockHookPlanner,
         mockHookRunner,
         mockHookAggregator,
+        expect.any(SessionHooksManager),
       );
     });
   });
@@ -169,7 +173,7 @@ describe('HookSystem', () => {
       const mockHooks = [
         {
           config: {
-            type: HookType.Command,
+            type: HookType.Command as const,
             command: 'echo test',
             source: HooksConfigSource.Project,
           },
@@ -1660,6 +1664,25 @@ describe('HookSystem', () => {
 
       expect(result).toBeDefined();
       expect(result?.isBlockingDecision()).toBe(false);
+    });
+  });
+
+  describe('MessagesProvider', () => {
+    it('should set messagesProvider and forward to eventHandler', () => {
+      const provider = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', content: 'test' }]);
+
+      hookSystem.setMessagesProvider(provider);
+
+      expect(mockHookEventHandler.setMessagesProvider).toHaveBeenCalledWith(
+        provider,
+      );
+      expect(hookSystem.getMessagesProvider()).toBe(provider);
+    });
+
+    it('should return undefined when no provider is set', () => {
+      expect(hookSystem.getMessagesProvider()).toBeUndefined();
     });
   });
 });
