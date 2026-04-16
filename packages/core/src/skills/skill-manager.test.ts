@@ -950,9 +950,11 @@ Symlinked skill content`);
     });
 
     it('watcherIgnored should reject .git directories', () => {
-      expect(watcherIgnored('/skills/.git/config')).toBe(true);
-      expect(watcherIgnored('/skills/.git')).toBe(true);
-      expect(watcherIgnored('/skills/my-skill/SKILL.md')).toBe(false);
+      expect(watcherIgnored(path.join('/skills', '.git', 'config'))).toBe(true);
+      expect(watcherIgnored(path.join('/skills', '.git'))).toBe(true);
+      expect(watcherIgnored(path.join('/skills', 'my-skill', 'SKILL.md'))).toBe(
+        false,
+      );
     });
 
     it('watcherIgnored should reject special file types', () => {
