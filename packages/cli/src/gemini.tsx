@@ -67,6 +67,7 @@ import {
   startEarlyInputCapture,
   stopAndGetCapturedInput,
 } from './utils/earlyInputCapture.js';
+import { preconnectApi } from './utils/apiPreconnect.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
@@ -291,6 +292,7 @@ export async function main() {
   profileCheckpoint('main_entry');
   setupUnhandledRejectionHandler();
   const settings = loadSettings();
+
   await cleanupCheckpoints();
   profileCheckpoint('after_load_settings');
 
@@ -458,6 +460,19 @@ export async function main() {
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
     registerCleanup(() => config.shutdown());
+
+    // Startup optimization: preconnect API to warm TCP+TLS connection
+    // Only fire for flows that will make API calls
+    try {
+      const authType = config.getModelsConfig().getCurrentAuthType();
+      preconnectApi(authType, {
+        settingsBaseUrl: settings.merged.security?.auth?.baseUrl as
+          | string
+          | undefined,
+      });
+    } catch {
+      // If we can't get authType, skip preconnect - it's optional optimization
+    }
 
     // FIXME: list extensions after the config initialize
     // if (config.getListExtensions()) {
