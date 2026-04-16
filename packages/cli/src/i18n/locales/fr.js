@@ -1596,6 +1596,20 @@ export default {
     'Vous pouvez changer rapidement le mode de permission avec Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Essayez /insight pour générer des insights personnalisés depuis votre historique de chat.',
+  // DataWorks input placeholder
+  'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"':
+    'Saisissez votre message, par exemple：« Aidez-moi à vérifier mon identité et mes espaces de travail courants dans DataWorks ? »',
+  // DataWorks usage examples
+  '👤 Identity: "Help me verify my identity and permissions in DataWorks?"':
+    '👤 Identité : « Aidez-moi à vérifier mon identité et mes permissions dans DataWorks ? »',
+  '📊 Analysis: "Analyze the newly created nodes in the dataworks_analyze workspace in the past week and what they are doing?"':
+    "📊 Analyse : « Analysez les nœuds récemment créés dans l'espace de travail dataworks_analyze au cours de la dernière semaine et ce qu'ils font »",
+  '🧹 Governance: "In the dataworks_analyze workspace, help me find nodes that were created long ago but have never been published."':
+    "🧹 Gouvernance : « Dans l'espace de travail dataworks_analyze, aidez-moi à trouver des nœuds créés il y a longtemps mais qui n'ont jamais été publiés »",
+  '🔍 Troubleshooting: "The data in dwd_is_it_software_released_df and ads_is_it_sfw_moni_key_released_recycled_df are inconsistent, both have upstream ods_ism_it_software_key_released_df. Help me check what is different in their logic?"':
+    '🔍 Diagnostic : « Les données dans dwd_is_it_software_released_df et ads_is_it_sfw_moni_key_released_recycled_df sont incohérentes, toutes deux ont la source ods_ism_it_software_key_released_df. Vérifiez ce qui diffère dans leur logique »',
+  '🛠️ Fix: "In the employee table my_project.ods_emp_info_d, the department data for employee EMP001 is empty. Help me troubleshoot the cause and provide fix suggestions."':
+    "🛠️ Correction : « Dans la table des employés my_project.ods_emp_info_d, les données du service pour l'employé EMP001 sont vides. Aidez-moi à identifier la cause et à proposer des solutions »",
 
   // ============================================================================
   // Écran de sortie / Stats

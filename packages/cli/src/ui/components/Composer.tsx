@@ -110,7 +110,10 @@ export const Composer = () => {
           placeholder={
             vimEnabled
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
-              : '  ' + t('Type your message or @path/to/file')
+              : '  ' +
+                t(
+                  'Type your message, e.g. "Help me verify my identity and common workspaces in DataWorks?"',
+                )
           }
           promptSuggestion={uiState.promptSuggestion}
           onPromptSuggestionDismiss={uiState.dismissPromptSuggestion}
