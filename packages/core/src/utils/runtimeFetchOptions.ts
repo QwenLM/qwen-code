@@ -131,21 +131,55 @@ export function buildRuntimeFetchOptions(
   }
 }
 
+/**
+ * Cache of shared dispatcher instances keyed by proxy URL (undefined = no proxy).
+ * Ensures preconnect and SDK clients share the same connection pool.
+ */
+const dispatcherCache = new Map<string | undefined, Dispatcher>();
+
+/**
+ * Get or create a shared undici dispatcher for the given proxy configuration.
+ * The dispatcher is cached so that preconnect and subsequent SDK requests
+ * share the same connection pool, enabling TCP+TLS connection reuse.
+ *
+ * @param proxyUrl - Optional proxy URL; undefined for direct connections
+ * @returns A cached undici Dispatcher (Agent or ProxyAgent)
+ */
+export function getOrCreateSharedDispatcher(proxyUrl?: string): Dispatcher {
+  const cached = dispatcherCache.get(proxyUrl);
+  if (cached) {
+    return cached;
+  }
+
+  const dispatcher = proxyUrl
+    ? new ProxyAgent({
+        uri: proxyUrl,
+        headersTimeout: 0,
+        bodyTimeout: 0,
+      })
+    : new Agent({
+        headersTimeout: 0,
+        bodyTimeout: 0,
+      });
+
+  dispatcherCache.set(proxyUrl, dispatcher);
+  return dispatcher;
+}
+
+/**
+ * Reset the dispatcher cache (for testing only)
+ * @internal
+ */
+export function resetDispatcherCache(): void {
+  dispatcherCache.clear();
+}
+
 function buildFetchOptionsWithDispatcher(
   sdkType: SDKType,
   proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   try {
-    const dispatcher = proxyUrl
-      ? new ProxyAgent({
-          uri: proxyUrl,
-          headersTimeout: 0,
-          bodyTimeout: 0,
-        })
-      : new Agent({
-          headersTimeout: 0,
-          bodyTimeout: 0,
-        });
+    const dispatcher = getOrCreateSharedDispatcher(proxyUrl);
     return { fetchOptions: { dispatcher } };
   } catch {
     return sdkType === 'openai' ? undefined : {};
