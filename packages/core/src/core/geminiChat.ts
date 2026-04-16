@@ -575,8 +575,7 @@ export class GeminiChat {
 
           // Recovery: if the escalated response is also truncated, keep the
           // partial response in history and inject a recovery message so the
-          // model can continue from where it left off. This mirrors Claude
-          // Code's multi-turn recovery strategy.
+          // model can continue from where it left off.
           let recoveryCount = 0;
           while (
             escalatedFinishReason === FinishReason.MAX_TOKENS &&
