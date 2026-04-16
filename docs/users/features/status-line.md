@@ -5,14 +5,21 @@
 The status line lets you run a shell command whose output is displayed in the footer's left section. The command receives structured JSON context via stdin, so it can show session-aware information like the current model, token usage, git branch, or anything else you can script.
 
 ```
-With status line (default approval mode — 1 row):
+Single-line status (default approval mode — 1 row):
 ┌─────────────────────────────────────────────────────────────────┐
 │  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line
 └─────────────────────────────────────────────────────────────────┘
 
-With status line + non-default mode (2 rows):
+Multi-line status (up to 2 lines — 2 rows):
 ┌─────────────────────────────────────────────────────────────────┐
-│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line
+│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line 1
+│  ████████░░░░░░░░░░ 34% context                                │  ← status line 2
+└─────────────────────────────────────────────────────────────────┘
+
+Multi-line status + non-default mode (3 rows max):
+┌─────────────────────────────────────────────────────────────────┐
+│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line 1
+│  ████████░░░░░░░░░░ 34% context                                │  ← status line 2
 │  auto-accept edits (shift + tab to cycle)                       │  ← mode indicator
 └─────────────────────────────────────────────────────────────────┘
 ```

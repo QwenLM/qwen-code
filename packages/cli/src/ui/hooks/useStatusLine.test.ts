@@ -358,7 +358,7 @@ describe('useStatusLine', () => {
     });
 
     it('falls back to zero when contextWindowSize is unavailable', () => {
-      mockConfig.getContentGeneratorConfig.mockReturnValueOnce(null);
+      mockConfig.getContentGeneratorConfig.mockReturnValueOnce(null as never);
       setStatusLineConfig({ type: 'command', command: 'cat' });
       renderHook(() => useStatusLine());
 
