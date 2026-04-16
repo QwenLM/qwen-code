@@ -282,7 +282,7 @@ export * from './test-utils/index.js';
 
 export * from './hooks/types.js';
 export { HookSystem, HookRegistry } from './hooks/index.js';
-export type { HookRegistryEntry } from './hooks/index.js';
+export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
 export { type StopFailureErrorType } from './hooks/types.js';
 
 // Export hook triggers for all hook events

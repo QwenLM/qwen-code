@@ -435,6 +435,7 @@ export default {
   'User Settings': 'ユーザー設定',
   'System Settings': 'システム設定',
   Extensions: '拡張機能',
+  'Session (temporary)': 'セッション（一時）',
   // Hooks - Status
   '✓ Enabled': '✓ 有効',
   '✗ Disabled': '✗ 無効',
