@@ -161,6 +161,9 @@ export interface CliArgs {
   excludeTools: string[] | undefined;
   authType: string | undefined;
   channel: string | undefined;
+  jsonFd?: number | undefined;
+  jsonFile?: string | undefined;
+  inputFile?: string | undefined;
 }
 
 function normalizeOutputFormat(
@@ -459,6 +462,25 @@ export async function parseArguments(): Promise<CliArgs> {
             'Include partial assistant messages when using stream-json output.',
           default: false,
         })
+        .option('json-fd', {
+          type: 'number',
+          description:
+            'File descriptor for structured JSON event output (dual output mode). ' +
+            'The TUI renders normally on stdout while JSON events are written to this fd. ' +
+            'The caller must provide this fd via spawn stdio configuration.',
+        })
+        .option('json-file', {
+          type: 'string',
+          description:
+            'File path for structured JSON event output (dual output mode). ' +
+            'Can be a regular file, FIFO (named pipe), or /dev/fd/N.',
+        })
+        .option('input-file', {
+          type: 'string',
+          description:
+            'File path for receiving remote input commands (bidirectional sync). ' +
+            'An external process writes JSONL commands; the TUI watches and processes them.',
+        })
         .option('continue', {
           alias: 'c',
           type: 'boolean',
@@ -573,6 +595,9 @@ export async function parseArguments(): Promise<CliArgs> {
           }
           if (argv['resume'] && !isValidSessionId(argv['resume'] as string)) {
             return `Invalid --resume: "${argv['resume']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
+          }
+          if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
+            return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
           }
           return true;
         }),
@@ -1134,6 +1159,9 @@ export async function loadCliConfig(
     hooks: settings.hooks, // Keep for backward compatibility
     disableAllHooks: settings.disableAllHooks ?? false,
     channel: argv.channel,
+    jsonFd: argv.jsonFd,
+    jsonFile: argv.jsonFile,
+    inputFile: argv.inputFile,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
     // always be true and the settings file can never disable recording.

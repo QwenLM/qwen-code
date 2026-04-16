@@ -29,6 +29,7 @@ import type {
   CLIResultMessageSuccess,
   CLIUserMessage,
   ContentBlock,
+  ControlMessage,
   ExtendedUsage,
   TextBlock,
   ThinkingBlock,
@@ -407,6 +408,15 @@ export abstract class BaseJsonOutputAdapter {
    * @param message - Message to emit (already contains parent_tool_use_id if applicable)
    */
   protected abstract emitMessageImpl(message: CLIMessage): void;
+
+  /**
+   * Emits a control-plane message (control_request / control_response).
+   * Only meaningful in streaming adapters; batch adapters inherit this
+   * no-op since control messages are not collected into the final array.
+   */
+  protected emitControlMessageImpl(_message: ControlMessage): void {
+    // Default: no-op for non-streaming / batch adapters.
+  }
 
   /**
    * Abstract method to determine if stream events should be emitted.
@@ -1059,6 +1069,49 @@ export abstract class BaseJsonOutputAdapter {
       data,
     } as const;
     this.emitMessageImpl(systemMessage);
+  }
+
+  /**
+   * Emits a `can_use_tool` permission control_request so an external consumer
+   * can approve or deny the tool call. Pairs with {@link emitControlResponse}.
+   */
+  emitPermissionRequest(
+    requestId: string,
+    toolName: string,
+    toolUseId: string,
+    input: unknown,
+    blockedPath: string | null = null,
+  ): void {
+    const message: ControlMessage = {
+      type: 'control_request',
+      request_id: requestId,
+      request: {
+        subtype: 'can_use_tool',
+        tool_name: toolName,
+        tool_use_id: toolUseId,
+        input,
+        permission_suggestions: null,
+        blocked_path: blockedPath,
+      },
+    };
+    this.emitControlMessageImpl(message);
+  }
+
+  /**
+   * Emits a control_response carrying a permission approval result.
+   * Used both to mirror TUI-native resolutions back to external consumers
+   * and to acknowledge externally-supplied confirmation_responses.
+   */
+  emitControlResponse(requestId: string, allowed: boolean): void {
+    const message: ControlMessage = {
+      type: 'control_response',
+      response: {
+        subtype: 'success',
+        request_id: requestId,
+        response: { allowed },
+      },
+    };
+    this.emitControlMessageImpl(message);
   }
 
   /**

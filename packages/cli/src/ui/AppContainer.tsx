@@ -53,6 +53,8 @@ import {
   IDLE_SPECULATION,
   ApprovalMode,
   type PermissionMode,
+  ToolConfirmationOutcome,
+  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -126,6 +128,8 @@ import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
+import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
+import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
@@ -727,6 +731,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    pendingToolCalls,
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -809,6 +814,105 @@ export const AppContainer = (props: AppContainerProps) => {
   // drainQueue reads the synchronous queueRef inside the hook, so it
   // stays consistent with popAllMessages even before React re-renders.
   midTurnDrainRef.current = drainQueue;
+
+  // Connect remote input watcher to submitQuery for bidirectional sync.
+  // When an external process writes a command to the input-file,
+  // the watcher calls submitQuery as if the user typed it in the TUI.
+  const remoteInput = useRemoteInput();
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setSubmitFn((text: string) => submitQuery(text));
+  }, [remoteInput, submitQuery]);
+
+  // Notify remote input watcher when TUI becomes idle so it can
+  // retry queued commands that were deferred while TUI was busy.
+  useEffect(() => {
+    if (!remoteInput) return;
+    if (streamingState === StreamingState.Idle) {
+      remoteInput.notifyIdle();
+    }
+  }, [remoteInput, streamingState]);
+
+  // Dual-output tool-confirmation bridge.
+  //
+  // When a tool call enters awaiting_approval we emit a `control_request`
+  // (subtype: can_use_tool) on the dual-output channel so an external
+  // consumer can decide. Whichever side resolves first (TUI native UI or
+  // `confirmation_response` written to --input-file) wins; we always emit
+  // a `control_response` mirroring the final decision so observers stay in
+  // sync.
+  const dualOutput = useDualOutput();
+  const confirmRequestMap = useRef(new Map<string, string>()); // requestId → callId
+  const confirmCallIdMap = useRef(new Map<string, string>()); // callId → requestId
+  const confirmEmitted = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (!dualOutput || !dualOutput.isConnected) return;
+    for (const tc of pendingToolCalls) {
+      if (
+        tc.status === 'awaiting_approval' &&
+        !confirmEmitted.current.has(tc.request.callId)
+      ) {
+        const requestId = crypto.randomUUID();
+        confirmRequestMap.current.set(requestId, tc.request.callId);
+        confirmCallIdMap.current.set(tc.request.callId, requestId);
+        confirmEmitted.current.add(tc.request.callId);
+        dualOutput.emitPermissionRequest(
+          requestId,
+          tc.request.name,
+          tc.request.callId,
+          tc.request.args,
+        );
+      }
+    }
+    // Detect tools that left awaiting_approval (TUI-native resolution) so we
+    // can emit a matching control_response back to external consumers.
+    for (const [callId, requestId] of confirmCallIdMap.current) {
+      const tc = pendingToolCalls.find((t) => t.request.callId === callId);
+      if (
+        tc &&
+        tc.status !== 'awaiting_approval' &&
+        confirmEmitted.current.has(callId)
+      ) {
+        const allowed = tc.status !== 'cancelled' && tc.status !== 'error';
+        dualOutput.emitControlResponse(requestId, allowed);
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      }
+    }
+  }, [dualOutput, pendingToolCalls]);
+
+  // Route confirmation_response commands written to --input-file back into
+  // the tool's onConfirm handler.
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setConfirmationHandler(
+      (requestId: string, allowed: boolean) => {
+        const callId = confirmRequestMap.current.get(requestId);
+        if (!callId) return;
+        const tc = pendingToolCalls.find(
+          (t) =>
+            t.request.callId === callId && t.status === 'awaiting_approval',
+        );
+        if (!tc) return;
+        const waitingTc = tc as WaitingToolCall;
+        if (!waitingTc.confirmationDetails?.onConfirm) return;
+        void waitingTc.confirmationDetails.onConfirm(
+          allowed
+            ? ToolConfirmationOutcome.ProceedOnce
+            : ToolConfirmationOutcome.Cancel,
+        );
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      },
+    );
+
+    return () => {
+      remoteInput.setConfirmationHandler(() => {});
+    };
+  }, [remoteInput, pendingToolCalls]);
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(

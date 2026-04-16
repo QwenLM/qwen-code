@@ -6,6 +6,7 @@ export default {
   arena: 'Agent Arena',
   skills: 'Skills',
   headless: 'Headless Mode',
+  'dual-output': 'Dual Output',
   checkpointing: {
     display: 'hidden',
   },

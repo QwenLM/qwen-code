@@ -438,6 +438,26 @@ export interface ConfigParameters {
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
+  /**
+   * File descriptor number for structured JSON event output (dual output mode).
+   * When set, Qwen Code outputs structured JSON events to this fd while
+   * continuing to render the TUI on stdout. The caller must provide this fd
+   * via spawn stdio configuration.
+   * Mutually exclusive with jsonFile.
+   */
+  jsonFd?: number;
+  /**
+   * File path for structured JSON event output (dual output mode).
+   * Can be a regular file, FIFO (named pipe), or /dev/fd/N.
+   * Mutually exclusive with jsonFd.
+   */
+  jsonFile?: string;
+  /**
+   * File path for receiving remote input commands (bidirectional sync mode).
+   * An external process writes JSONL commands to this file, and the TUI
+   * watches it to process messages as if the user typed them.
+   */
+  inputFile?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
@@ -637,6 +657,9 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
+  private readonly jsonFd: number | undefined;
+  private readonly jsonFile: string | undefined;
+  private readonly inputFile: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly disableAllHooks: boolean;
   /** User-level hooks (always loaded regardless of trust) */
@@ -775,6 +798,9 @@ export class Config {
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.channel = params.channel;
+    this.jsonFd = params.jsonFd;
+    this.jsonFile = params.jsonFile;
+    this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -2085,6 +2111,31 @@ export class Config {
 
   getChannel(): string | undefined {
     return this.channel;
+  }
+
+  /**
+   * Get the file descriptor for dual output JSON event stream.
+   * When set, the TUI mode will also emit structured JSON events to this fd.
+   */
+  getJsonFd(): number | undefined {
+    return this.jsonFd;
+  }
+
+  /**
+   * Get the file path for dual output JSON event stream.
+   * When set, the TUI mode will also emit structured JSON events to this file.
+   */
+  getJsonFile(): string | undefined {
+    return this.jsonFile;
+  }
+
+  /**
+   * Get the file path for remote input commands (bidirectional sync).
+   * When set, the TUI mode will watch this file for JSONL commands written
+   * by an external process and submit them as user messages.
+   */
+  getInputFile(): string | undefined {
+    return this.inputFile;
   }
 
   /**
