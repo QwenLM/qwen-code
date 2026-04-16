@@ -57,6 +57,7 @@ export default {
   'to search history': '搜索历史',
   'to paste images': '粘贴图片',
   'for external editor': '外部编辑器',
+  'to toggle compact mode': '切换紧凑模式',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':
     '关闭对话框、取消请求或退出应用程序',
@@ -1480,6 +1481,8 @@ export default {
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '试试 /insight，从聊天记录中生成个性化洞察。',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    '按 Ctrl+O 切换紧凑模式 ── 隐藏工具输出和思考过程，界面更简洁。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     '添加 QWEN.md 文件，为 Qwen Code 提供持久的项目上下文。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1839,6 +1842,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
   compact: '紧凑',
+  'compact mode: on (Ctrl+O off)': '紧凑模式：开（Ctrl+O 关闭）',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
