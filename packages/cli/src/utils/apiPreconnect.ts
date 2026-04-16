@@ -10,9 +10,16 @@
  * Principle: Fire a fire-and-forget HEAD request early in startup to warm
  * the TCP+TLS connection. Subsequent actual API calls reuse this connection,
  * saving 100-200ms.
+ *
+ * The preconnect uses the same shared undici dispatcher as the SDK clients,
+ * ensuring the warmed TCP+TLS connection is reused by subsequent API calls.
  */
 
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  detectRuntime,
+  getOrCreateSharedDispatcher,
+} from '@qwen-code/qwen-code-core';
 
 const debugLogger = createDebugLogger('PRECONNECT');
 
@@ -30,9 +37,9 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
 };
 
 /**
- * Check if preconnect should be skipped
+ * Check if preconnect should be skipped due to environment conditions
  */
-function shouldSkipPreconnect(settings: { baseUrl?: string }): boolean {
+function shouldSkipPreconnect(): boolean {
   // 1. Check proxy environment variables
   // Note: If NO_PROXY is set and target URL is in it, we don't need to skip
   // But for simplicity: skip if any proxy config is present
@@ -49,14 +56,6 @@ function shouldSkipPreconnect(settings: { baseUrl?: string }): boolean {
   // 2. Check custom CA certificate (may use enterprise TLS inspection)
   if (process.env['NODE_EXTRA_CA_CERTS']) {
     debugLogger.debug('Skipping preconnect: custom CA certificate configured');
-    return true;
-  }
-
-  // 3. User explicitly configured custom baseUrl (may use mTLS or private deployment)
-  if (settings.baseUrl && !isDefaultBaseUrl(settings.baseUrl)) {
-    debugLogger.debug(
-      'Skipping preconnect: custom baseUrl (may use mTLS or private deployment)',
-    );
     return true;
   }
 
@@ -92,64 +91,30 @@ function isDefaultBaseUrl(baseUrl: string): boolean {
 }
 
 /**
- * Environment variable to AuthType mapping
- */
-const ENV_BASE_URL_MAP: Record<string, string> = {
-  OPENAI_BASE_URL: 'openai',
-  ANTHROPIC_BASE_URL: 'anthropic',
-  GEMINI_BASE_URL: 'gemini',
-};
-
-/**
- * Get environment variable baseUrl for the given authType
- */
-function getEnvBaseUrlForAuthType(
-  authType: string | undefined,
-): string | undefined {
-  if (!authType) {
-    return undefined;
-  }
-
-  // Lookup the corresponding environment variable based on authType
-  for (const [envVar, mappedAuthType] of Object.entries(ENV_BASE_URL_MAP)) {
-    if (mappedAuthType === authType) {
-      return process.env[envVar];
-    }
-  }
-
-  return undefined;
-}
-
-/**
- * Get the target URL for preconnect
- * Priority: settingsBaseUrl > environment variable > default value
+ * Get the target URL for preconnect.
+ * Uses the already-resolved base URL from the model config, falling back
+ * to default URLs by authType.
  *
- * If custom baseUrl is set (non-default URL), return undefined to skip preconnect
+ * Only preconnects to known default URLs — custom URLs may not accept HEAD
+ * requests or may require mTLS / private deployment configurations.
  */
 function getPreconnectTargetUrl(
   authType: string | undefined,
-  settingsBaseUrl: string | undefined,
+  resolvedBaseUrl: string | undefined,
 ): string | undefined {
-  // 1. Get from settings
-  if (settingsBaseUrl) {
-    // If it's a default URL, use it; otherwise skip
-    if (isDefaultBaseUrl(settingsBaseUrl)) {
-      return settingsBaseUrl;
+  // 1. Use the resolved base URL from model config (already incorporates
+  //    modelProviders > cli > env > settings priority chain)
+  if (resolvedBaseUrl) {
+    if (isDefaultBaseUrl(resolvedBaseUrl)) {
+      return resolvedBaseUrl;
     }
+    debugLogger.debug(
+      'Skipping preconnect: resolved baseUrl is not a default URL',
+    );
     return undefined;
   }
 
-  // 2. Get from environment variable (lookup based on authType)
-  const envBaseUrl = getEnvBaseUrlForAuthType(authType);
-  if (envBaseUrl) {
-    // If it's a default URL, use it; otherwise skip
-    if (isDefaultBaseUrl(envBaseUrl)) {
-      return envBaseUrl;
-    }
-    return undefined;
-  }
-
-  // 3. Use default value
+  // 2. Fall back to default value by authType
   if (authType && DEFAULT_BASE_URLS[authType]) {
     return DEFAULT_BASE_URLS[authType];
   }
@@ -159,7 +124,8 @@ function getPreconnectTargetUrl(
 
 /**
  * Execute API preconnect
- * Use HEAD request to establish TCP+TLS connection without sending actual request body
+ * Use HEAD request to establish TCP+TLS connection without sending actual request body.
+ * Uses the shared undici dispatcher to ensure connection pool is shared with SDK clients.
  *
  * @param authType - Authentication type (openai, qwen-oauth, anthropic, etc.)
  * @param options - Configuration options
@@ -167,7 +133,7 @@ function getPreconnectTargetUrl(
 export function preconnectApi(
   authType: string | undefined,
   options: {
-    settingsBaseUrl?: string;
+    resolvedBaseUrl?: string;
   } = {},
 ): void {
   if (preconnectFired) {
@@ -187,16 +153,12 @@ export function preconnectApi(
     return;
   }
 
-  // Check skip conditions
-  if (
-    shouldSkipPreconnect({
-      baseUrl: options.settingsBaseUrl,
-    })
-  ) {
+  // Check environment skip conditions (proxy, custom CA)
+  if (shouldSkipPreconnect()) {
     return;
   }
 
-  const targetUrl = getPreconnectTargetUrl(authType, options.settingsBaseUrl);
+  const targetUrl = getPreconnectTargetUrl(authType, options.resolvedBaseUrl);
 
   if (!targetUrl) {
     debugLogger.debug('No target URL for preconnect');
@@ -204,6 +166,14 @@ export function preconnectApi(
   }
 
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
+
+  // Build fetch options with shared dispatcher for connection pool reuse.
+  // On Node.js, use the same undici dispatcher that SDK clients will use,
+  // so the warmed TCP+TLS connection is reused by subsequent API calls.
+  const dispatcherOptions: Record<string, unknown> =
+    detectRuntime() === 'node'
+      ? { dispatcher: getOrCreateSharedDispatcher() }
+      : {};
 
   // Fire HEAD request to warm connection (fire-and-forget)
   fetch(targetUrl, {
@@ -213,6 +183,7 @@ export function preconnectApi(
     headers: {
       'User-Agent': 'QwenCode-Preconnect/1.0',
     },
+    ...dispatcherOptions,
   })
     .then(() => {
       debugLogger.debug('Preconnect completed');

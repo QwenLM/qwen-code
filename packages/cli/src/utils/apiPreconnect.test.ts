@@ -11,6 +11,17 @@ import { preconnectApi, resetPreconnectState } from './apiPreconnect.js';
 const mockFetch = vi.fn().mockResolvedValue(undefined);
 global.fetch = mockFetch;
 
+// Mock the shared dispatcher functions from core
+const mockDispatcher = { fake: 'dispatcher' };
+vi.mock('@qwen-code/qwen-code-core', async () => {
+  const { createDebugLogger } = await import('@qwen-code/qwen-code-core');
+  return {
+    createDebugLogger,
+    detectRuntime: () => 'node',
+    getOrCreateSharedDispatcher: () => mockDispatcher,
+  };
+});
+
 describe('apiPreconnect', () => {
   beforeEach(() => {
     resetPreconnectState();
@@ -20,9 +31,6 @@ describe('apiPreconnect', () => {
     delete process.env['https_proxy'];
     delete process.env['HTTP_PROXY'];
     delete process.env['http_proxy'];
-    delete process.env['OPENAI_BASE_URL'];
-    delete process.env['ANTHROPIC_BASE_URL'];
-    delete process.env['GEMINI_BASE_URL'];
     delete process.env['QWEN_CODE_DISABLE_PRECONNECT'];
     delete process.env['NODE_EXTRA_CA_CERTS'];
     delete process.env['SANDBOX'];
@@ -62,23 +70,39 @@ describe('apiPreconnect', () => {
       preconnectApi('qwen-oauth');
       expect(mockFetch).not.toHaveBeenCalled();
     });
+  });
 
-    it('should skip when custom baseUrl is set', () => {
-      preconnectApi('openai', { settingsBaseUrl: 'https://custom.api.com/v1' });
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('should not skip when baseUrl is a default URL', () => {
-      preconnectApi('openai', { settingsBaseUrl: 'https://api.openai.com/v1' });
-      expect(mockFetch).toHaveBeenCalled();
-    });
-
-    it('should skip when baseUrl is a subdomain-spoofed URL resembling a default', () => {
-      resetPreconnectState();
+  describe('resolvedBaseUrl handling', () => {
+    it('should use resolvedBaseUrl when it is a default URL', () => {
       preconnectApi('openai', {
-        settingsBaseUrl: 'https://api.openai.com.malicious.com/v1',
+        resolvedBaseUrl: 'https://api.openai.com/v1',
+      });
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://api.openai.com/v1',
+        expect.objectContaining({ method: 'HEAD' }),
+      );
+    });
+
+    it('should skip when resolvedBaseUrl is a custom (non-default) URL', () => {
+      preconnectApi('openai', {
+        resolvedBaseUrl: 'https://custom.api.com/v1',
       });
       expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should skip when resolvedBaseUrl is a subdomain-spoofed URL', () => {
+      preconnectApi('openai', {
+        resolvedBaseUrl: 'https://api.openai.com.malicious.com/v1',
+      });
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to default URL when resolvedBaseUrl is undefined', () => {
+      preconnectApi('qwen-oauth');
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://coding.dashscope.aliyuncs.com',
+        expect.objectContaining({ method: 'HEAD' }),
+      );
     });
   });
 
@@ -107,40 +131,13 @@ describe('apiPreconnect', () => {
       );
     });
 
-    it('should use settings baseUrl when available', () => {
-      preconnectApi('openai', {
-        settingsBaseUrl: 'https://custom.openai.com/v1',
-      });
-      // Should skip because it's a custom URL
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('should use environment variable baseUrl when available', () => {
-      process.env['OPENAI_BASE_URL'] = 'https://custom.env.com/v1';
-      preconnectApi('openai');
-      // Should skip because it's a custom URL
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('should only check OPENAI_BASE_URL for openai authType', () => {
-      process.env['OPENAI_BASE_URL'] = 'https://api.openai.com/v1';
-      process.env['ANTHROPIC_BASE_URL'] = 'https://custom.anthropic.com/v1';
-      preconnectApi('openai');
-      // Should use OPENAI_BASE_URL (which is default), ignore ANTHROPIC_BASE_URL
+    it('should pass shared dispatcher on Node.js runtime', () => {
+      preconnectApi('qwen-oauth');
       expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.openai.com/v1',
-        expect.objectContaining({ method: 'HEAD' }),
-      );
-    });
-
-    it('should only check ANTHROPIC_BASE_URL for anthropic authType', () => {
-      process.env['ANTHROPIC_BASE_URL'] = 'https://api.anthropic.com';
-      process.env['OPENAI_BASE_URL'] = 'https://custom.openai.com/v1';
-      preconnectApi('anthropic');
-      // Should use ANTHROPIC_BASE_URL (which is default), ignore OPENAI_BASE_URL
-      expect(mockFetch).toHaveBeenCalledWith(
-        'https://api.anthropic.com',
-        expect.objectContaining({ method: 'HEAD' }),
+        expect.any(String),
+        expect.objectContaining({
+          dispatcher: { fake: 'dispatcher' },
+        }),
       );
     });
 

@@ -239,6 +239,11 @@ export * from './utils/request-tokenizer/supportedImageFormats.js';
 export { TextTokenizer } from './utils/request-tokenizer/textTokenizer.js';
 export * from './utils/retry.js';
 export * from './utils/ripgrepUtils.js';
+export {
+  detectRuntime,
+  getOrCreateSharedDispatcher,
+  resetDispatcherCache,
+} from './utils/runtimeFetchOptions.js';
 export * from './utils/schemaValidator.js';
 export * from './utils/shell-utils.js';
 export * from './utils/subagentGenerator.js';

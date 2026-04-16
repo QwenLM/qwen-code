@@ -371,12 +371,10 @@ export async function main() {
     // Startup optimization: preconnect API to warm TCP+TLS connection
     // Only fire for flows that will make API calls
     try {
-      const authType = config.getModelsConfig().getCurrentAuthType();
-      preconnectApi(authType, {
-        settingsBaseUrl: settings.merged.security?.auth?.baseUrl as
-          | string
-          | undefined,
-      });
+      const modelsConfig = config.getModelsConfig();
+      const authType = modelsConfig.getCurrentAuthType();
+      const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
+      preconnectApi(authType, { resolvedBaseUrl });
     } catch (error) {
       // If we can't get authType, skip preconnect - it's optional optimization
       debugLogger.debug(
