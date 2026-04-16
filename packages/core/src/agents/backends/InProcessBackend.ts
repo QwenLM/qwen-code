@@ -114,6 +114,7 @@ export class InProcessBackend implements Backend {
         initialTask: inProcessConfig.initialTask,
         maxTurnsPerMessage: runConfig.max_turns,
         maxTimeMinutesPerMessage: runConfig.max_time_minutes,
+        completeOnIdle: inProcessConfig.completeOnIdle,
         chatHistory: inProcessConfig.chatHistory,
       },
       core,
@@ -150,11 +151,20 @@ export class InProcessBackend implements Backend {
 
       debugLogger.info(`Spawned in-process agent: ${config.agentId}`);
     } catch (error) {
+      // Clean up registered state so the caller's rollback logic
+      // can detect the failure (spawnAgent must reject, not swallow).
+      this.agents.delete(config.agentId);
+      const idx = this.agentOrder.indexOf(config.agentId);
+      if (idx !== -1) this.agentOrder.splice(idx, 1);
+      if (this.activeAgentId === config.agentId) {
+        this.activeAgentId = this.agentOrder[0] ?? null;
+      }
+
       debugLogger.error(
         `Failed to start in-process agent "${config.agentId}":`,
         error,
       );
-      this.exitCallback?.(config.agentId, 1, null);
+      throw error;
     }
   }
 
@@ -228,6 +238,31 @@ export class InProcessBackend implements Backend {
 
     const result = await Promise.race([
       Promise.allSettled(promises).then(() => 'done' as const),
+      timeout,
+    ]);
+
+    clearTimeout(timerId!);
+    return result === 'done';
+  }
+
+  async waitForAgent(agentId: string, timeoutMs?: number): Promise<boolean> {
+    const agent = this.agents.get(agentId);
+    if (!agent) return false;
+
+    const completion = agent.waitForCompletion();
+
+    if (timeoutMs === undefined) {
+      await completion;
+      return true;
+    }
+
+    let timerId: ReturnType<typeof setTimeout>;
+    const timeout = new Promise<'timeout'>((resolve) => {
+      timerId = setTimeout(() => resolve('timeout'), timeoutMs);
+    });
+
+    const result = await Promise.race([
+      completion.then(() => 'done' as const),
       timeout,
     ]);
 

@@ -102,6 +102,8 @@ export enum SendMessageType {
   Hook = 'hook',
   /** Cron-fired prompt. Behaves like UserQuery but skips UserPromptSubmit hook. */
   Cron = 'cron',
+  /** Teammate message injected into the leader's conversation. */
+  Teammate = 'teammate',
 }
 
 export interface SendMessageOptions {
@@ -598,6 +600,7 @@ export class GeminiClient {
     if (
       messageType !== SendMessageType.Retry &&
       messageType !== SendMessageType.Cron &&
+      messageType !== SendMessageType.Teammate &&
       hooksEnabled &&
       messageBus &&
       this.config.hasHooksForEvent('UserPromptSubmit')
@@ -644,7 +647,8 @@ export class GeminiClient {
 
     if (
       messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.Cron
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Teammate
     ) {
       this.loopDetector.reset(prompt_id);
       this.lastPromptId = prompt_id;
@@ -803,7 +807,8 @@ export class GeminiClient {
     let requestToSent = await flatMapTextParts(request, async (text) => [text]);
     if (
       messageType === SendMessageType.UserQuery ||
-      messageType === SendMessageType.Cron
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Teammate
     ) {
       const systemReminders = [];
       const relevantAutoMemory = relevantAutoMemoryPromise

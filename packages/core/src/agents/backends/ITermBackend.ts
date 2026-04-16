@@ -243,6 +243,10 @@ export class ITermBackend implements Backend {
     });
   }
 
+  async waitForAgent(_agentId: string, timeoutMs?: number): Promise<boolean> {
+    return this.waitForAll(timeoutMs);
+  }
+
   // ─── Active Agent & Navigation ──────────────────────────────
 
   switchTo(agentId: string): void {

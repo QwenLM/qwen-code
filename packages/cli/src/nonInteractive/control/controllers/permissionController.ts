@@ -19,6 +19,8 @@ import type {
   ToolExecuteConfirmationDetails,
   ToolMcpConfirmationDetails,
   ApprovalMode,
+  TeammateApprovalRequestEvent,
+  ToolConfirmationPayload,
 } from '@qwen-code/qwen-code-core';
 import {
   InputFormat,
@@ -376,6 +378,79 @@ export class PermissionController extends BaseController {
         }
       }
     };
+  }
+
+  /**
+   * Handle a teammate tool approval request routed via the
+   * TEAMMATE_APPROVAL_REQUEST team event. Uses the same
+   * permission channel as the leader's own tool approvals
+   * (stream-json control request or local mode check).
+   */
+  async handleTeammateApproval(
+    event: TeammateApprovalRequestEvent,
+  ): Promise<void> {
+    try {
+      if (this.context.abortSignal?.aborted) {
+        await event.respond(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+
+      const inputFormat = this.context.config.getInputFormat?.();
+      const isStreamJsonMode = inputFormat === InputFormat.STREAM_JSON;
+
+      if (!isStreamJsonMode) {
+        const modeCheck = this.checkPermissionMode();
+        const outcome = modeCheck.allowed
+          ? ToolConfirmationOutcome.ProceedOnce
+          : ToolConfirmationOutcome.Cancel;
+        await event.respond(outcome);
+        return;
+      }
+
+      // Stream-json mode: ask SDK for permission.
+      const callId = `teammate-${event.teammateName}-${event.timestamp}`;
+      const response = await this.sendControlRequest(
+        {
+          subtype: 'can_use_tool',
+          tool_name: event.toolName,
+          tool_use_id: callId,
+          input: event.toolInput,
+          permission_suggestions: [],
+          blocked_path: null,
+        } as CLIControlPermissionRequest,
+        undefined,
+        this.context.abortSignal,
+      );
+
+      if (response.subtype !== 'success') {
+        await event.respond(ToolConfirmationOutcome.Cancel);
+        return;
+      }
+
+      const payload = (response.response || {}) as Record<string, unknown>;
+      const behavior = String(payload['behavior'] || '').toLowerCase();
+
+      if (behavior === 'allow') {
+        await event.respond(ToolConfirmationOutcome.ProceedOnce);
+      } else {
+        const cancelMessage =
+          typeof payload['message'] === 'string'
+            ? payload['message']
+            : undefined;
+        await event.respond(
+          ToolConfirmationOutcome.Cancel,
+          cancelMessage
+            ? ({ cancelMessage } as ToolConfirmationPayload)
+            : undefined,
+        );
+      }
+    } catch (error) {
+      this.debugLogger.error(
+        '[PermissionController] Teammate approval failed:',
+        error,
+      );
+      await event.respond(ToolConfirmationOutcome.Cancel);
+    }
   }
 
   /**

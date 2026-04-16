@@ -37,12 +37,15 @@ import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { PermissionMode } from '../hooks/types.js';
 import type { StopHookOutput } from '../hooks/types.js';
+import { isTeammate } from '../agents/team/identity.js';
 import { ApprovalMode } from '../config/config.js';
 
 export interface AgentParams {
   description: string;
   prompt: string;
   subagent_type?: string;
+  /** When set, spawn as a named teammate via TeamManager instead of a one-shot subagent. */
+  name?: string;
 }
 
 const debugLogger = createDebugLogger('AGENT');
@@ -169,6 +172,12 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'string',
           description: 'The type of specialized agent to use for this task',
         },
+        name: {
+          type: 'string',
+          description:
+            'When provided, spawn as a named teammate via the active team ' +
+            'instead of a one-shot subagent. Requires an active team context.',
+        },
       },
       required: ['description', 'prompt'],
       additionalProperties: false,
@@ -246,6 +255,8 @@ When NOT to use the Agent tool:
 - If you are searching for a specific class definition like "class Foo", use the ${ToolNames.GREP} tool instead, to find the match more quickly
 - If you are searching for code within a specific file or set of 2-3 files, use the ${ToolNames.READ_FILE} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
 - Other tasks that are not related to the agent descriptions above
+
+**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with \`name\` and \`team_name\` parameters. Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.
 
 
 Usage notes:
@@ -576,6 +587,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    // ─── Team routing ────────────────────────────────────
+    // When a team is active, route through TeamManager as a
+    // named teammate. Auto-generate a name from the
+    // description if none was provided.
+    if (this.config.getTeamManager() && !isTeammate()) {
+      if (!this.params.name) {
+        // Derive a short kebab-case name from the description.
+        this.params.name =
+          this.params.description
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, '-')
+            .replace(/^-|-$/g, '')
+            .slice(0, 30) || 'teammate';
+      }
+      return this.executeTeammate(signal);
+    }
+
     try {
       let subagentConfig: SubagentConfig;
       let extraHistory: Array<import('@google/genai').Content> | undefined;
@@ -940,6 +968,66 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       return {
         llmContent: `Failed to run subagent: ${errorMessage}`,
         returnDisplay: errorDisplay,
+      };
+    }
+  }
+
+  /**
+   * Spawn a named teammate via TeamManager.
+   * Returns immediately — the teammate runs concurrently.
+   * Messages from the teammate are delivered to the leader
+   * via TeamManager's inbox polling mechanism.
+   */
+  private async executeTeammate(_signal?: AbortSignal): Promise<ToolResult> {
+    const teamManager = this.config.getTeamManager();
+    if (!teamManager) {
+      return {
+        llmContent: 'No active team. Use TeamCreate to start a team first.',
+        returnDisplay: 'No active team. Use TeamCreate to start a team first.',
+        error: { message: 'No active team.' },
+      };
+    }
+
+    // Teammates cannot spawn sub-teammates (leader-only).
+    if (isTeammate()) {
+      return {
+        llmContent: 'Only the team leader can spawn teammates.',
+        returnDisplay: 'Only the team leader can spawn teammates.',
+        error: {
+          message: 'Only the team leader can spawn teammates.',
+        },
+      };
+    }
+
+    const name = this.params.name!;
+    try {
+      await teamManager.spawnTeammate({
+        name,
+        prompt: this.params.prompt,
+        agentType: this.params.subagent_type,
+        cwd: this.config.getCwd(),
+      });
+
+      // Return immediately — teammate runs concurrently.
+      const msg =
+        `Teammate "${name}" is now running concurrently.` +
+        ` Task: ${this.params.description}` +
+        '\n\nYou will receive their messages as they' +
+        ' arrive. Do NOT call task_list to check on' +
+        ' them — teammates report results via' +
+        ' send_message. Spawn more teammates or' +
+        ' end your turn and wait.';
+      return { llmContent: msg, returnDisplay: msg };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      debugLogger.error(
+        `[AgentTool] Failed to spawn teammate: ${errorMessage}`,
+      );
+      return {
+        llmContent: `Failed to spawn teammate "${name}": ${errorMessage}`,
+        returnDisplay: `Failed to spawn teammate "${name}": ${errorMessage}`,
+        error: { message: errorMessage },
       };
     }
   }

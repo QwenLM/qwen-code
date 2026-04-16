@@ -1311,7 +1311,8 @@ export const useGeminiStream = (
         // Check image format support for non-continuations
         if (
           submitType === SendMessageType.UserQuery ||
-          submitType === SendMessageType.Cron
+          submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate
         ) {
           const formatCheck = checkImageFormatsSupport(queryToSend);
           if (formatCheck.hasUnsupportedFormats) {
@@ -1331,7 +1332,8 @@ export const useGeminiStream = (
 
         if (
           submitType === SendMessageType.UserQuery ||
-          submitType === SendMessageType.Cron
+          submitType === SendMessageType.Cron ||
+          submitType === SendMessageType.Teammate
         ) {
           // trigger new prompt event for session stats in CLI
           startNewPrompt();
@@ -1874,6 +1876,47 @@ export const useGeminiStream = (
       submitQuery(prompt, SendMessageType.Cron);
     }
   }, [streamingState, submitQuery, cronTrigger]);
+
+  // ─── Teammate message integration ─────────────────────────
+  const teammateQueueRef = useRef<string[]>([]);
+  const [teammateTrigger, setTeammateTrigger] = useState(0);
+
+  // Subscribe to TeamManager's leader message callback
+  useEffect(() => {
+    const handleManagerChange = (
+      manager: import('@qwen-code/qwen-code-core').TeamManager | null,
+    ) => {
+      if (manager) {
+        manager.setLeaderMessageCallback((formatted: string) => {
+          teammateQueueRef.current.push(formatted);
+          setTeammateTrigger((n) => n + 1);
+        });
+      }
+    };
+
+    config.onTeamManagerChange(handleManagerChange);
+
+    // Catch manager that was set before this effect ran
+    const current = config.getTeamManager();
+    if (current) {
+      handleManagerChange(current);
+    }
+
+    return () => {
+      config.onTeamManagerChange(null, handleManagerChange);
+    };
+  }, [config]);
+
+  // When idle, drain teammate messages one at a time
+  useEffect(() => {
+    if (
+      streamingState === StreamingState.Idle &&
+      teammateQueueRef.current.length > 0
+    ) {
+      const batch = teammateQueueRef.current.splice(0);
+      submitQuery(batch.join('\n\n'), SendMessageType.Teammate);
+    }
+  }, [streamingState, submitQuery, teammateTrigger]);
 
   return {
     streamingState,

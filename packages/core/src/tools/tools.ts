@@ -541,8 +541,27 @@ export type ToolResultDisplay =
   | TodoResultDisplay
   | PlanResultDisplay
   | AgentResultDisplay
+  | TeamResultDisplay
+  | TaskListResultDisplay
   | AnsiOutputDisplay
   | McpToolProgressData;
+
+export interface TeamResultDisplay {
+  type: 'team_result';
+  teamName: string;
+  action: 'created' | 'deleted';
+  memberCount?: number;
+}
+
+export interface TaskListResultDisplay {
+  type: 'task_list';
+  tasks: Array<{
+    id: string;
+    subject: string;
+    status: string;
+    owner?: string;
+  }>;
+}
 
 export interface FileDiff {
   fileDiff: string;

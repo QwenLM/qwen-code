@@ -370,6 +370,12 @@ export class TmuxBackend implements Backend {
     });
   }
 
+  async waitForAgent(_agentId: string, timeoutMs?: number): Promise<boolean> {
+    // TmuxBackend does not support per-agent waiting; fall back
+    // to waitForAll which watches all panes.
+    return this.waitForAll(timeoutMs);
+  }
+
   // ─── Active Agent & Navigation ──────────────────────────────
 
   switchTo(agentId: string): void {

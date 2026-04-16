@@ -139,10 +139,24 @@ const useResultDisplayRenderer = (
       return { type: 'ansi', data: resultDisplay.ansiOutput as AnsiOutput };
     }
 
-    // Default to string
+    // TeamResultDisplay / TaskListResultDisplay — render as short string
+    if (
+      typeof resultDisplay === 'object' &&
+      resultDisplay !== null &&
+      'type' in resultDisplay &&
+      (resultDisplay.type === 'team_result' ||
+        resultDisplay.type === 'task_list')
+    ) {
+      return { type: 'none' };
+    }
+
+    // Default to string — safeguard against non-string objects
     return {
       type: 'string',
-      data: resultDisplay as string,
+      data:
+        typeof resultDisplay === 'string'
+          ? resultDisplay
+          : JSON.stringify(resultDisplay),
     };
   }, [resultDisplay]);
 

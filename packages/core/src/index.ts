@@ -100,6 +100,12 @@ export * from './tools/write-file.js';
 export * from './tools/cron-create.js';
 export * from './tools/cron-list.js';
 export * from './tools/cron-delete.js';
+export * from './tools/team-create.js';
+export * from './tools/team-delete.js';
+export * from './tools/send-message.js';
+export * from './tools/task-create.js';
+export * from './tools/task-update.js';
+export * from './tools/task-list.js';
 
 // ============================================================================
 // Services

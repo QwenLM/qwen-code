@@ -155,6 +155,12 @@ export interface AgentInteractiveConfig {
   /** Max wall-clock minutes per enqueued message (default: unlimited). */
   maxTimeMinutesPerMessage?: number;
   /**
+   * When true, the agent transitions to COMPLETED (terminal) instead of
+   * IDLE when its message queue empties. Used for one-shot agents like
+   * team teammates that should not linger after finishing their task.
+   */
+  completeOnIdle?: boolean;
+  /**
    * Optional conversation history from a parent session to seed the
    * agent's chat with prior context.
    */

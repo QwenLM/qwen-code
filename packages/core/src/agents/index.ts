@@ -16,3 +16,4 @@
 export * from './backends/index.js';
 export * from './arena/index.js';
 export * from './runtime/index.js';
+export * from './team/index.js';

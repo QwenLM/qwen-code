@@ -84,6 +84,9 @@ export class ControlService {
        */
       getToolCallUpdateCallback:
         controller.getToolCallUpdateCallback.bind(controller),
+
+      handleTeammateApproval:
+        controller.handleTeammateApproval.bind(controller),
     };
   }
 
