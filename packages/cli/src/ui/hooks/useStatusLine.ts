@@ -269,21 +269,33 @@ export function useStatusLine(): {
     // Bump generation so earlier in-flight callbacks are ignored.
     const gen = ++generationRef.current;
 
-    const child = exec(
-      cmd,
-      { cwd: cfg.getTargetDir(), timeout: 5000, maxBuffer: 1024 * 10 },
-      (error, stdout) => {
-        if (gen !== generationRef.current) return; // stale
-        activeChildRef.current = undefined;
-        if (!error && stdout) {
-          // Strip only the trailing newline to preserve intentional whitespace.
-          const line = stdout.replace(/\r?\n$/, '').split(/\r?\n/, 1)[0];
-          setOutput(line || null);
-        } else {
-          setOutput(null);
-        }
-      },
-    );
+    // exec() can throw synchronously: libuv reports a handful of spawn
+    // errors (EACCES, ENOENT, …) via the async 'error' event, but anything
+    // else — including EBADF, reported on macOS Node 22 in issue #3264 — is
+    // thrown from ChildProcess.spawn. Without this guard the throw escapes
+    // the setTimeout callback and crashes the CLI as uncaughtException.
+    let child: ChildProcess;
+    try {
+      child = exec(
+        cmd,
+        { cwd: cfg.getTargetDir(), timeout: 5000, maxBuffer: 1024 * 10 },
+        (error, stdout) => {
+          if (gen !== generationRef.current) return; // stale
+          activeChildRef.current = undefined;
+          if (!error && stdout) {
+            // Strip only the trailing newline to preserve intentional whitespace.
+            const line = stdout.replace(/\r?\n$/, '').split(/\r?\n/, 1)[0];
+            setOutput(line || null);
+          } else {
+            setOutput(null);
+          }
+        },
+      );
+    } catch (err) {
+      debugLog.error('statusline exec error:', (err as Error).message);
+      setOutput(null);
+      return;
+    }
 
     activeChildRef.current = child;
 

@@ -16,6 +16,7 @@ import { getPersistScopeForModelSelection } from '../../config/modelProvidersSco
 
 export const modelCommand: SlashCommand = {
   name: 'model',
+  completionPriority: 100,
   get description() {
     return t('Switch the model for this session (--fast for suggestion model)');
   },
@@ -71,6 +72,9 @@ export const modelCommand: SlashCommand = {
         'fastModel',
         modelName,
       );
+      // Sync the runtime Config so forked agents pick up the change immediately
+      // without requiring a restart.
+      config.setFastModel(modelName);
       return {
         type: 'message',
         messageType: 'info',

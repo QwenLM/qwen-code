@@ -393,13 +393,11 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
     // Generate title for first message, but only if it hasn't been set yet
     if (isFirstMessage && !this.isTitleSet) {
-      const title =
-        displayText.substring(0, 50) + (displayText.length > 50 ? '...' : '');
       this.sendToWebView({
         type: 'sessionTitleUpdated',
         data: {
           sessionId: this.currentConversationId,
-          title,
+          title: displayText,
         },
       });
       this.isTitleSet = true; // Mark title as set
@@ -593,7 +591,8 @@ export class SessionMessageHandler extends BaseMessageHandler {
       const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
       const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
 
-      await this.agentManager.createNewSession(workingDir);
+      await this.agentManager.createNewSession(workingDir, { forceNew: true });
+      this.currentConversationId = null;
 
       this.sendToWebView({
         type: 'conversationCleared',
@@ -732,8 +731,12 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // If we are connected, try to create a fresh ACP session so user can interact
         if (this.agentManager.isConnected) {
           try {
-            const newAcpSessionId =
-              await this.agentManager.createNewSession(workingDir);
+            const newAcpSessionId = await this.agentManager.createNewSession(
+              workingDir,
+              {
+                forceNew: true,
+              },
+            );
 
             this.currentConversationId = newAcpSessionId;
 

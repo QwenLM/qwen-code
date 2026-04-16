@@ -534,7 +534,7 @@ export class DingtalkChannel extends ChannelBase {
 
       const envelope: Envelope = {
         channelName: this.name,
-        senderId: data.senderId || data.senderStaffId || '',
+        senderId: data.senderStaffId || data.senderId || '',
         senderName: data.senderNick || 'Unknown',
         chatId,
         text: cleanText || content.text,

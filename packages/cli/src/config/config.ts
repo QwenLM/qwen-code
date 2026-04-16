@@ -514,7 +514,7 @@ export async function parseArguments(): Promise<CliArgs> {
         })
         .deprecateOption(
           'sandbox-image',
-          'Use the "tools.sandbox" setting in settings.json instead. This flag will be removed in a future version.',
+          'Use the "tools.sandboxImage" setting in settings.json instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
           'checkpointing',
@@ -701,6 +701,14 @@ export async function loadCliConfig(
   argv: CliArgs,
   cwd: string = process.cwd(),
   overrideExtensions?: string[],
+  /**
+   * Optional separated hooks for proper source attribution.
+   * If provided, these override settings.hooks for hook loading.
+   */
+  hooksConfig?: {
+    userHooks?: Record<string, unknown>;
+    projectHooks?: Record<string, unknown>;
+  },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
 
@@ -1068,8 +1076,8 @@ export async function loadCliConfig(
     },
     telemetry: telemetrySettings,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
+    clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
-    thinkingIdleThresholdMinutes: settings.context?.gapThresholdMinutes,
     checkpointing:
       argv.checkpointing || settings.general?.checkpointing?.enabled,
     proxy:
@@ -1099,6 +1107,7 @@ export async function loadCliConfig(
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
+    allowedHttpHookUrls: settings.security?.allowedHttpHookUrls ?? [],
     cliVersion: await getCliVersion(),
     webSearch: buildWebSearchConfig(argv, settings, selectedAuthType),
     ideMode,
@@ -1119,7 +1128,13 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
-    hooks: settings.hooks,
+    enableManagedAutoMemory: settings.memory?.enableManagedAutoMemory ?? true,
+    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    fastModel: settings.fastModel || undefined,
+    // Use separated hooks if provided, otherwise fall back to merged hooks
+    userHooks: hooksConfig?.userHooks ?? settings.hooks,
+    projectHooks: hooksConfig?.projectHooks,
+    hooks: settings.hooks, // Keep for backward compatibility
     disableAllHooks: settings.disableAllHooks ?? false,
     channel: argv.channel,
     // Precedence: explicit CLI flag > settings file > default(true).

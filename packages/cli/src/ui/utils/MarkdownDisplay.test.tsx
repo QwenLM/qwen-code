@@ -155,6 +155,149 @@ Some text before.
       expect(lastFrame()).toMatchSnapshot();
     });
 
+    it('renders a single-column table', () => {
+      const text = `
+| Name |
+|---|
+| Alice |
+| Bob |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('Name');
+      expect(output).toContain('Alice');
+      expect(output).toContain('Bob');
+      expect(output).toContain('┌');
+      expect(output).toContain('└');
+      expect(output).toMatchSnapshot();
+    });
+
+    it('renders a single-column table with center alignment', () => {
+      const text = `
+| Name |
+|:---:|
+| Alice |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      expect(lastFrame()).toContain('Alice');
+      expect(lastFrame()).toMatchSnapshot();
+    });
+
+    it('handles escaped pipes in table cells', () => {
+      const text = `
+| Name | Value |
+|---|---|
+| A \\| B | C |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('A | B');
+      expect(output).toContain('C');
+    });
+
+    it('does not treat a lone table-like line as a table', () => {
+      const text = `
+| just text |
+next line
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('| just text |');
+      expect(output).not.toContain('┌');
+    });
+
+    it('does not treat invalid separator as a table separator', () => {
+      const text = `
+| A | B |
+| x | y |
+| 1 | 2 |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('| A | B |');
+      expect(output).not.toContain('┌');
+    });
+
+    it('does not treat separator with mismatched column count as a table', () => {
+      const text = `
+| A | B |
+|---|
+| 1 | 2 |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('| A | B |');
+      expect(output).not.toContain('┌');
+    });
+
+    it('does not treat a horizontal rule after a pipe line as a table separator', () => {
+      const text = `
+| Header |
+---
+data
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      // `---` without any `|` is a horizontal rule, not a table separator
+      expect(output).toContain('| Header |');
+      expect(output).not.toContain('┌');
+    });
+
+    it('ends a table when a blank line appears', () => {
+      const text = `
+| A | B |
+|---|---|
+| 1 | 2 |
+
+After
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('┌');
+      expect(output).toContain('After');
+    });
+
+    it('does not treat separator-only text without header row as a table', () => {
+      const text = `
+|---|---|
+plain
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame();
+      expect(output).toContain('|---|---|');
+      expect(output).not.toContain('┌');
+    });
+
+    it('does not crash on uneven escaped pipes near row edges', () => {
+      const text = `
+| A | B |
+|---|---|
+| \\| edge | ok |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      expect(lastFrame()).toContain('| edge');
+    });
+
     it('inserts a single space between paragraphs', () => {
       const text = `Paragraph 1.
 

@@ -136,6 +136,12 @@ export const Help: React.FC<Help> = ({ commands, width }) => (
     </Text>
     <Text color={theme.text.primary}>
       <Text bold color={theme.text.accent}>
+        Ctrl+O
+      </Text>{' '}
+      - {t('to toggle compact mode')}
+    </Text>
+    <Text color={theme.text.primary}>
+      <Text bold color={theme.text.accent}>
         {process.platform === 'darwin' ? 'Ctrl+X / Meta+Enter' : 'Ctrl+X'}
       </Text>{' '}
       - {t('Open input in external editor')}
