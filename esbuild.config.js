@@ -40,7 +40,6 @@ const external = [
   '@teddyzhu/clipboard-linux-arm64-gnu',
   '@teddyzhu/clipboard-win32-x64-msvc',
   '@teddyzhu/clipboard-win32-arm64-msvc',
-  '@qwen-code/modifiers-napi',
 ];
 
 esbuild
