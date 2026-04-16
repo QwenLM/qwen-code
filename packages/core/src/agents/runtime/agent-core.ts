@@ -315,7 +315,10 @@ export class AgentCore {
         (t): t is FunctionDeclaration => typeof t !== 'string',
       );
 
-      if (hasWildcard || asStrings.length === 0) {
+      if (
+        hasWildcard ||
+        (asStrings.length === 0 && onlyInlineDecls.length === 0)
+      ) {
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations()
