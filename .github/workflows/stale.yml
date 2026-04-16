@@ -10,7 +10,7 @@ jobs:
   stale:
     runs-on: 'ubuntu-latest'
     if: |-
-      ${{ github.repository == 'google-gemini/gemini-cli' }}
+      ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
       issues: 'write'
       pull-requests: 'write'
@@ -21,19 +21,25 @@ jobs:
       - uses: 'actions/stale@5bef64f19d7facfb25b37b414482c7164d639639' # ratchet:actions/stale@v9
         with:
           repo-token: '${{ secrets.GITHUB_TOKEN }}'
-          stale-issue-message: >-
-            This issue has been automatically marked as stale due to 60 days of inactivity.
-            It will be closed in 14 days if no further activity occurs.
+          # Issues are intentionally disabled here; a separate policy will
+          # be introduced once issue triage labels are in place.
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+          # Pull requests: 4 weeks to stale + 4 weeks to close.
+          days-before-pr-stale: 28
+          days-before-pr-close: 28
+          stale-pr-label: 'status/stale'
           stale-pr-message: >-
-            This pull request has been automatically marked as stale due to 60 days of inactivity.
-            It will be closed in 14 days if no further activity occurs.
-          close-issue-message: >-
-            This issue has been closed due to 14 additional days of inactivity after being marked as stale.
-            If you believe this is still relevant, feel free to comment or reopen the issue. Thank you!
+            This pull request has had no activity for 4 weeks and is being marked as stale.
+            It will be closed in another 4 weeks if no further activity occurs.
+            To keep it open, push a new commit or leave a comment.
+            Maintainers may apply `pinned`, `status/blocked`, `status/on-hold`,
+            or `status/ready-for-merge` to exempt it from auto-close.
           close-pr-message: >-
-            This pull request has been closed due to 14 additional days of inactivity after being marked as stale.
-            If this is still relevant, you are welcome to reopen or leave a comment. Thanks for contributing!
-          days-before-stale: 60
-          days-before-close: 14
-          exempt-issue-labels: 'pinned,security'
-          exempt-pr-labels: 'pinned,security'
+            This pull request has been closed after 4 additional weeks of inactivity.
+            You are welcome to reopen it or submit a new pull request if the change is still relevant.
+            Thanks for contributing!
+          exempt-pr-labels: 'pinned,security,status/blocked,status/on-hold,status/ready-for-merge'
+          remove-stale-when-updated: true
+          ascending: true
+          operations-per-run: 100
