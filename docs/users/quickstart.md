@@ -10,7 +10,7 @@ Make sure you have:
 
 - A **terminal** or command prompt open
 - A code project to work with
-- A [Qwen Code](https://chat.qwen.ai/auth?mode=register) account
+- An API key from [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/), an [Alibaba Cloud Coding Plan](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) subscription, or a local model setup (Ollama/vLLM)
 
 ## Step 1: Install Qwen Code
 
@@ -52,9 +52,9 @@ npm install -g @qwen-code/qwen-code@latest
 brew install qwen-code
 ```
 
-## Step 2: Log in to your account
+## Step 2: Set up authentication
 
-Qwen Code requires an account to use. When you start an interactive session with the `qwen` command, you'll be prompted to log in:
+When you start an interactive session with the `qwen` command, you'll be prompted to configure authentication:
 
 ```bash
 # You'll be prompted to log in on first use
@@ -66,7 +66,13 @@ qwen
 /auth
 ```
 
-Select `Qwen OAuth`, log in to your account and follow the prompts to confirm. Once logged in, your credentials are stored and you won't need to log in again.
+Choose your preferred authentication method:
+
+- **API Key (recommended)**: Select `API Key`, then enter your API key from [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/) or another supported provider. See the [API setup guide](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) for details.
+- **Alibaba Cloud Coding Plan**: Select `Alibaba Cloud Coding Plan` for a fixed monthly fee with diverse model options. See the [Coding Plan guide](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) for setup instructions.
+- **Local Inference**: Configure Ollama or vLLM in `~/.qwen/settings.json` to run models locally — completely free and private.
+
+> ⚠️ **Note**: Qwen OAuth was discontinued on April 15, 2026. If you were previously using Qwen OAuth, please switch to one of the methods above.
 
 > [!note]
 >
