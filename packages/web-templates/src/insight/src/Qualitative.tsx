@@ -3,7 +3,7 @@ import { useState } from 'react';
 import { DashboardCards, HeatmapSection } from './Charts';
 import type { InsightData, QualitativeData } from './types';
 import { CopyButton, MarkdownText } from './Components';
-import { t } from './i18n';
+import { ti } from './i18n';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 
@@ -17,34 +17,34 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
 
   return (
     <div className="at-a-glance">
-      <div className="glance-title">{t('insight_at_a_glance')}</div>
+      <div className="glance-title">{ti('insight_at_a_glance')}</div>
       <div className="glance-sections">
         <div className="glance-section">
-          <strong>{t('insight_whats_working')}</strong>{' '}
+          <strong>{ti('insight_whats_working')}</strong>{' '}
           <MarkdownText>{atAGlance.whats_working}</MarkdownText>
           <a href="#section-wins" className="see-more">
-            {t('insight_see_more_wins')}
+            {ti('insight_see_more_wins')}
           </a>
         </div>
         <div className="glance-section">
-          <strong>{t('insight_whats_hindering')}</strong>{' '}
+          <strong>{ti('insight_whats_hindering')}</strong>{' '}
           <MarkdownText>{atAGlance.whats_hindering}</MarkdownText>
           <a href="#section-friction" className="see-more">
-            {t('insight_see_more_friction')}
+            {ti('insight_see_more_friction')}
           </a>
         </div>
         <div className="glance-section">
-          <strong>{t('insight_quick_wins')}</strong>{' '}
+          <strong>{ti('insight_quick_wins')}</strong>{' '}
           <MarkdownText>{atAGlance.quick_wins}</MarkdownText>
           <a href="#section-features" className="see-more">
-            {t('insight_see_more_features')}
+            {ti('insight_see_more_features')}
           </a>
         </div>
         <div className="glance-section">
-          <strong>{t('insight_ambitious_workflows')}</strong>{' '}
+          <strong>{ti('insight_ambitious_workflows')}</strong>{' '}
           <MarkdownText>{atAGlance.ambitious_workflows}</MarkdownText>
           <a href="#section-horizon" className="see-more">
-            {t('insight_see_more_horizon')}
+            {ti('insight_see_more_horizon')}
           </a>
         </div>
       </div>
@@ -55,13 +55,13 @@ export function AtAGlance({ qualitative }: { qualitative: QualitativeData }) {
 export function NavToc() {
   return (
     <nav className="nav-toc">
-      <a href="#section-work">{t('insight_nav_work')}</a>
-      <a href="#section-usage">{t('insight_nav_usage')}</a>
-      <a href="#section-wins">{t('insight_nav_wins')}</a>
-      <a href="#section-friction">{t('insight_nav_friction')}</a>
-      <a href="#section-features">{t('insight_nav_features')}</a>
-      <a href="#section-patterns">{t('insight_nav_patterns')}</a>
-      <a href="#section-horizon">{t('insight_nav_horizon')}</a>
+      <a href="#section-work">{ti('insight_nav_work')}</a>
+      <a href="#section-usage">{ti('insight_nav_usage')}</a>
+      <a href="#section-wins">{ti('insight_nav_wins')}</a>
+      <a href="#section-friction">{ti('insight_nav_friction')}</a>
+      <a href="#section-features">{ti('insight_nav_features')}</a>
+      <a href="#section-patterns">{ti('insight_nav_patterns')}</a>
+      <a href="#section-horizon">{ti('insight_nav_horizon')}</a>
     </nav>
   );
 }
@@ -88,7 +88,7 @@ export function ProjectAreas({
         id="section-work"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        {t('insight_what_you_work_on')}
+        {ti('insight_what_you_work_on')}
       </h2>
 
       {Array.isArray(projectAreas?.areas) && projectAreas.areas.length > 0 && (
@@ -98,7 +98,10 @@ export function ProjectAreas({
               <div className="area-header">
                 <span className="area-name">{area.name}</span>
                 <span className="area-count">
-                  {t('insight_sessions_count', { count: area.session_count })}
+                  ~
+                  {ti('insight_sessions_count', {
+                    count: String(area.session_count),
+                  })}
                 </span>
               </div>
               <div className="area-desc">
@@ -120,14 +123,14 @@ export function ProjectAreas({
         {topGoals && Object.keys(topGoals).length > 0 && (
           <HorizontalBarChart
             data={topGoals}
-            title={t('insight_what_you_wanted')}
+            title={ti('insight_what_you_wanted')}
             color="#0ea5e9"
           />
         )}
         {topToolsObj && Object.keys(topToolsObj).length > 0 && (
           <HorizontalBarChart
             data={topToolsObj}
-            title={t('insight_top_tools_used')}
+            title={ti('insight_top_tools_used')}
             color="#6366f1"
           />
         )}
@@ -152,7 +155,7 @@ export function InteractionStyle({
         id="section-usage"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        {t('insight_how_you_use')}
+        {ti('insight_how_you_use')}
       </h2>
       <div className="narrative">
         <p>
@@ -160,7 +163,7 @@ export function InteractionStyle({
         </p>
         {interactionStyle.key_pattern && (
           <div className="key-insight">
-            <strong>{t('insight_key_pattern')}</strong>{' '}
+            <strong>{ti('insight_key_pattern')}</strong>{' '}
             <MarkdownText>{interactionStyle.key_pattern}</MarkdownText>
           </div>
         )}
@@ -190,7 +193,7 @@ export function ImpressiveWorkflows({
         id="section-wins"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        {t('insight_impressive_things')}
+        {ti('insight_impressive_things')}
       </h2>
       {impressiveWorkflows.intro && (
         <p className="section-intro">
@@ -221,7 +224,7 @@ export function ImpressiveWorkflows({
         {primarySuccess && Object.keys(primarySuccess).length > 0 && (
           <HorizontalBarChart
             data={primarySuccess}
-            title={t('insight_what_helped_most')}
+            title={ti('insight_what_helped_most')}
             color="#3b82f6"
             allowedKeys={[
               'fast_accurate_search',
@@ -236,7 +239,7 @@ export function ImpressiveWorkflows({
         {outcomes && Object.keys(outcomes).length > 0 && (
           <HorizontalBarChart
             data={outcomes}
-            title={t('insight_outcomes')}
+            title={ti('insight_outcomes')}
             color="#8b5cf6"
             allowedKeys={[
               'fully_achieved',
@@ -255,7 +258,7 @@ export function ImpressiveWorkflows({
 // Format label for display (capitalize and replace underscores with spaces)
 function formatLabel(label: string) {
   if (label === 'unclear_from_transcript') {
-    return t('insight_unclear');
+    return ti('insight_unclear');
   }
   return label
     .split('_')
@@ -414,7 +417,7 @@ export function FrictionPoints({
         id="section-friction"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        {t('insight_where_things_go_wrong')}
+        {ti('insight_where_things_go_wrong')}
       </h2>
       {frictionPoints.intro && (
         <p className="section-intro">
@@ -455,7 +458,7 @@ export function FrictionPoints({
         {friction && Object.keys(friction).length > 0 && (
           <HorizontalBarChart
             data={friction}
-            title={t('insight_primary_friction_types')}
+            title={ti('insight_primary_friction_types')}
             color="#ef4444"
             allowedKeys={[
               'misunderstood_request',
@@ -469,7 +472,7 @@ export function FrictionPoints({
         {satisfaction && Object.keys(satisfaction).length > 0 && (
           <HorizontalBarChart
             data={satisfaction}
-            title={t('insight_inferred_satisfaction')}
+            title={ti('insight_inferred_satisfaction')}
             color="#10b981"
             allowedKeys={[
               'happy',
@@ -523,8 +526,10 @@ function QwenMdAdditionsSection({
 
   return (
     <div className="qwen-md-section">
-      <h3>{t('insight_suggested_qwen_md')}</h3>
-      <p className="text-xs text-slate-500 mb-3">{t('insight_qwen_md_hint')}</p>
+      <h3>{ti('insight_suggested_qwen_md')}</h3>
+      <p className="text-xs text-slate-500 mb-3">
+        {ti('insight_qwen_md_hint')}
+      </p>
 
       <div className="qwen-md-actions" style={{ marginBottom: '12px' }}>
         <button
@@ -533,8 +538,8 @@ function QwenMdAdditionsSection({
           disabled={checkedCount === 0}
         >
           {copiedAll
-            ? t('insight_copied_all')
-            : t('insight_copy_all_checked', { count: checkedCount })}
+            ? ti('insight_copied_all')
+            : ti('insight_copy_all_checked', { count: String(checkedCount) })}
         </button>
       </div>
 
@@ -573,7 +578,7 @@ export function Improvements({
         id="section-features"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        {t('insight_features_to_try')}
+        {ti('insight_features_to_try')}
       </h2>
 
       {/* QWEN.md Additions */}
@@ -583,7 +588,7 @@ export function Improvements({
         )}
 
       <p className="text-xs text-slate-500 mb-3">
-        {t('insight_features_hint')}
+        {ti('insight_features_hint')}
       </p>
 
       {/* Features to Try */}
@@ -596,7 +601,7 @@ export function Improvements({
                 <MarkdownText>{feat.one_liner}</MarkdownText>
               </div>
               <div className="feature-why">
-                <strong>{t('insight_why_for_you')}</strong>{' '}
+                <strong>{ti('insight_why_for_you')}</strong>{' '}
                 <MarkdownText>{feat.why_for_you}</MarkdownText>
               </div>
               <div className="feature-examples">
@@ -615,10 +620,10 @@ export function Improvements({
         id="section-patterns"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        {t('insight_new_ways_to_use')}
+        {ti('insight_new_ways_to_use')}
       </h2>
       <p className="text-xs text-slate-500 mb-3">
-        {t('insight_patterns_hint')}
+        {ti('insight_patterns_hint')}
       </p>
 
       <div className="patterns-section">
@@ -634,7 +639,7 @@ export function Improvements({
               </div>
               <div className="copyable-prompt-section">
                 <div className="prompt-label">
-                  {t('insight_paste_into_qwen')}
+                  {ti('insight_paste_into_qwen')}
                 </div>
                 <div className="copyable-prompt-row">
                   <code className="copyable-prompt">{pat.copyable_prompt}</code>
@@ -662,7 +667,7 @@ export function FutureOpportunities({
         id="section-horizon"
         className="text-xl font-semibold text-slate-900 mt-8 mb-4"
       >
-        {t('insight_on_the_horizon')}
+        {ti('insight_on_the_horizon')}
       </h2>
       {futureOpportunities.intro && (
         <p className="section-intro">
@@ -679,12 +684,12 @@ export function FutureOpportunities({
                 <MarkdownText>{opp.whats_possible}</MarkdownText>
               </div>
               <div className="horizon-tip">
-                <strong>{t('insight_getting_started')}</strong>{' '}
+                <strong>{ti('insight_getting_started')}</strong>{' '}
                 <MarkdownText>{opp.how_to_try}</MarkdownText>
               </div>
               <div className="pattern-prompt">
                 <div className="prompt-label">
-                  {t('insight_paste_into_qwen')}
+                  {ti('insight_paste_into_qwen')}
                 </div>
                 <div
                   style={{

@@ -15,7 +15,7 @@ import {
 import { ShareCard, type Theme } from './ShareCard';
 import './styles.css';
 import type { InsightData } from './types';
-import { t } from './i18n';
+import { ti } from './i18n';
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 
@@ -27,7 +27,7 @@ function InsightApp({ data }: { data: InsightData }) {
   const performExport = async () => {
     const card = document.getElementById('share-card');
     if (!card || !window.html2canvas) {
-      alert(t('insight_export_not_available'));
+      alert(ti('insight_export_not_available'));
       return;
     }
 
@@ -56,7 +56,7 @@ function InsightApp({ data }: { data: InsightData }) {
       link.click();
     } catch (error) {
       console.error('Export card error:', error);
-      alert(t('insight_export_failed'));
+      alert(ti('insight_export_failed'));
     }
   };
 
@@ -79,7 +79,7 @@ function InsightApp({ data }: { data: InsightData }) {
 
   if (!data) {
     return (
-      <div className="text-center text-slate-600">{t('insight_no_data')}</div>
+      <div className="text-center text-slate-600">{ti('insight_no_data')}</div>
     );
   }
 
@@ -101,14 +101,14 @@ function InsightApp({ data }: { data: InsightData }) {
       <header className="insights-header">
         <div className="header-content">
           <div className="header-title-section">
-            <h1 className="header-title">{t('insight_title')}</h1>
+            <h1 className="header-title">{ti('insight_title')}</h1>
             <p className="header-subtitle">
               {data.totalMessages
-                ? t('insight_messages_across_sessions', {
+                ? ti('insight_messages_across_sessions', {
                     messages: data.totalMessages.toLocaleString(),
                     sessions: data.totalSessions?.toLocaleString() ?? '0',
                   })
-                : t('insight_personalized_journey')}
+                : ti('insight_personalized_journey')}
               {dateRangeStr && ` · ${dateRangeStr}`}
             </p>
           </div>
@@ -207,7 +207,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
           <polyline points="16 6 12 2 8 6" />
           <line x1="12" y1="2" x2="12" y2="15" />
         </svg>
-        <span>{t('insight_export_card')}</span>
+        <span>{ti('insight_export_card')}</span>
         <svg
           width="12"
           height="12"
@@ -249,7 +249,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
               <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
               <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
             </svg>
-            <span>{t('insight_light_theme')}</span>
+            <span>{ti('insight_light_theme')}</span>
           </button>
           <button
             className="export-dropdown-item"
@@ -267,7 +267,7 @@ function ExportCardButton({ onExport }: { onExport: (theme: Theme) => void }) {
             >
               <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
             </svg>
-            <span>{t('insight_dark_theme')}</span>
+            <span>{ti('insight_dark_theme')}</span>
           </button>
         </div>
       )}

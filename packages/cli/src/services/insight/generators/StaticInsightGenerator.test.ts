@@ -80,7 +80,7 @@ describe('StaticInsightGenerator', () => {
       facetsDir,
       undefined,
     );
-    expect(renderInsightHTML).toHaveBeenCalledWith({});
+    expect(renderInsightHTML).toHaveBeenCalledWith({ language: 'en' }, 'en');
     expect(mockedFs.writeFile).toHaveBeenCalledWith(
       expectedOutputPath,
       '<html>ok</html>',

@@ -1096,8 +1096,16 @@ Call respond_in_schema function with A VALID JSON OBJECT as argument:
 /**
  * Get an insight analysis prompt by type.
  * @param type - The type of insight prompt to retrieve
+ * @param language - Optional language to instruct the LLM to respond in
  * @returns The prompt string for the specified type
  */
-export function getInsightPrompt(type: InsightPromptType): string {
-  return INSIGHT_PROMPTS[type];
+export function getInsightPrompt(
+  type: InsightPromptType,
+  language?: string,
+): string {
+  const prompt = INSIGHT_PROMPTS[type];
+  if (language) {
+    return `${prompt}\n\nIMPORTANT: You MUST respond in ${language}. All narrative text, descriptions, recommendations, and analysis MUST be in ${language}. Keep code snippets, commands, and technical identifiers in their original form.`;
+  }
+  return prompt;
 }

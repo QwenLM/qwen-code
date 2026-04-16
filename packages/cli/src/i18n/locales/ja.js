@@ -1505,4 +1505,141 @@ export default {
     'Not in plan mode. Use "/plan" to enter plan mode first.',
 
   "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+
+  'Generating insights in {{language}}...':
+    '{{language}}でインサイトを生成中...',
+  'Opening insights in your browser: {{path}}':
+    'ブラウザでインサイトを開いています: {{path}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    'インサイトは {{path}} に生成されました。ブラウザでこのファイルを開いてください。',
+
+  // ============================================================================
+  // Insight Report - HTML Report Static Text
+  // ============================================================================
+  // Header
+  insight_title: 'Qwen Code インサイト',
+  insight_messages_across_sessions:
+    '{{messages}}件のメッセージ、{{sessions}}セッション',
+  insight_personalized_journey:
+    'あなたのパーソナライズされたコーディングの旅とパターン',
+
+  // Stats
+  insight_stat_messages: 'メッセージ',
+  insight_stat_lines: '行数',
+  insight_stat_files: 'ファイル',
+  insight_stat_days: '日数',
+  insight_stat_msgs_per_day: 'メッセージ/日',
+
+  // Charts
+  insight_active_hours: 'アクティブ時間',
+  insight_morning: '朝',
+  insight_afternoon: '午後',
+  insight_evening: '夕方',
+  insight_night: '夜間',
+  insight_time_morning: '06:00 - 12:00',
+  insight_time_afternoon: '12:00 - 18:00',
+  insight_time_evening: '18:00 - 22:00',
+  insight_time_night: '22:00 - 06:00',
+  insight_activity_heatmap: 'アクティビティヒートマップ',
+  insight_heatmap_subtitle: '過去1年のアクティビティ',
+  insight_less: '少',
+  insight_more: '多',
+  insight_activities: 'アクティビティ',
+  insight_month_jan: '1月',
+  insight_month_feb: '2月',
+  insight_month_mar: '3月',
+  insight_month_apr: '4月',
+  insight_month_may: '5月',
+  insight_month_jun: '6月',
+  insight_month_jul: '7月',
+  insight_month_aug: '8月',
+  insight_month_sep: '9月',
+  insight_month_oct: '10月',
+  insight_month_nov: '11月',
+  insight_month_dec: '12月',
+
+  // Qualitative - At a Glance
+  insight_at_a_glance: '概要',
+  insight_whats_working: 'うまくいっていること：',
+  insight_whats_hindering: '妨げていること：',
+  insight_quick_wins: 'すぐ試せる改善：',
+  insight_ambitious_workflows: '野心的なワークフロー：',
+  insight_see_more_wins: 'あなたの素晴らしい成果 →',
+  insight_see_more_friction: '問題が起きているところ →',
+  insight_see_more_features: '試すべき機能 →',
+  insight_see_more_horizon: '将来の展望 →',
+
+  // Qualitative - Navigation TOC
+  insight_nav_work: 'あなたが取り組む領域',
+  insight_nav_usage: 'Qwen Code の使い方',
+  insight_nav_wins: '素晴らしい成果',
+  insight_nav_friction: '問題が起きているところ',
+  insight_nav_features: '試すべき機能',
+  insight_nav_patterns: '新しい使い方',
+  insight_nav_horizon: '将来の展望',
+
+  // Qualitative - Project Areas
+  insight_what_you_work_on: 'あなたが取り組む領域',
+  insight_sessions_count: '〜{{count}}セッション',
+  insight_what_you_wanted: 'あなたの目標',
+  insight_top_tools_used: 'よく使うツール',
+
+  // Qualitative - Interaction Style
+  insight_how_you_use: 'Qwen Code の使い方',
+  insight_key_pattern: 'キーパターン：',
+
+  // Qualitative - Impressive Workflows
+  insight_impressive_things: 'あなたの素晴らしい成果',
+  insight_what_helped_most: '最も役立った能力',
+  insight_outcomes: '成果',
+
+  // Qualitative - Friction Points
+  insight_where_things_go_wrong: '問題が起きているところ',
+  insight_primary_friction_types: '主な摩擦タイプ',
+  insight_inferred_satisfaction: '推定満足度',
+  insight_unclear: '不明',
+
+  // Qualitative - Improvements
+  insight_features_to_try: '試すべき Qwen Code の機能',
+  insight_suggested_qwen_md: '推奨 QWEN.md 追加項目',
+  insight_qwen_md_hint: 'Qwen Code にコピーすると QWEN.md に追加されます。',
+  insight_copy_all_checked: 'チェック済みを全コピー ({{count}})',
+  insight_copied_all: '全コピー済み！',
+  insight_why_for_you: 'あなたにとっての理由：',
+  insight_features_hint: 'Qwen Code にコピーすると自動設定されます。',
+  insight_new_ways_to_use: 'Qwen Code の新しい使い方',
+  insight_patterns_hint: 'Qwen Code にコピーすると手順を案内します。',
+  insight_paste_into_qwen: 'Qwen Code に貼り付け：',
+
+  // Qualitative - Future Opportunities
+  insight_on_the_horizon: '将来の展望',
+  insight_getting_started: '始め方：',
+
+  // Buttons & UI
+  insight_no_data: 'インサイトデータがありません',
+  insight_export_card: 'カードをエクスポート',
+  insight_light_theme: 'ライトテーマ',
+  insight_dark_theme: 'ダークテーマ',
+  insight_export_not_available: 'エクスポート機能は利用できません。',
+  insight_export_failed:
+    'カードのエクスポートに失敗しました。もう一度お試しください。',
+  insight_copy: 'コピー',
+  insight_copied: 'コピー済み！',
+
+  // Share Card
+  insight_share_sessions: 'セッション',
+  insight_share_lines_changed: '行変更',
+  insight_share_streak: '連続日数',
+  insight_share_best_streak: '最長連続日数',
+  insight_share_activity: 'アクティビティ · {{days}}アクティブ日数',
+  insight_share_generated: 'Qwen Code で生成 ·',
+  insight_share_github: 'github.com/QwenLM/qwen-code',
+  insight_share_brand: 'qwen.ai',
+
+  // DataProcessor progress messages
+  insight_scanning_chat_history: 'チャット履歴をスキャン中...',
+  insight_crunching_numbers: 'データを処理中',
+  insight_preparing_sessions: 'セッションを準備中...',
+  insight_generating_personalized: 'パーソナライズされたインサイトを生成中...',
+  insight_assembling_report: 'レポートを構成中...',
 };

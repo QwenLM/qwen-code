@@ -389,14 +389,11 @@ export class DataProcessor {
 
     const commonData = this.prepareCommonPromptData(metrics, facets);
 
-    // Language instruction for LLM to generate content in user's preferred language
-    const languageInstruction = `\n\nIMPORTANT: You MUST respond in ${this.outputLanguage}. All narrative text, descriptions, recommendations, and analysis MUST be in ${this.outputLanguage}. Keep code snippets, commands, and technical identifiers in their original form.`;
-
     const generate = async <T>(
       promptTemplate: string,
       schema: Record<string, unknown>,
     ): Promise<T | undefined> => {
-      const prompt = `${promptTemplate}\n\n${commonData}${languageInstruction}`;
+      const prompt = `${promptTemplate}\n\n${commonData}`;
       try {
         const result = await this.config.getBaseLlmClient().generateJson({
           model: this.config.getModel(),

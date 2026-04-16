@@ -1,7 +1,7 @@
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 import React from 'react';
 import type { InsightData } from './types';
-import { t } from './i18n';
+import { ti } from './i18n';
 
 /**
  * Theme configuration for the share card
@@ -58,7 +58,7 @@ export function ShareCard({
   data: InsightData;
   theme?: Theme;
 }) {
-  const tc = themes[theme];
+  const t = themes[theme];
 
   const {
     totalMessages = 0,
@@ -91,15 +91,15 @@ export function ShareCard({
   const truncatedHeadline = data.qualitative?.memorableMoment?.headline ?? null;
 
   // Mini heatmap: last 52 weeks (simplified 7-row grid)
-  const miniHeatmap = buildMiniHeatmap(data.heatmap || {}, tc);
+  const miniHeatmap = buildMiniHeatmap(data.heatmap || {}, t);
 
   return (
     <div
       id="share-card"
       style={{
         width: '1200px',
-        background: tc.background,
-        color: tc.textPrimary,
+        background: t.background,
+        color: t.textPrimary,
         fontFamily:
           'ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"',
         display: 'flex',
@@ -130,12 +130,12 @@ export function ShareCard({
               lineHeight: 1.2,
             }}
           >
-            {t('insight_title')}
+            {ti('insight_title')}
           </div>
           <div
             style={{
               fontSize: '14px',
-              color: tc.textMuted,
+              color: t.textMuted,
               marginTop: '6px',
             }}
           >
@@ -145,13 +145,13 @@ export function ShareCard({
         <div
           style={{
             fontSize: '11px',
-            color: tc.textMuted,
+            color: t.textMuted,
             textTransform: 'uppercase',
             letterSpacing: '0.15em',
             paddingTop: '8px',
           }}
         >
-          {t('insight_share_brand')}
+          {ti('insight_share_brand')}
         </div>
       </div>
 
@@ -166,34 +166,34 @@ export function ShareCard({
       >
         <StatBox
           value={String(totalMessages)}
-          label={t('insight_stat_messages')}
-          theme={tc}
+          label={ti('insight_stat_messages')}
+          theme={t}
         />
         <StatBox
           value={String(totalSessions)}
-          label={t('insight_share_sessions')}
-          theme={tc}
+          label={ti('insight_share_sessions')}
+          theme={t}
         />
         <StatBox
           value={`+${totalLinesAdded}/-${totalLinesRemoved}`}
-          label={t('insight_share_lines_changed')}
+          label={ti('insight_share_lines_changed')}
           small
-          theme={tc}
+          theme={t}
         />
         <StatBox
           value={String(totalFiles)}
-          label={t('insight_stat_files')}
-          theme={tc}
+          label={ti('insight_stat_files')}
+          theme={t}
         />
         <StatBox
           value={`${currentStreak}d`}
-          label={t('insight_share_streak')}
-          theme={tc}
+          label={ti('insight_share_streak')}
+          theme={t}
         />
         <StatBox
           value={`${longestStreak}d`}
-          label={t('insight_share_best_streak')}
-          theme={tc}
+          label={ti('insight_share_best_streak')}
+          theme={t}
         />
       </div>
 
@@ -209,7 +209,7 @@ export function ShareCard({
         {/* Left: Mini Heatmap */}
         <div
           style={{
-            background: tc.cardBackground,
+            background: t.cardBackground,
             borderRadius: '12px',
             padding: '20px',
             display: 'flex',
@@ -220,13 +220,13 @@ export function ShareCard({
             style={{
               fontSize: '12px',
               fontWeight: 600,
-              color: tc.textMuted,
+              color: t.textMuted,
               textTransform: 'uppercase',
               letterSpacing: '0.08em',
               marginBottom: '12px',
             }}
           >
-            {t('insight_share_activity', { days: activeDays })}
+            {ti('insight_share_activity', { days: String(activeDays) })}
           </div>
           <div
             style={{
@@ -238,7 +238,7 @@ export function ShareCard({
           >
             <MiniHeatmapGrid cells={miniHeatmap} />
           </div>
-          <MiniHeatmapLegend theme={tc} />
+          <MiniHeatmapLegend theme={t} />
         </div>
 
         {/* Right: Active Hours + Moment */}
@@ -252,7 +252,7 @@ export function ShareCard({
           {/* Active Hours */}
           <div
             style={{
-              background: tc.cardBackground,
+              background: t.cardBackground,
               borderRadius: '12px',
               padding: '20px',
               display: 'flex',
@@ -263,13 +263,13 @@ export function ShareCard({
               style={{
                 fontSize: '12px',
                 fontWeight: 600,
-                color: tc.textMuted,
+                color: t.textMuted,
                 textTransform: 'uppercase',
                 letterSpacing: '0.08em',
                 marginBottom: '12px',
               }}
             >
-              {t('insight_active_hours')}
+              {ti('insight_active_hours')}
             </div>
             <div
               style={{
@@ -280,14 +280,14 @@ export function ShareCard({
                 gap: '10px',
               }}
             >
-              <ActiveHoursChart activeHours={activeHours} theme={tc} />
+              <ActiveHoursChart activeHours={activeHours} theme={t} />
             </div>
           </div>
 
           {/* Key Pattern + Memorable Moment */}
           <div
             style={{
-              background: tc.cardBackgroundSecondary,
+              background: t.cardBackgroundSecondary,
               borderRadius: '12px',
               padding: '16px 16px',
               position: 'relative',
@@ -322,7 +322,7 @@ export function ShareCard({
                 <div
                   style={{
                     fontSize: '13px',
-                    color: tc.textSecondary,
+                    color: t.textSecondary,
                     lineHeight: 1.6,
                     marginBottom: truncatedHeadline ? '8px' : 0,
                   }}
@@ -334,7 +334,7 @@ export function ShareCard({
                 <div
                   style={{
                     fontSize: '12px',
-                    color: tc.textMuted,
+                    color: t.textMuted,
                     lineHeight: 1.5,
                     fontStyle: 'italic',
                   }}
@@ -355,16 +355,16 @@ export function ShareCard({
           alignItems: 'center',
           marginTop: 'auto',
           paddingTop: '24px',
-          borderTop: `1px solid ${tc.borderColor}`,
+          borderTop: `1px solid ${t.borderColor}`,
           flexShrink: 0,
         }}
       >
-        <div style={{ fontSize: '12px', color: tc.textMuted }}>
-          {t('insight_share_generated')}{' '}
+        <div style={{ fontSize: '12px', color: t.textMuted }}>
+          {ti('insight_share_generated')}{' '}
           {new Date().toISOString().split('T')[0]}
         </div>
-        <div style={{ fontSize: '12px', color: tc.textMuted }}>
-          {t('insight_share_github')}
+        <div style={{ fontSize: '12px', color: t.textMuted }}>
+          {ti('insight_share_github')}
         </div>
       </div>
     </div>
@@ -418,26 +418,26 @@ function ActiveHoursChart({
 }) {
   const phases = [
     {
-      label: t('insight_morning'),
-      time: '06–12',
+      label: ti('insight_morning'),
+      time: '06-12',
       hours: [6, 7, 8, 9, 10, 11],
       color: '#fbbf24',
     },
     {
-      label: t('insight_afternoon'),
-      time: '12–18',
+      label: ti('insight_afternoon'),
+      time: '12-18',
       hours: [12, 13, 14, 15, 16, 17],
       color: '#0ea5e9',
     },
     {
-      label: t('insight_evening'),
-      time: '18–22',
+      label: ti('insight_evening'),
+      time: '18-22',
       hours: [18, 19, 20, 21],
       color: '#6366f1',
     },
     {
-      label: t('insight_night'),
-      time: '22–06',
+      label: ti('insight_night'),
+      time: '22-06',
       hours: [22, 23, 0, 1, 2, 3, 4, 5],
       color: '#475569',
     },
@@ -596,7 +596,7 @@ function MiniHeatmapLegend({ theme }: { theme: ThemeConfig }) {
       }}
     >
       <span style={{ fontSize: '11px', color: theme.textMuted }}>
-        {t('insight_less')}
+        {ti('insight_less')}
       </span>
       {[
         theme.heatmapEmpty,
@@ -617,7 +617,7 @@ function MiniHeatmapLegend({ theme }: { theme: ThemeConfig }) {
         />
       ))}
       <span style={{ fontSize: '11px', color: theme.textMuted }}>
-        {t('insight_more')}
+        {ti('insight_more')}
       </span>
     </div>
   );

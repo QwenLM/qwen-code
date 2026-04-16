@@ -2015,4 +2015,136 @@ export default {
     'Not in plan mode. Use "/plan" to enter plan mode first.',
 
   "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+
+  'Generating insights in {{language}}...':
+    'Insights werden in {{language}} generiert...',
+  'Opening insights in your browser: {{path}}':
+    'Insights werden im Browser geöffnet: {{path}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    'Insights erstellt in {{path}}. Bitte öffnen Sie diese Datei im Browser.',
+
+  // ============================================================================
+  // Insight Report - HTML Report Static Text
+  // ============================================================================
+  // Header
+  insight_title: 'Qwen Code Einblicke',
+  insight_messages_across_sessions:
+    '{{messages}} Nachrichten in {{sessions}} Sitzungen',
+  insight_personalized_journey:
+    'Ihr personalisierter Programmierweg und Patterns',
+
+  // Stats
+  insight_stat_messages: 'Nachrichten',
+  insight_stat_lines: 'Zeilen',
+  insight_stat_files: 'Dateien',
+  insight_stat_days: 'Tage',
+  insight_stat_msgs_per_day: 'Nachr./Tag',
+
+  // Charts
+  insight_active_hours: 'Aktive Stunden',
+  insight_morning: 'Morgen',
+  insight_afternoon: 'Nachmittag',
+  insight_evening: 'Abend',
+  insight_night: 'Nacht',
+  insight_time_morning: '06:00 - 12:00',
+  insight_time_afternoon: '12:00 - 18:00',
+  insight_time_evening: '18:00 - 22:00',
+  insight_time_night: '22:00 - 06:00',
+  insight_activity_heatmap: 'Aktivitäts-Heatmap',
+  insight_heatmap_subtitle: 'Aktivität des letzten Jahres',
+  insight_less: 'Weniger',
+  insight_more: 'Mehr',
+  insight_activities: 'Aktivitäten',
+  insight_month_jan: 'Jan',
+  insight_month_feb: 'Feb',
+  insight_month_mar: 'Mär',
+  insight_month_apr: 'Apr',
+  insight_month_may: 'Mai',
+  insight_month_jun: 'Jun',
+  insight_month_jul: 'Jul',
+  insight_month_aug: 'Aug',
+  insight_month_sep: 'Sep',
+  insight_month_oct: 'Okt',
+  insight_month_nov: 'Nov',
+  insight_month_dec: 'Dez',
+
+  // Qualitative - At a Glance
+  insight_at_a_glance: 'Überblick',
+  insight_whats_working: 'Was funktioniert:',
+  insight_whats_hindering: 'Was Sie behindert:',
+  insight_quick_wins: 'Schnelle Verbesserungen:',
+  insight_ambitious_workflows: 'Ambitionierte Workflows:',
+  insight_see_more_wins: 'Beeindruckende Ergebnisse →',
+  insight_see_more_friction: 'Wo Probleme auftreten →',
+  insight_see_more_features: 'Funktionen zum Ausprobieren →',
+  insight_see_more_horizon: 'Auf dem Horizont →',
+
+  // Qualitative - Navigation TOC
+  insight_nav_work: 'Was Sie bearbeiten',
+  insight_nav_usage: 'Wie Sie Qwen Code nutzen',
+  insight_nav_wins: 'Beeindruckende Ergebnisse',
+  insight_nav_friction: 'Wo Probleme auftreten',
+  insight_nav_features: 'Funktionen zum Ausprobieren',
+  insight_nav_patterns: 'Neue Patterns',
+  insight_nav_horizon: 'Auf dem Horizont',
+
+  // Qualitative - Project Areas
+  insight_what_you_work_on: 'Was Sie bearbeiten',
+  insight_sessions_count: '~{{count}} Sitzungen',
+  insight_what_you_wanted: 'Was Sie wollten',
+  insight_top_tools_used: 'Top-Tools',
+
+  // Qualitative - Interaction Style
+  insight_how_you_use: 'Wie Sie Qwen Code nutzen',
+  insight_key_pattern: 'Schlüsselpattern:',
+  insight_impressive_things: 'Beeindruckende Ergebnisse',
+  insight_what_helped_most: 'Was am meisten half',
+  insight_outcomes: 'Ergebnisse',
+
+  // Qualitative - Friction Points
+  insight_where_things_go_wrong: 'Wo Probleme auftreten',
+  insight_primary_friction_types: 'Hauptproblemtypen',
+  insight_inferred_satisfaction: 'Ermittelte Zufriedenheit',
+  insight_unclear: 'Unklar',
+
+  // Qualitative - Improvements
+  insight_features_to_try: 'Qwen Code Funktionen zum Ausprobieren',
+  insight_suggested_qwen_md: 'Empfohlene QWEN.md Ergänzungen',
+  insight_qwen_md_hint: 'In Qwen Code kopieren, um es zu QWEN.md hinzuzufügen.',
+  insight_copy_all_checked: 'Alle markierten kopieren ({{count}})',
+  insight_copied_all: 'Alle kopiert!',
+  insight_why_for_you: 'Warum für Sie:',
+  insight_features_hint:
+    'In Qwen Code kopieren — es wird automatisch konfiguriert.',
+  insight_new_ways_to_use: 'Neue Wege zur Nutzung von Qwen Code',
+  insight_patterns_hint:
+    'In Qwen Code kopieren — es führt Sie durch die Einrichtung.',
+  insight_paste_into_qwen: 'In Qwen Code einfügen:',
+  insight_on_the_horizon: 'Auf dem Horizont',
+  insight_getting_started: 'Erste Schritte:',
+  insight_no_data: 'Keine Insight-Daten verfügbar',
+  insight_export_card: 'Karte exportieren',
+  insight_light_theme: 'Helles Thema',
+  insight_dark_theme: 'Dunkles Thema',
+  insight_export_not_available: 'Exportfunktion nicht verfügbar.',
+  insight_export_failed:
+    'Karte konnte nicht exportiert werden. Bitte erneut versuchen.',
+  insight_copy: 'Kopieren',
+  insight_copied: 'Kopiert!',
+  insight_share_sessions: 'Sitzungen',
+  insight_share_lines_changed: 'Zeilen geändert',
+  insight_share_streak: 'Serie',
+  insight_share_best_streak: 'Beste Serie',
+  insight_share_activity: 'Aktivität · {{days}} aktive Tage',
+  insight_share_generated: 'Erstellt von Qwen Code ·',
+  insight_share_github: 'github.com/QwenLM/qwen-code',
+  insight_share_brand: 'qwen.ai',
+
+  // DataProcessor progress messages
+  insight_scanning_chat_history: 'Chat-Verlauf wird gescannt...',
+  insight_crunching_numbers: 'Daten werden verarbeitet',
+  insight_preparing_sessions: 'Sitzungen werden vorbereitet...',
+  insight_generating_personalized:
+    'Personalisierte Insights werden generiert...',
+  insight_assembling_report: 'Bericht wird zusammengestellt...',
 };

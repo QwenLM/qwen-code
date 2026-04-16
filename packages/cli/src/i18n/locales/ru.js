@@ -2012,4 +2012,132 @@ export default {
     'Not in plan mode. Use "/plan" to enter plan mode first.',
 
   "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+
+  'Generating insights in {{language}}...':
+    'Генерация инсайтов на {{language}}...',
+  'Opening insights in your browser: {{path}}':
+    'Открытие инсайтов в браузере: {{path}}',
+  'Insights generated at: {{path}}. Please open this file in your browser.':
+    'Инсайты созданы в {{path}}. Откройте этот файл в браузере.',
+
+  // ============================================================================
+  // Insight Report - HTML Report Static Text
+  // ============================================================================
+  // Header
+  insight_title: 'Qwen Code Аналитика',
+  insight_messages_across_sessions:
+    '{{messages}} сообщений в {{sessions}} сеансах',
+  insight_personalized_journey:
+    'Ваш персональный путь и паттерны программирования',
+
+  // Stats
+  insight_stat_messages: 'Сообщения',
+  insight_stat_lines: 'Строки',
+  insight_stat_files: 'Файлы',
+  insight_stat_days: 'Дни',
+  insight_stat_msgs_per_day: 'Сообщ./день',
+
+  // Charts
+  insight_active_hours: 'Активные часы',
+  insight_morning: 'Утро',
+  insight_afternoon: 'День',
+  insight_evening: 'Вечер',
+  insight_night: 'Ночь',
+  insight_time_morning: '06:00 - 12:00',
+  insight_time_afternoon: '12:00 - 18:00',
+  insight_time_evening: '18:00 - 22:00',
+  insight_time_night: '22:00 - 06:00',
+  insight_activity_heatmap: 'Тепловая карта активности',
+  insight_heatmap_subtitle: 'Активность за последний год',
+  insight_less: 'Мало',
+  insight_more: 'Много',
+  insight_activities: 'активностей',
+  insight_month_jan: 'Янв',
+  insight_month_feb: 'Фев',
+  insight_month_mar: 'Мар',
+  insight_month_apr: 'Апр',
+  insight_month_may: 'Май',
+  insight_month_jun: 'Июн',
+  insight_month_jul: 'Июл',
+  insight_month_aug: 'Авг',
+  insight_month_sep: 'Сен',
+  insight_month_oct: 'Окт',
+  insight_month_nov: 'Ноя',
+  insight_month_dec: 'Дек',
+
+  // Qualitative - At a Glance
+  insight_at_a_glance: 'Обзор',
+  insight_whats_working: 'Что работает хорошо:',
+  insight_whats_hindering: 'Что мешает вам:',
+  insight_quick_wins: 'Быстрые улучшения:',
+  insight_ambitious_workflows: 'Амбициозные workflows:',
+  insight_see_more_wins: 'Впечатляющие результаты →',
+  insight_see_more_friction: 'Где возникают проблемы →',
+  insight_see_more_features: 'Функции, которые стоит попробовать →',
+  insight_see_more_horizon: 'На горизонте →',
+
+  // Qualitative - Navigation TOC
+  insight_nav_work: 'Чем вы занимаетесь',
+  insight_nav_usage: 'Как вы используете Qwen Code',
+  insight_nav_wins: 'Впечатляющие результаты',
+  insight_nav_friction: 'Где возникают проблемы',
+  insight_nav_features: 'Функции для пробного использования',
+  insight_nav_patterns: 'Новые паттерны использования',
+  insight_nav_horizon: 'На горизонте',
+
+  // Qualitative - Project Areas
+  insight_what_you_work_on: 'Чем вы занимаетесь',
+  insight_sessions_count: '~{{count}} сеансов',
+  insight_what_you_wanted: 'Ваши цели',
+  insight_top_tools_used: 'Популярные инструменты',
+
+  // Qualitative - Interaction Style
+  insight_how_you_use: 'Как вы используете Qwen Code',
+  insight_key_pattern: 'Ключевой паттерн:',
+  insight_impressive_things: 'Впечатляющие результаты',
+  insight_what_helped_most: 'Самые полезные возможности',
+  insight_outcomes: 'Результаты',
+
+  // Qualitative - Friction Points
+  insight_where_things_go_wrong: 'Где возникают проблемы',
+  insight_primary_friction_types: 'Основные типы проблем',
+  insight_inferred_satisfaction: 'Предполагаемое удовлетворение',
+  insight_unclear: 'Неясно',
+
+  // Qualitative - Improvements
+  insight_features_to_try: 'Функции Qwen Code, которые стоит попробовать',
+  insight_suggested_qwen_md: 'Предложения для QWEN.md',
+  insight_qwen_md_hint: 'Скопируйте в Qwen Code, чтобы добавить в QWEN.md.',
+  insight_copy_all_checked: 'Копировать все отмеченные ({{count}})',
+  insight_copied_all: 'Все скопированы!',
+  insight_why_for_you: 'Почему для вас:',
+  insight_features_hint: 'Скопируйте в Qwen Code — он настроит автоматически.',
+  insight_new_ways_to_use: 'Новые способы использования Qwen Code',
+  insight_patterns_hint:
+    'Скопируйте в Qwen Code — он проведёт через настройку.',
+  insight_paste_into_qwen: 'Вставить в Qwen Code:',
+  insight_on_the_horizon: 'На горизонте',
+  insight_getting_started: 'Как начать:',
+  insight_no_data: 'Нет данных для инсайтов',
+  insight_export_card: 'Экспорт карточки',
+  insight_light_theme: 'Светлая тема',
+  insight_dark_theme: 'Тёмная тема',
+  insight_export_not_available: 'Экспорт недоступен.',
+  insight_export_failed:
+    'Не удалось экспортировать карточку. Попробуйте ещё раз.',
+  insight_copy: 'Копировать',
+  insight_copied: 'Скопировано!',
+  insight_share_sessions: 'Сеансы',
+  insight_share_lines_changed: 'Изменено строк',
+  insight_share_streak: 'Серия',
+  insight_share_best_streak: 'Лучшая серия',
+  insight_share_activity: 'Активность · {{days}} активных дней',
+  insight_share_generated: 'Создано Qwen Code ·',
+  insight_share_github: 'github.com/QwenLM/qwen-code',
+  insight_share_brand: 'qwen.ai',
+  insight_scanning_chat_history: 'Сканирование истории чатов...',
+  insight_crunching_numbers: 'Обработка данных',
+  insight_preparing_sessions: 'Подготовка сеансов...',
+  insight_generating_personalized: 'Генерация персонализированных инсайтов...',
+  insight_assembling_report: 'Сборка отчёта...',
 };
