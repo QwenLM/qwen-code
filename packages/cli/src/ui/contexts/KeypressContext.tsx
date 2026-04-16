@@ -39,7 +39,6 @@ import {
 import { clipboardHasImage } from '../utils/clipboardUtils.js';
 
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
-import { stopAndGetCapturedInput } from '../../utils/earlyInputCapture.js';
 
 const ESC = '\u001B';
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
@@ -138,12 +137,14 @@ export function KeypressProvider({
   pasteWorkaround = false,
   config,
   debugKeystrokeLogging,
+  initialCapturedInput,
 }: {
   children?: React.ReactNode;
   kittyProtocolEnabled: boolean;
   pasteWorkaround?: boolean;
   config?: Config;
   debugKeystrokeLogging?: boolean;
+  initialCapturedInput?: Buffer;
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
@@ -168,8 +169,10 @@ export function KeypressProvider({
       setRawMode(true);
     }
 
-    // Startup optimization: stop early input capture and get captured input
-    const capturedInput = stopAndGetCapturedInput();
+    // Use pre-drained captured input passed from outside React.
+    // Draining happens before render() so StrictMode's mount/cleanup/remount
+    // always reads from the stable prop reference, not the (already empty) module buffer.
+    const capturedInput = initialCapturedInput ?? Buffer.alloc(0);
 
     const keypressStream = new PassThrough();
     let usePassthrough = false;
@@ -1178,6 +1181,7 @@ export function KeypressProvider({
     pasteWorkaround,
     config,
     subscribers,
+    initialCapturedInput,
   ]);
 
   return (

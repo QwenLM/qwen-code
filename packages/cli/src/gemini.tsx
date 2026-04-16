@@ -208,6 +208,11 @@ export async function startInteractiveUI(
     }
   }
 
+  // Drain the early-captured input exactly once, before any React rendering.
+  // Must be outside any component/effect so StrictMode's mount/cleanup/remount
+  // always reads from the same stable prop rather than the (now empty) module buffer.
+  const initialCapturedInput = stopAndGetCapturedInput();
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
@@ -225,6 +230,7 @@ export async function startInteractiveUI(
               pasteWorkaround={
                 process.platform === 'win32' || nodeMajorVersion < 20
               }
+              initialCapturedInput={initialCapturedInput}
             >
               <SessionStatsProvider sessionId={config.getSessionId()}>
                 <VimModeProvider settings={settings}>
