@@ -422,6 +422,7 @@ describe('memoryCommand', () => {
       const refreshResult: LoadServerHierarchicalMemoryResponse = {
         memoryContent: 'new memory content',
         fileCount: 2,
+        ruleCount: 0,
       };
       mockLoadServerHierarchicalMemory.mockResolvedValue(refreshResult);
 
@@ -455,7 +456,7 @@ describe('memoryCommand', () => {
     it('should display success message when memory is refreshed with no content', async () => {
       if (!refreshCommand.action) throw new Error('Command has no action');
 
-      const refreshResult = { memoryContent: '', fileCount: 0 };
+      const refreshResult = { memoryContent: '', fileCount: 0, ruleCount: 0 };
       mockLoadServerHierarchicalMemory.mockResolvedValue(refreshResult);
 
       await refreshCommand.action(mockContext, '');

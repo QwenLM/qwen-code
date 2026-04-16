@@ -155,6 +155,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
         Promise.resolve({
           memoryContent: extensionPaths?.join(',') || '',
           fileCount: extensionPaths?.length || 0,
+          ruleCount: 0,
         }),
     ),
     DEFAULT_MEMORY_FILE_FILTERING_OPTIONS: {

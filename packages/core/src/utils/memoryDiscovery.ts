@@ -13,6 +13,7 @@ import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
 import { QWEN_DIR } from './paths.js';
 import { createDebugLogger } from './debugLogger.js';
+import { loadRules } from './rulesDiscovery.js';
 
 const logger = createDebugLogger('MEMORY_DISCOVERY');
 
@@ -303,10 +304,12 @@ function concatenateInstructions(
 export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: string;
   fileCount: number;
+  ruleCount: number;
 }
 
 /**
  * Loads hierarchical QWEN.md files and concatenates their content.
+ * Also loads path-based context rules from `.qwen/rules/` directories.
  * This function is intended for use by the server.
  */
 export async function loadServerHierarchicalMemory(
@@ -332,26 +335,50 @@ export async function loadServerHierarchicalMemory(
     extensionContextFilePaths,
     folderTrust,
   );
-  if (filePaths.length === 0) {
-    logger.debug('No QWEN.md files found in hierarchy.');
-    return { memoryContent: '', fileCount: 0 };
+
+  let combinedInstructions = '';
+  let fileCount = 0;
+
+  if (filePaths.length > 0) {
+    const contentsWithPaths = await readGeminiMdFiles(filePaths, importFormat);
+    // Pass CWD for relative path display in concatenated content
+    combinedInstructions = concatenateInstructions(
+      contentsWithPaths,
+      currentWorkingDirectory,
+    );
+
+    // Only count files that match configured memory filenames (e.g., QWEN.md),
+    // excluding system context files like output-language.md
+    const memoryFilenames = new Set(getAllGeminiMdFilenames());
+    fileCount = contentsWithPaths.filter((item) =>
+      memoryFilenames.has(path.basename(item.filePath)),
+    ).length;
   }
-  const contentsWithPaths = await readGeminiMdFiles(filePaths, importFormat);
-  // Pass CWD for relative path display in concatenated content
-  const combinedInstructions = concatenateInstructions(
-    contentsWithPaths,
-    currentWorkingDirectory,
+
+  // Load path-based context rules from .qwen/rules/ directories
+  const resolvedCwd = path.resolve(currentWorkingDirectory);
+  const projectRoot = await findProjectRoot(resolvedCwd);
+  const effectiveRoot = projectRoot ?? resolvedCwd;
+
+  const { content: rulesContent, ruleCount } = await loadRules(
+    effectiveRoot,
+    folderTrust,
   );
 
-  // Only count files that match configured memory filenames (e.g., QWEN.md),
-  // excluding system context files like output-language.md
-  const memoryFilenames = new Set(getAllGeminiMdFilenames());
-  const fileCount = contentsWithPaths.filter((item) =>
-    memoryFilenames.has(path.basename(item.filePath)),
-  ).length;
+  let memoryContent = combinedInstructions;
+  if (rulesContent) {
+    memoryContent = memoryContent
+      ? `${memoryContent}\n\n${rulesContent}`
+      : rulesContent;
+  }
+
+  if (!memoryContent && filePaths.length === 0 && ruleCount === 0) {
+    logger.debug('No QWEN.md files or rules found.');
+  }
 
   return {
-    memoryContent: combinedInstructions,
-    fileCount, // Only count the context files
+    memoryContent,
+    fileCount,
+    ruleCount,
   };
 }

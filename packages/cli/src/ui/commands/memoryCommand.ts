@@ -308,7 +308,7 @@ export const memoryCommand: SlashCommand = {
         try {
           const config = context.services.config;
           if (config) {
-            const { memoryContent, fileCount } =
+            const { memoryContent, fileCount, ruleCount } =
               await loadServerHierarchicalMemory(
                 config.getWorkingDir(),
                 config.shouldLoadMemoryFromIncludeDirectories()
@@ -323,10 +323,18 @@ export const memoryCommand: SlashCommand = {
             config.setUserMemory(memoryContent);
             config.setGeminiMdFileCount(fileCount);
 
-            const successMessage =
-              memoryContent.length > 0
-                ? `Memory refreshed successfully. Loaded ${memoryContent.length} characters from ${fileCount} file(s).`
-                : 'Memory refreshed successfully. No memory content found.';
+            let successMessage: string;
+            if (memoryContent.length > 0) {
+              const sources: string[] = [];
+              if (fileCount > 0) sources.push(`${fileCount} file(s)`);
+              if (ruleCount > 0) sources.push(`${ruleCount} rule(s)`);
+              const from =
+                sources.length > 0 ? ` from ${sources.join(' and ')}` : '';
+              successMessage = `Memory refreshed successfully. Loaded ${memoryContent.length} characters${from}.`;
+            } else {
+              successMessage =
+                'Memory refreshed successfully. No memory content found.';
+            }
 
             context.ui.addItem(
               {
