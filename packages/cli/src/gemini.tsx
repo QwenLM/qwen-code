@@ -467,7 +467,8 @@ export async function main() {
       const modelsConfig = config.getModelsConfig();
       const authType = modelsConfig.getCurrentAuthType();
       const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
-      preconnectApi(authType, { resolvedBaseUrl });
+      const proxy = config.getProxy();
+      preconnectApi(authType, { resolvedBaseUrl, proxy });
     } catch (error) {
       // If we can't get authType, skip preconnect - it's optional optimization
       debugLogger.debug(
