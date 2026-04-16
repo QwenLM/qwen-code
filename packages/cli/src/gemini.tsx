@@ -377,8 +377,11 @@ export async function main() {
           | string
           | undefined,
       });
-    } catch {
+    } catch (error) {
       // If we can't get authType, skip preconnect - it's optional optimization
+      debugLogger.debug(
+        `Preconnect skipped due to error getting authType: ${error}`,
+      );
     }
 
     // FIXME: list extensions after the config initialize

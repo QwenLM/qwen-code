@@ -75,10 +75,20 @@ function isInSandboxMode(): boolean {
  * Check if baseUrl is a default URL
  */
 function isDefaultBaseUrl(baseUrl: string): boolean {
-  const normalized = baseUrl.toLowerCase().replace(/\/+$/, '');
-  return Object.values(DEFAULT_BASE_URLS).some((url) =>
-    normalized.startsWith(url.toLowerCase()),
-  );
+  const normalizedInput = baseUrl
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/+$/, '');
+  return Object.values(DEFAULT_BASE_URLS).some((defaultUrl) => {
+    const normalizedDefault = defaultUrl
+      .toLowerCase()
+      .replace(/^https?:\/\//, '')
+      .replace(/\/+$/, '');
+    return (
+      normalizedInput === normalizedDefault ||
+      normalizedInput.startsWith(normalizedDefault + '/')
+    );
+  });
 }
 
 /**
@@ -215,6 +225,7 @@ export function preconnectApi(
 
 /**
  * Reset preconnect state (for testing only)
+ * @internal
  */
 export function resetPreconnectState(): void {
   preconnectFired = false;

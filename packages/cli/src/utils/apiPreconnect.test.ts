@@ -72,6 +72,14 @@ describe('apiPreconnect', () => {
       preconnectApi('openai', { settingsBaseUrl: 'https://api.openai.com/v1' });
       expect(mockFetch).toHaveBeenCalled();
     });
+
+    it('should skip when baseUrl is a subdomain-spoofed URL resembling a default', () => {
+      resetPreconnectState();
+      preconnectApi('openai', {
+        settingsBaseUrl: 'https://api.openai.com.malicious.com/v1',
+      });
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
   });
 
   describe('preconnect behavior', () => {
