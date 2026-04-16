@@ -1300,10 +1300,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
-  const [frozenSnapshot, setFrozenSnapshot] = useState<
-    HistoryItemWithoutId[] | null
-  >(null);
-
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -1317,18 +1313,6 @@ export const AppContainer = (props: AppContainerProps) => {
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
-
-  useEffect(() => {
-    // Clear frozen snapshot when streaming ends OR when entering confirmation
-    // state. During WaitingForConfirmation, the user needs to see the latest
-    // pending items (including the confirmation message) rather than a stale snapshot.
-    if (
-      streamingState === StreamingState.Idle ||
-      streamingState === StreamingState.WaitingForConfirmation
-    ) {
-      setFrozenSnapshot(null);
-    }
-  }, [streamingState]);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
@@ -1723,13 +1707,6 @@ export const AppContainer = (props: AppContainerProps) => {
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
-        // Only freeze during the actual responding phase. WaitingForConfirmation
-        // must keep focus so the user can approve/cancel tool confirmation UI.
-        if (streamingState === StreamingState.Responding) {
-          setFrozenSnapshot([...pendingHistoryItems]);
-        } else {
-          setFrozenSnapshot(null);
-        }
       }
     },
     [
@@ -1765,8 +1742,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
-      setFrozenSnapshot,
-      pendingHistoryItems,
       refreshStatic,
     ],
   );
@@ -2203,8 +2178,8 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const compactModeValue = useMemo(
-    () => ({ compactMode, frozenSnapshot }),
-    [compactMode, frozenSnapshot],
+    () => ({ compactMode, setCompactMode }),
+    [compactMode, setCompactMode],
   );
 
   return (

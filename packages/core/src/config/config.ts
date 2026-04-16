@@ -103,6 +103,8 @@ import {
   PermissionMode,
   NotificationType,
   type PermissionSuggestion,
+  type HookEventName,
+  type HookDefinition,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
@@ -461,10 +463,23 @@ export interface ConfigParameters {
    * to use disableAllHooks instead (note: inverted logic - enabled:true → disableAllHooks:false).
    */
   disableAllHooks?: boolean;
-  /** Hooks configuration from settings */
+  /**
+   * User-level hooks configuration (from user settings).
+   * These hooks are always loaded regardless of folder trust status.
+   */
+  userHooks?: Record<string, unknown>;
+  /**
+   * Project-level hooks configuration (from workspace settings).
+   * These hooks are only loaded in trusted folders.
+   * When undefined or the folder is untrusted, project hooks are skipped.
+   */
+  projectHooks?: Record<string, unknown>;
+
   hooks?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
+  /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
+  allowedHttpHookUrls?: string[];
   /**
    * Callback for persisting a permission rule to settings.
    * Injected by the CLI layer; core uses this to write allow/ask/deny rules
@@ -623,6 +638,7 @@ export class Config {
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly warnings: string[];
+  private readonly allowedHttpHookUrls: string[];
   private readonly onPersistPermissionRuleCallback?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
@@ -640,6 +656,11 @@ export class Config {
   private readonly enableManagedAutoDream: boolean;
   private fastModel?: string;
   private readonly disableAllHooks: boolean;
+  /** User-level hooks (always loaded regardless of trust) */
+  private readonly userHooks?: Record<string, unknown>;
+  /** Project-level hooks (only loaded in trusted folders) */
+  private readonly projectHooks?: Record<string, unknown>;
+  /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
   private readonly hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
@@ -750,6 +771,7 @@ export class Config {
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.warnings = params.warnings ?? [];
+    this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // Web search
@@ -819,6 +841,10 @@ export class Config {
     this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
+    // Store user and project hooks separately for proper source attribution
+    this.userHooks = params.userHooks;
+    this.projectHooks = params.projectHooks;
+    // Legacy: fall back to merged hooks if new fields are not provided
     this.hooks = params.hooks;
     this.memoryManager = new MemoryManager();
   }
@@ -1995,20 +2021,28 @@ export class Config {
 
   /**
    * Get project-level hooks configuration.
-   * This is used by the HookRegistry to load project-specific hooks.
+   * Returns hooks from workspace settings, only in trusted folders.
+   * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
-  getProjectHooks(): Record<string, unknown> | undefined {
-    // This will be populated from settings by the CLI layer
-    // The core Config doesn't have direct access to settings
-    return undefined;
+  getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    // Only return project hooks if workspace is trusted
+    if (!this.isTrustedFolder()) {
+      return undefined;
+    }
+    // Prefer new projectHooks field, fall back to hooks for backward compatibility
+    const hooks = this.projectHooks ?? this.hooks;
+    return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
   /**
-   * Get all hooks configuration (merged from all sources).
-   * This is used by the HookRegistry to load hooks.
+   * Get user-level hooks configuration.
+   * Returns hooks from user settings, always available regardless of folder trust.
+   * Used by HookRegistry to load user-specific hooks with proper source attribution.
    */
-  getHooks(): Record<string, unknown> | undefined {
-    return this.hooks;
+  getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    // Prefer new userHooks field, fall back to hooks for backward compatibility
+    const hooks = this.userHooks ?? this.hooks;
+    return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
   getExtensions(): Extension[] {
@@ -2084,6 +2118,14 @@ export class Config {
    */
   getFolderTrust(): boolean {
     return this.folderTrust;
+  }
+
+  /**
+   * Returns the whitelist of allowed HTTP hook URL patterns.
+   * If empty, all URLs are allowed (subject to SSRF protection).
+   */
+  getAllowedHttpHookUrls(): string[] {
+    return this.allowedHttpHookUrls;
   }
 
   isTrustedFolder(): boolean {
@@ -2373,8 +2415,6 @@ export class Config {
     !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
     await registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured
-    // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
-    // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
       await registerCoreTool(WebSearchTool, this);
     }

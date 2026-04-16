@@ -123,11 +123,13 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const focusedSubagentCallId = focusedSubagentRef.current;
 
   // Compact mode: entire group → single line summary
-  // Force-expand when: user must interact (Confirming), tool errored,
-  // shell is focused, or user-initiated
+  // Force-expand when: user must interact (Confirming or subagent pending
+  // confirmation), tool errored, shell is focused, or user-initiated
+  const hasSubagentPendingConfirmation = subagentsAwaitingApproval.length > 0;
   const showCompact =
     compactMode &&
     !hasConfirmingTool &&
+    !hasSubagentPendingConfirmation &&
     !hasErrorTool &&
     !isEmbeddedShellFocused &&
     !isUserInitiated;
@@ -278,7 +280,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 forceShowResult={
                   isUserInitiated ||
                   tool.status === ToolCallStatus.Confirming ||
-                  tool.status === ToolCallStatus.Error
+                  tool.status === ToolCallStatus.Error ||
+                  isAgentWithPendingConfirmation(tool.resultDisplay)
                 }
                 isFocused={isSubagentFocused}
                 isWaitingForOtherApproval={isWaitingForOtherApproval}

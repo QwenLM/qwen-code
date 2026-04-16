@@ -213,11 +213,19 @@ export function ModelDialog({
           const value =
             isRuntime && snapshotId ? snapshotId : `${t2}::${model.id}`;
 
+          const isQwenOAuth = t2 === AuthType.QWEN_OAUTH;
+
           const title = (
             <Text>
               <Text
                 bold
-                color={isRuntime ? theme.status.warning : theme.text.accent}
+                color={
+                  isQwenOAuth
+                    ? theme.status.warning
+                    : isRuntime
+                      ? theme.status.warning
+                      : theme.text.accent
+                }
               >
                 [{t2}]
               </Text>
@@ -225,15 +233,21 @@ export function ModelDialog({
               {isRuntime && (
                 <Text color={theme.status.warning}> (Runtime)</Text>
               )}
+              {isQwenOAuth && !isRuntime && (
+                <Text color={theme.status.warning}> ({t('Discontinued')})</Text>
+              )}
             </Text>
           );
 
-          // Include runtime indicator in description
+          // Include runtime / discontinued indicator in description
           let description = model.description || '';
           if (isRuntime) {
             description = description
               ? `${description} (Runtime)`
               : 'Runtime model';
+          }
+          if (isQwenOAuth && !isRuntime) {
+            description = t('Discontinued — switch to Coding Plan or API Key');
           }
 
           return {
@@ -322,6 +336,25 @@ export function ModelDialog({
           Date.now(),
         );
         onClose();
+        return;
+      }
+
+      // Block selection of discontinued qwen-oauth models
+      // (only block non-runtime OAuth; runtime OAuth models from existing
+      //  cached tokens are still allowed to work until the server rejects them)
+      const isQwenOAuthSelection =
+        selected.startsWith(`${AuthType.QWEN_OAUTH}::`) ||
+        (selected.startsWith('$runtime|') &&
+          selected.split('|')[1] === AuthType.QWEN_OAUTH);
+      const isRuntimeOAuthSelection = selected.startsWith(
+        `$runtime|${AuthType.QWEN_OAUTH}|`,
+      );
+      if (isQwenOAuthSelection && !isRuntimeOAuthSelection) {
+        setErrorMessage(
+          t(
+            'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+          ),
+        );
         return;
       }
 
@@ -463,6 +496,14 @@ export function ModelDialog({
             borderRight={false}
             borderColor={theme.border.default}
           />
+          {highlightedEntry.authType === AuthType.QWEN_OAUTH &&
+            !highlightedEntry.isRuntime && (
+              <Box marginTop={1}>
+                <Text color={theme.status.warning}>
+                  ⚠ {t('Discontinued — switch to Coding Plan or API Key')}
+                </Text>
+              </Box>
+            )}
           <DetailRow
             label={t('Modality')}
             value={formatModalities(highlightedEntry.model.modalities)}
