@@ -1,16 +1,38 @@
 # .aoneci/workflows/npm-publish.yml
-# 推送到 dev 分支时自动发布 npm beta 包
-# 推送到 main 分支时自动发布 npm 正式包（latest）
+# 推送到 release 分支时自动发布 npm 包到 anpm
+#
+# 流程：
+#   1. npm ci          — 安装依赖
+#   2. npm run build   — tsc 编译所有 workspace 包
+#   3. npm run bundle  — esbuild 首次打包 CLI（使用 package.json 原始版本）
+#   4. publish-packages.js:
+#      a. 写入 .npmrc 认证
+#      b. auto-version → 更新所有 package.json 版本号
+#      c. re-bundle    → 重新 esbuild 打包（使用新版本号，嵌入 CLI_VERSION）
+#      d. npm publish --workspaces → 发布所有非 private 包
+#         CLI 包的 prepublishOnly 会将 bundle 产物复制到 packages/cli/dist/
 
 name: 'NPM Publish'
 
-# triggers:
-#   push:
-#     branches: ['main', 'dev']
+triggers:
+  push:
+    branches: ['dataworks-release/*']
 
 params:
+  tag:
+    description: 'npm dist-tag（beta / latest）'
+    type: string
+    default: 'beta'
+  dry_run:
+    description: '是否 dry-run（勾选=仅模拟，不勾选=真实发布）'
+    type: boolean
+    default: true
+  auto_version:
+    description: '是否自动递增 prerelease 版本号（true=自动，false=使用 package.json 中的版本）'
+    type: string
+    default: 'true'
   skip_tests:
-    description: '是否跳过测试步骤（1=跳过，0=不跳过，默认不跳过）'
+    description: '是否跳过测试步骤（1=跳过，0=不跳过）'
     type: string
     default: '0'
 
@@ -18,7 +40,7 @@ jobs:
   npm-build-publish:
     runs-on:
       - 32-128Gi
-    name: 'Build, Test & Publish'
+    name: 'Build & Publish'
     image: alios-8u
     steps:
       - uses: checkout
@@ -33,23 +55,37 @@ jobs:
       - name: 'Install dependencies'
         run: 'npm ci'
 
-      # - name: 'Run tests'
-      #   run: |
-      #     if [ "$SKIP_TESTS" = "1" ]; then
-      #       echo "⏭️ Skipping tests (skip_tests=1)"
-      #     else
-      #       NO_COLOR=true npm run test:ci
-      #     fi
-      #   env:
-      #     SKIP_TESTS: ${{ params.skip_tests }}
-
-      - name: 'Build project'
+      - name: 'Build project (tsc)'
         run: 'npm run build'
 
-      - uses: npm-publisher
-        inputs:
-          token: ${{ secrets.inner_npm_publish_token }}
-          innerToken: ${{ secrets.inner_npm_publish_token }}
-          baseBranches: ['main']
-          # beta 版本自动更新版本号
-          autoVersion: true
+      - name: 'Bundle CLI (esbuild)'
+        run: 'npm run bundle'
+
+      - name: 'Verify bundle'
+        run: |
+          echo "=== dist/cli.js ==="
+          ls -lh dist/cli.js
+          echo ""
+          echo "=== dist/ structure ==="
+          ls dist/
+
+      - name: 'Publish packages'
+        run: |
+          ARGS="--token ${{ secrets.inner_npm_publish_token }} --tag ${{ params.tag }}"
+          [ "${{ params.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
+          [ "${{ params.auto_version }}" = "true" ] && ARGS="$ARGS --auto-version"
+          node scripts/publish-packages.js $ARGS
+
+      - name: 'Verify published CLI package'
+        run: |
+          if [ "${{ params.dry_run }}" = "true" ]; then
+            echo "Skipped (dry-run mode)"
+            exit 0
+          fi
+          sleep 5
+          echo "=== @alife/dataworks-qwen-code ==="
+          npm view @alife/dataworks-qwen-code --registry=https://registry.anpm.alibaba-inc.com/ --json 2>&1 | node -e "
+            const j = JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));
+            console.log('latest:', j['dist-tags']?.latest);
+            console.log('beta:', j['dist-tags']?.beta);
+          " || echo "View failed"
