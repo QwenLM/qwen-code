@@ -1,9 +1,11 @@
 name: 'Mark stale issues and pull requests'
 
-# Run as a daily cron at 1:30 AM
+# Run as a daily cron at 00:30 UTC (Beijing time 08:30).
+# Avoid the top of the hour to dodge GitHub's high-contention window,
+# and stay 30 minutes after release.yml (00:00 UTC) to reduce overlap.
 on:
   schedule:
-    - cron: '30 1 * * *'
+    - cron: '30 0 * * *'
   workflow_dispatch:
 
 jobs:
