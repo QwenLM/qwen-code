@@ -73,7 +73,7 @@ Choose your preferred authentication method:
 - **Local Inference**: Configure Ollama or vLLM in `~/.qwen/settings.json` to run models locally — completely free and private.
 
 > [!warning]
-
+>
 > Qwen OAuth was discontinued on April 15, 2026. If you were previously using Qwen OAuth, please switch to one of the methods above.
 
 > [!note]
