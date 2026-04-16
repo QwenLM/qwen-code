@@ -2222,10 +2222,7 @@ export function useTextBuffer({
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
       const editorString =
-        opts.editor ??
-        process.env['VISUAL'] ??
-        process.env['EDITOR'] ??
-        (process.platform === 'win32' ? 'notepad' : 'vi');
+        opts.editor ?? process.env['VISUAL'] ?? process.env['EDITOR'] ?? '';
 
       // Parse the editor command to handle arguments (e.g., "emacsclient -c")
       const parsedEditor = parse(editorString, process.env) as string[];
