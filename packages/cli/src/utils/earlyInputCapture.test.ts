@@ -9,6 +9,7 @@ import {
   startEarlyInputCapture,
   stopEarlyInputCapture,
   getAndClearCapturedInput,
+  stopAndGetCapturedInput,
   hasCapturedInput,
   resetCaptureState,
 } from './earlyInputCapture.js';
@@ -99,6 +100,18 @@ describe('earlyInputCapture', () => {
 
       const input = getAndClearCapturedInput();
       expect(input.toString()).toBe('a');
+    });
+
+    it('stopAndGetCapturedInput should atomically stop and return input', () => {
+      startEarlyInputCapture();
+      mockStdin.write(Buffer.from('hello'));
+
+      const input = stopAndGetCapturedInput();
+      expect(input.toString()).toBe('hello');
+
+      // Further writes should not be captured
+      mockStdin.write(Buffer.from('world'));
+      expect(hasCapturedInput()).toBe(false);
     });
   });
 

@@ -20,17 +20,20 @@ const debugLogger = createDebugLogger('EARLY_INPUT');
 const MAX_BUFFER_SIZE = 64 * 1024;
 
 /**
- * Input buffer
+ * Input buffer - collects chunks and concatenates on retrieval to avoid O(n^2) copies.
  */
 interface InputBuffer {
-  /** Raw byte data */
-  rawBytes: Buffer;
+  /** Collected raw byte chunks */
+  chunks: Buffer[];
+  /** Total bytes across all chunks */
+  totalBytes: number;
   /** Whether capture is complete */
   captured: boolean;
 }
 
 let inputBuffer: InputBuffer = {
-  rawBytes: Buffer.alloc(0),
+  chunks: [],
+  totalBytes: 0,
   captured: false,
 };
 
@@ -153,9 +156,14 @@ function skipTerminalResponse(data: Buffer, startIdx: number): number {
 /**
  * Filter terminal response sequences (like Kitty protocol responses, device attributes, etc.)
  * Preserve user input (including function keys like arrow keys)
+ *
+ * Note: This filter operates on a single data chunk. Terminal response sequences
+ * split across multiple data events will not be detected and may leak into the
+ * buffer. In practice this is rare since terminal responses arrive as complete chunks.
  */
 function filterTerminalResponses(data: Buffer): Buffer {
-  const result: number[] = [];
+  const result = Buffer.allocUnsafe(data.length);
+  let writeIdx = 0;
   let i = 0;
 
   while (i < data.length) {
@@ -170,11 +178,11 @@ function filterTerminalResponses(data: Buffer): Buffer {
       // User input function keys (like arrow keys ESC [A), preserve
     }
     // Preserve current byte
-    result.push(data[i]);
+    result[writeIdx++] = data[i];
     i++;
   }
 
-  return Buffer.from(result);
+  return result.subarray(0, writeIdx);
 }
 
 /**
@@ -194,7 +202,8 @@ export function startEarlyInputCapture(): void {
 
   isCapturing = true;
   inputBuffer = {
-    rawBytes: Buffer.alloc(0),
+    chunks: [],
+    totalBytes: 0,
     captured: false,
   };
 
@@ -206,7 +215,7 @@ export function startEarlyInputCapture(): void {
     }
 
     // Check buffer size limit
-    if (inputBuffer.rawBytes.length >= MAX_BUFFER_SIZE) {
+    if (inputBuffer.totalBytes >= MAX_BUFFER_SIZE) {
       debugLogger.debug('Buffer size limit reached, stopping capture');
       return;
     }
@@ -215,18 +224,20 @@ export function startEarlyInputCapture(): void {
     const filtered = filterTerminalResponses(data);
     if (filtered.length > 0) {
       // Limit buffer size
-      const newLength = inputBuffer.rawBytes.length + filtered.length;
+      const newLength = inputBuffer.totalBytes + filtered.length;
       if (newLength > MAX_BUFFER_SIZE) {
         const truncated = filtered.subarray(
           0,
-          MAX_BUFFER_SIZE - inputBuffer.rawBytes.length,
+          MAX_BUFFER_SIZE - inputBuffer.totalBytes,
         );
-        inputBuffer.rawBytes = Buffer.concat([inputBuffer.rawBytes, truncated]);
+        inputBuffer.chunks.push(Buffer.from(truncated));
+        inputBuffer.totalBytes += truncated.length;
         debugLogger.debug(`Buffer truncated at ${MAX_BUFFER_SIZE} bytes`);
       } else {
-        inputBuffer.rawBytes = Buffer.concat([inputBuffer.rawBytes, filtered]);
+        inputBuffer.chunks.push(Buffer.from(filtered));
+        inputBuffer.totalBytes += filtered.length;
         debugLogger.debug(
-          `Captured ${filtered.length} bytes (total: ${inputBuffer.rawBytes.length})`,
+          `Captured ${filtered.length} bytes (total: ${inputBuffer.totalBytes})`,
         );
       }
     }
@@ -250,7 +261,7 @@ export function stopEarlyInputCapture(): void {
   inputBuffer.captured = true;
 
   debugLogger.debug(
-    `Stopped early input capture: ${inputBuffer.rawBytes.length} bytes`,
+    `Stopped early input capture: ${inputBuffer.totalBytes} bytes`,
   );
 }
 
@@ -259,19 +270,30 @@ export function stopEarlyInputCapture(): void {
  * For use by KeypressContext
  */
 export function getAndClearCapturedInput(): Buffer {
-  const buffer = Buffer.from(inputBuffer.rawBytes);
-  inputBuffer = {
-    rawBytes: Buffer.alloc(0),
-    captured: false,
-  };
+  const buffer =
+    inputBuffer.chunks.length > 0
+      ? Buffer.concat(inputBuffer.chunks)
+      : Buffer.alloc(0);
+  inputBuffer.chunks = [];
+  inputBuffer.totalBytes = 0;
+  // Keep captured=true — capture has completed, don't re-arm
   return buffer;
+}
+
+/**
+ * Stop capture and return captured input in one atomic operation.
+ * Preferred over calling stopEarlyInputCapture + getAndClearCapturedInput separately.
+ */
+export function stopAndGetCapturedInput(): Buffer {
+  stopEarlyInputCapture();
+  return getAndClearCapturedInput();
 }
 
 /**
  * Check if there is captured input
  */
 export function hasCapturedInput(): boolean {
-  return inputBuffer.rawBytes.length > 0;
+  return inputBuffer.totalBytes > 0;
 }
 
 /**
@@ -284,7 +306,8 @@ export function resetCaptureState(): void {
   }
   isCapturing = false;
   inputBuffer = {
-    rawBytes: Buffer.alloc(0),
+    chunks: [],
+    totalBytes: 0,
     captured: false,
   };
 }
