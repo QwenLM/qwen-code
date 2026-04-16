@@ -57,19 +57,19 @@ brew install qwen-code
 When you start an interactive session with the `qwen` command, you'll be prompted to configure authentication:
 
 ```bash
-# You'll be prompted to log in on first use
+# You'll be prompted to set up authentication on first use
 qwen
 ```
 
 ```bash
-# Follow the prompts to log in with your account
+# Or run /auth anytime to change authentication method
 /auth
 ```
 
 Choose your preferred authentication method:
 
-- **API Key (recommended)**: Select `API Key`, then enter your API key from [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/) or another supported provider. See the [API setup guide](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) for details.
 - **Alibaba Cloud Coding Plan**: Select `Alibaba Cloud Coding Plan` for a fixed monthly fee with diverse model options. See the [Coding Plan guide](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) for setup instructions.
+- **API Key (recommended)**: Select `API Key`, then enter your API key from [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/) or another supported provider. See the [API setup guide](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) for details.
 - **Local Inference**: Configure Ollama or vLLM in `~/.qwen/settings.json` to run models locally — completely free and private.
 
 > ⚠️ **Note**: Qwen OAuth was discontinued on April 15, 2026. If you were previously using Qwen OAuth, please switch to one of the methods above.
