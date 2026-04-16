@@ -1100,6 +1100,7 @@ export default {
   'View tools': 'Werkzeuge anzeigen',
   'Status:': 'Status:',
   'Command:': 'Befehl:',
+  'Prompt:': 'Prompt:',
   'Working Directory:': 'Arbeitsverzeichnis:',
   'Capabilities:': 'Fähigkeiten:',
   'No server selected': 'Kein Server ausgewählt',

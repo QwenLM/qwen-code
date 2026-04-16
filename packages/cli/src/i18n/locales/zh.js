@@ -990,6 +990,7 @@ export default {
 
   // MCP Server Detail
   'Command:': '命令：',
+  'Prompt:': '提示词：',
   'Working Directory:': '工作目录：',
   'Capabilities:': '功能：',
 

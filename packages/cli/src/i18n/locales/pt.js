@@ -1106,6 +1106,7 @@ export default {
   'Status:': 'Status:',
   'Source:': 'Fonte:',
   'Command:': 'Comando:',
+  'Prompt:': 'Prompt:',
   'Working Directory:': 'Diretório de trabalho:',
   'Capabilities:': 'Capacidades:',
   'No server selected': 'Nenhum servidor selecionado',

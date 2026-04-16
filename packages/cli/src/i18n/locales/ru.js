@@ -1810,6 +1810,7 @@ export default {
     'Enter для подтверждения, Esc для отмены',
   'Status:': 'Статус:',
   'Command:': 'Команда:',
+  'Prompt:': 'Промпт:',
   'Working Directory:': 'Рабочий каталог:',
   'Capabilities:': 'Возможности:',
   'No server selected': 'Сервер не выбран',

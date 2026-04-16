@@ -1017,6 +1017,7 @@ export default {
   'Clear Authentication': 'Clear Authentication',
   'Server:': 'Server:',
   'Command:': 'Command:',
+  'Prompt:': 'Prompt:',
   'Working Directory:': 'Working Directory:',
   'Capabilities:': 'Capabilities:',
   'No server selected': 'No server selected',

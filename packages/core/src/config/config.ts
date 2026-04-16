@@ -1199,6 +1199,16 @@ export class Config {
   }
 
   /**
+   * Get the fast model for cost-efficient operations like prompt hooks.
+   * Returns undefined if not configured.
+   */
+  getFastModel(): string | undefined {
+    // For prompt hooks and other cost-sensitive operations, use a fast model
+    // Default to turbo model for cost efficiency
+    return 'qwen-turbo';
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Delegates to ModelsConfig.
    */

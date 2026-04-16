@@ -14,6 +14,7 @@ import { HookEventName } from './types.js';
 interface MockConfig {
   getBaseLlmClient: ReturnType<typeof vi.fn>;
   getModel: ReturnType<typeof vi.fn>;
+  getFastModel: ReturnType<typeof vi.fn>;
 }
 
 interface MockLlmClient {
@@ -33,6 +34,7 @@ describe('PromptHookRunner', () => {
     mockConfig = {
       getBaseLlmClient: vi.fn().mockReturnValue(mockLlmClient),
       getModel: vi.fn().mockReturnValue('qwen-coder'),
+      getFastModel: vi.fn().mockReturnValue('qwen-turbo'),
     };
 
     runner = new PromptHookRunner(mockConfig as unknown as Config);
@@ -106,7 +108,7 @@ describe('PromptHookRunner', () => {
       );
     });
 
-    it('should use main model when hook model not specified', async () => {
+    it('should use fast model when hook model not specified', async () => {
       mockLlmClient.generateJson.mockResolvedValue({ ok: true });
 
       await runner.execute(
@@ -117,7 +119,7 @@ describe('PromptHookRunner', () => {
       );
 
       expect(mockLlmClient.generateJson).toHaveBeenCalledWith(
-        expect.objectContaining({ model: 'qwen-coder' }),
+        expect.objectContaining({ model: 'qwen-turbo' }),
       );
     });
 

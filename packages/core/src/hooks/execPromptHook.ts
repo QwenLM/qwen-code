@@ -180,10 +180,7 @@ export class PromptHookRunner {
 
   /**
    * Get the model to use for this prompt hook.
-   * Priority: hook.model > config.getModel() > DEFAULT_PROMPT_HOOK_MODEL
-   *
-   * Note: If Config adds getFastModel() in the future, it should be inserted
-   * between hook.model and config.getModel() in the priority chain.
+   * Priority: hook.model > config.getFastModel() > DEFAULT_PROMPT_HOOK_MODEL
    */
   private getModel(hook: PromptHookConfig): string {
     // 1. Use hook-specific model if provided
@@ -191,10 +188,10 @@ export class PromptHookRunner {
       return hook.model;
     }
 
-    // 2. Fall back to main model
-    const mainModel = this.config.getModel();
-    if (mainModel) {
-      return mainModel;
+    // 2. Fall back to fast model for cost efficiency
+    const fastModel = this.config.getFastModel();
+    if (fastModel) {
+      return fastModel;
     }
 
     // 3. Ultimate fallback

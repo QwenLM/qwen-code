@@ -836,6 +836,7 @@ export default {
   'Status:': 'ステータス:',
   'Source:': 'ソース:',
   'Command:': 'コマンド:',
+  'Prompt:': 'プロンプト:',
   'Working Directory:': '作業ディレクトリ:',
   'Capabilities:': '機能:',
   'No server selected': 'サーバーが選択されていません',

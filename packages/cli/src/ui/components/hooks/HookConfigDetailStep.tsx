@@ -8,8 +8,17 @@ import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import type { HookConfigDisplayInfo, HookEventDisplayInfo } from './types.js';
-import { HooksConfigSource } from '@qwen-code/qwen-code-core';
+import {
+  HooksConfigSource,
+  type HookConfig,
+  type PromptHookConfig,
+} from '@qwen-code/qwen-code-core';
 import { t } from '../../../i18n/index.js';
+
+// Type guard to check if hook config is a prompt hook
+function isPromptHook(config: HookConfig): config is PromptHookConfig {
+  return config.type === 'prompt';
+}
 
 interface HookConfigDetailStepProps {
   hookEvent: HookEventDisplayInfo;
@@ -43,23 +52,32 @@ export function HookConfigDetailStep({
 
   // Get hook type display
   const getHookTypeDisplay = (): string => {
-    switch (hookConfig.config.type) {
-      case 'command':
-        return 'command';
-      default:
-        return hookConfig.config.type;
+    if (isPromptHook(hookConfig.config)) {
+      return 'prompt';
     }
+    return 'command';
   };
 
   // Get command to display
   const getCommand = (): string => {
-    if (hookConfig.config.type === 'command') {
+    if (!isPromptHook(hookConfig.config)) {
       return hookConfig.config.command;
     }
     return '';
   };
 
-  // Calculate box width for command display
+  // Get prompt to display
+  const getPrompt = (): string => {
+    if (isPromptHook(hookConfig.config)) {
+      return hookConfig.config.prompt;
+    }
+    return '';
+  };
+
+  // Check if this is a prompt hook
+  const isPromptHookType = isPromptHook(hookConfig.config);
+
+  // Calculate box width for command/prompt display
   const commandBoxWidth = Math.min(terminalWidth - 6, 80);
 
   // Label width for alignment (Extension: is the longest label)
@@ -133,12 +151,14 @@ export function HookConfigDetailStep({
         </Box>
       )}
 
-      {/* Command */}
+      {/* Command/Prompt section */}
       <Box marginTop={1}>
-        <Text color={theme.text.secondary}>{t('Command:')}</Text>
+        <Text color={theme.text.secondary}>
+          {isPromptHookType ? t('Prompt:') : t('Command:')}
+        </Text>
       </Box>
 
-      {/* Command box */}
+      {/* Command/Prompt box */}
       <Box
         flexDirection="column"
         borderStyle="round"
@@ -146,7 +166,9 @@ export function HookConfigDetailStep({
         paddingX={1}
         width={commandBoxWidth}
       >
-        <Text color={theme.text.primary}>{getCommand()}</Text>
+        <Text color={theme.text.primary}>
+          {isPromptHookType ? getPrompt() : getCommand()}
+        </Text>
       </Box>
 
       {/* Help text */}

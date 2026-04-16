@@ -86,13 +86,22 @@ export function HookDetailStep({
           {hook.configs.map((config, index) => {
             const isSelected = index === selectedIndex;
             const sourceDisplay = getConfigSourceDisplay(config);
-            const command =
-              config.config.type === 'command' ? config.config.command : '';
+
+            // Get display text based on hook type
+            let displayText = '';
+            if (config.config.type === 'command') {
+              displayText = config.config.command;
+            } else if (config.config.type === 'prompt') {
+              // For prompt hooks, show name if available, otherwise show truncated prompt
+              displayText =
+                config.config.name ||
+                config.config.prompt.substring(0, 50) + '...';
+            }
             const hookType = config.config.type;
 
             return (
               <Box key={index}>
-                {/* Left column: selector + command */}
+                {/* Left column: selector + display text */}
                 <Box width={commandWidth}>
                   <Box minWidth={2}>
                     <Text
@@ -108,7 +117,7 @@ export function HookDetailStep({
                     bold={isSelected}
                     wrap="wrap"
                   >
-                    {`${index + 1}. [${hookType}] ${command}`}
+                    {`${index + 1}. [${hookType}] ${displayText}`}
                   </Text>
                 </Box>
                 {/* Spacer between columns */}

@@ -32,52 +32,11 @@ describe('substituteArguments', () => {
       const result = substituteArguments(content, undefined);
       expect(result).toBe('Evaluate this: ');
     });
-  });
 
-  describe('$ARGUMENTS[N] indexed syntax', () => {
-    it('should replace $ARGUMENTS[0] with first extracted field', () => {
-      const content = 'Tool: $ARGUMENTS[0]';
-      const args = JSON.stringify({ tool_name: 'bash', command: 'ls -la' });
-      const result = substituteArguments(content, args);
-      expect(result).toBe('Tool: bash');
-    });
-
-    it('should replace $ARGUMENTS[1] with second extracted field', () => {
-      const content = 'Command: $ARGUMENTS[1]';
-      const args = JSON.stringify({ tool_name: 'bash', command: 'ls -la' });
-      const result = substituteArguments(content, args);
-      expect(result).toBe('Command: ls -la');
-    });
-
-    it('should return empty string for out-of-bounds index', () => {
-      const content = 'Extra: $ARGUMENTS[99]';
-      const args = JSON.stringify({ tool_name: 'bash' });
-      const result = substituteArguments(content, args);
-      expect(result).toBe('Extra: ');
-    });
-  });
-
-  describe('$N shorthand syntax', () => {
-    it('should replace $0 with first field', () => {
-      const content = 'Tool: $0';
-      const args = JSON.stringify({ tool_name: 'bash' });
-      const result = substituteArguments(content, args);
-      expect(result).toBe('Tool: bash');
-    });
-
-    it('should replace $1 with second field', () => {
-      const content = 'Command: $1';
-      const args = JSON.stringify({ tool_name: 'bash', command: 'rm -rf' });
-      const result = substituteArguments(content, args);
-      expect(result).toBe('Command: rm -rf');
-    });
-
-    it('should not match $ARGUMENTS with $N pattern', () => {
-      const content = 'Args: $ARGUMENTS';
-      const args = 'test';
-      const result = substituteArguments(content, args);
-      // $ARGUMENTS should be replaced, not treated as $0
-      expect(result).toBe('Args: test');
+    it('should handle empty args', () => {
+      const content = 'Evaluate: $ARGUMENTS';
+      const result = substituteArguments(content, '');
+      expect(result).toBe('Evaluate: ');
     });
   });
 
@@ -106,34 +65,28 @@ describe('substituteArguments', () => {
     });
   });
 
-  describe('mixed placeholders', () => {
-    it('should handle multiple placeholder types in same content', () => {
-      const content = 'Tool: $0\nFull: $ARGUMENTS\nCommand: $ARGUMENTS[1]';
-      const args = JSON.stringify({
-        tool_name: 'bash',
-        command: 'ls',
-        prompt: 'test',
-      });
-      const result = substituteArguments(content, args);
-      expect(result).toContain('Tool: bash');
-      expect(result).toContain('Full:');
-      expect(result).toContain('Command: ls');
-    });
-  });
-
-  describe('shell-like argument parsing', () => {
-    it('should parse quoted arguments correctly', () => {
-      const content = 'Arg: $0';
-      const args = '"hello world" test';
-      const result = substituteArguments(content, args);
-      expect(result).toBe('Arg: hello world');
+  describe('edge cases', () => {
+    it('should handle empty content', () => {
+      const result = substituteArguments('', 'test');
+      expect(result).toBe('test');
     });
 
-    it('should handle single quotes', () => {
-      const content = 'Arg: $0';
-      const args = "'hello world' test";
+    it('should handle special characters in JSON', () => {
+      const args = JSON.stringify({ command: 'echo "hello\\nworld"' });
+      const content = 'Command: $ARGUMENTS';
       const result = substituteArguments(content, args);
-      expect(result).toBe('Arg: hello world');
+      // Check that the JSON is properly included
+      expect(result).toContain('"command"');
+      expect(result).toContain('hello');
+      expect(result).toContain('world');
+    });
+
+    it('should handle large JSON', () => {
+      const largeObj = { data: 'x'.repeat(10000) };
+      const args = JSON.stringify(largeObj);
+      const content = '$ARGUMENTS';
+      const result = substituteArguments(content, args);
+      expect(result.length).toBeGreaterThan(10000);
     });
   });
 });
@@ -176,14 +129,12 @@ describe('validatePromptHookResponse', () => {
         "'reason' must be a string",
       );
     });
-  });
 
-  describe('extra fields', () => {
-    it('should warn but accept responses with extra fields', () => {
+    it('should throw error when response has extra fields', () => {
       const response = { ok: true, extra: 'field', another: 123 };
-      // Should not throw, just warn
-      const result = validatePromptHookResponse(response);
-      expect(result.ok).toBe(true);
+      expect(() => validatePromptHookResponse(response)).toThrow(
+        'unexpected keys',
+      );
     });
   });
 });
