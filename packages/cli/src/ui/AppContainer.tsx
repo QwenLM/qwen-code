@@ -360,10 +360,25 @@ export const AppContainer = (props: AppContainerProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
 
-  useEffect(
-    () => setUpdateHandler(historyManager.addItem, setUpdateInfo),
-    [historyManager.addItem],
-  );
+  // Track idle state via ref so the update handler can defer notifications
+  // while the model is streaming, without triggering re-renders.
+  // Note: isIdleRef.current is assigned after streamingState becomes available
+  // (see the assignment below useGeminiStream).
+  const isIdleRef = useRef(true);
+  const updateHandlerRef = useRef<{
+    cleanup: () => void;
+    flush: () => void;
+  } | null>(null);
+
+  useEffect(() => {
+    const handler = setUpdateHandler(
+      historyManager.addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+    updateHandlerRef.current = handler;
+    return () => handler?.cleanup();
+  }, [historyManager.addItem]);
 
   // Watch for model changes (e.g., user switches model via /model)
   useEffect(() => {
@@ -748,6 +763,16 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     midTurnDrainRef,
   );
+
+  // Now that streamingState is available, keep isIdleRef in sync and
+  // flush any deferred update notifications when the model finishes responding.
+  isIdleRef.current = streamingState === StreamingState.Idle;
+
+  useEffect(() => {
+    if (streamingState === StreamingState.Idle) {
+      updateHandlerRef.current?.flush();
+    }
+  }, [streamingState]);
 
   // Contextual tips — show tips based on context usage after model responses
   // Defer TipHistory loading when tips are disabled to avoid side effects
