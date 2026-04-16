@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
@@ -20,10 +21,37 @@ import { useVimMode } from '../contexts/VimModeContext.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
+/**
+ * Returns true while any dream task for the current project is in
+ * 'pending' or 'running' state. Uses MemoryManager's subscribe/notify
+ * mechanism so there is zero polling overhead.
+ */
+function useDreamRunning(projectRoot: string): boolean {
+  const config = useConfig();
+
+  const subscribe = useCallback(
+    (onStoreChange: () => void) =>
+      config.getMemoryManager().subscribe(onStoreChange),
+    [config],
+  );
+
+  const getSnapshot = useCallback(
+    () =>
+      config
+        .getMemoryManager()
+        .listTasksByType('dream', projectRoot)
+        .some((task) => task.status === 'pending' || task.status === 'running'),
+    [config, projectRoot],
+  );
+
+  return useSyncExternalStore(subscribe, getSnapshot);
+}
+
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
+  const dreamRunning = useDreamRunning(config.getProjectRoot());
   const { text: statusLineText } = useStatusLine();
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -83,6 +111,12 @@ export const Footer: React.FC = () => {
     rightItems.push({
       key: 'debug',
       node: <Text color={theme.status.warning}>Debug Mode</Text>,
+    });
+  }
+  if (dreamRunning) {
+    rightItems.push({
+      key: 'dream',
+      node: <Text color={theme.text.secondary}>{t('✦ dreaming')}</Text>,
     });
   }
   if (promptTokenCount > 0 && contextWindowSize) {

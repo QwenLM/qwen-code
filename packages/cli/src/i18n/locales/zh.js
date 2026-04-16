@@ -899,6 +899,41 @@ export default {
     '用法：/memory add [--global|--project] <要记住的文本>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     '正在尝试保存到记忆 {{scope}}："{{fact}}"',
+  'Open auto-memory folder': '打开自动记忆文件夹',
+  'Auto-memory: {{status}}': '自动记忆：{{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    '自动整理：{{status}} · {{lastDream}} · /dream 立即运行',
+  never: '从未',
+  on: '开',
+  off: '关',
+  '✦ dreaming': '✦ 整理中',
+  'Remove matching entries from managed auto-memory.':
+    '从托管自动记忆中删除匹配的条目。',
+  'Usage: /forget <memory text to remove>': '用法：/forget <要删除的记忆文本>',
+  'No managed auto-memory entries matched: {{query}}':
+    '没有匹配的托管自动记忆条目：{{query}}',
+  'Show managed auto-memory status.': '显示托管自动记忆状态',
+  'Run managed auto-memory extraction for the current session.':
+    '为当前会话运行托管自动记忆提炼',
+  'Managed auto-memory root: {{root}}': '托管自动记忆根目录：{{root}}',
+  'Managed auto-memory topics:': '托管自动记忆主题：',
+  'No extraction cursor found yet.': '尚未找到提炼游标。',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    '游标：session={{sessionId}}，offset={{offset}}，updated={{updatedAt}}',
+  'No chat client available to extract memory.':
+    '没有可用于提炼记忆的聊天客户端。',
+  'Managed auto-memory extraction is already running.':
+    '托管自动记忆提炼已在运行中。',
+  'Managed auto-memory extraction found no new durable memories.':
+    '托管自动记忆提炼未发现新的持久记忆。',
+  'Consolidate managed auto-memory topic files.': '整理托管自动记忆主题文件',
+  'Managed auto-memory dream found nothing to improve.':
+    '托管自动记忆 dream 未发现可改进内容。',
+  'Deduplicated entries: {{count}}': '去重条目数：{{count}}',
+  'Save a durable memory using the save_memory tool.':
+    '使用 save_memory 工具保存一条持久记忆',
+  'Usage: /remember [--global|--project] <text to remember>':
+    '用法：/remember [--global|--project] <要记住的文本>',
 
   // ============================================================================
   // Commands - MCP

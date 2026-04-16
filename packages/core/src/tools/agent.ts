@@ -602,9 +602,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Retrieve the parent's cached generationConfig (systemInstruction +
         // tools) so the fork's API requests share the same prefix for
         // DashScope prompt cache hits.
-        const { getCacheSafeParams } = await import(
-          '../followup/forkedQuery.js'
-        );
+        const { getCacheSafeParams } = await import('../utils/forkedAgent.js');
         const cacheSafeParams = getCacheSafeParams();
         if (cacheSafeParams) {
           forkGenerationConfig = cacheSafeParams.generationConfig;
@@ -612,7 +610,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           if (tools && tools.length > 0) {
             forkToolsOverride = tools
               .flatMap(
-                (t) =>
+                (t: import('@google/genai').ToolUnion) =>
                   (
                     t as {
                       functionDeclarations?: Array<
@@ -622,7 +620,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   ).functionDeclarations ?? [],
               )
               .filter(
-                (decl) =>
+                (decl: import('@google/genai').FunctionDeclaration) =>
                   !(decl.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(decl.name)),
               );
           }

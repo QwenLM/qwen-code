@@ -949,6 +949,43 @@ export default {
     'Usage: /memory add [--global|--project] <text to remember>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Attempting to save to memory {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Open auto-memory folder',
+  'Auto-memory: {{status}}': 'Auto-memory: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Auto-dream: {{status}} · {{lastDream}} · /dream to run',
+  never: 'never',
+  on: 'on',
+  off: 'off',
+  '✦ dreaming': '✦ dreaming',
+  'Remove matching entries from managed auto-memory.':
+    'Remove matching entries from managed auto-memory.',
+  'Usage: /forget <memory text to remove>':
+    'Usage: /forget <memory text to remove>',
+  'No managed auto-memory entries matched: {{query}}':
+    'No managed auto-memory entries matched: {{query}}',
+  'Show managed auto-memory status.': 'Show managed auto-memory status.',
+  'Run managed auto-memory extraction for the current session.':
+    'Run managed auto-memory extraction for the current session.',
+  'Managed auto-memory root: {{root}}': 'Managed auto-memory root: {{root}}',
+  'Managed auto-memory topics:': 'Managed auto-memory topics:',
+  'No extraction cursor found yet.': 'No extraction cursor found yet.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'No chat client available to extract memory.',
+  'Managed auto-memory extraction is already running.':
+    'Managed auto-memory extraction is already running.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Managed auto-memory extraction found no new durable memories.',
+  'Consolidate managed auto-memory topic files.':
+    'Consolidate managed auto-memory topic files.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Managed auto-memory dream found nothing to improve.',
+  'Deduplicated entries: {{count}}': 'Deduplicated entries: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Save a durable memory using the save_memory tool.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Usage: /remember [--global|--project] <text to remember>',
 
   // ============================================================================
   // Commands - MCP

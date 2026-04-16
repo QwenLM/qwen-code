@@ -52,7 +52,7 @@ import { GlobTool } from '../tools/glob.js';
 import { GrepTool } from '../tools/grep.js';
 import { LSTool } from '../tools/ls.js';
 import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
-import { MemoryTool, setGeminiMdFilename } from '../tools/memoryTool.js';
+import { setGeminiMdFilename } from '../memory/const.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { RipGrepTool } from '../tools/ripGrep.js';
@@ -137,6 +137,9 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
+import { getAutoMemoryRoot } from '../memory/paths.js';
+import { readAutoMemoryIndex } from '../memory/store.js';
+import { MemoryManager } from '../memory/manager.js';
 
 import {
   ModelsConfig,
@@ -442,6 +445,17 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
+  /** Enable managed auto-memory background extraction and dream. Defaults to true. */
+  enableManagedAutoMemory?: boolean;
+  /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
+  enableManagedAutoDream?: boolean;
+  /**
+   * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
+   * When set and valid for the current auth type, forked agents use this model instead of
+   * the main session model, reducing latency and cost.
+   * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
+   */
+  fastModel?: string;
   /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
@@ -638,6 +652,9 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
+  private readonly enableManagedAutoMemory: boolean;
+  private readonly enableManagedAutoDream: boolean;
+  private fastModel?: string;
   private readonly disableAllHooks: boolean;
   /** User-level hooks (always loaded regardless of trust) */
   private readonly userHooks?: Record<string, unknown>;
@@ -647,6 +664,7 @@ export class Config {
   private readonly hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
+  private readonly memoryManager: MemoryManager;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -819,12 +837,16 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
+    this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
+    this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
+    this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     // Store user and project hooks separately for proper source attribution
     this.userHooks = params.userHooks;
     this.projectHooks = params.projectHooks;
     // Legacy: fall back to merged hooks if new fields are not provided
     this.hooks = params.hooks;
+    this.memoryManager = new MemoryManager();
   }
 
   /**
@@ -1062,7 +1084,20 @@ export class Config {
       this.isTrustedFolder(),
       this.getImportFormat(),
     );
-    this.setUserMemory(memoryContent);
+    if (this.getManagedAutoMemoryEnabled()) {
+      const managedAutoMemoryIndex = await readAutoMemoryIndex(
+        this.getProjectRoot(),
+      );
+      this.setUserMemory(
+        this.memoryManager.appendToUserMemory(
+          memoryContent,
+          getAutoMemoryRoot(this.getProjectRoot()),
+          managedAutoMemoryIndex,
+        ),
+      );
+    } else {
+      this.setUserMemory(memoryContent);
+    }
     this.setGeminiMdFileCount(fileCount);
   }
 
@@ -1247,6 +1282,29 @@ export class Config {
 
   getModel(): string {
     return this.contentGeneratorConfig?.model || this.modelsConfig.getModel();
+  }
+
+  /**
+   * Returns the fast model if one is configured and valid for the current auth type,
+   * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
+   * use this as a cheaper alternative to the main session model.
+   */
+  getFastModel(): string | undefined {
+    if (!this.fastModel) return undefined;
+    const authType = this.contentGeneratorConfig?.authType;
+    if (!authType) return undefined;
+    const available = this.getAvailableModelsForAuthType(authType);
+    return available.some((m) => m.id === this.fastModel)
+      ? this.fastModel
+      : undefined;
+  }
+
+  /**
+   * Update the fast model at runtime (e.g., when the user runs `/model --fast <model>`).
+   * Pass undefined or an empty string to clear the fast model override.
+   */
+  setFastModel(model: string | undefined): void {
+    this.fastModel = model || undefined;
   }
 
   /**
@@ -1927,6 +1985,24 @@ export class Config {
     return this.disableAllHooks;
   }
 
+  getManagedAutoMemoryEnabled(): boolean {
+    return this.enableManagedAutoMemory;
+  }
+
+  getManagedAutoDreamEnabled(): boolean {
+    return this.enableManagedAutoDream;
+  }
+
+  /**
+   * Return the MemoryManager instance created for this Config.
+   * Use this to share background-task state (registry, drainer) with memory
+   * module runtimes (extract, dream) instead of relying on module-level
+   * globals.
+   */
+  getMemoryManager(): MemoryManager {
+    return this.memoryManager;
+  }
+
   /**
    * Get the message bus instance.
    * Returns undefined if not set.
@@ -2334,7 +2410,6 @@ export class Config {
     await registerCoreTool(EditTool, this);
     await registerCoreTool(WriteFileTool, this);
     await registerCoreTool(ShellTool, this);
-    await registerCoreTool(MemoryTool);
     await registerCoreTool(TodoWriteTool, this);
     await registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));

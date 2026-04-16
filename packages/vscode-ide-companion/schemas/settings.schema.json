@@ -418,6 +418,22 @@
         }
       }
     },
+    "memory": {
+      "description": "Settings for managed auto-memory.",
+      "type": "object",
+      "properties": {
+        "enableManagedAutoMemory": {
+          "description": "Enable background extraction of memories from conversations.",
+          "type": "boolean",
+          "default": true
+        },
+        "enableManagedAutoDream": {
+          "description": "Enable automatic consolidation (dream) of collected memories.",
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
     "permissions": {
       "description": "Permission rules controlling tool usage. Rules are evaluated in priority order: deny > ask > allow.",
       "type": "object",
