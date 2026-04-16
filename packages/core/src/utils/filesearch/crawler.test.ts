@@ -608,6 +608,37 @@ describe('crawler', () => {
         ]),
       );
     });
+
+    it('should treat maxDepth as relative to the crawl directory', async () => {
+      await initGitRepo(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: path.join(tmpDir, 'level1'),
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        maxDepth: 0,
+      });
+
+      expect(results).toEqual(
+        expect.arrayContaining([
+          '.',
+          'level1/',
+          'level1/file-level1.txt',
+          'level1/level2/',
+        ]),
+      );
+      expect(results).not.toContain('level1/level2/file-level2.txt');
+      expect(results).not.toContain('level1/level2/level3/');
+    });
   });
 
   describe('with maxFiles', () => {

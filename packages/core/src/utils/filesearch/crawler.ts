@@ -169,7 +169,38 @@ function getEntryDepth(entry: string): number {
   return withoutTrailingSlash.split('/').length - 1;
 }
 
-function applyMaxDepthLimit(results: string[], maxDepth?: number): string[] {
+function stripCrawlDirectoryPrefix(
+  entry: string,
+  relativeToCrawlDir: string,
+): string {
+  if (
+    entry === '.' ||
+    relativeToCrawlDir === '' ||
+    relativeToCrawlDir === '.'
+  ) {
+    return entry;
+  }
+
+  const prefix = relativeToCrawlDir.endsWith('/')
+    ? relativeToCrawlDir
+    : `${relativeToCrawlDir}/`;
+
+  if (entry === relativeToCrawlDir) {
+    return '.';
+  }
+
+  if (entry.startsWith(prefix)) {
+    return entry.slice(prefix.length) || '.';
+  }
+
+  return entry;
+}
+
+function applyMaxDepthLimit(
+  results: string[],
+  maxDepth?: number,
+  relativeToCrawlDir?: string,
+): string[] {
   if (maxDepth === undefined) {
     return results;
   }
@@ -178,7 +209,12 @@ function applyMaxDepthLimit(results: string[], maxDepth?: number): string[] {
     if (entry === '.') {
       return true;
     }
-    return getEntryDepth(entry) <= maxDepth;
+
+    const crawlRootRelativeEntry = relativeToCrawlDir
+      ? stripCrawlDirectoryPrefix(entry, relativeToCrawlDir)
+      : entry;
+
+    return getEntryDepth(crawlRootRelativeEntry) <= maxDepth;
   });
 }
 
@@ -199,8 +235,16 @@ function isUnderIgnoredDirectory(
   return false;
 }
 
-function applyFilters(results: string[], options: CrawlOptions): string[] {
-  const depthFiltered = applyMaxDepthLimit(results, options.maxDepth);
+function applyFilters(
+  results: string[],
+  options: CrawlOptions,
+  relativeToCrawlDir?: string,
+): string[] {
+  const depthFiltered = applyMaxDepthLimit(
+    results,
+    options.maxDepth,
+    relativeToCrawlDir,
+  );
   const dirFilter = options.ignore.getDirectoryFilter();
   const fileFilter = options.ignore.getFileFilter();
 
@@ -311,7 +355,7 @@ async function crawlWithGitLsFiles(
   }
 
   const results = buildResultsFromFileSet(fileSet);
-  const filteredResults = applyFilters(results, options);
+  const filteredResults = applyFilters(results, options, relativeToCrawlDir);
 
   updateChangeState(stateKey, crawlDirectory, filteredResults);
   recordRebuild(stateKey);
@@ -364,7 +408,7 @@ async function crawlWithRipgrep(
   }
 
   const results = buildResultsFromFileSet(fileSet);
-  const filteredResults = applyFilters(results, options);
+  const filteredResults = applyFilters(results, options, relativeToCrawlDir);
 
   updateChangeState(stateKey, crawlDirectory, filteredResults);
   recordRebuild(stateKey);
