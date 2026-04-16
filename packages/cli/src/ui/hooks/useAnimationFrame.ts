@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Qwen
+ * Copyright 2025 Google LLC
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -11,8 +11,7 @@ import { useEffect, useRef, useState } from 'react';
  * when the ref's value has changed. This avoids the cost of unconditional
  * re-renders while still providing smooth animation-style updates.
  *
- * Pass `null` as intervalMs to pause polling entirely. When resuming from
- * pause, the internal tracking is re-synced to the ref's current value.
+ * Pass `null` as intervalMs to pause polling entirely.
  *
  * @param watchRef - The ref to poll for changes.
  * @param intervalMs - How often to check (ms), or null to pause.
@@ -28,8 +27,8 @@ export function useAnimationFrame(
   useEffect(() => {
     if (intervalMs === null) return;
 
-    // Re-sync when resuming from pause (e.g. new turn resets ref to 0
-    // while we were paused with a stale lastSeen from the previous turn).
+    // Re-sync when the interval resumes or when the ref value changed
+    // externally (e.g. ref reset to 0 at new turn start while paused).
     const current = watchRef.current;
     if (current !== lastSeen.current) {
       lastSeen.current = current;

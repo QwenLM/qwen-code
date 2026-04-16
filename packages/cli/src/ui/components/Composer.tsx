@@ -15,7 +15,7 @@ import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
-import { StreamingState } from '../types.js';
+import { StreamingState, type HistoryItemToolGroup } from '../types.js';
 import { ConfigInitDisplay } from '../components/ConfigInitDisplay.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
@@ -49,16 +49,19 @@ export const Composer = () => {
   // Aggregate agent tool tokens from executing tool calls
   let agentTokens = 0;
   for (const item of uiState.pendingGeminiHistoryItems ?? []) {
-    if (item.type === 'tool_group' && 'tools' in item) {
-      const toolGroup = item as {
-        tools: Array<{ resultDisplay?: { type: string; tokenCount?: number } }>;
-      };
+    if (item.type === 'tool_group') {
+      const toolGroup = item as HistoryItemToolGroup;
       for (const tool of toolGroup.tools) {
+        const display = tool.resultDisplay;
         if (
-          tool.resultDisplay?.type === 'task_execution' &&
-          tool.resultDisplay?.tokenCount
+          typeof display === 'object' &&
+          display !== null &&
+          'type' in display &&
+          display.type === 'task_execution' &&
+          'tokenCount' in display &&
+          typeof display.tokenCount === 'number'
         ) {
-          agentTokens += tool.resultDisplay.tokenCount;
+          agentTokens += display.tokenCount;
         }
       }
     }

@@ -485,7 +485,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       );
     });
 
-    // Track real-time token consumption from subagent API calls
+    // Track real-time token consumption from subagent API calls.
+    // Each USAGE_METADATA event carries the cumulative totalTokenCount for the
+    // subagent session, so we replace (not accumulate) on every event.
     this.eventEmitter.on(
       AgentEventType.USAGE_METADATA,
       (...args: unknown[]) => {

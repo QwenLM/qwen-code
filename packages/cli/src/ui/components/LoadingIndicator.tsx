@@ -22,7 +22,11 @@ interface LoadingIndicatorProps {
   rightContent?: React.ReactNode;
   thought?: ThoughtSummary | null;
   candidatesTokens?: number;
-  /** true = receiving content (↓), false = waiting for API (↑). Default true. */
+  /**
+   * True when receiving content (shows ↓ arrow), false when waiting for API
+   * response (shows ↑ arrow).
+   * @default true
+   */
   isReceivingContent?: boolean;
 }
 
