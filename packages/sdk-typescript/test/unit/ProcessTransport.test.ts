@@ -1035,6 +1035,40 @@ describe('ProcessTransport', () => {
       expect(process.listeners('exit').length).toBe(initialExitListeners);
     });
 
+    it('should terminate all active child processes from the global exit handler', async () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+
+      const childA = createMockChildProcess();
+      const childB = createMockChildProcess();
+      mockSpawn.mockReturnValueOnce(childA).mockReturnValueOnce(childB);
+
+      const transportA = new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+      });
+      const transportB = new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+      });
+
+      (
+        ProcessTransport as unknown as {
+          globalProcessExitHandler: () => void;
+        }
+      ).globalProcessExitHandler();
+
+      expect(childA.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(childA.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(childB.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(childB.kill).toHaveBeenCalledWith('SIGKILL');
+
+      await transportA.close();
+      await transportB.close();
+    });
+
     it('should register abort listener', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',

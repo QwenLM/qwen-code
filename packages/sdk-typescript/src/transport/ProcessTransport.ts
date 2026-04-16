@@ -15,7 +15,7 @@ export class ProcessTransport implements Transport {
   private static hasProcessExitHandler = false;
   private static readonly globalProcessExitHandler = (): void => {
     for (const transport of ProcessTransport.activeTransports) {
-      transport.killChildProcess();
+      transport.killChildProcessOnProcessExit();
     }
   };
 
@@ -213,6 +213,26 @@ export class ProcessTransport implements Transport {
   private killChildProcess(): void {
     if (this.childProcess && !this.childProcess.killed) {
       this.childProcess.kill('SIGTERM');
+    }
+  }
+
+  private killChildProcessOnProcessExit(): void {
+    if (!this.childProcess || this.childProcess.exitCode !== null) {
+      return;
+    }
+
+    try {
+      this.childProcess.kill('SIGTERM');
+    } catch {
+      return;
+    }
+
+    // Timers do not reliably run during process exit, so use a best-effort
+    // synchronous escalation to avoid leaving child processes behind.
+    try {
+      this.childProcess.kill('SIGKILL');
+    } catch {
+      // Ignore failures during process teardown.
     }
   }
 
