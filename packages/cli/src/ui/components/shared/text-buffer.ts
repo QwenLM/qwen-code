@@ -2298,6 +2298,7 @@ export function useTextBuffer({
       else if (key.meta && key.name === 'b') move('wordLeft');
       else if ((key.ctrl || key.meta) && key.name === 'right')
         move('wordRight');
+      else if (key.meta && key.name === 'd') deleteWordRight();
       else if (key.meta && key.name === 'f') move('wordRight');
       else if (key.name === 'home') move('home');
       else if (key.ctrl && key.name === 'a') move('home');
