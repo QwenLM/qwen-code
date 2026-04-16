@@ -134,6 +134,7 @@ export function preconnectApi(
   authType: string | undefined,
   options: {
     resolvedBaseUrl?: string;
+    proxy?: string;
   } = {},
 ): void {
   if (preconnectFired) {
@@ -172,7 +173,7 @@ export function preconnectApi(
   // so the warmed TCP+TLS connection is reused by subsequent API calls.
   const dispatcherOptions: Record<string, unknown> =
     detectRuntime() === 'node'
-      ? { dispatcher: getOrCreateSharedDispatcher() }
+      ? { dispatcher: getOrCreateSharedDispatcher(options.proxy) }
       : {};
 
   // Fire HEAD request to warm connection (fire-and-forget)

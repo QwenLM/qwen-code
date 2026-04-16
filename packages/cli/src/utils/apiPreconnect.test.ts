@@ -12,13 +12,18 @@ const mockFetch = vi.fn().mockResolvedValue(undefined);
 global.fetch = mockFetch;
 
 // Mock the shared dispatcher functions from core
-const mockDispatcher = { fake: 'dispatcher' };
+const { mockGetOrCreateSharedDispatcher } = vi.hoisted(() => {
+  const dispatcher = { fake: 'dispatcher' };
+  return {
+    mockGetOrCreateSharedDispatcher: vi.fn(() => dispatcher),
+  };
+});
 vi.mock('@qwen-code/qwen-code-core', async () => {
   const { createDebugLogger } = await import('@qwen-code/qwen-code-core');
   return {
     createDebugLogger,
     detectRuntime: () => 'node',
-    getOrCreateSharedDispatcher: () => mockDispatcher,
+    getOrCreateSharedDispatcher: mockGetOrCreateSharedDispatcher,
   };
 });
 
@@ -27,6 +32,7 @@ describe('apiPreconnect', () => {
     resetPreconnectState();
     mockFetch.mockClear();
     mockFetch.mockResolvedValue(undefined);
+    mockGetOrCreateSharedDispatcher.mockClear();
     delete process.env['HTTPS_PROXY'];
     delete process.env['https_proxy'];
     delete process.env['HTTP_PROXY'];
@@ -138,6 +144,18 @@ describe('apiPreconnect', () => {
         expect.objectContaining({
           dispatcher: { fake: 'dispatcher' },
         }),
+      );
+    });
+
+    it('should pass undefined proxy to shared dispatcher by default', () => {
+      preconnectApi('qwen-oauth');
+      expect(mockGetOrCreateSharedDispatcher).toHaveBeenCalledWith(undefined);
+    });
+
+    it('should pass configured proxy to shared dispatcher', () => {
+      preconnectApi('qwen-oauth', { proxy: 'http://proxy.example.com:8080' });
+      expect(mockGetOrCreateSharedDispatcher).toHaveBeenCalledWith(
+        'http://proxy.example.com:8080',
       );
     });
 
