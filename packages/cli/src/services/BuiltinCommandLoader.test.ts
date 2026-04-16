@@ -81,12 +81,14 @@ vi.mock('../ui/commands/bugCommand.js', () => ({ bugCommand: {} }));
 vi.mock('../ui/commands/clearCommand.js', () => ({ clearCommand: {} }));
 vi.mock('../ui/commands/compressCommand.js', () => ({ compressCommand: {} }));
 vi.mock('../ui/commands/docsCommand.js', () => ({ docsCommand: {} }));
+vi.mock('../ui/commands/exportCommand.js', () => ({ exportCommand: {} }));
 vi.mock('../ui/commands/editorCommand.js', () => ({ editorCommand: {} }));
 vi.mock('../ui/commands/extensionsCommand.js', () => ({
   extensionsCommand: {},
 }));
 vi.mock('../ui/commands/helpCommand.js', () => ({ helpCommand: {} }));
 vi.mock('../ui/commands/memoryCommand.js', () => ({ memoryCommand: {} }));
+vi.mock('../ui/commands/insightCommand.js', () => ({ insightCommand: {} }));
 vi.mock('../ui/commands/modelCommand.js', () => ({
   modelCommand: { name: 'model' },
 }));
@@ -122,6 +124,7 @@ describe('BuiltinCommandLoader', () => {
       getFolderTrust: vi.fn().mockReturnValue(true),
       getUseModelRouter: () => false,
       getDisableAllHooks: vi.fn().mockReturnValue(false),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     restoreCommandMock.mockReturnValue({

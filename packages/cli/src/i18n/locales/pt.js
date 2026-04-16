@@ -51,6 +51,7 @@ export default {
   'to search history': 'para pesquisar no histórico',
   'to paste images': 'para colar imagens',
   'for external editor': 'para editor externo',
+  'to toggle compact mode': 'alternar modo compacto',
   'Jump through words in the input': 'Pular palavras na entrada',
   'Close dialogs, cancel requests, or quit application':
     'Fechar diálogos, cancelar solicitações ou sair do aplicativo',
@@ -656,6 +657,7 @@ export default {
   'User Settings': 'Configurações do Usuário',
   'System Settings': 'Configurações do Sistema',
   Extensions: 'Extensões',
+  'Session (temporary)': 'Sessão (temporário)',
   // Hooks - Status
   '✓ Enabled': '✓ Ativado',
   '✗ Disabled': '✗ Desativado',
@@ -891,6 +893,46 @@ export default {
     'Uso: /memory add [--global|--project] <texto para lembrar>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Tentando salvar na memória {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Abrir pasta de memória automática',
+  'Auto-memory: {{status}}': 'Memória automática: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Consolidação automática: {{status}} · {{lastDream}} · /dream para executar',
+  never: 'nunca',
+  on: 'ativado',
+  off: 'desativado',
+  '❆ dreaming': '❆ consolidando',
+  'Remove matching entries from managed auto-memory.':
+    'Remover entradas correspondentes da memória automática gerenciada.',
+  'Usage: /forget <memory text to remove>':
+    'Uso: /forget <texto de memória a remover>',
+  'No managed auto-memory entries matched: {{query}}':
+    'Nenhuma entrada de memória automática gerenciada correspondeu: {{query}}',
+  'Show managed auto-memory status.':
+    'Mostrar status da memória automática gerenciada.',
+  'Run managed auto-memory extraction for the current session.':
+    'Executar extração de memória automática gerenciada para a sessão atual.',
+  'Managed auto-memory root: {{root}}':
+    'Raiz da memória automática gerenciada: {{root}}',
+  'Managed auto-memory topics:': 'Tópicos de memória automática gerenciada:',
+  'No extraction cursor found yet.':
+    'Nenhum cursor de extração encontrado ainda.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Cursor: sessão={{sessionId}}, offset={{offset}}, atualizado={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'Nenhum cliente de chat disponível para extrair memória.',
+  'Managed auto-memory extraction is already running.':
+    'A extração de memória automática gerenciada já está em execução.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'A extração de memória automática gerenciada não encontrou novas memórias duráveis.',
+  'Consolidate managed auto-memory topic files.':
+    'Consolidar arquivos de tópicos de memória automática gerenciada.',
+  'Managed auto-memory dream found nothing to improve.':
+    'A consolidação de memória automática não encontrou nada para melhorar.',
+  'Deduplicated entries: {{count}}': 'Entradas desduplicadas: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Salvar uma memória durável usando a ferramenta save_memory.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Uso: /remember [--global|--project] <texto a lembrar>',
 
   // ============================================================================
   // Commands - MCP
@@ -1251,10 +1293,16 @@ export default {
   'Terms of Services and Privacy Notice':
     'Termos de Serviço e Aviso de Privacidade',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Gratuito \u00B7 Até 1.000 solicitações/dia \u00B7 Modelos Qwen mais recentes',
-  'Login with QwenChat account to use daily free quota.':
-    'Faça login com sua conta QwenChat para usar a cota gratuita diária.',
+  'Discontinued — switch to Coding Plan or API Key':
+    'Descontinuado — mude para Coding Plan ou API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'O nível gratuito do Qwen OAuth foi descontinuado em 2026-04-15. Execute /auth para trocar de provedor.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'O nível gratuito do Qwen OAuth foi descontinuado em 2026-04-15. Selecione Coding Plan ou API Key.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'O nível gratuito do Qwen OAuth foi descontinuado em 2026-04-15. Por favor, selecione um modelo de outro provedor ou execute /auth para trocar.',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ O nível gratuito do Qwen OAuth foi descontinuado em 2026-04-15. Selecione outra opção.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Pago \u00B7 Até 6.000 solicitações/5 hrs \u00B7 Todos os modelos Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
@@ -1514,6 +1562,18 @@ export default {
     'Você pode alternar o modo de permissão rapidamente com Shift+Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Experimente /insight para gerar insights personalizados do seu histórico de conversas.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Pressione Ctrl+O para alternar o modo compacto — ocultar saída de ferramentas e raciocínio.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Adicione um arquivo QWEN.md para dar ao Qwen Code um contexto persistente do projeto.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Use /btw para fazer uma pergunta lateral rápida sem interromper a conversa.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'O contexto está quase cheio! Execute /compress agora ou inicie /new para continuar.',
+  'Context is getting full. Use /compress to free up space.':
+    'O contexto está ficando cheio. Use /compress para liberar espaço.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Conversa longa? /compress resume o histórico para liberar contexto.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1929,16 +1989,19 @@ export default {
     '⚠️  Nenhum método de autenticação configurado.\n',
   'Run one of the following commands to get started:\n':
     'Execute um dos seguintes comandos para começar:\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - Autenticar com Qwen OAuth (gratuito)',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - Autenticar com Qwen OAuth (descontinuado)',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - Autenticar com Alibaba Cloud Coding Plan\n',
   'Or simply run:': 'Ou simplesmente execute:',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Configuração interativa de autenticação\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Método de autenticação: Qwen OAuth',
-  '  Type: Free tier': '  Tipo: Gratuito',
-  '  Limit: Up to 1,000 requests/day': '  Limite: Até 1.000 solicitações/dia',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  Tipo: Nível gratuito (descontinuado 2026-04-15)',
+  '  Limit: No longer available': '  Limite: Não mais disponível',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'O nível gratuito do Qwen OAuth foi descontinuado em 2026-04-15. Execute /auth para mudar para Coding Plan, OpenRouter, Fireworks AI ou outro provedor.',
   '  Models: Qwen latest models\n': '  Modelos: Modelos Qwen mais recentes\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Método de autenticação: Alibaba Cloud Coding Plan',
@@ -1964,6 +2027,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
   compact: 'compacto',
+  'compact mode: on (Ctrl+O off)': 'modo compacto: ligado (Ctrl+O desligar)',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'Ocultar saída da ferramenta e raciocínio para uma visualização mais limpa (alternar com Ctrl+O).',
   'Press Ctrl+O to show full tool output':

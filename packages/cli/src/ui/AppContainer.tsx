@@ -123,7 +123,10 @@ import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
+import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { useContextualTips } from './hooks/useContextualTips.js';
+import { getTipHistory } from '../services/tips/index.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
@@ -358,10 +361,25 @@ export const AppContainer = (props: AppContainerProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
 
-  useEffect(
-    () => setUpdateHandler(historyManager.addItem, setUpdateInfo),
-    [historyManager.addItem],
-  );
+  // Track idle state via ref so the update handler can defer notifications
+  // while the model is streaming, without triggering re-renders.
+  // Note: isIdleRef.current is assigned after streamingState becomes available
+  // (see the assignment below useGeminiStream).
+  const isIdleRef = useRef(true);
+  const updateHandlerRef = useRef<{
+    cleanup: () => void;
+    flush: () => void;
+  } | null>(null);
+
+  useEffect(() => {
+    const handler = setUpdateHandler(
+      historyManager.addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+    updateHandlerRef.current = handler;
+    return () => handler?.cleanup();
+  }, [historyManager.addItem]);
 
   // Watch for model changes (e.g., user switches model via /model)
   useEffect(() => {
@@ -529,6 +547,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
+  const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
+    useMemoryDialog();
 
   const {
     isModelDialogOpen,
@@ -577,6 +597,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       openSettingsDialog,
       openModelDialog,
       openTrustDialog,
@@ -604,6 +625,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       openSettingsDialog,
       openModelDialog,
       openArenaDialog,
@@ -747,6 +769,36 @@ export const AppContainer = (props: AppContainerProps) => {
     midTurnDrainRef,
   );
 
+  // Now that streamingState is available, keep isIdleRef in sync and
+  // flush any deferred update notifications when the model finishes responding.
+  isIdleRef.current = streamingState === StreamingState.Idle;
+
+  useEffect(() => {
+    if (streamingState === StreamingState.Idle) {
+      updateHandlerRef.current?.flush();
+    }
+  }, [streamingState]);
+
+  // Contextual tips — show tips based on context usage after model responses
+  // Defer TipHistory loading when tips are disabled to avoid side effects
+  // (sessionCount increment + disk write) when the user has opted out.
+  const tipsDisabled = !!(
+    settings.merged.ui?.hideTips || config.getScreenReader()
+  );
+  const tipHistory = useMemo(
+    () => (tipsDisabled ? null : getTipHistory()),
+    [tipsDisabled],
+  );
+  useContextualTips({
+    streamingState,
+    lastPromptTokenCount: sessionStats.lastPromptTokenCount,
+    sessionPromptCount: sessionStats.promptCount,
+    config,
+    tipHistory,
+    addItem: historyManager.addItem,
+    hideTips: tipsDisabled,
+  });
+
   // Track whether suggestions are visible for Tab key handling
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
 
@@ -776,18 +828,12 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const {
-    messageQueue,
-    addMessage,
-    clearQueue,
-    getQueuedMessagesText,
-    popAllMessages,
-    drainQueue,
-  } = useMessageQueue({
-    isConfigInitialized,
-    streamingState,
-    submitQuery,
-  });
+  const { messageQueue, addMessage, popAllMessages, drainQueue } =
+    useMessageQueue({
+      isConfigInitialized,
+      streamingState,
+      submitQuery,
+    });
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it
@@ -810,6 +856,16 @@ export const AppContainer = (props: AppContainerProps) => {
         isBtwCommand(submittedValue)
       ) {
         void submitQuery(submittedValue);
+        return;
+      }
+
+      // Handle bare exit/quit commands (without the / prefix)
+      if (
+        ['exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
+          submittedValue.trim(),
+        )
+      ) {
+        void handleSlashCommand('/quit');
         return;
       }
 
@@ -938,6 +994,7 @@ export const AppContainer = (props: AppContainerProps) => {
       agentViewState,
       streamingState,
       submitQuery,
+      handleSlashCommand,
       config,
       geminiClient,
       historyManager,
@@ -977,23 +1034,24 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
 
-    const lastUserMessage = userMessages.at(-1);
-    let textToSet = lastUserMessage || '';
-
-    const queuedText = getQueuedMessagesText();
-    if (queuedText) {
-      textToSet = textToSet ? `${textToSet}\n\n${queuedText}` : queuedText;
-      clearQueue();
-    }
-
-    if (textToSet) {
-      buffer.setText(textToSet);
+    // Move any queued follow-up messages back into the buffer so the user
+    // can edit or resubmit them. Otherwise leave the buffer alone — in
+    // particular, do NOT repopulate it with the previous prompt; the user
+    // can still recall it via history navigation (Up/Ctrl+P).
+    //
+    // popAllMessages is atomic via the queue's synchronous ref, matching
+    // the drain behavior used during tool completion.
+    const popped = popAllMessages();
+    if (popped) {
+      const currentText = buffer.text;
+      // Preserve any in-progress draft the user typed since submitting (this
+      // is reachable via Ctrl+C cancel, which fires regardless of buffer
+      // content). Mirrors the popQueueIntoInput convention in InputPrompt.
+      buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
     }
   }, [
     buffer,
-    userMessages,
-    getQueuedMessagesText,
-    clearQueue,
+    popAllMessages,
     pendingSlashCommandHistoryItems,
     pendingGeminiHistoryItems,
   ]);
@@ -1164,9 +1222,10 @@ export const AppContainer = (props: AppContainerProps) => {
       const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
+      const fastModel = config.getFastModel();
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
-        model: settings.merged.fastModel || undefined,
+        model: fastModel,
       })
         .then((result) => {
           if (ac.signal.aborted) return;
@@ -1175,7 +1234,7 @@ export const AppContainer = (props: AppContainerProps) => {
             // Start speculation if enabled (runs in background)
             if (settings.merged.ui?.enableSpeculation) {
               startSpeculation(config, result.suggestion, ac.signal, {
-                model: settings.merged.fastModel || undefined,
+                model: fastModel,
               })
                 .then((state) => {
                   speculationRef.current = state;
@@ -1266,10 +1325,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
-  const [frozenSnapshot, setFrozenSnapshot] = useState<
-    HistoryItemWithoutId[] | null
-  >(null);
-
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -1283,18 +1338,6 @@ export const AppContainer = (props: AppContainerProps) => {
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
-
-  useEffect(() => {
-    // Clear frozen snapshot when streaming ends OR when entering confirmation
-    // state. During WaitingForConfirmation, the user needs to see the latest
-    // pending items (including the confirmation message) rather than a stale snapshot.
-    if (
-      streamingState === StreamingState.Idle ||
-      streamingState === StreamingState.WaitingForConfirmation
-    ) {
-      setFrozenSnapshot(null);
-    }
-  }, [streamingState]);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
@@ -1472,6 +1515,8 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    isMemoryDialogOpen,
+    closeMemoryDialog,
     activeArenaDialog,
     closeArenaDialog,
     isFolderTrustDialogOpen,
@@ -1687,13 +1732,6 @@ export const AppContainer = (props: AppContainerProps) => {
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
-        // Only freeze during the actual responding phase. WaitingForConfirmation
-        // must keep focus so the user can approve/cancel tool confirmation UI.
-        if (streamingState === StreamingState.Responding) {
-          setFrozenSnapshot([...pendingHistoryItems]);
-        } else {
-          setFrozenSnapshot(null);
-        }
       }
     },
     [
@@ -1729,8 +1767,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
-      setFrozenSnapshot,
-      pendingHistoryItems,
       refreshStatic,
     ],
   );
@@ -1789,6 +1825,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
+    isMemoryDialogOpen ||
     isModelDialogOpen ||
     isTrustDialogOpen ||
     activeArenaDialog !== null ||
@@ -1838,6 +1875,7 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
       isTrustDialogOpen,
@@ -1944,6 +1982,7 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
       isTrustDialogOpen,
@@ -2042,6 +2081,7 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -2054,6 +2094,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
       openArenaDialog,
@@ -2102,6 +2143,7 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -2114,6 +2156,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
       openArenaDialog,
@@ -2160,8 +2203,8 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const compactModeValue = useMemo(
-    () => ({ compactMode, frozenSnapshot }),
-    [compactMode, frozenSnapshot],
+    () => ({ compactMode, setCompactMode }),
+    [compactMode, setCompactMode],
   );
 
   return (

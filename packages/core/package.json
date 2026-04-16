@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.14.3",
+  "version": "0.14.5",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -82,7 +82,6 @@
     "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
   },
   "devDependencies": {
-    "@qwen-code/qwen-code-test-utils": "file:../test-utils",
     "@types/diff": "^7.0.2",
     "@types/dotenv": "^6.1.1",
     "@types/fast-levenshtein": "^0.0.4",

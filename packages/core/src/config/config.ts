@@ -52,7 +52,7 @@ import { GlobTool } from '../tools/glob.js';
 import { GrepTool } from '../tools/grep.js';
 import { LSTool } from '../tools/ls.js';
 import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
-import { MemoryTool, setGeminiMdFilename } from '../tools/memoryTool.js';
+import { setGeminiMdFilename } from '../memory/const.js';
 import { ReadFileTool } from '../tools/read-file.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import { RipGrepTool } from '../tools/ripGrep.js';
@@ -104,6 +104,8 @@ import {
   PermissionMode,
   NotificationType,
   type PermissionSuggestion,
+  type HookEventName,
+  type HookDefinition,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
@@ -136,6 +138,9 @@ import {
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
+import { getAutoMemoryRoot } from '../memory/paths.js';
+import { readAutoMemoryIndex } from '../memory/store.js';
+import { MemoryManager } from '../memory/manager.js';
 
 import {
   ModelsConfig,
@@ -208,6 +213,19 @@ export interface BugCommandSettings {
 
 export interface ChatCompressionSettings {
   contextPercentageThreshold?: number;
+}
+
+/**
+ * Settings for clearing stale context after idle periods.
+ * Threshold values of -1 mean "never clear" (disabled).
+ */
+export interface ClearContextOnIdleSettings {
+  /** Minutes idle before clearing old thinking blocks. Default 5. Use -1 to disable. */
+  thinkingThresholdMinutes?: number;
+  /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
+  toolResultsThresholdMinutes?: number;
+  /** Number of most-recent tool results to preserve. Default 5. */
+  toolResultsNumToKeep?: number;
 }
 
 export interface TelemetrySettings {
@@ -372,8 +390,7 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
-  /** Minutes of inactivity before clearing retained thinking blocks. */
-  thinkingIdleThresholdMinutes?: number;
+  clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
@@ -429,6 +446,17 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
+  /** Enable managed auto-memory background extraction and dream. Defaults to true. */
+  enableManagedAutoMemory?: boolean;
+  /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
+  enableManagedAutoDream?: boolean;
+  /**
+   * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
+   * When set and valid for the current auth type, forked agents use this model instead of
+   * the main session model, reducing latency and cost.
+   * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
+   */
+  fastModel?: string;
   /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
@@ -436,10 +464,23 @@ export interface ConfigParameters {
    * to use disableAllHooks instead (note: inverted logic - enabled:true → disableAllHooks:false).
    */
   disableAllHooks?: boolean;
-  /** Hooks configuration from settings */
+  /**
+   * User-level hooks configuration (from user settings).
+   * These hooks are always loaded regardless of folder trust status.
+   */
+  userHooks?: Record<string, unknown>;
+  /**
+   * Project-level hooks configuration (from workspace settings).
+   * These hooks are only loaded in trusted folders.
+   * When undefined or the folder is untrusted, project hooks are skipped.
+   */
+  projectHooks?: Record<string, unknown>;
+
   hooks?: Record<string, unknown>;
   /** Warnings generated during configuration resolution */
   warnings?: string[];
+  /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
+  allowedHttpHookUrls?: string[];
   /**
    * Callback for persisting a permission rule to settings.
    * Injected by the CLI layer; core uses this to write allow/ask/deny rules
@@ -563,7 +604,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
-  private readonly thinkingIdleThresholdMs: number;
+  private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
   private readonly overrideExtensions?: string[];
@@ -599,6 +640,7 @@ export class Config {
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly warnings: string[];
+  private readonly allowedHttpHookUrls: string[];
   private readonly onPersistPermissionRuleCallback?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
@@ -612,10 +654,19 @@ export class Config {
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
+  private readonly enableManagedAutoMemory: boolean;
+  private readonly enableManagedAutoDream: boolean;
+  private fastModel?: string;
   private readonly disableAllHooks: boolean;
+  /** User-level hooks (always loaded regardless of trust) */
+  private readonly userHooks?: Record<string, unknown>;
+  /** Project-level hooks (only loaded in trusted folders) */
+  private readonly projectHooks?: Record<string, unknown>;
+  /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
   private readonly hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
+  private readonly memoryManager: MemoryManager;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -690,8 +741,14 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
-    this.thinkingIdleThresholdMs =
-      (params.thinkingIdleThresholdMinutes ?? 5) * 60 * 1000;
+    this.clearContextOnIdle = {
+      thinkingThresholdMinutes:
+        params.clearContextOnIdle?.thinkingThresholdMinutes ?? 5,
+      toolResultsThresholdMinutes:
+        params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
+      toolResultsNumToKeep:
+        params.clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+    };
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
@@ -716,6 +773,7 @@ export class Config {
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.warnings = params.warnings ?? [];
+    this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // Web search
@@ -781,8 +839,16 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
+    this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
+    this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
+    this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
+    // Store user and project hooks separately for proper source attribution
+    this.userHooks = params.userHooks;
+    this.projectHooks = params.projectHooks;
+    // Legacy: fall back to merged hooks if new fields are not provided
     this.hooks = params.hooks;
+    this.memoryManager = new MemoryManager();
   }
 
   /**
@@ -1020,7 +1086,20 @@ export class Config {
       this.isTrustedFolder(),
       this.getImportFormat(),
     );
-    this.setUserMemory(memoryContent);
+    if (this.getManagedAutoMemoryEnabled()) {
+      const managedAutoMemoryIndex = await readAutoMemoryIndex(
+        this.getProjectRoot(),
+      );
+      this.setUserMemory(
+        this.memoryManager.appendToUserMemory(
+          memoryContent,
+          getAutoMemoryRoot(this.getProjectRoot()),
+          managedAutoMemoryIndex,
+        ),
+      );
+    } else {
+      this.setUserMemory(memoryContent);
+    }
     this.setGeminiMdFileCount(fileCount);
   }
 
@@ -1208,6 +1287,29 @@ export class Config {
   }
 
   /**
+   * Returns the fast model if one is configured and valid for the current auth type,
+   * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
+   * use this as a cheaper alternative to the main session model.
+   */
+  getFastModel(): string | undefined {
+    if (!this.fastModel) return undefined;
+    const authType = this.contentGeneratorConfig?.authType;
+    if (!authType) return undefined;
+    const available = this.getAvailableModelsForAuthType(authType);
+    return available.some((m) => m.id === this.fastModel)
+      ? this.fastModel
+      : undefined;
+  }
+
+  /**
+   * Update the fast model at runtime (e.g., when the user runs `/model --fast <model>`).
+   * Pass undefined or an empty string to clear the fast model override.
+   */
+  setFastModel(model: string | undefined): void {
+    this.fastModel = model || undefined;
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Delegates to ModelsConfig.
    */
@@ -1338,8 +1440,8 @@ export class Config {
     return this.maxSessionTurns;
   }
 
-  getThinkingIdleThresholdMs(): number {
-    return this.thinkingIdleThresholdMs;
+  getClearContextOnIdle(): ClearContextOnIdleSettings {
+    return this.clearContextOnIdle;
   }
 
   getSessionTokenLimit(): number {
@@ -1887,6 +1989,24 @@ export class Config {
     return this.disableAllHooks;
   }
 
+  getManagedAutoMemoryEnabled(): boolean {
+    return this.enableManagedAutoMemory;
+  }
+
+  getManagedAutoDreamEnabled(): boolean {
+    return this.enableManagedAutoDream;
+  }
+
+  /**
+   * Return the MemoryManager instance created for this Config.
+   * Use this to share background-task state (registry, drainer) with memory
+   * module runtimes (extract, dream) instead of relying on module-level
+   * globals.
+   */
+  getMemoryManager(): MemoryManager {
+    return this.memoryManager;
+  }
+
   /**
    * Get the message bus instance.
    * Returns undefined if not set.
@@ -1905,20 +2025,28 @@ export class Config {
 
   /**
    * Get project-level hooks configuration.
-   * This is used by the HookRegistry to load project-specific hooks.
+   * Returns hooks from workspace settings, only in trusted folders.
+   * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
-  getProjectHooks(): Record<string, unknown> | undefined {
-    // This will be populated from settings by the CLI layer
-    // The core Config doesn't have direct access to settings
-    return undefined;
+  getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    // Only return project hooks if workspace is trusted
+    if (!this.isTrustedFolder()) {
+      return undefined;
+    }
+    // Prefer new projectHooks field, fall back to hooks for backward compatibility
+    const hooks = this.projectHooks ?? this.hooks;
+    return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
   /**
-   * Get all hooks configuration (merged from all sources).
-   * This is used by the HookRegistry to load hooks.
+   * Get user-level hooks configuration.
+   * Returns hooks from user settings, always available regardless of folder trust.
+   * Used by HookRegistry to load user-specific hooks with proper source attribution.
    */
-  getHooks(): Record<string, unknown> | undefined {
-    return this.hooks;
+  getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    // Prefer new userHooks field, fall back to hooks for backward compatibility
+    const hooks = this.userHooks ?? this.hooks;
+    return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
   getExtensions(): Extension[] {
@@ -1994,6 +2122,14 @@ export class Config {
    */
   getFolderTrust(): boolean {
     return this.folderTrust;
+  }
+
+  /**
+   * Returns the whitelist of allowed HTTP hook URL patterns.
+   * If empty, all URLs are allowed (subject to SSRF protection).
+   */
+  getAllowedHttpHookUrls(): string[] {
+    return this.allowedHttpHookUrls;
   }
 
   isTrustedFolder(): boolean {
@@ -2291,14 +2427,11 @@ export class Config {
     await registerCoreTool(EditTool, this);
     await registerCoreTool(WriteFileTool, this);
     await registerCoreTool(ShellTool, this);
-    await registerCoreTool(MemoryTool);
     await registerCoreTool(TodoWriteTool, this);
     await registerCoreTool(AskUserQuestionTool, this);
     !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
     await registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured
-    // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
-    // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
       await registerCoreTool(WebSearchTool, this);
     }
