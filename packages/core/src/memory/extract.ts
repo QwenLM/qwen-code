@@ -15,7 +15,6 @@ import {
 } from './paths.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
-import { scheduleManagedAutoMemoryExtract } from './extractScheduler.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
 import {
   type AutoMemoryExtractCursor,
@@ -193,14 +192,4 @@ export async function runAutoMemoryExtract(params: {
     cursor,
     systemMessage: agentResult.systemMessage,
   };
-}
-
-export async function scheduleAutoMemoryExtract(params: {
-  projectRoot: string;
-  sessionId: string;
-  history: Content[];
-  now?: Date;
-  config?: Config;
-}): Promise<AutoMemoryExtractResult> {
-  return scheduleManagedAutoMemoryExtract(params);
 }

@@ -8,7 +8,7 @@ import type { Config } from '../config/config.js';
 import {
   runForkedAgent,
   type ForkedAgentResult,
-} from '../background/forkedAgent.js';
+} from '../utils/forkedAgent.js';
 import { getProjectHash, QWEN_DIR } from '../utils/paths.js';
 import {
   AUTO_MEMORY_INDEX_FILENAME,

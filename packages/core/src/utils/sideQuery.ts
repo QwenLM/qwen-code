@@ -4,14 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  Content,
-  GenerateContentConfig,
-  Part,
-} from '@google/genai';
+import type { Content, GenerateContentConfig, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
-import { SchemaValidator } from '../utils/schemaValidator.js';
+import { SchemaValidator } from './schemaValidator.js';
 
 export interface SideQueryOptions<TResponse> {
   contents: Content[];

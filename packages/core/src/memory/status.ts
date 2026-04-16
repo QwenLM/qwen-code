@@ -5,9 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
-import { globalBackgroundTaskHub } from '../background/taskHub.js';
-import { EXTRACT_TASK_TYPE } from './extractScheduler.js';
-import { DREAM_TASK_TYPE } from './dreamScheduler.js';
+import { type MemoryManager, type MemoryTaskRecord } from './manager.js';
 import {
   getAutoMemoryExtractCursorPath,
   getAutoMemoryIndexPath,
@@ -15,14 +13,12 @@ import {
   getAutoMemoryRoot,
 } from './paths.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
-import { isExtractRunning } from './state.js';
 import type {
   AutoMemoryExtractCursor,
   AutoMemoryMetadata,
   AutoMemoryType,
 } from './types.js';
 import { AUTO_MEMORY_TYPES } from './types.js';
-import type { BackgroundTaskState } from '../background/taskRegistry.js';
 
 export interface ManagedAutoMemoryTopicStatus {
   topic: AutoMemoryType;
@@ -38,8 +34,8 @@ export interface ManagedAutoMemoryStatus {
   metadata?: AutoMemoryMetadata;
   extractionRunning: boolean;
   topics: ManagedAutoMemoryTopicStatus[];
-  extractionTasks: BackgroundTaskState[];
-  dreamTasks: BackgroundTaskState[];
+  extractionTasks: MemoryTaskRecord[];
+  dreamTasks: MemoryTaskRecord[];
 }
 
 async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
@@ -53,6 +49,7 @@ async function readJsonFile<T>(filePath: string): Promise<T | undefined> {
 
 export async function getManagedAutoMemoryStatus(
   projectRoot: string,
+  manager: MemoryManager,
 ): Promise<ManagedAutoMemoryStatus> {
   const root = getAutoMemoryRoot(projectRoot);
   const indexPath = getAutoMemoryIndexPath(projectRoot);
@@ -80,19 +77,22 @@ export async function getManagedAutoMemoryStatus(
     filePaths: byTopic.get(topic) ?? [],
   }));
 
+  const extractTaskType = 'extract' as const;
+  const dreamTaskType = 'dream' as const;
+
   return {
     root,
     indexPath,
     indexContent,
     cursor,
     metadata,
-    extractionRunning: isExtractRunning(projectRoot),
+    extractionRunning: manager
+      .listTasksByType(extractTaskType, projectRoot)
+      .some((t) => t.status === 'running'),
     topics,
-    extractionTasks: globalBackgroundTaskHub
-      .listByType(EXTRACT_TASK_TYPE, projectRoot)
+    extractionTasks: manager
+      .listTasksByType(extractTaskType, projectRoot)
       .slice(0, 8),
-    dreamTasks: globalBackgroundTaskHub
-      .listByType(DREAM_TASK_TYPE, projectRoot)
-      .slice(0, 5),
+    dreamTasks: manager.listTasksByType(dreamTaskType, projectRoot).slice(0, 5),
   };
 }

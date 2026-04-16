@@ -137,7 +137,7 @@ import {
 } from '../utils/debugLogger.js';
 import { getAutoMemoryRoot } from '../memory/paths.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
-import { appendManagedAutoMemoryToUserMemory } from '../memory/prompt.js';
+import { MemoryManager } from '../memory/manager.js';
 
 import {
   ModelsConfig,
@@ -643,6 +643,7 @@ export class Config {
   private readonly hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
+  private readonly memoryManager: MemoryManager;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -819,6 +820,7 @@ export class Config {
     this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.hooks = params.hooks;
+    this.memoryManager = new MemoryManager();
   }
 
   /**
@@ -1061,7 +1063,7 @@ export class Config {
         this.getProjectRoot(),
       );
       this.setUserMemory(
-        appendManagedAutoMemoryToUserMemory(
+        this.memoryManager.appendToUserMemory(
           memoryContent,
           getAutoMemoryRoot(this.getProjectRoot()),
           managedAutoMemoryIndex,
@@ -1963,6 +1965,16 @@ export class Config {
 
   getManagedAutoDreamEnabled(): boolean {
     return this.enableManagedAutoDream;
+  }
+
+  /**
+   * Return the MemoryManager instance created for this Config.
+   * Use this to share background-task state (registry, drainer) with memory
+   * module runtimes (extract, dream) instead of relying on module-level
+   * globals.
+   */
+  getMemoryManager(): MemoryManager {
+    return this.memoryManager;
   }
 
   /**

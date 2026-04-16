@@ -602,9 +602,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Retrieve the parent's cached generationConfig (systemInstruction +
         // tools) so the fork's API requests share the same prefix for
         // DashScope prompt cache hits.
-        const { getCacheSafeParams } = await import(
-          '../background/forkedAgent.js'
-        );
+        const { getCacheSafeParams } = await import('../utils/forkedAgent.js');
         const cacheSafeParams = getCacheSafeParams();
         if (cacheSafeParams) {
           forkGenerationConfig = cacheSafeParams.generationConfig;

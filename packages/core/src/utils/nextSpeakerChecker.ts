@@ -9,7 +9,7 @@ import type { GeminiChat } from '../core/geminiChat.js';
 import { isFunctionResponse } from './messageInspectors.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
-import { runSideQuery } from '../auxiliary/sideQuery.js';
+import { runSideQuery } from './sideQuery.js';
 
 const debugLogger = createDebugLogger('NEXT_SPEAKER');
 

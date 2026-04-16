@@ -9,12 +9,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import type { ForkedAgentResult } from '../background/forkedAgent.js';
-import { runForkedAgent } from '../background/forkedAgent.js';
+import type { ForkedAgentResult } from '../utils/forkedAgent.js';
+import { runForkedAgent } from '../utils/forkedAgent.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 
-vi.mock('../background/forkedAgent.js', () => ({
+vi.mock('../utils/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
 }));
 

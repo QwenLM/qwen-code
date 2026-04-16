@@ -6,7 +6,7 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { runSideQuery } from '../auxiliary/sideQuery.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import { parseAutoMemoryEntries } from './entries.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import type { AutoMemoryType } from './types.js';
@@ -227,9 +227,7 @@ function buildHeuristicSuggestions(
       });
     }
 
-    if (
-      /\b(deprecated|obsolete|sunset|legacy|old)\b/i.test(entry.summary)
-    ) {
+    if (/\b(deprecated|obsolete|sunset|legacy|old)\b/i.test(entry.summary)) {
       suggestions.push({
         type: 'outdated',
         topic: entry.topic,
@@ -339,8 +337,7 @@ export async function reviewManagedAutoMemoryGovernance(
             suggestedTargetTopic: suggestion.suggestedTargetTopic,
           } satisfies AutoMemoryGovernanceSuggestion;
         }),
-        strategy:
-          response.suggestions.length > 0 ? 'model' : 'none',
+        strategy: response.suggestions.length > 0 ? 'model' : 'none',
       };
     } catch {
       // Fall back to heuristics.

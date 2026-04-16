@@ -12,17 +12,12 @@ import type { Config } from '../config/config.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { runManagedAutoMemoryDream } from './dream.js';
 import { planManagedAutoMemoryDreamByAgent } from './dreamAgentPlanner.js';
-import {
-  drainManagedAutoMemoryExtractTasks,
-  resetManagedAutoMemoryExtractRuntimeForTests,
-  scheduleManagedAutoMemoryExtract,
-} from './extractScheduler.js';
+import { MemoryManager } from './manager.js';
 import { rebuildManagedAutoMemoryIndex } from './indexer.js';
 import { getAutoMemoryFilePath, getAutoMemoryIndexPath } from './paths.js';
 import { resolveRelevantAutoMemoryPromptForQuery } from './recall.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
-import { resetAutoMemoryStateForTests } from './state.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
@@ -37,8 +32,10 @@ describe('managed auto-memory lifecycle integration', () => {
   let projectRoot: string;
   let mockConfig: Config;
   let extractionCount: number;
+  let mgr: MemoryManager;
 
   beforeEach(async () => {
+    mgr = new MemoryManager();
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'memory-lifecycle-int-'));
     projectRoot = path.join(tempDir, 'project');
     await fs.mkdir(projectRoot, { recursive: true });
@@ -104,8 +101,7 @@ describe('managed auto-memory lifecycle integration', () => {
   });
 
   afterEach(async () => {
-    resetAutoMemoryStateForTests();
-    resetManagedAutoMemoryExtractRuntimeForTests();
+    mgr.resetExtractStateForTests();
     await fs.rm(tempDir, {
       recursive: true,
       force: true,
@@ -115,7 +111,7 @@ describe('managed auto-memory lifecycle integration', () => {
   });
 
   it('supports a durable memory lifecycle across extraction, recall, and dream', async () => {
-    const firstExtraction = scheduleManagedAutoMemoryExtract({
+    const firstExtraction = mgr.scheduleExtract({
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
@@ -124,7 +120,7 @@ describe('managed auto-memory lifecycle integration', () => {
       ],
     });
 
-    const queuedExtraction = await scheduleManagedAutoMemoryExtract({
+    const queuedExtraction = await mgr.scheduleExtract({
       projectRoot,
       sessionId: 'session-1',
       config: mockConfig,
@@ -147,7 +143,7 @@ describe('managed auto-memory lifecycle integration', () => {
     const firstResult = await firstExtraction;
     expect(firstResult.touchedTopics).toEqual(['user']);
 
-    const drained = await drainManagedAutoMemoryExtractTasks({
+    const drained = await mgr.drain({
       timeoutMs: 1_000,
     });
     expect(drained).toBe(true);

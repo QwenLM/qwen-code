@@ -25,7 +25,7 @@ import {
   getCacheSafeParams,
   createForkedChat,
   runForkedAgent,
-} from '../background/forkedAgent.js';
+} from '../utils/forkedAgent.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
 
 // ---------------------------------------------------------------------------
@@ -197,7 +197,7 @@ interface LoopResult {
 async function runSpeculativeLoop(
   config: Config,
   state: SpeculationState,
-  cacheSafe: import('../background/forkedAgent.js').CacheSafeParams,
+  cacheSafe: import('../utils/forkedAgent.js').CacheSafeParams,
   modelOverride?: string,
 ): Promise<LoopResult> {
   const chat = createForkedChat(config, cacheSafe);

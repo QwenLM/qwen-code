@@ -8,10 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
-import {
-  runForkedAgent,
-  getCacheSafeParams,
-} from '../background/forkedAgent.js';
+import { runForkedAgent, getCacheSafeParams } from '../utils/forkedAgent.js';
 
 vi.mock('./scan.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./scan.js')>();
@@ -29,7 +26,7 @@ vi.mock('./paths.js', async (importOriginal) => {
   };
 });
 
-vi.mock('../background/forkedAgent.js', () => ({
+vi.mock('../utils/forkedAgent.js', () => ({
   runForkedAgent: vi.fn(),
   getCacheSafeParams: vi.fn(),
 }));

@@ -34,6 +34,11 @@ const defaultProps = {
   model: 'gemini-pro',
 };
 
+const createMockMemoryManager = () => ({
+  subscribe: vi.fn(() => () => {}),
+  listTasksByType: vi.fn(() => []),
+});
+
 const createMockConfig = (overrides = {}) => ({
   getModel: vi.fn(() => defaultProps.model),
   getDebugMode: vi.fn(() => false),
@@ -41,6 +46,7 @@ const createMockConfig = (overrides = {}) => ({
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
   getProjectRoot: vi.fn(() => '/test/project'),
+  getMemoryManager: vi.fn(createMockMemoryManager),
   ...overrides,
 });
 

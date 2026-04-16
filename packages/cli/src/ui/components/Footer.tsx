@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
+import { useCallback, useSyncExternalStore } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ContextUsageDisplay } from './ContextUsageDisplay.js';
@@ -18,47 +18,34 @@ import { useStatusLine } from '../hooks/useStatusLine.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
-import {
-  ApprovalMode,
-  globalBackgroundTaskHub,
-  DREAM_TASK_TYPE,
-} from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { t } from '../../i18n/index.js';
 
 /**
- * Subscribes to the dream task registry and returns true while any dream task
- * for the current project is in 'pending' or 'running' state.
+ * Returns true while any dream task for the current project is in
+ * 'pending' or 'running' state. Uses MemoryManager's subscribe/notify
+ * mechanism so there is zero polling overhead.
  */
 function useDreamRunning(projectRoot: string): boolean {
-  const [running, setRunning] = useState(false);
+  const config = useConfig();
 
-  useEffect(() => {
-    const registry = globalBackgroundTaskHub.registry;
+  const subscribe = useCallback(
+    (onStoreChange: () => void) =>
+      config.getMemoryManager().subscribe(onStoreChange),
+    [config],
+  );
 
-    function check() {
-      const tasks = registry.list(projectRoot);
-      setRunning(
-        tasks.some(
-          (t) =>
-            t.taskType === DREAM_TASK_TYPE &&
-            (t.status === 'pending' || t.status === 'running'),
-        ),
-      );
-    }
+  const getSnapshot = useCallback(
+    () =>
+      config
+        .getMemoryManager()
+        .listTasksByType('dream', projectRoot)
+        .some((task) => task.status === 'pending' || task.status === 'running'),
+    [config, projectRoot],
+  );
 
-    check();
-    return registry.subscribe((task) => {
-      if (
-        task.projectRoot === projectRoot &&
-        task.taskType === DREAM_TASK_TYPE
-      ) {
-        check();
-      }
-    });
-  }, [projectRoot]);
-
-  return running;
+  return useSyncExternalStore(subscribe, getSnapshot);
 }
 
 export const Footer: React.FC = () => {

@@ -11,10 +11,7 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import {
-  getCacheSafeParams,
-  runForkedAgent,
-} from '../background/forkedAgent.js';
+import { getCacheSafeParams, runForkedAgent } from '../utils/forkedAgent.js';
 import {
   uiTelemetryService,
   EVENT_API_RESPONSE,

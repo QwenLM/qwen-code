@@ -6,11 +6,11 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
-import { runSideQuery } from '../auxiliary/sideQuery.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import type { ScannedAutoMemoryDocument } from './scan.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 
-vi.mock('../auxiliary/sideQuery.js', () => ({
+vi.mock('../utils/sideQuery.js', () => ({
   runSideQuery: vi.fn(),
 }));
 

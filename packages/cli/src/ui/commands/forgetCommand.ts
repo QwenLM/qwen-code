@@ -4,10 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  forgetManagedAutoMemoryMatches,
-  selectManagedAutoMemoryForgetCandidates,
-} from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type { SlashCommand } from './types.js';
 import { CommandKind } from './types.js';
@@ -38,16 +34,13 @@ export const forgetCommand: SlashCommand = {
       };
     }
 
-    const selection = await selectManagedAutoMemoryForgetCandidates(
-      config.getProjectRoot(),
-      query,
-      { config },
-    );
+    const selection = await config
+      .getMemoryManager()
+      .selectForgetCandidates(config.getProjectRoot(), query, { config });
 
-    const result = await forgetManagedAutoMemoryMatches(
-      config.getProjectRoot(),
-      selection.matches,
-    );
+    const result = await config
+      .getMemoryManager()
+      .forgetMatches(config.getProjectRoot(), selection.matches);
     return {
       type: 'message',
       messageType: 'info',

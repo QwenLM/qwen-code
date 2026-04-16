@@ -6,7 +6,7 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { runSideQuery } from '../auxiliary/sideQuery.js';
+import { runSideQuery } from '../utils/sideQuery.js';
 import type { ScannedAutoMemoryDocument } from './scan.js';
 
 /**

@@ -8,8 +8,6 @@ import {
   getAutoMemoryRoot,
   getProjectHash,
   QWEN_DIR,
-  buildConsolidationTaskPrompt,
-  writeDreamManualRunToMetadata,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import type { SlashCommand } from './types.js';
@@ -36,16 +34,17 @@ export const dreamCommand: SlashCommand = {
     const projectHash = getProjectHash(projectRoot);
     const transcriptDir = `${QWEN_DIR}/tmp/${projectHash}/chats`;
 
-    const prompt = buildConsolidationTaskPrompt(memoryRoot, transcriptDir);
+    const prompt = config
+      .getMemoryManager()
+      .buildConsolidationPrompt(memoryRoot, transcriptDir);
 
     return {
       type: 'submit_prompt',
       content: prompt,
       onComplete: async () => {
-    await writeDreamManualRunToMetadata(
-          projectRoot,
-          config.getSessionId(),
-        );
+        await config
+          .getMemoryManager()
+          .writeDreamManualRun(projectRoot, config.getSessionId());
       },
     };
   },

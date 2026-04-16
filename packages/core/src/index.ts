@@ -118,32 +118,17 @@ export * from './services/shellExecutionService.js';
 // Managed Auto-Memory
 // ============================================================================
 
-export * from './auxiliary/sideQuery.js';
-export * from './background/taskRegistry.js';
-export * from './background/taskDrainer.js';
-export * from './background/taskScheduler.js';
-export * from './background/taskHub.js';
-export * from './background/forkedAgent.js';
+// MemoryManager is the single public API for all memory operations.
+// Production code: config.getMemoryManager().method(...)
+// Tests: new MemoryManager()
+export * from './memory/manager.js';
 
+// Foundational utilities (paths, storage scaffold, type definitions, constants)
+// that are legitimately needed by UI code (MemoryDialog, commands, etc.)
 export * from './memory/types.js';
 export * from './memory/paths.js';
 export * from './memory/store.js';
-export * from './memory/entries.js';
-export * from './memory/indexer.js';
-export * from './memory/prompt.js';
-export * from './memory/state.js';
-export * from './memory/extractionAgentPlanner.js';
-export * from './memory/extract.js';
-export * from './memory/extractScheduler.js';
-export * from './memory/dreamAgentPlanner.js';
-export * from './memory/dream.js';
-export * from './memory/dreamScheduler.js';
-export * from './memory/scan.js';
-export * from './memory/relevanceSelector.js';
-export * from './memory/recall.js';
-export * from './memory/forget.js';
-export * from './memory/governance.js';
-export * from './memory/status.js';
+export * from './memory/const.js';
 
 // ============================================================================
 // IDE Support
@@ -282,6 +267,8 @@ export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/tool-utils.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
+export * from './utils/forkedAgent.js';
+export * from './utils/sideQuery.js';
 
 // ============================================================================
 // OAuth & Authentication

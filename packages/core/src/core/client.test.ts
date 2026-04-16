@@ -38,9 +38,6 @@ import { promptIdContext } from '../utils/promptIdContext.js';
 import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
-import { scheduleAutoMemoryExtract } from '../memory/extract.js';
-import { scheduleManagedAutoMemoryDream } from '../memory/dreamScheduler.js';
-import { resolveRelevantAutoMemoryPromptForQuery } from '../memory/recall.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -93,26 +90,6 @@ vi.mock('./turn', async (importOriginal) => {
 
 vi.mock('../config/config.js');
 vi.mock('./prompts');
-vi.mock('../memory/extract.js', () => ({
-  scheduleAutoMemoryExtract: vi.fn().mockResolvedValue({
-    patches: [],
-    touchedTopics: [],
-    cursor: { updatedAt: new Date(0).toISOString() },
-  }),
-}));
-vi.mock('../memory/dreamScheduler.js', () => ({
-  scheduleManagedAutoMemoryDream: vi.fn().mockResolvedValue({
-    status: 'skipped',
-    skippedReason: 'min_sessions',
-  }),
-}));
-vi.mock('../memory/recall.js', () => ({
-  resolveRelevantAutoMemoryPromptForQuery: vi.fn().mockResolvedValue({
-    prompt: '',
-    selectedDocs: [],
-    strategy: 'none',
-  }),
-}));
 vi.mock('../utils/getFolderStructure', () => ({
   getFolderStructure: vi.fn().mockResolvedValue('Mock Folder Structure'),
 }));
@@ -291,22 +268,30 @@ describe('Gemini Client (client.ts)', () => {
   let mockConfig: Config;
   let client: GeminiClient;
   let mockGenerateContentFn: Mock;
+  let mockMemoryManager: {
+    scheduleExtract: ReturnType<typeof vi.fn>;
+    scheduleDream: ReturnType<typeof vi.fn>;
+    recall: ReturnType<typeof vi.fn>;
+  };
   beforeEach(async () => {
     vi.resetAllMocks();
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
-    vi.mocked(resolveRelevantAutoMemoryPromptForQuery).mockResolvedValue({
-      prompt: '',
-      selectedDocs: [],
-      strategy: 'none',
-    });
-    vi.mocked(scheduleAutoMemoryExtract).mockResolvedValue({
-      touchedTopics: [],
-      cursor: { updatedAt: new Date(0).toISOString() },
-    });
-    vi.mocked(scheduleManagedAutoMemoryDream).mockResolvedValue({
-      status: 'skipped',
-      skippedReason: 'min_sessions',
-    });
+
+    mockMemoryManager = {
+      scheduleExtract: vi.fn().mockResolvedValue({
+        touchedTopics: [],
+        cursor: { updatedAt: new Date(0).toISOString() },
+      }),
+      scheduleDream: vi.fn().mockResolvedValue({
+        status: 'skipped',
+        skippedReason: 'min_sessions',
+      }),
+      recall: vi.fn().mockResolvedValue({
+        prompt: '',
+        selectedDocs: [],
+        strategy: 'none',
+      }),
+    };
 
     mockGenerateContentFn = vi.fn().mockResolvedValue({
       candidates: [{ content: { parts: [{ text: '{"key": "value"}' }] } }],
@@ -402,6 +387,7 @@ describe('Gemini Client (client.ts)', () => {
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
       getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -1453,7 +1439,7 @@ hello
     });
 
     it('should prepend relevant managed auto-memory prompt when recall returns content', async () => {
-      vi.mocked(resolveRelevantAutoMemoryPromptForQuery).mockResolvedValue({
+      mockMemoryManager.recall.mockResolvedValue({
         prompt: '## Relevant memory\n\nUser prefers terse responses.',
         selectedDocs: [
           {
@@ -1491,7 +1477,7 @@ hello
         // consume stream
       }
 
-      expect(resolveRelevantAutoMemoryPromptForQuery).toHaveBeenCalledWith(
+      expect(mockMemoryManager.recall).toHaveBeenCalledWith(
         '/test/project/root',
         'Please answer tersely',
         expect.objectContaining({
@@ -1510,7 +1496,7 @@ hello
     });
 
     it('should track surfaced managed memory paths across user queries', async () => {
-      vi.mocked(resolveRelevantAutoMemoryPromptForQuery)
+      mockMemoryManager.recall
         .mockResolvedValueOnce({
           prompt: '## Relevant memory\n\nUser prefers terse responses.',
           selectedDocs: [
@@ -1563,7 +1549,7 @@ hello
         // consume stream
       }
 
-      expect(resolveRelevantAutoMemoryPromptForQuery).toHaveBeenNthCalledWith(
+      expect(mockMemoryManager.recall).toHaveBeenNthCalledWith(
         2,
         '/test/project/root',
         'Keep it short again',
@@ -1576,7 +1562,7 @@ hello
     });
 
     it('should run managed auto-memory extraction after a completed user query', async () => {
-      vi.mocked(scheduleAutoMemoryExtract).mockResolvedValue({
+      mockMemoryManager.scheduleExtract.mockResolvedValue({
         touchedTopics: ['user'],
         cursor: {
           sessionId: 'test-session-id',
@@ -1611,13 +1597,13 @@ hello
 
       const recordedHistory = mockChat.getHistory?.();
 
-      expect(scheduleAutoMemoryExtract).toHaveBeenCalledWith({
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
         projectRoot: '/test/project/root',
         sessionId: 'test-session-id',
         history: recordedHistory,
         config: mockConfig,
       });
-      expect(scheduleManagedAutoMemoryDream).toHaveBeenCalledWith({
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledWith({
         projectRoot: '/test/project/root',
         sessionId: 'test-session-id',
         config: mockConfig,

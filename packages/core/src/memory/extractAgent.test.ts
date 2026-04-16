@@ -14,7 +14,6 @@ import { runAutoMemoryExtract } from './extract.js';
 import { getAutoMemoryRoot } from './paths.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
-import { resetAutoMemoryStateForTests } from './state.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
@@ -36,7 +35,6 @@ describe('auto-memory extraction with agent planner', () => {
   });
 
   afterEach(async () => {
-    resetAutoMemoryStateForTests();
     await fs.rm(tempDir, {
       recursive: true,
       force: true,

@@ -118,7 +118,9 @@ describe('runSideQuery', () => {
         },
         abortSignal: abortController.signal,
         validate: (response) =>
-          response.status.trim().length === 0 ? 'Status must be non-empty' : null,
+          response.status.trim().length === 0
+            ? 'Status must be non-empty'
+            : null,
       }),
     ).rejects.toThrow('Status must be non-empty');
   });

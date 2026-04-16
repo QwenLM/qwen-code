@@ -48,12 +48,7 @@ import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
 import { AgentTool } from '../tools/agent.js';
-import { scheduleAutoMemoryExtract } from '../memory/extract.js';
-import { scheduleManagedAutoMemoryDream } from '../memory/dreamScheduler.js';
-import {
-  type RelevantAutoMemoryPromptResult,
-  resolveRelevantAutoMemoryPromptForQuery,
-} from '../memory/recall.js';
+import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 
 // Telemetry
 import {
@@ -66,7 +61,7 @@ import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
   saveCacheSafeParams,
   clearCacheSafeParams,
-} from '../background/forkedAgent.js';
+} from '../utils/forkedAgent.js';
 
 // Utilities
 import {
@@ -524,15 +519,17 @@ export class GeminiClient {
     const projectRoot = this.config.getProjectRoot();
     const sessionId = this.config.getSessionId();
     const history = this.getHistory();
+    const mgr = this.config.getMemoryManager();
 
-    const extractPromise = scheduleAutoMemoryExtract({
-      projectRoot,
-      sessionId,
-      history,
-      config: this.config,
-    })
+    const extractPromise = mgr
+      .scheduleExtract({
+        projectRoot,
+        sessionId,
+        history,
+        config: this.config,
+      })
       .then((result) => result.touchedTopics.length)
-      .catch((error) => {
+      .catch((error: unknown) => {
         debugLogger.warn(
           'Failed to schedule managed auto-memory extraction.',
           error,
@@ -541,11 +538,12 @@ export class GeminiClient {
       });
     this.pendingMemoryTaskPromises.push(extractPromise);
 
-    const dreamPromise = scheduleManagedAutoMemoryDream({
-      projectRoot,
-      sessionId,
-      config: this.config,
-    })
+    const dreamPromise = mgr
+      .scheduleDream({
+        projectRoot,
+        sessionId,
+        config: this.config,
+      })
       .then((schedResult) => {
         if (schedResult.status === 'scheduled' && schedResult.promise) {
           return schedResult.promise.then((state) => {
@@ -557,7 +555,7 @@ export class GeminiClient {
         }
         return 0;
       })
-      .catch((error) => {
+      .catch((error: unknown) => {
         debugLogger.warn(
           'Failed to schedule managed auto-memory dream.',
           error,
@@ -587,9 +585,7 @@ export class GeminiClient {
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
     let relevantAutoMemoryPromise:
-      | Promise<
-          Awaited<ReturnType<typeof resolveRelevantAutoMemoryPromptForQuery>>
-        >
+      | Promise<RelevantAutoMemoryPromptResult>
       | undefined;
 
     if (messageType === SendMessageType.Retry) {
@@ -654,20 +650,19 @@ export class GeminiClient {
       this.lastPromptId = prompt_id;
 
       if (this.config.getManagedAutoMemoryEnabled()) {
-        relevantAutoMemoryPromise = resolveRelevantAutoMemoryPromptForQuery(
-          this.config.getProjectRoot(),
-          partToString(request),
-          {
+        relevantAutoMemoryPromise = this.config
+          .getMemoryManager()
+          .recall(this.config.getProjectRoot(), partToString(request), {
             config: this.config,
             excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
-          },
-        ).catch((error) => {
-          debugLogger.warn(
-            'Managed auto-memory recall prefetch failed.',
-            error,
-          );
-          return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
-        });
+          })
+          .catch((error: unknown) => {
+            debugLogger.warn(
+              'Managed auto-memory recall prefetch failed.',
+              error,
+            );
+            return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+          });
       }
 
       // record user message for session management
