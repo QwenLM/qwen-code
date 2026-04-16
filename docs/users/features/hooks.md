@@ -712,6 +712,218 @@ if len(user_prompt) > 1000:
 exit(0)
 ```
 
+## Prompt Hooks
+
+In addition to command hooks, Qwen Code supports **prompt hooks** that use an LLM to evaluate conditions and make decisions. Prompt hooks are particularly useful for complex security checks, content moderation, and intelligent decision-making that requires natural language understanding.
+
+### How Prompt Hooks Work
+
+Prompt hooks send the hook context to an LLM with a custom prompt template. The LLM evaluates the input and returns a structured JSON response indicating whether to allow or block the operation.
+
+### Prompt Hook Configuration
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "hooks": [
+          {
+            "type": "prompt",
+            "name": "security-check",
+            "prompt": "Check if the following command is dangerous:\n\n$ARGUMENTS\n\nIf the command contains dangerous operations (rm -rf, format, system-critical operations), return {\"ok\": false, \"reason\": \"dangerous operation\"}\nOtherwise return {\"ok\": true}",
+            "model": "qwen-turbo",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Configuration Fields
+
+| Field     | Type   | Description                                                           |
+| --------- | ------ | --------------------------------------------------------------------- |
+| `type`    | string | Must be `"prompt"`                                                    |
+| `prompt`  | string | LLM prompt template. Use `$ARGUMENTS` placeholder for hook input JSON |
+| `model`   | string | Optional. Model to use (defaults to fast model)                       |
+| `name`    | string | Optional. Hook name for identification                                |
+| `timeout` | number | Optional. Timeout in milliseconds (default: 30000)                    |
+
+### Response Format
+
+Prompt hooks must return valid JSON with the following structure:
+
+```json
+// Allow operation
+{"ok": true}
+
+// Block operation with reason
+{"ok": false, "reason": "Reason for blocking"}
+```
+
+> **Important**: Only `ok` (required) and `reason` (optional) fields are allowed. Additional fields will cause validation errors.
+
+### Complete Examples
+
+#### Example 1: File Write Protection
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "write_file",
+        "hooks": [
+          {
+            "type": "prompt",
+            "name": "file-write-guard",
+            "prompt": "Check the file write operation:\n$ARGUMENTS\n\nBlock if writing to:\n1. System files (/etc/, /usr/)\n2. User home directory config files\n3. Files with sensitive names\n\nReturn JSON: {\"ok\": true} or {\"ok\": false, \"reason\": \"...\"}",
+            "model": "qwen-turbo"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### Example 2: Network Request Audit
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "web_fetch|web_search",
+        "hooks": [
+          {
+            "type": "prompt",
+            "name": "network-auditor",
+            "prompt": "Audit the network request:\n$ARGUMENTS\n\nCheck:\n1. Is the URL trusted?\n2. Does it contain malicious domains?\n3. Does it comply with company policy?\n\nReturn: {\"ok\": true/false, \"reason\": \"...\"}",
+            "timeout": 15000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+#### Example 3: Sensitive Information Filter (UserPromptSubmit)
+
+```json
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "name": "sensitive-info-filter",
+            "prompt": "Check if user input contains sensitive information:\n\n$ARGUMENTS\n\nSensitive information includes:\n- API keys, passwords\n- ID numbers, phone numbers\n- Credit card numbers\n- Personal privacy information\n\nIf detected, return: {\"ok\": false, \"reason\": \"Contains sensitive information: [type]\"}\nOtherwise return: {\"ok\": true}",
+            "timeout": 10000
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+### Debugging Prompt Hooks
+
+#### Enable Debug Logging
+
+```bash
+# View prompt hook logs
+DEBUG=qwen:prompt_hook npm start
+
+# View all hook-related logs
+DEBUG=TRUSTED_HOOKS,PROMPT_HOOK npm start
+```
+
+#### Test Hook Response Format
+
+Create a test script to verify hook behavior:
+
+```bash
+cat > test-hook.sh << 'EOF'
+#!/bin/bash
+# Simulate hook input
+echo '{
+  "tool_name": "bash",
+  "command": "rm -rf /tmp/test",
+  "cwd": "/Users/test"
+}' | node -e "
+const input = JSON.parse(require('fs').readFileSync(0, 'utf-8'));
+console.log('Received input:', JSON.stringify(input, null, 2));
+
+// Simulate LLM response
+const response = { ok: false, reason: 'Dangerous operation detected' };
+console.log('Expected response:', JSON.stringify(response));
+"
+EOF
+
+chmod +x test-hook.sh
+./test-hook.sh
+```
+
+### Performance Optimization
+
+1. **Use Fast Models**: For simple checks, use `qwen-turbo` instead of larger models
+
+2. **Precise Matchers**: Reduce unnecessary hook triggers with specific patterns
+
+```json
+{
+  "matcher": "^bash$"
+}
+```
+
+3. **Set Appropriate Timeouts**: Don't wait too long for LLM responses
+
+```json
+{
+  "timeout": 10000
+}
+```
+
+### Common Issues
+
+#### Q: Hook response format errors?
+
+A: Ensure your JSON response contains only `ok` and optional `reason`:
+
+```json
+// ✅ Valid
+{"ok": true}
+{"ok": false, "reason": "Reason"}
+
+// ❌ Invalid (extra fields)
+{"ok": true, "extra": "field"}
+```
+
+#### Q: Hook not triggering?
+
+A:
+
+1. Check if the project folder is trusted (project hooks require trust)
+2. Verify the matcher pattern matches the tool name
+3. Enable debug logging to see what's happening
+
+#### Q: Hook executing too slowly?
+
+A:
+
+1. Use a faster model (`qwen-turbo`)
+2. Reduce prompt length
+3. Lower the timeout value
+4. Use more precise matchers
+
 ## Troubleshooting
 
 - Check application logs for hook execution details
