@@ -24,7 +24,7 @@
 
 - **2026-04-13**: Qwen OAuth free tier policy update: daily quota adjusted to 100 requests/day (from 1,000).
 
-- **2026-04-02**: Qwen3.6-Plus is now live! Get an API key from [Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3.6-plus) to access it through the OpenAI-compatible API, or run it locally via Ollama/vLLM.
+- **2026-04-02**: Qwen3.6-Plus is now live! Get an API key from [Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3.6-plus) to access it through the OpenAI-compatible API.
 
 - **2026-02-16**: Qwen3.5-Plus is now live!
 
@@ -351,70 +351,6 @@ Use the `/model` command at any time to switch between all configured models.
 #### Local Inference (free & private)
 
 Run models locally using [Ollama](https://ollama.com/) or [vLLM](https://github.com/vllm-project/vllm) — no API key or cloud account needed.
-
-<details>
-<summary>Ollama setup</summary>
-
-1. Install Ollama from [ollama.com](https://ollama.com/)
-2. Pull a model: `ollama pull qwen3:32b`
-3. Configure `~/.qwen/settings.json`:
-
-```json
-{
-  "modelProviders": {
-    "openai": [
-      {
-        "id": "qwen3:32b",
-        "name": "Qwen3 32B (Ollama)",
-        "baseUrl": "http://localhost:11434/v1",
-        "description": "Qwen3 32B running locally via Ollama"
-      }
-    ]
-  },
-  "security": {
-    "auth": {
-      "selectedType": "openai"
-    }
-  },
-  "model": {
-    "name": "qwen3:32b"
-  }
-}
-```
-
-</details>
-
-<details>
-<summary>vLLM setup</summary>
-
-1. Install vLLM: `pip install vllm`
-2. Start the server: `vllm serve Qwen/Qwen3-32B`
-3. Configure `~/.qwen/settings.json`:
-
-```json
-{
-  "modelProviders": {
-    "openai": [
-      {
-        "id": "Qwen/Qwen3-32B",
-        "name": "Qwen3 32B (vLLM)",
-        "baseUrl": "http://localhost:8000/v1",
-        "description": "Qwen3 32B running locally via vLLM"
-      }
-    ]
-  },
-  "security": {
-    "auth": {
-      "selectedType": "openai"
-    }
-  },
-  "model": {
-    "name": "Qwen/Qwen3-32B"
-  }
-}
-```
-
-</details>
 
 ## Usage
 
