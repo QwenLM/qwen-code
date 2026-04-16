@@ -509,7 +509,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Show welcome back dialog when returning to a project with conversation history.',
+          'Show welcome back dialog when returning to a project with conversation history. Choosing "Start new chat session" suppresses the dialog for that project until the project summary changes.',
         showInDialog: true,
       },
       enableUserFeedback: {
