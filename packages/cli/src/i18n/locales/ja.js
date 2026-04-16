@@ -6,7 +6,10 @@
 
 // Japanese translations for Qwen Code CLI
 
+import en from './en.js';
+
 export default {
+  ...en,
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -1488,16 +1491,159 @@ export default {
     'コンパクトモードでツール出力と思考を非表示にします（Ctrl+O で切り替え）。',
   'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
 
+  // ============================================================================
+  // i18n completeness overrides
+  // ============================================================================
+  '↑ to manage attachments': '↑ で添付を管理',
+  '← → select, Delete to remove, ↓ to exit':
+    '← → で選択、Delete で削除、↓ で終了',
+  'Attachments: ': '添付: ',
+  '(tab to cycle)': '(Tab で切り替え)',
+  'Toggle this help display': 'このヘルプ表示を切り替え',
+  'Toggle shell mode': 'シェルモードを切り替え',
+  'Open command menu': 'コマンドメニューを開く',
+  'Add file context': 'ファイルコンテキストを追加',
+  'Accept suggestion / Autocomplete': '候補を受け入れる / 自動補完',
+  'Reverse search history': '履歴を逆方向に検索',
+  'Press ? again to close': '? をもう一度押して閉じる',
+  'for shell mode': 'シェルモード用',
+  'for commands': 'コマンド用',
+  'for file paths': 'ファイルパス用',
+  'to clear input': '入力をクリア',
+  'to cycle approvals': '承認モードを切り替え',
+  'to quit': '終了',
+  'for newline': '改行',
+  'to clear screen': '画面をクリア',
+  'to search history': '履歴を検索',
+  'to paste images': '画像を貼り付け',
+  'for external editor': '外部エディタ用',
+  '? for shortcuts': '? でショートカット表示',
+  Status: 'ステータス',
+  Runtime: '実行環境',
+  Auth: '認証',
+  Proxy: 'プロキシ',
+  'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
+    '無効な承認モード "{{arg}}" です。有効なモード: {{modes}}',
+  'Approval mode set to "{{mode}}"': '承認モードを "{{mode}}" に設定しました',
+  '(Use Enter to apply scope, Tab to go back)':
+    '(Enter でスコープを適用、Tab で戻る)',
+  'Extension Agents': '拡張エージェント',
+  'Attribution: commit': 'Attribution: commit',
+  'Terminal Bell Notification': 'ターミナルベル通知',
+  'Enable Usage Statistics': '使用統計を有効化',
+  Theme: 'テーマ',
+  'Preferred Editor': '優先エディタ',
+  'Auto-connect to IDE': 'IDE に自動接続',
+  'Language: UI': '言語: UI',
+  'Language: Model': '言語: モデル',
+  'Show Line Numbers in Code': 'コードの行番号を表示',
+  'Show Welcome Back Dialog': 'おかえりダイアログを表示',
+  'Enable User Feedback': 'ユーザーフィードバックを有効化',
+  'How is Qwen doing this session? (optional)':
+    'このセッションでの Qwen の調子はどうですか？（任意）',
+  Bad: '悪い',
+  Fine: '普通',
+  Good: '良い',
+  Dismiss: '閉じる',
+  'Not Sure Yet': 'まだわからない',
+  'Any other key': 'その他のキー',
+  'Interactive Shell (PTY)': '対話型シェル (PTY)',
+  'Select Editor': 'エディタを選択',
+  'Editor Preference': 'エディタ設定',
+  'These editors are currently supported. Please note that some editors cannot be used in sandbox mode.':
+    '現在サポートされているエディタです。サンドボックスモードでは一部のエディタが利用できない場合があります。',
+  'Your preferred editor is:': '現在の優先エディタ:',
+  'Open MCP management dialog': 'MCP 管理ダイアログを開く',
+  prompts: 'プロンプト',
   'Switch to plan mode or exit plan mode':
-    'Switch to plan mode or exit plan mode',
+    'プランモードに切り替える、または終了する',
   'Exited plan mode. Previous approval mode restored.':
-    'Exited plan mode. Previous approval mode restored.',
+    'プランモードを終了し、以前の承認モードを復元しました。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
-    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+    'プランモードを有効化しました。エージェントはツールを実行せずに分析と計画を行います。',
   'Already in plan mode. Use "/plan exit" to exit plan mode.':
-    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+    'すでにプランモードです。"/plan exit" で終了できます。',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
-    'Not in plan mode. Use "/plan" to enter plan mode first.',
-
-  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+    'プランモードではありません。まず "/plan" でプランモードに入ってください。',
+  'Install an extension from a git repo or local path':
+    'git リポジトリまたはローカルパスから拡張機能をインストール',
+  'Disable an extension': '拡張機能を無効化',
+  'Enable an extension': '拡張機能を有効化',
+  'Uninstall an extension': '拡張機能をアンインストール',
+  'Manage extension settings': '拡張機能の設定を管理',
+  'Lists installed extensions.': 'インストール済みの拡張機能を一覧表示します。',
+  'Updates all extensions or a named extension to the latest version.':
+    'すべての拡張機能、または指定した拡張機能を最新バージョンに更新します。',
+  'Open extensions page in your browser': 'ブラウザで拡張機能ページを開く',
+  'Manage Extensions': '拡張機能を管理',
+  'Extension Details': '拡張機能の詳細',
+  'View Extension': '拡張機能を表示',
+  'Update Extension': '拡張機能を更新',
+  'Disable Extension': '拡張機能を無効化',
+  'Enable Extension': '拡張機能を有効化',
+  'Uninstall Extension': '拡張機能をアンインストール',
+  'Select Scope': 'スコープを選択',
+  'User Scope': 'ユーザースコープ',
+  'Workspace Scope': 'ワークスペーススコープ',
+  'No extensions found.': '拡張機能が見つかりません。',
+  'Are you sure you want to uninstall extension "{{name}}"?':
+    '拡張機能 "{{name}}" をアンインストールしてもよろしいですか？',
+  'This action cannot be undone.': 'この操作は元に戻せません。',
+  'Extension "{{name}}" disabled successfully.':
+    '拡張機能 "{{name}}" を無効化しました。',
+  'Extension "{{name}}" enabled successfully.':
+    '拡張機能 "{{name}}" を有効化しました。',
+  'Extension "{{name}}" updated successfully.':
+    '拡張機能 "{{name}}" を更新しました。',
+  'Failed to update extension "{{name}}": {{error}}':
+    '拡張機能 "{{name}}" の更新に失敗しました: {{error}}',
+  'Select the scope for this action:': 'この操作のスコープを選択してください:',
+  'User - Applies to all projects': 'ユーザー - すべてのプロジェクトに適用',
+  'Workspace - Applies to current project only':
+    'ワークスペース - 現在のプロジェクトのみに適用',
+  'Name:': '名前:',
+  'MCP Servers:': 'MCP サーバー:',
+  'Settings:': '設定:',
+  'View Details': '詳細を表示',
+  'Update failed:': '更新に失敗しました:',
+  'Updating {{name}}...': '{{name}} を更新中...',
+  'Update complete!': '更新が完了しました！',
+  'User (global)': 'ユーザー (グローバル)',
+  'Workspace (project-specific)': 'ワークスペース (プロジェクト固有)',
+  'Disable "{{name}}" - Select Scope': '"{{name}}" を無効化 - スコープを選択',
+  'Enable "{{name}}" - Select Scope': '"{{name}}" を有効化 - スコープを選択',
+  'No extension selected': '拡張機能が選択されていません',
+  'Press Y/Enter to confirm, N/Esc to cancel':
+    'Y/Enter で確認、N/Esc でキャンセル',
+  'Y/Enter to confirm, N/Esc to cancel': 'Y/Enter で確認、N/Esc でキャンセル',
+  '{{count}} extensions installed': '{{count}} 個の拡張機能をインストール済み',
+  "Use '/extensions install' to install your first extension.":
+    "'/extensions install' を使って最初の拡張機能をインストールしてください。",
+  'up to date': '最新',
+  'update available': '更新あり',
+  'checking...': '確認中...',
+  'not updatable': '更新不可',
+  'LLM output language set to {{lang}}':
+    'LLM 出力言語を {{lang}} に設定しました',
+  'Tool Approval Mode': 'ツール承認モード',
+  "Set up Qwen Code's status line UI": 'Qwen Code のステータスライン UI を設定',
+  'Ask a quick side question without affecting the main conversation':
+    'メインの会話に影響を与えずに、ちょっとした質問をする',
+  'Manage Arena sessions': 'Arena セッションを管理',
+  'Start an Arena session with multiple models competing on the same task':
+    '同じタスクで複数モデルを競わせる Arena セッションを開始',
+  'Stop the current Arena session': '現在の Arena セッションを停止',
+  'Show the current Arena session status':
+    '現在の Arena セッションの状態を表示',
+  'Select a model result and merge its diff into the current workspace':
+    'モデル結果を選択し、その差分を現在のワークスペースにマージ',
+  'Manage dynamic translation cache': '動的翻訳キャッシュを管理',
+  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
+    '現在の UI 言語向けに、読み込み済みの動的スラッシュコマンド説明を再翻訳',
+  'Clear cached translations for the current UI language':
+    '現在の UI 言語のキャッシュ済み翻訳を削除',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    'コンテキストウィンドウ使用量の内訳を表示します。項目ごとの内訳は "/context detail" を使用してください。',
+  'Show per-item context usage breakdown.':
+    '項目ごとのコンテキスト使用量の内訳を表示します。',
 };

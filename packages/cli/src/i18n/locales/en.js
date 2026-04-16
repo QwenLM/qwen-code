@@ -2050,4 +2050,23 @@ export default {
     'Not in plan mode. Use "/plan" to enter plan mode first.',
 
   "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+  'Ask a quick side question without affecting the main conversation':
+    'Ask a quick side question without affecting the main conversation',
+  'Manage Arena sessions': 'Manage Arena sessions',
+  'Start an Arena session with multiple models competing on the same task':
+    'Start an Arena session with multiple models competing on the same task',
+  'Stop the current Arena session': 'Stop the current Arena session',
+  'Show the current Arena session status':
+    'Show the current Arena session status',
+  'Select a model result and merge its diff into the current workspace':
+    'Select a model result and merge its diff into the current workspace',
+  'Manage dynamic translation cache': 'Manage dynamic translation cache',
+  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
+    'Re-translate currently loaded dynamic slash descriptions for the current UI language',
+  'Clear cached translations for the current UI language':
+    'Clear cached translations for the current UI language',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    'Show context window usage breakdown. Use "/context detail" for per-item breakdown.',
+  'Show per-item context usage breakdown.':
+    'Show per-item context usage breakdown.',
 };

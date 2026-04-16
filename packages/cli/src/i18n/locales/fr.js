@@ -6,7 +6,10 @@
 
 // Traductions françaises pour Qwen Code CLI
 
+import en from './en.js';
+
 export default {
+  ...en,
   // ============================================================================
   // Aide / Composants UI
   // ============================================================================
@@ -1994,6 +1997,19 @@ export default {
     '↑/↓ : Naviguer | Espace/Entrée : Basculer | Échap : Annuler',
   '↑/↓: Navigate | Enter: Select | Esc: Cancel':
     '↑/↓ : Naviguer | Entrée : Sélectionner | Échap : Annuler',
+  'Press ↑ to edit queued messages':
+    'Appuyez sur ↑ pour modifier les messages en file d’attente',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Ajoutez un fichier QWEN.md pour donner à Qwen Code un contexte de projet persistant.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Utilisez /btw pour poser une question secondaire rapide sans perturber la conversation.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Le contexte est presque plein ! Lancez /compress maintenant ou démarrez /new pour continuer.',
+  'Context is getting full. Use /compress to free up space.':
+    'Le contexte se remplit. Utilisez /compress pour libérer de l’espace.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Conversation longue ? /compress résume l’historique pour libérer du contexte.',
+  'Manage extension settings': 'Gérer les paramètres de l’extension',
 
   // ============================================================================
   // Commandes - Auth
@@ -2092,4 +2108,23 @@ export default {
 
   "Set up Qwen Code's status line UI":
     "Configurer l'interface de la barre de statut de Qwen Code",
+  'Ask a quick side question without affecting the main conversation':
+    'Poser rapidement une question annexe sans affecter la conversation principale',
+  'Manage Arena sessions': 'Gérer les sessions Arena',
+  'Start an Arena session with multiple models competing on the same task':
+    "Démarrer une session Arena où plusieurs modèles s'affrontent sur la même tâche",
+  'Stop the current Arena session': 'Arrêter la session Arena en cours',
+  'Show the current Arena session status':
+    "Afficher l'état de la session Arena en cours",
+  'Select a model result and merge its diff into the current workspace':
+    "Sélectionner un résultat de modèle et fusionner son diff dans l'espace de travail actuel",
+  'Manage dynamic translation cache': 'Gérer le cache de traduction dynamique',
+  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
+    'Retraduire les descriptions dynamiques de commandes slash actuellement chargées pour la langue UI active',
+  'Clear cached translations for the current UI language':
+    'Effacer les traductions en cache pour la langue UI active',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    'Afficher le détail de l’utilisation de la fenêtre de contexte. Utilisez "/context detail" pour le détail par élément.',
+  'Show per-item context usage breakdown.':
+    'Afficher le détail de l’utilisation du contexte par élément.',
 };

@@ -7,7 +7,10 @@
 // German translations for Qwen Code CLI
 // Deutsche Übersetzungen für Qwen Code CLI
 
+import en from './en.js';
+
 export default {
+  ...en,
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -1998,16 +2001,106 @@ export default {
   'Press Ctrl+O to show full tool output':
     'Strg+O für vollständige Tool-Ausgabe drücken',
 
+  // ============================================================================
+  // i18n completeness overrides
+  // ============================================================================
+  'Open MCP management dialog': 'MCP-Verwaltungsdialog öffnen',
+  prompts: 'Prompts',
   'Switch to plan mode or exit plan mode':
-    'Switch to plan mode or exit plan mode',
+    'In den Planungsmodus wechseln oder ihn verlassen',
   'Exited plan mode. Previous approval mode restored.':
-    'Exited plan mode. Previous approval mode restored.',
+    'Planungsmodus beendet. Der vorherige Freigabemodus wurde wiederhergestellt.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
-    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+    'Planungsmodus aktiviert. Der Agent analysiert und plant, ohne Werkzeuge auszuführen.',
   'Already in plan mode. Use "/plan exit" to exit plan mode.':
-    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+    'Planungsmodus ist bereits aktiv. Verwenden Sie "/plan exit", um ihn zu verlassen.',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
-    'Not in plan mode. Use "/plan" to enter plan mode first.',
-
-  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+    'Nicht im Planungsmodus. Verwenden Sie zuerst "/plan", um ihn zu aktivieren.',
+  'Manage extension settings': 'Erweiterungseinstellungen verwalten',
+  'Manage Extensions': 'Erweiterungen verwalten',
+  'Extension Details': 'Erweiterungsdetails',
+  'View Extension': 'Erweiterung anzeigen',
+  'Update Extension': 'Erweiterung aktualisieren',
+  'Disable Extension': 'Erweiterung deaktivieren',
+  'Enable Extension': 'Erweiterung aktivieren',
+  'Uninstall Extension': 'Erweiterung deinstallieren',
+  'Select Scope': 'Bereich auswählen',
+  'User Scope': 'Benutzerbereich',
+  'Workspace Scope': 'Arbeitsbereich',
+  'No extensions found.': 'Keine Erweiterungen gefunden.',
+  'Toggle this help display': 'Diese Hilfe ein- oder ausblenden',
+  'Toggle shell mode': 'Shell-Modus umschalten',
+  'Open command menu': 'Befehlsmenü öffnen',
+  'Add file context': 'Dateikontext hinzufügen',
+  'Accept suggestion / Autocomplete':
+    'Vorschlag akzeptieren / automatisch vervollständigen',
+  'Reverse search history': 'Verlauf rückwärts durchsuchen',
+  'Press ? again to close': 'Erneut ? drücken, um zu schließen',
+  '? for shortcuts': '? für Tastenkürzel',
+  'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
+    'Ungültiger Freigabemodus "{{arg}}". Gültige Modi: {{modes}}',
+  'Approval mode set to "{{mode}}"': 'Freigabemodus auf "{{mode}}" gesetzt',
+  "Set up Qwen Code's status line UI":
+    'Die Statuszeilen-Oberfläche von Qwen Code einrichten',
+  'Are you sure you want to uninstall extension "{{name}}"?':
+    'Sind Sie sicher, dass Sie die Erweiterung "{{name}}" deinstallieren möchten?',
+  'This action cannot be undone.':
+    'Diese Aktion kann nicht rückgängig gemacht werden.',
+  'Extension "{{name}}" disabled successfully.':
+    'Erweiterung "{{name}}" erfolgreich deaktiviert.',
+  'Extension "{{name}}" enabled successfully.':
+    'Erweiterung "{{name}}" erfolgreich aktiviert.',
+  'Extension "{{name}}" updated successfully.':
+    'Erweiterung "{{name}}" erfolgreich aktualisiert.',
+  'Failed to update extension "{{name}}": {{error}}':
+    'Erweiterung "{{name}}" konnte nicht aktualisiert werden: {{error}}',
+  'Select the scope for this action:':
+    'Wählen Sie den Bereich für diese Aktion aus:',
+  'User - Applies to all projects': 'Benutzer - gilt für alle Projekte',
+  'Workspace - Applies to current project only':
+    'Arbeitsbereich - gilt nur für das aktuelle Projekt',
+  'Name:': 'Name:',
+  'MCP Servers:': 'MCP-Server:',
+  'Settings:': 'Einstellungen:',
+  'View Details': 'Details anzeigen',
+  'Update failed:': 'Aktualisierung fehlgeschlagen:',
+  'Updating {{name}}...': '{{name}} wird aktualisiert...',
+  'Update complete!': 'Aktualisierung abgeschlossen!',
+  'User (global)': 'Benutzer (global)',
+  'Workspace (project-specific)': 'Arbeitsbereich (projektspezifisch)',
+  'Disable "{{name}}" - Select Scope':
+    '"{{name}}" deaktivieren - Bereich auswählen',
+  'Enable "{{name}}" - Select Scope':
+    '"{{name}}" aktivieren - Bereich auswählen',
+  'No extension selected': 'Keine Erweiterung ausgewählt',
+  'Press Y/Enter to confirm, N/Esc to cancel':
+    'Y/Enter zum Bestätigen, N/Esc zum Abbrechen drücken',
+  'Y/Enter to confirm, N/Esc to cancel':
+    'Y/Enter zum Bestätigen, N/Esc zum Abbrechen',
+  '{{count}} extensions installed': '{{count}} Erweiterungen installiert',
+  "Use '/extensions install' to install your first extension.":
+    "Verwenden Sie '/extensions install', um Ihre erste Erweiterung zu installieren.",
+  'up to date': 'aktuell',
+  'update available': 'Update verfügbar',
+  'checking...': 'wird geprüft...',
+  'not updatable': 'nicht aktualisierbar',
+  'Ask a quick side question without affecting the main conversation':
+    'Eine kurze Nebenfrage stellen, ohne die Hauptunterhaltung zu beeinflussen',
+  'Manage Arena sessions': 'Arena-Sitzungen verwalten',
+  'Start an Arena session with multiple models competing on the same task':
+    'Eine Arena-Sitzung starten, in der mehrere Modelle dieselbe Aufgabe bearbeiten',
+  'Stop the current Arena session': 'Die aktuelle Arena-Sitzung beenden',
+  'Show the current Arena session status':
+    'Den Status der aktuellen Arena-Sitzung anzeigen',
+  'Select a model result and merge its diff into the current workspace':
+    'Ein Modellergebnis auswählen und dessen Diff in den aktuellen Arbeitsbereich übernehmen',
+  'Manage dynamic translation cache': 'Dynamischen Übersetzungscache verwalten',
+  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
+    'Bereits geladene dynamische Slash-Beschreibungen für die aktuelle UI-Sprache erneut übersetzen',
+  'Clear cached translations for the current UI language':
+    'Zwischengespeicherte Übersetzungen für die aktuelle UI-Sprache löschen',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    'Die Aufschlüsselung der Nutzung des Kontextfensters anzeigen. Für Details pro Element "/context detail" verwenden.',
+  'Show per-item context usage breakdown.':
+    'Die Aufschlüsselung der Kontextnutzung pro Element anzeigen.',
 };

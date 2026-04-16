@@ -23,6 +23,7 @@ vi.mock('../../i18n/index.js', () => ({
       de: 'German',
       ja: 'Japanese',
       pt: 'Portuguese',
+      fr: 'French',
     };
     return map[locale] || 'English';
   }),
@@ -768,6 +769,12 @@ describe('languageCommand', () => {
     const deDESubcommand = uiSubcommand?.subCommands?.find(
       (c) => c.name === 'de-DE',
     );
+    const ptBRSubcommand = uiSubcommand?.subCommands?.find(
+      (c) => c.name === 'pt-BR',
+    );
+    const frFRSubcommand = uiSubcommand?.subCommands?.find(
+      (c) => c.name === 'fr-FR',
+    );
 
     it('zh-CN action should set Chinese', async () => {
       if (!zhCNSubcommand?.action) {
@@ -825,6 +832,36 @@ describe('languageCommand', () => {
       const result = await jaJPSubcommand.action(mockContext, '');
 
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('ja');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('UI language changed'),
+      });
+    });
+
+    it('pt-BR action should set Portuguese', async () => {
+      if (!ptBRSubcommand?.action) {
+        throw new Error('pt-BR subcommand must have an action.');
+      }
+
+      const result = await ptBRSubcommand.action(mockContext, '');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('pt');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('UI language changed'),
+      });
+    });
+
+    it('fr-FR action should set French', async () => {
+      if (!frFRSubcommand?.action) {
+        throw new Error('fr-FR subcommand must have an action.');
+      }
+
+      const result = await frFRSubcommand.action(mockContext, '');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('fr');
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
@@ -972,6 +1009,19 @@ describe('languageCommand', () => {
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('output-language.md'),
         expect.stringContaining('Portuguese'),
+        'utf-8',
+      );
+    });
+
+    it('should detect French locale and create French rule file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('fr');
+
+      initializeLlmOutputLanguage();
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('French'),
         'utf-8',
       );
     });

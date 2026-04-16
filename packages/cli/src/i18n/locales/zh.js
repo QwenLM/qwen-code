@@ -6,7 +6,10 @@
 
 // Chinese translations for Qwen Code CLI
 
+import en from './en.js';
+
 export default {
+  ...en,
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -1979,4 +1982,10 @@ export default {
   'Received an empty or invalid prompt response from the server.':
     '从服务器收到空响应或无效的提示响应。',
   'Missing required argument(s): {{args}}': '缺少必填参数：{{args}}',
+  'Value:': '值：',
+  'No server selected': '未选择服务器',
+  prompts: '提示',
+  required: '必填',
+  Enum: '枚举',
+  'Manage extension settings': '管理扩展设置',
 };
