@@ -156,6 +156,7 @@ export interface OpenDialogActionReturn {
     | 'theme'
     | 'editor'
     | 'settings'
+    | 'memory'
     | 'model'
     | 'fast-model'
     | 'subagent_create'
@@ -186,6 +187,8 @@ export interface LoadHistoryActionReturn {
 export interface SubmitPromptActionReturn {
   type: 'submit_prompt';
   content: PartListUnion;
+  /** Optional callback invoked after the agent turn completes successfully. */
+  onComplete?: () => Promise<void>;
 }
 
 /**

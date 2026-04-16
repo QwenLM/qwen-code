@@ -15,6 +15,29 @@ export { HookAggregator } from './hookAggregator.js';
 export { HookPlanner } from './hookPlanner.js';
 export { HookEventHandler } from './hookEventHandler.js';
 
+// Export new hook runners
+export { HttpHookRunner } from './httpHookRunner.js';
+export { FunctionHookRunner } from './functionHookRunner.js';
+
+// Export session and async hook management
+export { SessionHooksManager } from './sessionHooksManager.js';
+export type { SessionHookEntry } from './sessionHooksManager.js';
+export { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
+export {
+  registerSkillHooks,
+  unregisterSkillHooks,
+} from './registerSkillHooks.js';
+
+// Export utilities
+export {
+  interpolateEnvVars,
+  interpolateHeaders,
+  interpolateUrl,
+  hasEnvVarReferences,
+  extractEnvVarNames,
+} from './envInterpolator.js';
+export { UrlValidator, createUrlValidator } from './urlValidator.js';
+
 // Export interfaces and enums
 export type { HookRegistryEntry } from './hookRegistry.js';
 export { HooksConfigSource as ConfigSource } from './types.js';
