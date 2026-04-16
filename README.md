@@ -360,7 +360,7 @@ As an open-source terminal agent, you can use Qwen Code in four primary ways:
 1. Interactive mode (terminal UI)
 2. Headless mode (scripts, CI)
 3. IDE integration (VS Code, Zed)
-4. TypeScript SDK
+4. SDKs (TypeScript, Python, Java)
 
 #### Interactive mode
 
@@ -388,11 +388,38 @@ Use Qwen Code inside your editor (VS Code, Zed, and JetBrains IDEs):
 - [Use in Zed](https://qwenlm.github.io/qwen-code-docs/en/users/integration-zed/)
 - [Use in JetBrains IDEs](https://qwenlm.github.io/qwen-code-docs/en/users/integration-jetbrains/)
 
-#### TypeScript SDK
+#### SDKs
 
-Build on top of Qwen Code with the TypeScript SDK:
+Build on top of Qwen Code with the available SDKs:
 
-- [Use the Qwen Code SDK](./packages/sdk-typescript/README.md)
+- TypeScript: [Use the Qwen Code SDK](./packages/sdk-typescript/README.md)
+- Python: [Use the Python SDK](./packages/sdk-python/README.md)
+- Java: [Use the Java SDK](./packages/sdk-java/qwencode/README.md)
+
+Python SDK example:
+
+```python
+import asyncio
+
+from qwen_code_sdk import is_sdk_result_message, query
+
+
+async def main() -> None:
+    result = query(
+        "Summarize the repository layout.",
+        {
+            "cwd": "/path/to/project",
+            "path_to_qwen_executable": "qwen",
+        },
+    )
+
+    async for message in result:
+        if is_sdk_result_message(message):
+            print(message["result"])
+
+
+asyncio.run(main())
+```
 
 ## Commands & Shortcuts
 

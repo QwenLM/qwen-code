@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.27.0"]
+build-backend = "hatchling.build"
+
+[project]
+name = "qwen-code-sdk"
+version = "0.1.0"
+description = "Python SDK for programmatic access to qwen-code CLI"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Qwen Team" }]
+keywords = ["qwen", "qwen-code", "sdk", "python", "ai", "code-assistant"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = ["typing-extensions>=4.12.0"]
+
+[project.urls]
+Homepage = "https://qwenlm.github.io/qwen-code-docs/"
+Repository = "https://github.com/QwenLM/qwen-code"
+Issues = "https://github.com/QwenLM/qwen-code/issues"
+
+[project.optional-dependencies]
+dev = [
+  "mypy>=1.11.0",
+  "pytest>=8.3.0",
+  "pytest-asyncio>=0.24.0",
+  "ruff>=0.8.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qwen_code_sdk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC", "RUF"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_unused_configs = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+show_error_codes = true
+mypy_path = "src"
