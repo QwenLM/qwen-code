@@ -233,6 +233,17 @@ describe('useStatusLine', () => {
       expect(result.current.text).toBe('line one\n\nline three');
     });
 
+    it('caps output at 3 lines', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'line1\nline2\nline3\nline4\nline5\n', '');
+      });
+
+      expect(result.current.text).toBe('line1\nline2\nline3');
+    });
+
     it('returns null when command fails', async () => {
       setStatusLineConfig({ type: 'command', command: 'bad-cmd' });
       const { result } = renderHook(() => useStatusLine());

@@ -72,6 +72,7 @@ interface StatusLineConfig {
 }
 
 const debugLog = createDebugLogger('STATUS_LINE');
+const MAX_STATUS_LINES = 3;
 
 function getStatusLineConfig(
   settings: ReturnType<typeof useSettings>,
@@ -277,7 +278,8 @@ export function useStatusLine(): {
         activeChildRef.current = undefined;
         if (!error && stdout) {
           // Strip only the trailing newline to preserve intentional whitespace.
-          const text = stdout.replace(/\r?\n$/, '');
+          const lines = stdout.replace(/\r?\n$/, '').split(/\r?\n/);
+          const text = lines.slice(0, MAX_STATUS_LINES).join('\n');
           setOutput(text || null);
         } else {
           setOutput(null);
