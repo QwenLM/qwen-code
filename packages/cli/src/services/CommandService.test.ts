@@ -345,4 +345,50 @@ describe('CommandService', () => {
     expect(deployExtension).toBeDefined();
     expect(deployExtension?.description).toBe('[gcp] Deploy to Google Cloud');
   });
+
+  it('should preserve description getters so translated labels update after language changes', async () => {
+    const commandWithGetter = {
+      name: 'dynamic',
+      get description() {
+        return this.name === 'dynamic'
+          ? '显示版本信息'
+          : `renamed:${this.name}`;
+      },
+      kind: CommandKind.BUILT_IN,
+      action: vi.fn(),
+    } satisfies SlashCommand;
+
+    const service = await CommandService.create(
+      [new MockCommandLoader([commandWithGetter])],
+      new AbortController().signal,
+    );
+
+    const command = service.getCommands().find((cmd) => cmd.name === 'dynamic');
+    expect(command?.description).toBe('显示版本信息');
+
+    const conflictingExtension = {
+      name: 'deploy',
+      extensionName: 'firebase',
+      get description() {
+        return `dynamic:${this.name}`;
+      },
+      kind: CommandKind.FILE,
+      action: vi.fn(),
+    } satisfies SlashCommand;
+
+    const renamedService = await CommandService.create(
+      [
+        new MockCommandLoader([
+          createMockCommand('deploy', CommandKind.BUILT_IN),
+        ]),
+        new MockCommandLoader([conflictingExtension]),
+      ],
+      new AbortController().signal,
+    );
+
+    const renamedCommand = renamedService
+      .getCommands()
+      .find((cmd) => cmd.name === 'firebase.deploy');
+    expect(renamedCommand?.description).toBe('dynamic:firebase.deploy');
+  });
 });

@@ -26,6 +26,7 @@ import {
   type CommandDefinition,
 } from './command-factory.js';
 import type { SlashCommand } from '../ui/commands/types.js';
+import type { DynamicCommandTranslationService } from './DynamicCommandTranslationService.js';
 
 interface CommandDirectory {
   path: string;
@@ -61,7 +62,10 @@ export class FileCommandLoader implements ICommandLoader {
   private readonly folderTrustEnabled: boolean;
   private readonly folderTrust: boolean;
 
-  constructor(private readonly config: Config | null) {
+  constructor(
+    private readonly config: Config | null,
+    private readonly dynamicTranslationService?: DynamicCommandTranslationService,
+  ) {
     this.folderTrustEnabled = !!config?.getFolderTrustFeature();
     this.folderTrust = !!config?.getFolderTrust();
     this.projectRoot = config?.getProjectRoot() || process.cwd();
@@ -292,6 +296,7 @@ export class FileCommandLoader implements ICommandLoader {
       validDef,
       extensionName,
       '.toml',
+      this.dynamicTranslationService,
     );
   }
 
@@ -358,6 +363,7 @@ export class FileCommandLoader implements ICommandLoader {
       definition,
       extensionName,
       '.md',
+      this.dynamicTranslationService,
     );
   }
 }

@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { BundledSkillLoader } from './BundledSkillLoader.js';
 import { CommandKind } from '../ui/commands/types.js';
 import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
+import { setLanguageAsync } from '../i18n/index.js';
+import type { DynamicCommandTranslationService } from './DynamicCommandTranslationService.js';
 
 function makeSkill(overrides: Partial<SkillConfig> = {}): SkillConfig {
   return {
@@ -28,6 +30,12 @@ describe('BundledSkillLoader', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    return setLanguageAsync('en');
+  });
+
+  afterEach(() => setLanguageAsync('en'));
+
+  beforeEach(() => {
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
@@ -69,6 +77,29 @@ describe('BundledSkillLoader', () => {
     expect(mockSkillManager.listSkills).toHaveBeenCalledWith({
       level: 'bundled',
     });
+  });
+
+  it('should resolve bundled skill descriptions through the dynamic translation service', async () => {
+    const skill = makeSkill({
+      description:
+        'Review changed code for correctness, security, code quality, and performance. Use when the user asks to review code changes, a PR, or specific files. Invoke with `/review`, `/review <pr-number>`, `/review <file-path>`, or `/review <pr-number> --comment` to post inline comments on the PR.',
+    });
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    const dynamicTranslationService = {
+      getDescription: vi.fn(() => '审查已变更代码'),
+    } as unknown as DynamicCommandTranslationService;
+
+    const loader = new BundledSkillLoader(
+      mockConfig,
+      dynamicTranslationService,
+    );
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands[0].description).toContain('审查已变更代码');
+    expect(dynamicTranslationService.getDescription).toHaveBeenCalledWith(
+      CommandKind.SKILL,
+      skill.description,
+    );
   });
 
   it('should submit skill body as prompt without args', async () => {

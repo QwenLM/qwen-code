@@ -78,6 +78,10 @@ function formatUiLanguageDisplay(lang: SupportedLanguage): string {
     : `${option.fullName} [${option.id}]`;
 }
 
+function getDynamicTranslationService(context: CommandContext) {
+  return context.services.dynamicCommandTranslationService;
+}
+
 /**
  * Sets the UI language and persists it to user settings.
  */
@@ -109,6 +113,11 @@ async function setUiLanguage(
 
   // Reload commands to update localized descriptions
   context.ui.reloadCommands();
+  // Re-render static UI so translated placeholders, views, and labels update immediately.
+  context.ui.refreshStatic?.();
+  // After the UI language changes, requeue the currently tracked dynamic
+  // descriptions so their runtime translations follow the new UI language.
+  getDynamicTranslationService(context)?.refreshTrackedDescriptions();
 
   return {
     type: 'message',
@@ -216,6 +225,18 @@ export const languageCommand: SlashCommand = {
         }
       }
 
+      if (subCommandName === 'cache') {
+        const subCommand = languageCommand.subCommands?.find(
+          (s) => s.name === subCommandName,
+        );
+        if (subCommand?.action) {
+          return subCommand.action(
+            context,
+            subArgs,
+          ) as Promise<SlashCommandActionReturn>;
+        }
+      }
+
       // Backward compatibility: direct language code (e.g., /language zh)
       const targetLang = parseUiLanguageArg(trimmedArgs);
       if (targetLang) {
@@ -230,6 +251,7 @@ export const languageCommand: SlashCommand = {
           t('Invalid command. Available subcommands:'),
           `  - /language ui [${getSupportedLanguageIds()}] - ${t('Set UI language')}`,
           `  - /language output <language> - ${t('Set LLM output language')}`,
+          `  - /language cache <refresh|clear> - ${t('Manage dynamic translation cache')}`,
         ].join('\n'),
       };
     }
@@ -256,6 +278,7 @@ export const languageCommand: SlashCommand = {
         t('Available subcommands:'),
         `  /language ui [${getSupportedLanguageIds()}] - ${t('Set UI language')}`,
         `  /language output <language> - ${t('Set LLM output language')}`,
+        `  /language cache <refresh|clear> - ${t('Manage dynamic translation cache')}`,
       ].join('\n'),
     };
   },
@@ -369,6 +392,140 @@ export const languageCommand: SlashCommand = {
 
         return setOutputLanguage(context, trimmedArgs);
       },
+    },
+
+    {
+      name: 'cache',
+      get description() {
+        return t('Manage dynamic translation cache');
+      },
+      kind: CommandKind.BUILT_IN,
+
+      action: async (
+        context: CommandContext,
+        args: string,
+      ): Promise<MessageActionReturn> => {
+        const trimmedArgs = args.trim();
+
+        if (!trimmedArgs) {
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: [
+              t('Manage dynamic translation cache'),
+              '',
+              t('Usage: /language cache <refresh|clear>'),
+              `  /language cache refresh - ${t('Re-translate currently loaded dynamic slash descriptions for the current UI language')}`,
+              `  /language cache clear - ${t('Clear cached translations for the current UI language')}`,
+            ].join('\n'),
+          };
+        }
+
+        const nestedSubcommand = languageCommand.subCommands
+          ?.find((subcommand) => subcommand.name === 'cache')
+          ?.subCommands?.find(
+            (subcommand) => subcommand.name === trimmedArgs.split(/\s+/, 1)[0],
+          );
+
+        if (!nestedSubcommand?.action) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t('Invalid cache command. Available: refresh, clear'),
+          };
+        }
+
+        return nestedSubcommand.action(
+          context,
+          trimmedArgs.split(/\s+/).slice(1).join(' '),
+        ) as Promise<MessageActionReturn>;
+      },
+
+      subCommands: [
+        {
+          name: 'refresh',
+          get description() {
+            return t(
+              'Re-translate currently loaded dynamic slash descriptions for the current UI language',
+            );
+          },
+          kind: CommandKind.BUILT_IN,
+          action: async (context, args): Promise<MessageActionReturn> => {
+            if (args.trim()) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content: t(
+                  'Cache subcommands do not accept additional arguments.',
+                ),
+              };
+            }
+
+            const translationService = getDynamicTranslationService(context);
+            if (!translationService) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content: t('Dynamic translation service is not available.'),
+              };
+            }
+
+            const queued = translationService.refreshTrackedDescriptions();
+            context.ui.reloadCommands();
+            context.ui.refreshStatic?.();
+
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: t(
+                'Queued translation refresh for {{count}} dynamic description(s).',
+                {
+                  count: String(queued),
+                },
+              ),
+            };
+          },
+        },
+        {
+          name: 'clear',
+          get description() {
+            return t('Clear cached translations for the current UI language');
+          },
+          kind: CommandKind.BUILT_IN,
+          action: async (context, args): Promise<MessageActionReturn> => {
+            if (args.trim()) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content: t(
+                  'Cache subcommands do not accept additional arguments.',
+                ),
+              };
+            }
+
+            const translationService = getDynamicTranslationService(context);
+            if (!translationService) {
+              return {
+                type: 'message',
+                messageType: 'error',
+                content: t('Dynamic translation service is not available.'),
+              };
+            }
+
+            translationService.clearCurrentLanguageCache();
+            context.ui.reloadCommands();
+            context.ui.refreshStatic?.();
+
+            return {
+              type: 'message',
+              messageType: 'info',
+              content: t(
+                'Cleared dynamic translation cache for the current UI language.',
+              ),
+            };
+          },
+        },
+      ],
     },
   ],
 };

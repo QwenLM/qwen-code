@@ -11,12 +11,18 @@
 
 import path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { t } from '../i18n/index.js';
 import type {
   CommandContext,
   SlashCommand,
   SlashCommandActionReturn,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
+import type {
+  DynamicCommandTranslationService} from './DynamicCommandTranslationService.js';
+import {
+  markDynamicDescriptionSource,
+} from './DynamicCommandTranslationService.js';
 import { DefaultArgumentProcessor } from './prompt-processors/argumentProcessor.js';
 import type {
   IPromptProcessor,
@@ -40,6 +46,26 @@ export interface CommandDefinition {
 
 const debugLogger = createDebugLogger('COMMAND_FACTORY');
 
+function getLocalizedDescription(
+  filePath: string,
+  description: string | undefined,
+  extensionName: string | undefined,
+  dynamicTranslationService: DynamicCommandTranslationService | undefined,
+): string {
+  const baseDescription = description
+    ? (dynamicTranslationService?.getDescription(
+        CommandKind.FILE,
+        description,
+      ) ?? description)
+    : t('Custom command from {{file}}', {
+        file: path.basename(filePath),
+      });
+
+  return extensionName
+    ? `[${extensionName}] ${baseDescription}`
+    : baseDescription;
+}
+
 /**
  * Creates a SlashCommand from a parsed command definition.
  * This function is used by both TOML and Markdown command loaders.
@@ -57,6 +83,7 @@ export function createSlashCommandFromDefinition(
   definition: CommandDefinition,
   extensionName: string | undefined,
   fileExtension: string,
+  dynamicTranslationService?: DynamicCommandTranslationService,
 ): SlashCommand {
   const relativePathWithExt = path.relative(baseDir, filePath);
   const relativePath = relativePathWithExt.substring(
@@ -72,12 +99,6 @@ export function createSlashCommandFromDefinition(
     .join(':');
 
   // Add extension name tag for extension commands
-  const defaultDescription = `Custom command from ${path.basename(filePath)}`;
-  let description = definition.description || defaultDescription;
-  if (extensionName) {
-    description = `[${extensionName}] ${description}`;
-  }
-
   const processors: IPromptProcessor[] = [];
   const usesArgs = definition.prompt.includes(SHORTHAND_ARGS_PLACEHOLDER);
   const usesShellInjection = definition.prompt.includes(
@@ -106,9 +127,16 @@ export function createSlashCommandFromDefinition(
     processors.push(new DefaultArgumentProcessor());
   }
 
-  return {
+  const command: SlashCommand = {
     name: baseCommandName,
-    description,
+    get description() {
+      return getLocalizedDescription(
+        filePath,
+        definition.description,
+        extensionName,
+        dynamicTranslationService,
+      );
+    },
     kind: CommandKind.FILE,
     extensionName,
     action: async (
@@ -154,4 +182,14 @@ export function createSlashCommandFromDefinition(
       }
     },
   };
+
+  if (definition.description) {
+    markDynamicDescriptionSource(
+      command,
+      CommandKind.FILE,
+      definition.description,
+    );
+  }
+
+  return command;
 }

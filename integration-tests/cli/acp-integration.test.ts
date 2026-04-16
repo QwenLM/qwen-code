@@ -5,7 +5,16 @@
  */
 
 import { spawn } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import os from 'node:os';
+import { dirname, join } from 'node:path';
 import { createInterface } from 'node:readline';
 import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, it } from 'vitest';
@@ -16,6 +25,7 @@ const INITIAL_PROMPT = 'Create a quick note (smoke test).';
 const IS_SANDBOX =
   process.env['QWEN_SANDBOX'] &&
   process.env['QWEN_SANDBOX']!.toLowerCase() !== 'false';
+const COMMAND_TRANSLATION_CACHE_VERSION = 1;
 
 type PendingRequest = {
   resolve: (value: unknown) => void;
@@ -78,6 +88,122 @@ type PermissionRequest = {
 type PermissionHandler = (
   request: PermissionRequest,
 ) => { optionId: string } | { outcome: 'cancelled' };
+
+type TranslationCacheEntry = {
+  sourceText: string;
+  translatedText: string;
+  updatedAt: string;
+  translator: 'dynamic-command-translation';
+  translatorVersion: number;
+  model: string;
+};
+
+type TranslationCacheFile = {
+  version: number;
+  language: string;
+  entries: Record<string, TranslationCacheEntry>;
+};
+
+function getCommandTranslationCachePath(language: string): string {
+  return join(
+    os.homedir(),
+    '.qwen',
+    'i18n-cache',
+    'commands',
+    `${language}.json`,
+  );
+}
+
+function createTranslationCacheEntry(
+  sourceText: string,
+  translatedText: string,
+): TranslationCacheEntry {
+  return {
+    sourceText,
+    translatedText,
+    updatedAt: new Date().toISOString(),
+    translator: 'dynamic-command-translation',
+    translatorVersion: COMMAND_TRANSLATION_CACHE_VERSION,
+    model: 'qwen3-max',
+  };
+}
+
+function loadCommandTranslationCache(language: string): TranslationCacheFile {
+  const cachePath = getCommandTranslationCachePath(language);
+  if (!existsSync(cachePath)) {
+    return {
+      version: COMMAND_TRANSLATION_CACHE_VERSION,
+      language,
+      entries: {},
+    };
+  }
+
+  return JSON.parse(readFileSync(cachePath, 'utf8')) as TranslationCacheFile;
+}
+
+function withCommandTranslationCacheMutation(
+  language: string,
+  mutate: (cache: TranslationCacheFile) => void,
+): () => void {
+  const cachePath = getCommandTranslationCachePath(language);
+  const originalContent = existsSync(cachePath)
+    ? readFileSync(cachePath, 'utf8')
+    : null;
+  const cache = loadCommandTranslationCache(language);
+
+  mutate(cache);
+  mkdirSync(dirname(cachePath), { recursive: true });
+  writeFileSync(cachePath, JSON.stringify(cache, null, 2), 'utf8');
+
+  return () => {
+    if (originalContent === null) {
+      rmSync(cachePath, { force: true });
+      return;
+    }
+
+    writeFileSync(cachePath, originalContent, 'utf8');
+  };
+}
+
+function setCachedCommandTranslation(
+  language: string,
+  sourceText: string,
+  translatedText: string,
+): () => void {
+  const hash = createHash('sha256').update(sourceText).digest('hex');
+  return withCommandTranslationCacheMutation(language, (cache) => {
+    cache.version = COMMAND_TRANSLATION_CACHE_VERSION;
+    cache.language = language;
+    cache.entries[hash] = createTranslationCacheEntry(
+      sourceText,
+      translatedText,
+    );
+  });
+}
+
+function removeCachedCommandTranslation(
+  language: string,
+  sourceText: string,
+): () => void {
+  const hash = createHash('sha256').update(sourceText).digest('hex');
+  return withCommandTranslationCacheMutation(language, (cache) => {
+    delete cache.entries[hash];
+  });
+}
+
+function createProjectMarkdownCommand(
+  rig: TestRig,
+  commandName: string,
+  description: string,
+): void {
+  const commandsDir = join(rig.testDir!, '.qwen', 'commands');
+  mkdirSync(commandsDir, { recursive: true });
+  writeFileSync(
+    join(commandsDir, `${commandName}.md`),
+    `---\ndescription: ${description}\n---\n\nThis command is used by ACP integration tests.\n`,
+    'utf8',
+  );
+}
 
 /**
  * Sets up an ACP test environment with all necessary utilities.
@@ -636,6 +762,128 @@ function setupAcpTest(
       }
       throw e;
     } finally {
+      await cleanup();
+    }
+  });
+
+  it('uses cached dynamic translations for custom command descriptions in available_commands_update', async () => {
+    const rig = new TestRig();
+    rig.setup('acp slash commands cached dynamic translation', {
+      settings: {
+        general: {
+          language: 'zh',
+        },
+      },
+    });
+
+    const commandName = 'acp-create-pr';
+    const sourceDescription =
+      'Create a pull request from staged changes for ACP integration tests';
+    const translatedDescription = '为 ACP 集成测试从已暂存变更创建拉取请求';
+    createProjectMarkdownCommand(rig, commandName, sourceDescription);
+
+    const restoreCache = setCachedCommandTranslation(
+      'zh',
+      sourceDescription,
+      translatedDescription,
+    );
+    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig);
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+        },
+      });
+
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+      expect(newSession.sessionId).toBeTruthy();
+
+      await delay(1000);
+
+      const commandsUpdate = sessionUpdates.find(
+        (update) =>
+          update.update?.sessionUpdate === 'available_commands_update',
+      );
+      const translatedCommand = commandsUpdate?.update?.availableCommands?.find(
+        (cmd) => cmd.name === commandName,
+      );
+
+      expect(translatedCommand).toBeDefined();
+      expect(translatedCommand?.description).toBe(translatedDescription);
+    } catch (e) {
+      if (stderr.length) {
+        console.error('Agent stderr:', stderr.join(''));
+      }
+      throw e;
+    } finally {
+      restoreCache();
+      await cleanup();
+    }
+  });
+
+  it('falls back to the source description for uncached dynamic commands in available_commands_update', async () => {
+    const rig = new TestRig();
+    rig.setup('acp slash commands uncached dynamic translation', {
+      settings: {
+        general: {
+          language: 'zh',
+        },
+      },
+    });
+
+    const commandName = 'acp-uncached-command';
+    const sourceDescription =
+      'Show pending review notes for the ACP uncached translation integration test';
+    createProjectMarkdownCommand(rig, commandName, sourceDescription);
+
+    const restoreCache = removeCachedCommandTranslation(
+      'zh',
+      sourceDescription,
+    );
+    const { sendRequest, cleanup, stderr, sessionUpdates } = setupAcpTest(rig);
+
+    try {
+      await sendRequest('initialize', {
+        protocolVersion: 1,
+        clientCapabilities: {
+          fs: { readTextFile: true, writeTextFile: true },
+        },
+      });
+
+      await sendRequest('authenticate', { methodId: 'openai' });
+
+      const newSession = (await sendRequest('session/new', {
+        cwd: rig.testDir!,
+        mcpServers: [],
+      })) as { sessionId: string };
+      expect(newSession.sessionId).toBeTruthy();
+
+      await delay(1000);
+
+      const commandsUpdate = sessionUpdates.find(
+        (update) =>
+          update.update?.sessionUpdate === 'available_commands_update',
+      );
+      const uncachedCommand = commandsUpdate?.update?.availableCommands?.find(
+        (cmd) => cmd.name === commandName,
+      );
+
+      expect(uncachedCommand).toBeDefined();
+      expect(uncachedCommand?.description).toBe(sourceDescription);
+    } catch (e) {
+      if (stderr.length) {
+        console.error('Agent stderr:', stderr.join(''));
+      }
+      throw e;
+    } finally {
+      restoreCache();
       await cleanup();
     }
   });

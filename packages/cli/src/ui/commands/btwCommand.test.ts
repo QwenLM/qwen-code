@@ -4,24 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach } from 'vitest';
+import { vi, describe, it, expect, beforeEach, afterAll } from 'vitest';
 import { btwCommand } from './btwCommand.js';
 import { type CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import { CommandKind } from './types.js';
 import { MessageType } from '../types.js';
-
-vi.mock('../../i18n/index.js', () => ({
-  t: (key: string, params?: Record<string, string>) => {
-    if (params) {
-      return Object.entries(params).reduce(
-        (str, [k, v]) => str.replace(`{{${k}}}`, v),
-        key,
-      );
-    }
-    return key;
-  },
-}));
+import { setLanguageAsync } from '../../i18n/index.js';
 
 describe('btwCommand', () => {
   let mockContext: CommandContext;
@@ -50,10 +39,34 @@ describe('btwCommand', () => {
     });
   });
 
+  beforeEach(async () => {
+    await setLanguageAsync('en');
+  });
+
+  afterAll(async () => {
+    await setLanguageAsync('en');
+  });
+
   it('should have correct metadata', () => {
     expect(btwCommand.name).toBe('btw');
     expect(btwCommand.kind).toBe(CommandKind.BUILT_IN);
     expect(btwCommand.description).toBeTruthy();
+  });
+
+  it('should localize metadata and validation errors in zh', async () => {
+    await setLanguageAsync('zh');
+
+    expect(btwCommand.description).toBe(
+      '在不影响主对话的情况下快速问一个旁支问题',
+    );
+
+    const result = await btwCommand.action!(mockContext, '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: '请输入问题。用法：/btw <your question>',
+    });
   });
 
   it('should return error when no question is provided', async () => {

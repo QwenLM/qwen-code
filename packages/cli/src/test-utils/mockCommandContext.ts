@@ -41,6 +41,7 @@ export const createMockCommandContext = (
         setValue: vi.fn(),
       } as unknown as LoadedSettings,
       git: undefined as GitService | undefined,
+      dynamicCommandTranslationService: undefined,
       logger: {
         log: vi.fn(),
         logMessage: vi.fn(),
@@ -52,6 +53,7 @@ export const createMockCommandContext = (
     ui: {
       addItem: vi.fn(),
       clear: vi.fn(),
+      refreshStatic: vi.fn(),
       setDebugMessage: vi.fn(),
       pendingItem: null,
       setPendingItem: vi.fn(),

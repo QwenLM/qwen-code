@@ -82,10 +82,10 @@ export class CommandService {
         finalName = renamedName;
       }
 
-      commandMap.set(finalName, {
-        ...cmd,
-        name: finalName,
-      });
+      commandMap.set(
+        finalName,
+        cloneCommandPreservingDescriptors(cmd, finalName),
+      );
     }
 
     const finalCommands = Object.freeze(Array.from(commandMap.values()));
@@ -103,4 +103,22 @@ export class CommandService {
   getCommands(): readonly SlashCommand[] {
     return this.commands;
   }
+}
+
+function cloneCommandPreservingDescriptors(
+  command: SlashCommand,
+  name: string,
+): SlashCommand {
+  const descriptors = Object.getOwnPropertyDescriptors(command);
+  descriptors['name'] = {
+    value: name,
+    writable: true,
+    enumerable: true,
+    configurable: true,
+  };
+
+  return Object.create(
+    Object.getPrototypeOf(command),
+    descriptors,
+  ) as SlashCommand;
 }

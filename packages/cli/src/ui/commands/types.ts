@@ -20,6 +20,7 @@ import type {
   ExtensionUpdateAction,
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
+import type { DynamicCommandTranslationService } from '../../services/DynamicCommandTranslationService.js';
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -47,6 +48,7 @@ export interface CommandContext {
     settings: LoadedSettings;
     git: GitService | undefined;
     logger: Logger | null;
+    dynamicCommandTranslationService?: DynamicCommandTranslationService;
   };
   // UI state and history management
   ui: {
@@ -54,6 +56,8 @@ export interface CommandContext {
     addItem: UseHistoryManagerReturn['addItem'];
     /** Clears all history items and the console screen. */
     clear: () => void;
+    /** Forces the static UI to re-render, clearing the terminal in the process. */
+    refreshStatic?: () => void;
     /**
      * Sets the transient debug message displayed in the application footer in debug mode.
      */

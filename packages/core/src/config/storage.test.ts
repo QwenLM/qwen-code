@@ -39,6 +39,27 @@ describe('Storage – additional helpers', () => {
     const expected = path.join(os.homedir(), '.qwen', 'mcp-oauth-tokens.json');
     expect(Storage.getMcpOAuthTokensPath()).toBe(expected);
   });
+
+  it('getI18nCacheDir returns ~/.qwen/i18n-cache', () => {
+    const expected = path.join(os.homedir(), '.qwen', 'i18n-cache');
+    expect(Storage.getI18nCacheDir()).toBe(expected);
+  });
+
+  it('getCommandTranslationsCacheDir returns ~/.qwen/i18n-cache/commands', () => {
+    const expected = path.join(os.homedir(), '.qwen', 'i18n-cache', 'commands');
+    expect(Storage.getCommandTranslationsCacheDir()).toBe(expected);
+  });
+
+  it('getCommandTranslationsCachePath returns ~/.qwen/i18n-cache/commands/<lang>.json', () => {
+    const expected = path.join(
+      os.homedir(),
+      '.qwen',
+      'i18n-cache',
+      'commands',
+      'zh.json',
+    );
+    expect(Storage.getCommandTranslationsCachePath('zh')).toBe(expected);
+  });
 });
 
 describe('Storage – getRuntimeBaseDir / setRuntimeBaseDir', () => {
@@ -302,6 +323,18 @@ describe('Storage – config paths remain at ~/.qwen regardless of runtime dir',
 
   it('getGlobalBinDir still uses ~/.qwen', () => {
     expect(Storage.getGlobalBinDir()).toBe(path.join(globalQwenDir, 'bin'));
+  });
+
+  it('getI18nCacheDir still uses ~/.qwen', () => {
+    expect(Storage.getI18nCacheDir()).toBe(
+      path.join(globalQwenDir, 'i18n-cache'),
+    );
+  });
+
+  it('getCommandTranslationsCachePath still uses ~/.qwen', () => {
+    expect(Storage.getCommandTranslationsCachePath('zh')).toBe(
+      path.join(globalQwenDir, 'i18n-cache', 'commands', 'zh.json'),
+    );
   });
 
   it('getUserSkillsDirs still includes ~/.qwen/skills', () => {

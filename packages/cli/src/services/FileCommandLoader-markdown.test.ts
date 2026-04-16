@@ -4,11 +4,22 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+  vi,
+} from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { FileCommandLoader } from './FileCommandLoader.js';
+import { setLanguageAsync } from '../i18n/index.js';
+import type { DynamicCommandTranslationService } from './DynamicCommandTranslationService.js';
 
 describe('FileCommandLoader - Markdown support', () => {
   let tempDir: string;
@@ -18,9 +29,17 @@ describe('FileCommandLoader - Markdown support', () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-md-test-'));
   });
 
+  beforeEach(async () => {
+    await setLanguageAsync('en');
+  });
+
   afterAll(async () => {
     // Clean up
     await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    await setLanguageAsync('en');
   });
 
   it('should load markdown commands with frontmatter', async () => {
@@ -134,6 +153,37 @@ Markdown prompt`;
 
       expect(mdCommand).toBeDefined();
       expect(mdCommand?.description).toBe('Markdown command');
+    } finally {
+      loader['getCommandDirectories'] = originalMethod;
+    }
+  });
+
+  it('should resolve markdown command descriptions through the dynamic translation service', async () => {
+    const mdContent = `---
+description: Create a pull request based on staged code changes
+---
+
+This is a test prompt from markdown.`;
+
+    const commandPath = path.join(tempDir, 'create-pr.md');
+    await fs.writeFile(commandPath, mdContent, 'utf-8');
+
+    const dynamicTranslationService = {
+      getDescription: vi.fn(() => '基于已暂存的代码变更创建拉取请求'),
+    } as unknown as DynamicCommandTranslationService;
+    const loader = new FileCommandLoader(null, dynamicTranslationService);
+    const originalMethod = loader['getCommandDirectories'];
+    loader['getCommandDirectories'] = () => [{ path: tempDir }];
+
+    try {
+      const commands = await loader.loadCommands(new AbortController().signal);
+      const command = commands.find((cmd) => cmd.name === 'create-pr');
+
+      expect(command?.description).toBe('基于已暂存的代码变更创建拉取请求');
+      expect(dynamicTranslationService.getDescription).toHaveBeenCalledWith(
+        expect.anything(),
+        'Create a pull request based on staged code changes',
+      );
     } finally {
       loader['getCommandDirectories'] = originalMethod;
     }
