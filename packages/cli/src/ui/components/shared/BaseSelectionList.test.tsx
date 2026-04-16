@@ -300,7 +300,7 @@ describe('BaseSelectionList', () => {
         rerender(<BaseSelectionList {...componentProps} />);
 
         await waitFor(() => {
-          expect(lastFrame()).toBeTruthy();
+          expect(lastFrame()).toContain(longList[newIndex]!.label);
         });
       };
 
