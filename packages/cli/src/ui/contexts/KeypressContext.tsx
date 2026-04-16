@@ -39,6 +39,10 @@ import {
 import { clipboardHasImage } from '../utils/clipboardUtils.js';
 
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
+import {
+  stopEarlyInputCapture,
+  getAndClearCapturedInput,
+} from '../../utils/earlyInputCapture.js';
 
 const ESC = '\u001B';
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
@@ -166,6 +170,10 @@ export function KeypressProvider({
     if (wasRaw === false) {
       setRawMode(true);
     }
+
+    // Startup optimization: stop early input capture and get captured input
+    stopEarlyInputCapture();
+    const capturedInput = getAndClearCapturedInput();
 
     const keypressStream = new PassThrough();
     let usePassthrough = false;
@@ -1100,6 +1108,22 @@ export function KeypressProvider({
       rl = readline.createInterface({ input: stdin, escapeCodeTimeout: 0 });
       readline.emitKeypressEvents(stdin, rl);
       stdin.on('keypress', handleKeypress);
+    }
+
+    // Startup optimization: replay captured input if available
+    if (capturedInput.length > 0) {
+      debugLogger.debug(
+        `Replaying ${capturedInput.length} bytes of captured input`,
+      );
+      // Process in next event loop tick to ensure subscribers are ready
+      setImmediate(() => {
+        if (usePassthrough) {
+          keypressStream.write(capturedInput);
+        } else {
+          // Emit data event directly on stdin
+          stdin.emit('data', capturedInput);
+        }
+      });
     }
 
     return () => {
