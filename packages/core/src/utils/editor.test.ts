@@ -733,7 +733,12 @@ describe('editor utils', () => {
         expect(diffCommand).not.toBeNull();
         // Verify the command ends with cli (the CLI tool, not GUI binary zed)
         expect(diffCommand!.command).toMatch(/MacOS[\/\\]cli$/);
-        expect(diffCommand!.args).toEqual(['--wait', '--diff', 'old.txt', 'new.txt']);
+        expect(diffCommand!.args).toEqual([
+          '--wait',
+          '--diff',
+          'old.txt',
+          'new.txt',
+        ]);
       });
 
       it('should prefer CLI in PATH over app bundle', () => {
