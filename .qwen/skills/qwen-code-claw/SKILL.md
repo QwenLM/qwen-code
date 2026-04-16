@@ -182,7 +182,7 @@ Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/ma
 
 ### Authentication
 
-Supports Qwen OAuth (browser-based, 1000 free requests/day) and OpenAI-compatible API keys.
+Supports Alibaba Cloud Coding Plan, OpenAI-compatible API keys, and Qwen OAuth (free tier discontinued 2026-04-15).
 
 Full reference: https://raw.githubusercontent.com/QwenLM/qwen-code/refs/heads/main/docs/users/configuration/auth.md
 

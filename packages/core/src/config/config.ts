@@ -2340,8 +2340,6 @@ export class Config {
     !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
     await registerCoreTool(WebFetchTool, this);
     // Conditionally register web search tool if web search provider is configured
-    // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
-    // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
       await registerCoreTool(WebSearchTool, this);
     }

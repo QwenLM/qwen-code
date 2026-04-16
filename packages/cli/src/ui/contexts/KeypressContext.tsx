@@ -989,6 +989,14 @@ export function KeypressProvider({
       sequence,
     });
 
+    const shouldFlushRawDataAsPaste = (data: Buffer) => {
+      const hasReturn = data.includes(0x0d);
+      const hasEmbeddedTab = data.length > 1 && data.includes(0x09);
+      const isSingleReturn = data.length <= 2 && hasReturn;
+
+      return !isSingleReturn && (hasReturn || hasEmbeddedTab);
+    };
+
     const flushRawBuffer = () => {
       if (!rawDataBuffer.length) {
         return;
@@ -1045,11 +1053,7 @@ export function KeypressProvider({
         return;
       }
 
-      if (
-        (rawDataBuffer.length <= 2 && rawDataBuffer.includes(0x0d)) ||
-        !rawDataBuffer.includes(0x0d) ||
-        isPaste
-      ) {
+      if (isPaste || !shouldFlushRawDataAsPaste(rawDataBuffer)) {
         keypressStream.write(rawDataBuffer);
       } else {
         // Flush raw data buffer as a paste event

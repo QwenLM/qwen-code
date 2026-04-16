@@ -259,6 +259,17 @@ export * from './utils/yaml-parser.js';
 export * from './qwen/qwenOAuth2.js';
 
 // ============================================================================
+// Message Bus Types
+// ============================================================================
+
+export {
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from './confirmation-bus/types.js';
+export { MessageBus } from './confirmation-bus/message-bus.js';
+
+// ============================================================================
 // Testing Utilities
 // ============================================================================
 
@@ -272,10 +283,19 @@ export * from './test-utils/index.js';
 export * from './hooks/types.js';
 export { HookSystem, HookRegistry } from './hooks/index.js';
 export type { HookRegistryEntry, SessionHookEntry } from './hooks/index.js';
+export { type StopFailureErrorType } from './hooks/types.js';
 
-// Export hook triggers for notification hooks
+// Export hook triggers for all hook events
 export {
   fireNotificationHook,
   firePermissionRequestHook,
+  firePreToolUseHook,
+  firePostToolUseHook,
+  firePostToolUseFailureHook,
   type NotificationHookResult,
+  type PermissionRequestHookResult,
+  type PreToolUseHookResult,
+  type PostToolUseHookResult,
+  type PostToolUseFailureHookResult,
+  generateToolUseId,
 } from './core/toolHookTriggers.js';

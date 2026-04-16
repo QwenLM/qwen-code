@@ -959,6 +959,63 @@ describe('KeypressContext - Kitty Protocol', () => {
       }
     });
 
+    it('should keep a literal tab key as a non-paste keypress', () => {
+      vi.useFakeTimers();
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) => wrapper({ children, pasteWorkaround: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      try {
+        act(() => {
+          stdin.emit('data', Buffer.from('\t'));
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 'tab',
+            sequence: '\t',
+            paste: false,
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should mark single-line tabbed raw chunks as paste', async () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) => wrapper({ children, pasteWorkaround: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.emit('data', Buffer.from('first\tsecond'));
+      });
+
+      await waitFor(() => {
+        expect(keyHandler).toHaveBeenCalledTimes(1);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: '',
+          sequence: 'first\tsecond',
+          paste: true,
+        }),
+      );
+    });
+
     it('should concatenate new data and reset timeout', () => {
       vi.useFakeTimers();
       const keyHandler = vi.fn();
