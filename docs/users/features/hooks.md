@@ -155,7 +155,6 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 
 ### Matcher Patterns
 
-<<<<<<< HEAD
 `matcher` is a regular expression used to filter trigger conditions.
 
 | Event Type          | Events                                                                 | Matcher Support | Matcher Target                                           |
@@ -219,26 +218,6 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
   }
 }
 ```
-
-=======
-| Event Name | Description | Use Case |
-| -------------------- | ------------------------------------------- | ----------------------------------------------- |
-| `PreToolUse` | Fired before tool execution | Permission checking, input validation, logging |
-| `PostToolUse` | Fired after successful tool execution | Logging, output processing, monitoring |
-| `PostToolUseFailure` | Fired when tool execution fails | Error handling, alerting, remediation |
-| `Notification` | Fired when notifications are sent | Notification customization, logging |
-| `UserPromptSubmit` | Fired when user submits a prompt | Input processing, validation, context injection |
-| `SessionStart` | Fired when a new session starts | Initialization, context setup |
-| `Stop` | Fired before Qwen concludes its response | Finalization, cleanup |
-| `StopFailure` | Fired when turn ends due to API error | Error logging, alerting, rate limit handling |
-| `SubagentStart` | Fired when a subagent starts | Subagent initialization |
-| `SubagentStop` | Fired when a subagent stops | Subagent finalization |
-| `PreCompact` | Fired before conversation compaction | Pre-compaction processing |
-| `PostCompact` | Fired after conversation compaction | Summary archiving, usage statistics |
-| `SessionEnd` | Fired when a session ends | Cleanup, reporting |
-| `PermissionRequest` | Fired when permission dialogs are displayed | Permission automation, policy enforcement |
-
-> > > > > > > main
 
 ## Input/Output Rules
 

@@ -177,7 +177,7 @@
           }
         },
         "enableWelcomeBack": {
-          "description": "Show welcome back dialog when returning to a project with conversation history.",
+          "description": "Show welcome back dialog when returning to a project with conversation history. Choosing \"Start new chat session\" suppresses the dialog for that project until the project summary changes.",
           "type": "boolean",
           "default": true
         },
