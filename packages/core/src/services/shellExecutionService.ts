@@ -12,6 +12,7 @@ import { TextDecoder } from 'node:util';
 import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import type { IPty } from '@lydell/node-pty';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
@@ -341,7 +342,8 @@ export class ShellExecutionService {
 
     try {
       const ptyPackageName = `@lydell/node-pty-darwin-${os.arch()}`;
-      const ptyMainPath = require.resolve(ptyPackageName);
+      const esmRequire = createRequire(import.meta.url);
+      const ptyMainPath = esmRequire.resolve(ptyPackageName);
       const pkgRoot = path.dirname(ptyMainPath);
       const helperPath = path.join(
         pkgRoot,
