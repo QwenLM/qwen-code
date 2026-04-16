@@ -27,6 +27,10 @@ type TranslationValue = string | string[];
 type TranslationDict = Record<string, TranslationValue>;
 const translationCache: Record<string, TranslationDict> = {};
 const loadingPromises: Record<string, Promise<TranslationDict>> = {};
+
+type TranslationLoadResult =
+  | { translations: TranslationDict; error?: undefined }
+  | { translations?: undefined; error: Error };
 // Path helpers
 const getBuiltinLocalesDir = (): string => {
   const __filename = fileURLToPath(import.meta.url);
@@ -75,6 +79,54 @@ export function detectSystemLanguage(): SupportedLanguage {
 }
 
 // Translation loading
+async function tryImportTranslations(
+  moduleSpecifier: string,
+): Promise<TranslationLoadResult> {
+  try {
+    const module = await import(moduleSpecifier);
+    const result = module.default || module;
+    if (
+      result &&
+      typeof result === 'object' &&
+      Object.keys(result).length > 0
+    ) {
+      return { translations: result };
+    }
+
+    return {
+      error: new Error('Module loaded but result is empty or invalid'),
+    };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
+}
+
+async function tryImportBundledTranslations(
+  lang: SupportedLanguage,
+): Promise<TranslationLoadResult> {
+  try {
+    const module = await import(`./locales/${lang}.js`);
+    const result = module.default || module;
+    if (
+      result &&
+      typeof result === 'object' &&
+      Object.keys(result).length > 0
+    ) {
+      return { translations: result };
+    }
+
+    return {
+      error: new Error('Module loaded but result is empty or invalid'),
+    };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error : new Error(String(error)),
+    };
+  }
+}
+
 async function loadTranslationsAsync(
   lang: SupportedLanguage,
 ): Promise<TranslationDict> {
@@ -88,74 +140,50 @@ async function loadTranslationsAsync(
   }
 
   const loadPromise = (async () => {
-    // Try user directory first (for custom language packs), then builtin directory
-    const searchDirs = [
-      { dir: getUserLocalesDir(), isUser: true },
-      { dir: getBuiltinLocalesDir(), isUser: false },
-    ];
-
-    for (const { dir, isUser } of searchDirs) {
-      // Ensure directory exists
-      if (!fs.existsSync(dir)) {
-        continue;
+    const userJsPath = getLocalePath(lang, true);
+    if (fs.existsSync(getUserLocalesDir()) && fs.existsSync(userJsPath)) {
+      const userResult = await tryImportTranslations(
+        pathToFileURL(userJsPath).href,
+      );
+      if (userResult.translations) {
+        translationCache[lang] = userResult.translations;
+        return userResult.translations;
       }
 
-      const jsPath = getLocalePath(lang, isUser);
-      if (!fs.existsSync(jsPath)) {
-        continue;
+      writeStderrLine(
+        `Failed to load translations from user directory for ${lang}: ${userResult.error.message}`,
+      );
+    }
+
+    const builtinJsPath = getLocalePath(lang, false);
+    const builtinModuleSpecifiers: string[] = [];
+    if (fs.existsSync(getBuiltinLocalesDir()) && fs.existsSync(builtinJsPath)) {
+      builtinModuleSpecifiers.push(pathToFileURL(builtinJsPath).href);
+    }
+
+    let lastBuiltinError: Error | undefined;
+    for (const moduleSpecifier of builtinModuleSpecifiers) {
+      const builtinResult = await tryImportTranslations(moduleSpecifier);
+      if (builtinResult.translations) {
+        translationCache[lang] = builtinResult.translations;
+        return builtinResult.translations;
       }
 
-      try {
-        // Convert file path to file:// URL for cross-platform compatibility
-        const fileUrl = pathToFileURL(jsPath).href;
-        try {
-          const module = await import(fileUrl);
-          const result = module.default || module;
-          if (
-            result &&
-            typeof result === 'object' &&
-            Object.keys(result).length > 0
-          ) {
-            translationCache[lang] = result;
-            return result;
-          } else {
-            throw new Error('Module loaded but result is empty or invalid');
-          }
-        } catch {
-          // For builtin locales, try alternative import method (relative path)
-          if (!isUser) {
-            try {
-              const module = await import(`./locales/${lang}.js`);
-              const result = module.default || module;
-              if (
-                result &&
-                typeof result === 'object' &&
-                Object.keys(result).length > 0
-              ) {
-                translationCache[lang] = result;
-                return result;
-              }
-            } catch {
-              // Continue to next directory
-            }
-          }
-          // If import failed, continue to next directory
-          continue;
-        }
-      } catch (error) {
-        // Log warning but continue to next directory
-        if (isUser) {
-          writeStderrLine(
-            `Failed to load translations from user directory for ${lang}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        } else {
-          writeStderrLine(
-            `Failed to load JS translations for ${lang}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        }
-        // Continue to next directory
-        continue;
-      }
+      lastBuiltinError = builtinResult.error;
+    }
+
+    const bundledBuiltinResult = await tryImportBundledTranslations(lang);
+    if (bundledBuiltinResult.translations) {
+      translationCache[lang] = bundledBuiltinResult.translations;
+      return bundledBuiltinResult.translations;
+    }
+
+    lastBuiltinError = bundledBuiltinResult.error;
+
+    if (lastBuiltinError) {
+      writeStderrLine(
+        `Failed to load JS translations for ${lang}: ${lastBuiltinError.message}`,
+      );
     }
 
     // Return empty object if both directories fail
