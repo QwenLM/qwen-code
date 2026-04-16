@@ -57,6 +57,7 @@ export default {
   'to search history': '搜索历史',
   'to paste images': '粘贴图片',
   'for external editor': '外部编辑器',
+  'to toggle compact mode': '切换紧凑模式',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':
     '关闭对话框、取消请求或退出应用程序',
@@ -686,6 +687,7 @@ export default {
   'User Settings': '用户设置',
   'System Settings': '系统设置',
   Extensions: '扩展',
+  'Session (temporary)': '会话（临时）',
   // Hooks - Status
   '✓ Enabled': '✓ 已启用',
   '✗ Disabled': '✗ 已禁用',
@@ -1227,10 +1229,16 @@ export default {
     '您必须选择认证方法才能继续。再次按 Ctrl+C 退出',
   'Terms of Services and Privacy Notice': '服务条款和隐私声明',
   'Qwen OAuth': 'Qwen OAuth (免费)',
-  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
-    '免费 \u00B7 每天 100 次请求 \u00B7 将于 2026-04-15 停止',
-  'Login with QwenChat account to use daily free quota.':
-    '使用 QwenChat 账号登录，享受每日免费额度。',
+  'Discontinued — switch to Coding Plan or API Key':
+    '已停用 — 请切换到 Coding Plan 或 API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'Qwen OAuth 免费额度已于 2026-04-15 停用。请运行 /auth 切换服务商。',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'Qwen OAuth 免费额度已于 2026-04-15 停用。请选择 Coding Plan 或 API Key。',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Qwen OAuth免费层已于2026-04-15停止服务。请选择其他提供商的模型或运行 /auth 切换。',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ Qwen OAuth 免费额度已于 2026-04-15 停用。请选择其他选项。\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     '付费 \u00B7 每 5 小时最多 6,000 次请求 \u00B7 支持阿里云百炼 Coding Plan 全部模型',
   'Alibaba Cloud Coding Plan': '阿里云百炼 Coding Plan',
@@ -1474,6 +1482,8 @@ export default {
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '试试 /insight，从聊天记录中生成个性化洞察。',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    '按 Ctrl+O 切换紧凑模式 ── 隐藏工具输出和思考过程，界面更简洁。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     '添加 QWEN.md 文件，为 Qwen Code 提供持久的项目上下文。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1795,17 +1805,19 @@ export default {
   '⚠️  No authentication method configured.\n': '⚠️  未配置认证方式。\n',
   'Run one of the following commands to get started:\n':
     '运行以下命令之一开始配置：\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - 使用 Qwen OAuth 认证（免费）',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - 使用 Qwen OAuth 登录（已停用）',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - 使用阿里云百炼 Coding Plan 认证\n',
   'Or simply run:': '或者直接运行：',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - 交互式认证配置\n',
   '✓ Authentication Method: Qwen OAuth': '✓ 认证方式：Qwen OAuth',
-  '  Type: Free tier (ending 2026-04-15)':
-    '  类型：免费版（将于 2026-04-15 停止）',
-  '  Limit: 100 requests/day': '  限额：每天 100 次请求',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  类型：免费额度（2026-04-15 已停用）',
+  '  Limit: No longer available': '  限额：已不可用',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'Qwen OAuth 免费额度已于 2026-04-15 停用。请运行 /auth 切换到 Coding Plan、OpenRouter、Fireworks AI 或其他服务商。',
   '  Models: Qwen latest models\n': '  模型：Qwen 最新模型\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ 认证方式：阿里云百炼 Coding Plan',
@@ -1831,6 +1843,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
   compact: '紧凑',
+  'compact mode: on (Ctrl+O off)': '紧凑模式：开（Ctrl+O 关闭）',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',

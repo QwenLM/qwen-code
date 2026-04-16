@@ -802,6 +802,9 @@ export class AuthEvent implements BaseTelemetryEvent {
   }
 }
 
+/** Hook type for telemetry */
+export type HookTelemetryType = 'command' | 'http' | 'function';
+
 /**
  * Hook call telemetry event
  */
@@ -809,7 +812,7 @@ export class HookCallEvent implements BaseTelemetryEvent {
   'event.name': string;
   'event.timestamp': string;
   hook_event_name: string;
-  hook_type: 'command';
+  hook_type: HookTelemetryType;
   hook_name: string;
   hook_input: Record<string, unknown>;
   hook_output?: Record<string, unknown>;
@@ -822,7 +825,7 @@ export class HookCallEvent implements BaseTelemetryEvent {
 
   constructor(
     hookEventName: string,
-    hookType: 'command',
+    hookType: HookTelemetryType,
     hookName: string,
     hookInput: Record<string, unknown>,
     durationMs: number,
