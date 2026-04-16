@@ -25,7 +25,7 @@ export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
-  const { text: statusLineText } = useStatusLine();
+  const { lines: statusLineLines } = useStatusLine();
   const { compactMode } = useCompactMode();
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
@@ -53,10 +53,8 @@ export const Footer: React.FC = () => {
     config.getContentGeneratorConfig()?.contextWindowSize;
 
   // Hide "? for shortcuts" when a custom status line is active (it already
-  // occupies the top row, so the hint is redundant). Matches upstream behavior.
-  const suppressHint = !!statusLineText;
-
-  const statusLineLines = statusLineText ? statusLineText.split(/\r?\n/) : [];
+  // occupies the footer, so the hint is redundant). Matches upstream behavior.
+  const suppressHint = statusLineLines.length > 0;
 
   // Left bottom row: high-priority messages > approval mode > hint.
   const leftBottomContent = uiState.ctrlCPressedOnce ? (
@@ -126,7 +124,7 @@ export const Footer: React.FC = () => {
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce &&
           statusLineLines.map((line, i) => (
-            <Text key={i} dimColor wrap="truncate">
+            <Text key={`status-line-${i}`} dimColor wrap="truncate">
               {line}
             </Text>
           ))}

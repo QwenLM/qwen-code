@@ -72,7 +72,9 @@ interface StatusLineConfig {
 }
 
 const debugLog = createDebugLogger('STATUS_LINE');
-const MAX_STATUS_LINES = 2;
+// Footer's bottom row (hint/mode indicator) occupies 1 line, so the status
+// line gets at most 2 to keep the total footer height at 3 rows max.
+export const MAX_STATUS_LINES = 2;
 
 function getStatusLineConfig(
   settings: ReturnType<typeof useSettings>,
@@ -134,7 +136,7 @@ function buildMetricsPayload(
  * new messages, vim mode toggle) rather than blind polling.
  */
 export function useStatusLine(): {
-  text: string | null;
+  lines: string[];
 } {
   const settings = useSettings();
   const uiState = useUIState();
@@ -144,7 +146,7 @@ export function useStatusLine(): {
   const statusLineConfig = getStatusLineConfig(settings);
   const statusLineCommand = statusLineConfig?.command;
 
-  const [output, setOutput] = useState<string | null>(null);
+  const [output, setOutput] = useState<string[]>([]);
 
   // Keep latest values in refs so the stable doUpdate callback can read them
   // without being recreated on every render.
@@ -202,7 +204,7 @@ export function useStatusLine(): {
   const doUpdate = useCallback(() => {
     const cmd = statusLineCommandRef.current;
     if (!cmd) {
-      setOutput(null);
+      setOutput([]);
       return;
     }
 
@@ -277,12 +279,13 @@ export function useStatusLine(): {
         if (gen !== generationRef.current) return; // stale
         activeChildRef.current = undefined;
         if (!error && stdout) {
-          // Strip only the trailing newline to preserve intentional whitespace.
-          const lines = stdout.replace(/\r?\n$/, '').split(/\r?\n/);
-          const text = lines.slice(0, MAX_STATUS_LINES).join('\n');
-          setOutput(text || null);
+          const lines = stdout
+            .replace(/\r?\n$/, '')
+            .split(/\r?\n/)
+            .filter(Boolean);
+          setOutput(lines.slice(0, MAX_STATUS_LINES));
         } else {
-          setOutput(null);
+          setOutput([]);
         }
       },
     );
@@ -323,7 +326,7 @@ export function useStatusLine(): {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = undefined;
       }
-      setOutput(null);
+      setOutput([]);
       return;
     }
 
@@ -394,5 +397,5 @@ export function useStatusLine(): {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { text: output };
+  return { lines: output };
 }

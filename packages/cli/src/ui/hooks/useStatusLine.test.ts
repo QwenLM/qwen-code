@@ -150,28 +150,28 @@ describe('useStatusLine', () => {
   describe('config validation', () => {
     it('returns null when no statusLine config is set', () => {
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
 
     it('returns null when statusLine type is not "command"', () => {
       setStatusLineConfig({ type: 'invalid', command: 'echo hi' });
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
 
     it('returns null when command is empty string', () => {
       setStatusLineConfig({ type: 'command', command: '' });
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
 
     it('returns null when command is whitespace only', () => {
       setStatusLineConfig({ type: 'command', command: '   ' });
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
   });
@@ -200,7 +200,7 @@ describe('useStatusLine', () => {
       expect(opts.maxBuffer).toBe(1024 * 10);
     });
 
-    it('returns stdout as text with trailing newline stripped', async () => {
+    it('returns single line as array', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo hello' });
       const { result } = renderHook(() => useStatusLine());
 
@@ -208,7 +208,7 @@ describe('useStatusLine', () => {
         execCallback(null, 'hello world\n', '');
       });
 
-      expect(result.current.text).toBe('hello world');
+      expect(result.current.lines).toEqual(['hello world']);
     });
 
     it('returns all lines when stdout has multiple lines', async () => {
@@ -219,18 +219,18 @@ describe('useStatusLine', () => {
         execCallback(null, 'first line\nsecond line\n', '');
       });
 
-      expect(result.current.text).toBe('first line\nsecond line');
+      expect(result.current.lines).toEqual(['first line', 'second line']);
     });
 
-    it('preserves empty lines in multi-line output', async () => {
+    it('filters empty lines from output', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo lines' });
       const { result } = renderHook(() => useStatusLine());
 
       await act(async () => {
-        execCallback(null, '\nline two\n', '');
+        execCallback(null, '\n\nreal content\n', '');
       });
 
-      expect(result.current.text).toBe('\nline two');
+      expect(result.current.lines).toEqual(['real content']);
     });
 
     it('caps output at 2 lines', async () => {
@@ -241,7 +241,7 @@ describe('useStatusLine', () => {
         execCallback(null, 'line1\nline2\nline3\nline4\n', '');
       });
 
-      expect(result.current.text).toBe('line1\nline2');
+      expect(result.current.lines).toEqual(['line1', 'line2']);
     });
 
     it('returns null when command fails', async () => {
@@ -252,7 +252,7 @@ describe('useStatusLine', () => {
         execCallback(new Error('command not found'), '', '');
       });
 
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
     });
 
     it('returns null when stdout is empty', async () => {
@@ -263,7 +263,7 @@ describe('useStatusLine', () => {
         execCallback(null, '', '');
       });
 
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
     });
   });
 
@@ -412,13 +412,13 @@ describe('useStatusLine', () => {
       await act(async () => {
         firstCallback(null, 'stale output\n', '');
       });
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
 
       // Resolve the fresh second callback — should be accepted
       await act(async () => {
         secondCallback(null, 'fresh output\n', '');
       });
-      expect(result.current.text).toBe('fresh output');
+      expect(result.current.lines).toEqual(['fresh output']);
     });
   });
 
@@ -463,13 +463,13 @@ describe('useStatusLine', () => {
       await act(async () => {
         execCallback(null, 'hello\n', '');
       });
-      expect(result.current.text).toBe('hello');
+      expect(result.current.lines).toEqual(['hello']);
 
       // Remove config
       setStatusLineConfig(undefined);
       rerender();
 
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
     });
 
     it('cancels pending debounce and kills child when config is removed', async () => {
