@@ -461,9 +461,9 @@ describe('editor utils', () => {
         (execSync as Mock).mockImplementation(() => {
           throw new Error(); // CLI not found
         });
-        // Accept any path that contains the app bundle indicator
+        // Accept any path containing Zed.app
         (existsSync as Mock).mockImplementation((path: string) => {
-          return path.includes('Applications') && path.includes('Zed.app');
+          return path.includes('Zed.app');
         });
 
         const mockSpawnOn = vi.fn((event, cb) => {
@@ -475,10 +475,9 @@ describe('editor utils', () => {
 
         await openDiff('old.txt', 'new.txt', 'zed', () => {});
         expect(spawn).toHaveBeenCalled();
-        // Verify the command contains Zed.app indicator
+        // Verify the command uses the CLI tool (not GUI binary)
         const call = (spawn as Mock).mock.calls[0];
-        expect(call[0]).toContain('Applications');
-        expect(call[0]).toContain('Zed.app');
+        expect(call[0]).toMatch(/MacOS[\/\\]cli$/);
       });
 
       it('should reject if zed is not installed', async () => {
@@ -714,10 +713,10 @@ describe('editor utils', () => {
 
     describe('getDiffCommand for Zed on macOS', () => {
       // Dynamically compute the path based on what join() produces on the mocked platform
-      const getAppBundlePath = () => {
+      const getAppBundleCliPath = () => {
         // When platform is darwin, join() produces Unix paths
-        // Use the same logic as the code: first path in zedMacOsPaths
-        return '/Applications/Zed.app/Contents/MacOS/zed';
+        // Use the correct CLI path: Contents/MacOS/cli (not the GUI binary)
+        return '/Applications/Zed.app/Contents/MacOS/cli';
       };
 
       it('should use app bundle CLI path when CLI is not in PATH', () => {
@@ -725,16 +724,15 @@ describe('editor utils', () => {
         (execSync as Mock).mockImplementation(() => {
           throw new Error(); // CLI not found
         });
-        // Accept any path containing the app bundle indicator
+        // Accept any path containing Zed.app (the CLI check will be for Contents/MacOS/cli)
         (existsSync as Mock).mockImplementation((path: string) => {
-          return path.includes('Applications') && path.includes('Zed.app');
+          return path.includes('Zed.app');
         });
 
         const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
         expect(diffCommand).not.toBeNull();
-        // Verify the command contains Zed.app indicator
-        expect(diffCommand!.command).toContain('Applications');
-        expect(diffCommand!.command).toContain('Zed.app');
+        // Verify the command ends with cli (the CLI tool, not GUI binary zed)
+        expect(diffCommand!.command).toMatch(/MacOS[\/\\]cli$/);
         expect(diffCommand!.args).toEqual(['--wait', '--diff', 'old.txt', 'new.txt']);
       });
 
@@ -766,16 +764,14 @@ describe('editor utils', () => {
         (execSync as Mock).mockImplementation(() => {
           throw new Error(); // CLI not found
         });
+        // Accept any path containing Zed.app
         (existsSync as Mock).mockImplementation((path: string) => {
-          const home = require('node:os').homedir();
-          // Accept any path containing the app bundle indicator
-          return path.includes('Applications') && path.includes('Zed.app');
+          return path.includes('Zed.app');
         });
 
         const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
         expect(diffCommand).not.toBeNull();
-        expect(diffCommand!.command).toContain('Applications');
-        expect(diffCommand!.command).toContain('Zed.app');
+        expect(diffCommand!.command).toMatch(/MacOS[\/\\]cli$/);
       });
     });
   });

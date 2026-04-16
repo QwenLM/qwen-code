@@ -106,10 +106,10 @@ function getZedCommand(): string | null {
     }
   }
   
-  // On macOS, check for app bundle
+  // On macOS, check for app bundle CLI
   if (process.platform === 'darwin') {
     for (const appPath of zedMacOsPaths) {
-      const cliPath = join(appPath, 'Contents/MacOS/zed');
+      const cliPath = join(appPath, 'Contents/MacOS/cli');
       if (existsSync(cliPath)) {
         return cliPath;
       }
@@ -135,10 +135,10 @@ export function getEditorExecutable(editorType: EditorType): string {
     return found;
   }
 
-  // Special handling for Zed on macOS: check app bundle as fallback
+  // Special handling for Zed on macOS: check app bundle CLI as fallback
   if (editorType === 'zed' && process.platform === 'darwin') {
     for (const appPath of zedMacOsPaths) {
-      const cliPath = join(appPath, 'Contents/MacOS/zed');
+      const cliPath = join(appPath, 'Contents/MacOS/cli');
       if (existsSync(cliPath)) {
         return cliPath;
       }
