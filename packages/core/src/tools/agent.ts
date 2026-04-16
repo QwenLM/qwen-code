@@ -32,6 +32,7 @@ import type {
   AgentFinishEvent,
   AgentErrorEvent,
   AgentApprovalRequestEvent,
+  AgentUsageEvent,
 } from '../agents/runtime/agent-events.js';
 import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -483,6 +484,19 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput,
       );
     });
+
+    // Track real-time token consumption from subagent API calls
+    this.eventEmitter.on(
+      AgentEventType.USAGE_METADATA,
+      (...args: unknown[]) => {
+        const event = args[0] as AgentUsageEvent;
+        const total =
+          event.usage?.totalTokenCount ?? event.usage?.promptTokenCount ?? 0;
+        if (total > 0) {
+          this.updateDisplay({ tokenCount: total }, updateOutput);
+        }
+      },
+    );
 
     // Indicate when a tool call is waiting for approval
     this.eventEmitter.on(

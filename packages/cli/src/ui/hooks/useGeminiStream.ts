@@ -238,6 +238,12 @@ export const useGeminiStream = (
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  // --- Real-time token display ---
+  // Accumulates output character count across the whole turn (not per API call).
+  // Uses a ref to avoid re-renders on every text_delta.
+  const streamingResponseLengthRef = useRef(0);
+  // Tracks whether we are receiving content (↓) or waiting for API (↑).
+  const [isReceivingContent, setIsReceivingContent] = useState(false);
   const {
     startNewPrompt,
     getPromptCount,
@@ -645,6 +651,9 @@ export const useGeminiStream = (
         // Prevents additional output after a user initiated cancel.
         return '';
       }
+      // Track output chars for real-time token estimation & mark as receiving.
+      streamingResponseLengthRef.current += eventValue.length;
+      setIsReceivingContent(true);
       let newGeminiMessageBuffer = currentGeminiMessageBuffer + eventValue;
       if (
         pendingHistoryItemRef.current?.type !== 'gemini' &&
@@ -1354,6 +1363,13 @@ export const useGeminiStream = (
 
         setIsResponding(true);
         setInitError(null);
+        // Entering "requesting" phase — no content yet for this API call.
+        setIsReceivingContent(false);
+        // Reset char counter only on new user queries; tool-result continuations
+        // keep accumulating so the token count only goes up within a turn.
+        if (submitType !== SendMessageType.ToolResult) {
+          streamingResponseLengthRef.current = 0;
+        }
 
         try {
           const stream = geminiClient.sendMessageStream(
@@ -1853,5 +1869,7 @@ export const useGeminiStream = (
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    streamingResponseLengthRef,
+    isReceivingContent,
   };
 };

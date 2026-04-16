@@ -19,6 +19,7 @@ import { StreamingState } from '../types.js';
 import { ConfigInitDisplay } from '../components/ConfigInitDisplay.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
+import { useAnimationFrame } from '../hooks/useAnimationFrame.js';
 
 export const Composer = () => {
   const config = useConfig();
@@ -27,17 +28,43 @@ export const Composer = () => {
   const uiActions = useUIActions();
   const { vimEnabled } = useVimMode();
 
-  const { showAutoAcceptIndicator, sessionStats, taskStartTokens } = uiState;
+  const {
+    showAutoAcceptIndicator,
+    streamingResponseLengthRef,
+    isReceivingContent,
+  } = uiState;
 
-  const tokens = Object.values(sessionStats.metrics?.models ?? {}).reduce(
-    (acc, model) => ({
-      prompt: acc.prompt + (model.tokens?.prompt ?? 0),
-      candidates: acc.candidates + (model.tokens?.candidates ?? 0),
-    }),
-    { prompt: 0, candidates: 0 },
+  // --- Real-time token estimation ---
+  // Poll streamingResponseLengthRef at 50ms; only re-renders when the value
+  // actually changes, avoiding unnecessary empty renders.
+  const isStreaming =
+    uiState.streamingState === StreamingState.Responding ||
+    uiState.streamingState === StreamingState.WaitingForConfirmation;
+  const streamingChars = useAnimationFrame(
+    streamingResponseLengthRef,
+    isStreaming ? 50 : null,
   );
+  const estimatedStreamingTokens = Math.round(streamingChars / 4);
 
-  const taskTokens = tokens.candidates - taskStartTokens;
+  // Aggregate agent tool tokens from executing tool calls
+  let agentTokens = 0;
+  for (const item of uiState.pendingGeminiHistoryItems ?? []) {
+    if (item.type === 'tool_group' && 'tools' in item) {
+      const toolGroup = item as {
+        tools: Array<{ resultDisplay?: { type: string; tokenCount?: number } }>;
+      };
+      for (const tool of toolGroup.tools) {
+        if (
+          tool.resultDisplay?.type === 'task_execution' &&
+          tool.resultDisplay?.tokenCount
+        ) {
+          agentTokens += tool.resultDisplay.tokenCount;
+        }
+      }
+    }
+  }
+
+  const taskTokens = estimatedStreamingTokens + agentTokens;
 
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -75,6 +102,7 @@ export const Composer = () => {
           }
           elapsedTime={uiState.elapsedTime}
           candidatesTokens={taskTokens}
+          isReceivingContent={isReceivingContent}
         />
       )}
 

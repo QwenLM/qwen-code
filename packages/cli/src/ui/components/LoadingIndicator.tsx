@@ -22,6 +22,8 @@ interface LoadingIndicatorProps {
   rightContent?: React.ReactNode;
   thought?: ThoughtSummary | null;
   candidatesTokens?: number;
+  /** true = receiving content (↓), false = waiting for API (↑). Default true. */
+  isReceivingContent?: boolean;
 }
 
 export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
@@ -30,6 +32,7 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
   rightContent,
   thought,
   candidatesTokens,
+  isReceivingContent = true,
 }) => {
   const streamingState = useStreamingContext();
   const { columns: terminalWidth } = useTerminalSize();
@@ -43,12 +46,13 @@ export const LoadingIndicator: React.FC<LoadingIndicatorProps> = ({
 
   const outputTokens = candidatesTokens ?? 0;
   const showTokens = !isNarrow && outputTokens > 0;
+  const tokenArrow = isReceivingContent ? '↓' : '↑';
 
   const timeStr =
     elapsedTime < 60 ? `${elapsedTime}s` : formatDuration(elapsedTime * 1000);
 
   const tokenStr = showTokens
-    ? ` · ↓ ${formatTokenCount(outputTokens)} tokens`
+    ? ` · ${tokenArrow} ${formatTokenCount(outputTokens)} tokens`
     : '';
 
   const cancelAndTimerContent =
