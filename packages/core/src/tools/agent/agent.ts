@@ -963,23 +963,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagentConfig.background === true;
 
       if (shouldRunInBackground) {
-        // Background agents are not supported in non-interactive mode
-        if (!this.config.isInteractive()) {
-          return {
-            llmContent:
-              'Background agents are not supported in non-interactive mode. Retry without run_in_background.',
-            returnDisplay: {
-              type: 'task_execution' as const,
-              subagentName: this.params.subagent_type || 'unknown',
-              taskDescription: this.params.description,
-              taskPrompt: this.params.prompt,
-              status: 'failed' as const,
-              terminateReason:
-                'Background agents are not supported in non-interactive mode',
-            },
-          };
-        }
-
         // Fire SubagentStart hook before background launch
         const hookSystem = this.config.getHookSystem();
         if (hookSystem) {

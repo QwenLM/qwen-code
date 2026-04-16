@@ -544,13 +544,15 @@ export const useGeminiStream = (
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
 
-        // Notification messages (e.g. background agent completions) are
-        // pre-processed by the notification drain loop which already
-        // added the display item to history. Just pass the model text
-        // through to the API.
-        if (submitType === SendMessageType.Notification) {
+        // Notification and cron messages are pre-processed by the unified
+        // notification drain loop which already added the display item
+        // to history. Just pass the model text through to the API.
+        if (
+          submitType === SendMessageType.Notification ||
+          submitType === SendMessageType.Cron
+        ) {
           onDebugMessage(
-            `Received notification (${trimmedQuery.length} chars)`,
+            `Received ${submitType} (${trimmedQuery.length} chars)`,
           );
           return { queryToSend: trimmedQuery, shouldProceed: true };
         }
@@ -1862,17 +1864,29 @@ export const useGeminiStream = (
     storage,
   ]);
 
-  // ─── Cron scheduler integration ─────────────────────────
-  const cronQueueRef = useRef<string[]>([]);
-  const [cronTrigger, setCronTrigger] = useState(0);
+  // ─── Unified notification queue (cron + background agents) ──────
+  const notificationQueueRef = useRef<
+    Array<{
+      displayText: string;
+      modelText: string;
+      sendMessageType: SendMessageType;
+    }>
+  >([]);
+  const [notificationTrigger, setNotificationTrigger] = useState(0);
 
-  // Start the scheduler on mount, stop on unmount
+  // Start the cron scheduler on mount, stop on unmount.
+  // Cron fires enqueue onto the shared notification queue.
   useEffect(() => {
     if (!config.isCronEnabled()) return;
     const scheduler = config.getCronScheduler();
     scheduler.start((job: { prompt: string }) => {
-      cronQueueRef.current.push(job.prompt);
-      setCronTrigger((n) => n + 1);
+      const label = job.prompt.slice(0, 40);
+      notificationQueueRef.current.push({
+        displayText: `Cron: ${label}`,
+        modelText: job.prompt,
+        sendMessageType: SendMessageType.Cron,
+      });
+      setNotificationTrigger((n) => n + 1);
     });
     return () => {
       const summary = scheduler.getExitSummary();
@@ -1883,28 +1897,16 @@ export const useGeminiStream = (
     };
   }, [config]);
 
-  // When idle, drain the cron queue one prompt at a time
-  useEffect(() => {
-    if (
-      streamingState === StreamingState.Idle &&
-      cronQueueRef.current.length > 0
-    ) {
-      const prompt = cronQueueRef.current.shift()!;
-      submitQuery(prompt, SendMessageType.Cron);
-    }
-  }, [streamingState, submitQuery, cronTrigger]);
-
-  // ─── Background agent notification queue ───────────────────
-  const notificationQueueRef = useRef<
-    Array<{ displayText: string; modelText: string }>
-  >([]);
-  const [notificationTrigger, setNotificationTrigger] = useState(0);
-
+  // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
     registry.setNotificationCallback(
       (displayText: string, modelText: string) => {
-        notificationQueueRef.current.push({ displayText, modelText });
+        notificationQueueRef.current.push({
+          displayText,
+          modelText,
+          sendMessageType: SendMessageType.Notification,
+        });
         setNotificationTrigger((n) => n + 1);
       },
     );
@@ -1913,7 +1915,7 @@ export const useGeminiStream = (
     };
   }, [config]);
 
-  // When idle, drain the notification queue one item at a time
+  // When idle, drain the unified queue one item at a time.
   useEffect(() => {
     if (
       streamingState === StreamingState.Idle &&
@@ -1924,7 +1926,7 @@ export const useGeminiStream = (
         { type: 'notification' as const, text: item.displayText },
         Date.now(),
       );
-      submitQuery(item.modelText, SendMessageType.Notification, undefined, {
+      submitQuery(item.modelText, item.sendMessageType, undefined, {
         notificationDisplayText: item.displayText,
       });
     }
