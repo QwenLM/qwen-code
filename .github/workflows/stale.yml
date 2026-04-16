@@ -25,18 +25,18 @@ jobs:
           # be introduced once issue triage labels are in place.
           days-before-issue-stale: -1
           days-before-issue-close: -1
-          # Pull requests: 4 weeks to stale + 4 weeks to close.
-          days-before-pr-stale: 28
-          days-before-pr-close: 28
+          # Pull requests: 5 weeks to stale + 5 weeks to close.
+          days-before-pr-stale: 35
+          days-before-pr-close: 35
           stale-pr-label: 'status/stale'
           stale-pr-message: >-
-            This pull request has had no activity for 4 weeks and is being marked as stale.
-            It will be closed in another 4 weeks if no further activity occurs.
+            This pull request has had no activity for 5 weeks and is being marked as stale.
+            It will be closed in another 5 weeks if no further activity occurs.
             To keep it open, push a new commit or leave a comment.
             Maintainers may apply `pinned`, `status/blocked`, `status/on-hold`,
             or `status/ready-for-merge` to exempt it from auto-close.
           close-pr-message: >-
-            This pull request has been closed after 4 additional weeks of inactivity.
+            This pull request has been closed after 5 additional weeks of inactivity.
             You are welcome to reopen it or submit a new pull request if the change is still relevant.
             Thanks for contributing!
           exempt-pr-labels: 'pinned,security,status/blocked,status/on-hold,status/ready-for-merge'
