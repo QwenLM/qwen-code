@@ -56,7 +56,7 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 | Field     | Type        | Required | Description                                                                             |
 | --------- | ----------- | -------- | --------------------------------------------------------------------------------------- |
 | `type`    | `"command"` | Yes      | Must be `"command"`                                                                     |
-| `command` | string      | Yes      | Shell command to execute. Receives JSON via stdin, stdout is displayed (up to 3 lines). |
+| `command` | string      | Yes      | Shell command to execute. Receives JSON via stdin, stdout is displayed (up to 2 lines). |
 
 ## JSON input
 
@@ -220,7 +220,7 @@ Then reference it in settings:
 
 - **Update triggers**: The status line updates when the model changes, a new message is sent (token count changes), vim mode is toggled, git branch changes, tool calls complete, or file changes occur. Updates are debounced (300ms).
 - **Timeout**: Commands that take longer than 5 seconds are killed. The status line clears on failure.
-- **Output**: Multi-line output is supported (up to 3 lines; extra lines are discarded). Each line is rendered as a separate row with dimmed colors in the footer's left section. Lines that exceed the available width are truncated.
+- **Output**: Multi-line output is supported (up to 2 lines; extra lines are discarded). Each line is rendered as a separate row with dimmed colors in the footer's left section. Lines that exceed the available width are truncated.
 - **Hot reload**: Changes to `ui.statusLine` in settings take effect immediately — no restart required.
 - **Shell**: Commands run via `/bin/sh` on macOS/Linux. On Windows, `cmd.exe` is used by default — wrap POSIX commands with `bash -c "..."` or point to a bash script (e.g. `bash ~/.qwen/statusline-command.sh`).
 - **Removal**: Delete the `ui.statusLine` key from settings to disable. The "? for shortcuts" hint returns.

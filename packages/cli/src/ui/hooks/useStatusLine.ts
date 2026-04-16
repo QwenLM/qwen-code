@@ -72,7 +72,7 @@ interface StatusLineConfig {
 }
 
 const debugLog = createDebugLogger('STATUS_LINE');
-const MAX_STATUS_LINES = 3;
+const MAX_STATUS_LINES = 2;
 
 function getStatusLineConfig(
   settings: ReturnType<typeof useSettings>,
