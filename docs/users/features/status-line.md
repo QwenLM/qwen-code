@@ -53,10 +53,10 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 }
 ```
 
-| Field     | Type        | Required | Description                                                                           |
-| --------- | ----------- | -------- | ------------------------------------------------------------------------------------- |
-| `type`    | `"command"` | Yes      | Must be `"command"`                                                                   |
-| `command` | string      | Yes      | Shell command to execute. Receives JSON via stdin, first line of stdout is displayed. |
+| Field     | Type        | Required | Description                                                                                    |
+| --------- | ----------- | -------- | ---------------------------------------------------------------------------------------------- |
+| `type`    | `"command"` | Yes      | Must be `"command"`                                                                            |
+| `command` | string      | Yes      | Shell command to execute. Receives JSON via stdin, stdout is displayed (multi-line supported). |
 
 ## JSON input
 
@@ -220,7 +220,7 @@ Then reference it in settings:
 
 - **Update triggers**: The status line updates when the model changes, a new message is sent (token count changes), vim mode is toggled, git branch changes, tool calls complete, or file changes occur. Updates are debounced (300ms).
 - **Timeout**: Commands that take longer than 5 seconds are killed. The status line clears on failure.
-- **Output**: Only the first line of stdout is used. The text is rendered with dimmed colors in the footer's left section and truncated if it exceeds the available width.
+- **Output**: Multi-line output is supported — each line is rendered as a separate row with dimmed colors in the footer's left section. Lines that exceed the available width are truncated.
 - **Hot reload**: Changes to `ui.statusLine` in settings take effect immediately — no restart required.
 - **Shell**: Commands run via `/bin/sh` on macOS/Linux. On Windows, `cmd.exe` is used by default — wrap POSIX commands with `bash -c "..."` or point to a bash script (e.g. `bash ~/.qwen/statusline-command.sh`).
 - **Removal**: Delete the `ui.statusLine` key from settings to disable. The "? for shortcuts" hint returns.

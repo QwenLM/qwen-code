@@ -200,7 +200,7 @@ describe('useStatusLine', () => {
       expect(opts.maxBuffer).toBe(1024 * 10);
     });
 
-    it('returns first line of stdout as text', async () => {
+    it('returns stdout as text with trailing newline stripped', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo hello' });
       const { result } = renderHook(() => useStatusLine());
 
@@ -211,7 +211,7 @@ describe('useStatusLine', () => {
       expect(result.current.text).toBe('hello world');
     });
 
-    it('returns only the first line when stdout has multiple lines', async () => {
+    it('returns all lines when stdout has multiple lines', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo lines' });
       const { result } = renderHook(() => useStatusLine());
 
@@ -219,7 +219,18 @@ describe('useStatusLine', () => {
         execCallback(null, 'first line\nsecond line\n', '');
       });
 
-      expect(result.current.text).toBe('first line');
+      expect(result.current.text).toBe('first line\nsecond line');
+    });
+
+    it('preserves empty lines in multi-line output', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'line one\n\nline three\n', '');
+      });
+
+      expect(result.current.text).toBe('line one\n\nline three');
     });
 
     it('returns null when command fails', async () => {

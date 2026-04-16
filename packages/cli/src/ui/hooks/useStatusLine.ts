@@ -277,8 +277,8 @@ export function useStatusLine(): {
         activeChildRef.current = undefined;
         if (!error && stdout) {
           // Strip only the trailing newline to preserve intentional whitespace.
-          const line = stdout.replace(/\r?\n$/, '').split(/\r?\n/, 1)[0];
-          setOutput(line || null);
+          const text = stdout.replace(/\r?\n$/, '');
+          setOutput(text || null);
         } else {
           setOutput(null);
         }

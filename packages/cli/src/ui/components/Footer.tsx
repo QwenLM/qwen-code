@@ -56,6 +56,8 @@ export const Footer: React.FC = () => {
   // occupies the top row, so the hint is redundant). Matches upstream behavior.
   const suppressHint = !!statusLineText;
 
+  const statusLineLines = statusLineText ? statusLineText.split(/\r?\n/) : [];
+
   // Left bottom row: high-priority messages > approval mode > hint.
   const leftBottomContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
@@ -120,13 +122,14 @@ export const Footer: React.FC = () => {
     >
       {/* Left column — status line on top, hints/mode on bottom */}
       <Box flexDirection="column" flexShrink={isNarrow ? 0 : 1}>
-        {statusLineText &&
+        {statusLineLines.length > 0 &&
           !uiState.ctrlCPressedOnce &&
-          !uiState.ctrlDPressedOnce && (
-            <Text dimColor wrap="truncate">
-              {statusLineText}
+          !uiState.ctrlDPressedOnce &&
+          statusLineLines.map((line, i) => (
+            <Text key={i} dimColor wrap="truncate">
+              {line}
             </Text>
-          )}
+          ))}
         <Text wrap="truncate">{leftBottomContent}</Text>
       </Box>
 
