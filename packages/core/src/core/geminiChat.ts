@@ -23,7 +23,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
 import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
 import type { Config } from '../config/config.js';
-import { ESCALATED_MAX_TOKENS } from './tokenLimits.js';
+import { ESCALATED_MAX_TOKENS, tokenLimit } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -49,7 +49,14 @@ export enum StreamEventType {
 
 export type StreamEvent =
   | { type: StreamEventType.CHUNK; value: GenerateContentResponse }
-  | { type: StreamEventType.RETRY; retryInfo?: RetryInfo };
+  | {
+      type: StreamEventType.RETRY;
+      retryInfo?: RetryInfo;
+      /** When true, the retry is a continuation (recovery) rather than a
+       *  fresh restart (escalation). The UI should keep the accumulated text
+       *  buffer so the continuation appends to it. */
+      isContinuation?: boolean;
+    };
 
 /**
  * Options for retrying due to invalid content from the model.
@@ -75,6 +82,23 @@ const INVALID_STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 2000,
 };
+
+/**
+ * Max recovery attempts when the escalated response is also truncated.
+ * Each attempt keeps the partial response in history and injects a recovery
+ * message so the model can continue from where it left off.
+ */
+const MAX_OUTPUT_RECOVERY_ATTEMPTS = 3;
+
+/**
+ * Recovery message injected as a user turn when the model's output is
+ * truncated even after token escalation. Instructs the model to resume
+ * without repeating itself and to break remaining work into smaller steps.
+ */
+const OUTPUT_RECOVERY_MESSAGE =
+  'Output token limit hit. Resume directly — no apology, no recap of what ' +
+  'you were doing. Pick up mid-thought if that is where the cut happened. ' +
+  'Break remaining work into smaller pieces.';
 
 /**
  * Options for retrying on rate-limit throttling errors returned as stream content.
@@ -497,7 +521,11 @@ export class GeminiChat {
         }
 
         // Max output tokens escalation: if the retry loop succeeded with
-        // the capped default (8K) but hit MAX_TOKENS, retry once at 64K.
+        // the capped default (8K) but hit MAX_TOKENS, retry once at the
+        // model's full output limit. This ensures models with large output
+        // limits (e.g., 128K for Claude Opus, GPT-5) are fully utilized,
+        // while using ESCALATED_MAX_TOKENS (64K) as a floor for unknown
+        // models.
         // Placed outside the retry loop so that any errors from the
         // escalated stream propagate directly (not caught by retry logic).
         if (
@@ -507,8 +535,12 @@ export class GeminiChat {
           !hasUserMaxTokensOverride
         ) {
           maxTokensEscalated = true;
+          const escalatedLimit = Math.max(
+            ESCALATED_MAX_TOKENS,
+            tokenLimit(model, 'output'),
+          );
           debugLogger.info(
-            `Output truncated at capped default. Escalating to ${ESCALATED_MAX_TOKENS} tokens.`,
+            `Output truncated at capped default. Escalating to ${escalatedLimit} tokens.`,
           );
           // Remove partial model response from history
           // (processStreamResponse already pushed it)
@@ -525,9 +557,10 @@ export class GeminiChat {
             ...params,
             config: {
               ...params.config,
-              maxOutputTokens: ESCALATED_MAX_TOKENS,
+              maxOutputTokens: escalatedLimit,
             },
           };
+          let escalatedFinishReason: string | undefined;
           const escalatedStream = await self.makeApiCallAndProcessStream(
             model,
             requestContents,
@@ -535,7 +568,65 @@ export class GeminiChat {
             prompt_id,
           );
           for await (const chunk of escalatedStream) {
+            const fr = chunk.candidates?.[0]?.finishReason;
+            if (fr) escalatedFinishReason = fr;
             yield { type: StreamEventType.CHUNK, value: chunk };
+          }
+
+          // Recovery: if the escalated response is also truncated, keep the
+          // partial response in history and inject a recovery message so the
+          // model can continue from where it left off. This mirrors Claude
+          // Code's multi-turn recovery strategy.
+          let recoveryCount = 0;
+          while (
+            escalatedFinishReason === FinishReason.MAX_TOKENS &&
+            recoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
+          ) {
+            recoveryCount++;
+            debugLogger.info(
+              `Output still truncated after escalation. ` +
+                `Recovery attempt ${recoveryCount}/${MAX_OUTPUT_RECOVERY_ATTEMPTS}.`,
+            );
+            // The partial model response is already in history
+            // (pushed by processStreamResponse). Push a recovery user
+            // message so the model sees its partial output and continues.
+            self.history.push(
+              createUserContent([{ text: OUTPUT_RECOVERY_MESSAGE }]),
+            );
+            // Signal UI/turn to clear pending (incomplete) tool calls.
+            // isContinuation tells the UI to keep the text buffer so the
+            // model's continuation appends to the previous partial output.
+            yield { type: StreamEventType.RETRY, isContinuation: true };
+            // Re-send with the updated history (includes partial + recovery)
+            const recoveryContents = self.getHistory(true);
+            escalatedFinishReason = undefined;
+            try {
+              const recoveryStream = await self.makeApiCallAndProcessStream(
+                model,
+                recoveryContents,
+                escalatedParams,
+                prompt_id,
+              );
+              for await (const chunk of recoveryStream) {
+                const fr = chunk.candidates?.[0]?.finishReason;
+                if (fr) escalatedFinishReason = fr;
+                yield { type: StreamEventType.CHUNK, value: chunk };
+              }
+            } catch (recoveryError) {
+              // If a recovery attempt fails (e.g., empty response, network
+              // error), stop recovering and let the partial output stand.
+              // Pop the dangling recovery message to keep history valid.
+              if (
+                self.history.length > 0 &&
+                self.history[self.history.length - 1].role === 'user'
+              ) {
+                self.history.pop();
+              }
+              debugLogger.warn(
+                `Recovery attempt ${recoveryCount} failed: ${recoveryError}`,
+              );
+              break;
+            }
           }
         }
 

@@ -1149,6 +1149,16 @@ export const useGeminiStream = (
             if (pendingHistoryItemRef.current) {
               setPendingHistoryItem(null);
             }
+            // Discard tool call requests from the truncated/failed attempt
+            // to prevent duplicate execution after escalation or recovery.
+            toolCallRequests.length = 0;
+            // For fresh restarts (escalation), reset buffers to avoid
+            // duplicating text from the discarded attempt. For continuations
+            // (recovery), keep buffers so the model's continuation appends.
+            if (!event.isContinuation) {
+              geminiMessageBuffer = '';
+              thoughtBuffer = '';
+            }
             // Show retry info if available (rate-limit / throttling errors)
             if (event.retryInfo) {
               startRetryCountdown(event.retryInfo);
