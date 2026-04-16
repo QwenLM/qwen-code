@@ -20,7 +20,7 @@ export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { SkillTool } from '../tools/skill.js';
-import type { AgentTool } from '../tools/agent.js';
+import type { AgentTool } from '../tools/agent/agent.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;

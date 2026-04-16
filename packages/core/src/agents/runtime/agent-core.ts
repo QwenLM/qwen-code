@@ -110,29 +110,9 @@ export interface CreateChatOptions {
   /**
    * Optional conversation history from a parent session. When provided,
    * this history is prepended to the chat so the agent has prior
-   * conversational context (e.g., from the main session that spawned it).
+   * conversational context (e.g., from AgentInteractive.start()).
    */
   extraHistory?: Content[];
-  /**
-   * When provided, replaces the auto-built generationConfig
-   * (systemInstruction, temperature, etc.) with this exact config.
-   * Used by fork subagents to share the parent conversation's cache
-   * prefix for DashScope prompt caching.
-   */
-  generationConfigOverride?: GenerateContentConfig & {
-    systemInstruction?: string | Content;
-  };
-  /**
-   * When true, skip injecting the env bootstrap messages from
-   * `getInitialChatHistory()`. Set by fork subagents because their
-   * `extraHistory` is the full parent history that already contains
-   * those env messages — re-injecting would duplicate them.
-   *
-   * Other callers (e.g. arena interactive agents) pass an
-   * env-stripped history and DO need fresh env init for their own
-   * working directory, so they must leave this unset.
-   */
-  skipEnvHistory?: boolean;
 }
 
 /**
@@ -243,21 +223,31 @@ export class AgentCore {
     context: ContextState,
     options?: CreateChatOptions,
   ): Promise<GeminiChat | undefined> {
-    if (!this.promptConfig.systemPrompt && !this.promptConfig.initialMessages) {
+    if (
+      !this.promptConfig.systemPrompt &&
+      !this.promptConfig.renderedSystemPrompt &&
+      !this.promptConfig.initialMessages
+    ) {
       throw new Error(
-        'PromptConfig must have either `systemPrompt` or `initialMessages` defined.',
+        'PromptConfig must have `systemPrompt`, `renderedSystemPrompt`, or `initialMessages` defined.',
       );
     }
-    if (this.promptConfig.systemPrompt && this.promptConfig.initialMessages) {
+    if (
+      this.promptConfig.systemPrompt &&
+      this.promptConfig.renderedSystemPrompt
+    ) {
       throw new Error(
-        'PromptConfig cannot have both `systemPrompt` and `initialMessages` defined.',
+        'PromptConfig cannot have both `systemPrompt` and `renderedSystemPrompt` defined.',
       );
     }
 
-    // Skip env bootstrap when the caller (fork) explicitly says its
-    // extraHistory already contains those messages. Other callers that
-    // provide an env-stripped history (e.g. arena) still get fresh env init.
-    const envHistory = options?.skipEnvHistory
+    // When initialMessages is set, the caller owns the full prior history
+    // (including any env bootstrap it wants). Fork relies on this to inherit
+    // the parent conversation verbatim without duplicating env messages.
+    const hasInitialMessages =
+      !!this.promptConfig.initialMessages &&
+      this.promptConfig.initialMessages.length > 0;
+    const envHistory = hasInitialMessages
       ? []
       : await getInitialChatHistory(this.runtimeContext);
 
@@ -267,24 +257,19 @@ export class AgentCore {
       ...(this.promptConfig.initialMessages ?? []),
     ];
 
-    // If an override is provided (fork path), use it directly for cache
-    // sharing. Otherwise, build the config from this agent's promptConfig.
-    // Note: buildChatSystemPrompt is called OUTSIDE the try/catch so template
-    // errors propagate to the caller (not swallowed by reportError).
-    let generationConfig: GenerateContentConfig & {
+    // Build generationConfig. For fork subagents, `renderedSystemPrompt`
+    // carries the parent's exact rendered systemInstruction so the fork
+    // shares a byte-identical cache prefix. Otherwise, template
+    // `systemPrompt` via buildChatSystemPrompt (which may throw — kept
+    // outside the try/catch so template errors surface to the caller).
+    const generationConfig: GenerateContentConfig & {
       systemInstruction?: string | Content;
-    };
-
-    if (options?.generationConfigOverride) {
-      generationConfig = options.generationConfigOverride;
-    } else {
-      const systemInstruction = this.promptConfig.systemPrompt
-        ? this.buildChatSystemPrompt(context, options)
-        : undefined;
-      generationConfig = {
-        temperature: this.modelConfig.temp,
-        topP: this.modelConfig.top_p,
-      };
+    } = {};
+    if (this.promptConfig.renderedSystemPrompt !== undefined) {
+      generationConfig.systemInstruction =
+        this.promptConfig.renderedSystemPrompt;
+    } else if (this.promptConfig.systemPrompt) {
+      const systemInstruction = this.buildChatSystemPrompt(context, options);
       if (systemInstruction) {
         generationConfig.systemInstruction = systemInstruction;
       }
@@ -330,7 +315,10 @@ export class AgentCore {
         (t): t is FunctionDeclaration => typeof t !== 'string',
       );
 
-      if (hasWildcard || asStrings.length === 0) {
+      if (
+        hasWildcard ||
+        (asStrings.length === 0 && onlyInlineDecls.length === 0)
+      ) {
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations()

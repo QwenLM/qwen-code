@@ -47,7 +47,7 @@ import {
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
-import { AgentTool } from '../tools/agent.js';
+import { AgentTool } from '../tools/agent/agent.js';
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 
 // Telemetry

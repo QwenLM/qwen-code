@@ -393,11 +393,13 @@ export async function runForkedAgent(
     }
   });
 
-  const promptConfig: PromptConfig = { systemPrompt: params.systemPrompt };
+  const promptConfig: PromptConfig = {
+    systemPrompt: params.systemPrompt,
+    initialMessages: params.extraHistory,
+  };
   const modelConfig: ModelConfig = {
     model:
       params.model ?? params.config.getFastModel() ?? params.config.getModel(),
-    temp: params.temp ?? 0,
   };
   const runConfig: RunConfig = {
     max_turns: params.maxTurns,
@@ -418,10 +420,7 @@ export async function runForkedAgent(
 
   const context = new ContextState();
   context.set('task_prompt', params.taskPrompt);
-  await headless.execute(context, params.abortSignal, {
-    extraHistory: params.extraHistory,
-    skipEnvHistory: params.skipEnvHistory,
-  });
+  await headless.execute(context, params.abortSignal);
 
   const terminateReason = headless.getTerminateMode();
   const finalText = headless.getFinalText() || undefined;
