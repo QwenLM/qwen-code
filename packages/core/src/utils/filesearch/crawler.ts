@@ -310,7 +310,7 @@ async function crawlWithGitLsFiles(
     return { success: false, files: [], isGitRepo: true };
   }
 
-  const untrackedArgs = ['ls-files', '--others'];
+  const untrackedArgs = ['ls-files', '--others', '--exclude-standard'];
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
     untrackedArgs.push(relativeToGitRoot);
   }

@@ -837,7 +837,7 @@ describe('crawler', () => {
       expect(results).not.toContain('nested/deep/file.js');
     });
 
-    it('should respect useGitignore option on git path', async () => {
+    it('should avoid enumerating gitignored untracked files on git path', async () => {
       tmpDir = await createTmpDir({
         '.gitignore': '*.log',
         'keep.log': '',
@@ -858,7 +858,8 @@ describe('crawler', () => {
         cache: false,
         cacheTtl: 0,
       });
-      expect(withoutGitignoreResults).toContain('keep.log');
+      expect(withoutGitignoreResults).not.toContain('keep.log');
+      expect(withoutGitignoreResults).toContain('keep.txt');
 
       const withGitignore = loadIgnoreRules({
         projectRoot: tmpDir,
