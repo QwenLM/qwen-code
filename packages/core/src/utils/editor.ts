@@ -123,8 +123,9 @@ function getZedCommand(): string | null {
  * Get the executable command for a given editor type.
  * Resolves both CLI commands and platform-specific fallbacks (e.g., macOS app bundles).
  * This is the shared function used by both getDiffCommand and useLaunchEditor.
+ * Returns null if no editor command is found.
  */
-export function getEditorExecutable(editorType: EditorType): string {
+export function getEditorExecutable(editorType: EditorType): string | null {
   const commandConfig = editorCommands[editorType];
   const commands =
     process.platform === 'win32' ? commandConfig.win32 : commandConfig.default;
@@ -145,8 +146,8 @@ export function getEditorExecutable(editorType: EditorType): string {
     }
   }
 
-  // Fallback to last known command (preserves original behavior for other editors)
-  return commands[commands.length - 1];
+  // No command found
+  return null;
 }
 
 export function checkHasEditorType(editor: EditorType): boolean {

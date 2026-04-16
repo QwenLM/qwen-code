@@ -712,13 +712,6 @@ describe('editor utils', () => {
     });
 
     describe('getDiffCommand for Zed on macOS', () => {
-      // Dynamically compute the path based on what join() produces on the mocked platform
-      const getAppBundleCliPath = () => {
-        // When platform is darwin, join() produces Unix paths
-        // Use the correct CLI path: Contents/MacOS/cli (not the GUI binary)
-        return '/Applications/Zed.app/Contents/MacOS/cli';
-      };
-
       it('should use app bundle CLI path when CLI is not in PATH', () => {
         Object.defineProperty(process, 'platform', { value: 'darwin' });
         (execSync as Mock).mockImplementation(() => {
@@ -739,6 +732,10 @@ describe('editor utils', () => {
           'old.txt',
           'new.txt',
         ]);
+      });
+
+      it('should prefer CLI in PATH over app bundle', () => {
+        toEqual(['--wait', '--diff', 'old.txt', 'new.txt']);
       });
 
       it('should prefer CLI in PATH over app bundle', () => {
