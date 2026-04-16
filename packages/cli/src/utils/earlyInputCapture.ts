@@ -38,6 +38,7 @@ let inputBuffer: InputBuffer = {
 };
 
 let captureHandler: ((data: Buffer) => void) | null = null;
+let captureStdin: NodeJS.ReadStream | null = null;
 let isCapturing = false;
 
 /**
@@ -191,6 +192,9 @@ function filterTerminalResponses(data: Buffer): Buffer {
  */
 export function startEarlyInputCapture(): void {
   if (isCapturing || !process.stdin.isTTY) {
+    if (!process.stdin.isTTY) {
+      debugLogger.debug('Early input capture skipped: stdin is not a TTY');
+    }
     return;
   }
 
@@ -216,7 +220,10 @@ export function startEarlyInputCapture(): void {
 
     // Check buffer size limit
     if (inputBuffer.totalBytes >= MAX_BUFFER_SIZE) {
-      debugLogger.debug('Buffer size limit reached, stopping capture');
+      debugLogger.warn(
+        `Early input capture buffer full (${MAX_BUFFER_SIZE} bytes). Stopping capture; additional keystrokes during startup will be lost.`,
+      );
+      stopEarlyInputCapture();
       return;
     }
 
@@ -243,7 +250,8 @@ export function startEarlyInputCapture(): void {
     }
   };
 
-  process.stdin.on('data', captureHandler);
+  captureStdin = process.stdin;
+  captureStdin.on('data', captureHandler);
 }
 
 /**
@@ -251,11 +259,12 @@ export function startEarlyInputCapture(): void {
  * Call before KeypressProvider mounts
  */
 export function stopEarlyInputCapture(): void {
-  if (!isCapturing || !captureHandler) {
+  if (!isCapturing || !captureHandler || !captureStdin) {
     return;
   }
 
-  process.stdin.removeListener('data', captureHandler);
+  captureStdin.removeListener('data', captureHandler);
+  captureStdin = null;
   captureHandler = null;
   isCapturing = false;
   inputBuffer.captured = true;
@@ -300,10 +309,13 @@ export function hasCapturedInput(): boolean {
  * Reset capture state (for testing only)
  */
 export function resetCaptureState(): void {
-  if (captureHandler) {
+  if (captureHandler && captureStdin) {
+    captureStdin.removeListener('data', captureHandler);
+  } else if (captureHandler) {
     process.stdin.removeListener('data', captureHandler);
-    captureHandler = null;
   }
+  captureStdin = null;
+  captureHandler = null;
   isCapturing = false;
   inputBuffer = {
     chunks: [],
