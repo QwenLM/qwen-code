@@ -957,7 +957,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       };
 
       // ── Background (async) execution path ──────────────────────
-      if (this.params.run_in_background) {
+      // OR the tool parameter with the agent definition's background flag.
+      const shouldRunInBackground =
+        this.params.run_in_background === true ||
+        subagentConfig.background === true;
+
+      if (shouldRunInBackground) {
         // Background agents are not supported in non-interactive mode
         if (!this.config.isInteractive()) {
           return {
