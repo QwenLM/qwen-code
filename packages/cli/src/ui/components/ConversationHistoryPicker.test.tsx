@@ -5,6 +5,7 @@
  */
 
 import { render } from 'ink-testing-library';
+import { waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { KeypressProvider } from '../contexts/KeypressContext.js';
 import { ConversationHistoryPicker } from './ConversationHistoryPicker.js';
@@ -116,7 +117,7 @@ describe('ConversationHistoryPicker', () => {
   it('selects the highlighted entry on Enter', async () => {
     const onSelect = vi.fn();
 
-    const { stdin } = render(
+    const { stdin, lastFrame } = render(
       <KeypressProvider kittyProtocolEnabled={false}>
         <ConversationHistoryPicker
           config={config}
@@ -130,7 +131,9 @@ describe('ConversationHistoryPicker', () => {
     await wait(100);
 
     stdin.write('\u001B[A');
-    await wait(20);
+    await waitFor(() => {
+      expect(lastFrame()).toContain('› how are you?');
+    });
     stdin.write('\r');
     await wait(20);
 
