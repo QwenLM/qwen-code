@@ -1020,8 +1020,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // we set shouldAvoidPermissionPrompts so the tool scheduler
         // auto-denies 'ask' decisions — matching claw-code's approach.
         // PermissionRequest hooks still run and can override the denial.
+        // Inherit from agentConfig so the resolved approval mode is preserved.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const bgConfig = Object.create(this.config) as any;
+        const bgConfig = Object.create(agentConfig) as any;
         bgConfig.getShouldAvoidPermissionPrompts = () => true;
 
         // Create a dedicated subagent that uses the bg-specific config.
@@ -1035,25 +1036,82 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           try {
             await bgSubagent.execute(contextState, bgAbortController.signal);
 
-            // Fire SubagentStop hook in the background
+            // Fire SubagentStop hook with blocking-decision loop (mirrors
+            // foreground runSubagentWithHooks): if the hook blocks, feed the
+            // reason back and re-execute up to maxIterations times.
             if (hookSystem && !bgAbortController.signal.aborted) {
-              try {
-                await hookSystem.fireSubagentStopEvent(
-                  hookOpts.agentId,
-                  hookOpts.agentType,
-                  this.config.getTranscriptPath(),
-                  bgSubagent.getFinalText(),
-                  false,
-                  resolvedMode,
-                );
-              } catch (hookError) {
-                debugLogger.warn(
-                  `[Agent] Background SubagentStop hook failed: ${hookError}`,
-                );
+              const transcriptPath = this.config.getTranscriptPath();
+              let stopHookActive = false;
+              let continueExecution = true;
+              let iterationCount = 0;
+              const maxIterations = 5;
+
+              while (continueExecution) {
+                iterationCount++;
+                if (iterationCount >= maxIterations) {
+                  debugLogger.warn(
+                    `[Agent] Background SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop`,
+                  );
+                  break;
+                }
+
+                try {
+                  const stopHookOutput = await hookSystem.fireSubagentStopEvent(
+                    hookOpts.agentId,
+                    hookOpts.agentType,
+                    transcriptPath,
+                    bgSubagent.getFinalText(),
+                    stopHookActive,
+                    resolvedMode,
+                    bgAbortController.signal,
+                  );
+
+                  const typedStopOutput = stopHookOutput as
+                    | StopHookOutput
+                    | undefined;
+
+                  if (
+                    typedStopOutput?.isBlockingDecision() ||
+                    typedStopOutput?.shouldStopExecution()
+                  ) {
+                    const continueReason = typedStopOutput.getEffectiveReason();
+                    stopHookActive = true;
+
+                    const continueContext = new ContextState();
+                    continueContext.set('task_prompt', continueReason);
+                    await bgSubagent.execute(
+                      continueContext,
+                      bgAbortController.signal,
+                    );
+
+                    if (bgAbortController.signal.aborted) {
+                      continueExecution = false;
+                    }
+                  } else {
+                    continueExecution = false;
+                  }
+                } catch (hookError) {
+                  debugLogger.warn(
+                    `[Agent] Background SubagentStop hook failed, allowing stop: ${hookError}`,
+                  );
+                  continueExecution = false;
+                }
               }
             }
 
-            registry.complete(hookOpts.agentId, bgSubagent.getFinalText());
+            // Report terminate mode: only GOAL counts as success. ERROR,
+            // MAX_TURNS, and TIMEOUT are surfaced as failures so the parent
+            // model (and the UI) don't treat incomplete runs as completed.
+            const terminateMode = bgSubagent.getTerminateMode();
+            const finalText = bgSubagent.getFinalText();
+            if (terminateMode === AgentTerminateMode.GOAL) {
+              registry.complete(hookOpts.agentId, finalText);
+            } else {
+              registry.fail(
+                hookOpts.agentId,
+                finalText || `Agent terminated with mode: ${terminateMode}`,
+              );
+            }
           } catch (error) {
             const errorMsg =
               error instanceof Error ? error.message : String(error);

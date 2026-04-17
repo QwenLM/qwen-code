@@ -602,6 +602,7 @@ export class GeminiClient {
     if (
       messageType !== SendMessageType.Retry &&
       messageType !== SendMessageType.Cron &&
+      messageType !== SendMessageType.Notification &&
       hooksEnabled &&
       messageBus &&
       this.config.hasHooksForEvent('UserPromptSubmit')
