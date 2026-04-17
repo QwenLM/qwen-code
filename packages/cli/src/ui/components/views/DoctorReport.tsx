@@ -16,7 +16,7 @@ interface DoctorReportProps {
   width?: number;
 }
 
-const STATUS_ICONS: Record<string, string> = {
+const STATUS_ICONS: Record<DoctorCheckStatus, string> = {
   pass: '\u2713', // checkmark
   warn: '\u26A0', // warning triangle
   fail: '\u2717', // X mark
@@ -89,7 +89,7 @@ export const DoctorReport: React.FC<DoctorReportProps> = ({
               <Box flexDirection="row">
                 <Text color={getStatusColor(check.status)}>
                   {'  '}
-                  {STATUS_ICONS[check.status] || '?'}{' '}
+                  {STATUS_ICONS[check.status]}{' '}
                 </Text>
                 <Box width={20}>
                   <Text color={theme.text.primary}>{check.name}</Text>
