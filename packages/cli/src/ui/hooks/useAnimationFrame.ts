@@ -33,6 +33,16 @@ export function useAnimationFrame(
   const displayRef = useRef(watchRef.current);
   const targetRef = useRef(watchRef.current);
 
+  // Snap down synchronously on render when the external ref drops below the
+  // last displayed value (e.g. ref reset to 0 at the start of a new turn).
+  // Without this, the previous turn's count would briefly flash before the
+  // next interval tick fires. Idempotent under StrictMode double-render.
+  const currentTarget = watchRef.current;
+  if (currentTarget < displayRef.current) {
+    displayRef.current = currentTarget;
+    targetRef.current = currentTarget;
+  }
+
   useEffect(() => {
     if (intervalMs === null) return;
 
@@ -80,5 +90,7 @@ export function useAnimationFrame(
     return () => clearInterval(id);
   }, [watchRef, intervalMs]);
 
-  return displayValue;
+  // Return the lower of state vs current ref so a freshly reset ref is
+  // reflected immediately, before setDisplayValue catches up next tick.
+  return Math.min(displayValue, currentTarget);
 }
