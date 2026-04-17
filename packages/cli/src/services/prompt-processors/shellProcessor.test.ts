@@ -19,6 +19,19 @@ import type { PromptPipelineContent } from './types.js';
 // mirroring the logic in the actual `escapeShellArg` implementation.
 function getExpectedEscapedArgForPlatform(arg: string): string {
   if (os.platform() === 'win32') {
+    // Detect Git Bash / MSYS2 / MinTTY environments (same logic as getShellConfiguration)
+    const msystem = process.env['MSYSTEM'];
+    const term = process.env['TERM'] || '';
+    const isGitBash =
+      msystem?.startsWith('MINGW') ||
+      msystem?.startsWith('MSYS') ||
+      term.includes('msys') ||
+      term.includes('cygwin');
+
+    if (isGitBash) {
+      return quote([arg]);
+    }
+
     const comSpec = (process.env['ComSpec'] || 'cmd.exe').toLowerCase();
     const isPowerShell =
       comSpec.endsWith('powershell.exe') || comSpec.endsWith('pwsh.exe');

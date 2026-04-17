@@ -57,13 +57,26 @@ import type {
 } from './agent-events.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
-import { AgentTool } from '../../tools/agent.js';
+import { matchesMcpPattern } from '../../permissions/rule-parser.js';
+import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
 
 /**
  * Result of a single reasoning loop invocation.
  */
+/**
+ * Tools that must never be available to subagents (including forked agents).
+ * - AgentTool prevents recursive subagent spawning.
+ * - Cron tools are session-scoped and should only run from the main session.
+ */
+export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
+  ToolNames.AGENT,
+  ToolNames.CRON_CREATE,
+  ToolNames.CRON_LIST,
+  ToolNames.CRON_DELETE,
+]);
+
 export interface ReasoningLoopResult {
   /** The final model text response (empty if terminated by abort/limits). */
   text: string;
@@ -100,6 +113,26 @@ export interface CreateChatOptions {
    * conversational context (e.g., from the main session that spawned it).
    */
   extraHistory?: Content[];
+  /**
+   * When provided, replaces the auto-built generationConfig
+   * (systemInstruction, temperature, etc.) with this exact config.
+   * Used by fork subagents to share the parent conversation's cache
+   * prefix for DashScope prompt caching.
+   */
+  generationConfigOverride?: GenerateContentConfig & {
+    systemInstruction?: string | Content;
+  };
+  /**
+   * When true, skip injecting the env bootstrap messages from
+   * `getInitialChatHistory()`. Set by fork subagents because their
+   * `extraHistory` is the full parent history that already contains
+   * those env messages — re-injecting would duplicate them.
+   *
+   * Other callers (e.g. arena interactive agents) pass an
+   * env-stripped history and DO need fresh env init for their own
+   * working directory, so they must leave this unset.
+   */
+  skipEnvHistory?: boolean;
 }
 
 /**
@@ -221,7 +254,12 @@ export class AgentCore {
       );
     }
 
-    const envHistory = await getInitialChatHistory(this.runtimeContext);
+    // Skip env bootstrap when the caller (fork) explicitly says its
+    // extraHistory already contains those messages. Other callers that
+    // provide an env-stripped history (e.g. arena) still get fresh env init.
+    const envHistory = options?.skipEnvHistory
+      ? []
+      : await getInitialChatHistory(this.runtimeContext);
 
     const startHistory = [
       ...envHistory,
@@ -229,22 +267,30 @@ export class AgentCore {
       ...(this.promptConfig.initialMessages ?? []),
     ];
 
-    const systemInstruction = this.promptConfig.systemPrompt
-      ? this.buildChatSystemPrompt(context, options)
-      : undefined;
+    // If an override is provided (fork path), use it directly for cache
+    // sharing. Otherwise, build the config from this agent's promptConfig.
+    // Note: buildChatSystemPrompt is called OUTSIDE the try/catch so template
+    // errors propagate to the caller (not swallowed by reportError).
+    let generationConfig: GenerateContentConfig & {
+      systemInstruction?: string | Content;
+    };
 
-    try {
-      const generationConfig: GenerateContentConfig & {
-        systemInstruction?: string | Content;
-      } = {
+    if (options?.generationConfigOverride) {
+      generationConfig = options.generationConfigOverride;
+    } else {
+      const systemInstruction = this.promptConfig.systemPrompt
+        ? this.buildChatSystemPrompt(context, options)
+        : undefined;
+      generationConfig = {
         temperature: this.modelConfig.temp,
         topP: this.modelConfig.top_p,
       };
-
       if (systemInstruction) {
         generationConfig.systemInstruction = systemInstruction;
       }
+    }
 
+    try {
       return new GeminiChat(
         this.runtimeContext,
         generationConfig,
@@ -273,6 +319,8 @@ export class AgentCore {
     const toolRegistry = this.runtimeContext.getToolRegistry();
     const toolsList: FunctionDeclaration[] = [];
 
+    const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
+
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
         (t): t is string => typeof t === 'string',
@@ -286,11 +334,13 @@ export class AgentCore {
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations()
-            .filter((t) => t.name !== AgentTool.Name),
+            .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
         );
       } else {
         toolsList.push(
-          ...toolRegistry.getFunctionDeclarationsFiltered(asStrings),
+          ...toolRegistry.getFunctionDeclarationsFiltered(
+            asStrings.filter((name) => !excludedFromSubagents.has(name)),
+          ),
         );
       }
       toolsList.push(...onlyInlineDecls);
@@ -299,8 +349,21 @@ export class AgentCore {
       toolsList.push(
         ...toolRegistry
           .getFunctionDeclarations()
-          .filter((t) => t.name !== AgentTool.Name),
+          .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
       );
+    }
+
+    // Apply disallowedTools blocklist (supports MCP server-level patterns).
+    if (this.toolConfig?.disallowedTools?.length) {
+      const disallowed = this.toolConfig.disallowedTools;
+      return toolsList.filter((t) => {
+        if (!t.name) return true;
+        return !disallowed.some((pattern) =>
+          t.name!.startsWith('mcp__')
+            ? matchesMcpPattern(pattern, t.name!)
+            : pattern === t.name,
+        );
+      });
     }
 
     return toolsList;

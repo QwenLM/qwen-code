@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -12,7 +12,10 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import type { HookRegistryEntry } from '@qwen-code/qwen-code-core';
+import type {
+  HookRegistryEntry,
+  SessionHookEntry,
+} from '@qwen-code/qwen-code-core';
 
 /**
  * Format hook source for display
@@ -20,23 +23,18 @@ import type { HookRegistryEntry } from '@qwen-code/qwen-code-core';
 function formatHookSource(source: string): string {
   switch (source) {
     case 'project':
-      return 'Project';
+      return t('Project');
     case 'user':
-      return 'User';
+      return t('User');
     case 'system':
-      return 'System';
+      return t('System');
     case 'extensions':
-      return 'Extension';
+      return t('Extension');
+    case 'session':
+      return t('Session (temporary)');
     default:
       return source;
   }
-}
-
-/**
- * Format hook status for display
- */
-function formatHookStatus(enabled: boolean): string {
-  return enabled ? '✓ Enabled' : '✗ Disabled';
 }
 
 const listCommand: SlashCommand = {
@@ -70,38 +68,105 @@ const listCommand: SlashCommand = {
     }
 
     const registry = hookSystem.getRegistry();
-    const allHooks = registry.getAllHooks();
+    const configHooks = registry.getAllHooks();
 
-    if (allHooks.length === 0) {
+    // Get session hooks
+    const sessionId = config.getSessionId();
+    const sessionHooksManager = hookSystem.getSessionHooksManager();
+    const sessionHooks = sessionId
+      ? sessionHooksManager.getAllSessionHooks(sessionId)
+      : [];
+
+    const totalHooks = configHooks.length + sessionHooks.length;
+
+    if (totalHooks === 0) {
       return {
         type: 'message',
         messageType: 'info',
         content: t(
-          'No hooks configured. Add hooks in your settings.json file.',
+          'No hooks configured. Add hooks in your settings.json file or invoke a skill with hooks.',
         ),
       };
     }
 
     // Group hooks by event
-    const hooksByEvent = new Map<string, HookRegistryEntry[]>();
-    for (const hook of allHooks) {
+    const hooksByEvent = new Map<
+      string,
+      Array<{ hook: HookRegistryEntry | SessionHookEntry; isSession: boolean }>
+    >();
+
+    // Add config hooks
+    for (const hook of configHooks) {
       const eventName = hook.eventName;
       if (!hooksByEvent.has(eventName)) {
         hooksByEvent.set(eventName, []);
       }
-      hooksByEvent.get(eventName)!.push(hook);
+      hooksByEvent.get(eventName)!.push({ hook, isSession: false });
     }
 
-    let output = `**Configured Hooks (${allHooks.length} total)**\n\n`;
+    // Add session hooks
+    for (const hook of sessionHooks) {
+      const eventName = hook.eventName;
+      if (!hooksByEvent.has(eventName)) {
+        hooksByEvent.set(eventName, []);
+      }
+      hooksByEvent.get(eventName)!.push({ hook, isSession: true });
+    }
+
+    let output = `**Configured Hooks (${totalHooks} total)**\n\n`;
 
     for (const [eventName, hooks] of hooksByEvent) {
       output += `### ${eventName}\n`;
-      for (const hook of hooks) {
-        const name = hook.config.name || hook.config.command || 'unnamed';
-        const source = formatHookSource(hook.source);
-        const status = formatHookStatus(hook.enabled);
-        const matcher = hook.matcher ? ` (matcher: ${hook.matcher})` : '';
-        output += `- **${name}** [${source}] ${status}${matcher}\n`;
+      for (const { hook, isSession } of hooks) {
+        let name: string;
+        let source: string;
+        let matcher: string;
+        let config: {
+          type: string;
+          command?: string;
+          url?: string;
+          name?: string;
+        };
+
+        if (isSession) {
+          // Session hook
+          const sessionHook = hook as SessionHookEntry;
+          config = sessionHook.config as {
+            type: string;
+            command?: string;
+            url?: string;
+            name?: string;
+          };
+          name =
+            config.name ||
+            (config.type === 'command' ? config.command : undefined) ||
+            (config.type === 'http' ? config.url : undefined) ||
+            'unnamed';
+          source = formatHookSource('session');
+          matcher = sessionHook.matcher
+            ? ` (matcher: ${sessionHook.matcher})`
+            : '';
+        } else {
+          // Config hook
+          const configHook = hook as HookRegistryEntry;
+          config = configHook.config as {
+            type: string;
+            command?: string;
+            url?: string;
+            name?: string;
+          };
+          name =
+            config.name ||
+            (config.type === 'command' ? config.command : undefined) ||
+            (config.type === 'http' ? config.url : undefined) ||
+            'unnamed';
+          source = formatHookSource(configHook.source);
+          matcher = configHook.matcher
+            ? ` (matcher: ${configHook.matcher})`
+            : '';
+        }
+
+        output += `- **${name}** [${source}]${matcher}\n`;
       }
       output += '\n';
     }
@@ -114,209 +179,27 @@ const listCommand: SlashCommand = {
   },
 };
 
-const enableCommand: SlashCommand = {
-  name: 'enable',
-  get description() {
-    return t('Enable a disabled hook');
-  },
-  kind: CommandKind.BUILT_IN,
-  action: async (
-    context: CommandContext,
-    args: string,
-  ): Promise<MessageActionReturn> => {
-    const hookName = args.trim();
-    if (!hookName) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t(
-          'Please specify a hook name. Usage: /hooks enable <hook-name>',
-        ),
-      };
-    }
-
-    const { config } = context.services;
-    if (!config) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Config not loaded.'),
-      };
-    }
-
-    const hookSystem = config.getHookSystem();
-    if (!hookSystem) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Hooks are not enabled.'),
-      };
-    }
-
-    const registry = hookSystem.getRegistry();
-    registry.setHookEnabled(hookName, true);
-
-    return {
-      type: 'message',
-      messageType: 'info',
-      content: t('Hook "{{name}}" has been enabled for this session.', {
-        name: hookName,
-      }),
-    };
-  },
-  completion: async (context: CommandContext, partialArg: string) => {
-    const { config } = context.services;
-    if (!config) return [];
-
-    const hookSystem = config.getHookSystem();
-    if (!hookSystem) return [];
-
-    const registry = hookSystem.getRegistry();
-    const allHooks = registry.getAllHooks();
-
-    // Return disabled hooks for enable command (deduplicated by name)
-    const disabledHookNames = allHooks
-      .filter((hook) => !hook.enabled)
-      .map((hook) => hook.config.name || hook.config.command || '')
-      .filter((name) => name && name.startsWith(partialArg));
-    return [...new Set(disabledHookNames)];
-  },
-};
-
-const disableCommand: SlashCommand = {
-  name: 'disable',
-  get description() {
-    return t('Disable an active hook');
-  },
-  kind: CommandKind.BUILT_IN,
-  action: async (
-    context: CommandContext,
-    args: string,
-  ): Promise<MessageActionReturn> => {
-    const hookName = args.trim();
-    if (!hookName) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t(
-          'Please specify a hook name. Usage: /hooks disable <hook-name>',
-        ),
-      };
-    }
-
-    const { config } = context.services;
-    if (!config) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Config not loaded.'),
-      };
-    }
-
-    const hookSystem = config.getHookSystem();
-    if (!hookSystem) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Hooks are not enabled.'),
-      };
-    }
-
-    const registry = hookSystem.getRegistry();
-    registry.setHookEnabled(hookName, false);
-
-    return {
-      type: 'message',
-      messageType: 'info',
-      content: t('Hook "{{name}}" has been disabled for this session.', {
-        name: hookName,
-      }),
-    };
-  },
-  completion: async (context: CommandContext, partialArg: string) => {
-    const { config } = context.services;
-    if (!config) return [];
-
-    const hookSystem = config.getHookSystem();
-    if (!hookSystem) return [];
-
-    const registry = hookSystem.getRegistry();
-    const allHooks = registry.getAllHooks();
-
-    // Return enabled hooks for disable command (deduplicated by name)
-    const enabledHookNames = allHooks
-      .filter((hook) => hook.enabled)
-      .map((hook) => hook.config.name || hook.config.command || '')
-      .filter((name) => name && name.startsWith(partialArg));
-    return [...new Set(enabledHookNames)];
-  },
-};
-
 export const hooksCommand: SlashCommand = {
   name: 'hooks',
   get description() {
     return t('Manage Qwen Code hooks');
   },
   kind: CommandKind.BUILT_IN,
-  subCommands: [listCommand, enableCommand, disableCommand],
   action: async (
     context: CommandContext,
     args: string,
   ): Promise<SlashCommandActionReturn> => {
-    // If no subcommand provided, show list
-    if (!args.trim()) {
-      const result = await listCommand.action?.(context, '');
-      return result ?? { type: 'message', messageType: 'info', content: '' };
+    // In interactive mode, open the hooks dialog
+    const executionMode = context.executionMode ?? 'interactive';
+    if (executionMode === 'interactive') {
+      return {
+        type: 'dialog',
+        dialog: 'hooks',
+      };
     }
 
-    const [subcommand, ...rest] = args.trim().split(/\s+/);
-    const subArgs = rest.join(' ');
-
-    let result: SlashCommandActionReturn | void;
-    switch (subcommand.toLowerCase()) {
-      case 'list':
-        result = await listCommand.action?.(context, subArgs);
-        break;
-      case 'enable':
-        result = await enableCommand.action?.(context, subArgs);
-        break;
-      case 'disable':
-        result = await disableCommand.action?.(context, subArgs);
-        break;
-      default:
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t(
-            'Unknown subcommand: {{cmd}}. Available: list, enable, disable',
-            {
-              cmd: subcommand,
-            },
-          ),
-        };
-    }
+    // In non-interactive mode, list hooks
+    const result = await listCommand.action?.(context, args);
     return result ?? { type: 'message', messageType: 'info', content: '' };
-  },
-  completion: async (context: CommandContext, partialArg: string) => {
-    const subcommands = ['list', 'enable', 'disable'];
-    const parts = partialArg.split(/\s+/);
-
-    if (parts.length <= 1) {
-      // Complete subcommand
-      return subcommands.filter((cmd) => cmd.startsWith(partialArg));
-    }
-
-    // Complete subcommand arguments
-    const [subcommand, ...rest] = parts;
-    const subArgs = rest.join(' ');
-
-    switch (subcommand.toLowerCase()) {
-      case 'enable':
-        return enableCommand.completion?.(context, subArgs) ?? [];
-      case 'disable':
-        return disableCommand.completion?.(context, subArgs) ?? [];
-      default:
-        return [];
-    }
   },
 };

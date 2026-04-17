@@ -2,18 +2,20 @@
 
 Qwen Code supports three authentication methods. Pick the one that matches how you want to run the CLI:
 
-- **Qwen OAuth**: sign in with your `qwen.ai` account in a browser. Free with a daily quota.
+- **Qwen OAuth**: sign in with your `qwen.ai` account in a browser. **Free tier discontinued on 2026-04-15** — switch to another method.
 - **Alibaba Cloud Coding Plan**: use an API key from Alibaba Cloud. Paid subscription with diverse model options and higher quotas.
 - **API Key**: bring your own API key. Flexible to your own needs — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
-## Option 1: Qwen OAuth (Free)
+## Option 1: Qwen OAuth (Discontinued)
 
-Use this if you want the simplest setup and you're using Qwen models.
+> [!warning]
+>
+> The Qwen OAuth free tier was discontinued on 2026-04-15. Existing cached tokens may continue working briefly, but new requests will be rejected. Please switch to Alibaba Cloud Coding Plan, [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or another provider. Run `qwen auth` to configure.
 
 - **How it works**: on first start, Qwen Code opens a browser login page. After you finish, credentials are cached locally so you usually won't need to log in again.
 - **Requirements**: a `qwen.ai` account + internet access (at least for the first login).
 - **Benefits**: no API key management, automatic credential refresh.
-- **Cost & quota**: free, with a quota of **60 requests/minute** and **1,000 requests/day**.
+- **Cost & quota**: the free tier has been discontinued as of 2026-04-15.
 
 Start the CLI and follow the browser flow:
 
@@ -37,16 +39,16 @@ qwen auth qwen-oauth
 Use this if you want predictable costs with diverse model options and higher usage quotas.
 
 - **How it works**: Subscribe to the Coding Plan with a fixed monthly fee, then configure Qwen Code to use the dedicated endpoint and your subscription API key.
-- **Requirements**: Obtain an active Coding Plan subscription from [Aliyun Bailian](https://bailian.console.aliyun.com/?tab=model#/efm/coding_plan) or [Alibaba Cloud](https://bailian.console.alibabacloud.com/?tab=model#/efm/coding_plan), depending on the region of your account.
+- **Requirements**: Obtain an active Coding Plan subscription from [Alibaba Cloud ModelStudio(Beijing)](https://bailian.console.aliyun.com/cn-beijing?tab=coding-plan#/efm/coding-plan-index) or [Alibaba Cloud ModelStudio(intl)](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index), depending on the region of your account.
 - **Benefits**: Diverse model options, higher usage quotas, predictable monthly costs, access to a wide range of models (Qwen, GLM, Kimi, Minimax and more).
-- **Cost & quota**: View [Aliyun Bailian Coding Plan documentation](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961).
+- **Cost & quota**: View Aliyun ModelStudio Coding Plan documentation[Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3005961)[intl](https://modelstudio.console.alibabacloud.com/?tab=doc#/doc/?type=model&url=2840914).
 
 Alibaba Cloud Coding Plan is available in two regions:
 
-| Region                           | Console URL                                                                  |
-| -------------------------------- | ---------------------------------------------------------------------------- |
-| Aliyun Bailian (aliyun.com)      | [bailian.console.aliyun.com](https://bailian.console.aliyun.com)             |
-| Alibaba Cloud (alibabacloud.com) | [bailian.console.alibabacloud.com](https://bailian.console.alibabacloud.com) |
+| Region                       | Console URL                                                                  |
+| ---------------------------- | ---------------------------------------------------------------------------- |
+| Aliyun ModelStudio (Beijing) | [bailian.console.aliyun.com](https://bailian.console.aliyun.com)             |
+| Alibaba Cloud (intl)         | [bailian.console.alibabacloud.com](https://bailian.console.alibabacloud.com) |
 
 ### Interactive setup
 
@@ -327,8 +329,8 @@ You'll see a selector with arrow-key navigation:
 ```
 Select authentication method:
 
-> Qwen OAuth - Free · Up to 1,000 requests/day · Qwen latest models
   Alibaba Cloud Coding Plan - Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models
+  Qwen OAuth - Discontinued — switch to Coding Plan or API Key
 
 (Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)
 ```

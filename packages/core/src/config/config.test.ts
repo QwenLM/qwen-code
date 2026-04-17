@@ -8,8 +8,9 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import { Config, ApprovalMode } from './config.js';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../tools/memoryTool.js';
+import { setGeminiMdFilename as mockSetGeminiMdFilename } from '../memory/const.js';
 import {
   DEFAULT_TELEMETRY_TARGET,
   DEFAULT_OTLP_ENDPOINT,
@@ -38,6 +39,8 @@ import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import { readAutoMemoryIndex } from '../memory/store.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -57,6 +60,9 @@ vi.mock('node:fs', async (importOriginal) => {
       isDirectory: vi.fn().mockReturnValue(true),
     }),
     realpathSync: vi.fn((path) => path),
+    mkdirSync: vi.fn(),
+    writeFileSync: vi.fn(),
+    readFileSync: vi.fn(),
   };
   return {
     ...mocked,
@@ -80,6 +86,10 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi
     .fn()
     .mockResolvedValue({ memoryContent: '', fileCount: 0 }),
+}));
+
+vi.mock('../memory/store.js', () => ({
+  readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
 
 // Mock individual tools if their constructors are complex or have side effects
@@ -116,8 +126,7 @@ vi.mock('../tools/web-fetch', () => ({
 vi.mock('../tools/read-many-files', () => ({
   ReadManyFilesTool: createToolMock('read_many_files'),
 }));
-vi.mock('../tools/memoryTool', () => ({
-  MemoryTool: createToolMock('save_memory'),
+vi.mock('../memory/const.js', () => ({
   setGeminiMdFilename: vi.fn(),
   getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'), // Mock the original filename
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
@@ -347,7 +356,7 @@ describe('Server Config (config.ts)', () => {
       const mockMessageBus = { request: vi.fn() };
       const config = new Config({
         ...baseParams,
-        enableHooks: true,
+        disableAllHooks: false,
       });
       // Set messageBus using the setter
       config.setMessageBus(mockMessageBus as unknown as MessageBus);
@@ -378,7 +387,7 @@ describe('Server Config (config.ts)', () => {
     it('should not fire notification hook when hooks are disabled', async () => {
       const config = new Config({
         ...baseParams,
-        enableHooks: false,
+        disableAllHooks: true,
       });
       const authType = AuthType.USE_GEMINI;
       const mockContentConfig = {
@@ -556,6 +565,40 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(paramsWithoutMemory);
 
     expect(config.getUserMemory()).toBe('');
+  });
+
+  it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
+    const config = new Config(baseParams);
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValue(
+      '# Managed Auto-Memory Index\n\n- [Project Memory](project.md)',
+    );
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getUserMemory()).toContain('Project rules');
+    expect(config.getUserMemory()).toContain('# auto memory');
+    expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+  });
+
+  it('refreshHierarchicalMemory should include empty memory prompt when no managed auto-memory index exists', async () => {
+    const config = new Config(baseParams);
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getUserMemory()).toContain('Project rules');
+    expect(config.getUserMemory()).toContain('# auto memory');
+    expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
   });
 
   it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {
@@ -1203,6 +1246,103 @@ describe('setApprovalMode with folder trust', () => {
     expect(() => config.setApprovalMode(ApprovalMode.PLAN)).not.toThrow();
   });
 
+  describe('prePlanMode tracking', () => {
+    it('should save pre-plan mode when entering plan mode', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO_EDIT);
+    });
+
+    it('should clear pre-plan mode when leaving plan mode', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('should default to DEFAULT when no pre-plan mode was recorded', () => {
+      const config = new Config(baseParams);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('should not update pre-plan mode when already in plan mode', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.YOLO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      // Setting PLAN again should not overwrite prePlanMode
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
+    });
+  });
+
+  describe('plan file persistence', () => {
+    it('should save plan to disk', () => {
+      const config = new Config(baseParams);
+
+      config.savePlan('# My Plan\n1. Step one\n2. Step two');
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith(
+        expect.stringContaining('plans'),
+        { recursive: true },
+      );
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('.md'),
+        '# My Plan\n1. Step one\n2. Step two',
+        'utf-8',
+      );
+    });
+
+    it('should load plan from disk', () => {
+      const config = new Config(baseParams);
+      (fs.readFileSync as Mock).mockReturnValue('# Saved Plan');
+
+      const plan = config.loadPlan();
+      expect(plan).toBe('# Saved Plan');
+    });
+
+    it('should return undefined when no plan file exists', () => {
+      const config = new Config(baseParams);
+      const enoentError = new Error('ENOENT') as NodeJS.ErrnoException;
+      enoentError.code = 'ENOENT';
+      (fs.readFileSync as Mock).mockImplementation(() => {
+        throw enoentError;
+      });
+
+      const plan = config.loadPlan();
+      expect(plan).toBeUndefined();
+    });
+
+    it('should rethrow non-ENOENT errors from loadPlan', () => {
+      const config = new Config(baseParams);
+      const permError = new Error('EACCES') as NodeJS.ErrnoException;
+      permError.code = 'EACCES';
+      (fs.readFileSync as Mock).mockImplementation(() => {
+        throw permError;
+      });
+
+      expect(() => config.loadPlan()).toThrow('EACCES');
+    });
+
+    it('should use session ID in plan file path', () => {
+      const config = new Config({
+        ...baseParams,
+        sessionId: 'test-session-123',
+      });
+
+      const filePath = config.getPlanFilePath();
+      expect(filePath).toContain('test-session-123');
+      expect(filePath).toMatch(/\.md$/);
+    });
+  });
+
   describe('registerCoreTools', () => {
     beforeEach(() => {
       vi.clearAllMocks();
@@ -1581,5 +1721,38 @@ describe('Model Switching and Config Updates', () => {
     // Verify limits are now defined
     const updatedConfig = config.getContentGeneratorConfig();
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
+  });
+
+  describe('hasHooksForEvent', () => {
+    it('should return false when hookSystem is not initialized', () => {
+      const config = new Config(baseParams);
+      expect(config.hasHooksForEvent('Stop')).toBe(false);
+    });
+
+    it('should delegate to hookSystem.hasHooksForEvent when hookSystem exists', () => {
+      const config = new Config(baseParams);
+      const mockHasHooksForEvent = vi.fn().mockReturnValue(true);
+      const mockHookSystem = {
+        hasHooksForEvent: mockHasHooksForEvent,
+      };
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = mockHookSystem;
+
+      expect(config.hasHooksForEvent('UserPromptSubmit')).toBe(true);
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith('UserPromptSubmit');
+    });
+
+    it('should return false when hookSystem has no hooks for the event', () => {
+      const config = new Config(baseParams);
+      const mockHasHooksForEvent = vi.fn().mockReturnValue(false);
+      const mockHookSystem = {
+        hasHooksForEvent: mockHasHooksForEvent,
+      };
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = mockHookSystem;
+
+      expect(config.hasHooksForEvent('Stop')).toBe(false);
+      expect(mockHasHooksForEvent).toHaveBeenCalledWith('Stop');
+    });
   });
 });

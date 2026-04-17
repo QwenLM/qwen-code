@@ -268,9 +268,30 @@ describe('Gemini Client (client.ts)', () => {
   let mockConfig: Config;
   let client: GeminiClient;
   let mockGenerateContentFn: Mock;
+  let mockMemoryManager: {
+    scheduleExtract: ReturnType<typeof vi.fn>;
+    scheduleDream: ReturnType<typeof vi.fn>;
+    recall: ReturnType<typeof vi.fn>;
+  };
   beforeEach(async () => {
     vi.resetAllMocks();
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
+
+    mockMemoryManager = {
+      scheduleExtract: vi.fn().mockResolvedValue({
+        touchedTopics: [],
+        cursor: { updatedAt: new Date(0).toISOString() },
+      }),
+      scheduleDream: vi.fn().mockResolvedValue({
+        status: 'skipped',
+        skippedReason: 'min_sessions',
+      }),
+      recall: vi.fn().mockResolvedValue({
+        prompt: '',
+        selectedDocs: [],
+        strategy: 'none',
+      }),
+    };
 
     mockGenerateContentFn = vi.fn().mockResolvedValue({
       candidates: [{ content: { parts: [{ text: '{"key": "value"}' }] } }],
@@ -323,6 +344,11 @@ describe('Gemini Client (client.ts)', () => {
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
       getFileService: vi.fn().mockReturnValue(fileService),
       getMaxSessionTurns: vi.fn().mockReturnValue(0),
+      getClearContextOnIdle: vi.fn().mockReturnValue({
+        thinkingThresholdMinutes: 5,
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+      }),
       getSessionTokenLimit: vi.fn().mockReturnValue(32000),
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
@@ -360,9 +386,12 @@ describe('Gemini Client (client.ts)', () => {
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
-      getEnableHooks: vi.fn().mockReturnValue(false),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi.fn().mockReturnValue({
         debug: vi.fn(),
@@ -426,6 +455,119 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
+  describe('thinking block idle cleanup and latch', () => {
+    let mockChat: Partial<GeminiChat>;
+
+    beforeEach(() => {
+      const mockStream = (async function* () {
+        yield {
+          type: GeminiEventType.Content,
+          value: 'response',
+        };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      mockChat = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+    });
+
+    it('should not strip thoughts on active session (< 5min idle)', async () => {
+      // Simulate a recent API completion (2 minutes ago — within default 5 min threshold)
+      client['lastApiCompletionTimestamp'] = Date.now() - 2 * 60 * 1000;
+      client['thinkingClearLatched'] = false;
+
+      const gen = client.sendMessageStream(
+        [{ text: 'Hello' }],
+        new AbortController().signal,
+        'prompt-1',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of gen) {
+        /* drain */
+      }
+
+      expect(
+        mockChat.stripThoughtsFromHistoryKeepRecent,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('should latch and strip thoughts after > 5min idle', async () => {
+      // Simulate an old API completion (10 minutes ago — exceeds default 5 min threshold)
+      client['lastApiCompletionTimestamp'] = Date.now() - 10 * 60 * 1000;
+      client['thinkingClearLatched'] = false;
+
+      const gen = client.sendMessageStream(
+        [{ text: 'Hello' }],
+        new AbortController().signal,
+        'prompt-2',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of gen) {
+        /* drain */
+      }
+
+      expect(client['thinkingClearLatched']).toBe(true);
+      expect(mockChat.stripThoughtsFromHistoryKeepRecent).toHaveBeenCalledWith(
+        1,
+      );
+    });
+
+    it('should keep stripping once latched even if idle < 5min', async () => {
+      // Pre-set latch with a recent timestamp (2 minutes ago — within threshold)
+      client['lastApiCompletionTimestamp'] = Date.now() - 2 * 60 * 1000;
+      client['thinkingClearLatched'] = true;
+
+      const gen = client.sendMessageStream(
+        [{ text: 'Hello' }],
+        new AbortController().signal,
+        'prompt-3',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of gen) {
+        /* drain */
+      }
+
+      expect(client['thinkingClearLatched']).toBe(true);
+      expect(mockChat.stripThoughtsFromHistoryKeepRecent).toHaveBeenCalledWith(
+        1,
+      );
+    });
+
+    it('should update lastApiCompletionTimestamp after API call', async () => {
+      client['lastApiCompletionTimestamp'] = null;
+
+      const before = Date.now();
+      const gen = client.sendMessageStream(
+        [{ text: 'Hello' }],
+        new AbortController().signal,
+        'prompt-4',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of gen) {
+        /* drain */
+      }
+
+      expect(client['lastApiCompletionTimestamp']).toBeGreaterThanOrEqual(
+        before,
+      );
+    });
+
+    it('should reset latch and timestamp on resetChat', async () => {
+      client['lastApiCompletionTimestamp'] = Date.now();
+      client['thinkingClearLatched'] = true;
+
+      await client.resetChat();
+
+      expect(client['thinkingClearLatched']).toBe(false);
+      expect(client['lastApiCompletionTimestamp']).toBeNull();
+    });
+  });
+
   describe('tryCompressChat', () => {
     const mockGetHistory = vi.fn();
 
@@ -435,6 +577,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         setHistory: vi.fn(),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       } as unknown as GeminiChat;
     });
 
@@ -456,6 +599,7 @@ describe('Gemini Client (client.ts)', () => {
         getHistory: vi.fn((_curated?: boolean) => chatHistory),
         setHistory: vi.fn(),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockOriginalChat as GeminiChat;
 
@@ -1148,6 +1292,7 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       } as unknown as GeminiChat;
       client['chat'] = mockChat;
 
@@ -1203,6 +1348,7 @@ Other open files:
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1259,6 +1405,7 @@ Other open files:
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1288,6 +1435,182 @@ hello
       expect(mockChat.addHistory).toHaveBeenCalledWith({
         role: 'user',
         parts: expectedRequest,
+      });
+    });
+
+    it('should prepend relevant managed auto-memory prompt when recall returns content', async () => {
+      mockMemoryManager.recall.mockResolvedValue({
+        prompt: '## Relevant memory\n\nUser prefers terse responses.',
+        selectedDocs: [
+          {
+            type: 'user',
+            filePath: '/test/project/root/.qwen/memory/user.md',
+            relativePath: 'user.md',
+            filename: 'user.md',
+            title: 'User Memory',
+            description: 'User preferences',
+            body: '- User prefers terse responses.',
+            mtimeMs: 1,
+          },
+        ],
+        strategy: 'model',
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Please answer tersely' }],
+        new AbortController().signal,
+        'prompt-id-memory',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(mockMemoryManager.recall).toHaveBeenCalledWith(
+        '/test/project/root',
+        'Please answer tersely',
+        expect.objectContaining({
+          config: mockConfig,
+          excludedFilePaths: expect.any(Set),
+        }),
+      );
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          '## Relevant memory\n\nUser prefers terse responses.',
+          'Please answer tersely',
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('should track surfaced managed memory paths across user queries', async () => {
+      mockMemoryManager.recall
+        .mockResolvedValueOnce({
+          prompt: '## Relevant memory\n\nUser prefers terse responses.',
+          selectedDocs: [
+            {
+              type: 'user',
+              filePath: '/test/project/root/.qwen/memory/user.md',
+              relativePath: 'user.md',
+              filename: 'user.md',
+              title: 'User Memory',
+              description: 'User preferences',
+              body: '- User prefers terse responses.',
+              mtimeMs: 1,
+            },
+          ],
+          strategy: 'model',
+        })
+        .mockResolvedValueOnce({
+          prompt: '',
+          selectedDocs: [],
+          strategy: 'none',
+        });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const first = client.sendMessageStream(
+        [{ text: 'Please answer tersely' }],
+        new AbortController().signal,
+        'prompt-id-memory-1',
+      );
+      for await (const _ of first) {
+        // consume stream
+      }
+
+      const second = client.sendMessageStream(
+        [{ text: 'Keep it short again' }],
+        new AbortController().signal,
+        'prompt-id-memory-2',
+      );
+      for await (const _ of second) {
+        // consume stream
+      }
+
+      expect(mockMemoryManager.recall).toHaveBeenNthCalledWith(
+        2,
+        '/test/project/root',
+        'Keep it short again',
+        expect.objectContaining({
+          excludedFilePaths: new Set([
+            '/test/project/root/.qwen/memory/user.md',
+          ]),
+        }),
+      );
+    });
+
+    it('should run managed auto-memory extraction after a completed user query', async () => {
+      mockMemoryManager.scheduleExtract.mockResolvedValue({
+        touchedTopics: ['user'],
+        cursor: {
+          sessionId: 'test-session-id',
+          processedOffset: 2,
+          updatedAt: new Date(0).toISOString(),
+        },
+        systemMessage: 'Managed auto-memory updated: user.md',
+      });
+
+      const mockStream = (async function* () {
+        yield { type: GeminiEventType.Content, value: 'Done' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([
+          { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+          { role: 'model', parts: [{ text: 'Done' }] },
+        ]),
+        stripThoughtsFromHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Please answer tersely' }],
+          new AbortController().signal,
+          'prompt-id-extract',
+        ),
+      );
+
+      const recordedHistory = mockChat.getHistory?.();
+
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
+        projectRoot: '/test/project/root',
+        sessionId: 'test-session-id',
+        history: recordedHistory,
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledWith({
+        projectRoot: '/test/project/root',
+        sessionId: 'test-session-id',
+        config: mockConfig,
+      });
+      expect(events).not.toContainEqual({
+        type: GeminiEventType.HookSystemMessage,
+        value: 'Managed auto-memory updated: user.md',
       });
     });
 
@@ -1325,6 +1648,7 @@ hello
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1364,6 +1688,7 @@ Other open files:
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1409,6 +1734,7 @@ Other open files:
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1497,6 +1823,7 @@ Other open files:
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1554,6 +1881,7 @@ Other open files:
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -1635,6 +1963,7 @@ Other open files:
               { role: 'user', parts: [{ text: 'previous message' }] },
             ]),
           stripThoughtsFromHistory: vi.fn(),
+          stripThoughtsFromHistoryKeepRecent: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
       });
@@ -1888,6 +2217,7 @@ Other open files:
           getHistory: vi.fn().mockReturnValue([]), // Default empty history
           setHistory: vi.fn(),
           stripThoughtsFromHistory: vi.fn(),
+          stripThoughtsFromHistoryKeepRecent: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
 
@@ -2227,6 +2557,7 @@ Other open files:
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2264,6 +2595,7 @@ Other open files:
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2304,6 +2636,7 @@ Other open files:
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue([]),
         stripThoughtsFromHistory: vi.fn(),
+        stripThoughtsFromHistoryKeepRecent: vi.fn(),
       };
       client['chat'] = mockChat as GeminiChat;
 
@@ -2328,6 +2661,7 @@ Other open files:
           getHistory: vi.fn().mockReturnValue([]),
           setHistory: vi.fn(),
           stripThoughtsFromHistory: vi.fn(),
+          stripThoughtsFromHistoryKeepRecent: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
@@ -2360,6 +2694,7 @@ Other open files:
           getHistory: vi.fn().mockReturnValue([]),
           setHistory: vi.fn(),
           stripThoughtsFromHistory: vi.fn(),
+          stripThoughtsFromHistoryKeepRecent: vi.fn(),
           stripOrphanedUserEntriesFromHistory: vi.fn(),
         };
         client['chat'] = mockChat as GeminiChat;
@@ -2382,6 +2717,106 @@ Other open files:
         }
 
         expect(client['sessionTurnCount']).toBe(turnCountBefore);
+      });
+    });
+
+    describe('hooks fast-path optimization', () => {
+      let mockChat: Partial<GeminiChat>;
+
+      beforeEach(() => {
+        vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: CompressionStatus.COMPRESSED,
+        });
+
+        const mockStream = (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })();
+        mockTurnRunFn.mockReturnValue(mockStream);
+
+        mockChat = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          stripThoughtsFromHistory: vi.fn(),
+          stripThoughtsFromHistoryKeepRecent: vi.fn(),
+        };
+        client['chat'] = mockChat as GeminiChat;
+      });
+
+      it('should skip messageBus.request for UserPromptSubmit when hasHooksForEvent returns false', async () => {
+        // Enable hooks and provide messageBus
+        const mockMessageBus = {
+          request: vi.fn(),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-hooks-1',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // messageBus.request should NOT be called because hasHooksForEvent returned false
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+      });
+
+      it('should skip messageBus.request for Stop when hasHooksForEvent returns false', async () => {
+        const mockMessageBus = {
+          request: vi.fn(),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-hooks-2',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // messageBus.request should NOT be called for Stop hook either
+        expect(mockMessageBus.request).not.toHaveBeenCalled();
+      });
+
+      it('should not skip hooks when hasHooksForEvent returns true', async () => {
+        const mockMessageBus = {
+          request: vi.fn().mockResolvedValue({ modifiedPrompt: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'UserPromptSubmit',
+        );
+
+        const stream = client.sendMessageStream(
+          [{ text: 'Hi' }],
+          new AbortController().signal,
+          'prompt-hooks-3',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+
+        // messageBus.request SHOULD be called for UserPromptSubmit
+        expect(mockMessageBus.request).toHaveBeenCalled();
       });
     });
   });

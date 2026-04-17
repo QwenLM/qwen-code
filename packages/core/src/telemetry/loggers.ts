@@ -8,6 +8,7 @@ import type { LogAttributes, LogRecord } from '@opentelemetry/api-logs';
 import { logs } from '@opentelemetry/api-logs';
 import { SemanticAttributes } from '@opentelemetry/semantic-conventions';
 import type { Config } from '../config/config.js';
+import { isInternalPromptId } from '../utils/internalPromptIds.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import {
   EVENT_API_ERROR,
@@ -44,6 +45,11 @@ import {
   EVENT_ARENA_SESSION_STARTED,
   EVENT_ARENA_AGENT_COMPLETED,
   EVENT_ARENA_SESSION_ENDED,
+  EVENT_PROMPT_SUGGESTION,
+  EVENT_SPECULATION,
+  EVENT_MEMORY_EXTRACT,
+  EVENT_MEMORY_DREAM,
+  EVENT_MEMORY_RECALL,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -60,6 +66,9 @@ import {
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
+  recordMemoryExtractMetrics,
+  recordMemoryDreamMetrics,
+  recordMemoryRecallMetrics,
 } from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
@@ -101,7 +110,13 @@ import type {
   ArenaSessionStartedEvent,
   ArenaAgentCompletedEvent,
   ArenaSessionEndedEvent,
+  PromptSuggestionEvent,
+  SpeculationEvent,
+  MemoryExtractEvent,
+  MemoryDreamEvent,
+  MemoryRecallEvent,
 } from './types.js';
+import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
 import { uiTelemetryService } from './uiTelemetry.js';
 
@@ -113,6 +128,8 @@ function getCommonAttributes(config: Config): LogAttributes {
     'session.id': config.getSessionId(),
   };
 }
+
+export { getCommonAttributes };
 
 export function logStartSession(
   config: Config,
@@ -207,7 +224,9 @@ export function logToolCall(config: Config, event: ToolCallEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
-  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  if (!isInternalPromptId(event.prompt_id)) {
+    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  }
   QwenLogger.getInstance(config)?.logToolCallEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -375,7 +394,9 @@ export function logApiError(config: Config, event: ApiErrorEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
-  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  if (!isInternalPromptId(event.prompt_id)) {
+    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  }
   QwenLogger.getInstance(config)?.logApiErrorEvent(event);
   if (!isTelemetrySdkInitialized()) return;
 
@@ -442,7 +463,9 @@ export function logApiResponse(config: Config, event: ApiResponseEvent): void {
     'event.timestamp': new Date().toISOString(),
   } as UiEvent;
   uiTelemetryService.addEvent(uiEvent);
-  config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  if (!isInternalPromptId(event.prompt_id)) {
+    config.getChatRecordingService()?.recordUiTelemetryEvent(uiEvent);
+  }
   QwenLogger.getInstance(config)?.logApiResponseEvent(event);
   if (!isTelemetrySdkInitialized()) return;
   const attributes: LogAttributes = {
@@ -787,6 +810,11 @@ export function logModelSlashCommand(
   recordModelSlashCommand(config, event);
 }
 
+export function logHookCall(config: Config, event: HookCallEvent): void {
+  // Log to QwenLogger for RUM telemetry only
+  QwenLogger.getInstance(config)?.logHookCallEvent(event);
+}
+
 export function logExtensionInstallEvent(
   config: Config,
   event: ExtensionInstallEvent,
@@ -1059,4 +1087,169 @@ export function logArenaSessionEnded(
     event.duration_ms,
     event.winner_model_id,
   );
+}
+
+export function logPromptSuggestion(
+  config: Config,
+  event: PromptSuggestionEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_PROMPT_SUGGESTION,
+    'event.timestamp': event['event.timestamp'],
+    outcome: event.outcome,
+  };
+
+  if (event.prompt_id) {
+    attributes['prompt_id'] = event.prompt_id;
+  }
+  if (event.accept_method) {
+    attributes['accept_method'] = event.accept_method;
+  }
+  if (event.time_to_accept_ms !== undefined) {
+    attributes['time_to_accept_ms'] = event.time_to_accept_ms;
+  }
+  if (event.time_to_ignore_ms !== undefined) {
+    attributes['time_to_ignore_ms'] = event.time_to_ignore_ms;
+  }
+  if (event.time_to_first_keystroke_ms !== undefined) {
+    attributes['time_to_first_keystroke_ms'] = event.time_to_first_keystroke_ms;
+  }
+  if (event.suggestion_length !== undefined) {
+    attributes['suggestion_length'] = event.suggestion_length;
+  }
+  if (event.similarity !== undefined) {
+    attributes['similarity'] = event.similarity;
+  }
+  if (event.was_focused_when_shown !== undefined) {
+    attributes['was_focused_when_shown'] = event.was_focused_when_shown;
+  }
+  if (event.reason) {
+    attributes['reason'] = event.reason;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Prompt suggestion: ${event.outcome}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+export function logSpeculation(config: Config, event: SpeculationEvent): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_SPECULATION,
+    'event.timestamp': event['event.timestamp'],
+    outcome: event.outcome,
+    turns_used: event.turns_used,
+    files_written: event.files_written,
+    tool_use_count: event.tool_use_count,
+    duration_ms: event.duration_ms,
+    had_pipelined_suggestion: event.had_pipelined_suggestion,
+  };
+
+  if (event.boundary_type) {
+    attributes['boundary_type'] = event.boundary_type;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  const logRecord: LogRecord = {
+    body: `Speculation: ${event.outcome}.`,
+    attributes,
+  };
+  logger.emit(logRecord);
+}
+
+// ─── Auto-Memory Log Functions ───────────────────────────────────────────────
+
+export function logMemoryExtract(
+  config: Config,
+  event: MemoryExtractEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_EXTRACT,
+    'event.timestamp': event['event.timestamp'],
+    trigger: event.trigger,
+    status: event.status,
+    patches_count: event.patches_count,
+    touched_topics: event.touched_topics,
+    duration_ms: event.duration_ms,
+  };
+  if (event.skipped_reason) {
+    attributes['skipped_reason'] = event.skipped_reason;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Memory extract: ${event.status}. Patches: ${event.patches_count}. Topics: ${event.touched_topics || 'none'}.`,
+    attributes,
+  });
+  recordMemoryExtractMetrics(config, event.duration_ms, {
+    trigger: event.trigger,
+    status: event.status,
+    patches_count: event.patches_count,
+  });
+}
+
+export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_DREAM,
+    'event.timestamp': event['event.timestamp'],
+    trigger: event.trigger,
+    status: event.status,
+    deduped_entries: event.deduped_entries,
+    touched_topics_count: event.touched_topics_count,
+    touched_topics: event.touched_topics,
+    duration_ms: event.duration_ms,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Memory dream: ${event.status}. Deduped: ${event.deduped_entries}. Topics: ${event.touched_topics || 'none'}.`,
+    attributes,
+  });
+  recordMemoryDreamMetrics(config, event.duration_ms, {
+    trigger: event.trigger,
+    status: event.status,
+    deduped_entries: event.deduped_entries,
+  });
+}
+
+export function logMemoryRecall(
+  config: Config,
+  event: MemoryRecallEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_RECALL,
+    'event.timestamp': event['event.timestamp'],
+    query_length: event.query_length,
+    docs_scanned: event.docs_scanned,
+    docs_selected: event.docs_selected,
+    strategy: event.strategy,
+    duration_ms: event.duration_ms,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Memory recall: strategy=${event.strategy}. Selected ${event.docs_selected}/${event.docs_scanned} docs.`,
+    attributes,
+  });
+  recordMemoryRecallMetrics(config, event.duration_ms, {
+    strategy: event.strategy,
+    docs_selected: event.docs_selected,
+  });
 }

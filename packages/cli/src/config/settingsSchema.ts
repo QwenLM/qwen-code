@@ -107,7 +107,7 @@ export interface SettingsSchema {
 
 /**
  * Common items schema for hook definitions.
- * Used by both UserPromptSubmit and Stop hooks.
+ * Used by all hook event types in the hooks configuration.
  */
 const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
   type: 'object',
@@ -131,18 +131,36 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
       items: {
         type: 'object',
         description:
-          'A hook configuration entry that defines a command to execute.',
+          'A hook configuration entry that defines a hook to execute.',
         properties: {
           type: {
             type: 'string',
-            description: 'The type of hook.',
-            enum: ['command'],
+            description:
+              'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
+            enum: ['command', 'http'],
             required: true,
           },
           command: {
             type: 'string',
-            description: 'The command to execute when the hook is triggered.',
-            required: true,
+            description:
+              'The command to execute when the hook is triggered. Required for "command" type.',
+          },
+          url: {
+            type: 'string',
+            description:
+              'The URL to send the POST request to. Required for "http" type.',
+          },
+          headers: {
+            type: 'object',
+            description:
+              'HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).',
+            additionalProperties: { type: 'string' },
+          },
+          allowedEnvVars: {
+            type: 'array',
+            description:
+              'List of environment variables allowed for interpolation in headers and URL.',
+            items: { type: 'string' },
           },
           name: {
             type: 'string',
@@ -154,13 +172,32 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
           },
           timeout: {
             type: 'number',
-            description: 'Timeout in milliseconds for the hook execution.',
+            description: 'Timeout in seconds for the hook execution.',
           },
           env: {
             type: 'object',
             description:
               'Environment variables to set when executing the hook command.',
             additionalProperties: { type: 'string' },
+          },
+          async: {
+            type: 'boolean',
+            description:
+              'Whether to execute the hook asynchronously (non-blocking, for "command" type only).',
+          },
+          once: {
+            type: 'boolean',
+            description:
+              'Whether to execute the hook only once per session (for "http" type).',
+          },
+          statusMessage: {
+            type: 'string',
+            description: 'A message to display while the hook is executing.',
+          },
+          shell: {
+            type: 'string',
+            description: 'The shell to use for command execution.',
+            enum: ['bash', 'powershell'],
           },
         },
       },
@@ -185,6 +222,18 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {} as Record<string, MCPServerConfig>,
     description: 'Configuration for MCP servers.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
+  // Channels configuration (Telegram, Discord, etc.)
+  channels: {
+    type: 'object',
+    label: 'Channels',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as Record<string, Record<string, unknown>>,
+    description: 'Configuration for messaging channels.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
@@ -417,6 +466,15 @@ const SETTINGS_SCHEMA = {
         description: 'The color theme for the UI.',
         showInDialog: true,
       },
+      statusLine: {
+        type: 'object',
+        label: 'Status Line',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as { type: 'command'; command: string } | undefined,
+        description: 'Custom status line display configuration.',
+        showInDialog: false,
+      },
       customThemes: {
         type: 'object',
         label: 'Custom Themes',
@@ -488,7 +546,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Show welcome back dialog when returning to a project with conversation history.',
+          'Show welcome back dialog when returning to a project with conversation history. Choosing "Start new chat session" suppresses the dialog for that project until the project summary changes.',
         showInDialog: true,
       },
       enableUserFeedback: {
@@ -500,6 +558,36 @@ const SETTINGS_SCHEMA = {
         description:
           'Show optional feedback dialog after conversations to help improve Qwen performance.',
         showInDialog: true,
+      },
+      enableFollowupSuggestions: {
+        type: 'boolean',
+        label: 'Enable Follow-up Suggestions',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
+        showInDialog: true,
+      },
+      enableCacheSharing: {
+        type: 'boolean',
+        label: 'Enable Cache Sharing for Suggestions',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).',
+        showInDialog: false,
+      },
+      enableSpeculation: {
+        type: 'boolean',
+        label: 'Enable Speculative Execution',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).',
+        showInDialog: false,
       },
       accessibility: {
         type: 'object',
@@ -539,6 +627,16 @@ const SETTINGS_SCHEMA = {
         default: 0,
         description: 'The last time the feedback dialog was shown.',
         showInDialog: false,
+      },
+      compactMode: {
+        type: 'boolean',
+        label: 'Compact Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+        showInDialog: true,
       },
     },
   },
@@ -602,6 +700,17 @@ const SETTINGS_SCHEMA = {
     default: undefined as TelemetrySettings | undefined,
     description: 'Telemetry configuration.',
     showInDialog: false,
+  },
+
+  fastModel: {
+    type: 'string',
+    label: 'Fast Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.',
+    showInDialog: true,
   },
 
   model: {
@@ -814,6 +923,48 @@ const SETTINGS_SCHEMA = {
         description: 'Whether to load memory files from include directories.',
         showInDialog: false,
       },
+      clearContextOnIdle: {
+        type: 'object',
+        label: 'Clear Context On Idle',
+        category: 'Context',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for clearing stale context after idle periods. Use -1 to disable a threshold.',
+        showInDialog: false,
+        properties: {
+          thinkingThresholdMinutes: {
+            type: 'number',
+            label: 'Thinking Idle Threshold (minutes)',
+            category: 'Context',
+            requiresRestart: false,
+            default: 5 as number,
+            description:
+              'Minutes of inactivity before clearing old thinking blocks. Use -1 to disable.',
+            showInDialog: false,
+          },
+          toolResultsThresholdMinutes: {
+            type: 'number',
+            label: 'Tool Results Idle Threshold (minutes)',
+            category: 'Context',
+            requiresRestart: false,
+            default: 60 as number,
+            description:
+              'Minutes of inactivity before clearing old tool result content. Use -1 to disable.',
+            showInDialog: false,
+          },
+          toolResultsNumToKeep: {
+            type: 'number',
+            label: 'Tool Results Number To Keep',
+            category: 'Context',
+            requiresRestart: false,
+            default: 5 as number,
+            description:
+              'Number of most-recent compactable tool results to preserve when clearing. Floor at 1.',
+            showInDialog: false,
+          },
+        },
+      },
       fileFiltering: {
         type: 'object',
         label: 'File Filtering',
@@ -860,6 +1011,38 @@ const SETTINGS_SCHEMA = {
             showInDialog: true,
           },
         },
+      },
+    },
+  },
+
+  memory: {
+    type: 'object',
+    label: 'Memory',
+    category: 'Memory',
+    requiresRestart: false,
+    default: {},
+    description: 'Settings for managed auto-memory.',
+    showInDialog: false,
+    properties: {
+      enableManagedAutoMemory: {
+        type: 'boolean',
+        label: 'Enable Managed Auto-Memory',
+        category: 'Memory',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Enable background extraction of memories from conversations.',
+        showInDialog: false,
+      },
+      enableManagedAutoDream: {
+        type: 'boolean',
+        label: 'Enable Managed Auto-Dream',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable automatic consolidation (dream) of collected memories.',
+        showInDialog: false,
       },
     },
   },
@@ -930,6 +1113,16 @@ const SETTINGS_SCHEMA = {
         default: undefined as boolean | string | undefined,
         description:
           'Sandbox execution environment (can be a boolean or a path string).',
+        showInDialog: false,
+      },
+      sandboxImage: {
+        type: 'string',
+        label: 'Sandbox Image',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.',
         showInDialog: false,
       },
       shell: {
@@ -1214,6 +1407,20 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      allowedHttpHookUrls: {
+        type: 'array',
+        label: 'Allowed HTTP Hook URLs',
+        category: 'Security',
+        requiresRestart: false,
+        default: [] as string[],
+        description:
+          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).',
+        showInDialog: false,
+        items: {
+          type: 'string',
+          description: 'URL pattern (supports * wildcard)',
+        },
+      },
     },
   },
 
@@ -1404,38 +1611,15 @@ const SETTINGS_SCHEMA = {
     },
   },
 
-  hooksConfig: {
-    type: 'object',
-    label: 'Hooks Config',
+  disableAllHooks: {
+    type: 'boolean',
+    label: 'Disable All Hooks',
     category: 'Advanced',
-    requiresRestart: false,
-    default: {},
+    requiresRestart: true, // Future enhancement: consider supporting mid-session toggle for better UX
+    default: false,
     description:
-      'Hook configurations for intercepting and customizing agent behavior.',
+      'Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).',
     showInDialog: false,
-    properties: {
-      enabled: {
-        type: 'boolean',
-        label: 'Enable Hooks',
-        category: 'Advanced',
-        requiresRestart: true,
-        default: true,
-        description:
-          'Canonical toggle for the hooks system. When disabled, no hooks will be executed.',
-        showInDialog: false,
-      },
-      disabled: {
-        type: 'array',
-        label: 'Disabled Hooks',
-        category: 'Advanced',
-        requiresRestart: false,
-        default: [] as string[],
-        description:
-          'List of hook names (commands) that should be disabled. Hooks in this list will not execute even if configured.',
-        showInDialog: false,
-        mergeStrategy: MergeStrategy.UNION,
-      },
-    },
   },
 
   hooks: {
@@ -1481,6 +1665,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when notifications are sent.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PreToolUse: {
         type: 'array',
@@ -1491,6 +1676,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute before tool execution.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PostToolUse: {
         type: 'array',
@@ -1501,6 +1687,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute after successful tool execution.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PostToolUseFailure: {
         type: 'array',
@@ -1511,6 +1698,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when tool execution fails. ',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SessionStart: {
         type: 'array',
@@ -1521,6 +1709,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when a new session starts or resumes.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SessionEnd: {
         type: 'array',
@@ -1531,6 +1720,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute when a session ends.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PreCompact: {
         type: 'array',
@@ -1541,6 +1731,7 @@ const SETTINGS_SCHEMA = {
         description: 'Hooks that execute before conversation compaction.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SubagentStart: {
         type: 'array',
@@ -1552,6 +1743,7 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute when a subagent (Task tool call) is started.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       SubagentStop: {
         type: 'array',
@@ -1563,6 +1755,7 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute right before a subagent (Task tool call) concludes its response.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
       PermissionRequest: {
         type: 'array',
@@ -1574,6 +1767,7 @@ const SETTINGS_SCHEMA = {
           'Hooks that execute when a permission dialog is displayed.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
       },
     },
   },
@@ -1584,9 +1778,20 @@ const SETTINGS_SCHEMA = {
     category: 'Experimental',
     requiresRestart: true,
     default: {},
-    description: 'Setting to enable experimental features',
+    description: 'Settings to enable experimental features.',
     showInDialog: false,
-    properties: {},
+    properties: {
+      cron: {
+        type: 'boolean',
+        label: 'Enable Cron/Loop Tools',
+        category: 'Experimental',
+        requiresRestart: true,
+        default: false,
+        description:
+          'Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.',
+        showInDialog: true,
+      },
+    },
   },
 } as const satisfies SettingsSchema;
 

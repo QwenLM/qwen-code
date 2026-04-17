@@ -59,6 +59,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
+  'to toggle compact mode': 'to toggle compact mode',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -98,6 +99,7 @@ export default {
   'CLI Version': 'CLI Version',
   'Git Commit': 'Git Commit',
   Model: 'Model',
+  'Fast Model': 'Fast Model',
   Sandbox: 'Sandbox',
   'OS Platform': 'OS Platform',
   'OS Arch': 'OS Arch',
@@ -668,6 +670,135 @@ export default {
   'List all configured hooks': 'List all configured hooks',
   'Enable a disabled hook': 'Enable a disabled hook',
   'Disable an active hook': 'Disable an active hook',
+  // Hooks - Dialog
+  Hooks: 'Hooks',
+  'Loading hooks...': 'Loading hooks...',
+  'Error loading hooks:': 'Error loading hooks:',
+  'Press Escape to close': 'Press Escape to close',
+  'Press Escape, Ctrl+C, or Ctrl+D to cancel':
+    'Press Escape, Ctrl+C, or Ctrl+D to cancel',
+  'Press Space, Enter, or Escape to dismiss':
+    'Press Space, Enter, or Escape to dismiss',
+  'No hook selected': 'No hook selected',
+  // Hooks - List Step
+  'No hook events found.': 'No hook events found.',
+  '{{count}} hook configured': '{{count}} hook configured',
+  '{{count}} hooks configured': '{{count}} hooks configured',
+  'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.':
+    'This menu is read-only. To add or modify hooks, edit settings.json directly or ask Qwen Code.',
+  'Enter to select · Esc to cancel': 'Enter to select · Esc to cancel',
+  // Hooks - Detail Step
+  'Exit codes:': 'Exit codes:',
+  'Configured hooks:': 'Configured hooks:',
+  'No hooks configured for this event.': 'No hooks configured for this event.',
+  'To add hooks, edit settings.json directly or ask Qwen.':
+    'To add hooks, edit settings.json directly or ask Qwen.',
+  'Enter to select · Esc to go back': 'Enter to select · Esc to go back',
+  // Hooks - Config Detail Step
+  'Hook details': 'Hook details',
+  'Event:': 'Event:',
+  'Extension:': 'Extension:',
+  'Desc:': 'Desc:',
+  'No hook config selected': 'No hook config selected',
+  'To modify or remove this hook, edit settings.json directly or ask Qwen to help.':
+    'To modify or remove this hook, edit settings.json directly or ask Qwen to help.',
+  // Hooks - Disabled Step
+  'Hook Configuration - Disabled': 'Hook Configuration - Disabled',
+  'All hooks are currently disabled. You have {{count}} that are not running.':
+    'All hooks are currently disabled. You have {{count}} that are not running.',
+  '{{count}} configured hook': '{{count}} configured hook',
+  '{{count}} configured hooks': '{{count}} configured hooks',
+  'When hooks are disabled:': 'When hooks are disabled:',
+  'No hook commands will execute': 'No hook commands will execute',
+  'StatusLine will not be displayed': 'StatusLine will not be displayed',
+  'Tool operations will proceed without hook validation':
+    'Tool operations will proceed without hook validation',
+  'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.':
+    'To re-enable hooks, remove "disableAllHooks" from settings.json or ask Qwen Code.',
+  // Hooks - Source
+  Project: 'Project',
+  User: 'User',
+  System: 'System',
+  Extension: 'Extension',
+  'Local Settings': 'Local Settings',
+  'User Settings': 'User Settings',
+  'System Settings': 'System Settings',
+  Extensions: 'Extensions',
+  // Hooks - Status
+  '✓ Enabled': '✓ Enabled',
+  '✗ Disabled': '✗ Disabled',
+  // Hooks - Event Descriptions (short)
+  'Before tool execution': 'Before tool execution',
+  'After tool execution': 'After tool execution',
+  'After tool execution fails': 'After tool execution fails',
+  'When notifications are sent': 'When notifications are sent',
+  'When the user submits a prompt': 'When the user submits a prompt',
+  'When a new session is started': 'When a new session is started',
+  'Right before Qwen Code concludes its response':
+    'Right before Qwen Code concludes its response',
+  'When a subagent (Agent tool call) is started':
+    'When a subagent (Agent tool call) is started',
+  'Right before a subagent concludes its response':
+    'Right before a subagent concludes its response',
+  'Before conversation compaction': 'Before conversation compaction',
+  'When a session is ending': 'When a session is ending',
+  'When a permission dialog is displayed':
+    'When a permission dialog is displayed',
+  // Hooks - Event Descriptions (detailed)
+  'Input to command is JSON of tool call arguments.':
+    'Input to command is JSON of tool call arguments.',
+  'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
+    'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).',
+  'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.':
+    'Input to command is JSON with tool_name, tool_input, tool_use_id, error, error_type, is_interrupt, and is_timeout.',
+  'Input to command is JSON with notification message and type.':
+    'Input to command is JSON with notification message and type.',
+  'Input to command is JSON with original user prompt text.':
+    'Input to command is JSON with original user prompt text.',
+  'Input to command is JSON with session start source.':
+    'Input to command is JSON with session start source.',
+  'Input to command is JSON with session end reason.':
+    'Input to command is JSON with session end reason.',
+  'Input to command is JSON with agent_id and agent_type.':
+    'Input to command is JSON with agent_id and agent_type.',
+  'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.':
+    'Input to command is JSON with agent_id, agent_type, and agent_transcript_path.',
+  'Input to command is JSON with compaction details.':
+    'Input to command is JSON with compaction details.',
+  'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
+    'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.',
+  // Hooks - Exit Code Descriptions
+  'stdout/stderr not shown': 'stdout/stderr not shown',
+  'show stderr to model and continue conversation':
+    'show stderr to model and continue conversation',
+  'show stderr to user only': 'show stderr to user only',
+  'stdout shown in transcript mode (ctrl+o)':
+    'stdout shown in transcript mode (ctrl+o)',
+  'show stderr to model immediately': 'show stderr to model immediately',
+  'show stderr to user only but continue with tool call':
+    'show stderr to user only but continue with tool call',
+  'block processing, erase original prompt, and show stderr to user only':
+    'block processing, erase original prompt, and show stderr to user only',
+  'stdout shown to Qwen': 'stdout shown to Qwen',
+  'show stderr to user only (blocking errors ignored)':
+    'show stderr to user only (blocking errors ignored)',
+  'command completes successfully': 'command completes successfully',
+  'stdout shown to subagent': 'stdout shown to subagent',
+  'show stderr to subagent and continue having it run':
+    'show stderr to subagent and continue having it run',
+  'stdout appended as custom compact instructions':
+    'stdout appended as custom compact instructions',
+  'block compaction': 'block compaction',
+  'show stderr to user only but continue with compaction':
+    'show stderr to user only but continue with compaction',
+  'use hook decision if provided': 'use hook decision if provided',
+  // Hooks - Messages
+  'Config not loaded.': 'Config not loaded.',
+  'Hooks are not enabled. Enable hooks in settings to use this feature.':
+    'Hooks are not enabled. Enable hooks in settings to use this feature.',
+  'No hooks configured. Add hooks in your settings.json file.':
+    'No hooks configured. Add hooks in your settings.json file.',
+  'Configured Hooks ({{count}} total)': 'Configured Hooks ({{count}} total)',
 
   // ============================================================================
   // Commands - Session Export
@@ -775,7 +906,6 @@ export default {
   'Workspace approval mode exists and takes priority. User-level change will have no effect.':
     'Workspace approval mode exists and takes priority. User-level change will have no effect.',
   'Apply To': 'Apply To',
-  'User Settings': 'User Settings',
   'Workspace Settings': 'Workspace Settings',
 
   // ============================================================================
@@ -819,6 +949,43 @@ export default {
     'Usage: /memory add [--global|--project] <text to remember>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Attempting to save to memory {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Open auto-memory folder',
+  'Auto-memory: {{status}}': 'Auto-memory: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Auto-dream: {{status}} · {{lastDream}} · /dream to run',
+  never: 'never',
+  on: 'on',
+  off: 'off',
+  '✦ dreaming': '✦ dreaming',
+  'Remove matching entries from managed auto-memory.':
+    'Remove matching entries from managed auto-memory.',
+  'Usage: /forget <memory text to remove>':
+    'Usage: /forget <memory text to remove>',
+  'No managed auto-memory entries matched: {{query}}':
+    'No managed auto-memory entries matched: {{query}}',
+  'Show managed auto-memory status.': 'Show managed auto-memory status.',
+  'Run managed auto-memory extraction for the current session.':
+    'Run managed auto-memory extraction for the current session.',
+  'Managed auto-memory root: {{root}}': 'Managed auto-memory root: {{root}}',
+  'Managed auto-memory topics:': 'Managed auto-memory topics:',
+  'No extraction cursor found yet.': 'No extraction cursor found yet.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'No chat client available to extract memory.',
+  'Managed auto-memory extraction is already running.':
+    'Managed auto-memory extraction is already running.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Managed auto-memory extraction found no new durable memories.',
+  'Consolidate managed auto-memory topic files.':
+    'Consolidate managed auto-memory topic files.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Managed auto-memory dream found nothing to improve.',
+  'Deduplicated entries: {{count}}': 'Deduplicated entries: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Save a durable memory using the save_memory tool.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Usage: /remember [--global|--project] <text to remember>',
 
   // ============================================================================
   // Commands - MCP
@@ -829,7 +996,6 @@ export default {
     'List configured MCP servers and tools',
   'Restarts MCP servers.': 'Restarts MCP servers.',
   'Open MCP management dialog': 'Open MCP management dialog',
-  'Config not loaded.': 'Config not loaded.',
   'Could not retrieve tool registry.': 'Could not retrieve tool registry.',
   'No MCP servers configured with OAuth authentication.':
     'No MCP servers configured with OAuth authentication.',
@@ -895,7 +1061,6 @@ export default {
   prompts: 'prompts',
   '(disabled)': '(disabled)',
   'Error:': 'Error:',
-  Extension: 'Extension',
   tool: 'tool',
   tools: 'tools',
   connected: 'connected',
@@ -1024,7 +1189,10 @@ export default {
   // ============================================================================
   // Commands - Model
   // ============================================================================
-  'Switch the model for this session': 'Switch the model for this session',
+  'Switch the model for this session (--fast for suggestion model)':
+    'Switch the model for this session (--fast for suggestion model)',
+  'Set a lighter model for prompt suggestions and speculative execution':
+    'Set a lighter model for prompt suggestions and speculative execution',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',
@@ -1103,7 +1271,13 @@ export default {
   "Allow execution of: '{{command}}'?": "Allow execution of: '{{command}}'?",
   'Yes, allow always ...': 'Yes, allow always ...',
   'Always allow in this project': 'Always allow in this project',
+  'Always allow {{action}} in this project':
+    'Always allow {{action}} in this project',
   'Always allow for this user': 'Always allow for this user',
+  'Always allow {{action}} for this user':
+    'Always allow {{action}} for this user',
+  'Yes, restore previous mode ({{mode}})':
+    'Yes, restore previous mode ({{mode}})',
   'Yes, and auto-accept edits': 'Yes, and auto-accept edits',
   'Yes, and manually approve edits': 'Yes, and manually approve edits',
   'No, keep planning (esc)': 'No, keep planning (esc)',
@@ -1162,10 +1336,16 @@ export default {
   'Terms of Services and Privacy Notice':
     'Terms of Services and Privacy Notice',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models',
-  'Login with QwenChat account to use daily free quota.':
-    'Login with QwenChat account to use daily free quota.',
+  'Discontinued — switch to Coding Plan or API Key':
+    'Discontinued — switch to Coding Plan or API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
@@ -1259,8 +1439,8 @@ export default {
   unknown: 'unknown',
   "Failed to switch model to '{{modelId}}'.\n\n{{error}}":
     "Failed to switch model to '{{modelId}}'.\n\n{{error}}",
-  'Qwen 3.5 Plus — efficient hybrid model with leading coding performance':
-    'Qwen 3.5 Plus — efficient hybrid model with leading coding performance',
+  'Qwen 3.6 Plus — efficient hybrid model with leading coding performance':
+    'Qwen 3.6 Plus — efficient hybrid model with leading coding performance',
   'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)':
     'The latest Qwen Vision model from Alibaba Cloud ModelStudio (version: qwen3-vl-plus-2025-09-23)',
 
@@ -1353,6 +1533,7 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
+  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
 
   // ============================================================================
   // MCP Status
@@ -1420,6 +1601,18 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    'Add a QWEN.md file to give Qwen Code persistent project context.',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    'Use /btw to ask a quick side question without disrupting the conversation.',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    'Context is almost full! Run /compress now or start /new to continue.',
+  'Context is getting full. Use /compress to free up space.':
+    'Context is getting full. Use /compress to free up space.',
+  'Long conversation? /compress summarizes history to free context.':
+    'Long conversation? /compress summarizes history to free context.',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1720,8 +1913,8 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
-  "Paste your api key of Bailian Coding Plan and you're all set!":
-    "Paste your api key of Bailian Coding Plan and you're all set!",
+  "Paste your api key of ModelStudio Coding Plan and you're all set!":
+    "Paste your api key of ModelStudio Coding Plan and you're all set!",
   Custom: 'Custom',
   'More instructions about configuring `modelProviders` manually.':
     'More instructions about configuring `modelProviders` manually.',
@@ -1842,16 +2035,19 @@ export default {
     '⚠️  No authentication method configured.\n',
   'Run one of the following commands to get started:\n':
     'Run one of the following commands to get started:\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n',
   'Or simply run:': 'Or simply run:',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Interactive authentication setup\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Authentication Method: Qwen OAuth',
-  '  Type: Free tier': '  Type: Free tier',
-  '  Limit: Up to 1,000 requests/day': '  Limit: Up to 1,000 requests/day',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  Type: Free tier (discontinued 2026-04-15)',
+  '  Limit: No longer available': '  Limit: No longer available',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.',
   '  Models: Qwen latest models\n': '  Models: Qwen latest models\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Authentication Method: Alibaba Cloud Coding Plan',
@@ -1876,4 +2072,23 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
+  compact: 'compact',
+  'compact mode: on (Ctrl+O off)': 'compact mode: on (Ctrl+O off)',
+  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
+    'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+  'Press Ctrl+O to show full tool output':
+    'Press Ctrl+O to show full tool output',
+
+  'Switch to plan mode or exit plan mode':
+    'Switch to plan mode or exit plan mode',
+  'Exited plan mode. Previous approval mode restored.':
+    'Exited plan mode. Previous approval mode restored.',
+  'Enabled plan mode. The agent will analyze and plan without executing tools.':
+    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+  'Already in plan mode. Use "/plan exit" to exit plan mode.':
+    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+  'Not in plan mode. Use "/plan" to enter plan mode first.':
+    'Not in plan mode. Use "/plan" to enter plan mode first.',
+
+  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
 };

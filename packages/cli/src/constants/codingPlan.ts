@@ -54,7 +54,20 @@ export function generateCodingPlanTemplate(
     return [
       {
         id: 'qwen3.5-plus',
-        name: '[Bailian Coding Plan] qwen3.5-plus',
+        name: '[ModelStudio Coding Plan] qwen3.5-plus',
+        baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
+        envKey: CODING_PLAN_ENV_KEY,
+        generationConfig: {
+          extra_body: {
+            enable_thinking: true,
+          },
+          contextWindowSize: 1000000,
+        },
+      },
+      {
+        id: 'qwen3.6-plus',
+        name: '[ModelStudio Coding Plan] qwen3.6-plus',
+        description: 'Currently available to Pro subscribers only.',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -66,7 +79,7 @@ export function generateCodingPlanTemplate(
       },
       {
         id: 'glm-5',
-        name: '[Bailian Coding Plan] glm-5',
+        name: '[ModelStudio Coding Plan] glm-5',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -78,7 +91,7 @@ export function generateCodingPlanTemplate(
       },
       {
         id: 'kimi-k2.5',
-        name: '[Bailian Coding Plan] kimi-k2.5',
+        name: '[ModelStudio Coding Plan] kimi-k2.5',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -90,7 +103,7 @@ export function generateCodingPlanTemplate(
       },
       {
         id: 'MiniMax-M2.5',
-        name: '[Bailian Coding Plan] MiniMax-M2.5',
+        name: '[ModelStudio Coding Plan] MiniMax-M2.5',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -102,7 +115,7 @@ export function generateCodingPlanTemplate(
       },
       {
         id: 'qwen3-coder-plus',
-        name: '[Bailian Coding Plan] qwen3-coder-plus',
+        name: '[ModelStudio Coding Plan] qwen3-coder-plus',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -111,7 +124,7 @@ export function generateCodingPlanTemplate(
       },
       {
         id: 'qwen3-coder-next',
-        name: '[Bailian Coding Plan] qwen3-coder-next',
+        name: '[ModelStudio Coding Plan] qwen3-coder-next',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -120,7 +133,7 @@ export function generateCodingPlanTemplate(
       },
       {
         id: 'qwen3-max-2026-01-23',
-        name: '[Bailian Coding Plan] qwen3-max-2026-01-23',
+        name: '[ModelStudio Coding Plan] qwen3-max-2026-01-23',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -132,7 +145,7 @@ export function generateCodingPlanTemplate(
       },
       {
         id: 'glm-4.7',
-        name: '[Bailian Coding Plan] glm-4.7',
+        name: '[ModelStudio Coding Plan] glm-4.7',
         baseUrl: 'https://coding.dashscope.aliyuncs.com/v1',
         envKey: CODING_PLAN_ENV_KEY,
         generationConfig: {
@@ -145,11 +158,24 @@ export function generateCodingPlanTemplate(
     ];
   }
 
-  // Global region uses Bailian Coding Plan branding for Global/Intl
+  // Global region uses ModelStudio Coding Plan branding for Global/Intl
   return [
     {
       id: 'qwen3.5-plus',
-      name: '[Bailian Coding Plan for Global/Intl] qwen3.5-plus',
+      name: '[ModelStudio Coding Plan for Global/Intl] qwen3.5-plus',
+      baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
+      envKey: CODING_PLAN_ENV_KEY,
+      generationConfig: {
+        extra_body: {
+          enable_thinking: true,
+        },
+        contextWindowSize: 1000000,
+      },
+    },
+    {
+      id: 'qwen3.6-plus',
+      name: '[ModelStudio Coding Plan for Global/Intl] qwen3.6-plus',
+      description: 'Currently available to Pro subscribers only.',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
@@ -161,7 +187,7 @@ export function generateCodingPlanTemplate(
     },
     {
       id: 'qwen3-coder-plus',
-      name: '[Bailian Coding Plan for Global/Intl] qwen3-coder-plus',
+      name: '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-plus',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
@@ -170,7 +196,7 @@ export function generateCodingPlanTemplate(
     },
     {
       id: 'qwen3-coder-next',
-      name: '[Bailian Coding Plan for Global/Intl] qwen3-coder-next',
+      name: '[ModelStudio Coding Plan for Global/Intl] qwen3-coder-next',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
@@ -179,7 +205,7 @@ export function generateCodingPlanTemplate(
     },
     {
       id: 'qwen3-max-2026-01-23',
-      name: '[Bailian Coding Plan for Global/Intl] qwen3-max-2026-01-23',
+      name: '[ModelStudio Coding Plan for Global/Intl] qwen3-max-2026-01-23',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
@@ -191,7 +217,7 @@ export function generateCodingPlanTemplate(
     },
     {
       id: 'glm-4.7',
-      name: '[Bailian Coding Plan for Global/Intl] glm-4.7',
+      name: '[ModelStudio Coding Plan for Global/Intl] glm-4.7',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
@@ -203,7 +229,7 @@ export function generateCodingPlanTemplate(
     },
     {
       id: 'glm-5',
-      name: '[Bailian Coding Plan for Global/Intl] glm-5',
+      name: '[ModelStudio Coding Plan for Global/Intl] glm-5',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
@@ -215,7 +241,7 @@ export function generateCodingPlanTemplate(
     },
     {
       id: 'MiniMax-M2.5',
-      name: '[Bailian Coding Plan for Global/Intl] MiniMax-M2.5',
+      name: '[ModelStudio Coding Plan for Global/Intl] MiniMax-M2.5',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {
@@ -227,7 +253,7 @@ export function generateCodingPlanTemplate(
     },
     {
       id: 'kimi-k2.5',
-      name: '[Bailian Coding Plan for Global/Intl] kimi-k2.5',
+      name: '[ModelStudio Coding Plan for Global/Intl] kimi-k2.5',
       baseUrl: 'https://coding-intl.dashscope.aliyuncs.com/v1',
       envKey: CODING_PLAN_ENV_KEY,
       generationConfig: {

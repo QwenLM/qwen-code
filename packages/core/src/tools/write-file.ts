@@ -9,6 +9,7 @@ import path from 'node:path';
 import * as Diff from 'diff';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
+import { isAutoMemPath } from '../memory/paths.js';
 import type {
   FileDiff,
   ToolCallConfirmationDetails,
@@ -25,7 +26,12 @@ import {
   ToolConfirmationOutcome,
 } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
-import { FileEncoding, needsUtf8Bom } from '../services/fileSystemService.js';
+import {
+  FileEncoding,
+  needsUtf8Bom,
+  detectLineEnding,
+} from '../services/fileSystemService.js';
+import type { LineEnding } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
@@ -34,7 +40,6 @@ import type {
   ModifiableDeclarativeTool,
   ModifyContext,
 } from './modifiable-tool.js';
-import { IdeClient } from '../ide/ide-client.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
 import { FileOperation } from '../telemetry/metrics.js';
@@ -96,9 +101,14 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Write operations always need user confirmation.
+   * Write operations always need user confirmation, except for managed
+   * auto-memory files which are written autonomously by the model.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    const projectRoot = this.config.getProjectRoot();
+    if (isAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
+      return 'allow';
+    }
     return 'ask';
   }
 
@@ -138,12 +148,6 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       DEFAULT_DIFF_OPTIONS,
     );
 
-    const ideClient = await IdeClient.getInstance();
-    const ideConfirmation =
-      this.config.getIdeMode() && ideClient.isDiffingEnabled()
-        ? ideClient.openDiff(this.params.file_path, this.params.content)
-        : undefined;
-
     const confirmationDetails: ToolEditConfirmationDetails = {
       type: 'edit',
       title: `Confirm Write: ${shortenPath(relativePath)}`,
@@ -156,15 +160,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         if (outcome === ToolConfirmationOutcome.ProceedAlways) {
           this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
         }
-
-        if (ideConfirmation) {
-          const result = await ideConfirmation;
-          if (result.status === 'accepted' && result.content) {
-            this.params.content = result.content;
-          }
-        }
       },
-      ideConfirmation,
     };
     return confirmationDetails;
   }
@@ -177,6 +173,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     let originalContent = '';
     let useBOM = false;
     let detectedEncoding: string | undefined;
+    let detectedLineEnding: LineEnding | undefined;
     const dirName = path.dirname(file_path);
     if (fileExists) {
       try {
@@ -191,6 +188,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
             fileInfo.content.codePointAt(0) === 0xfeff;
         }
         detectedEncoding = fileInfo._meta?.encoding || 'utf-8';
+        detectedLineEnding = detectLineEnding(fileInfo.content);
         originalContent = fileInfo.content;
         fileExists = true; // File exists and was read
       } catch (err) {
@@ -239,6 +237,7 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         _meta: {
           bom: useBOM,
           encoding: detectedEncoding,
+          lineEnding: detectedLineEnding,
         },
       });
 

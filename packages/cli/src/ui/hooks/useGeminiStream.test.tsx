@@ -8,7 +8,7 @@
 import type { Mock, MockInstance } from 'vitest';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act, waitFor } from '@testing-library/react';
-import { useGeminiStream } from './useGeminiStream.js';
+import { useGeminiStream, classifyApiError } from './useGeminiStream.js';
 import * as atCommandProcessor from './atCommandProcessor.js';
 import type {
   TrackedToolCall,
@@ -50,6 +50,7 @@ const MockedGeminiClientClass = vi.hoisted(() =>
     this.startChat = mockStartChat;
     this.sendMessageStream = mockSendMessageStream;
     this.addHistory = vi.fn();
+    this.consumePendingMemoryTaskPromises = vi.fn().mockReturnValue([]);
     this.getChatRecordingService = vi.fn().mockReturnValue({
       recordThought: vi.fn(),
       initialize: vi.fn(),
@@ -204,6 +205,8 @@ describe('useGeminiStream', () => {
         .mockReturnValue(contentGeneratorConfig),
       getMaxSessionTurns: vi.fn(() => 50),
       getArenaAgentClient: vi.fn(() => null),
+      isCronEnabled: vi.fn(() => false),
+      getCronScheduler: vi.fn(() => null),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
@@ -1058,7 +1061,7 @@ describe('useGeminiStream', () => {
       const { result } = renderTestHook();
 
       await act(async () => {
-        await result.current.submitQuery('/memory add "test fact"');
+        await result.current.submitQuery('/save-test-fact "test fact"');
       });
 
       await waitFor(() => {
@@ -3225,5 +3228,400 @@ describe('useGeminiStream', () => {
         expect(result.current.loopDetectionConfirmationRequest).not.toBeNull();
       });
     });
+  });
+
+  describe('UserPromptSubmitBlocked Event', () => {
+    it('should handle UserPromptSubmitBlocked event and add blocked history item', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.UserPromptSubmitBlocked,
+            value: {
+              reason: 'Hook blocked due to security policy',
+              originalPrompt: 'This is the original user prompt',
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('This is the original user prompt');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'user_prompt_submit_blocked',
+            reason: 'Hook blocked due to security policy',
+            originalPrompt: 'This is the original user prompt',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Verify streaming state transitions correctly
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should move pending history item before adding UserPromptSubmitBlocked event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Partial response before block',
+          };
+          yield {
+            type: ServerGeminiEventType.UserPromptSubmitBlocked,
+            value: {
+              reason: 'Security violation detected',
+              originalPrompt: 'Execute system command',
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('Execute system command');
+      });
+
+      // Verify content was added first
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'Partial response before block',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Then verify blocked event was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'user_prompt_submit_blocked',
+            reason: 'Security violation detected',
+            originalPrompt: 'Execute system command',
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+  });
+
+  describe('StopHookLoop Event', () => {
+    it('should handle StopHookLoop event and add stop hook loop history item', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 3,
+              reasons: [
+                'Reason 1: Continue analysis',
+                'Reason 2: More details needed',
+                'Reason 3: Incomplete response',
+              ],
+              stopHookCount: 3,
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test query with stop hooks');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_loop',
+            iterationCount: 3,
+            reasons: [
+              'Reason 1: Continue analysis',
+              'Reason 2: More details needed',
+              'Reason 3: Incomplete response',
+            ],
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Verify streaming state transitions correctly
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should move pending history item before adding StopHookLoop event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Initial response before loop',
+          };
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 5,
+              reasons: ['Hook reason 1', 'Hook reason 2'],
+              stopHookCount: 2,
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('query triggering stop hooks');
+      });
+
+      // Verify content was added first
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'Initial response before loop',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Then verify stop hook loop event was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_loop',
+            iterationCount: 5,
+            reasons: ['Hook reason 1', 'Hook reason 2'],
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+
+    it('should handle single iteration StopHookLoop event', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.StopHookLoop,
+            value: {
+              iterationCount: 1,
+              reasons: ['Single hook execution'],
+            },
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('single iteration query');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_loop',
+            iterationCount: 1,
+            reasons: ['Single hook execution'],
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+  });
+
+  describe('HookSystemMessage Event', () => {
+    it('should handle HookSystemMessage event and add stop_hook_system_message history item', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.HookSystemMessage,
+            value: '🔄 Ralph iteration 3 | No completion promise set',
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('test query with hook system message');
+      });
+
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_system_message',
+            message: '🔄 Ralph iteration 3 | No completion promise set',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      expect(result.current.streamingState).toBe(StreamingState.Idle);
+    });
+
+    it('should display HookSystemMessage after content', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Here is the response',
+          };
+          yield {
+            type: ServerGeminiEventType.HookSystemMessage,
+            value: 'Stop hook feedback message',
+          };
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery(
+          'query with response and hook message',
+        );
+      });
+
+      // Verify content was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'gemini',
+            text: 'Here is the response',
+          }),
+          expect.any(Number),
+        );
+      });
+
+      // Verify hook system message was added
+      await waitFor(() => {
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'stop_hook_system_message',
+            message: 'Stop hook feedback message',
+          }),
+          expect.any(Number),
+        );
+      });
+    });
+  });
+});
+
+describe('classifyApiError', () => {
+  it('should classify rate limit errors by status code 429', () => {
+    expect(classifyApiError({ message: 'error', status: 429 })).toBe(
+      'rate_limit',
+    );
+  });
+
+  it('should classify rate limit errors by message', () => {
+    expect(classifyApiError({ message: 'Rate limit exceeded' })).toBe(
+      'rate_limit',
+    );
+  });
+
+  it('should classify authentication errors by status code 401', () => {
+    expect(classifyApiError({ message: 'error', status: 401 })).toBe(
+      'authentication_failed',
+    );
+  });
+
+  it('should classify authentication errors by message', () => {
+    expect(classifyApiError({ message: 'Unauthorized access' })).toBe(
+      'authentication_failed',
+    );
+  });
+
+  it('should classify billing errors by status code 402', () => {
+    expect(classifyApiError({ message: 'error', status: 402 })).toBe(
+      'billing_error',
+    );
+  });
+
+  it('should classify billing errors by status code 403', () => {
+    expect(classifyApiError({ message: 'error', status: 403 })).toBe(
+      'billing_error',
+    );
+  });
+
+  it('should classify billing errors by message containing billing', () => {
+    expect(classifyApiError({ message: 'Billing issue detected' })).toBe(
+      'billing_error',
+    );
+  });
+
+  it('should classify billing errors by message containing quota', () => {
+    expect(classifyApiError({ message: 'Quota exceeded' })).toBe(
+      'billing_error',
+    );
+  });
+
+  it('should classify invalid request errors by status code 400', () => {
+    expect(classifyApiError({ message: 'error', status: 400 })).toBe(
+      'invalid_request',
+    );
+  });
+
+  it('should classify invalid request errors by message', () => {
+    expect(classifyApiError({ message: 'Invalid request format' })).toBe(
+      'invalid_request',
+    );
+  });
+
+  it('should classify server errors by status code 500', () => {
+    expect(classifyApiError({ message: 'error', status: 500 })).toBe(
+      'server_error',
+    );
+  });
+
+  it('should classify server errors by status code 502', () => {
+    expect(classifyApiError({ message: 'error', status: 502 })).toBe(
+      'server_error',
+    );
+  });
+
+  it('should classify server errors by status code 503', () => {
+    expect(classifyApiError({ message: 'error', status: 503 })).toBe(
+      'server_error',
+    );
+  });
+
+  it('should classify max output tokens errors by message', () => {
+    expect(classifyApiError({ message: 'max_tokens limit reached' })).toBe(
+      'max_output_tokens',
+    );
+  });
+
+  it('should classify token limit errors by message', () => {
+    expect(classifyApiError({ message: 'Token limit exceeded' })).toBe(
+      'max_output_tokens',
+    );
+  });
+
+  it('should return unknown for unrecognized errors', () => {
+    expect(classifyApiError({ message: 'Some random error' })).toBe('unknown');
+  });
+
+  it('should return unknown for empty message', () => {
+    expect(classifyApiError({ message: '' })).toBe('unknown');
+  });
+
+  it('should handle case insensitive matching', () => {
+    expect(classifyApiError({ message: 'RATE LIMIT exceeded' })).toBe(
+      'rate_limit',
+    );
+    expect(classifyApiError({ message: 'UNAUTHORIZED' })).toBe(
+      'authentication_failed',
+    );
+    expect(classifyApiError({ message: 'BILLING error' })).toBe(
+      'billing_error',
+    );
   });
 });

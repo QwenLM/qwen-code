@@ -38,6 +38,7 @@ function formatModalities(modalities?: InputModalities): string {
 
 interface ModelDialogProps {
   onClose: () => void;
+  isFastModelMode?: boolean;
 }
 
 function maskApiKey(apiKey: string | undefined): string {
@@ -130,7 +131,10 @@ function DetailRow({
   );
 }
 
-export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
+export function ModelDialog({
+  onClose,
+  isFastModelMode,
+}: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
   const settings = useSettings();
@@ -209,11 +213,19 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
           const value =
             isRuntime && snapshotId ? snapshotId : `${t2}::${model.id}`;
 
+          const isQwenOAuth = t2 === AuthType.QWEN_OAUTH;
+
           const title = (
             <Text>
               <Text
                 bold
-                color={isRuntime ? theme.status.warning : theme.text.accent}
+                color={
+                  isQwenOAuth
+                    ? theme.status.warning
+                    : isRuntime
+                      ? theme.status.warning
+                      : theme.text.accent
+                }
               >
                 [{t2}]
               </Text>
@@ -221,15 +233,21 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
               {isRuntime && (
                 <Text color={theme.status.warning}> (Runtime)</Text>
               )}
+              {isQwenOAuth && !isRuntime && (
+                <Text color={theme.status.warning}> ({t('Discontinued')})</Text>
+              )}
             </Text>
           );
 
-          // Include runtime indicator in description
+          // Include runtime / discontinued indicator in description
           let description = model.description || '';
           if (isRuntime) {
             description = description
               ? `${description} (Runtime)`
               : 'Runtime model';
+          }
+          if (isQwenOAuth && !isRuntime) {
+            description = t('Discontinued — switch to Coding Plan or API Key');
           }
 
           return {
@@ -243,10 +261,17 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
     [availableModelEntries],
   );
 
-  const preferredModelId = config?.getModel() || MAINLINE_CODER_MODEL;
+  // In fast model mode, default to the currently configured fast model
+  const fastModelSetting = settings?.merged?.fastModel as string | undefined;
+  const preferredModelId =
+    isFastModelMode && fastModelSetting
+      ? fastModelSetting
+      : config?.getModel() || MAINLINE_CODER_MODEL;
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
-  const activeRuntimeSnapshot = config?.getActiveRuntimeModelSnapshot?.();
+  const activeRuntimeSnapshot = isFastModelMode
+    ? undefined // fast model is never a runtime model
+    : config?.getActiveRuntimeModelSnapshot?.();
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
     : authType
@@ -255,7 +280,7 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
 
   useKeypress(
     (key) => {
-      if (key.name === 'escape') {
+      if (key.name === 'escape' || (key.name === 'left' && isFastModelMode)) {
         onClose();
       }
     },
@@ -286,6 +311,52 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
   const handleSelect = useCallback(
     async (selected: string) => {
       setErrorMessage(null);
+
+      // Fast model mode: just save the model ID and close
+      if (isFastModelMode) {
+        // Extract model ID from selection key (format: "authType::modelId" or "$runtime|authType|modelId")
+        let modelId: string;
+        if (selected.includes('::')) {
+          modelId = selected.split('::').slice(1).join('::');
+        } else if (selected.startsWith('$runtime|')) {
+          const parts = selected.split('|');
+          modelId = parts[2] ?? selected;
+        } else {
+          modelId = selected;
+        }
+        const scope = getPersistScopeForModelSelection(settings);
+        settings.setValue(scope, 'fastModel', modelId);
+        // Sync the runtime Config so forked agents pick up the change immediately.
+        config?.setFastModel(modelId);
+        uiState?.historyManager.addItem(
+          {
+            type: 'success',
+            text: `${t('Fast Model')}: ${modelId}`,
+          },
+          Date.now(),
+        );
+        onClose();
+        return;
+      }
+
+      // Block selection of discontinued qwen-oauth models
+      // (only block non-runtime OAuth; runtime OAuth models from existing
+      //  cached tokens are still allowed to work until the server rejects them)
+      const isQwenOAuthSelection =
+        selected.startsWith(`${AuthType.QWEN_OAUTH}::`) ||
+        (selected.startsWith('$runtime|') &&
+          selected.split('|')[1] === AuthType.QWEN_OAUTH);
+      const isRuntimeOAuthSelection = selected.startsWith(
+        `$runtime|${AuthType.QWEN_OAUTH}|`,
+      );
+      if (isQwenOAuthSelection && !isRuntimeOAuthSelection) {
+        setErrorMessage(
+          t(
+            'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.',
+          ),
+        );
+        return;
+      }
 
       let after: ContentGeneratorConfig | undefined;
       let effectiveAuthType: AuthType | undefined;
@@ -362,7 +433,15 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
       });
       onClose();
     },
-    [authType, config, onClose, settings, uiState, setErrorMessage],
+    [
+      authType,
+      config,
+      onClose,
+      settings,
+      uiState,
+      setErrorMessage,
+      isFastModelMode,
+    ],
   );
 
   const hasModels = MODEL_OPTIONS.length > 0;
@@ -417,6 +496,14 @@ export function ModelDialog({ onClose }: ModelDialogProps): React.JSX.Element {
             borderRight={false}
             borderColor={theme.border.default}
           />
+          {highlightedEntry.authType === AuthType.QWEN_OAUTH &&
+            !highlightedEntry.isRuntime && (
+              <Box marginTop={1}>
+                <Text color={theme.status.warning}>
+                  ⚠ {t('Discontinued — switch to Coding Plan or API Key')}
+                </Text>
+              </Box>
+            )}
           <DetailRow
             label={t('Modality')}
             value={formatModalities(highlightedEntry.model.modalities)}

@@ -39,6 +39,10 @@ export const EVENT_SKILL_LAUNCH = 'qwen-code.skill_launch';
 export const EVENT_AUTH = 'qwen-code.auth';
 export const EVENT_USER_FEEDBACK = 'qwen-code.user_feedback';
 
+// Prompt Suggestion Events
+export const EVENT_PROMPT_SUGGESTION = 'qwen-code.prompt_suggestion';
+export const EVENT_SPECULATION = 'qwen-code.speculation';
+
 // Arena Events
 export const EVENT_ARENA_SESSION_STARTED = 'qwen-code.arena_session_started';
 export const EVENT_ARENA_AGENT_COMPLETED = 'qwen-code.arena_agent_completed';
@@ -49,3 +53,8 @@ export const EVENT_STARTUP_PERFORMANCE = 'qwen-code.startup.performance';
 export const EVENT_MEMORY_USAGE = 'qwen-code.memory.usage';
 export const EVENT_PERFORMANCE_BASELINE = 'qwen-code.performance.baseline';
 export const EVENT_PERFORMANCE_REGRESSION = 'qwen-code.performance.regression';
+
+// Managed Auto-Memory Events
+export const EVENT_MEMORY_EXTRACT = 'qwen-code.memory.extract';
+export const EVENT_MEMORY_DREAM = 'qwen-code.memory.dream';
+export const EVENT_MEMORY_RECALL = 'qwen-code.memory.recall';

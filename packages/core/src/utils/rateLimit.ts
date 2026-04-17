@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { getErrorStatus } from './errors.js';
 import { isApiError, isStructuredError } from './quotaErrorDetection.js';
 
 // Known rate-limit error codes across providers.
@@ -22,6 +23,8 @@ export interface RetryInfo {
   maxRetries: number;
   /** Delay in milliseconds before the retry happens. */
   delayMs: number;
+  /** When called, resolves the delay promise early so the retry happens immediately. */
+  skipDelay: () => void;
 }
 
 /**
@@ -47,7 +50,13 @@ export function isRateLimitError(
  * Mirrors the same parsing patterns used by parseAndFormatApiError.
  */
 function getErrorCode(error: unknown): number | null {
-  if (isApiError(error)) return Number(error.error.code) || null;
+  // ApiError (.error.code) — fall through when the code is not a finite number
+  // (e.g. DashScope `"code":"Throttling.AllocationQuota"`) so later handlers
+  // can still recover a status from `.status` or the message.
+  if (isApiError(error)) {
+    const n = Number(error.error.code);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
 
   // JSON in string / Error.message — check BEFORE isStructuredError because
   // Error instances also satisfy isStructuredError (both have .message).
@@ -62,16 +71,21 @@ function getErrorCode(error: unknown): number | null {
     if (i !== -1) {
       try {
         const p = JSON.parse(msg.substring(i)) as unknown;
-        if (isApiError(p)) return Number(p.error.code) || null;
+        if (isApiError(p)) {
+          const n = Number(p.error.code);
+          if (Number.isFinite(n) && n > 0) return n;
+        }
       } catch {
         /* not valid JSON */
       }
     }
   }
 
-  // StructuredError (.status) — plain objects from Gemini SDK
-  if (isStructuredError(error)) {
-    return typeof error.status === 'number' ? error.status : null;
+  // StructuredError (.status) — plain objects from Gemini SDK.
+  // Fall through when .status is missing so the getErrorStatus fallback
+  // below can still recover a status from streamed SSE error frames.
+  if (isStructuredError(error) && typeof error.status === 'number') {
+    return error.status;
   }
 
   // HttpError (.status on Error)
@@ -80,5 +94,9 @@ function getErrorCode(error: unknown): number | null {
     if (typeof s === 'number') return s;
   }
 
-  return null;
+  // Final fallback: delegate to getErrorStatus which also parses
+  // `HTTP_STATUS/NNN` out of streamed SSE error frames (e.g. DashScope
+  // `Throttling.AllocationQuota` where the SDK never surfaces a real HTTP
+  // status because the stream opened with 200 OK).
+  return getErrorStatus(error) ?? null;
 }

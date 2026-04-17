@@ -13,7 +13,6 @@ import {
   // All ToolCall components from webui
   GenericToolCall,
   ThinkToolCall,
-  SaveMemoryToolCall,
   EditToolCall,
   WriteToolCall,
   SearchToolCall,
@@ -33,6 +32,11 @@ export const getToolCallComponent = (kind: string): FC<BaseToolCallProps> => {
   // Route to specialized components
   switch (normalizedKind) {
     case 'read':
+    case 'read_file':
+    case 'read_many_files':
+    case 'readmanyfiles':
+    case 'list_directory':
+    case 'listfiles':
       return ReadToolCall;
 
     case 'write':
@@ -62,11 +66,6 @@ export const getToolCallComponent = (kind: string): FC<BaseToolCallProps> => {
     case 'think':
     case 'thinking':
       return ThinkToolCall;
-
-    case 'save_memory':
-    case 'savememory':
-    case 'memory':
-      return SaveMemoryToolCall;
 
     case 'fetch':
     case 'web_fetch':

@@ -52,6 +52,23 @@ export interface SubagentConfig {
   tools?: string[];
 
   /**
+   * Optional list of tool names that this subagent is NOT allowed to use.
+   * Applied after the allowlist (`tools`) and MCP bypass. Supports
+   * MCP server-level patterns (e.g., "mcp__server" blocks all tools
+   * from that server).
+   */
+  disallowedTools?: string[];
+
+  /**
+   * Optional permission mode for this subagent.
+   * Controls how tool calls are approved during execution.
+   * Valid values: 'default', 'plan', 'auto-edit', 'yolo'.
+   * If omitted, the resolved mode depends on the parent's mode
+   * (permissive parent modes win; otherwise defaults to 'auto-edit').
+   */
+  approvalMode?: string;
+
+  /**
    * System prompt content that defines the subagent's behavior.
    * Supports ${variable} templating via ContextState.
    */
@@ -64,10 +81,12 @@ export interface SubagentConfig {
   filePath?: string;
 
   /**
-   * Optional model configuration. If not provided, uses defaults.
-   * Can specify model name, temperature, and top_p values.
+   * Optional model selector.
+   * - Omitted or 'inherit': use the main conversation model
+   * - 'model-id': use the given model with the main conversation authType
+   * - 'authType:model-id': use the given authType and model ID
    */
-  modelConfig?: Partial<ModelConfig>;
+  model?: string;
 
   /**
    * Optional runtime configuration. If not provided, uses defaults.

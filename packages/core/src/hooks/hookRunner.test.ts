@@ -231,6 +231,65 @@ describe('HookRunner', () => {
       expect(result.output?.reason).toBe('stderr error message');
     });
 
+    it('should parse JSON from stderr on exit code 2 to preserve additionalContext', async () => {
+      // Exit code 2 with JSON in stderr should parse structured output
+      // to preserve hookSpecificOutput.additionalContext
+      const jsonOutput = JSON.stringify({
+        decision: 'deny',
+        reason: 'blocked by policy',
+        hookSpecificOutput: {
+          hookEventName: 'PostToolUse',
+          additionalContext: '[Hook] Tool execution blocked with context',
+        },
+      });
+      const mockProcess = createMockProcess(2, 'stdout ignored', jsonOutput);
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'exit 2',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toBe('blocked by policy');
+      expect(result.output?.hookSpecificOutput).toEqual({
+        hookEventName: 'PostToolUse',
+        additionalContext: '[Hook] Tool execution blocked with context',
+      });
+    });
+
+    it('should fall back to plain text when stderr JSON is invalid on exit code 2', async () => {
+      const mockProcess = createMockProcess(2, '', 'plain blocking error');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'exit 2',
+        source: HooksConfigSource.Project,
+      };
+      const input = createMockInput();
+
+      const result = await hookRunner.executeHook(
+        hookConfig,
+        HookEventName.PreToolUse,
+        input,
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.output?.decision).toBe('deny');
+      expect(result.output?.reason).toBe('plain blocking error');
+      expect(result.output?.hookSpecificOutput).toBeUndefined();
+    });
+
     it('should not parse JSON on exit code 2', async () => {
       // Exit code 2 should ignore JSON in stdout
       const mockProcess = createMockProcess(
@@ -679,6 +738,75 @@ describe('HookRunner', () => {
       );
 
       expect(result.output?.decision).toBe('allow');
+    });
+  });
+
+  describe('shell configuration', () => {
+    it('should use global shell configuration when hookConfig.shell is not specified', async () => {
+      const mockProcess = createMockProcess(0, '{"continue": true}');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo test',
+        source: HooksConfigSource.Project,
+        // No shell specified - should use global config
+      };
+      const input = createMockInput();
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      // Verify spawn was called with global shell config
+      expect(mockSpawn).toHaveBeenCalled();
+      const spawnArgs = mockSpawn.mock.calls[0];
+      // Global config uses bash or cmd depending on platform
+      expect(spawnArgs[2].shell).toBe(false);
+    });
+
+    it('should use bash shell when hookConfig.shell is bash', async () => {
+      const mockProcess = createMockProcess(0, '{"continue": true}');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'echo test',
+        source: HooksConfigSource.Project,
+        shell: 'bash',
+      };
+      const input = createMockInput();
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      // Verify spawn was called with bash configuration
+      expect(mockSpawn).toHaveBeenCalled();
+      const spawnArgs = mockSpawn.mock.calls[0];
+      // Should use bash executable
+      expect(spawnArgs[0]).toMatch(/bash/);
+      expect(spawnArgs[1]).toContain('-c');
+      expect(spawnArgs[2].shell).toBe(false);
+    });
+
+    it('should use powershell when hookConfig.shell is powershell', async () => {
+      const mockProcess = createMockProcess(0, '{"continue": true}');
+      mockSpawn.mockImplementation(() => mockProcess);
+
+      const hookConfig: HookConfig = {
+        type: HookType.Command,
+        command: 'Write-Output test',
+        source: HooksConfigSource.Project,
+        shell: 'powershell',
+      };
+      const input = createMockInput();
+
+      await hookRunner.executeHook(hookConfig, HookEventName.PreToolUse, input);
+
+      // Verify spawn was called with powershell configuration
+      expect(mockSpawn).toHaveBeenCalled();
+      const spawnArgs = mockSpawn.mock.calls[0];
+      // Should use powershell executable
+      expect(spawnArgs[0]).toBe('powershell');
+      expect(spawnArgs[1]).toContain('-Command');
+      expect(spawnArgs[2].shell).toBe(false);
     });
   });
 });

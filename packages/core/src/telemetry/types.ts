@@ -802,6 +802,56 @@ export class AuthEvent implements BaseTelemetryEvent {
   }
 }
 
+/** Hook type for telemetry */
+export type HookTelemetryType = 'command' | 'http' | 'function';
+
+/**
+ * Hook call telemetry event
+ */
+export class HookCallEvent implements BaseTelemetryEvent {
+  'event.name': string;
+  'event.timestamp': string;
+  hook_event_name: string;
+  hook_type: HookTelemetryType;
+  hook_name: string;
+  hook_input: Record<string, unknown>;
+  hook_output?: Record<string, unknown>;
+  exit_code?: number;
+  stdout?: string;
+  stderr?: string;
+  duration_ms: number;
+  success: boolean;
+  error?: string;
+
+  constructor(
+    hookEventName: string,
+    hookType: HookTelemetryType,
+    hookName: string,
+    hookInput: Record<string, unknown>,
+    durationMs: number,
+    success: boolean,
+    hookOutput?: Record<string, unknown>,
+    exitCode?: number,
+    stdout?: string,
+    stderr?: string,
+    error?: string,
+  ) {
+    this['event.name'] = 'hook_call';
+    this['event.timestamp'] = new Date().toISOString();
+    this.hook_event_name = hookEventName;
+    this.hook_type = hookType;
+    this.hook_name = hookName;
+    this.hook_input = hookInput;
+    this.hook_output = hookOutput;
+    this.exit_code = exitCode;
+    this.stdout = stdout;
+    this.stderr = stderr;
+    this.duration_ms = durationMs;
+    this.success = success;
+    this.error = error;
+  }
+}
+
 export class SkillLaunchEvent implements BaseTelemetryEvent {
   'event.name': 'skill_launch';
   'event.timestamp': string;
@@ -877,6 +927,7 @@ export type TelemetryEvent =
   | ToolOutputTruncatedEvent
   | ModelSlashCommandEvent
   | AuthEvent
+  | HookCallEvent
   | SkillLaunchEvent
   | UserFeedbackEvent
   | ArenaSessionStartedEvent
@@ -1012,5 +1063,167 @@ export class ExtensionDisableEvent implements BaseTelemetryEvent {
     this['event.timestamp'] = new Date().toISOString();
     this.extension_name = extension_name;
     this.setting_scope = settingScope;
+  }
+}
+
+export class PromptSuggestionEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.prompt_suggestion';
+  'event.timestamp': string;
+  outcome: 'accepted' | 'ignored' | 'suppressed';
+  prompt_id?: string;
+  accept_method?: 'tab' | 'enter' | 'right';
+  time_to_accept_ms?: number;
+  time_to_ignore_ms?: number;
+  time_to_first_keystroke_ms?: number;
+  suggestion_length?: number;
+  similarity?: number;
+  was_focused_when_shown?: boolean;
+  reason?: string;
+
+  constructor(params: {
+    outcome: 'accepted' | 'ignored' | 'suppressed';
+    prompt_id?: string;
+    accept_method?: 'tab' | 'enter' | 'right';
+    time_to_accept_ms?: number;
+    time_to_ignore_ms?: number;
+    time_to_first_keystroke_ms?: number;
+    suggestion_length?: number;
+    similarity?: number;
+    was_focused_when_shown?: boolean;
+    reason?: string;
+  }) {
+    this['event.name'] = 'qwen-code.prompt_suggestion';
+    this['event.timestamp'] = new Date().toISOString();
+    this.outcome = params.outcome;
+    this.prompt_id = params.prompt_id ?? 'user_intent';
+    this.accept_method = params.accept_method;
+    this.time_to_accept_ms = params.time_to_accept_ms;
+    this.time_to_ignore_ms = params.time_to_ignore_ms;
+    this.time_to_first_keystroke_ms = params.time_to_first_keystroke_ms;
+    this.suggestion_length = params.suggestion_length;
+    this.similarity = params.similarity;
+    this.was_focused_when_shown = params.was_focused_when_shown;
+    this.reason = params.reason;
+  }
+}
+
+export class SpeculationEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.speculation';
+  'event.timestamp': string;
+  outcome: 'accepted' | 'aborted' | 'failed';
+  turns_used: number;
+  files_written: number;
+  tool_use_count: number;
+  duration_ms: number;
+  boundary_type?: string;
+  had_pipelined_suggestion: boolean;
+
+  constructor(params: {
+    outcome: 'accepted' | 'aborted' | 'failed';
+    turns_used: number;
+    files_written: number;
+    tool_use_count: number;
+    duration_ms: number;
+    boundary_type?: string;
+    had_pipelined_suggestion: boolean;
+  }) {
+    this['event.name'] = 'qwen-code.speculation';
+    this['event.timestamp'] = new Date().toISOString();
+    this.outcome = params.outcome;
+    this.turns_used = params.turns_used;
+    this.files_written = params.files_written;
+    this.tool_use_count = params.tool_use_count;
+    this.duration_ms = params.duration_ms;
+    this.boundary_type = params.boundary_type;
+    this.had_pipelined_suggestion = params.had_pipelined_suggestion;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Managed Auto-Memory Events
+// ---------------------------------------------------------------------------
+
+export class MemoryExtractEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.extract';
+  'event.timestamp': string;
+  /** 'auto' = triggered by session turn; 'manual' = user-initiated */
+  trigger: 'auto' | 'manual';
+  status: 'completed' | 'skipped' | 'failed';
+  skipped_reason?: 'already_running' | 'queued' | 'memory_tool';
+  patches_count: number;
+  touched_topics: string;
+  duration_ms: number;
+
+  constructor(params: {
+    trigger: 'auto' | 'manual';
+    status: 'completed' | 'skipped' | 'failed';
+    skipped_reason?: 'already_running' | 'queued' | 'memory_tool';
+    patches_count: number;
+    touched_topics: string[];
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.extract';
+    this['event.timestamp'] = new Date().toISOString();
+    this.trigger = params.trigger;
+    this.status = params.status;
+    this.skipped_reason = params.skipped_reason;
+    this.patches_count = params.patches_count;
+    this.touched_topics = params.touched_topics.join(',');
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryDreamEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.dream';
+  'event.timestamp': string;
+  /** 'auto' = scheduler-triggered; 'manual' = user ran /dream */
+  trigger: 'auto' | 'manual';
+  status: 'updated' | 'noop' | 'failed';
+  deduped_entries: number;
+  touched_topics_count: number;
+  touched_topics: string;
+  duration_ms: number;
+
+  constructor(params: {
+    trigger: 'auto' | 'manual';
+    status: 'updated' | 'noop' | 'failed';
+    deduped_entries: number;
+    touched_topics: string[];
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.dream';
+    this['event.timestamp'] = new Date().toISOString();
+    this.trigger = params.trigger;
+    this.status = params.status;
+    this.deduped_entries = params.deduped_entries;
+    this.touched_topics_count = params.touched_topics.length;
+    this.touched_topics = params.touched_topics.join(',');
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryRecallEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.recall';
+  'event.timestamp': string;
+  query_length: number;
+  docs_scanned: number;
+  docs_selected: number;
+  strategy: 'none' | 'heuristic' | 'model';
+  duration_ms: number;
+
+  constructor(params: {
+    query_length: number;
+    docs_scanned: number;
+    docs_selected: number;
+    strategy: 'none' | 'heuristic' | 'model';
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.recall';
+    this['event.timestamp'] = new Date().toISOString();
+    this.query_length = params.query_length;
+    this.docs_scanned = params.docs_scanned;
+    this.docs_selected = params.docs_selected;
+    this.strategy = params.strategy;
+    this.duration_ms = params.duration_ms;
   }
 }

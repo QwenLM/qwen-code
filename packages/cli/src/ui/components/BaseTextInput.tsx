@@ -211,6 +211,12 @@ export const BaseTextInput: React.FC<BaseTextInputProps> = ({
         return;
       }
 
+      // Tab — never insert literal tab characters into the buffer;
+      // consumers that need Tab behaviour should intercept it via onKeypress.
+      if ((key.name === 'tab' || key.sequence === '\t') && !key.paste) {
+        return;
+      }
+
       // Backspace
       if (
         key.name === 'backspace' ||

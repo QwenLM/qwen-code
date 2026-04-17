@@ -44,6 +44,20 @@ const ESC = '\u001B';
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
 export const PASTE_MODE_SUFFIX = `${ESC}[201~`;
 export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100ms if no more input
+// Kitty sequence timeout: 200ms balances between:
+// - Too short: prematurely clear valid sequences during slow input
+// - Too long: delayed recovery from interrupted sequences (e.g., IME interruptions)
+// Based on empirical testing with IME input patterns in VS Code integrated terminal.
+export const KITTY_SEQUENCE_TIMEOUT_MS = 200;
+
+// Paste idle timeout: auto-recovers from a stuck bracketed-paste mode
+// when `paste-end` (`ESC[201~`) never arrives. Without this safety net, a
+// lost paste-end marker leaves `isPaste = true` forever, every subsequent
+// keystroke (including Ctrl+C) is silently buffered, and the only way to
+// recover is to kill the terminal. 1000ms is long enough to cover slow
+// chunked pastes on cold terminals yet short enough that users don't
+// perceive the recovery as a hang.
+export const PASTE_IDLE_TIMEOUT_MS = 1000;
 export const SINGLE_QUOTE = "'";
 export const DOUBLE_QUOTE = '"';
 
@@ -132,9 +146,6 @@ export function KeypressProvider({
 }) {
   const { stdin, setRawMode } = useStdin();
   const subscribers = useRef<Set<KeypressHandler>>(new Set()).current;
-  const isDraggingRef = useRef(false);
-  const dragBufferRef = useRef('');
-  const draggingTimerRef = useRef<NodeJS.Timeout | null>(null);
 
   const subscribe = useCallback(
     (handler: KeypressHandler) => {
@@ -151,13 +162,6 @@ export function KeypressProvider({
   );
 
   useEffect(() => {
-    const clearDraggingTimer = () => {
-      if (draggingTimerRef.current) {
-        clearTimeout(draggingTimerRef.current);
-        draggingTimerRef.current = null;
-      }
-    };
-
     const wasRaw = stdin.isRaw;
     if (wasRaw === false) {
       setRawMode(true);
@@ -172,11 +176,113 @@ export function KeypressProvider({
 
     let isPaste = false;
     let pasteBuffer = Buffer.alloc(0);
-    let kittySequenceBuffer = '';
+    // Set to true when paste mode is ended by something other than a
+    // received paste-end event (idle timeout or Ctrl+C escape). The next
+    // real paste-end event that arrives — if any — is then a stale echo
+    // and must be swallowed instead of producing a spurious empty paste.
+    let pasteAlreadyFlushed = false;
+    let pasteIdleTimeout: NodeJS.Timeout | null = null;
+    const kittySequenceBufferRef = { current: '' };
+    let kittySequenceTimeout: NodeJS.Timeout | null = null;
     let backslashTimeout: NodeJS.Timeout | null = null;
     let waitingForEnterAfterBackslash = false;
     let rawDataBuffer = Buffer.alloc(0);
     let rawFlushTimeout: NodeJS.Timeout | null = null;
+
+    const updateKittyBuffer = (value: string) => {
+      kittySequenceBufferRef.current = value;
+    };
+
+    const clearKittyTimeout = () => {
+      if (kittySequenceTimeout) {
+        clearTimeout(kittySequenceTimeout);
+        kittySequenceTimeout = null;
+      }
+    };
+
+    const startKittyTimeout = () => {
+      clearKittyTimeout();
+      kittySequenceTimeout = setTimeout(() => {
+        if (kittySequenceBufferRef.current) {
+          // Before discarding, try to salvage any parseable sequences
+          // that may have been missed (e.g., due to chunked input).
+          while (kittySequenceBufferRef.current) {
+            const parsed = parseKittyPrefix(kittySequenceBufferRef.current);
+            if (parsed) {
+              kittySequenceBufferRef.current =
+                kittySequenceBufferRef.current.slice(parsed.length);
+              broadcast(parsed.key);
+              continue;
+            }
+            const plain = parsePlainTextPrefix(kittySequenceBufferRef.current);
+            if (plain) {
+              kittySequenceBufferRef.current =
+                kittySequenceBufferRef.current.slice(plain.length);
+              broadcast(plain.key);
+              continue;
+            }
+            break;
+          }
+          // Clear any remaining unparseable content
+          if (kittySequenceBufferRef.current) {
+            if (debugKeystrokeLogging) {
+              debugLogger.debug(
+                '[DEBUG] Kitty buffer timeout, clearing:',
+                kittySequenceBufferRef.current,
+              );
+            }
+            kittySequenceBufferRef.current = '';
+          }
+        }
+      }, KITTY_SEQUENCE_TIMEOUT_MS);
+    };
+
+    const clearKittyBufferAndTimeout = () => {
+      clearKittyTimeout();
+      kittySequenceBufferRef.current = '';
+    };
+
+    const clearPasteIdleTimeout = () => {
+      if (pasteIdleTimeout) {
+        clearTimeout(pasteIdleTimeout);
+        pasteIdleTimeout = null;
+      }
+    };
+
+    // Force-flush a paste that has gone too long without its paste-end
+    // marker. Rather than dropping whatever the user typed, broadcast the
+    // buffered content as a regular paste event and reset state so the
+    // next keystroke is handled normally.
+    const forceFlushStuckPaste = () => {
+      clearPasteIdleTimeout();
+      // Nothing to recover from: not in paste mode AND no buffered content.
+      // We still run when either condition is true — e.g. isPaste=true with
+      // an empty buffer (need to clear the flag) or isPaste=false with stale
+      // buffered content (e.g. after a race between Ctrl+C and the timer).
+      if (!isPaste && pasteBuffer.length === 0) return;
+      const buffered = pasteBuffer.toString();
+      isPaste = false;
+      pasteBuffer = Buffer.alloc(0);
+      pasteAlreadyFlushed = true;
+      if (buffered.length > 0) {
+        broadcast({
+          name: '',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: true,
+          sequence: buffered,
+        });
+      }
+    };
+
+    const startPasteIdleTimeout = () => {
+      clearPasteIdleTimeout();
+      pasteIdleTimeout = setTimeout(
+        forceFlushStuckPaste,
+        PASTE_IDLE_TIMEOUT_MS,
+      );
+    };
 
     const createPrintableKey = (char: string): Key => {
       const printableName =
@@ -304,14 +410,19 @@ export function KeypressProvider({
         };
       }
 
-      // 3) CSI-u form: ESC [ <code> ; <mods> (u|~)
-      // 3) CSI-u and tilde-coded functional keys: ESC [ <code> ; <mods> (u|~)
+      // 3) CSI-u form: ESC [ <code>[:<shifted>][:<base>] ; <mods>[:<event>] [; <text>] (u|~)
+      // 3) CSI-u and tilde-coded functional keys with optional kitty extensions:
+      //    Full kitty format: ESC [ code:shifted:base ; mods:event ; text u
       //    'u' terminator: Kitty CSI-u; '~' terminator: tilde-coded function keys.
-      const csiUPrefix = new RegExp(`^${ESC}\\[(\\d+)(;(\\d+))?([u~])`);
+      //    The colon-separated fields (shifted key, base key, event type, text)
+      //    are optional extensions that some terminals send.
+      const csiUPrefix = new RegExp(
+        `^${ESC}\\[(\\d+)(?::\\d+)*(?:;(\\d+)(?::\\d+)*)?(?:;\\d+)?([u~])`,
+      );
       m = buffer.match(csiUPrefix);
       if (m) {
         const keyCode = parseInt(m[1], 10);
-        let modifiers = m[3] ? parseInt(m[3], 10) : KITTY_MODIFIER_BASE;
+        let modifiers = m[2] ? parseInt(m[2], 10) : KITTY_MODIFIER_BASE;
         if (modifiers >= KITTY_MODIFIER_EVENT_TYPES_OFFSET) {
           modifiers -= KITTY_MODIFIER_EVENT_TYPES_OFFSET;
         }
@@ -320,7 +431,7 @@ export function KeypressProvider({
           (modifierBits & MODIFIER_SHIFT_BIT) === MODIFIER_SHIFT_BIT;
         const alt = (modifierBits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
         const ctrl = (modifierBits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
-        const terminator = m[4];
+        const terminator = m[3];
 
         // Tilde-coded functional keys (Delete, Insert, PageUp/Down, Home/End)
         if (terminator === '~') {
@@ -540,15 +651,76 @@ export function KeypressProvider({
       }
     };
 
+    // Matches terminal query responses (DA1, DA2, Kitty protocol query)
+    // that may arrive late from startup detection in kittyProtocolDetector.
+    // These are never valid user input.
+    // eslint-disable-next-line no-control-regex
+    const TERMINAL_RESPONSE_RE = /^\x1b\[[?>][\d;]*[uc]$/;
+
     const handleKeypress = async (_: unknown, key: Key) => {
+      if (TERMINAL_RESPONSE_RE.test(key.sequence)) {
+        return;
+      }
       if (key.sequence === FOCUS_IN || key.sequence === FOCUS_OUT) {
         return;
       }
+
+      // Ctrl+C is an always-available escape hatch. It MUST be processed
+      // before the `isPaste` branch below, otherwise a stuck paste mode
+      // (paste-start without paste-end) silently buffers every key —
+      // including Ctrl+C itself — and the user has no way to recover
+      // without killing the terminal.
+      const isCtrlCKey =
+        (key.ctrl && key.name === 'c') ||
+        key.sequence === `${ESC}${KITTY_CTRL_C}`;
+      if (isCtrlCKey) {
+        if (isPaste || pasteBuffer.length > 0) {
+          isPaste = false;
+          pasteBuffer = Buffer.alloc(0);
+          pasteAlreadyFlushed = true;
+          clearPasteIdleTimeout();
+        }
+        if (kittySequenceBufferRef.current && debugKeystrokeLogging) {
+          debugLogger.debug(
+            '[DEBUG] Kitty buffer cleared on Ctrl+C:',
+            kittySequenceBufferRef.current,
+          );
+        }
+        clearKittyBufferAndTimeout();
+        if (key.sequence === `${ESC}${KITTY_CTRL_C}`) {
+          broadcast({
+            name: 'c',
+            ctrl: true,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: key.sequence,
+            kittyProtocol: true,
+          });
+        } else {
+          broadcast(key);
+        }
+        return;
+      }
+
       if (key.name === 'paste-start') {
         isPaste = true;
+        pasteAlreadyFlushed = false;
+        startPasteIdleTimeout();
         return;
       }
       if (key.name === 'paste-end') {
+        clearPasteIdleTimeout();
+        // A stale paste-end may arrive after we force-flushed the paste
+        // via the idle timeout or Ctrl+C escape — swallow it so we don't
+        // broadcast a spurious empty/image paste event.
+        if (pasteAlreadyFlushed) {
+          // Reset for the next paste cycle.
+          pasteAlreadyFlushed = false;
+          isPaste = false;
+          pasteBuffer = Buffer.alloc(0);
+          return;
+        }
         isPaste = false;
         if (pasteBuffer.toString().length > 0) {
           broadcast({
@@ -578,29 +750,13 @@ export function KeypressProvider({
 
       if (isPaste) {
         pasteBuffer = Buffer.concat([pasteBuffer, Buffer.from(key.sequence)]);
+        startPasteIdleTimeout();
         return;
       }
 
-      if (
-        key.sequence === SINGLE_QUOTE ||
-        key.sequence === DOUBLE_QUOTE ||
-        isDraggingRef.current
-      ) {
-        isDraggingRef.current = true;
-        dragBufferRef.current += key.sequence;
-
-        clearDraggingTimer();
-        draggingTimerRef.current = setTimeout(() => {
-          isDraggingRef.current = false;
-          const seq = dragBufferRef.current;
-          dragBufferRef.current = '';
-          if (seq) {
-            broadcast({ ...key, name: '', paste: true, sequence: seq });
-          }
-        }, DRAG_COMPLETION_TIMEOUT_MS);
-
-        return;
-      }
+      // Note: We no longer treat quotes specially for drag-and-drop detection.
+      // Modern terminals use bracketed paste mode (PASTE_MODE_PREFIX) for file drops,
+      // which is handled above. This prevents input lag on quote keystrokes.
 
       if (key.name === 'return' && waitingForEnterAfterBackslash) {
         if (backslashTimeout) {
@@ -648,48 +804,25 @@ export function KeypressProvider({
         return;
       }
 
-      if (
-        (key.ctrl && key.name === 'c') ||
-        key.sequence === `${ESC}${KITTY_CTRL_C}`
-      ) {
-        if (kittySequenceBuffer && debugKeystrokeLogging) {
-          debugLogger.debug(
-            '[DEBUG] Kitty buffer cleared on Ctrl+C:',
-            kittySequenceBuffer,
-          );
-        }
-        kittySequenceBuffer = '';
-        if (key.sequence === `${ESC}${KITTY_CTRL_C}`) {
-          broadcast({
-            name: 'c',
-            ctrl: true,
-            meta: false,
-            shift: false,
-            paste: false,
-            sequence: key.sequence,
-            kittyProtocol: true,
-          });
-        } else {
-          broadcast(key);
-        }
-        return;
-      }
+      // Ctrl+C is handled earlier, above the paste-state branches, so
+      // that it remains an escape hatch even when paste mode is stuck.
 
       if (kittyProtocolEnabled) {
         if (
-          kittySequenceBuffer ||
+          kittySequenceBufferRef.current ||
           (key.sequence.startsWith(`${ESC}[`) &&
             !key.sequence.startsWith(PASTE_MODE_PREFIX) &&
             !key.sequence.startsWith(PASTE_MODE_SUFFIX) &&
             !key.sequence.startsWith(FOCUS_IN) &&
             !key.sequence.startsWith(FOCUS_OUT))
         ) {
-          kittySequenceBuffer += key.sequence;
+          updateKittyBuffer(kittySequenceBufferRef.current + key.sequence);
+          startKittyTimeout();
 
           if (debugKeystrokeLogging) {
             debugLogger.debug(
               '[DEBUG] Kitty buffer accumulating:',
-              kittySequenceBuffer,
+              kittySequenceBufferRef.current,
             );
           }
 
@@ -698,15 +831,15 @@ export function KeypressProvider({
           // prefix is incomplete or invalid, skip to the next CSI introducer
           // (ESC[) so that a following valid sequence can still be parsed.
           let bufferedInputHandled = false;
-          while (kittySequenceBuffer) {
-            const parsed = parseKittyPrefix(kittySequenceBuffer);
+          while (kittySequenceBufferRef.current) {
+            const parsed = parseKittyPrefix(kittySequenceBufferRef.current);
             if (parsed) {
               if (debugKeystrokeLogging) {
-                const parsedSequence = kittySequenceBuffer.slice(
+                const parsedSequence = kittySequenceBufferRef.current.slice(
                   0,
                   parsed.length,
                 );
-                if (kittySequenceBuffer.length > parsed.length) {
+                if (kittySequenceBufferRef.current.length > parsed.length) {
                   debugLogger.debug(
                     '[DEBUG] Kitty sequence parsed successfully (prefix):',
                     parsedSequence,
@@ -719,29 +852,45 @@ export function KeypressProvider({
                 }
               }
               // Consume the parsed prefix and broadcast it.
-              kittySequenceBuffer = kittySequenceBuffer.slice(parsed.length);
+              updateKittyBuffer(
+                kittySequenceBufferRef.current.slice(parsed.length),
+              );
+              if (!kittySequenceBufferRef.current) {
+                clearKittyTimeout();
+              }
               broadcast(parsed.key);
               bufferedInputHandled = true;
               continue;
             }
 
-            const completeUnsupportedCsiLength =
-              getCompleteCsiSequenceLength(kittySequenceBuffer);
+            const completeUnsupportedCsiLength = getCompleteCsiSequenceLength(
+              kittySequenceBufferRef.current,
+            );
             if (completeUnsupportedCsiLength) {
               if (debugKeystrokeLogging) {
                 debugLogger.debug(
                   '[DEBUG] Dropping unsupported complete CSI sequence:',
-                  kittySequenceBuffer.slice(0, completeUnsupportedCsiLength),
+                  kittySequenceBufferRef.current.slice(
+                    0,
+                    completeUnsupportedCsiLength,
+                  ),
                 );
               }
-              kittySequenceBuffer = kittySequenceBuffer.slice(
-                completeUnsupportedCsiLength,
+              updateKittyBuffer(
+                kittySequenceBufferRef.current.slice(
+                  completeUnsupportedCsiLength,
+                ),
               );
+              if (!kittySequenceBufferRef.current) {
+                clearKittyTimeout();
+              }
               bufferedInputHandled = true;
               continue;
             }
 
-            const plainTextPrefix = parsePlainTextPrefix(kittySequenceBuffer);
+            const plainTextPrefix = parsePlainTextPrefix(
+              kittySequenceBufferRef.current,
+            );
             if (plainTextPrefix) {
               if (debugKeystrokeLogging) {
                 debugLogger.debug(
@@ -749,24 +898,35 @@ export function KeypressProvider({
                   plainTextPrefix.key.sequence,
                 );
               }
-              kittySequenceBuffer = kittySequenceBuffer.slice(
-                plainTextPrefix.length,
+              updateKittyBuffer(
+                kittySequenceBufferRef.current.slice(plainTextPrefix.length),
               );
+              if (!kittySequenceBufferRef.current) {
+                clearKittyTimeout();
+              }
               broadcast(plainTextPrefix.key);
               bufferedInputHandled = true;
               continue;
             }
 
             // Look for the next potential CSI start beyond index 0
-            const nextStart = kittySequenceBuffer.indexOf(`${ESC}[`, 1);
+            const nextStart = kittySequenceBufferRef.current.indexOf(
+              `${ESC}[`,
+              1,
+            );
             if (nextStart > 0) {
               if (debugKeystrokeLogging) {
                 debugLogger.debug(
                   '[DEBUG] Skipping incomplete/invalid CSI prefix:',
-                  kittySequenceBuffer.slice(0, nextStart),
+                  kittySequenceBufferRef.current.slice(0, nextStart),
                 );
               }
-              kittySequenceBuffer = kittySequenceBuffer.slice(nextStart);
+              updateKittyBuffer(
+                kittySequenceBufferRef.current.slice(nextStart),
+              );
+              if (!kittySequenceBufferRef.current) {
+                clearKittyTimeout();
+              }
               bufferedInputHandled = true;
               continue;
             }
@@ -775,27 +935,29 @@ export function KeypressProvider({
           if (bufferedInputHandled) return;
 
           if (config?.getDebugMode() || debugKeystrokeLogging) {
-            const codes = Array.from(kittySequenceBuffer).map((ch) =>
-              ch.charCodeAt(0),
+            const codes = Array.from(kittySequenceBufferRef.current).map(
+              (ch: string) => ch.charCodeAt(0),
             );
             debugLogger.warn('Kitty sequence buffer has char codes:', codes);
           }
 
-          if (kittySequenceBuffer.length > MAX_KITTY_SEQUENCE_LENGTH) {
+          if (
+            kittySequenceBufferRef.current.length > MAX_KITTY_SEQUENCE_LENGTH
+          ) {
             if (debugKeystrokeLogging) {
               debugLogger.debug(
                 '[DEBUG] Kitty buffer overflow, clearing:',
-                kittySequenceBuffer,
+                kittySequenceBufferRef.current,
               );
             }
             if (config) {
               const event = new KittySequenceOverflowEvent(
-                kittySequenceBuffer.length,
-                kittySequenceBuffer,
+                kittySequenceBufferRef.current.length,
+                kittySequenceBufferRef.current,
               );
               logKittySequenceOverflow(config, event);
             }
-            kittySequenceBuffer = '';
+            clearKittyBufferAndTimeout();
           } else {
             return;
           }
@@ -826,6 +988,14 @@ export function KeypressProvider({
       paste: false,
       sequence,
     });
+
+    const shouldFlushRawDataAsPaste = (data: Buffer) => {
+      const hasReturn = data.includes(0x0d);
+      const hasEmbeddedTab = data.length > 1 && data.includes(0x09);
+      const isSingleReturn = data.length <= 2 && hasReturn;
+
+      return !isSingleReturn && (hasReturn || hasEmbeddedTab);
+    };
 
     const flushRawBuffer = () => {
       if (!rawDataBuffer.length) {
@@ -883,11 +1053,7 @@ export function KeypressProvider({
         return;
       }
 
-      if (
-        (rawDataBuffer.length <= 2 && rawDataBuffer.includes(0x0d)) ||
-        !rawDataBuffer.includes(0x0d) ||
-        isPaste
-      ) {
+      if (isPaste || !shouldFlushRawDataAsPaste(rawDataBuffer)) {
         keypressStream.write(rawDataBuffer);
       } else {
         // Flush raw data buffer as a paste event
@@ -956,6 +1122,9 @@ export function KeypressProvider({
         backslashTimeout = null;
       }
 
+      clearKittyBufferAndTimeout();
+      clearPasteIdleTimeout();
+
       if (rawFlushTimeout) {
         clearTimeout(rawFlushTimeout);
         rawFlushTimeout = null;
@@ -972,23 +1141,6 @@ export function KeypressProvider({
           sequence: pasteBuffer.toString(),
         });
         pasteBuffer = Buffer.alloc(0);
-      }
-
-      if (draggingTimerRef.current) {
-        clearTimeout(draggingTimerRef.current);
-        draggingTimerRef.current = null;
-      }
-      if (isDraggingRef.current && dragBufferRef.current) {
-        broadcast({
-          name: '',
-          ctrl: false,
-          meta: false,
-          shift: false,
-          paste: true,
-          sequence: dragBufferRef.current,
-        });
-        isDraggingRef.current = false;
-        dragBufferRef.current = '';
       }
     };
   }, [

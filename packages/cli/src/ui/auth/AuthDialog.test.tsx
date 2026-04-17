@@ -32,6 +32,9 @@ const createMockUIActions = (overrides: Partial<UIActions> = {}): UIActions => {
   // AuthDialog only uses handleAuthSelect
   const baseActions = {
     handleAuthSelect: vi.fn(),
+    handleCodingPlanSubmit: vi.fn(),
+    handleAlibabaStandardSubmit: vi.fn(),
+    onAuthError: vi.fn(),
     handleRetryLastPrompt: vi.fn(),
   } as Partial<UIActions>;
 
@@ -345,8 +348,8 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is Qwen OAuth (first option)
-      expect(lastFrame()).toContain('Qwen OAuth');
+      // Default is Coding Plan (first option); Qwen OAuth is last (discontinued)
+      expect(lastFrame()).toContain('Alibaba Cloud Coding Plan');
     });
 
     it('should show an error and fall back to default if QWEN_DEFAULT_AUTH_TYPE is invalid', () => {

@@ -81,12 +81,14 @@ vi.mock('../ui/commands/bugCommand.js', () => ({ bugCommand: {} }));
 vi.mock('../ui/commands/clearCommand.js', () => ({ clearCommand: {} }));
 vi.mock('../ui/commands/compressCommand.js', () => ({ compressCommand: {} }));
 vi.mock('../ui/commands/docsCommand.js', () => ({ docsCommand: {} }));
+vi.mock('../ui/commands/exportCommand.js', () => ({ exportCommand: {} }));
 vi.mock('../ui/commands/editorCommand.js', () => ({ editorCommand: {} }));
 vi.mock('../ui/commands/extensionsCommand.js', () => ({
   extensionsCommand: {},
 }));
 vi.mock('../ui/commands/helpCommand.js', () => ({ helpCommand: {} }));
 vi.mock('../ui/commands/memoryCommand.js', () => ({ memoryCommand: {} }));
+vi.mock('../ui/commands/insightCommand.js', () => ({ insightCommand: {} }));
 vi.mock('../ui/commands/modelCommand.js', () => ({
   modelCommand: { name: 'model' },
 }));
@@ -121,7 +123,8 @@ describe('BuiltinCommandLoader', () => {
     mockConfig = {
       getFolderTrust: vi.fn().mockReturnValue(true),
       getUseModelRouter: () => false,
-      getEnableHooks: vi.fn().mockReturnValue(true),
+      getDisableAllHooks: vi.fn().mockReturnValue(false),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     restoreCommandMock.mockReturnValue({
@@ -207,18 +210,46 @@ describe('BuiltinCommandLoader', () => {
     expect(modelCmd?.name).toBe('model');
   });
 
-  it('should include hooks command when enableHooks is true', async () => {
+  it('should still load all other commands when ideCommand() throws', async () => {
+    // Simulate ideCommand() failure (e.g., platform-specific process detection fails)
+    const { ideCommand: ideCommandMock } = await import(
+      '../ui/commands/ideCommand.js'
+    );
+    (ideCommandMock as Mock).mockRejectedValueOnce(
+      new Error('PowerShell not available'),
+    );
+
     const loader = new BuiltinCommandLoader(mockConfig);
     const commands = await loader.loadCommands(new AbortController().signal);
-    const hooksCmd = commands.find((c) => c.name === 'hooks');
-    expect(hooksCmd).toBeDefined();
+
+    // IDE command should NOT be present
+    const ideCmd = commands.find((c) => c.name === 'ide');
+    expect(ideCmd).toBeUndefined();
+
+    // But all other built-in commands should still be loaded
+    const modelCmd = commands.find((c) => c.name === 'model');
+    expect(modelCmd).toBeDefined();
+
+    const statusCmd = commands.find((c) => c.name === 'status');
+    expect(statusCmd).toBeDefined();
+
+    const mcpCmd = commands.find((c) => c.name === 'mcp');
+    expect(mcpCmd).toBeDefined();
   });
 
-  it('should exclude hooks command when enableHooks is false', async () => {
-    (mockConfig.getEnableHooks as Mock).mockReturnValue(false);
-    const loader = new BuiltinCommandLoader(mockConfig);
-    const commands = await loader.loadCommands(new AbortController().signal);
-    const hooksCmd = commands.find((c) => c.name === 'hooks');
-    expect(hooksCmd).toBeUndefined();
+  it('should always include hooks command regardless of disableAllHooks', async () => {
+    // When disableAllHooks is false
+    const loader1 = new BuiltinCommandLoader(mockConfig);
+    const commands1 = await loader1.loadCommands(new AbortController().signal);
+    const hooksCmd1 = commands1.find((c) => c.name === 'hooks');
+    expect(hooksCmd1).toBeDefined();
+
+    // When disableAllHooks is true - hooks command should still be available
+    // (it will show a disabled state page in the UI instead of hiding the command)
+    (mockConfig.getDisableAllHooks as Mock).mockReturnValue(true);
+    const loader2 = new BuiltinCommandLoader(mockConfig);
+    const commands2 = await loader2.loadCommands(new AbortController().signal);
+    const hooksCmd2 = commands2.find((c) => c.name === 'hooks');
+    expect(hooksCmd2).toBeDefined();
   });
 });

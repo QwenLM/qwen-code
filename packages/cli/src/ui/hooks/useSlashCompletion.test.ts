@@ -246,6 +246,36 @@ describe('useSlashCompletion', () => {
       });
     });
 
+    it('should prefer higher completionPriority when match quality ties', async () => {
+      const slashCommands = [
+        createTestCommand({
+          name: 'mock',
+          description: 'Mock command',
+        }),
+        createTestCommand({
+          name: 'model',
+          description: 'Model command',
+          completionPriority: 100,
+        }),
+      ];
+
+      const { result } = renderHook(() =>
+        useTestHarnessForSlashCompletion(
+          true,
+          '/mo',
+          slashCommands,
+          mockCommandContext,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.map((s) => s.value)).toEqual([
+          'model',
+          'mock',
+        ]);
+      });
+    });
+
     it('should suggest commands based on partial altNames', async () => {
       const slashCommands = [
         createTestCommand({
@@ -532,12 +562,12 @@ describe('useSlashCompletion', () => {
 
       const slashCommands = [
         createTestCommand({
-          name: 'memory',
-          description: 'Manage memory',
+          name: 'config',
+          description: 'Manage configuration',
           subCommands: [
             createTestCommand({
-              name: 'show',
-              description: 'Show memory',
+              name: 'set',
+              description: 'Set configuration',
               completion: mockCompletionFn,
             }),
           ],
@@ -547,7 +577,7 @@ describe('useSlashCompletion', () => {
       const { result } = renderHook(() =>
         useTestHarnessForSlashCompletion(
           true,
-          '/memory show --project',
+          '/config set --project',
           slashCommands,
           mockCommandContext,
         ),
@@ -557,8 +587,8 @@ describe('useSlashCompletion', () => {
         expect(mockCompletionFn).toHaveBeenCalledWith(
           expect.objectContaining({
             invocation: {
-              raw: '/memory show --project',
-              name: 'show',
+              raw: '/config set --project',
+              name: 'set',
               args: '--project',
             },
           }),

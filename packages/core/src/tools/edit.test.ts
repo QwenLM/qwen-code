@@ -7,18 +7,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const mockGenerateJson = vi.hoisted(() => vi.fn());
-const mockOpenDiff = vi.hoisted(() => vi.fn());
-
-import { IdeClient } from '../ide/ide-client.js';
-
-vi.mock('../ide/ide-client.js', () => ({
-  IdeClient: {
-    getInstance: vi.fn(),
-  },
-}));
 
 vi.mock('../utils/editor.js', () => ({
-  openDiff: mockOpenDiff,
+  openDiff: vi.fn(),
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
@@ -30,7 +21,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { EditToolParams } from './edit.js';
 import { applyReplacement, EditTool } from './edit.js';
 import type { FileDiff } from './tools.js';
-import { ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -784,20 +774,23 @@ describe('EditTool', () => {
       expect(() => tool.build(params)).toThrow();
     });
 
-    it('should return FILE_WRITE_FAILURE on write error', async () => {
-      fs.writeFileSync(filePath, 'content', 'utf8');
-      // Make file readonly to trigger a write error
-      fs.chmodSync(filePath, '444');
+    it.skipIf(process.getuid && process.getuid() === 0)(
+      'should return FILE_WRITE_FAILURE on write error',
+      async () => {
+        fs.writeFileSync(filePath, 'content', 'utf8');
+        // Make file readonly to trigger a write error
+        fs.chmodSync(filePath, '444');
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'content',
-        new_string: 'new content',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
-      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
-    });
+        const params: EditToolParams = {
+          file_path: filePath,
+          old_string: 'content',
+          new_string: 'new content',
+        };
+        const invocation = tool.build(params);
+        const result = await invocation.execute(new AbortController().signal);
+        expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+      },
+    );
   });
 
   describe('getDescription', () => {
@@ -875,52 +868,6 @@ describe('EditTool', () => {
       };
       const error = tool.validateToolParams(externalPath);
       expect(error).toBeNull();
-    });
-  });
-
-  describe('IDE mode', () => {
-    const testFile = 'edit_me.txt';
-    let filePath: string;
-    let ideClient: any;
-
-    beforeEach(() => {
-      filePath = path.join(rootDir, testFile);
-      ideClient = {
-        openDiff: vi.fn(),
-        isDiffingEnabled: vi.fn().mockReturnValue(true),
-      };
-      vi.mocked(IdeClient.getInstance).mockResolvedValue(ideClient);
-      (mockConfig as any).getIdeMode = () => true;
-    });
-
-    it('should call ideClient.openDiff and update params on confirmation', async () => {
-      const initialContent = 'some old content here';
-      const newContent = 'some new content here';
-      const modifiedContent = 'some modified content here';
-      fs.writeFileSync(filePath, initialContent);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-      ideClient.openDiff.mockResolvedValueOnce({
-        status: 'accepted',
-        content: modifiedContent,
-      });
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.getConfirmationDetails(
-        new AbortController().signal,
-      );
-
-      expect(ideClient.openDiff).toHaveBeenCalledWith(filePath, newContent);
-
-      if (confirmation && 'onConfirm' in confirmation) {
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-      }
-
-      expect(params.old_string).toBe(initialContent);
-      expect(params.new_string).toBe(modifiedContent);
     });
   });
 });
