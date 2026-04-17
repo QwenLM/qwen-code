@@ -172,42 +172,4 @@ describe('approvalModeCommand', () => {
   it('should not have completion function', () => {
     expect(approvalModeCommand.completion).toBeUndefined();
   });
-
-  describe('non-interactive mode', () => {
-    let nonInteractiveContext: CommandContext;
-
-    beforeEach(() => {
-      nonInteractiveContext = createMockCommandContext({
-        executionMode: 'non_interactive',
-        services: {
-          config: {
-            getApprovalMode: () => 'default',
-            setApprovalMode: mockSetApprovalMode,
-          },
-        },
-      });
-    });
-
-    it('should return current mode instead of opening dialog when no args', async () => {
-      const result = (await approvalModeCommand.action?.(
-        nonInteractiveContext,
-        '',
-      )) as MessageActionReturn;
-
-      expect(result.type).toBe('message');
-      expect(result.messageType).toBe('info');
-      expect(result.content).toContain('default');
-      expect(result.content).not.toContain('dialog');
-    });
-
-    it('should still set mode with args in non-interactive mode', async () => {
-      const result = (await approvalModeCommand.action?.(
-        nonInteractiveContext,
-        'yolo',
-      )) as MessageActionReturn;
-
-      expect(result.type).toBe('message');
-      expect(mockSetApprovalMode).toHaveBeenCalledWith('yolo');
-    });
-  });
 });

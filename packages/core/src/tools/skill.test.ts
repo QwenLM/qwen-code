@@ -76,6 +76,7 @@ describe('SkillTool', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSkillManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
+      getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
     } as unknown as Config;
 
     changeListeners = [];
