@@ -11,12 +11,10 @@ import path from 'node:path';
 import { parse, quote } from 'shell-quote';
 import { doesToolInvocationMatch } from './tool-utils.js';
 import {
-  isParserReady,
   splitCommandsAST,
   getCommandRootAST,
   getCommandRootsAST,
   detectCommandSubstitutionAST,
-  isShellCommandReadOnlySync,
 } from './shellAstParser.js';
 import {
   execFile,
@@ -1126,77 +1124,6 @@ export async function isCommandAllowed(
   }
   return { allowed: false, reason: blockReason };
 }
-
-export function isCommandNeedsPermission(command: string): {
-  requiresPermission: boolean;
-  reason?: string;
-} {
-  // Prefer AST-based read-only check (sync)
-  if (isParserReady()) {
-    const isAllowed = isShellCommandReadOnlySync(command);
-    if (isAllowed !== null) {
-      if (isAllowed) {
-        return { requiresPermission: false };
-      }
-      return {
-        requiresPermission: true,
-        reason: 'Command requires permission to execute.',
-      };
-    }
-  }
-
-  // Lightweight sync fallback: check if the root command is a known read-only
-  // command.  This is less accurate than the full AST analysis (no redirect or
-  // sub-command awareness) but covers the common simple cases (e.g. `ls`,
-  // `cat`, `git status`) when the parser has not been initialised yet.
-  const root = getCommandRoot(command);
-  if (root && BASIC_READ_ONLY_COMMANDS.has(root)) {
-    return { requiresPermission: false };
-  }
-
-  // Conservatively require permission for anything else
-  return {
-    requiresPermission: true,
-    reason: 'Command requires permission to execute.',
-  };
-}
-
-/**
- * Minimal set of commands known to be read-only for the lightweight fallback
- * in `isCommandNeedsPermission`.  Intentionally conservative — only includes
- * commands that are always read-only regardless of arguments.
- */
-const BASIC_READ_ONLY_COMMANDS = new Set([
-  'cat',
-  'cd',
-  'cut',
-  'df',
-  'dirname',
-  'du',
-  'echo',
-  'env',
-  'grep',
-  'head',
-  'less',
-  'ls',
-  'more',
-  'printenv',
-  'printf',
-  'ps',
-  'pwd',
-  'rg',
-  'sort',
-  'stat',
-  'tail',
-  'tree',
-  'uniq',
-  'wc',
-  'which',
-  'where',
-  'whoami',
-  'basename',
-  'column',
-]);
 
 /**
  * Checks user arguments for potentially dangerous shell characters.

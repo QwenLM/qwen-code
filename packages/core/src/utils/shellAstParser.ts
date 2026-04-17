@@ -1497,40 +1497,6 @@ function extractFileRedirect(node: SyntaxNode): {
 }
 
 // ---------------------------------------------------------------------------
-// Public API: isShellCommandReadOnlySync
-// ---------------------------------------------------------------------------
-
-/**
- * Synchronous AST-based check whether a shell command is read-only.
- * Returns `null` if the parser is not ready.
- */
-export function isShellCommandReadOnlySync(command: string): boolean | null {
-  if (!parserInstance) {
-    ensureParserInitStarted();
-    return null;
-  }
-  if (typeof command !== 'string' || !command.trim()) return false;
-
-  const tree = parseShellCommandSync(command);
-  const root = tree.rootNode;
-
-  if (root.namedChildCount === 0) {
-    tree.delete();
-    return false;
-  }
-
-  for (const stmt of root.namedChildren) {
-    if (!evaluateStatementReadOnly(stmt)) {
-      tree.delete();
-      return false;
-    }
-  }
-
-  tree.delete();
-  return true;
-}
-
-// ---------------------------------------------------------------------------
 // Reset (for testing)
 // ---------------------------------------------------------------------------
 

@@ -50,7 +50,7 @@ import type {
 } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
-import { isShellCommandReadOnlySync } from '../utils/shellAstParser.js';
+import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
   buildPermissionCheckContext,
@@ -344,7 +344,7 @@ interface ToolBatch {
  * Returns true if a scheduled tool call can safely execute concurrently
  * with other safe tools (no side effects, no shared mutable state).
  */
-function isConcurrencySafe(call: ScheduledToolCall): boolean {
+async function isConcurrencySafe(call: ScheduledToolCall): Promise<boolean> {
   // Agent tools spawn independent sub-agents with no shared state.
   if (call.request.name === ToolNames.AGENT) return true;
   // Shell commands: check if the command is read-only (e.g., git log, cat).
@@ -356,7 +356,10 @@ function isConcurrencySafe(call: ScheduledToolCall): boolean {
     const command = (call.request.args as { command?: string }).command;
     if (typeof command !== 'string') return false;
     try {
-      return isShellCommandReadOnlySync(stripShellWrapper(command)) ?? false;
+      const isReadOnly = await isShellCommandReadOnlyAST(
+        stripShellWrapper(command),
+      );
+      return isReadOnly ?? false;
     } catch {
       return false; // fail-closed
     }
@@ -372,17 +375,20 @@ function isConcurrencySafe(call: ScheduledToolCall): boolean {
  *
  * Example: [Read, Read, Edit, Read] → [[Read,Read](parallel), [Edit](seq), [Read](seq)]
  */
-function partitionToolCalls(calls: ScheduledToolCall[]): ToolBatch[] {
-  return calls.reduce<ToolBatch[]>((batches, call) => {
-    const safe = isConcurrencySafe(call);
+async function partitionToolCalls(
+  calls: ScheduledToolCall[],
+): Promise<ToolBatch[]> {
+  const batches: ToolBatch[] = [];
+  for (let i = 0; i < calls.length; i++) {
+    const safe = await isConcurrencySafe(calls[i]);
     const lastBatch = batches[batches.length - 1];
     if (safe && lastBatch?.concurrent) {
-      lastBatch.calls.push(call);
+      lastBatch.calls.push(calls[i]);
     } else {
-      batches.push({ concurrent: safe, calls: [call] });
+      batches.push({ concurrent: safe, calls: [calls[i]] });
     }
-    return batches;
-  }, []);
+  }
+  return batches;
 }
 
 export class CoreToolScheduler {
@@ -1390,7 +1396,7 @@ export class CoreToolScheduler {
       // Consecutive safe tools are grouped into parallel batches; unsafe
       // tools each form their own sequential batch. Execute (shell) is safe
       // only when isShellCommandReadOnly() returns true; otherwise sequential.
-      const batches = partitionToolCalls(callsToExecute);
+      const batches = await partitionToolCalls(callsToExecute);
 
       for (const batch of batches) {
         if (batch.concurrent && batch.calls.length > 1) {

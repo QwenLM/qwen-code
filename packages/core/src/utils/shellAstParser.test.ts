@@ -16,7 +16,6 @@ import {
   getCommandRootsAST,
   detectCommandSubstitutionAST,
   tokenizeCommandAST,
-  isShellCommandReadOnlySync,
   _resetParser,
   _setParserFailedForTesting,
 } from './shellAstParser.js';
@@ -722,64 +721,6 @@ describe('tokenizeCommandAST', () => {
   it('returns null for compound command (not a simple command)', () => {
     const result = tokenizeCommandAST('ls && echo hello');
     expect(result).toBeNull();
-  });
-});
-
-// =========================================================================
-// isShellCommandReadOnlySync — parser ready
-// =========================================================================
-
-describe('isShellCommandReadOnlySync', () => {
-  it('allows simple read-only command', () => {
-    expect(isShellCommandReadOnlySync('ls -la')).toBe(true);
-  });
-
-  it('rejects mutating commands', () => {
-    expect(isShellCommandReadOnlySync('rm -rf temp')).toBe(false);
-  });
-
-  it('rejects write redirection', () => {
-    expect(isShellCommandReadOnlySync('ls > out.txt')).toBe(false);
-  });
-
-  it('allows read-only pipeline', () => {
-    expect(isShellCommandReadOnlySync('cat file | grep pattern | sort')).toBe(
-      true,
-    );
-  });
-
-  it('rejects command substitution', () => {
-    expect(isShellCommandReadOnlySync('echo $(rm file)')).toBe(false);
-  });
-
-  it('allows git status', () => {
-    expect(isShellCommandReadOnlySync('git status')).toBe(true);
-  });
-
-  it('rejects git push', () => {
-    expect(isShellCommandReadOnlySync('git push origin main')).toBe(false);
-  });
-
-  it('handles empty/whitespace', () => {
-    expect(isShellCommandReadOnlySync('')).toBe(false);
-    expect(isShellCommandReadOnlySync('   ')).toBe(false);
-  });
-
-  it('agrees with async isShellCommandReadOnlyAST', async () => {
-    const testCases = [
-      'ls -la',
-      'cat /etc/passwd',
-      'git status && ls',
-      'rm -rf /',
-      'echo $(whoami)',
-      'git push origin main',
-      'find . -name "*.ts" | grep -v node_modules',
-    ];
-    for (const cmd of testCases) {
-      const syncResult = isShellCommandReadOnlySync(cmd);
-      const asyncResult = await isShellCommandReadOnlyAST(cmd);
-      expect(syncResult).toBe(asyncResult);
-    }
   });
 });
 
