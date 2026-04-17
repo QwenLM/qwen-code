@@ -144,8 +144,15 @@ export const Footer: React.FC = () => {
       paddingX={2}
       gap={isNarrow ? 0 : 1}
     >
-      {/* Left column — status line on top, hints/mode on bottom */}
-      <Box flexDirection="column" flexShrink={isNarrow ? 0 : 1}>
+      {/* Left column — status line on top, hints/mode on bottom.
+          `minWidth={0}` lets the column shrink below its natural content
+          width in narrow terminals; without it, Yoga's `min-width: auto`
+          default keeps the Box at content-width, the child `<Text
+          wrap="truncate">` never truncates, and the terminal wraps the
+          text physically — Ink only erases 1 logical row per frame, so
+          the extra physical rows accumulate above the input prompt each
+          tick (#3383). */}
+      <Box flexDirection="column" flexShrink={isNarrow ? 0 : 1} minWidth={0}>
         {statusLineLines.length > 0 &&
           !uiState.ctrlCPressedOnce &&
           !uiState.ctrlDPressedOnce &&
@@ -158,8 +165,12 @@ export const Footer: React.FC = () => {
       </Box>
 
       {/* Right Section — never compressed, aligns to top so multi-line
-          status lines on the left don't push the indicators to the center. */}
-      <Box flexShrink={0} gap={1} alignItems="flex-start">
+          status lines on the left don't push the indicators to the center.
+          `flexWrap="wrap"` lets the indicators break onto a second row when
+          the terminal is too narrow to fit them all — without it Ink
+          accounts for 1 row but the terminal physically wraps to 2, and the
+          extra physical row ghosts on every re-render (#3383). */}
+      <Box flexShrink={0} flexWrap="wrap" gap={1} alignItems="flex-start">
         {rightItems.map(({ key, node }, index) => (
           <Box key={key} alignItems="center">
             {index > 0 && <Text color={theme.text.secondary}> | </Text>}
