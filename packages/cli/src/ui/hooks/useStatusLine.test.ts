@@ -82,7 +82,9 @@ let stdinErrorHandler: ((err: Error) => void) | undefined;
 let mockKill: ReturnType<typeof vi.fn>;
 
 function setStatusLineConfig(
-  config: { type: string; command: string } | undefined,
+  config:
+    | { type: string; command: string; refreshInterval?: number }
+    | undefined,
 ) {
   mockSettings.merged = config ? { ui: { statusLine: config } } : {};
 }
@@ -777,6 +779,149 @@ describe('useStatusLine', () => {
         execCallback(null, 'recovered\n', '');
       });
       expect(result.current.lines).toEqual(['recovered']);
+    });
+  });
+
+  // --- refreshInterval (periodic refresh) ---
+
+  describe('refreshInterval', () => {
+    it('re-executes the command every N seconds', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 2,
+      });
+      renderHook(() => useStatusLine());
+
+      // Mount executes once immediately
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // First interval tick after 2s
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+
+      // Second interval tick after another 2s
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(3);
+    });
+
+    it('does not start an interval when refreshInterval is omitted', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo static' });
+      renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      // Still only the mount exec — no periodic refresh
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects refreshInterval < 1 (no interval scheduled)', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 0.5,
+      });
+      renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects non-finite refreshInterval (no interval scheduled)', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: Number.POSITIVE_INFINITY,
+      });
+      renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60_000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the interval when config is removed', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 1,
+      });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Remove the config — the interval should be torn down.
+      setStatusLineConfig(undefined);
+      rerender();
+
+      const callsAfterRemoval = vi.mocked(child_process.exec).mock.calls.length;
+
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(vi.mocked(child_process.exec).mock.calls.length).toBe(
+        callsAfterRemoval,
+      );
+    });
+
+    it('reschedules when refreshInterval changes', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 5,
+      });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // 2s passes — not yet a tick on the 5s schedule.
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Swap to a 1s interval — the old 5s timer must be cleared, not kept.
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 1,
+      });
+      rerender();
+
+      // 1s later — fires on the new schedule.
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears the interval on unmount', async () => {
+      setStatusLineConfig({
+        type: 'command',
+        command: 'echo tick',
+        refreshInterval: 1,
+      });
+      const { unmount } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      unmount();
+
+      const callsAfterUnmount = vi.mocked(child_process.exec).mock.calls.length;
+      await act(async () => {
+        vi.advanceTimersByTime(10_000);
+      });
+      expect(vi.mocked(child_process.exec).mock.calls.length).toBe(
+        callsAfterUnmount,
+      );
     });
   });
 });

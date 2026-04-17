@@ -69,6 +69,10 @@ export interface StatusLineCommandInput {
 interface StatusLineConfig {
   type: 'command';
   command: string;
+  // Re-run the command every N seconds so external data (git branch, quota,
+  // clock) stays fresh even when no Agent state changes. Values < 1 are
+  // rejected in getStatusLineConfig to avoid flooding the CLI with execs.
+  refreshInterval?: number;
 }
 
 const debugLog = createDebugLogger('STATUS_LINE');
@@ -93,6 +97,14 @@ function getStatusLineConfig(
       type: 'command',
       command: raw.command,
     };
+    if (
+      'refreshInterval' in raw &&
+      typeof raw.refreshInterval === 'number' &&
+      Number.isFinite(raw.refreshInterval) &&
+      raw.refreshInterval >= 1
+    ) {
+      config.refreshInterval = raw.refreshInterval;
+    }
     return config;
   }
   return undefined;
@@ -133,7 +145,10 @@ function buildMetricsPayload(
  * via stdin.
  *
  * Updates are debounced (300ms) and triggered by state changes (model switch,
- * new messages, vim mode toggle) rather than blind polling.
+ * new messages, vim mode toggle) rather than blind polling. When the config
+ * sets `refreshInterval` (seconds, >= 1), the command is additionally re-run
+ * on a timer so external data (git branch, quota, clock) stays fresh even
+ * when no Agent state has changed.
  */
 export function useStatusLine(): {
   lines: string[];
@@ -145,6 +160,7 @@ export function useStatusLine(): {
 
   const statusLineConfig = getStatusLineConfig(settings);
   const statusLineCommand = statusLineConfig?.command;
+  const refreshInterval = statusLineConfig?.refreshInterval;
 
   const [output, setOutput] = useState<string[]>([]);
 
@@ -388,6 +404,19 @@ export function useStatusLine(): {
     // Cleanup when command is removed is handled by the state-change effect.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusLineCommand]);
+
+  // Periodic refresh — re-run the command every `refreshInterval` seconds.
+  // Independent of state-change debounce: doUpdate already kills the prior
+  // child and bumps the generation counter, so overlapping ticks are safe.
+  useEffect(() => {
+    if (!statusLineCommand || !refreshInterval) return;
+    const timer = setInterval(() => {
+      doUpdate();
+    }, refreshInterval * 1000);
+    return () => {
+      clearInterval(timer);
+    };
+  }, [statusLineCommand, refreshInterval, doUpdate]);
 
   // Initial execution + cleanup
   useEffect(() => {
