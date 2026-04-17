@@ -1119,6 +1119,14 @@ export const useGeminiStream = (
             break;
           case ServerGeminiEventType.ToolCallRequest:
             toolCallRequests.push(event.value);
+            // Count tool call args JSON toward token estimation (matches
+            // Claude Code's input_json_delta handling).
+            try {
+              const argsJson = JSON.stringify(event.value.args);
+              streamingResponseLengthRef.current += argsJson.length;
+            } catch {
+              // Best-effort — don't block on serialization errors
+            }
             break;
           case ServerGeminiEventType.UserCancelled:
             handleUserCancelledEvent(userMessageTimestamp);
