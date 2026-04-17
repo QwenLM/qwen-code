@@ -589,8 +589,24 @@ export async function runNonInteractive(
 
           if (scheduler && scheduler.size > 0) {
             await new Promise<void>((resolve) => {
+              // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
+              // drop scheduler.size to 0 on their own, so without this the
+              // hold-back loop below is unreachable after an abort.
+              const onAbort = () => {
+                scheduler.stop();
+                resolve();
+              };
+              if (abortController.signal.aborted) {
+                onAbort();
+                return;
+              }
+              abortController.signal.addEventListener('abort', onAbort, {
+                once: true,
+              });
+
               const checkCronDone = () => {
                 if (scheduler.size === 0 && !drainPromise) {
+                  abortController.signal.removeEventListener('abort', onAbort);
                   scheduler.stop();
                   resolve();
                 }
