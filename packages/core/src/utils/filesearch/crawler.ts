@@ -179,6 +179,33 @@ function getPosixRelative(from: string, to: string): string {
   return relative === '' ? '.' : relative;
 }
 
+function isValidIgnorePath(relativePath: string): boolean {
+  if (!relativePath || relativePath === '.') {
+    return false;
+  }
+
+  if (path.posix.isAbsolute(relativePath)) {
+    return false;
+  }
+
+  return (
+    relativePath !== '..' &&
+    !relativePath.startsWith('../') &&
+    !relativePath.includes('/../')
+  );
+}
+
+function toIgnoreRelativePath(
+  baseDir: string,
+  candidatePath: string,
+): string | null {
+  const absoluteCandidate = path.isAbsolute(candidatePath)
+    ? candidatePath
+    : path.join(baseDir, candidatePath);
+  const relativePath = getPosixRelative(baseDir, absoluteCandidate);
+  return isValidIgnorePath(relativePath) ? relativePath : null;
+}
+
 function getEntryDepth(entry: string): number {
   if (entry === '.') {
     return -1;
@@ -273,7 +300,17 @@ function applyFilters(
 
   return depthFiltered.filter((p) => {
     if (p === '.') return true;
-    if (p.endsWith('/')) return !dirFilter(p);
+
+    if (p.endsWith('/')) {
+      if (!isValidIgnorePath(p.slice(0, -1))) {
+        return false;
+      }
+      return !dirFilter(p);
+    }
+
+    if (!isValidIgnorePath(p)) {
+      return false;
+    }
 
     if (isUnderIgnoredDirectory(p, dirFilter)) {
       return false;
@@ -438,9 +475,6 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
     options.cwd,
     options.crawlDirectory,
   );
-  const posixCrawlDirectory = normalizePath(
-    canonicalizePath(options.crawlDirectory),
-  );
 
   let results: string[];
   try {
@@ -451,12 +485,21 @@ async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
       .withDirs()
       .withPathSeparator('/')
       .exclude((_, dirPath) => {
-        const relativePath = path.posix.relative(posixCrawlDirectory, dirPath);
+        const relativePath = toIgnoreRelativePath(
+          options.crawlDirectory,
+          dirPath,
+        );
+        if (!relativePath) {
+          return false;
+        }
         return dirFilter(`${relativePath}/`);
       })
       .filter((filePath, isDirectory) => {
         if (isDirectory) return true;
         const cwdRelative = path.posix.join(relativeToCrawlDir, filePath);
+        if (!isValidIgnorePath(cwdRelative)) {
+          return false;
+        }
         return !fileFilter(cwdRelative);
       });
 
