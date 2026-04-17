@@ -328,7 +328,7 @@ describe('retryWithBackoff', () => {
       });
 
       await expect(promise).rejects.toThrow(
-        /Qwen OAuth free tier quota exceeded/,
+        /Qwen OAuth free tier has been discontinued/,
       );
 
       // Should be called only once (no retries)
@@ -351,7 +351,7 @@ describe('retryWithBackoff', () => {
       });
 
       await expect(promise).rejects.toThrow(
-        /Qwen OAuth free tier quota exceeded/,
+        /Qwen OAuth free tier has been discontinued/,
       );
 
       // Should be called only once (no retries)
@@ -427,7 +427,7 @@ describe('retryWithBackoff', () => {
       });
 
       await expect(promise).rejects.toThrow(
-        /Qwen OAuth free tier quota exceeded/,
+        /Qwen OAuth free tier has been discontinued/,
       );
 
       // Should be called only once (no retries)

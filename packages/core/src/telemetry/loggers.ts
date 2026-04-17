@@ -47,6 +47,9 @@ import {
   EVENT_ARENA_SESSION_ENDED,
   EVENT_PROMPT_SUGGESTION,
   EVENT_SPECULATION,
+  EVENT_MEMORY_EXTRACT,
+  EVENT_MEMORY_DREAM,
+  EVENT_MEMORY_RECALL,
 } from './constants.js';
 import {
   recordApiErrorMetrics,
@@ -63,6 +66,9 @@ import {
   recordArenaSessionStartedMetrics,
   recordArenaAgentCompletedMetrics,
   recordArenaSessionEndedMetrics,
+  recordMemoryExtractMetrics,
+  recordMemoryDreamMetrics,
+  recordMemoryRecallMetrics,
 } from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
@@ -106,6 +112,9 @@ import type {
   ArenaSessionEndedEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
+  MemoryExtractEvent,
+  MemoryDreamEvent,
+  MemoryRecallEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
@@ -1154,4 +1163,93 @@ export function logSpeculation(config: Config, event: SpeculationEvent): void {
     attributes,
   };
   logger.emit(logRecord);
+}
+
+// ─── Auto-Memory Log Functions ───────────────────────────────────────────────
+
+export function logMemoryExtract(
+  config: Config,
+  event: MemoryExtractEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_EXTRACT,
+    'event.timestamp': event['event.timestamp'],
+    trigger: event.trigger,
+    status: event.status,
+    patches_count: event.patches_count,
+    touched_topics: event.touched_topics,
+    duration_ms: event.duration_ms,
+  };
+  if (event.skipped_reason) {
+    attributes['skipped_reason'] = event.skipped_reason;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Memory extract: ${event.status}. Patches: ${event.patches_count}. Topics: ${event.touched_topics || 'none'}.`,
+    attributes,
+  });
+  recordMemoryExtractMetrics(config, event.duration_ms, {
+    trigger: event.trigger,
+    status: event.status,
+    patches_count: event.patches_count,
+  });
+}
+
+export function logMemoryDream(config: Config, event: MemoryDreamEvent): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_DREAM,
+    'event.timestamp': event['event.timestamp'],
+    trigger: event.trigger,
+    status: event.status,
+    deduped_entries: event.deduped_entries,
+    touched_topics_count: event.touched_topics_count,
+    touched_topics: event.touched_topics,
+    duration_ms: event.duration_ms,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Memory dream: ${event.status}. Deduped: ${event.deduped_entries}. Topics: ${event.touched_topics || 'none'}.`,
+    attributes,
+  });
+  recordMemoryDreamMetrics(config, event.duration_ms, {
+    trigger: event.trigger,
+    status: event.status,
+    deduped_entries: event.deduped_entries,
+  });
+}
+
+export function logMemoryRecall(
+  config: Config,
+  event: MemoryRecallEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_RECALL,
+    'event.timestamp': event['event.timestamp'],
+    query_length: event.query_length,
+    docs_scanned: event.docs_scanned,
+    docs_selected: event.docs_selected,
+    strategy: event.strategy,
+    duration_ms: event.duration_ms,
+  };
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Memory recall: strategy=${event.strategy}. Selected ${event.docs_selected}/${event.docs_scanned} docs.`,
+    attributes,
+  });
+  recordMemoryRecallMetrics(config, event.duration_ms, {
+    strategy: event.strategy,
+    docs_selected: event.docs_selected,
+  });
 }

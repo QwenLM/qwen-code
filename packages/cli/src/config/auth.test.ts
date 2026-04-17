@@ -107,8 +107,9 @@ describe('validateAuthMethod', () => {
     expect(result).toContain('GEMINI_API_KEY_ALTERED');
   });
 
-  it('should return null for QWEN_OAUTH', () => {
-    expect(validateAuthMethod(AuthType.QWEN_OAUTH)).toBeNull();
+  it('should return an error for QWEN_OAUTH (free tier discontinued)', () => {
+    const result = validateAuthMethod(AuthType.QWEN_OAUTH);
+    expect(result).toContain('discontinued on 2026-04-15');
   });
 
   it('should return an error message for an invalid auth method', () => {

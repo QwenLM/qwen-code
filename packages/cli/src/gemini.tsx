@@ -5,6 +5,7 @@
  */
 
 import {
+  AuthType,
   InputFormat,
   isDebugLoggingDegraded,
   logUserPrompt,
@@ -269,6 +270,11 @@ export async function main() {
         argv,
         undefined,
         [],
+        // Pass separated hooks for proper source attribution
+        {
+          userHooks: settings.getUserHooks(),
+          projectHooks: settings.getProjectHooks(),
+        },
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -398,6 +404,11 @@ export async function main() {
       argv,
       process.cwd(),
       argv.extensions,
+      // Pass separated hooks for proper source attribution
+      {
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
     );
     profileCheckpoint('after_load_cli_config');
 
@@ -466,6 +477,12 @@ export async function main() {
         })),
         ...getSettingsWarnings(settings),
         ...config.getWarnings(),
+        ...(config.getModelsConfig().getCurrentAuthType() ===
+        AuthType.QWEN_OAUTH
+          ? [
+              'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan or another provider.',
+            ]
+          : []),
       ]),
     ];
 
