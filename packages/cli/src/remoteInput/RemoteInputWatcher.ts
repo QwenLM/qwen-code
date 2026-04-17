@@ -54,9 +54,11 @@ export class RemoteInputWatcher {
   private reading = false;
   private filePath: string;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly pollIntervalMs: number;
 
-  constructor(filePath: string) {
+  constructor(filePath: string, options?: { pollIntervalMs?: number }) {
     this.filePath = filePath;
+    this.pollIntervalMs = options?.pollIntervalMs ?? 500;
     this.startWatching();
   }
 
@@ -97,7 +99,7 @@ export class RemoteInputWatcher {
       this.bytesRead = 0;
     }
 
-    watchFile(this.filePath, { interval: 500 }, () => {
+    watchFile(this.filePath, { interval: this.pollIntervalMs }, () => {
       if (!this.active) return;
       this.readNewLines();
     });
