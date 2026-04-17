@@ -12,10 +12,46 @@ Subagents are independent AI assistants that:
 - **Work autonomously** - Once given a task, they work independently until completion or failure
 - **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
 
+## Fork Subagent (Implicit Fork)
+
+In addition to named subagents, Qwen Code supports **implicit forking** — when the AI omits the `subagent_type` parameter, it triggers a fork that inherits the parent's full conversation context.
+
+### How Fork Differs from Named Subagents
+
+|               | Named Subagent                    | Fork Subagent                                         |
+| ------------- | --------------------------------- | ----------------------------------------------------- |
+| Context       | Starts fresh, no parent history   | Inherits parent's full conversation history           |
+| System prompt | Uses its own configured prompt    | Uses parent's exact system prompt (for cache sharing) |
+| Execution     | Blocks the parent until done      | Runs in background, parent continues immediately      |
+| Use case      | Specialized tasks (testing, docs) | Parallel tasks that need the current context          |
+
+### When Fork is Used
+
+The AI automatically uses fork when it needs to:
+
+- Run multiple research tasks in parallel (e.g., "investigate module A, B, and C")
+- Perform background work while continuing the main conversation
+- Delegate tasks that require understanding of the current conversation context
+
+### Prompt Cache Sharing
+
+All forks share the parent's exact API request prefix (system prompt, tools, conversation history), enabling DashScope prompt cache hits. When 3 forks run in parallel, the shared prefix is cached once and reused — saving 80%+ token costs compared to independent subagents.
+
+### Recursive Fork Prevention
+
+Fork children cannot create further forks. This is enforced at runtime — if a fork attempts to spawn another fork, it receives an error instructing it to execute tasks directly.
+
+### Current Limitations
+
+- **No result feedback**: Fork results are reflected in the UI progress display but are not automatically fed back into the main conversation. The parent AI sees a placeholder message and cannot act on the fork's output.
+- **No worktree isolation**: Forks share the parent's working directory. Concurrent file modifications from multiple forks may conflict.
+
 ## Key Benefits
 
 - **Task Specialization**: Create agents optimized for specific workflows (testing, documentation, refactoring, etc.)
 - **Context Isolation**: Keep specialized work separate from your main conversation
+- **Context Inheritance**: Fork subagents inherit the full conversation for context-heavy parallel tasks
+- **Prompt Cache Sharing**: Fork subagents share the parent's cache prefix, reducing token costs
 - **Reusability**: Save and reuse agent configurations across projects and sessions
 - **Controlled Access**: Limit which tools each agent can use for security and focus
 - **Progress Visibility**: Monitor agent execution with real-time progress updates
@@ -23,7 +59,7 @@ Subagents are independent AI assistants that:
 ## How Subagents Work
 
 1. **Configuration**: You create Subagents configurations that define their behavior, tools, and system prompts
-2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents
+2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or implicitly fork when no specific subagent type is needed
 3. **Execution**: Subagents work independently, using their configured tools to complete tasks
 4. **Results**: They return results and execution summaries back to the main conversation
 
@@ -99,10 +135,12 @@ Subagents are configured using Markdown files with YAML frontmatter. This format
 name: agent-name
 description: Brief description of when and how to use this agent
 model: inherit # Optional: inherit or model-id
-tools:
-	- tool1
-	- tool2
-	- tool3 # Optional
+approvalMode: auto-edit # Optional: default, plan, auto-edit, yolo
+tools:         # Optional: allowlist of tools
+  - tool1
+  - tool2
+disallowedTools: # Optional: blocklist of tools
+  - tool3
 ---
 
 System prompt content goes here.
@@ -117,6 +155,87 @@ Use the optional `model` frontmatter field to control which model a subagent use
 - Omit the field: Same as `inherit`
 - `glm-5`: Use that model ID with the main conversation's auth type
 - `openai:gpt-4o`: Use a different provider (resolves credentials from env vars)
+
+#### Permission Mode
+
+Use the optional `approvalMode` frontmatter field to control how a subagent's tool calls are approved. Valid values:
+
+- `default`: Tools require interactive approval (same as the main session default)
+- `plan`: Analyze-only mode — the agent plans but does not execute changes
+- `auto-edit`: Tools are auto-approved without prompting (recommended for most agents)
+- `yolo`: All tools auto-approved, including potentially destructive ones
+
+If you omit this field, the subagent's permission mode is determined automatically:
+
+- If the parent session is in **yolo** or **auto-edit** mode, the subagent inherits that mode. A permissive parent stays permissive.
+- If the parent session is in **plan** mode, the subagent stays in plan mode. An analyze-only session cannot mutate files through a delegated agent.
+- If the parent session is in **default** mode (in a trusted folder), the subagent gets **auto-edit** so it can work autonomously.
+
+When you do set `approvalMode`, the parent's permissive modes still take priority. For example, if the parent is in yolo mode, a subagent with `approvalMode: plan` will still run in yolo mode.
+
+```
+---
+name: cautious-reviewer
+description: Reviews code without making changes
+approvalMode: plan
+tools:
+  - read_file
+  - grep_search
+  - glob
+---
+
+You are a code reviewer. Analyze the code and report findings.
+Do not modify any files.
+```
+
+#### Tool Configuration
+
+Use `tools` and `disallowedTools` to control which tools a subagent can access.
+
+**`tools` (allowlist):** When specified, the subagent can only use the listed tools. When omitted, the subagent inherits all available tools from the parent session.
+
+```
+---
+name: reader
+description: Read-only agent for code exploration
+tools:
+  - read_file
+  - grep_search
+  - glob
+  - list_directory
+---
+```
+
+**`disallowedTools` (blocklist):** When specified, the listed tools are removed from the subagent's tool pool. This is useful when you want "everything except X" without listing every permitted tool.
+
+```
+---
+name: safe-worker
+description: Agent that cannot modify files
+disallowedTools:
+  - write_file
+  - edit
+  - run_shell_command
+---
+```
+
+If both `tools` and `disallowedTools` are set, the allowlist is applied first, then the blocklist removes from that set.
+
+**MCP tools** follow the same rules. If a subagent has no `tools` list, it inherits all MCP tools from the parent session. If a subagent has an explicit `tools` list, it only gets MCP tools that are explicitly named in that list.
+
+The `disallowedTools` field supports MCP server-level patterns:
+
+- `mcp__server__tool_name` — blocks a specific MCP tool
+- `mcp__server` — blocks all tools from that MCP server
+
+```
+---
+name: no-slack
+description: Agent without Slack access
+disallowedTools:
+  - mcp__slack
+---
+```
 
 #### Example Usage
 
@@ -500,7 +619,8 @@ Always follow these standards:
 
 ## Security Considerations
 
-- **Tool Restrictions**: Subagents only have access to their configured tools
+- **Tool Restrictions**: Use `tools` to limit which tools a subagent can access, or `disallowedTools` to block specific tools while inheriting everything else
+- **Permission Mode**: Subagents inherit their parent's permission mode by default. Plan-mode sessions cannot escalate to auto-edit through delegated agents. Privileged modes (auto-edit, yolo) are blocked in untrusted folders.
 - **Sandboxing**: All tool execution follows the same security model as direct tool use
 - **Audit Trail**: All Subagents actions are logged and visible in real-time
 - **Access Control**: Project and user-level separation provides appropriate boundaries

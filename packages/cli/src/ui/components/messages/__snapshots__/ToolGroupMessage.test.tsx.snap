@@ -22,7 +22,7 @@ exports[`<ToolGroupMessage /> > Border Color Logic > uses yellow border when too
 
 exports[`<ToolGroupMessage /> > Compact Mode (dataworks fork) > uses CompactToolGroupDisplay when compactMode is true 1`] = `
 "╭──────────────────────────────────────────────────────────────────────────────╮
-│⊷  second-tool  A tool for testing                                            │
+│⊷  second-tool × 2  A tool for testing                                        │
 │Press Ctrl+O to show full tool output                                         │
 ╰──────────────────────────────────────────────────────────────────────────────╯"
 `;

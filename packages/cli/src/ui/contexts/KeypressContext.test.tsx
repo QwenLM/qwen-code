@@ -13,6 +13,7 @@ import {
   KeypressProvider,
   useKeypressContext,
   DRAG_COMPLETION_TIMEOUT_MS,
+  PASTE_IDLE_TIMEOUT_MS,
   // CSI_END_O,
   // SS3_END,
   SINGLE_QUOTE,
@@ -228,6 +229,79 @@ describe('KeypressContext - Kitty Protocol', () => {
           shift: false,
         }),
       );
+    });
+
+    it('Ctrl+C escapes a paste mode that never received its paste-end marker', async () => {
+      // Regression test for the "must restart terminal" lockup reported by
+      // a user on Ghostty + Sogou pinyin: bracketed-paste-start arrived,
+      // isPaste was set true, and paste-end never followed. Every
+      // subsequent keystroke — including Ctrl+C — was silently buffered.
+      // This test checks that Ctrl+C is always dispatched regardless of
+      // paste mode state.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Send ONLY the paste-start marker (no paste-end) — this puts the
+      // dispatcher into the broken state.
+      act(() => {
+        stdin.emit('data', Buffer.from('\x1b[200~'));
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Ctrl+C should fire now, not get buffered into the stuck paste.
+      act(() => {
+        stdin.emit('data', Buffer.from('\x03'));
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const ctrlCSeen = keyHandler.mock.calls.some(
+        (c) => c[0]?.ctrl === true && c[0]?.name === 'c',
+      );
+      expect(ctrlCSeen).toBe(true);
+    });
+
+    it('auto-recovers from a stuck paste mode via idle timeout', async () => {
+      // Automatic recovery safety net for the same "must restart terminal"
+      // lockup the Ctrl+C test above covers manually: if paste-end never
+      // arrives, an idle timeout should flush whatever is in the paste
+      // buffer and reset paste state so normal typing resumes automatically
+      // (without requiring the user to hit Ctrl+C or restart the terminal).
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.emit('data', Buffer.from('\x1b[200~hello'));
+      });
+
+      // Wait long enough for the paste idle timeout to trigger recovery.
+      // Derived from the production constant so the test stays in sync
+      // if the timeout is ever tuned.
+      await new Promise((r) => setTimeout(r, PASTE_IDLE_TIMEOUT_MS + 200));
+
+      // A plain ASCII key after recovery must reach the handler.
+      act(() => {
+        stdin.emit('data', Buffer.from('z'));
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      const zSeen = keyHandler.mock.calls.some(
+        (c) => c[0]?.sequence === 'z' && c[0]?.paste !== true,
+      );
+      expect(zSeen).toBe(true);
     });
 
     it('should not process kitty sequences when kitty protocol is disabled', async () => {
@@ -883,6 +957,63 @@ describe('KeypressContext - Kitty Protocol', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('should keep a literal tab key as a non-paste keypress', () => {
+      vi.useFakeTimers();
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) => wrapper({ children, pasteWorkaround: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      try {
+        act(() => {
+          stdin.emit('data', Buffer.from('\t'));
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            name: 'tab',
+            sequence: '\t',
+            paste: false,
+          }),
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should mark single-line tabbed raw chunks as paste', async () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) => wrapper({ children, pasteWorkaround: true }),
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.emit('data', Buffer.from('first\tsecond'));
+      });
+
+      await waitFor(() => {
+        expect(keyHandler).toHaveBeenCalledTimes(1);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: '',
+          sequence: 'first\tsecond',
+          paste: true,
+        }),
+      );
     });
 
     it('should concatenate new data and reset timeout', () => {

@@ -1288,13 +1288,24 @@ export class CoreToolScheduler {
     if (confirmationDetails.type !== 'edit' || !this.config.getIdeMode()) {
       return;
     }
-    const ideClient = await IdeClient.getInstance();
-    if (!ideClient.isDiffingEnabled()) return;
 
-    const resolution = await ideClient.openDiff(
-      confirmationDetails.filePath,
-      confirmationDetails.newContent,
-    );
+    let resolution: Awaited<ReturnType<IdeClient['openDiff']>>;
+    try {
+      const ideClient = await IdeClient.getInstance();
+      if (!ideClient.isDiffingEnabled()) return;
+
+      resolution = await ideClient.openDiff(
+        confirmationDetails.filePath,
+        confirmationDetails.newContent,
+      );
+    } catch (error) {
+      if (!signal.aborted) {
+        debugLogger.warn(
+          `IDE diff open failed for ${callId}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return;
+    }
 
     // Guard: skip if the tool was already handled (e.g. by CLI
     // confirmation).  Without this check, resolveDiffFromCli
@@ -1313,7 +1324,7 @@ export class CoreToolScheduler {
       const userEdited =
         resolution.content != null &&
         resolution.content !== confirmationDetails.newContent;
-      this.handleConfirmationResponse(
+      await this.handleConfirmationResponse(
         callId,
         confirmationDetails.onConfirm,
         ToolConfirmationOutcome.ProceedOnce,
@@ -1321,7 +1332,7 @@ export class CoreToolScheduler {
         userEdited ? { newContent: resolution.content } : undefined,
       );
     } else {
-      this.handleConfirmationResponse(
+      await this.handleConfirmationResponse(
         callId,
         confirmationDetails.onConfirm,
         ToolConfirmationOutcome.Cancel,
@@ -1605,6 +1616,11 @@ export class CoreToolScheduler {
           error: undefined,
           errorType: undefined,
           contentLength,
+          // Propagate modelOverride from skill tools. Use `in` to distinguish
+          // "skill returned undefined (inherit)" from "non-skill tool (no field)".
+          ...('modelOverride' in toolResult
+            ? { modelOverride: toolResult.modelOverride }
+            : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
       } else {

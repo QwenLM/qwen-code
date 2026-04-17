@@ -187,10 +187,24 @@ export function convertClaudeAgentConfig(
     qwenAgent['model'] = claudeAgent.model;
   }
 
-  // Preserve unsupported fields as-is for potential future compatibility
-  // These fields are not supported by Qwen Code SubagentConfig but we keep them
+  // Map Claude permission mode aliases to Qwen ApprovalMode values.
+  // Note: Claude's `dontAsk` denies any tool call that would prompt the user,
+  // making it restrictive. We map it to `default` (which also requires approval)
+  // rather than `auto-edit` (which auto-approves), preserving the restrictive
+  // intent. `bypassPermissions` is the Claude mode that auto-approves everything.
   if (claudeAgent.permissionMode) {
-    qwenAgent['permissionMode'] = claudeAgent.permissionMode;
+    const claudeToQwenMode: Record<string, string> = {
+      default: 'default',
+      plan: 'plan',
+      acceptEdits: 'auto-edit',
+      dontAsk: 'default',
+      bypassPermissions: 'yolo',
+      auto: 'auto-edit',
+    };
+    const mapped =
+      claudeToQwenMode[claudeAgent.permissionMode] ??
+      claudeAgent.permissionMode;
+    qwenAgent['approvalMode'] = mapped;
   }
   if (claudeAgent.hooks) {
     qwenAgent['hooks'] = claudeAgent.hooks;

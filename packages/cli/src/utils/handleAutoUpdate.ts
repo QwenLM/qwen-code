@@ -86,20 +86,28 @@ export function handleAutoUpdate(
 export function setUpdateHandler(
   addItem: (item: Omit<HistoryItem, 'id'>, timestamp: number) => void,
   setUpdateInfo: (info: UpdateObject | null) => void,
+  isIdleRef: { current: boolean } = { current: true },
 ) {
   let successfullyInstalled = false;
+  const pendingNotifications: Array<Omit<HistoryItem, 'id'>> = [];
+
+  const addItemOrDefer = (item: Omit<HistoryItem, 'id'>) => {
+    if (isIdleRef.current) {
+      addItem(item, Date.now());
+    } else {
+      pendingNotifications.push(item);
+    }
+  };
+
   const handleUpdateRecieved = (info: UpdateObject) => {
     setUpdateInfo(info);
     const savedMessage = info.message;
     setTimeout(() => {
       if (!successfullyInstalled) {
-        addItem(
-          {
-            type: MessageType.INFO,
-            text: savedMessage,
-          },
-          Date.now(),
-        );
+        addItemOrDefer({
+          type: MessageType.INFO,
+          text: savedMessage,
+        });
       }
       setUpdateInfo(null);
     }, 60000);
@@ -107,35 +115,26 @@ export function setUpdateHandler(
 
   const handleUpdateFailed = () => {
     setUpdateInfo(null);
-    addItem(
-      {
-        type: MessageType.ERROR,
-        text: `Automatic update failed. Please try updating manually`,
-      },
-      Date.now(),
-    );
+    addItemOrDefer({
+      type: MessageType.ERROR,
+      text: `Automatic update failed. Please try updating manually`,
+    });
   };
 
   const handleUpdateSuccess = () => {
     successfullyInstalled = true;
     setUpdateInfo(null);
-    addItem(
-      {
-        type: MessageType.INFO,
-        text: `Update successful! The new version will be used on your next run.`,
-      },
-      Date.now(),
-    );
+    addItemOrDefer({
+      type: MessageType.INFO,
+      text: `Update successful! The new version will be used on your next run.`,
+    });
   };
 
   const handleUpdateInfo = (data: { message: string }) => {
-    addItem(
-      {
-        type: MessageType.INFO,
-        text: data.message,
-      },
-      Date.now(),
-    );
+    addItemOrDefer({
+      type: MessageType.INFO,
+      text: data.message,
+    });
   };
 
   updateEventEmitter.on('update-received', handleUpdateRecieved);
@@ -143,10 +142,20 @@ export function setUpdateHandler(
   updateEventEmitter.on('update-success', handleUpdateSuccess);
   updateEventEmitter.on('update-info', handleUpdateInfo);
 
-  return () => {
+  const cleanup = () => {
     updateEventEmitter.off('update-received', handleUpdateRecieved);
     updateEventEmitter.off('update-failed', handleUpdateFailed);
     updateEventEmitter.off('update-success', handleUpdateSuccess);
     updateEventEmitter.off('update-info', handleUpdateInfo);
+    pendingNotifications.length = 0;
   };
+
+  const flush = () => {
+    while (pendingNotifications.length > 0) {
+      const item = pendingNotifications.shift()!;
+      addItem(item, Date.now());
+    }
+  };
+
+  return { cleanup, flush };
 }

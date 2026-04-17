@@ -111,11 +111,12 @@ export async function retryWithBackoff<T>(
       // Check for Qwen OAuth quota exceeded error - throw immediately without retry
       if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
         throw new Error(
-          `Qwen OAuth quota exceeded: Your free daily quota has been reached.\n\n` +
-            `To continue using Qwen Code without waiting, upgrade to the Alibaba Cloud Coding Plan:\n` +
-            `  China:       https://help.aliyun.com/zh/model-studio/coding-plan\n` +
-            `  Global/Intl: https://www.alibabacloud.com/help/en/model-studio/coding-plan\n\n` +
-            `After subscribing, run /auth to configure your Coding Plan API key.`,
+          `Qwen OAuth free tier has been discontinued as of 2026-04-15.\n\n` +
+            `To continue using Qwen Code, try one of these alternatives:\n` +
+            `  - OpenRouter:    https://openrouter.ai/docs/quickstart\n` +
+            `  - Fireworks AI:  https://docs.fireworks.ai/api-reference/introduction\n` +
+            `  - ModelStudio:   https://help.aliyun.com/zh/model-studio/coding-plan\n\n` +
+            `After setting up your API key, run /auth to configure your provider.`,
         );
       }
 

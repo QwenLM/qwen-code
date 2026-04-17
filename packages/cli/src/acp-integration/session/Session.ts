@@ -17,6 +17,10 @@ import type {
   ToolResult,
   ChatRecord,
   AgentEventEmitter,
+  StopHookOutput,
+  HookExecutionRequest,
+  HookExecutionResponse,
+  MessageBus,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -40,9 +44,15 @@ import {
   evaluatePermissionRules,
   fireNotificationHook,
   firePermissionRequestHook,
+  firePreToolUseHook,
+  firePostToolUseHook,
+  firePostToolUseFailureHook,
   injectPermissionRulesIfMissing,
   NotificationType,
   persistPermissionOutcome,
+  createHookOutput,
+  generateToolUseId,
+  MessageBusType,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -72,6 +82,7 @@ import {
 } from '../../nonInteractiveCliCommands.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 
 // Import modular session components
 import type {
@@ -88,6 +99,10 @@ import {
   buildPermissionRequestContent,
   toPermissionOptions,
 } from './permissionUtils.js';
+import {
+  MessageRewriteMiddleware,
+  loadRewriteConfig,
+} from './rewrite/index.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -124,6 +139,9 @@ export class Session implements SessionContext {
   private readonly planEmitter: PlanEmitter;
   private readonly messageEmitter: MessageEmitter;
 
+  // Message rewrite middleware (optional, installed after history replay)
+  messageRewriter?: MessageRewriteMiddleware;
+
   // Implement SessionContext interface
   readonly sessionId: string;
 
@@ -150,6 +168,22 @@ export class Session implements SessionContext {
 
   getConfig(): Config {
     return this.config;
+  }
+
+  /**
+   * Install the message rewrite middleware if configured.
+   * Must be called AFTER history replay to avoid rewriting historical messages.
+   */
+  installRewriter(): void {
+    const rewriteConfig = loadRewriteConfig(this.settings);
+    if (rewriteConfig?.enabled) {
+      debugLogger.info('Message rewrite middleware enabled');
+      this.messageRewriter = new MessageRewriteMiddleware(
+        this.config,
+        rewriteConfig,
+        (update) => this.sendUpdate(update),
+      );
+    }
   }
 
   /**
@@ -316,6 +350,52 @@ export class Session implements SessionContext {
           parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
         }
 
+        // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
+        const hooksEnabled = !this.config.getDisableAllHooks?.();
+        const messageBus = this.config.getMessageBus?.();
+        if (
+          hooksEnabled &&
+          messageBus &&
+          this.config.hasHooksForEvent?.('UserPromptSubmit')
+        ) {
+          const response = await messageBus.request<
+            HookExecutionRequest,
+            HookExecutionResponse
+          >(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName: 'UserPromptSubmit',
+              input: {
+                prompt: promptText,
+              },
+              signal: pendingSend.signal,
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+          const hookOutput = response.output
+            ? createHookOutput('UserPromptSubmit', response.output)
+            : undefined;
+
+          if (
+            hookOutput?.isBlockingDecision() ||
+            hookOutput?.shouldStopExecution()
+          ) {
+            // Hook blocked the prompt - send notification to UI and return
+            const blockReason =
+              hookOutput?.getEffectiveReason() || 'No reason provided';
+            await this.messageEmitter.emitAgentMessage(
+              `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+            );
+            return { stopReason: 'end_turn' };
+          }
+
+          // Add additional context from hooks to the request
+          const additionalContext = hookOutput?.getAdditionalContext();
+          if (additionalContext) {
+            parts = [...parts, { text: additionalContext }];
+          }
+        }
+
         let nextMessage: Content | null = { role: 'user', parts };
 
         while (nextMessage !== null) {
@@ -380,7 +460,33 @@ export class Session implements SessionContext {
               }
             }
           } catch (error) {
-            if (getErrorStatus(error) === 429) {
+            // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+            // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+            const errorStatus = getErrorStatus(error);
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            const errorType = classifyApiError({
+              message: errorMessage,
+              status: errorStatus,
+            });
+
+            const hookSystem = this.config.getHookSystem?.();
+            const hooksEnabledForStopFailure =
+              !this.config.getDisableAllHooks?.();
+            if (
+              hooksEnabledForStopFailure &&
+              hookSystem &&
+              this.config.hasHooksForEvent?.('StopFailure')
+            ) {
+              // Fire-and-forget: don't wait for hook to complete
+              hookSystem
+                .fireStopFailureEvent(errorType, errorMessage)
+                .catch((err) => {
+                  debugLogger.warn(`StopFailure hook failed: ${err}`);
+                });
+            }
+
+            if (errorStatus === 429) {
               throw new RequestError(
                 429,
                 'Rate limit exceeded. Try again later.',
@@ -391,6 +497,11 @@ export class Session implements SessionContext {
           }
 
           if (usageMetadata) {
+            // Kick off rewrite in background (non-blocking, runs parallel to tools)
+            if (this.messageRewriter) {
+              this.messageRewriter.flushTurn(pendingSend.signal);
+            }
+
             const durationMs = Date.now() - streamStartTime;
             await this.messageEmitter.emitUsageMetadata(
               usageMetadata,
@@ -414,9 +525,264 @@ export class Session implements SessionContext {
             nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
-        return { stopReason: 'end_turn' };
+
+        // Wait for any pending rewrite before returning
+        if (this.messageRewriter) {
+          await this.messageRewriter.waitForPendingRewrites();
+        }
+
+        // Fire Stop hook loop (aligned with core path in client.ts)
+        // This is triggered after model response completes with no pending tool calls
+        return this.#handleStopHookLoop(
+          chat,
+          pendingSend,
+          promptId,
+          hooksEnabled,
+          messageBus,
+        );
       },
     );
+  }
+
+  /**
+   * Handles the Stop hook iteration loop.
+   * This method processes Stop hooks after a model response completes with no pending tool calls.
+   * If a Stop hook requests continuation, it sends a follow-up message and loops back.
+   * Maximum iterations (100) prevent infinite loops.
+   *
+   * @param chat - The GeminiChat instance
+   * @param pendingSend - The abort controller for the current prompt
+   * @param promptId - The prompt ID for tracking
+   * @param hooksEnabled - Whether hooks are enabled
+   * @param messageBus - The MessageBus for hook communication (may be undefined)
+   * @returns The stop reason ('end_turn' or 'cancelled')
+   */
+  async #handleStopHookLoop(
+    chat: GeminiChat,
+    pendingSend: AbortController,
+    promptId: string,
+    hooksEnabled: boolean,
+    messageBus: MessageBus | undefined,
+  ): Promise<{ stopReason: 'end_turn' | 'cancelled' }> {
+    const MAX_STOP_HOOK_ITERATIONS = 100;
+    let stopHookIterationCount = 0;
+    let stopHookReasons: string[] = [];
+
+    while (stopHookIterationCount < MAX_STOP_HOOK_ITERATIONS) {
+      if (
+        !hooksEnabled ||
+        !messageBus ||
+        pendingSend.signal.aborted ||
+        !this.config.hasHooksForEvent?.('Stop')
+      ) {
+        return { stopReason: 'end_turn' };
+      }
+
+      // Get response text from the chat history
+      const history = chat.getHistory();
+      const lastModelMessage = history
+        .filter((msg) => msg.role === 'model')
+        .pop();
+      const responseText =
+        lastModelMessage?.parts
+          ?.filter((p): p is { text: string } => 'text' in p)
+          .map((p) => p.text)
+          .join('') || '[no response text]';
+
+      const response = await messageBus.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Stop',
+          input: {
+            stop_hook_active: true,
+            last_assistant_message: responseText,
+          },
+          signal: pendingSend.signal,
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      // Check if aborted after hook execution
+      if (pendingSend.signal.aborted) {
+        return { stopReason: 'cancelled' };
+      }
+
+      const hookOutput = response.output
+        ? createHookOutput('Stop', response.output)
+        : undefined;
+
+      const stopOutput = hookOutput as StopHookOutput | undefined;
+
+      // Emit system message if provided by hook
+      if (stopOutput?.systemMessage) {
+        await this.messageEmitter.emitAgentMessage(stopOutput.systemMessage);
+      }
+
+      // For Stop hooks, blocking/stop execution should force continuation
+      if (
+        stopOutput?.isBlockingDecision() ||
+        stopOutput?.shouldStopExecution()
+      ) {
+        const continueReason = stopOutput.getEffectiveReason();
+
+        // Track Stop hook iterations
+        stopHookIterationCount++;
+        stopHookReasons = [...stopHookReasons, continueReason];
+
+        // Emit StopHookLoop event for iterations after the first one
+        if (stopHookIterationCount > 1) {
+          await this.messageEmitter.emitStopHookLoop(
+            stopHookIterationCount,
+            stopHookReasons,
+            response.stopHookCount ?? 1,
+          );
+        }
+
+        // Continue the conversation with the hook's reason
+        const continueParts: Part[] = [{ text: continueReason }];
+        let nextMessage: Content | null = {
+          role: 'user',
+          parts: continueParts,
+        };
+
+        // Process the follow-up message and any tool calls that result
+        while (nextMessage !== null) {
+          if (pendingSend.signal.aborted) {
+            return { stopReason: 'cancelled' };
+          }
+
+          const functionCalls: FunctionCall[] = [];
+          let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+          const streamStartTime = Date.now();
+
+          try {
+            const continueResponseStream = await chat.sendMessageStream(
+              this.config.getModel(),
+              {
+                message: nextMessage?.parts ?? [],
+                config: {
+                  abortSignal: pendingSend.signal,
+                },
+              },
+              promptId + '_stop_hook_' + stopHookIterationCount,
+            );
+            nextMessage = null;
+
+            for await (const resp of continueResponseStream) {
+              if (pendingSend.signal.aborted) {
+                return { stopReason: 'cancelled' };
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) continue;
+                  this.messageEmitter.emitMessage(
+                    part.text,
+                    'assistant',
+                    part.thought,
+                  );
+                }
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
+              }
+            }
+          } catch (error) {
+            // Fire StopFailure hook (fire-and-forget)
+            const errorStatus = getErrorStatus(error);
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            const errorType = classifyApiError({
+              message: errorMessage,
+              status: errorStatus,
+            });
+
+            const hookSystem = this.config.getHookSystem?.();
+            const hooksEnabledForStopFailure =
+              !this.config.getDisableAllHooks?.();
+            if (
+              hooksEnabledForStopFailure &&
+              hookSystem &&
+              this.config.hasHooksForEvent?.('StopFailure')
+            ) {
+              hookSystem
+                .fireStopFailureEvent(errorType, errorMessage)
+                .catch((err) => {
+                  debugLogger.warn(`StopFailure hook failed: ${err}`);
+                });
+            }
+
+            if (errorStatus === 429) {
+              throw new RequestError(
+                429,
+                'Rate limit exceeded. Try again later.',
+              );
+            }
+
+            throw error;
+          }
+
+          if (usageMetadata) {
+            const durationMs = Date.now() - streamStartTime;
+            await this.messageEmitter.emitUsageMetadata(
+              usageMetadata,
+              '',
+              durationMs,
+            );
+          }
+
+          // Process tool calls from the follow-up message
+          if (functionCalls.length > 0) {
+            const toolResponseParts: Part[] = [];
+
+            for (const fc of functionCalls) {
+              const toolResponse = await this.runTool(
+                pendingSend.signal,
+                promptId,
+                fc,
+              );
+              toolResponseParts.push(...toolResponse);
+            }
+
+            nextMessage = { role: 'user', parts: toolResponseParts };
+          }
+        }
+
+        // Loop continues to check Stop hook again after processing the follow-up
+        continue;
+      }
+
+      // Stop hook allowed stopping, exit the loop
+      break;
+    }
+
+    // If we exceeded max iterations, log a warning but still end gracefully
+    if (stopHookIterationCount >= MAX_STOP_HOOK_ITERATIONS) {
+      debugLogger.warn(
+        `Stop hook loop reached maximum iterations (${MAX_STOP_HOOK_ITERATIONS}), forcing stop`,
+      );
+    }
+
+    return { stopReason: 'end_turn' };
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -560,6 +926,10 @@ export class Session implements SessionContext {
             }
 
             if (usageMetadata) {
+              // Kick off rewrite in background (non-blocking)
+              if (this.messageRewriter) {
+                this.messageRewriter.flushTurn(ac.signal);
+              }
               const durationMs = Date.now() - streamStartTime;
               await this.messageEmitter.emitUsageMetadata(
                 usageMetadata,
@@ -805,6 +1175,12 @@ export class Session implements SessionContext {
     // Track cleanup functions for sub-agent event listeners
     let subAgentCleanupFunctions: Array<() => void> = [];
 
+    // Generate tool_use_id for hook tracking (aligned with core path)
+    const toolUseId = generateToolUseId();
+
+    // Get approval mode for hook context (defined outside try for catch block access)
+    const approvalMode = this.config.getApprovalMode();
+
     try {
       const invocation = tool.build(args);
 
@@ -869,7 +1245,6 @@ export class Session implements SessionContext {
       const needsConfirmation = finalPermission === 'ask';
 
       // ---- L5: ApprovalMode overrides ----
-      const approvalMode = this.config.getApprovalMode();
       const isPlanMode = approvalMode === ApprovalMode.PLAN;
 
       if (finalPermission === 'deny') {
@@ -1071,6 +1446,41 @@ export class Session implements SessionContext {
         await this.toolCallEmitter.emitStart(startParams);
       }
 
+      // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
+      const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
+      const messageBusForTool = this.config.getMessageBus?.();
+      const permissionMode = String(approvalMode);
+
+      if (hooksEnabledForTool && messageBusForTool) {
+        const preHookResult = await firePreToolUseHook(
+          messageBusForTool,
+          fc.name,
+          args,
+          toolUseId,
+          permissionMode,
+          abortSignal,
+        );
+
+        if (!preHookResult.shouldProceed) {
+          // Hook blocked the tool execution - send notification to UI
+          const blockReason =
+            preHookResult.blockReason || 'Blocked by PreToolUse hook';
+          await this.messageEmitter.emitAgentMessage(
+            `🚫 **PreToolUse blocked**: ${fc.name} - ${blockReason}`,
+          );
+          return earlyErrorResponse(new Error(blockReason), fc.name);
+        }
+
+        // Add additional context from PreToolUse hook if provided
+        // Note: This context would need to be passed to the tool invocation
+        // For now, we just log it as the tool execution proceeds
+        if (preHookResult.additionalContext) {
+          debugLogger.debug(
+            `PreToolUse hook additional context for ${fc.name}: ${preHookResult.additionalContext}`,
+          );
+        }
+      }
+
       const toolResult: ToolResult = await invocation.execute(abortSignal);
 
       // Clean up event listeners
@@ -1082,6 +1492,61 @@ export class Session implements SessionContext {
         callId,
         toolResult.llmContent,
       );
+
+      // Fire PostToolUse hook on successful execution (aligned with core path)
+      if (hooksEnabledForTool && messageBusForTool && !toolResult.error) {
+        // Use the same response shape as core (llmContent/returnDisplay)
+        const toolResponse = {
+          llmContent: toolResult.llmContent,
+          returnDisplay: toolResult.returnDisplay,
+        };
+        const postHookResult = await firePostToolUseHook(
+          messageBusForTool,
+          fc.name,
+          args,
+          toolResponse,
+          toolUseId,
+          permissionMode,
+          abortSignal,
+        );
+
+        // If hook indicates to stop, return an error response
+        if (postHookResult.shouldStop) {
+          const stopMessage =
+            postHookResult.stopReason ||
+            'Execution stopped by PostToolUse hook';
+          debugLogger.info(
+            `PostToolUse hook requested stop for ${fc.name}: ${stopMessage}`,
+          );
+          return earlyErrorResponse(new Error(stopMessage), fc.name);
+        }
+
+        // Add additional context from PostToolUse hook if provided
+        if (postHookResult.additionalContext) {
+          // Append additional context to the tool response
+          const contextPart = { text: postHookResult.additionalContext };
+          responseParts.push(contextPart);
+        }
+      } else if (hooksEnabledForTool && messageBusForTool && toolResult.error) {
+        // Fire PostToolUseFailure hook when tool returns an error (aligned with core path)
+        const failureHookResult = await firePostToolUseFailureHook(
+          messageBusForTool,
+          toolUseId,
+          fc.name ?? 'unknown_tool',
+          args,
+          toolResult.error.message,
+          false, // not an interrupt
+          permissionMode,
+          abortSignal,
+        );
+
+        // Log additional context if provided
+        if (failureHookResult.additionalContext) {
+          debugLogger.debug(
+            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
+          );
+        }
+      }
 
       // Handle TodoWriteTool: extract todos and send plan update
       if (isTodoWriteTool) {
@@ -1146,6 +1611,31 @@ export class Session implements SessionContext {
       subAgentCleanupFunctions.forEach((cleanup) => cleanup());
 
       const error = e instanceof Error ? e : new Error(String(e));
+
+      // Fire PostToolUseFailure hook (aligned with core path in coreToolScheduler.ts)
+      const hooksEnabledForError = !this.config.getDisableAllHooks?.();
+      const messageBusForError = this.config.getMessageBus?.();
+      const isInterrupt = abortSignal.aborted;
+
+      if (hooksEnabledForError && messageBusForError) {
+        const failureHookResult = await firePostToolUseFailureHook(
+          messageBusForError,
+          toolUseId,
+          fc.name ?? 'unknown_tool',
+          args,
+          error.message,
+          isInterrupt,
+          String(approvalMode),
+          abortSignal,
+        );
+
+        // Log additional context if provided
+        if (failureHookResult.additionalContext) {
+          debugLogger.debug(
+            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
+          );
+        }
+      }
 
       // Use ToolCallEmitter for error handling
       await this.toolCallEmitter.emitError(

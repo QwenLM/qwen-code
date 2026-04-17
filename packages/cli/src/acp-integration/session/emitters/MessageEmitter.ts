@@ -18,6 +18,31 @@ import { BaseEmitter } from './BaseEmitter.js';
  */
 export class MessageEmitter extends BaseEmitter {
   /**
+   * Emits a StopHookLoop event when Stop hooks create a loop.
+   * This informs the client that Stop hooks have been executed multiple times.
+   *
+   * @param iterationCount - The current iteration count
+   * @param reasons - Array of reasons from each Stop hook execution
+   * @param stopHookCount - Number of Stop hooks that were executed
+   */
+  async emitStopHookLoop(
+    iterationCount: number,
+    reasons: string[],
+    stopHookCount: number,
+  ): Promise<void> {
+    await this.sendUpdate({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: '' },
+      _meta: {
+        stopHookLoop: {
+          iterationCount,
+          reasons,
+          stopHookCount,
+        },
+      },
+    });
+  }
+  /**
    * Emits a user message chunk.
    *
    * @param text - The user message text content

@@ -16,7 +16,11 @@ import { tokenLimit } from '../core/tokenLimits.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import type { Config } from '../config/config.js';
 import type { ContentGenerator } from '../core/contentGenerator.js';
-import { SessionStartSource, PreCompactTrigger } from '../hooks/types.js';
+import {
+  SessionStartSource,
+  PreCompactTrigger,
+  PostCompactTrigger,
+} from '../hooks/types.js';
 
 vi.mock('../telemetry/uiTelemetry.js');
 vi.mock('../core/tokenLimits.js');
@@ -813,12 +817,15 @@ describe('ChatCompressionService', () => {
 
   describe('PreCompact hook', () => {
     let mockFirePreCompactEvent: ReturnType<typeof vi.fn>;
+    let mockFirePostCompactEvent: ReturnType<typeof vi.fn>;
 
     beforeEach(() => {
       mockFirePreCompactEvent = vi.fn().mockResolvedValue(undefined);
+      mockFirePostCompactEvent = vi.fn().mockResolvedValue(undefined);
       mockGetHookSystem.mockReturnValue({
         fireSessionStartEvent: mockFireSessionStartEvent,
         firePreCompactEvent: mockFirePreCompactEvent,
+        firePostCompactEvent: mockFirePostCompactEvent,
       });
     });
 
@@ -1140,6 +1147,327 @@ describe('ChatCompressionService', () => {
       expect(result.newHistory).not.toBeNull();
       // mockFirePreCompactEvent should not be called since hookSystem is null
       expect(mockFirePreCompactEvent).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('PostCompact hook', () => {
+    let mockFirePreCompactEvent: ReturnType<typeof vi.fn>;
+    let mockFirePostCompactEvent: ReturnType<typeof vi.fn>;
+
+    beforeEach(() => {
+      mockFirePreCompactEvent = vi.fn().mockResolvedValue(undefined);
+      mockFirePostCompactEvent = vi.fn().mockResolvedValue(undefined);
+      mockGetHookSystem.mockReturnValue({
+        fireSessionStartEvent: mockFireSessionStartEvent,
+        firePreCompactEvent: mockFirePreCompactEvent,
+        firePostCompactEvent: mockFirePostCompactEvent,
+      });
+    });
+
+    it('should fire PostCompact hook with Manual trigger when force=true', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        100,
+      );
+      vi.mocked(tokenLimit).mockReturnValue(1000);
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1100,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1150,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      await service.compress(
+        mockChat,
+        mockPromptId,
+        true, // force = true -> Manual trigger
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      expect(mockFirePostCompactEvent).toHaveBeenCalledWith(
+        PostCompactTrigger.Manual,
+        'Summary',
+        undefined,
+      );
+    });
+
+    it('should fire PostCompact hook with Auto trigger when force=false', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        800,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 1000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Auto Summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1600,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1650,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      await service.compress(
+        mockChat,
+        mockPromptId,
+        false, // force = false -> Auto trigger
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      expect(mockFirePostCompactEvent).toHaveBeenCalledWith(
+        PostCompactTrigger.Auto,
+        'Auto Summary',
+        undefined,
+      );
+    });
+
+    it('should not fire PostCompact hook when compression fails with empty summary', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        100,
+      );
+      vi.mocked(tokenLimit).mockReturnValue(1000);
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: '' }], // Empty summary
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1100,
+          candidatesTokenCount: 0,
+          totalTokenCount: 1100,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      const result = await service.compress(
+        mockChat,
+        mockPromptId,
+        true,
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      expect(result.info.compressionStatus).toBe(
+        CompressionStatus.COMPRESSION_FAILED_EMPTY_SUMMARY,
+      );
+      expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
+    });
+
+    it('should handle PostCompact hook errors gracefully', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        800,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 1000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+      mockFirePostCompactEvent.mockRejectedValue(
+        new Error('PostCompact hook failed'),
+      );
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1600,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1650,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      const result = await service.compress(
+        mockChat,
+        mockPromptId,
+        false,
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      // Should still complete compression despite hook error
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.newHistory).not.toBeNull();
+      expect(mockFirePostCompactEvent).toHaveBeenCalled();
+    });
+
+    it('should fire hooks in correct order: PreCompact -> SessionStart -> PostCompact', async () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        800,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 1000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+      const callOrder: string[] = [];
+      mockFirePreCompactEvent.mockImplementation(async () => {
+        callOrder.push('PreCompact');
+      });
+      mockFireSessionStartEvent.mockImplementation(async () => {
+        callOrder.push('SessionStart');
+      });
+      mockFirePostCompactEvent.mockImplementation(async () => {
+        callOrder.push('PostCompact');
+      });
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1600,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1650,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      await service.compress(
+        mockChat,
+        mockPromptId,
+        false,
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      // Hooks should be called in order: PreCompact -> SessionStart -> PostCompact
+      expect(callOrder).toEqual(['PreCompact', 'SessionStart', 'PostCompact']);
+    });
+
+    it('should not fire PostCompact hook when hookSystem is null', async () => {
+      mockGetHookSystem.mockReturnValue(null);
+
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'msg1' }] },
+        { role: 'model', parts: [{ text: 'msg2' }] },
+        { role: 'user', parts: [{ text: 'msg3' }] },
+        { role: 'model', parts: [{ text: 'msg4' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        800,
+      );
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        model: 'gemini-pro',
+        contextWindowSize: 1000,
+      } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
+
+      const mockGenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [{ text: 'Summary' }],
+            },
+          },
+        ],
+        usageMetadata: {
+          promptTokenCount: 1600,
+          candidatesTokenCount: 50,
+          totalTokenCount: 1650,
+        },
+      } as unknown as GenerateContentResponse);
+      vi.mocked(mockConfig.getContentGenerator).mockReturnValue({
+        generateContent: mockGenerateContent,
+      } as unknown as ContentGenerator);
+
+      const result = await service.compress(
+        mockChat,
+        mockPromptId,
+        false,
+        mockModel,
+        mockConfig,
+        false,
+      );
+
+      // Should still complete compression without hook
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(result.newHistory).not.toBeNull();
+      // mockFirePostCompactEvent should not be called since hookSystem is null
+      expect(mockFirePostCompactEvent).not.toHaveBeenCalled();
     });
   });
 

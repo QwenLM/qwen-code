@@ -295,9 +295,7 @@ describe('<HistoryItemDisplay />', () => {
 
     it('hides gemini_thought in compact mode', () => {
       const { lastFrame } = renderWithProviders(
-        <CompactModeProvider
-          value={{ compactMode: true, frozenSnapshot: null }}
-        >
+        <CompactModeProvider value={{ compactMode: true }}>
           <HistoryItemDisplay
             item={thoughtItem}
             isPending={false}
@@ -311,9 +309,7 @@ describe('<HistoryItemDisplay />', () => {
 
     it('shows gemini_thought in verbose mode', () => {
       const { lastFrame } = renderWithProviders(
-        <CompactModeProvider
-          value={{ compactMode: false, frozenSnapshot: null }}
-        >
+        <CompactModeProvider value={{ compactMode: false }}>
           <HistoryItemDisplay
             item={thoughtItem}
             isPending={false}

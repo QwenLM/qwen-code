@@ -82,10 +82,10 @@ describe('showAuthStatus', () => {
       expect.stringContaining('Qwen OAuth'),
     );
     expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('Free tier'),
+      expect.stringContaining('Free tier (discontinued 2026-04-15)'),
     );
     expect(writeStdoutLine).toHaveBeenCalledWith(
-      expect.stringContaining('1,000 requests/day'),
+      expect.stringContaining('No longer available'),
     );
     expect(process.exit).toHaveBeenCalledWith(0);
   });

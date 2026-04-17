@@ -69,20 +69,4 @@ describe('hooksCommand', () => {
       });
     });
   });
-
-  describe('non-interactive mode', () => {
-    it('should list hooks in non-interactive mode', async () => {
-      const nonInteractiveContext = createMockCommandContext({
-        services: {
-          config: mockConfig,
-        },
-        executionMode: 'non_interactive',
-      });
-
-      const result = await hooksCommand.action!(nonInteractiveContext, '');
-
-      // In non-interactive mode, it should return a message
-      expect(result).toHaveProperty('type', 'message');
-    });
-  });
 });

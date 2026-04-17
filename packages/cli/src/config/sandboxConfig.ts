@@ -99,6 +99,7 @@ export async function loadSandboxConfig(
   const image =
     argv.sandboxImage ??
     process.env['QWEN_SANDBOX_IMAGE'] ??
+    settings.tools?.sandboxImage ??
     packageJson?.config?.sandboxImageUri;
 
   return command && image ? { command, image } : undefined;

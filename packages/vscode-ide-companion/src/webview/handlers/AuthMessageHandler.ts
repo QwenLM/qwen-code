@@ -16,7 +16,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
   private loginHandler: (() => Promise<void>) | null = null;
 
   canHandle(messageType: string): boolean {
-    return ['login'].includes(messageType);
+    return ['login', 'getAccountInfo'].includes(messageType);
   }
 
   async handle(message: { type: string; data?: unknown }): Promise<void> {
@@ -24,6 +24,11 @@ export class AuthMessageHandler extends BaseMessageHandler {
       case 'login':
         await this.handleLogin();
         break;
+
+      case 'getAccountInfo': {
+        await this.handleGetAccountInfo();
+        break;
+      }
 
       default:
         console.warn(
@@ -39,6 +44,31 @@ export class AuthMessageHandler extends BaseMessageHandler {
    */
   setLoginHandler(handler: () => Promise<void>): void {
     this.loginHandler = handler;
+  }
+
+  /**
+   * Handle getAccountInfo request - queries ACP for live account info
+   */
+  private async handleGetAccountInfo(): Promise<void> {
+    try {
+      const info = await this.agentManager.getAccountInfo();
+      this.sendToWebView({
+        type: 'accountInfo',
+        data: {
+          authType: info.authType,
+          baseUrl: info.baseUrl,
+          envKey: info.apiKeyEnvKey,
+          modelId: info.model,
+        },
+      });
+    } catch (error) {
+      const errorMsg = getErrorMessage(error);
+      console.error('[AuthMessageHandler] getAccountInfo failed:', error);
+      this.sendToWebView({
+        type: 'accountInfo',
+        data: { error: errorMsg },
+      });
+    }
   }
 
   /**

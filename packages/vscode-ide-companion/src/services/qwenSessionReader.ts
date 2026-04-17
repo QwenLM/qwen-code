@@ -9,6 +9,7 @@ import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
 import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
+import { truncatePanelTitle } from '../webview/utils/panelTitleUtils.js';
 
 export interface QwenMessage {
   id: string;
@@ -182,22 +183,15 @@ export class QwenSessionReader {
    */
   getSessionTitle(session: QwenSession): string {
     // Prefer cached prompt text to avoid loading messages for JSONL sessions
-    if (session.firstUserText) {
-      return (
-        session.firstUserText.substring(0, 50) +
-        (session.firstUserText.length > 50 ? '...' : '')
-      );
+    const text = session.firstUserText
+      ? session.firstUserText
+      : (session.messages.find((m) => m.type === 'user')?.content ?? '');
+
+    if (!text) {
+      return 'Untitled Session';
     }
 
-    const firstUserMessage = session.messages.find((m) => m.type === 'user');
-    if (firstUserMessage) {
-      // Extract first 50 characters as title
-      return (
-        firstUserMessage.content.substring(0, 50) +
-        (firstUserMessage.content.length > 50 ? '...' : '')
-      );
-    }
-    return 'Untitled Session';
+    return truncatePanelTitle(text);
   }
 
   /**

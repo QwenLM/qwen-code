@@ -43,6 +43,7 @@ import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
+import { MemoryDialog } from './MemoryDialog.js';
 
 interface DialogManagerProps {
   addItem: UseHistoryManagerReturn['addItem'];
@@ -236,6 +237,9 @@ export const DialogManager = ({
         />
       </Box>
     );
+  }
+  if (uiState.isMemoryDialogOpen) {
+    return <MemoryDialog onClose={uiActions.closeMemoryDialog} />;
   }
   if (uiState.isApprovalModeDialogOpen) {
     const currentMode = config.getApprovalMode();

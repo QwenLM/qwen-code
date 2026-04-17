@@ -8,6 +8,7 @@ import type { Config } from '../config/config.js';
 import type { HookPlanner, HookEventContext } from './hookPlanner.js';
 import type { HookRunner } from './hookRunner.js';
 import type { HookAggregator, AggregatedHookResult } from './hookAggregator.js';
+import type { SessionHooksManager } from './sessionHooksManager.js';
 import { HookEventName } from './types.js';
 import type {
   HookConfig,
@@ -25,12 +26,18 @@ import type {
   PostToolUseFailureInput,
   PreCompactInput,
   PreCompactTrigger,
+  PostCompactInput,
+  PostCompactTrigger,
   NotificationInput,
   NotificationType,
   PermissionRequestInput,
   PermissionSuggestion,
   SubagentStartInput,
   SubagentStopInput,
+  MessagesProvider,
+  FunctionHookContext,
+  StopFailureInput,
+  StopFailureErrorType,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -47,17 +54,38 @@ export class HookEventHandler {
   private readonly hookPlanner: HookPlanner;
   private readonly hookRunner: HookRunner;
   private readonly hookAggregator: HookAggregator;
+  private readonly sessionHooksManager: SessionHooksManager;
+  /** Optional provider for conversation history */
+  private messagesProvider?: MessagesProvider;
 
   constructor(
     config: Config,
     hookPlanner: HookPlanner,
     hookRunner: HookRunner,
     hookAggregator: HookAggregator,
+    sessionHooksManager: SessionHooksManager,
+    messagesProvider?: MessagesProvider,
   ) {
     this.config = config;
     this.hookPlanner = hookPlanner;
     this.hookRunner = hookRunner;
     this.hookAggregator = hookAggregator;
+    this.sessionHooksManager = sessionHooksManager;
+    this.messagesProvider = messagesProvider;
+  }
+
+  /**
+   * Set the messages provider for automatic conversation history passing
+   */
+  setMessagesProvider(provider: MessagesProvider): void {
+    this.messagesProvider = provider;
+  }
+
+  /**
+   * Get the current messages provider
+   */
+  getMessagesProvider(): MessagesProvider | undefined {
+    return this.messagesProvider;
   }
 
   /**
@@ -395,6 +423,57 @@ export class HookEventHandler {
   }
 
   /**
+   * Fire a StopFailure event
+   * Called when an API error ends the turn (instead of Stop)
+   * Fire-and-forget: output and exit codes are ignored
+   */
+  async fireStopFailureEvent(
+    error: StopFailureErrorType,
+    errorDetails?: string,
+    lastAssistantMessage?: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: StopFailureInput = {
+      ...this.createBaseInput(HookEventName.StopFailure),
+      error,
+      error_details: errorDetails,
+      last_assistant_message: lastAssistantMessage,
+    };
+
+    // Pass error type as context for matcher filtering (fieldToMatch: 'error')
+    return this.executeHooks(
+      HookEventName.StopFailure,
+      input,
+      { error },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a PostCompact event
+   * Called after conversation compaction completes
+   */
+  async firePostCompactEvent(
+    trigger: PostCompactTrigger,
+    compactSummary: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: PostCompactInput = {
+      ...this.createBaseInput(HookEventName.PostCompact),
+      trigger,
+      compact_summary: compactSummary,
+    };
+
+    // Pass trigger as context for matcher filtering
+    return this.executeHooks(
+      HookEventName.PostCompact,
+      input,
+      { trigger },
+      signal,
+    );
+  }
+
+  /**
    * Execute hooks for a specific event (direct execution without MessageBus)
    * Used as fallback when MessageBus is not available
    */
@@ -405,10 +484,26 @@ export class HookEventHandler {
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     try {
-      // Create execution plan
+      // Create execution plan from registry hooks
       const plan = this.hookPlanner.createExecutionPlan(eventName, context);
 
-      if (!plan || plan.hookConfigs.length === 0) {
+      // Get session hooks and merge with registry hooks
+      const sessionId = input.session_id;
+      const targetName = context?.toolName || '';
+      const sessionHooks = sessionId
+        ? this.sessionHooksManager.getMatchingHooks(
+            sessionId,
+            eventName,
+            targetName,
+          )
+        : [];
+
+      // Merge hook configs from registry plan and session hooks
+      const registryHookConfigs = plan?.hookConfigs || [];
+      const sessionHookConfigs = sessionHooks.map((entry) => entry.config);
+      const allHookConfigs = [...registryHookConfigs, ...sessionHookConfigs];
+
+      if (allHookConfigs.length === 0) {
         return {
           success: true,
           allOutputs: [],
@@ -417,10 +512,25 @@ export class HookEventHandler {
         };
       }
 
+      // Determine execution strategy: sequential if any hook requires it
+      const sequential =
+        (plan?.sequential ?? false) ||
+        sessionHooks.some((entry) => entry.sequential === true);
+
+      // Build function hook context with messages from provider
+      const messages = this.messagesProvider?.();
+      const functionContext: FunctionHookContext = {
+        messages,
+        toolUseID:
+          'tool_use_id' in input ? (input.tool_use_id as string) : undefined,
+        signal,
+      };
+
+      const totalHooks = allHookConfigs.length;
       const onHookStart = (config: HookConfig, index: number) => {
         const hookName = this.getHookName(config);
         debugLogger.debug(
-          `Hook ${hookName} started for event ${eventName} (${index + 1}/${plan.hookConfigs.length})`,
+          `Hook ${hookName} started for event ${eventName} (${index + 1}/${totalHooks})`,
         );
       };
 
@@ -431,23 +541,25 @@ export class HookEventHandler {
         );
       };
 
-      // Execute hooks according to the plan's strategy
-      const results = plan.sequential
+      // Execute hooks according to the merged strategy
+      const results = sequential
         ? await this.hookRunner.executeHooksSequential(
-            plan.hookConfigs,
+            allHookConfigs,
             eventName,
             input,
             onHookStart,
             onHookEnd,
             signal,
+            functionContext,
           )
         : await this.hookRunner.executeHooksParallel(
-            plan.hookConfigs,
+            allHookConfigs,
             eventName,
             input,
             onHookStart,
             onHookEnd,
             signal,
+            functionContext,
           );
 
       // Aggregate results
@@ -591,7 +703,9 @@ export class HookEventHandler {
   /**
    * Get hook type from execution result for telemetry
    */
-  private getHookTypeFromResult(result: HookExecutionResult): 'command' {
-    return result.hookConfig.type as 'command';
+  private getHookTypeFromResult(
+    result: HookExecutionResult,
+  ): 'command' | 'http' | 'function' {
+    return result.hookConfig.type;
   }
 }

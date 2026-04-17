@@ -393,13 +393,11 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
     // Generate title for first message, but only if it hasn't been set yet
     if (isFirstMessage && !this.isTitleSet) {
-      const title =
-        displayText.substring(0, 50) + (displayText.length > 50 ? '...' : '');
       this.sendToWebView({
         type: 'sessionTitleUpdated',
         data: {
           sessionId: this.currentConversationId,
-          title,
+          title: displayText,
         },
       });
       this.isTitleSet = true; // Mark title as set

@@ -11,15 +11,15 @@
 
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
-import type { ContentGenerator } from '../core/contentGenerator.js';
-import { AuthType, createContentGenerator } from '../core/contentGenerator.js';
-import { buildAgentContentGeneratorConfig } from '../models/content-generator-config.js';
-import { getCacheSafeParams, runForkedQuery } from './forkedQuery.js';
+import { getCacheSafeParams, runForkedAgent } from '../utils/forkedAgent.js';
 import {
   uiTelemetryService,
   EVENT_API_RESPONSE,
 } from '../telemetry/uiTelemetry.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('FOLLOWUP');
 
 /**
  * Prompt for suggestion generation.
@@ -82,72 +82,11 @@ const SUGGESTION_SCHEMA: Record<string, unknown> = {
 const MIN_ASSISTANT_TURNS = 2;
 
 /**
- * Cache of fast-model ContentGenerators, keyed by model ID.
- * Avoids re-creating the generator on every suggestion request.
- */
-const fastGeneratorCache = new Map<string, ContentGenerator>();
-
-/**
- * Get or create a ContentGenerator for the given fast model.
- *
- * For OpenAI-compatible providers, the pipeline ignores `request.model` and
- * always uses the model baked into the ContentGenerator at construction time.
- * So if `fastModel` points to a different model/baseUrl than the main model,
- * we must create a dedicated ContentGenerator for it.
- *
- * Returns null if the model is the same as the main model (no need for a
- * separate generator) or if creation fails.
- *
- * @param config - App config
- * @param fastModelId - The fast model ID from settings (e.g., "glm-4.7")
- */
-async function getOrCreateFastGenerator(
-  config: Config,
-  fastModelId: string,
-): Promise<ContentGenerator | null> {
-  // If fast model is the same as main model, no dedicated generator needed
-  if (fastModelId === config.getModel()) {
-    return null;
-  }
-
-  const cached = fastGeneratorCache.get(fastModelId);
-  if (cached) {
-    return cached;
-  }
-
-  try {
-    const parentAuthType = config.getContentGeneratorConfig().authType;
-    const cgConfig = buildAgentContentGeneratorConfig(config, fastModelId, {
-      authType: parentAuthType ?? AuthType.USE_OPENAI,
-    });
-    // Disable thinking/reasoning for the fast suggestion generator:
-    // - glm-4.7 uses extra_body.thinking.enabled
-    // - qwen3 series uses extra_body.enable_thinking
-    // - other providers use the reasoning field
-    // Setting all of these ensures the model returns a plain text response
-    // immediately, without a thinking phase that can result in empty content parts.
-    cgConfig.reasoning = false;
-    cgConfig.extra_body = {
-      ...cgConfig.extra_body,
-      thinking: { enabled: false },
-      enable_thinking: false,
-    };
-    const generator = await createContentGenerator(cgConfig, config);
-    fastGeneratorCache.set(fastModelId, generator);
-    return generator;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * Generate a prompt suggestion using an LLM call.
  *
- * @param config - App config (provides ContentGenerator and model)
+ * @param config - App config (provides BaseLlmClient and model)
  * @param conversationHistory - Full conversation history as Content[]
  * @param abortSignal - Signal to cancel the LLM call (e.g., when user types)
- * @param options.enableCacheSharing - Use cache-aware forked query path
- * @param options.model - Fast model ID override (e.g., "glm-4.7")
  * @returns Object with suggestion text and optional filter reason, or null on error/early skip
  */
 export async function generatePromptSuggestion(
@@ -164,55 +103,44 @@ export async function generatePromptSuggestion(
     return { suggestion: null, filterReason: 'early_conversation' };
   }
 
-  const fastModelId = options?.model;
-  const fastGenerator = fastModelId
-    ? await getOrCreateFastGenerator(config, fastModelId)
-    : null;
-  const effectiveModelId = fastModelId ?? config.getModel();
-
   try {
+    // Try cache-aware forked query if enabled and params available
     const cacheSafe = options?.enableCacheSharing ? getCacheSafeParams() : null;
-
-    let raw: string | null = null;
-
-    if (cacheSafe) {
-      raw = await generateViaForkedQuery(config, abortSignal, effectiveModelId);
-    } else {
-      raw = await generateViaBaseLlm(
-        config,
-        conversationHistory,
-        abortSignal,
-        effectiveModelId,
-        fastGenerator ?? undefined,
-      );
-
-      if (raw === null && fastGenerator) {
-        raw = await generateViaBaseLlm(
+    const modelOverride = options?.model;
+    debugLogger.debug(
+      `Generating suggestion: cacheSharing=${!!cacheSafe}, model=${modelOverride || '(default)'}`,
+    );
+    const raw = cacheSafe
+      ? await generateViaForkedQuery(config, abortSignal, modelOverride)
+      : await generateViaBaseLlm(
           config,
           conversationHistory,
           abortSignal,
-          config.getModel(),
-          undefined,
+          modelOverride,
         );
-      }
-    }
 
     const suggestion = typeof raw === 'string' ? raw.trim() : null;
 
     if (!suggestion) {
+      debugLogger.debug('Suggestion generation returned empty result');
       return { suggestion: null, filterReason: 'empty' };
     }
 
     const filterReason = getFilterReason(suggestion);
     if (filterReason) {
+      debugLogger.debug(
+        `Suggestion filtered: reason=${filterReason}, text="${suggestion}"`,
+      );
       return { suggestion: null, filterReason };
     }
 
+    debugLogger.debug(`Suggestion accepted: "${suggestion}"`);
     return { suggestion };
-  } catch {
+  } catch (error) {
     if (abortSignal.aborted) {
       return { suggestion: null };
     }
+    debugLogger.warn('Suggestion generation failed:', error);
     return { suggestion: null, filterReason: 'error' };
   }
 }
@@ -224,9 +152,13 @@ async function generateViaForkedQuery(
   modelOverride?: string,
 ): Promise<string | null> {
   const model = modelOverride || config.getModel();
+  const cacheSafeParams = getCacheSafeParams();
+  if (!cacheSafeParams) return null;
   const startTime = Date.now();
-  const result = await runForkedQuery(config, SUGGESTION_PROMPT, {
-    abortSignal,
+  const result = await runForkedAgent({
+    config,
+    userMessage: SUGGESTION_PROMPT,
+    cacheSafeParams,
     jsonSchema: SUGGESTION_SCHEMA,
     model,
   });
@@ -266,177 +198,59 @@ async function generateViaForkedQuery(
   return null;
 }
 
-/**
- * Generate via ContentGenerator (always reports usage).
- *
- * Main session path uses non-streaming `generateContent` with thinking disabled.
- * Optional dedicated fast generator uses streaming and simplified history so
- * OpenAI-compatible stacks get the correct model/baseUrl and BFF streaming works.
- *
- * @param generator - When set, used instead of config.getContentGenerator().
- */
+/** Generate via direct ContentGenerator.generateContent (always reports usage) */
 async function generateViaBaseLlm(
   config: Config,
   conversationHistory: Content[],
   abortSignal: AbortSignal,
-  modelOverride: string | undefined,
-  generator?: ContentGenerator,
+  modelOverride?: string,
 ): Promise<string | null> {
   const model = modelOverride || config.getModel();
-  const resolvedGenerator = generator ?? config.getContentGenerator();
-
-  if (!generator) {
-    const contents: Content[] = [
-      ...conversationHistory,
-      { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
-    ];
-    const startTime = Date.now();
-    const response = await resolvedGenerator.generateContent(
-      {
-        model,
-        contents,
-        config: {
-          abortSignal,
-          thinkingConfig: { includeThoughts: false },
-        },
-      },
-      'prompt_suggestion',
-    );
-    const durationMs = Date.now() - startTime;
-    const usage = response.usageMetadata;
-    if (usage) {
-      reportSuggestionUsage(model, usage, durationMs);
-    }
-    const text = response.candidates?.[0]?.content?.parts
-      ?.filter((p) => !('thought' in p && (p as { thought?: boolean }).thought))
-      .map((p) => p.text ?? '')
-      .join('')
-      .trim();
-    return parseSuggestionText(text);
-  }
-
-  const simplifiedHistory = simplifyHistoryForFastModel(conversationHistory);
   const contents: Content[] = [
-    ...simplifiedHistory,
+    ...conversationHistory,
     { role: 'user', parts: [{ text: SUGGESTION_PROMPT }] },
   ];
 
+  const generator = config.getContentGenerator();
   const startTime = Date.now();
-  const stream = await resolvedGenerator.generateContentStream(
+  const response = await generator.generateContent(
     {
       model,
       contents,
-      config: { abortSignal },
+      config: {
+        abortSignal,
+        // Disable thinking for suggestion generation — not needed and wastes tokens
+        thinkingConfig: { includeThoughts: false },
+      },
     },
     'prompt_suggestion',
   );
-
-  const allParts: Array<{ text?: string; thought?: boolean }> = [];
-  let usageMetadata:
-    | {
-        promptTokenCount?: number;
-        candidatesTokenCount?: number;
-        totalTokenCount?: number;
-        cachedContentTokenCount?: number;
-        thoughtsTokenCount?: number;
-      }
-    | undefined;
-
-  for await (const chunk of stream) {
-    const candidate = chunk.candidates?.[0];
-    if (candidate?.content?.parts) {
-      for (const part of candidate.content.parts) {
-        allParts.push(part as { text?: string; thought?: boolean });
-      }
-    }
-    if (chunk.usageMetadata) {
-      usageMetadata = chunk.usageMetadata;
-    }
-  }
   const durationMs = Date.now() - startTime;
 
-  if (usageMetadata) {
-    reportSuggestionUsage(model, usageMetadata, durationMs);
+  // Report usage to session stats so /stats tracks suggestion model tokens
+  const usage = response.usageMetadata;
+  if (usage) {
+    reportSuggestionUsage(model, usage, durationMs);
   }
 
-  const thoughtParts = allParts.filter((p) => 'thought' in p && p.thought);
-  const textParts = allParts.filter((p) => !('thought' in p && p.thought));
-
-  const text = textParts
+  const text = response.candidates?.[0]?.content?.parts
+    ?.filter((p) => !(p as Record<string, unknown>)['thought'])
     .map((p) => p.text ?? '')
     .join('')
     .trim();
-
-  const parsed = parseSuggestionText(text);
-  if (parsed !== null) {
-    return parsed;
-  }
-
-  if (thoughtParts.length > 0) {
-    const thoughtText = thoughtParts
-      .map((p) => p.text ?? '')
-      .join('')
-      .trim();
-    return parseSuggestionText(thoughtText);
+  if (text) {
+    // Try to parse as JSON first (model might return {"suggestion": "..."})
+    try {
+      const parsed = JSON.parse(text) as Record<string, unknown>;
+      const s = parsed['suggestion'];
+      if (typeof s === 'string') return s;
+    } catch {
+      // Not JSON — use raw text as the suggestion
+    }
+    return text;
   }
 
   return null;
-}
-
-function parseSuggestionText(text: string | undefined): string | null {
-  if (!text) {
-    return null;
-  }
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return null;
-  }
-  try {
-    const parsed = JSON.parse(trimmed) as Record<string, unknown>;
-    const s = parsed['suggestion'];
-    if (typeof s === 'string') {
-      return s;
-    }
-  } catch {
-    // Not JSON — use raw text
-  }
-  return trimmed;
-}
-
-/**
- * Simplify conversation history for fast/lite models that cannot handle
- * complex parts like function calls, function responses, or inline data.
- *
- * Extracts only the text content from each turn, preserving the user/model
- * alternation that the API expects. Turns that become empty after stripping
- * non-text parts are dropped. Consecutive same-role entries are merged to
- * maintain strict alternation.
- *
- * @param history - Full conversation history with potentially complex parts
- * @returns Simplified history containing only plain text parts
- */
-function simplifyHistoryForFastModel(history: Content[]): Content[] {
-  const result: Content[] = [];
-
-  for (const entry of history) {
-    const textParts = (entry.parts ?? [])
-      .filter((p) => 'text' in p && typeof p.text === 'string' && p.text.trim())
-      .map((p) => ({ text: (p as { text: string }).text }));
-
-    if (textParts.length === 0) {
-      continue;
-    }
-
-    const last = result[result.length - 1];
-    if (last && last.role === entry.role) {
-      // Merge into the previous entry to maintain strict alternation
-      last.parts = [...(last.parts ?? []), ...textParts];
-    } else {
-      result.push({ role: entry.role, parts: textParts });
-    }
-  }
-
-  return result;
 }
 
 /** Single-word suggestions allowed through the too_few_words filter */

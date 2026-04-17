@@ -12,7 +12,7 @@ import { loadServerHierarchicalMemory } from './memoryDiscovery.js';
 import {
   setGeminiMdFilename,
   DEFAULT_CONTEXT_FILENAME,
-} from '../tools/memoryTool.js';
+} from '../memory/const.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { QWEN_DIR } from './paths.js';
 

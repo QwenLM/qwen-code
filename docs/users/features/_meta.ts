@@ -5,6 +5,7 @@ export default {
   'sub-agents': 'SubAgents',
   arena: 'Agent Arena',
   skills: 'Skills',
+  memory: 'Memory',
   headless: 'Headless Mode',
   checkpointing: {
     display: 'hidden',
@@ -19,4 +20,5 @@ export default {
   hooks: 'Hooks',
   'status-line': 'Status Line',
   'scheduled-tasks': 'Scheduled Tasks',
+  tips: 'Contextual Tips',
 };
