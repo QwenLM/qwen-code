@@ -7,16 +7,17 @@
  */
 
 import { initStartupProfiler } from './src/utils/startupProfiler.js';
+import { startCapturingEarlyInput } from './src/utils/earlyInput.js';
 
 // Must run before any other imports to capture the earliest possible T0.
 initStartupProfiler();
 
-import './src/gemini.js';
-import { main } from './src/gemini.js';
-import { FatalError } from '@qwen-code/qwen-code-core';
-import { writeStderrLine } from './src/utils/stdioHelpers.js';
-
 // --- Global Entry Point ---
+//
+// Start capturing interactive input before loading the heavy CLI module graph.
+// This covers the real startup window where users can type before `gemini.tsx`
+// has finished evaluating and before `main()` starts.
+startCapturingEarlyInput();
 
 // Suppress known race conditions in @lydell/node-pty.
 //
@@ -68,27 +69,38 @@ process.on('uncaughtException', (error) => {
   }
 
   if (error instanceof Error) {
-    writeStderrLine(error.stack ?? error.message);
-  } else {
-    writeStderrLine(String(error));
-  }
-  process.exit(1);
-});
-
-main().catch((error) => {
-  if (error instanceof FatalError) {
-    let errorMessage = error.message;
-    if (!process.env['NO_COLOR']) {
-      errorMessage = `\x1b[31m${errorMessage}\x1b[0m`;
-    }
-    console.error(errorMessage);
-    process.exit(error.exitCode);
-  }
-  console.error('An unexpected critical error occurred:');
-  if (error instanceof Error) {
-    console.error(error.stack);
+    console.error(error.stack ?? error.message);
   } else {
     console.error(String(error));
   }
   process.exit(1);
 });
+
+const run = async () => {
+  const { main } = await import('./src/gemini.js');
+
+  try {
+    await main();
+  } catch (error) {
+    const { FatalError } = await import('@qwen-code/qwen-code-core');
+
+    if (error instanceof FatalError) {
+      let errorMessage = error.message;
+      if (!process.env['NO_COLOR']) {
+        errorMessage = `\x1b[31m${errorMessage}\x1b[0m`;
+      }
+      console.error(errorMessage);
+      process.exit(error.exitCode);
+    }
+
+    console.error('An unexpected critical error occurred:');
+    if (error instanceof Error) {
+      console.error(error.stack);
+    } else {
+      console.error(String(error));
+    }
+    process.exit(1);
+  }
+};
+
+void run();

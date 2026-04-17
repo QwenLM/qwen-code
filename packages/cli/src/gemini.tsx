@@ -66,8 +66,20 @@ import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import {
+  drainEarlyInput,
+  EARLY_INPUT_ENV_KEY,
+  serializeEarlyInputChunks,
+  startCapturingEarlyInput,
+} from './utils/earlyInput.js';
 
 const debugLogger = createDebugLogger('STARTUP');
+
+function getSerializedEarlyInputEnv(chunks: readonly Buffer[]) {
+  return {
+    [EARLY_INPUT_ENV_KEY]: serializeEarlyInputChunks(chunks),
+  };
+}
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -148,6 +160,7 @@ export async function startInteractiveUI(
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
+  initialInputChunks: Buffer[] = [],
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
@@ -162,6 +175,7 @@ export async function startInteractiveUI(
           kittyProtocolEnabled={kittyProtocolStatus.enabled}
           config={config}
           debugKeystrokeLogging={settings.merged.general?.debugKeystrokeLogging}
+          initialInputChunks={initialInputChunks}
           pasteWorkaround={
             process.platform === 'win32' || nodeMajorVersion < 20
           }
@@ -217,6 +231,7 @@ export async function startInteractiveUI(
 export async function main() {
   profileCheckpoint('main_entry');
   setupUnhandledRejectionHandler();
+  startCapturingEarlyInput();
   const settings = loadSettings();
   await cleanupCheckpoints();
   profileCheckpoint('after_load_settings');
@@ -226,6 +241,7 @@ export async function main() {
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
+    drainEarlyInput();
     writeStderrLine(
       'Error: The --prompt-interactive flag cannot be used when input is piped from stdin.',
     );
@@ -330,14 +346,24 @@ export async function main() {
 
       const sandboxArgs = injectStdinIntoArgs(process.argv, stdinData);
 
+      const sandboxInitialInputChunks = drainEarlyInput();
       await relaunchOnExitCode(() =>
-        start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+        start_sandbox(
+          sandboxConfig,
+          memoryArgs,
+          partialConfig,
+          sandboxArgs,
+          getSerializedEarlyInputEnv(sandboxInitialInputChunks),
+        ),
       );
       process.exit(0);
-    } else {
+    } else if (!process.env['QWEN_CODE_NO_RELAUNCH']) {
       // Relaunch app so we always have a child process that can be internally
       // restarted if needed.
-      await relaunchAppInChildProcess(memoryArgs, []);
+      const relaunchInputChunks = drainEarlyInput();
+      await relaunchAppInChildProcess(memoryArgs, [], {
+        ...getSerializedEarlyInputEnv(relaunchInputChunks),
+      });
     }
   }
 
@@ -346,6 +372,7 @@ export async function main() {
   // under a custom runtimeOutputDir (setRuntimeBaseDir is idempotent and will
   // be called again inside loadCliConfig).
   if (argv.resume === '') {
+    drainEarlyInput();
     Storage.setRuntimeBaseDir(
       settings.merged.advanced?.runtimeOutputDir,
       process.cwd(),
@@ -353,6 +380,7 @@ export async function main() {
     const selectedSessionId = await showResumeSessionPicker();
     if (!selectedSessionId) {
       // User cancelled or no sessions available
+      drainEarlyInput();
       process.exit(0);
     }
 
@@ -397,10 +425,15 @@ export async function main() {
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
-    if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
-      // Set this as early as possible to avoid spurious characters from
-      // input showing up in the output.
-      process.stdin.setRawMode(true);
+    if (config.isInteractive() && process.stdin.isTTY) {
+      // Early input capture may already have enabled raw mode. Keep detection
+      // enabled for that path so we do not lose kitty protocol support while
+      // users type during startup.
+      if (!wasRaw) {
+        // Set this as early as possible to avoid spurious characters from
+        // input showing up in the output.
+        process.stdin.setRawMode(true);
+      }
 
       // This cleanup isn't strictly needed but may help in certain situations.
       process.on('SIGTERM', () => {
@@ -461,6 +494,7 @@ export async function main() {
     finalizeStartupProfile(config.getSessionId());
 
     if (config.isInteractive()) {
+      const initialInputChunks = drainEarlyInput();
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
       await startInteractiveUI(
@@ -469,9 +503,12 @@ export async function main() {
         startupWarnings,
         process.cwd(),
         initializationResult!,
+        initialInputChunks,
       );
       return;
     }
+
+    drainEarlyInput();
 
     // Print debug mode notice to stderr for non-interactive mode
     if (config.getDebugMode()) {
