@@ -616,6 +616,9 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
     });
     vi.mocked(readAutoMemoryIndex).mockResolvedValue(
       '# Managed Auto-Memory Index\n\n- [Project Memory](project.md)',
@@ -634,6 +637,9 @@ describe('Server Config (config.ts)', () => {
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
     });
     vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
 
