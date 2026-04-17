@@ -537,11 +537,23 @@ export async function runNonInteractive(
             }
           };
 
-          // Drain all currently queued items.
-          const drainLocalQueue = async () => {
-            while (localQueue.length > 0) {
-              await drainOneItem();
-            }
+          // Single-flight drain: concurrent callers wait for the running
+          // drain. A new drain starts only after the previous one finishes
+          // its queue, which prevents overlapping turns when cron jobs fire
+          // while an earlier queued item is still streaming.
+          let drainPromise: Promise<void> | null = null;
+          const drainLocalQueue = (): Promise<void> => {
+            if (drainPromise) return drainPromise;
+            drainPromise = (async () => {
+              try {
+                while (localQueue.length > 0) {
+                  await drainOneItem();
+                }
+              } finally {
+                drainPromise = null;
+              }
+            })();
+            return drainPromise;
           };
 
           // Start cron scheduler — fires enqueue onto the shared queue.
@@ -552,7 +564,7 @@ export async function runNonInteractive(
           if (scheduler && scheduler.size > 0) {
             await new Promise<void>((resolve) => {
               const checkCronDone = () => {
-                if (scheduler.size === 0) {
+                if (scheduler.size === 0 && !drainPromise) {
                   scheduler.stop();
                   resolve();
                 }

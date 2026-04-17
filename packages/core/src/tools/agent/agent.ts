@@ -660,10 +660,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
       // Inline FunctionDeclaration[] from the parent — passed verbatim
-      // including `agent` itself so the fork's tool-name set matches the
-      // parent's. prepareTools bypasses the exclusion filter for inline
-      // decls; `isInForkExecution()` (ALS-based) is the sole
-      // recursive-fork block at runtime.
+      // (including `agent` and cron tools) so the fork's system prompt,
+      // tools, and history exactly match the parent's and share its
+      // DashScope cache prefix. A fork is a context-sharing extension of
+      // the parent, not an isolated subagent, so the general subagent
+      // exclusion list does not apply. Recursive forks are blocked by the
+      // ALS-based `isInForkExecution()` guard.
       const parentToolDecls: FunctionDeclaration[] =
         (
           generationConfig.tools as Array<{
@@ -1003,15 +1005,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // we set shouldAvoidPermissionPrompts so the tool scheduler
         // auto-denies 'ask' decisions — matching claw-code's approach.
         // PermissionRequest hooks still run and can override the denial.
+        // Base on agentConfig so the resolved approval mode override (e.g.
+        // subagent-level `approvalMode: auto-edit`) is preserved.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const bgConfig = Object.create(this.config) as any;
+        const bgConfig = Object.create(agentConfig) as any;
         bgConfig.getShouldAvoidPermissionPrompts = () => true;
 
-        // Create a dedicated subagent that uses the bg-specific config.
-        const bgSubagent = await this.subagentManager.createAgentHeadless(
-          subagentConfig,
-          bgConfig as Config,
-        );
+        // Rebuild the subagent against bgConfig. For forks, go through
+        // createForkSubagent so the parent's rendered system prompt and
+        // inherited history are carried over; otherwise the background fork
+        // degrades to a plain FORK_AGENT without context.
+        let bgSubagent: AgentHeadless;
+        if (isFork) {
+          const fork = await this.createForkSubagent(bgConfig as Config);
+          bgSubagent = fork.subagent;
+        } else {
+          bgSubagent = await this.subagentManager.createAgentHeadless(
+            subagentConfig,
+            bgConfig as Config,
+          );
+        }
 
         const getCompletionStats = () => {
           const summary = bgSubagent.getExecutionSummary();
