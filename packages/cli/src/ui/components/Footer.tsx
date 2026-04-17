@@ -123,8 +123,9 @@ export const Footer: React.FC = () => {
         <Text wrap="truncate">{leftBottomContent}</Text>
       </Box>
 
-      {/* Right Section — never compressed */}
-      <Box flexShrink={0} gap={1}>
+      {/* Right Section — never compressed, aligns to top so multi-line
+          status lines on the left don't push the indicators to the center. */}
+      <Box flexShrink={0} gap={1} alignItems="flex-start">
         {rightItems.map(({ key, node }, index) => (
           <Box key={key} alignItems="center">
             {index > 0 && <Text color={theme.text.secondary}> | </Text>}
