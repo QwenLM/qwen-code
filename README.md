@@ -120,9 +120,8 @@ Then follow the instructions inside to install, authenticate, and use Qwen Code 
 
 Qwen Code supports the following authentication methods:
 
-- **API Key (recommended)**: use an API key from [Alibaba Cloud Model Studio](https://modelstudio.console.alibabacloud.com/) or any supported provider (OpenAI, Anthropic, Google GenAI, and other compatible endpoints).
-- **Coding Plan**: subscribe to the [Alibaba Cloud Coding Plan](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index) for a fixed monthly fee with higher quotas.
-- **Local Inference**: run models locally via [Ollama](https://ollama.com/) or [vLLM](https://github.com/vllm-project/vllm) — completely free and private.
+- **API Key (recommended)**: use an API key from Alibaba Cloud Model Studio ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/)) or any supported provider (OpenAI, Anthropic, Google GenAI, and other compatible endpoints).
+- **Coding Plan**: subscribe to the Alibaba Cloud Coding Plan ([Beijing](https://bailian.console.aliyun.com/cn-beijing?tab=coding-plan#/efm/coding-plan-index) / [intl](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index)) for a fixed monthly fee with higher quotas.
 
 > ⚠️ **Qwen OAuth was discontinued on April 15, 2026.** If you were previously using Qwen OAuth, please switch to one of the methods above. Run `qwen` and then `/auth` to reconfigure.
 
@@ -348,9 +347,73 @@ Use the `/model` command at any time to switch between all configured models.
 
 > **Security note:** Never commit API keys to version control. The `~/.qwen/settings.json` file is in your home directory and should stay private.
 
-#### Local Inference (free & private)
+#### Local Model Setup (Ollama / vLLM)
 
-Run models locally using [Ollama](https://ollama.com/) or [vLLM](https://github.com/vllm-project/vllm) — no API key or cloud account needed.
+You can also run models locally — no API key or cloud account needed. This is not an authentication method; instead, configure your local model endpoint in `~/.qwen/settings.json` using the `modelProviders` field.
+
+<details>
+<summary>Ollama setup</summary>
+
+1. Install Ollama from [ollama.com](https://ollama.com/)
+2. Pull a model: `ollama pull qwen3:32b`
+3. Configure `~/.qwen/settings.json`:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "qwen3:32b",
+        "name": "Qwen3 32B (Ollama)",
+        "baseUrl": "http://localhost:11434/v1",
+        "description": "Qwen3 32B running locally via Ollama"
+      }
+    ]
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "qwen3:32b"
+  }
+}
+```
+
+</details>
+
+<details>
+<summary>vLLM setup</summary>
+
+1. Install vLLM: `pip install vllm`
+2. Start the server: `vllm serve Qwen/Qwen3-32B`
+3. Configure `~/.qwen/settings.json`:
+
+```json
+{
+  "modelProviders": {
+    "openai": [
+      {
+        "id": "Qwen/Qwen3-32B",
+        "name": "Qwen3 32B (vLLM)",
+        "baseUrl": "http://localhost:8000/v1",
+        "description": "Qwen3 32B running locally via vLLM"
+      }
+    ]
+  },
+  "security": {
+    "auth": {
+      "selectedType": "openai"
+    }
+  },
+  "model": {
+    "name": "Qwen/Qwen3-32B"
+  }
+}
+```
+
+</details>
 
 ## Usage
 
@@ -456,7 +519,7 @@ If you encounter issues, check the [troubleshooting guide](https://qwenlm.github
 
 **Common issues:**
 
-- **`Qwen OAuth free tier was discontinued on 2026-04-15`**: Qwen OAuth is no longer available. Run `qwen` → `/auth` and switch to API Key, Coding Plan, or Local Inference. See the [Authentication](#authentication) section above for setup instructions.
+- **`Qwen OAuth free tier was discontinued on 2026-04-15`**: Qwen OAuth is no longer available. Run `qwen` → `/auth` and switch to API Key or Coding Plan. See the [Authentication](#authentication) section above for setup instructions.
 
 To report a bug from within the CLI, run `/bug` and include a short title and repro steps.
 

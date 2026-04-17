@@ -2,7 +2,7 @@
 
 > [!tip]
 >
-> **Authentication / API keys:** Authentication (API Key, Alibaba Cloud Coding Plan, or Local Inference) and auth-related environment variables (like `OPENAI_API_KEY`) are documented in **[Authentication](../configuration/auth)**.
+> **Authentication / API keys:** Authentication (API Key, Alibaba Cloud Coding Plan) and auth-related environment variables (like `OPENAI_API_KEY`) are documented in **[Authentication](../configuration/auth)**.
 
 > [!note]
 >

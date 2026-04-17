@@ -12,9 +12,8 @@ This guide provides solutions to common issues and debugging tips, including top
 - **Error: `Qwen OAuth free tier was discontinued on 2026-04-15`**
   - **Cause:** Qwen OAuth is no longer available as of April 15, 2026.
   - **Solution:** Switch to a different authentication method. Run `qwen` → `/auth` and choose one of:
-    - **API Key**: Use an API key from [Alibaba Cloud Model Studio](https://bailian.console.aliyun.com/) or another provider. See the [API setup guide](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091).
-    - **Alibaba Cloud Coding Plan**: Subscribe for a fixed monthly fee with higher quotas. See the [Coding Plan guide](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index).
-    - **Local Inference**: Run models locally via Ollama or vLLM — completely free and private. See the [Authentication](../configuration/auth) page for configuration details.
+    - **API Key**: Use an API key from Alibaba Cloud Model Studio ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/)). See the API setup guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2974721)).
+    - **Alibaba Cloud Coding Plan**: Subscribe for a fixed monthly fee with higher quotas. See the Coding Plan guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) / [intl](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index)).
 
 - **Error: `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, or `unable to get local issuer certificate`**
   - **Cause:** You may be on a corporate network with a firewall that intercepts and inspects SSL/TLS traffic. This often requires a custom root CA certificate to be trusted by Node.js.
@@ -22,9 +21,9 @@ This guide provides solutions to common issues and debugging tips, including top
     - Example: `export NODE_EXTRA_CA_CERTS=/path/to/your/corporate-ca.crt`
 
 - **Error: `Device authorization flow failed: fetch failed`**
-  - **Cause:** Node.js could not reach API endpoints (often a proxy or SSL/TLS trust issue). When available, Qwen Code will also print the underlying error cause (for example: `UNABLE_TO_VERIFY_LEAF_SIGNATURE`).
+  - **Cause:** Node.js could not reach Qwen OAuth endpoints (often a proxy or SSL/TLS trust issue). When available, Qwen Code will also print the underlying error cause (for example: `UNABLE_TO_VERIFY_LEAF_SIGNATURE`). Note: this error is specific to the legacy Qwen OAuth flow.
   - **Solution:**
-    - Confirm you can access your API provider's endpoint from the same machine/network.
+    - If you are still using Qwen OAuth, switch to API Key or Coding Plan via `/auth`.
     - If you are behind a proxy, set it via `qwen --proxy <url>` (or the `proxy` setting in `settings.json`).
     - If your network uses a corporate TLS inspection CA, set `NODE_EXTRA_CA_CERTS` as described above.
 
