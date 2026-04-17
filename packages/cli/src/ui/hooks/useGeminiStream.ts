@@ -1900,18 +1900,16 @@ export const useGeminiStream = (
   // Register background agent notification callback onto the shared queue.
   useEffect(() => {
     const registry = config.getBackgroundTaskRegistry();
-    registry.setNotificationCallback(
-      (displayText: string, modelText: string) => {
-        notificationQueueRef.current.push({
-          displayText,
-          modelText,
-          sendMessageType: SendMessageType.Notification,
-        });
-        setNotificationTrigger((n) => n + 1);
-      },
-    );
+    registry.setNotificationCallback((displayText, modelText) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
     return () => {
-      registry.setNotificationCallback(() => {});
+      registry.setNotificationCallback(undefined);
     };
   }, [config]);
 

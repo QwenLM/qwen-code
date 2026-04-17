@@ -1013,6 +1013,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           bgConfig as Config,
         );
 
+        const getCompletionStats = () => {
+          const summary = bgSubagent.getExecutionSummary();
+          return {
+            totalTokens: summary.totalTokens,
+            toolUses: summary.totalToolCalls,
+            durationMs: summary.totalDurationMs,
+          };
+        };
+
         // Fire-and-forget: start the subagent without blocking the parent.
         void (async () => {
           try {
@@ -1036,13 +1045,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               }
             }
 
-            registry.complete(hookOpts.agentId, bgSubagent.getFinalText());
+            registry.complete(
+              hookOpts.agentId,
+              bgSubagent.getFinalText(),
+              getCompletionStats(),
+            );
           } catch (error) {
             const errorMsg =
               error instanceof Error ? error.message : String(error);
             debugLogger.error(`[Agent] Background agent failed: ${errorMsg}`);
 
-            registry.fail(hookOpts.agentId, errorMsg);
+            registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
           }
         })();
 

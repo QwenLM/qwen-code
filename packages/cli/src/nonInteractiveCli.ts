@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
+import type {
+  BackgroundAgentStatus,
+  Config,
+  ToolCallRequestInfo,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
@@ -257,18 +261,44 @@ export async function runNonInteractive(
         displayText: string;
         modelText: string;
         sendMessageType: SendMessageType;
+        sdkNotification?: {
+          task_id: string;
+          status: BackgroundAgentStatus;
+          usage?: {
+            total_tokens: number;
+            tool_uses: number;
+            duration_ms: number;
+          };
+        };
       }
       const localQueue: LocalQueueItem[] = [];
       const registry = config.getBackgroundTaskRegistry();
-      registry.setNotificationCallback(
-        (displayText: string, modelText: string) => {
-          localQueue.push({
-            displayText,
-            modelText,
-            sendMessageType: SendMessageType.Notification,
-          });
-        },
-      );
+      registry.setNotificationCallback((displayText, modelText, meta) => {
+        localQueue.push({
+          displayText,
+          modelText,
+          sendMessageType: SendMessageType.Notification,
+          sdkNotification: {
+            task_id: meta.agentId,
+            status: meta.status,
+            usage: meta.stats
+              ? {
+                  total_tokens: meta.stats.totalTokens,
+                  tool_uses: meta.stats.toolUses,
+                  duration_ms: meta.stats.durationMs,
+                }
+              : undefined,
+          },
+        });
+      });
+
+      registry.setRegisterCallback((entry) => {
+        adapter.emitSystemMessage('task_started', {
+          task_id: entry.agentId,
+          description: entry.description,
+          subagent_type: entry.subagentType,
+        });
+      });
 
       let isFirstTurn = true;
       let modelOverride: string | undefined;
@@ -407,11 +437,14 @@ export async function runNonInteractive(
             if (localQueue.length === 0) return;
             const item = localQueue.shift()!;
 
-            // Emit background agent notifications as a user message in the
-            // JSON stream so consumers can distinguish them from model output.
-            // Cron turns are not emitted — preserves existing headless cron output.
             if (item.sendMessageType === SendMessageType.Notification) {
               adapter.emitUserMessage([{ text: item.displayText }]);
+              if (item.sdkNotification) {
+                adapter.emitSystemMessage(
+                  'task_notification',
+                  item.sdkNotification,
+                );
+              }
             }
 
             turnCount++;
@@ -543,7 +576,7 @@ export async function runNonInteractive(
           // ─── Terminal hold-back phase ──────────────────────────
           // Wait for running background agents to complete and drain
           // their notifications before emitting the final result.
-           
+
           while (true) {
             await drainLocalQueue();
             const running = registry.getRunning();
@@ -600,9 +633,10 @@ export async function runNonInteractive(
       });
       handleError(error, config);
     } finally {
-      // Unregister background agent notification callback.
       try {
-        config.getBackgroundTaskRegistry().setNotificationCallback(() => {});
+        const reg = config.getBackgroundTaskRegistry();
+        reg.setNotificationCallback(undefined);
+        reg.setRegisterCallback(undefined);
       } catch {
         // Ignore — registry may not be initialized if we failed early.
       }
