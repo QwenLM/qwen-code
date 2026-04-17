@@ -21,9 +21,27 @@ const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 vi.mock('../hooks/useStatusLine.js');
 const useStatusLineMock = vi.mocked(useStatusLineModule.useStatusLine);
 
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  const registry = {
+    list: vi.fn(() => []),
+    subscribe: vi.fn(() => () => {}),
+  };
+  return {
+    ...actual,
+    getManagedAutoMemoryDreamTaskRegistry: vi.fn(() => registry),
+  };
+});
+
 const defaultProps = {
   model: 'gemini-pro',
 };
+
+const createMockMemoryManager = () => ({
+  subscribe: vi.fn(() => () => {}),
+  listTasksByType: vi.fn(() => []),
+});
 
 const createMockConfig = (overrides = {}) => ({
   getModel: vi.fn(() => defaultProps.model),
@@ -31,6 +49,8 @@ const createMockConfig = (overrides = {}) => ({
   getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
+  getProjectRoot: vi.fn(() => '/test/project'),
+  getMemoryManager: vi.fn(createMockMemoryManager),
   ...overrides,
 });
 

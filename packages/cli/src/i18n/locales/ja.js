@@ -649,6 +649,45 @@ export default {
     '使い方: /memory add [--global|--project] <記憶するテキスト>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'メモリ {{scope}} への保存を試行中: "{{fact}}"',
+  'Open auto-memory folder': '自動メモリフォルダを開く',
+  'Auto-memory: {{status}}': '自動メモリ: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    '自動統合: {{status}} · {{lastDream}} · /dream で実行',
+  never: '未実行',
+  on: 'オン',
+  off: 'オフ',
+  '❆ dreaming': '❆ 整理中',
+  'Remove matching entries from managed auto-memory.':
+    'マネージド自動メモリから一致するエントリを削除する。',
+  'Usage: /forget <memory text to remove>':
+    '使い方: /forget <削除するメモリテキスト>',
+  'No managed auto-memory entries matched: {{query}}':
+    '一致するマネージド自動メモリエントリなし: {{query}}',
+  'Show managed auto-memory status.':
+    'マネージド自動メモリのステータスを表示する。',
+  'Run managed auto-memory extraction for the current session.':
+    '現在のセッションのマネージド自動メモリ抽出を実行する。',
+  'Managed auto-memory root: {{root}}':
+    'マネージド自動メモリのルート: {{root}}',
+  'Managed auto-memory topics:': 'マネージド自動メモリのトピック:',
+  'No extraction cursor found yet.': 'まだ抽出カーソルが見つかりません。',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'カーソル: セッション={{sessionId}}, オフセット={{offset}}, 更新={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'メモリを抽出できるチャットクライアントがありません。',
+  'Managed auto-memory extraction is already running.':
+    'マネージド自動メモリ抽出はすでに実行中です。',
+  'Managed auto-memory extraction found no new durable memories.':
+    'マネージド自動メモリ抽出で新しい永続メモリは見つかりませんでした。',
+  'Consolidate managed auto-memory topic files.':
+    'マネージド自動メモリトピックファイルを統合する。',
+  'Managed auto-memory dream found nothing to improve.':
+    '自動メモリ統合で改善するものは見つかりませんでした。',
+  'Deduplicated entries: {{count}}': '重複除去したエントリ: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'save_memoryツールを使用して永続メモリを保存する。',
+  'Usage: /remember [--global|--project] <text to remember>':
+    '使い方: /remember [--global|--project] <覚えておくテキスト>',
   // MCP
   'Authenticate with an OAuth-enabled MCP server':
     'OAuth対応のMCPサーバーで認証',

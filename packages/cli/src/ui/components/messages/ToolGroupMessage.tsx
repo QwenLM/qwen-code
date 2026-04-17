@@ -5,8 +5,8 @@
  */
 
 import type React from 'react';
+import { Box, Text } from 'ink';
 import { useMemo, useRef } from 'react';
-import { Box } from 'ink';
 import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { ToolMessage } from './ToolMessage.js';
@@ -39,6 +39,10 @@ interface ToolGroupMessageProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   onShellInputSubmit?: (input: string) => void;
+  /** Pre-computed count of write ops to managed-auto-memory files. */
+  memoryWriteCount?: number;
+  /** Pre-computed count of read ops from managed-auto-memory files. */
+  memoryReadCount?: number;
   isUserInitiated?: boolean;
 }
 
@@ -50,6 +54,8 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   isFocused = true,
   activeShellPtyId,
   embeddedShellFocused,
+  memoryWriteCount,
+  memoryReadCount,
   isUserInitiated,
 }) => {
   const config = useConfig();
@@ -68,8 +74,25 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // useMemo must be called unconditionally (Rules of Hooks) — before any early return
   // only prompt for tool approval on the first 'confirming' tool in the list
+  // note, after the CTA, this automatically moves over to the next 'confirming' tool
   const toolAwaitingApproval = useMemo(
     () => toolCalls.find((tc) => tc.status === ToolCallStatus.Confirming),
+    [toolCalls],
+  );
+
+  // Detect if this is a "memory-only" group (all tool calls are memory ops)
+  const isMemoryOnlyGroup = useMemo(
+    () => toolCalls.length > 0 && toolCalls.every((t) => t.isMemoryOp != null),
+    [toolCalls],
+  );
+
+  const allComplete = useMemo(
+    () =>
+      toolCalls.every(
+        (t) =>
+          t.status === ToolCallStatus.Success ||
+          t.status === ToolCallStatus.Error,
+      ),
     [toolCalls],
   );
 
@@ -155,6 +178,37 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
       )
     : undefined;
 
+  // For completed memory-only groups, show a compact summary instead of individual tool calls
+  if (isMemoryOnlyGroup && allComplete) {
+    const readCount = memoryReadCount ?? 0;
+    const writeCount = memoryWriteCount ?? 0;
+    return (
+      <Box
+        flexDirection="column"
+        borderStyle="round"
+        width={contentWidth}
+        borderColor={theme.border.default}
+      >
+        {readCount > 0 && (
+          <Box paddingLeft={1}>
+            <Text dimColor>
+              {'● '}
+              Recalled {readCount} {readCount === 1 ? 'memory' : 'memories'}
+            </Text>
+          </Box>
+        )}
+        {writeCount > 0 && (
+          <Box paddingLeft={1}>
+            <Text dimColor>
+              {'● '}
+              Wrote {writeCount} {writeCount === 1 ? 'memory' : 'memories'}
+            </Text>
+          </Box>
+        )}
+      </Box>
+    );
+  }
+
   return (
     <Box
       flexDirection="column"
@@ -172,6 +226,25 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
       borderColor={borderColor}
       gap={1}
     >
+      {/* Memory badge for mixed groups (some memory ops + other ops) */}
+      {!isMemoryOnlyGroup &&
+        ((memoryWriteCount ?? 0) > 0 || (memoryReadCount ?? 0) > 0) &&
+        (() => {
+          const parts: string[] = [];
+          if ((memoryReadCount ?? 0) > 0) {
+            const n = memoryReadCount!;
+            parts.push(`Recalled ${n} ${n === 1 ? 'memory' : 'memories'}`);
+          }
+          if ((memoryWriteCount ?? 0) > 0) {
+            const n = memoryWriteCount!;
+            parts.push(`Wrote ${n} ${n === 1 ? 'memory' : 'memories'}`);
+          }
+          return (
+            <Box paddingLeft={1}>
+              <Text dimColor>● {parts.join(', ')}</Text>
+            </Box>
+          );
+        })()}
       {toolCalls.map((tool) => {
         const isConfirming = toolAwaitingApproval?.callId === tool.callId;
         // A subagent's inline confirmation should only receive keyboard focus

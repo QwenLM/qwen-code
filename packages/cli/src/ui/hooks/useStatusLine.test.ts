@@ -726,4 +726,57 @@ describe('useStatusLine', () => {
       expect(firstKill).toHaveBeenCalled();
     });
   });
+
+  // --- Spawn failure handling (issue #3264) ---
+  //
+  // On macOS with Node 22, exec() can throw synchronously with EBADF when
+  // stdio pipe setup fails. The throw must not escape doUpdate() — or the
+  // setTimeout callback — or the whole CLI crashes.
+
+  describe('spawn failure handling', () => {
+    it('does not crash when exec throws synchronously (EBADF)', () => {
+      vi.mocked(child_process.exec).mockImplementationOnce((() => {
+        const err = new Error('spawn EBADF') as NodeJS.ErrnoException;
+        err.code = 'EBADF';
+        throw err;
+      }) as unknown as typeof child_process.exec);
+
+      setStatusLineConfig({ type: 'command', command: 'echo test' });
+
+      let result: { current: { lines: string[] } } | undefined;
+      expect(() => {
+        result = renderHook(() => useStatusLine()).result;
+      }).not.toThrow();
+      expect(result!.current.lines).toEqual([]);
+    });
+
+    it('recovers on subsequent state changes after a sync exec failure', async () => {
+      // First call throws, subsequent calls succeed with the default mock.
+      // Verifies activeChildRef and generationRef don't get wedged.
+      vi.mocked(child_process.exec).mockImplementationOnce((() => {
+        const err = new Error('spawn EBADF') as NodeJS.ErrnoException;
+        err.code = 'EBADF';
+        throw err;
+      }) as unknown as typeof child_process.exec);
+
+      setStatusLineConfig({ type: 'command', command: 'echo test' });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([]);
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Trigger a re-execution via state change — should use the default mock.
+      mockUIState.currentModel = 'new-model';
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        execCallback(null, 'recovered\n', '');
+      });
+      expect(result.current.lines).toEqual(['recovered']);
+    });
+  });
 });
