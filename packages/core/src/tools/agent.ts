@@ -5,6 +5,7 @@
  */
 
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import { InvalidStreamError } from '../core/geminiChat.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
   ToolResult,
@@ -138,6 +139,15 @@ function createApprovalModeOverride(base: Config, mode: ApprovalMode): Config {
   override.getApprovalMode = (): ApprovalMode => mode;
   return override as Config;
 }
+
+// ---------------------------------------------------------------------------
+// Subagent-level retry for transient stream errors (DataWorks enhancement)
+// ---------------------------------------------------------------------------
+const SUBAGENT_STREAM_RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelayMs: 5000,
+  maxDelayMs: 30000,
+} as const;
 
 /**
  * Agent tool that enables primary agents to delegate tasks to specialized agents.
@@ -602,9 +612,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Retrieve the parent's cached generationConfig (systemInstruction +
         // tools) so the fork's API requests share the same prefix for
         // DashScope prompt cache hits.
-        const { getCacheSafeParams } = await import(
-          '../followup/forkedQuery.js'
-        );
+        const { getCacheSafeParams } = await import('../utils/forkedAgent.js');
         const cacheSafeParams = getCacheSafeParams();
         if (cacheSafeParams) {
           forkGenerationConfig = cacheSafeParams.generationConfig;
@@ -786,13 +794,24 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             }
           }
 
-          // Execute the subagent (blocking)
-          await subagent.execute(contextState, signal, {
+          // Execute the subagent (blocking). Named subagents use retry for
+          // transient stream errors; fork agents skip retry (background process).
+          const executeOptions = {
             extraHistory,
             generationConfigOverride: forkGenerationConfig,
             toolsOverride: forkToolsOverride,
             skipEnvHistory: !!extraHistory && extraHistory.length > 0,
-          });
+          };
+          if (this.params.subagent_type) {
+            await this.executeSubagentWithRetry(
+              subagent,
+              contextState,
+              signal,
+              executeOptions,
+            );
+          } else {
+            await subagent.execute(contextState, signal, executeOptions);
+          }
 
           // Fire SubagentStop hook after execution and handle block decisions
           if (hookSystem && !signal?.aborted) {
@@ -893,13 +912,21 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         } catch (error) {
           const errorMessage =
             error instanceof Error ? error.message : String(error);
+          const isStreamError = error instanceof InvalidStreamError;
+          const actualRetries = isStreamError
+            ? ((error as InvalidStreamError & { retriesAttempted?: number })
+                .retriesAttempted ?? 0)
+            : 0;
+          const retryNote = isStreamError
+            ? ` (after ${actualRetries} ${actualRetries === 1 ? 'retry' : 'retries'})`
+            : '';
           debugLogger.error(
-            `[AgentTool] Error inside subagent background task: ${errorMessage}`,
+            `[AgentTool] Error running subagent${retryNote}: ${errorMessage}`,
           );
           this.updateDisplay(
             {
               status: 'failed',
-              terminateReason: `Failed to run subagent: ${errorMessage}`,
+              terminateReason: `Failed to run subagent${retryNote}: ${errorMessage}`,
             },
             updateOutput,
           );
@@ -943,6 +970,81 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         llmContent: `Failed to run subagent: ${errorMessage}`,
         returnDisplay: errorDisplay,
       };
+    }
+  }
+
+  /**
+   * Wraps `subagent.execute()` with retry for transient InvalidStreamError.
+   * Only InvalidStreamError triggers retry; all other errors propagate immediately.
+   * Backoff: exponential with 0–25% additive jitter.
+   */
+  private async executeSubagentWithRetry(
+    subagent: {
+      execute: (
+        ctx: ContextState,
+        sig?: AbortSignal,
+        options?: Record<string, unknown>,
+      ) => Promise<void>;
+    },
+    contextState: ContextState,
+    signal?: AbortSignal,
+    options?: Record<string, unknown>,
+  ): Promise<void> {
+    const { maxRetries, baseDelayMs, maxDelayMs } =
+      SUBAGENT_STREAM_RETRY_CONFIG;
+
+    let lastError: InvalidStreamError | undefined;
+    let retriesAttempted = 0;
+
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (attempt > 0) {
+        retriesAttempted = attempt;
+        if (signal?.aborted) throw lastError!;
+
+        const exponentialDelay = Math.min(
+          baseDelayMs * Math.pow(2, attempt - 1),
+          maxDelayMs,
+        );
+        const jitter = Math.random() * 0.25 * exponentialDelay;
+        const totalDelayMs = Math.round(exponentialDelay + jitter);
+
+        debugLogger.warn(
+          `[AgentTool] Transient stream error (${lastError!.type}), ` +
+            `retry ${attempt}/${maxRetries} in ${totalDelayMs}ms`,
+        );
+        this.currentToolCalls = [];
+
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, totalDelayMs);
+          if (signal) {
+            const onAbort = () => {
+              clearTimeout(timer);
+              resolve();
+            };
+            signal.addEventListener('abort', onAbort, { once: true });
+          }
+        });
+
+        if (signal?.aborted) throw lastError!;
+      }
+
+      try {
+        await subagent.execute(contextState, signal, options);
+        return;
+      } catch (error) {
+        if (error instanceof InvalidStreamError) {
+          lastError = error;
+          continue;
+        }
+        throw error;
+      }
+    }
+
+    if (lastError) {
+      (
+        lastError as InvalidStreamError & { retriesAttempted?: number }
+      ).retriesAttempted = retriesAttempted;
+      throw lastError;
     }
   }
 }
