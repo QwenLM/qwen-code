@@ -91,14 +91,14 @@ describe('commandUtils', () => {
   describe('isSlashCommand', () => {
     it('should return true when query starts with /', () => {
       expect(isSlashCommand('/help')).toBe(true);
-      expect(isSlashCommand('/memory show')).toBe(true);
+      expect(isSlashCommand('/config set')).toBe(true);
       expect(isSlashCommand('/clear')).toBe(true);
       expect(isSlashCommand('/')).toBe(true);
     });
 
     it('should return false when query does not start with /', () => {
       expect(isSlashCommand('help')).toBe(false);
-      expect(isSlashCommand('memory show')).toBe(false);
+      expect(isSlashCommand('config set')).toBe(false);
       expect(isSlashCommand('')).toBe(false);
       expect(isSlashCommand('path/to/file')).toBe(false);
       expect(isSlashCommand(' /help')).toBe(false);

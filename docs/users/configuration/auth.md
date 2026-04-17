@@ -2,18 +2,20 @@
 
 Qwen Code supports three authentication methods. Pick the one that matches how you want to run the CLI:
 
-- **Qwen OAuth**: sign in with your `qwen.ai` account in a browser. Free with a daily quota.
+- **Qwen OAuth**: sign in with your `qwen.ai` account in a browser. **Free tier discontinued on 2026-04-15** — switch to another method.
 - **Alibaba Cloud Coding Plan**: use an API key from Alibaba Cloud. Paid subscription with diverse model options and higher quotas.
 - **API Key**: bring your own API key. Flexible to your own needs — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
-## Option 1: Qwen OAuth (Free)
+## Option 1: Qwen OAuth (Discontinued)
 
-Use this if you want the simplest setup and you're using Qwen models.
+> [!warning]
+>
+> The Qwen OAuth free tier was discontinued on 2026-04-15. Existing cached tokens may continue working briefly, but new requests will be rejected. Please switch to Alibaba Cloud Coding Plan, [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or another provider. Run `qwen auth` to configure.
 
 - **How it works**: on first start, Qwen Code opens a browser login page. After you finish, credentials are cached locally so you usually won't need to log in again.
 - **Requirements**: a `qwen.ai` account + internet access (at least for the first login).
 - **Benefits**: no API key management, automatic credential refresh.
-- **Cost & quota**: free, with a quota of **60 requests/minute** and **100 requests/day**. Note: the free tier will be discontinued on 2026-04-15. After that, consider switching to [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or [Alibaba Cloud ModelStudio](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2840914_2&modelId=qwen3.6-plus) — run `qwen auth` to configure your new provider.
+- **Cost & quota**: the free tier has been discontinued as of 2026-04-15.
 
 Start the CLI and follow the browser flow:
 
@@ -327,8 +329,8 @@ You'll see a selector with arrow-key navigation:
 ```
 Select authentication method:
 
-> Qwen OAuth - Free · 100 requests/day · Ending 2026-04-15
   Alibaba Cloud Coding Plan - Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models
+  Qwen OAuth - Discontinued — switch to Coding Plan or API Key
 
 (Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)
 ```

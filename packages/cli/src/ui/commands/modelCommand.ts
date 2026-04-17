@@ -82,6 +82,9 @@ export const modelCommand: SlashCommand = {
         'fastModel',
         modelName,
       );
+      // Sync the runtime Config so forked agents pick up the change immediately
+      // without requiring a restart.
+      config.setFastModel(modelName);
       return {
         type: 'message',
         messageType: 'info',
