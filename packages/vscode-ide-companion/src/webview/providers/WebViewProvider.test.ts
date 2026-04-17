@@ -42,6 +42,11 @@ vi.mock('vscode', () => ({
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/workspace-root' } }],
+    onDidChangeConfiguration: vi.fn(() => ({ dispose: vi.fn() })),
+    getConfiguration: vi.fn(() => ({
+      get: vi.fn(() => ''),
+      update: vi.fn(),
+    })),
   },
   commands: {
     executeCommand: vi.fn(),
