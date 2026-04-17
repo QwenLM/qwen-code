@@ -276,6 +276,9 @@ function executeArenaCommand(
     rounds: result.stats.rounds,
     error: result.error,
     diff: result.diff,
+    diffSummary: result.diffSummary,
+    modifiedFiles: result.modifiedFiles,
+    approachSummary: result.approachSummary,
   });
 
   const handleAgentComplete = (event: ArenaAgentCompleteEvent) => {

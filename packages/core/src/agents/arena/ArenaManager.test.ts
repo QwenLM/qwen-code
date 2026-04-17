@@ -11,6 +11,7 @@ import * as os from 'node:os';
 import { ArenaManager } from './ArenaManager.js';
 import { ArenaEventType } from './arena-events.js';
 import { ArenaSessionStatus, ARENA_MAX_AGENTS } from './types.js';
+import { AgentStatus } from '../runtime/agent-types.js';
 
 const hoistedMockSetupWorktrees = vi.hoisted(() => vi.fn());
 const hoistedMockCleanupSession = vi.hoisted(() => vi.fn());
@@ -374,6 +375,107 @@ describe('ArenaManager', () => {
   });
 
   describe('active session lifecycle', () => {
+    it('collects diff summaries and fallback approach summaries', async () => {
+      const manager = new ArenaManager(mockConfig as never);
+      mockBackend.setAutoExit(false);
+      hoistedMockGetWorktreeDiff.mockResolvedValue(`diff --git a/src/auth.ts b/src/auth.ts
+index 111..222 100644
+--- a/src/auth.ts
++++ b/src/auth.ts
+@@ -1 +1,2 @@
+-old
++new
++extra`);
+
+      const startPromise = manager.start(createValidStartOptions());
+      await waitForCondition(
+        () => mockBackend.spawnAgent.mock.calls.length >= 2,
+      );
+
+      const agentsDir = path.join(
+        os.tmpdir(),
+        'arena-mock',
+        'testsess',
+        'agents',
+      );
+      await fs.mkdir(agentsDir, { recursive: true });
+      for (const modelId of ['model-1', 'model-2']) {
+        await fs.writeFile(
+          path.join(agentsDir, `${modelId}.json`),
+          JSON.stringify({
+            agentId: modelId,
+            status: AgentStatus.COMPLETED,
+            updatedAt: Date.now(),
+            rounds: 1,
+            stats: {
+              rounds: 1,
+              totalTokens: 0,
+              inputTokens: 0,
+              outputTokens: 0,
+              durationMs: 0,
+              toolCalls: 0,
+              successfulToolCalls: 0,
+              failedToolCalls: 0,
+            },
+            finalSummary: null,
+            error: null,
+          }),
+          'utf-8',
+        );
+      }
+
+      const result = await startPromise;
+
+      expect(result.agents).toHaveLength(2);
+      expect(result.agents[0]?.modifiedFiles).toEqual(['src/auth.ts']);
+      expect(result.agents[0]?.diffSummary).toEqual({
+        files: [{ path: 'src/auth.ts', additions: 2, deletions: 1 }],
+        additions: 2,
+        deletions: 1,
+      });
+      expect(result.agents[0]?.approachSummary).toBe(
+        'Changed 1 file with 0 tool calls (+2/-1).',
+      );
+    });
+
+    it('uses the current content generator for semantic approach summaries', async () => {
+      const generateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    summaries: {
+                      'model-1': 'Model 1 used a strategy pattern.',
+                      'model-2': 'Model 2 made inline edits.',
+                    },
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      });
+      const config = {
+        ...mockConfig,
+        getContentGenerator: () => ({
+          generateContent,
+        }),
+      };
+      const manager = new ArenaManager(config as never);
+
+      const result = await manager.start(createValidStartOptions());
+
+      expect(generateContent).toHaveBeenCalledTimes(1);
+      expect(result.agents[0]?.approachSummary).toBe(
+        'Model 1 used a strategy pattern.',
+      );
+      expect(result.agents[1]?.approachSummary).toBe(
+        'Model 2 made inline edits.',
+      );
+    });
+
     it('cancel should stop backend and move session to CANCELLED', async () => {
       const manager = new ArenaManager(mockConfig as never);
 
