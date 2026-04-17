@@ -96,6 +96,8 @@ describe('HookSystem', () => {
       firePermissionRequestEvent: vi.fn(),
       fireSubagentStartEvent: vi.fn(),
       fireSubagentStopEvent: vi.fn(),
+      fireTodoCreatedEvent: vi.fn(),
+      fireTodoCompletedEvent: vi.fn(),
       setMessagesProvider: vi.fn(),
     } as unknown as HookEventHandler;
 
@@ -1683,6 +1685,196 @@ describe('HookSystem', () => {
 
     it('should return undefined when no provider is set', () => {
       expect(hookSystem.getMessagesProvider()).toBeUndefined();
+    });
+  });
+
+  describe('fireTodoCreatedEvent', () => {
+    it('should fire TodoCreated event and return AggregatedHookResult', async () => {
+      const mockResult: AggregatedHookResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: { decision: 'allow' as HookDecision, reason: 'OK' },
+      };
+
+      vi.mocked(mockHookEventHandler.fireTodoCreatedEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const allTodos = [
+        { id: '1', content: 'Test Task', status: 'pending' as const },
+      ];
+
+      const result = await hookSystem.fireTodoCreatedEvent(
+        '1',
+        'Test Task',
+        'pending',
+        allTodos,
+      );
+
+      expect(result).toEqual(mockResult);
+      expect(mockHookEventHandler.fireTodoCreatedEvent).toHaveBeenCalledWith(
+        '1',
+        'Test Task',
+        'pending',
+        allTodos,
+        undefined,
+      );
+    });
+
+    it('should pass abort signal to event handler', async () => {
+      const mockResult = createMockAggregatedResult(true);
+      vi.mocked(mockHookEventHandler.fireTodoCreatedEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const abortController = new AbortController();
+      const allTodos = [
+        { id: '1', content: 'Task', status: 'pending' as const },
+      ];
+
+      await hookSystem.fireTodoCreatedEvent(
+        '1',
+        'Task',
+        'pending',
+        allTodos,
+        abortController.signal,
+      );
+
+      expect(mockHookEventHandler.fireTodoCreatedEvent).toHaveBeenCalledWith(
+        '1',
+        'Task',
+        'pending',
+        allTodos,
+        abortController.signal,
+      );
+    });
+
+    it('should return blocking result when hook blocks', async () => {
+      const mockResult: AggregatedHookResult = {
+        success: false,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'block' as HookDecision,
+          reason: 'Invalid todo content',
+        },
+      };
+
+      vi.mocked(mockHookEventHandler.fireTodoCreatedEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const allTodos = [
+        { id: '1', content: 'test', status: 'pending' as const },
+      ];
+
+      const result = await hookSystem.fireTodoCreatedEvent(
+        '1',
+        'test',
+        'pending',
+        allTodos,
+      );
+
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe('Invalid todo content');
+    });
+  });
+
+  describe('fireTodoCompletedEvent', () => {
+    it('should fire TodoCompleted event and return AggregatedHookResult', async () => {
+      const mockResult: AggregatedHookResult = {
+        success: true,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: { decision: 'allow' as HookDecision, reason: 'OK' },
+      };
+
+      vi.mocked(mockHookEventHandler.fireTodoCompletedEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const allTodos = [
+        { id: '1', content: 'Test Task', status: 'completed' as const },
+      ];
+
+      const result = await hookSystem.fireTodoCompletedEvent(
+        '1',
+        'Test Task',
+        'pending',
+        allTodos,
+      );
+
+      expect(result).toEqual(mockResult);
+      expect(mockHookEventHandler.fireTodoCompletedEvent).toHaveBeenCalledWith(
+        '1',
+        'Test Task',
+        'pending',
+        allTodos,
+        undefined,
+      );
+    });
+
+    it('should pass abort signal to event handler', async () => {
+      const mockResult = createMockAggregatedResult(true);
+      vi.mocked(mockHookEventHandler.fireTodoCompletedEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const abortController = new AbortController();
+      const allTodos = [
+        { id: '1', content: 'Task', status: 'completed' as const },
+      ];
+
+      await hookSystem.fireTodoCompletedEvent(
+        '1',
+        'Task',
+        'in_progress',
+        allTodos,
+        abortController.signal,
+      );
+
+      expect(mockHookEventHandler.fireTodoCompletedEvent).toHaveBeenCalledWith(
+        '1',
+        'Task',
+        'in_progress',
+        allTodos,
+        abortController.signal,
+      );
+    });
+
+    it('should return blocking result when hook blocks completion', async () => {
+      const mockResult: AggregatedHookResult = {
+        success: false,
+        allOutputs: [],
+        errors: [],
+        totalDuration: 50,
+        finalOutput: {
+          decision: 'block' as HookDecision,
+          reason: 'Task not ready for completion',
+        },
+      };
+
+      vi.mocked(mockHookEventHandler.fireTodoCompletedEvent).mockResolvedValue(
+        mockResult,
+      );
+
+      const allTodos = [
+        { id: '1', content: 'Task', status: 'completed' as const },
+      ];
+
+      const result = await hookSystem.fireTodoCompletedEvent(
+        '1',
+        'Task',
+        'in_progress',
+        allTodos,
+      );
+
+      expect(result.finalOutput?.decision).toBe('block');
+      expect(result.finalOutput?.reason).toBe('Task not ready for completion');
     });
   });
 });

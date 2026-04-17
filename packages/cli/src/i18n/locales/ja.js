@@ -455,6 +455,8 @@ export default {
   'Before conversation compaction': '会話圧縮前',
   'When a session is ending': 'セッション終了時',
   'When a permission dialog is displayed': '権限ダイアログ表示時',
+  'When a new todo item is created': '新Todo項目作成時',
+  'When a todo item is marked as completed': 'Todo項目完了時',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     'コマンドへの入力はツール呼び出し引数の JSON です。',
@@ -478,6 +480,10 @@ export default {
     'コマンドへの入力は圧縮詳細を持つ JSON です。',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'コマンドへの入力は tool_name、tool_input、tool_use_id を持つ JSON です。許可または拒否の決定を含む hookSpecificOutput を持つ JSON を出力します。',
+  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
+    'コマンドへの入力は todo_id、todo_content、todo_status、all_todos を持つ JSON です。decision（allow/block）と reason を持つ JSON を出力します。',
+  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
+    'コマンドへの入力は todo_id、todo_content、previous_status、all_todos を持つ JSON です。decision（allow/block）と reason を持つ JSON を出力します。',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr は表示されません',
   'show stderr to model and continue conversation':
@@ -503,6 +509,12 @@ export default {
   'show stderr to user only but continue with compaction':
     'stderr をユーザーのみに表示し、圧縮を続ける',
   'use hook decision if provided': '提供されている場合はフックの決定を使用',
+  'allow todo creation': 'Todo作成を許可',
+  'block todo creation and show reason to model':
+    'Todo作成をブロックし、理由をモデルに表示',
+  'allow todo completion': 'Todo完了を許可',
+  'block todo completion and show reason to model':
+    'Todo完了をブロックし、理由をモデルに表示',
   // Hooks - Messages
   'Config not loaded.': '設定が読み込まれていません。',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':

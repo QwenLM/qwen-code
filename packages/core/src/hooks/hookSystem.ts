@@ -31,6 +31,8 @@ import type {
   PendingAsyncOutput,
   MessagesProvider,
   StopFailureErrorType,
+  TodoItem,
+  TodoStatus,
 } from './types.js';
 import { SessionHooksManager } from './sessionHooksManager.js';
 import type { AsyncHookRegistry } from './asyncHookRegistry.js';
@@ -405,6 +407,46 @@ export class HookSystem {
     return result.finalOutput
       ? createHookOutput('PermissionRequest', result.finalOutput)
       : undefined;
+  }
+
+  /**
+   * Fire a TodoCreated event
+   * Called when a new todo item is added to the list
+   */
+  async fireTodoCreatedEvent(
+    todoId: string,
+    todoContent: string,
+    todoStatus: TodoStatus,
+    allTodos: TodoItem[],
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireTodoCreatedEvent(
+      todoId,
+      todoContent,
+      todoStatus,
+      allTodos,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a TodoCompleted event
+   * Called when a todo item's status changes to 'completed'
+   */
+  async fireTodoCompletedEvent(
+    todoId: string,
+    todoContent: string,
+    previousStatus: 'pending' | 'in_progress',
+    allTodos: TodoItem[],
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireTodoCompletedEvent(
+      todoId,
+      todoContent,
+      previousStatus,
+      allTodos,
+      signal,
+    );
   }
 
   // ==================== Session Hooks API ====================

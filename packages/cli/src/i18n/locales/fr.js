@@ -757,6 +757,9 @@ export default {
   'When a session is ending': 'Quand une session se termine',
   'When a permission dialog is displayed':
     'Quand un dialogue de permission est affiché',
+  'When a new todo item is created': 'Quand un nouvel élément todo est créé',
+  'When a todo item is marked as completed':
+    'Quand un élément todo est marqué comme terminé',
   'Input to command is JSON of tool call arguments.':
     "L'entrée de la commande est du JSON des arguments d'appel d'outil.",
   'Input to command is JSON with fields "inputs" (tool call arguments) and "response" (tool call response).':
@@ -779,6 +782,10 @@ export default {
     "L'entrée de la commande est du JSON avec les détails de compaction.",
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     "L'entrée de la commande est du JSON avec tool_name, tool_input et tool_use_id. Sortie JSON avec hookSpecificOutput contenant la décision d'autoriser ou de refuser.",
+  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
+    "L'entrée de la commande est du JSON avec todo_id, todo_content, todo_status et all_todos. Sortie JSON avec decision (allow/block) et reason.",
+  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
+    "L'entrée de la commande est du JSON avec todo_id, todo_content, previous_status et all_todos. Sortie JSON avec decision (allow/block) et reason.",
   'stdout/stderr not shown': 'stdout/stderr non affiché',
   'show stderr to model and continue conversation':
     'afficher stderr au modèle et continuer la conversation',
@@ -803,6 +810,12 @@ export default {
   'show stderr to user only but continue with compaction':
     "afficher stderr à l'utilisateur uniquement mais continuer la compaction",
   'use hook decision if provided': 'utiliser la décision du hook si fournie',
+  'allow todo creation': 'autoriser la création de todo',
+  'block todo creation and show reason to model':
+    'bloquer la création de todo et afficher la raison au modèle',
+  'allow todo completion': 'autoriser la complétion de todo',
+  'block todo completion and show reason to model':
+    'bloquer la complétion de todo et afficher la raison au modèle',
   'Config not loaded.': 'Configuration non chargée.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':
     'Les hooks ne sont pas activés. Activez les hooks dans les paramètres pour utiliser cette fonctionnalité.',

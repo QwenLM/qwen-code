@@ -682,6 +682,9 @@ export default {
   'Before conversation compaction': 'Перед сжатием разговора',
   'When a session is ending': 'При завершении сессии',
   'When a permission dialog is displayed': 'При отображении диалога разрешений',
+  'When a new todo item is created': 'При создании новой задачи',
+  'When a todo item is marked as completed':
+    'При отметке задачи как выполненной',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     'Ввод в команду — это JSON аргументов вызова инструмента.',
@@ -705,6 +708,10 @@ export default {
     'Ввод в команду — это JSON с деталями сжатия.',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'Ввод в команду — это JSON с tool_name, tool_input и tool_use_id. Вывод — JSON с hookSpecificOutput, содержащим решение о разрешении или отказе.',
+  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
+    'Ввод в команду — это JSON с todo_id, todo_content, todo_status и all_todos. Вывод — JSON с decision (allow/block) и reason.',
+  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
+    'Ввод в команду — это JSON с todo_id, todo_content, previous_status и all_todos. Вывод — JSON с decision (allow/block) и reason.',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr не отображаются',
   'show stderr to model and continue conversation':
@@ -731,6 +738,12 @@ export default {
     'показать stderr только пользователю, но продолжить сжатие',
   'use hook decision if provided':
     'использовать решение хука, если предоставлено',
+  'allow todo creation': 'разрешить создание задачи',
+  'block todo creation and show reason to model':
+    'заблокировать создание задачи и показать причину модели',
+  'allow todo completion': 'разрешить выполнение задачи',
+  'block todo completion and show reason to model':
+    'заблокировать выполнение задачи и показать причину модели',
   // Hooks - Messages
   'Config not loaded.': 'Конфигурация не загружена.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':

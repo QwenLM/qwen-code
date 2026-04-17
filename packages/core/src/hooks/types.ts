@@ -48,6 +48,10 @@ export enum HookEventName {
   PermissionRequest = 'PermissionRequest',
   // StopFailure - When the turn ends due to an API error (instead of Stop)
   StopFailure = 'StopFailure',
+  // TodoCreated - When a new todo item is added to the list (Qwen Code specific)
+  TodoCreated = 'TodoCreated',
+  // TodoCompleted - When a todo item's status changes to 'completed' (Qwen Code specific)
+  TodoCompleted = 'TodoCompleted',
 }
 
 /**
@@ -881,6 +885,112 @@ export interface StopFailureInput extends HookInput {
  * This type alias is used instead of an empty interface to satisfy ESLint rules
  */
 export type StopFailureOutput = HookOutput;
+
+/**
+ * Todo item status types
+ */
+export type TodoStatus = 'pending' | 'in_progress' | 'completed';
+
+/**
+ * TodoCreated hook input
+ * Fired when a new todo item is added to the list
+ */
+export interface TodoCreatedInput extends HookInput {
+  hook_event_name: 'TodoCreated';
+  todo_id: string;
+  todo_content: string;
+  todo_status: TodoStatus;
+  all_todos: TodoItem[];
+}
+
+/**
+ * TodoCreated hook output
+ */
+export interface TodoCreatedOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'TodoCreated';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * TodoCompleted hook input
+ * Fired when a todo item's status changes to 'completed'
+ */
+export interface TodoCompletedInput extends HookInput {
+  hook_event_name: 'TodoCompleted';
+  todo_id: string;
+  todo_content: string;
+  previous_status: 'pending' | 'in_progress';
+  all_todos: TodoItem[];
+}
+
+/**
+ * TodoCompleted hook output
+ */
+export interface TodoCompletedOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'TodoCompleted';
+    additionalContext?: string;
+  };
+}
+
+/**
+ * Todo item structure (mirrors the one in todoWrite.ts)
+ */
+export interface TodoItem {
+  id: string;
+  content: string;
+  status: TodoStatus;
+}
+
+/**
+ * Changes detected when comparing old and new todo lists
+ */
+export interface TodoChanges {
+  created: TodoItem[];
+  completed: TodoItem[];
+  statusChanged: TodoItem[];
+}
+
+/**
+ * Compare old and new todo lists to detect changes
+ * @param oldTodos The previous todo list
+ * @param newTodos The new todo list
+ * @returns TodoChanges containing created, completed, and statusChanged items
+ */
+export function detectTodoChanges(
+  oldTodos: TodoItem[],
+  newTodos: TodoItem[],
+): TodoChanges {
+  const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));
+
+  const changes: TodoChanges = {
+    created: [],
+    completed: [],
+    statusChanged: [],
+  };
+
+  for (const newTodo of newTodos) {
+    const oldTodo = oldTodosMap.get(newTodo.id);
+
+    if (!oldTodo) {
+      // New todo created (ID not found in old todos)
+      changes.created.push(newTodo);
+    } else if (
+      oldTodo.status !== 'completed' &&
+      newTodo.status === 'completed'
+    ) {
+      // Todo completed (status changed to 'completed')
+      changes.completed.push(newTodo);
+    } else if (oldTodo.status !== newTodo.status) {
+      // Other status change (e.g., pending -> in_progress)
+      changes.statusChanged.push(newTodo);
+    }
+  }
+
+  return changes;
+}
 
 /**
  * Hook execution result

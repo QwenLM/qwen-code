@@ -176,10 +176,12 @@ describe('hooks constants', () => {
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PreCompact);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PostCompact);
       expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.PermissionRequest);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.TodoCreated);
+      expect(DISPLAY_HOOK_EVENTS).toContain(HookEventName.TodoCompleted);
     });
 
-    it('should have 14 events', () => {
-      expect(DISPLAY_HOOK_EVENTS).toHaveLength(14);
+    it('should have 16 events', () => {
+      expect(DISPLAY_HOOK_EVENTS).toHaveLength(16);
     });
   });
 
@@ -215,6 +217,28 @@ describe('hooks constants', () => {
       expect(info.shortDescription).toBe('');
       expect(info.description).toBe('');
       expect(info.exitCodes).toEqual([]);
+      expect(info.configs).toEqual([]);
+    });
+
+    it('should create empty info for TodoCreated', () => {
+      const info = createEmptyHookEventInfo(HookEventName.TodoCreated);
+
+      expect(info.event).toBe(HookEventName.TodoCreated);
+      expect(info.shortDescription).toBe('When a new todo item is created');
+      expect(info.description).toContain('todo_id');
+      expect(info.exitCodes).toHaveLength(3);
+      expect(info.configs).toEqual([]);
+    });
+
+    it('should create empty info for TodoCompleted', () => {
+      const info = createEmptyHookEventInfo(HookEventName.TodoCompleted);
+
+      expect(info.event).toBe(HookEventName.TodoCompleted);
+      expect(info.shortDescription).toBe(
+        'When a todo item is marked as completed',
+      );
+      expect(info.description).toContain('previous_status');
+      expect(info.exitCodes).toHaveLength(3);
       expect(info.configs).toEqual([]);
     });
   });

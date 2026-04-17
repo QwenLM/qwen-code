@@ -15,14 +15,11 @@ import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { TodoItem } from '../hooks/types.js';
+import { detectTodoChanges } from '../hooks/types.js';
+import type { AggregatedHookResult } from '../hooks/hookAggregator.js';
 
 const debugLogger = createDebugLogger('TODO_WRITE');
-
-export interface TodoItem {
-  id: string;
-  content: string;
-  status: 'pending' | 'in_progress' | 'completed';
-}
 
 export interface TodoWriteParams {
   todos: TodoItem[];
@@ -315,6 +312,9 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
     const sessionId = this.config.getSessionId();
 
     try {
+      // 1. Read current todos (for change detection)
+      const oldTodos = await readTodosFromFile(sessionId);
+
       let finalTodos: TodoItem[];
 
       if (modified_by_user && modified_content !== undefined) {
@@ -326,12 +326,71 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         finalTodos = todos;
       }
 
+      // 2. Detect changes
+      const changes = detectTodoChanges(oldTodos, finalTodos);
+      const oldTodosMap = new Map(oldTodos.map((t) => [t.id, t]));
+
+      // 3. Execute TodoCreated hooks BEFORE writing (blocking hooks should prevent creation)
+      if (changes.created.length > 0) {
+        const hookSystem = this.config.getHookSystem();
+        if (hookSystem) {
+          for (const todo of changes.created) {
+            const result: AggregatedHookResult =
+              await hookSystem.fireTodoCreatedEvent(
+                todo.id,
+                todo.content,
+                todo.status,
+                finalTodos,
+                _signal,
+              );
+
+            // If blocking error, throw WITHOUT writing (data not yet persisted)
+            if (result.finalOutput?.decision === 'block') {
+              throw new Error(
+                `TodoCreated hook feedback: ${result.finalOutput.reason || 'Hook blocked todo creation'}`,
+              );
+            }
+          }
+        }
+      }
+
+      // 4. Execute TodoCompleted hooks BEFORE writing (blocking hooks should prevent completion)
+      if (changes.completed.length > 0) {
+        const hookSystem = this.config.getHookSystem();
+        if (hookSystem) {
+          for (const todo of changes.completed) {
+            const oldTodo = oldTodosMap.get(todo.id);
+            // previousStatus is always 'pending' or 'in_progress' because
+            // changes.completed only contains items where oldTodo.status !== 'completed'
+            const previousStatus = oldTodo?.status ?? 'pending';
+
+            const result: AggregatedHookResult =
+              await hookSystem.fireTodoCompletedEvent(
+                todo.id,
+                todo.content,
+                previousStatus as 'pending' | 'in_progress',
+                finalTodos,
+                _signal,
+              );
+
+            // If blocking error, throw WITHOUT writing
+            if (result.finalOutput?.decision === 'block') {
+              throw new Error(
+                `TodoCompleted hook feedback: ${result.finalOutput.reason || 'Hook blocked todo completion'}`,
+              );
+            }
+          }
+        }
+      }
+
+      // 5. Write new todos AFTER hooks approve (or if no hooks registered)
       await writeTodosToFile(finalTodos, sessionId);
 
-      // Create structured display object for rich UI rendering
+      // 6. Create structured display object for rich UI rendering
       const todoResultDisplay = {
         type: 'todo_list' as const,
         todos: finalTodos,
+        changes,
       };
 
       // Create plain string format with system reminder
@@ -350,7 +409,7 @@ Your todo list is now empty. DO NOT mention this explicitly to the user. You hav
         llmContent = `Todos have been modified successfully. Ensure that you continue to use the todo list to track your progress. Please proceed with the current tasks if applicable
 
 <system-reminder>
-Your todo list has changed. DO NOT mention this explicitly to the user. Here are the latest contents of your todo list: 
+Your todo list has changed. DO NOT mention this explicitly to the user. Here are the latest contents of your todo list:
 
 ${todosJson}. Continue on with the tasks at hand if applicable.
 </system-reminder>`;

@@ -705,6 +705,8 @@ export default {
   'Before conversation compaction': '对话压缩前',
   'When a session is ending': '会话结束时',
   'When a permission dialog is displayed': '显示权限对话框时',
+  'When a new todo item is created': '创建新待办事项时',
+  'When a todo item is marked as completed': '待办事项标记为完成时',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     '命令输入为工具调用参数的 JSON。',
@@ -728,6 +730,10 @@ export default {
     '命令输入为包含压缩详情的 JSON。',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     '命令输入为包含 tool_name、tool_input 和 tool_use_id 的 JSON。输出包含 hookSpecificOutput 的 JSON，其中包含允许或拒绝的决定。',
+  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
+    '命令输入为包含 todo_id、todo_content、todo_status 和 all_todos 的 JSON。输出包含 decision（allow/block）和 reason 的 JSON。',
+  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
+    '命令输入为包含 todo_id、todo_content、previous_status 和 all_todos 的 JSON。输出包含 decision（allow/block）和 reason 的 JSON。',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr 不显示',
   'show stderr to model and continue conversation':
@@ -752,6 +758,12 @@ export default {
   'show stderr to user only but continue with compaction':
     '仅向用户显示 stderr 但继续压缩',
   'use hook decision if provided': '如果提供则使用 Hook 决定',
+  'allow todo creation': '允许创建待办事项',
+  'block todo creation and show reason to model':
+    '阻止创建待办事项并向模型显示原因',
+  'allow todo completion': '允许完成待办事项',
+  'block todo completion and show reason to model':
+    '阻止完成待办事项并向模型显示原因',
   // Hooks - Messages
   'Config not loaded.': '配置未加载。',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':

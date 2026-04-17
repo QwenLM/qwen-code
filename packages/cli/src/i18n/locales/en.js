@@ -744,6 +744,9 @@ export default {
   'When a session is ending': 'When a session is ending',
   'When a permission dialog is displayed':
     'When a permission dialog is displayed',
+  'When a new todo item is created': 'When a new todo item is created',
+  'When a todo item is marked as completed':
+    'When a todo item is marked as completed',
   // Hooks - Event Descriptions (detailed)
   'Input to command is JSON of tool call arguments.':
     'Input to command is JSON of tool call arguments.',
@@ -767,6 +770,10 @@ export default {
     'Input to command is JSON with compaction details.',
   'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.':
     'Input to command is JSON with tool_name, tool_input, and tool_use_id. Output JSON with hookSpecificOutput containing decision to allow or deny.',
+  'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.':
+    'Input to command is JSON with todo_id, todo_content, todo_status, and all_todos. Output JSON with decision (allow/block) and reason.',
+  'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.':
+    'Input to command is JSON with todo_id, todo_content, previous_status, and all_todos. Output JSON with decision (allow/block) and reason.',
   // Hooks - Exit Code Descriptions
   'stdout/stderr not shown': 'stdout/stderr not shown',
   'show stderr to model and continue conversation':
@@ -792,6 +799,12 @@ export default {
   'show stderr to user only but continue with compaction':
     'show stderr to user only but continue with compaction',
   'use hook decision if provided': 'use hook decision if provided',
+  'allow todo creation': 'allow todo creation',
+  'block todo creation and show reason to model':
+    'block todo creation and show reason to model',
+  'allow todo completion': 'allow todo completion',
+  'block todo completion and show reason to model':
+    'block todo completion and show reason to model',
   // Hooks - Messages
   'Config not loaded.': 'Config not loaded.',
   'Hooks are not enabled. Enable hooks in settings to use this feature.':

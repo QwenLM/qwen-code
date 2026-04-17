@@ -38,6 +38,10 @@ import type {
   FunctionHookContext,
   StopFailureInput,
   StopFailureErrorType,
+  TodoCreatedInput,
+  TodoCompletedInput,
+  TodoItem,
+  TodoStatus,
 } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -469,6 +473,62 @@ export class HookEventHandler {
       HookEventName.PostCompact,
       input,
       { trigger },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a TodoCreated event
+   * Called when a new todo item is added to the list
+   */
+  async fireTodoCreatedEvent(
+    todoId: string,
+    todoContent: string,
+    todoStatus: TodoStatus,
+    allTodos: TodoItem[],
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: TodoCreatedInput = {
+      ...this.createBaseInput(HookEventName.TodoCreated),
+      hook_event_name: 'TodoCreated',
+      todo_id: todoId,
+      todo_content: todoContent,
+      todo_status: todoStatus,
+      all_todos: allTodos,
+    };
+
+    return this.executeHooks(
+      HookEventName.TodoCreated,
+      input,
+      undefined,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a TodoCompleted event
+   * Called when a todo item's status changes to 'completed'
+   */
+  async fireTodoCompletedEvent(
+    todoId: string,
+    todoContent: string,
+    previousStatus: 'pending' | 'in_progress',
+    allTodos: TodoItem[],
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: TodoCompletedInput = {
+      ...this.createBaseInput(HookEventName.TodoCompleted),
+      hook_event_name: 'TodoCompleted',
+      todo_id: todoId,
+      todo_content: todoContent,
+      previous_status: previousStatus,
+      all_todos: allTodos,
+    };
+
+    return this.executeHooks(
+      HookEventName.TodoCompleted,
+      input,
+      undefined,
       signal,
     );
   }
