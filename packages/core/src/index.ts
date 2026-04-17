@@ -73,7 +73,6 @@ export * from './tools/tool-names.js';
 export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';
 export * from './tools/tools.js';
-export * from './tools/memory-config.js';
 
 // Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
