@@ -10,7 +10,7 @@ on:
     inputs:
       version:
         description: 'The version to release (e.g., v0.1.11). Required for manual patch releases.'
-        required: false # Not required for scheduled runs
+        required: false
         type: 'string'
       ref:
         description: 'The branch or ref (full git sha) to release from.'
@@ -33,26 +33,27 @@ on:
         type: 'boolean'
         default: false
       force_skip_tests:
-        description: 'Select to skip the "Run Tests" step in testing. Prod releases should run tests'
+        description: 'Skip the release validation jobs ("quality", "integration_none", and "integration_docker"), allowing publish to proceed without them. Prod releases should run validation.'
         required: false
         type: 'boolean'
         default: false
 
 jobs:
-  release:
+  prepare:
+    name: 'Prepare Release Metadata'
     runs-on: 'ubuntu-latest'
-    environment:
-      name: 'production-release'
-      url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ steps.version.outputs.RELEASE_TAG }}'
     if: |-
       ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
-      contents: 'write'
-      packages: 'write'
-      id-token: 'write'
-      issues: 'write' # For creating issues on failure
+      contents: 'read'
     outputs:
-      RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
+      release_tag: '${{ steps.version.outputs.RELEASE_TAG }}'
+      release_version: '${{ steps.version.outputs.RELEASE_VERSION }}'
+      npm_tag: '${{ steps.version.outputs.NPM_TAG }}'
+      previous_release_tag: '${{ steps.version.outputs.PREVIOUS_RELEASE_TAG }}'
+      is_nightly: '${{ steps.vars.outputs.is_nightly }}'
+      is_preview: '${{ steps.vars.outputs.is_preview }}'
+      is_dry_run: '${{ steps.vars.outputs.is_dry_run }}'
 
     steps:
       - name: 'Checkout'
@@ -62,13 +63,12 @@ jobs:
           fetch-depth: 0
 
       - name: 'Set booleans for simplified logic'
+        id: 'vars'
         env:
           CREATE_NIGHTLY_RELEASE: '${{ github.event.inputs.create_nightly_release }}'
           CREATE_PREVIEW_RELEASE: '${{ github.event.inputs.create_preview_release }}'
-          EVENT_NAME: '${{ github.event_name }}'
           CRON: '${{ github.event.schedule }}'
           DRY_RUN_INPUT: '${{ github.event.inputs.dry_run }}'
-        id: 'vars'
         run: |-
           is_nightly="false"
           if [[ "${CRON}" == "0 0 * * *" || "${CREATE_NIGHTLY_RELEASE}" == "true" ]]; then
@@ -93,14 +93,22 @@ jobs:
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
 
       - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
-          npm ci
+          npm ci --no-audit --progress=false
 
       - name: 'Get the version'
         id: 'version'
-        run: |
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
+          IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
+          MANUAL_VERSION: '${{ inputs.version }}'
+        run: |-
           VERSION_ARGS=()
           if [[ "${IS_NIGHTLY}" == "true" ]]; then
             VERSION_ARGS+=(--type=nightly)
@@ -120,37 +128,214 @@ jobs:
           echo "RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .releaseTag)" >> "$GITHUB_OUTPUT"
           echo "RELEASE_VERSION=$(echo "$VERSION_JSON" | jq -r .releaseVersion)" >> "$GITHUB_OUTPUT"
           echo "NPM_TAG=$(echo "$VERSION_JSON" | jq -r .npmTag)" >> "$GITHUB_OUTPUT"
-
           echo "PREVIOUS_RELEASE_TAG=$(echo "$VERSION_JSON" | jq -r .previousReleaseTag)" >> "$GITHUB_OUTPUT"
-        env:
-          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
-          IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
-          MANUAL_VERSION: '${{ inputs.version }}'
 
-      - name: 'Run Tests'
-        if: |-
-          ${{ github.event.inputs.force_skip_tests != 'true' }}
-        run: |
-          npm run preflight
-          npm run test:integration:cli:sandbox:none
-          npm run test:integration:interactive:sandbox:none
-          npm run test:integration:cli:sandbox:docker
-          npm run test:integration:interactive:sandbox:docker
+  quality:
+    name: 'Quality Checks'
+    runs-on: 'ubuntu-latest'
+    needs: 'prepare'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env:
+      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
         env:
-          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Format Project'
+        run: |-
+          npm run format
+
+      - name: 'Run Lint'
+        run: |-
+          npm run lint:ci
+
+      - name: 'Build Project'
+        run: |-
+          npm run build
+
+      - name: 'Typecheck Project'
+        run: |-
+          npm run typecheck
+
+      - name: 'Run Workspace Tests'
+        run: |-
+          npm run test:ci
+
+  integration_none:
+    name: 'Integration Tests (No Sandbox)'
+    runs-on: 'ubuntu-latest'
+    needs: 'prepare'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env:
+      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Run CLI Integration Tests'
+        run: |-
+          npm run test:integration:cli:sandbox:none
+
+      - name: 'Run Interactive Integration Tests'
+        run: |-
+          npm run test:integration:interactive:sandbox:none
+
+  integration_docker:
+    name: 'Integration Tests (Docker)'
+    runs-on: 'ubuntu-latest'
+    needs: 'prepare'
+    if: |-
+      ${{ github.event.inputs.force_skip_tests != 'true' }}
+    permissions:
+      contents: 'read'
+    env:
+      OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+      OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+      OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          npm ci --no-audit --progress=false
+
+      - name: 'Set up Docker'
+        uses: 'docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435' # ratchet:docker/setup-buildx-action@v3
+
+      - name: 'Build Sandbox'
+        env:
+          QWEN_SANDBOX: 'docker'
+        run: |-
+          npm run build:sandbox -- -s
+
+      - name: 'Run CLI Docker Integration Tests'
+        run: |-
+          # The package.json docker test scripts each rebuild the sandbox image.
+          # Run vitest directly here so this job reuses the image built above.
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests cli
+
+      - name: 'Run Interactive Docker Integration Tests'
+        run: |-
+          QWEN_SANDBOX=docker npx vitest run --root ./integration-tests interactive
+
+  publish:
+    name: 'Publish Release'
+    runs-on: 'ubuntu-latest'
+    needs:
+      - 'prepare'
+      - 'quality'
+      - 'integration_none'
+      - 'integration_docker'
+    if: |-
+      ${{
+        always() &&
+        needs.prepare.result == 'success' &&
+        (
+          github.event.inputs.force_skip_tests == 'true' ||
+          (
+            needs.quality.result == 'success' &&
+            needs.integration_none.result == 'success' &&
+            needs.integration_docker.result == 'success'
+          )
+        )
+      }}
+    environment:
+      name: 'production-release'
+      url: '${{ github.server_url }}/${{ github.repository }}/releases/tag/${{ needs.prepare.outputs.release_tag }}'
+    permissions:
+      contents: 'write'
+      packages: 'write'
+      id-token: 'write'
+
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8' # ratchet:actions/checkout@v5
+        with:
+          ref: '${{ github.event.inputs.ref || github.sha }}'
+          fetch-depth: 0
+
+      - name: 'Setup Node.js'
+        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org'
+          scope: '@qwen-code'
+
+      - name: 'Install Dependencies'
+        env:
+          NPM_CONFIG_PREFER_OFFLINE: 'true'
+        run: |-
+          npm ci --no-audit --progress=false
 
       - name: 'Configure Git User'
-        run: |
+        run: |-
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: 'Create and switch to a release branch'
         id: 'release_branch'
         env:
-          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
         run: |-
           BRANCH_NAME="release/${RELEASE_TAG}"
           git switch -c "${BRANCH_NAME}"
@@ -158,15 +343,15 @@ jobs:
 
       - name: 'Update package versions'
         env:
-          RELEASE_VERSION: '${{ steps.version.outputs.RELEASE_VERSION }}'
+          RELEASE_VERSION: '${{ needs.prepare.outputs.release_version }}'
         run: |-
           npm run release:version "${RELEASE_VERSION}"
 
       - name: 'Commit and Conditionally Push package versions'
         env:
           BRANCH_NAME: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-          IS_DRY_RUN: '${{ steps.vars.outputs.is_dry_run }}'
-          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
+          IS_DRY_RUN: '${{ needs.prepare.outputs.is_dry_run }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
         run: |-
           git add package.json package-lock.json packages/*/package.json packages/channels/*/package.json
           if git diff --staged --quiet; then
@@ -186,39 +371,31 @@ jobs:
           npm run bundle
           npm run prepare:package
 
-      - name: 'Configure npm for publishing'
-        uses: 'actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020' # ratchet:actions/setup-node@v4
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-          scope: '@qwen-code'
-
       - name: 'Publish @qwen-code/qwen-code'
         working-directory: 'dist'
         run: |-
-          npm publish --access public --tag=${{ steps.version.outputs.NPM_TAG }} ${{ steps.vars.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
 
       - name: 'Publish @qwen-code/channel-base'
         working-directory: 'packages/channels/base'
         run: |-
-          npm publish --access public --tag=${{ steps.version.outputs.NPM_TAG }} ${{ steps.vars.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
+          npm publish --access public --tag=${{ needs.prepare.outputs.npm_tag }} ${{ needs.prepare.outputs.is_dry_run == 'true' && '--dry-run' || '' }}
         env:
           NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
 
       - name: 'Create GitHub Release and Tag'
         if: |-
-          ${{ steps.vars.outputs.is_dry_run == 'false' }}
+          ${{ needs.prepare.outputs.is_dry_run == 'false' }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
           RELEASE_BRANCH: '${{ steps.release_branch.outputs.BRANCH_NAME }}'
-          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }}'
-          PREVIOUS_RELEASE_TAG: '${{ steps.version.outputs.PREVIOUS_RELEASE_TAG }}'
-          IS_NIGHTLY: '${{ steps.vars.outputs.is_nightly }}'
-          IS_PREVIEW: '${{ steps.vars.outputs.is_preview }}'
+          RELEASE_TAG: '${{ needs.prepare.outputs.release_tag }}'
+          PREVIOUS_RELEASE_TAG: '${{ needs.prepare.outputs.previous_release_tag }}'
+          IS_NIGHTLY: '${{ needs.prepare.outputs.is_nightly }}'
+          IS_PREVIEW: '${{ needs.prepare.outputs.is_preview }}'
         run: |-
-          # Set prerelease flag for nightly and preview releases
           PRERELEASE_FLAG=""
           if [[ "${IS_NIGHTLY}" == "true" || "${IS_PREVIEW}" == "true" ]]; then
             PRERELEASE_FLAG="--prerelease"
@@ -226,18 +403,45 @@ jobs:
 
           gh release create "${RELEASE_TAG}" \
             dist/cli.js \
-            --target "$RELEASE_BRANCH" \
+            --target "${RELEASE_BRANCH}" \
             --title "Release ${RELEASE_TAG}" \
-            --notes-start-tag "$PREVIOUS_RELEASE_TAG" \
+            --notes-start-tag "${PREVIOUS_RELEASE_TAG}" \
             --generate-notes \
             ${PRERELEASE_FLAG}
 
+  notify_failure:
+    name: 'Notify Release Failure'
+    runs-on: 'ubuntu-latest'
+    needs:
+      - 'prepare'
+      - 'quality'
+      - 'integration_none'
+      - 'integration_docker'
+      - 'publish'
+    if: |-
+      ${{
+        always() &&
+        (
+          github.event_name == 'schedule' ||
+          github.event.inputs.dry_run != 'true'
+        ) &&
+        (
+          needs.prepare.result == 'failure' ||
+          needs.quality.result == 'failure' ||
+          needs.integration_none.result == 'failure' ||
+          needs.integration_docker.result == 'failure' ||
+          needs.publish.result == 'failure'
+        )
+      }}
+    permissions:
+      issues: 'write'
+
+    steps:
       - name: 'Create Issue on Failure'
-        if: |-
-          ${{ failure() }}
         env:
           GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          RELEASE_TAG: '${{ steps.version.outputs.RELEASE_TAG }} || "N/A"'
+          GH_REPO: '${{ github.repository }}'
+          RELEASE_TAG: "${{ needs.prepare.outputs.release_tag || 'N/A' }}"
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           gh issue create \

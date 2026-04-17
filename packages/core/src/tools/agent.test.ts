@@ -87,6 +87,8 @@ describe('AgentTool', () => {
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getTranscriptPath: vi.fn().mockReturnValue('/test/transcript'),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
+      isTrustedFolder: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     changeListeners = [];
@@ -392,7 +394,7 @@ describe('AgentTool', () => {
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
         mockSubagents[0],
-        config,
+        expect.any(Object), // config (may be approval-mode override)
         expect.any(Object), // eventEmitter parameter
       );
       expect(mockAgent.execute).toHaveBeenCalledWith(
@@ -1618,3 +1620,6 @@ describe('AgentTool', () => {
     });
   });
 });
+
+// TODO: resolveSubagentApprovalMode tests will be added when
+// upstream approval-mode propagation feature (#3066) is integrated.

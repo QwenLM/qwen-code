@@ -8,7 +8,7 @@ import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
-import { getAllGeminiMdFilenames } from '../tools/memoryTool.js';
+import { getAllGeminiMdFilenames } from '../memory/const.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
 import { QWEN_DIR } from './paths.js';

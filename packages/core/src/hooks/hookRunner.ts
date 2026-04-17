@@ -5,7 +5,7 @@
  */
 
 import { spawn } from 'node:child_process';
-import { HookEventName } from './types.js';
+import { HookEventName, HookType } from './types.js';
 import type {
   HookConfig,
   HookInput,
@@ -13,13 +13,19 @@ import type {
   HookExecutionResult,
   PreToolUseInput,
   UserPromptSubmitInput,
+  CommandHookConfig,
+  FunctionHookContext,
 } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   escapeShellArg,
   getShellConfiguration,
   type ShellType,
+  type ShellConfiguration,
 } from '../utils/shell-utils.js';
+import { HttpHookRunner } from './httpHookRunner.js';
+import { FunctionHookRunner } from './functionHookRunner.js';
+import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -41,47 +47,116 @@ const EXIT_CODE_SUCCESS = 0;
 const EXIT_CODE_NON_BLOCKING_ERROR = 1;
 
 /**
- * Hook runner that executes command hooks
+ * Hook runner that executes command, HTTP, and function hooks
  */
 export class HookRunner {
+  private readonly httpRunner: HttpHookRunner;
+  private readonly functionRunner: FunctionHookRunner;
+  private readonly asyncRegistry: AsyncHookRegistry;
+
+  constructor(allowedHttpUrls?: string[]) {
+    this.httpRunner = new HttpHookRunner(allowedHttpUrls);
+    this.functionRunner = new FunctionHookRunner();
+    this.asyncRegistry = new AsyncHookRegistry();
+  }
+
+  /**
+   * Get the async hook registry
+   */
+  getAsyncRegistry(): AsyncHookRegistry {
+    return this.asyncRegistry;
+  }
+
+  /**
+   * Update allowed HTTP URLs
+   */
+  updateAllowedHttpUrls(allowedUrls: string[]): void {
+    this.httpRunner.updateAllowedUrls(allowedUrls);
+  }
+
   /**
    * Execute a single hook
    * @param hookConfig Hook configuration
    * @param eventName Event name
    * @param input Hook input
-   * @param signal Optional AbortSignal to cancel hook execution
+   * @param contextOrSignal Optional context (for function hooks) or AbortSignal
    */
   async executeHook(
     hookConfig: HookConfig,
     eventName: HookEventName,
     input: HookInput,
-    signal?: AbortSignal,
+    contextOrSignal?: FunctionHookContext | AbortSignal,
   ): Promise<HookExecutionResult> {
     const startTime = Date.now();
 
+    // Extract signal from context or use directly
+    const signal =
+      contextOrSignal && 'aborted' in contextOrSignal
+        ? contextOrSignal
+        : contextOrSignal?.signal;
+
     // Check if already aborted before starting
     if (signal?.aborted) {
-      const hookId = hookConfig.name || hookConfig.command || 'unknown';
+      const hookId = this.getHookId(hookConfig);
       return {
         hookConfig,
         eventName,
         success: false,
+        outcome: 'cancelled',
         error: new Error(`Hook execution cancelled (aborted): ${hookId}`),
         duration: 0,
       };
     }
 
     try {
-      return await this.executeCommandHook(
-        hookConfig,
-        eventName,
-        input,
-        startTime,
-        signal,
-      );
+      // Check if this is an async command hook
+      if (this.isAsyncHook(hookConfig)) {
+        return this.executeAsyncHook(
+          hookConfig as CommandHookConfig,
+          eventName,
+          input,
+          signal,
+        );
+      }
+
+      // Route to appropriate runner based on hook type
+      switch (hookConfig.type) {
+        case HookType.Command:
+          return await this.executeCommandHook(
+            hookConfig,
+            eventName,
+            input,
+            startTime,
+            signal,
+          );
+        case HookType.Http:
+          return await this.httpRunner.execute(
+            hookConfig,
+            eventName,
+            input,
+            signal,
+          );
+        case HookType.Function: {
+          // Function hooks accept context, not just signal
+          const functionContext =
+            contextOrSignal && !('aborted' in contextOrSignal)
+              ? contextOrSignal
+              : { signal };
+          return await this.functionRunner.execute(
+            hookConfig,
+            eventName,
+            input,
+            functionContext,
+          );
+        }
+        default:
+          throw new Error(
+            `Unknown hook type: ${(hookConfig as HookConfig).type}`,
+          );
+      }
     } catch (error) {
       const duration = Date.now() - startTime;
-      const hookId = hookConfig.name || hookConfig.command || 'unknown';
+      const hookId = this.getHookId(hookConfig);
       const errorMessage = `Hook execution failed for event '${eventName}' (hook: ${hookId}): ${error}`;
       debugLogger.warn(`Hook execution error (non-fatal): ${errorMessage}`);
 
@@ -96,8 +171,218 @@ export class HookRunner {
   }
 
   /**
+   * Check if a hook should be executed asynchronously
+   */
+  private isAsyncHook(hookConfig: HookConfig): boolean {
+    return hookConfig.type === HookType.Command && hookConfig.async === true;
+  }
+
+  /**
+   * Get a unique identifier for a hook
+   */
+  private getHookId(hookConfig: HookConfig): string {
+    if (hookConfig.name) {
+      return hookConfig.name;
+    }
+    switch (hookConfig.type) {
+      case HookType.Command:
+        return hookConfig.command || 'unknown-command';
+      case HookType.Http:
+        return hookConfig.url || 'unknown-url';
+      case HookType.Function:
+        return hookConfig.id || 'unknown-function';
+      default:
+        return 'unknown';
+    }
+  }
+
+  /**
+   * Get shell configuration for a hook, respecting hookConfig.shell override
+   */
+  private getShellConfigForHook(
+    hookConfig: CommandHookConfig,
+  ): ShellConfiguration {
+    const globalConfig = getShellConfiguration();
+
+    // If hook specifies a shell, use it
+    if (hookConfig.shell) {
+      const shellType: ShellType =
+        hookConfig.shell === 'powershell' ? 'powershell' : 'bash';
+
+      // Return configuration for the specified shell type
+      if (shellType === 'powershell') {
+        return {
+          shell: 'powershell',
+          executable: 'powershell',
+          argsPrefix: ['-Command'],
+        };
+      }
+
+      // For bash, use global config's executable path or fallback
+      return {
+        shell: 'bash',
+        executable:
+          globalConfig.shell === 'bash' ? globalConfig.executable : 'bash',
+        argsPrefix: ['-c'],
+      };
+    }
+
+    // Use global configuration
+    return globalConfig;
+  }
+
+  /**
+   * Execute a command hook asynchronously (non-blocking)
+   */
+  private async executeAsyncHook(
+    hookConfig: CommandHookConfig,
+    eventName: HookEventName,
+    input: HookInput,
+    signal?: AbortSignal,
+  ): Promise<HookExecutionResult> {
+    const hookId = generateHookId();
+    const hookName = hookConfig.name || hookConfig.command || 'async-hook';
+
+    // Check concurrency limit before registering
+    if (!this.asyncRegistry.canAcceptMore()) {
+      debugLogger.warn(
+        `Async hook rejected due to concurrency limit: ${hookName}`,
+      );
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        duration: 0,
+        isAsync: true,
+        error: new Error(
+          'Async hook rejected: too many concurrent async hooks running',
+        ),
+        output: { continue: true }, // Non-blocking, continue execution
+      };
+    }
+
+    // Register in async registry
+    const registeredId = this.asyncRegistry.register({
+      hookId,
+      hookName,
+      hookEvent: eventName,
+      sessionId: input.session_id,
+      startTime: Date.now(),
+      timeout: hookConfig.timeout || DEFAULT_HOOK_TIMEOUT,
+      stdout: '',
+      stderr: '',
+    });
+
+    // Double-check registration succeeded (race condition protection)
+    if (!registeredId) {
+      debugLogger.warn(
+        `Async hook registration failed due to concurrency limit: ${hookName}`,
+      );
+      return {
+        hookConfig,
+        eventName,
+        success: false,
+        duration: 0,
+        isAsync: true,
+        error: new Error(
+          'Async hook rejected: too many concurrent async hooks running',
+        ),
+        output: { continue: true },
+      };
+    }
+
+    // Execute in background with proper error handling
+    this.executeCommandHookInBackground(
+      hookConfig,
+      eventName,
+      input,
+      hookId,
+      signal,
+    ).catch((error) => {
+      // This catch handles any unexpected errors that escape the try-catch in executeCommandHookInBackground
+      debugLogger.error(
+        `Unexpected error in async hook background execution: ${hookId} (${hookName}): ${error instanceof Error ? error.message : String(error)}`,
+      );
+      // Ensure the hook is marked as failed in the registry
+      try {
+        this.asyncRegistry.fail(
+          hookId,
+          error instanceof Error
+            ? error
+            : new Error(`Unexpected error: ${String(error)}`),
+        );
+      } catch (registryError) {
+        // Registry operation failed, log but don't throw
+        debugLogger.error(
+          `Failed to update async registry for hook ${hookId}: ${registryError}`,
+        );
+      }
+    });
+
+    // Return immediately with success
+    debugLogger.debug(`Started async hook: ${hookId} (${hookName})`);
+    return {
+      hookConfig,
+      eventName,
+      success: true,
+      duration: 0,
+      isAsync: true,
+      output: { continue: true },
+    };
+  }
+
+  /**
+   * Execute a command hook in the background
+   */
+  private async executeCommandHookInBackground(
+    hookConfig: CommandHookConfig,
+    eventName: HookEventName,
+    input: HookInput,
+    hookId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const hookName = hookConfig.name || hookConfig.command || 'async-hook';
+
+    try {
+      debugLogger.debug(`Executing async hook in background: ${hookId}`);
+
+      const result = await this.executeCommandHook(
+        hookConfig,
+        eventName,
+        input,
+        Date.now(),
+        signal,
+      );
+
+      // Update registry with result
+      if (result.success) {
+        this.asyncRegistry.updateOutput(hookId, result.stdout, result.stderr);
+        this.asyncRegistry.complete(hookId, result.output);
+        debugLogger.debug(
+          `Async hook completed successfully: ${hookId} (${hookName})`,
+        );
+      } else {
+        const error = result.error || new Error('Unknown error');
+        this.asyncRegistry.fail(hookId, error);
+        debugLogger.warn(
+          `Async hook failed: ${hookId} (${hookName}): ${error.message}`,
+        );
+      }
+    } catch (error) {
+      const errorObj =
+        error instanceof Error ? error : new Error(String(error));
+      this.asyncRegistry.fail(hookId, errorObj);
+      debugLogger.error(
+        `Async hook threw exception: ${hookId} (${hookName}): ${errorObj.message}`,
+      );
+      // Re-throw to be caught by the .catch() in executeAsyncHook
+      throw error;
+    }
+  }
+
+  /**
    * Execute multiple hooks in parallel
-   * @param signal Optional AbortSignal to cancel hook execution
+   * @param context Optional function hook context (messages, toolUseID)
    */
   async executeHooksParallel(
     hookConfigs: HookConfig[],
@@ -106,10 +391,14 @@ export class HookRunner {
     onHookStart?: (config: HookConfig, index: number) => void,
     onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
     signal?: AbortSignal,
+    context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
     const promises = hookConfigs.map(async (config, index) => {
       onHookStart?.(config, index);
-      const result = await this.executeHook(config, eventName, input, signal);
+      const result = await this.executeHook(config, eventName, input, {
+        ...context,
+        signal,
+      });
       onHookEnd?.(config, result);
       return result;
     });
@@ -119,7 +408,7 @@ export class HookRunner {
 
   /**
    * Execute multiple hooks sequentially
-   * @param signal Optional AbortSignal to cancel hook execution
+   * @param context Optional function hook context (messages, toolUseID)
    */
   async executeHooksSequential(
     hookConfigs: HookConfig[],
@@ -128,6 +417,7 @@ export class HookRunner {
     onHookStart?: (config: HookConfig, index: number) => void,
     onHookEnd?: (config: HookConfig, result: HookExecutionResult) => void,
     signal?: AbortSignal,
+    context?: FunctionHookContext,
   ): Promise<HookExecutionResult[]> {
     const results: HookExecutionResult[] = [];
     let currentInput = input;
@@ -139,12 +429,10 @@ export class HookRunner {
       }
       const config = hookConfigs[i];
       onHookStart?.(config, i);
-      const result = await this.executeHook(
-        config,
-        eventName,
-        currentInput,
+      const result = await this.executeHook(config, eventName, currentInput, {
+        ...context,
         signal,
-      );
+      });
       onHookEnd?.(config, result);
       results.push(result);
 
@@ -222,7 +510,7 @@ export class HookRunner {
    * @param signal Optional AbortSignal to cancel hook execution
    */
   private async executeCommandHook(
-    hookConfig: HookConfig,
+    hookConfig: CommandHookConfig,
     eventName: HookEventName,
     input: HookInput,
     startTime: number,
@@ -251,7 +539,8 @@ export class HookRunner {
       let timedOut = false;
       let aborted = false;
 
-      const shellConfig = getShellConfiguration();
+      // Use hook-specific shell configuration if specified
+      const shellConfig = this.getShellConfigForHook(hookConfig);
       const command = this.expandCommand(
         hookConfig.command,
         input,

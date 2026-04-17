@@ -40,6 +40,21 @@ export class HookAggregator {
     results: HookExecutionResult[],
     eventName: HookEventName,
   ): AggregatedHookResult {
+    // StopFailure special handling: fire-and-forget, ignore all outputs and errors
+    if (eventName === HookEventName.StopFailure) {
+      let totalDuration = 0;
+      for (const result of results) {
+        totalDuration += result.duration;
+      }
+      return {
+        success: true, // Always return success
+        allOutputs: [],
+        errors: [], // Ignore errors
+        totalDuration,
+        finalOutput: undefined,
+      };
+    }
+
     const allOutputs: HookOutput[] = [];
     const errors: Error[] = [];
     let totalDuration = 0;

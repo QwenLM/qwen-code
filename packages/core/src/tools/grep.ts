@@ -15,7 +15,8 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('GREP');
-import { resolveAndValidatePath } from '../utils/paths.js';
+import { resolveAndValidatePath, isSubpath } from '../utils/paths.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import type { Config } from '../config/config.js';
@@ -87,7 +88,10 @@ class GrepToolInvocation extends BaseToolInvocation<
       this.config.getTargetDir(),
       this.params.path,
     );
-    if (workspaceContext.isPathWithinWorkspace(resolvedPath)) {
+    if (
+      workspaceContext.isPathWithinWorkspace(resolvedPath) ||
+      isSubpath(getMemoryBaseDir(), resolvedPath)
+    ) {
       return 'allow';
     }
     return 'ask';

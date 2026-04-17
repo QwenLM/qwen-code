@@ -103,7 +103,7 @@ describe('<ToolGroupMessage />', () => {
     render(
       <ConfigContext.Provider value={mockConfig}>
         <StreamingContext.Provider value={StreamingState.Idle}>
-          <CompactModeProvider value={{ compactMode, frozenSnapshot: null }}>
+          <CompactModeProvider value={{ compactMode }}>
             {component}
           </CompactModeProvider>
         </StreamingContext.Provider>

@@ -151,7 +151,6 @@ export {
   mapToolStatusToContainerStatus,
   // Business ToolCall components
   ThinkToolCall,
-  SaveMemoryToolCall,
   GenericToolCall,
   EditToolCall,
   WriteToolCall,

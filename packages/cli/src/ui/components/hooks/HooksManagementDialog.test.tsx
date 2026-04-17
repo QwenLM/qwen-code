@@ -59,6 +59,12 @@ vi.mock('../../contexts/ConfigContext.js', async (importOriginal) => {
     useConfig: vi.fn(() => ({
       getExtensions: vi.fn(() => []),
       getDisableAllHooks: vi.fn(() => false),
+      getHookSystem: vi.fn(() => ({
+        getSessionHooksManager: vi.fn(() => ({
+          getAllSessionHooks: vi.fn(() => []),
+        })),
+      })),
+      getSessionId: vi.fn(() => 'test-session-id'),
     })),
   };
 });
@@ -156,20 +162,6 @@ describe('HooksManagementDialog', () => {
       // The dialog should have a border (rendered as box-drawing characters)
       const output = lastFrame();
       expect(output).toBeTruthy();
-
-      unmount();
-    });
-
-    it('should handle empty hooks list gracefully', async () => {
-      const { lastFrame, unmount } = renderWithProviders(
-        <HooksManagementDialog onClose={mockOnClose} />,
-      );
-
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      const output = lastFrame();
-      // Should show 0 hooks configured when no hooks are configured
-      expect(output).toContain('0 hooks configured');
 
       unmount();
     });

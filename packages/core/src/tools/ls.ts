@@ -17,6 +17,7 @@ import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { Storage } from '../config/storage.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 
 const debugLogger = createDebugLogger('LS');
 
@@ -132,7 +133,8 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
     if (
       workspaceContext.isPathWithinWorkspace(dirPath) ||
       isSubpaths(userSkillsDirs, dirPath) ||
-      isSubpath(userExtensionsDir, dirPath)
+      isSubpath(userExtensionsDir, dirPath) ||
+      isSubpath(getMemoryBaseDir(), dirPath)
     ) {
       return 'allow';
     }

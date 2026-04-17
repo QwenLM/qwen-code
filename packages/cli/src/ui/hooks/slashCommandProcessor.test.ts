@@ -110,6 +110,7 @@ describe('useSlashCommandProcessor', () => {
   const mockLoadHistory = vi.fn();
   const mockOpenThemeDialog = vi.fn();
   const mockOpenAuthDialog = vi.fn();
+  const mockOpenMemoryDialog = vi.fn();
   const mockOpenModelDialog = vi.fn();
   const mockSetQuittingMessages = vi.fn();
 
@@ -126,6 +127,7 @@ describe('useSlashCommandProcessor', () => {
     mockFileLoadCommands.mockResolvedValue([]);
     mockMcpLoadCommands.mockResolvedValue([]);
     mockOpenModelDialog.mockClear();
+    mockOpenMemoryDialog.mockClear();
   });
 
   const setupProcessorHook = (
@@ -154,6 +156,7 @@ describe('useSlashCommandProcessor', () => {
           openAuthDialog: mockOpenAuthDialog,
           openThemeDialog: mockOpenThemeDialog,
           openEditorDialog: vi.fn(),
+          openMemoryDialog: mockOpenMemoryDialog,
           openSettingsDialog: vi.fn(),
           openModelDialog: mockOpenModelDialog,
           openTrustDialog: vi.fn(),
@@ -427,6 +430,44 @@ describe('useSlashCommandProcessor', () => {
       });
 
       expect(mockOpenModelDialog).toHaveBeenCalled();
+    });
+
+    it('should handle "dialog: memory" action', async () => {
+      const command = createTestCommand({
+        name: 'memorycmd',
+        action: vi.fn().mockResolvedValue({ type: 'dialog', dialog: 'memory' }),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/memorycmd');
+      });
+
+      expect(mockOpenMemoryDialog).toHaveBeenCalled();
+    });
+
+    it('should pass interactive execution mode to command actions', async () => {
+      const action = vi.fn().mockResolvedValue({
+        type: 'message',
+        messageType: 'info',
+        content: 'ok',
+      });
+      const command = createTestCommand({
+        name: 'interactivecmd',
+        action,
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      await act(async () => {
+        await result.current.handleSlashCommand('/interactivecmd');
+      });
+
+      expect(action).toHaveBeenCalledWith(
+        expect.objectContaining({ executionMode: 'interactive' }),
+        '',
+      );
     });
 
     it('should handle "load_history" action', async () => {
@@ -928,6 +969,7 @@ describe('useSlashCommandProcessor', () => {
             openAuthDialog: mockOpenAuthDialog,
             openThemeDialog: mockOpenThemeDialog,
             openEditorDialog: vi.fn(),
+            openMemoryDialog: mockOpenMemoryDialog,
             openSettingsDialog: vi.fn(),
             openModelDialog: vi.fn(),
             openTrustDialog: vi.fn(),

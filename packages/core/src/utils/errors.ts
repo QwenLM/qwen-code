@@ -59,6 +59,10 @@ export function getErrorMessage(error: unknown): string {
  * 2. `error.statusCode` - Some HTTP client libraries
  * 3. `error.response.status` - Axios-style errors
  * 4. `error.error.code` - Nested error objects
+ * 5. `HTTP_STATUS/NNN` pattern in `error.message` - SSE-embedded streaming
+ *    errors where the SDK never sees a real HTTP status because the stream
+ *    opened with 200 OK and the provider signaled the error mid-stream.
+ *    DashScope uses `:HTTP_STATUS/429` as an SSE comment on throttling.
  *
  * @returns The HTTP status code (100-599), or undefined if not found.
  */
@@ -72,14 +76,27 @@ export function getErrorStatus(error: unknown): number | undefined {
     statusCode?: unknown;
     response?: { status?: unknown };
     error?: { code?: unknown };
+    message?: unknown;
   };
 
   const value =
     err.status ?? err.statusCode ?? err.response?.status ?? err.error?.code;
 
-  return typeof value === 'number' && value >= 100 && value <= 599
-    ? value
-    : undefined;
+  if (typeof value === 'number' && value >= 100 && value <= 599) {
+    return value;
+  }
+
+  if (typeof err.message === 'string') {
+    const match = err.message.match(/HTTP_STATUS\/(\d{3})\b/);
+    if (match) {
+      const parsed = Number(match[1]);
+      if (parsed >= 100 && parsed <= 599) {
+        return parsed;
+      }
+    }
+  }
+
+  return undefined;
 }
 
 /**

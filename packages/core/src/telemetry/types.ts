@@ -802,6 +802,9 @@ export class AuthEvent implements BaseTelemetryEvent {
   }
 }
 
+/** Hook type for telemetry */
+export type HookTelemetryType = 'command' | 'http' | 'function';
+
 /**
  * Hook call telemetry event
  */
@@ -809,7 +812,7 @@ export class HookCallEvent implements BaseTelemetryEvent {
   'event.name': string;
   'event.timestamp': string;
   hook_event_name: string;
-  hook_type: 'command';
+  hook_type: HookTelemetryType;
   hook_name: string;
   hook_input: Record<string, unknown>;
   hook_output?: Record<string, unknown>;
@@ -822,7 +825,7 @@ export class HookCallEvent implements BaseTelemetryEvent {
 
   constructor(
     hookEventName: string,
-    hookType: 'command',
+    hookType: HookTelemetryType,
     hookName: string,
     hookInput: Record<string, unknown>,
     durationMs: number,
@@ -1133,5 +1136,94 @@ export class SpeculationEvent implements BaseTelemetryEvent {
     this.duration_ms = params.duration_ms;
     this.boundary_type = params.boundary_type;
     this.had_pipelined_suggestion = params.had_pipelined_suggestion;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Managed Auto-Memory Events
+// ---------------------------------------------------------------------------
+
+export class MemoryExtractEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.extract';
+  'event.timestamp': string;
+  /** 'auto' = triggered by session turn; 'manual' = user-initiated */
+  trigger: 'auto' | 'manual';
+  status: 'completed' | 'skipped' | 'failed';
+  skipped_reason?: 'already_running' | 'queued' | 'memory_tool';
+  patches_count: number;
+  touched_topics: string;
+  duration_ms: number;
+
+  constructor(params: {
+    trigger: 'auto' | 'manual';
+    status: 'completed' | 'skipped' | 'failed';
+    skipped_reason?: 'already_running' | 'queued' | 'memory_tool';
+    patches_count: number;
+    touched_topics: string[];
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.extract';
+    this['event.timestamp'] = new Date().toISOString();
+    this.trigger = params.trigger;
+    this.status = params.status;
+    this.skipped_reason = params.skipped_reason;
+    this.patches_count = params.patches_count;
+    this.touched_topics = params.touched_topics.join(',');
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryDreamEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.dream';
+  'event.timestamp': string;
+  /** 'auto' = scheduler-triggered; 'manual' = user ran /dream */
+  trigger: 'auto' | 'manual';
+  status: 'updated' | 'noop' | 'failed';
+  deduped_entries: number;
+  touched_topics_count: number;
+  touched_topics: string;
+  duration_ms: number;
+
+  constructor(params: {
+    trigger: 'auto' | 'manual';
+    status: 'updated' | 'noop' | 'failed';
+    deduped_entries: number;
+    touched_topics: string[];
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.dream';
+    this['event.timestamp'] = new Date().toISOString();
+    this.trigger = params.trigger;
+    this.status = params.status;
+    this.deduped_entries = params.deduped_entries;
+    this.touched_topics_count = params.touched_topics.length;
+    this.touched_topics = params.touched_topics.join(',');
+    this.duration_ms = params.duration_ms;
+  }
+}
+
+export class MemoryRecallEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.recall';
+  'event.timestamp': string;
+  query_length: number;
+  docs_scanned: number;
+  docs_selected: number;
+  strategy: 'none' | 'heuristic' | 'model';
+  duration_ms: number;
+
+  constructor(params: {
+    query_length: number;
+    docs_scanned: number;
+    docs_selected: number;
+    strategy: 'none' | 'heuristic' | 'model';
+    duration_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.recall';
+    this['event.timestamp'] = new Date().toISOString();
+    this.query_length = params.query_length;
+    this.docs_scanned = params.docs_scanned;
+    this.docs_selected = params.docs_selected;
+    this.strategy = params.strategy;
+    this.duration_ms = params.duration_ms;
   }
 }

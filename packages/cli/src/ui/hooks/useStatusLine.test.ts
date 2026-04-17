@@ -150,28 +150,28 @@ describe('useStatusLine', () => {
   describe('config validation', () => {
     it('returns null when no statusLine config is set', () => {
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
 
     it('returns null when statusLine type is not "command"', () => {
       setStatusLineConfig({ type: 'invalid', command: 'echo hi' });
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
 
     it('returns null when command is empty string', () => {
       setStatusLineConfig({ type: 'command', command: '' });
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
 
     it('returns null when command is whitespace only', () => {
       setStatusLineConfig({ type: 'command', command: '   ' });
       const { result } = renderHook(() => useStatusLine());
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
       expect(child_process.exec).not.toHaveBeenCalled();
     });
   });
@@ -200,7 +200,7 @@ describe('useStatusLine', () => {
       expect(opts.maxBuffer).toBe(1024 * 10);
     });
 
-    it('returns first line of stdout as text', async () => {
+    it('returns single line as array', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo hello' });
       const { result } = renderHook(() => useStatusLine());
 
@@ -208,10 +208,10 @@ describe('useStatusLine', () => {
         execCallback(null, 'hello world\n', '');
       });
 
-      expect(result.current.text).toBe('hello world');
+      expect(result.current.lines).toEqual(['hello world']);
     });
 
-    it('returns only the first line when stdout has multiple lines', async () => {
+    it('returns all lines when stdout has multiple lines', async () => {
       setStatusLineConfig({ type: 'command', command: 'echo lines' });
       const { result } = renderHook(() => useStatusLine());
 
@@ -219,7 +219,51 @@ describe('useStatusLine', () => {
         execCallback(null, 'first line\nsecond line\n', '');
       });
 
-      expect(result.current.text).toBe('first line');
+      expect(result.current.lines).toEqual(['first line', 'second line']);
+    });
+
+    it('filters empty lines from output', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, '\n\nreal content\n', '');
+      });
+
+      expect(result.current.lines).toEqual(['real content']);
+    });
+
+    it('caps output at 2 lines', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'line1\nline2\nline3\nline4\n', '');
+      });
+
+      expect(result.current.lines).toEqual(['line1', 'line2']);
+    });
+
+    it('handles \\r\\n line endings', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'line1\r\nline2\r\n', '');
+      });
+
+      expect(result.current.lines).toEqual(['line1', 'line2']);
+    });
+
+    it('returns empty when stdout is only newlines', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo lines' });
+      const { result } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, '\n\n', '');
+      });
+
+      expect(result.current.lines).toEqual([]);
     });
 
     it('returns null when command fails', async () => {
@@ -230,7 +274,7 @@ describe('useStatusLine', () => {
         execCallback(new Error('command not found'), '', '');
       });
 
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
     });
 
     it('returns null when stdout is empty', async () => {
@@ -241,7 +285,7 @@ describe('useStatusLine', () => {
         execCallback(null, '', '');
       });
 
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
     });
   });
 
@@ -307,6 +351,61 @@ describe('useStatusLine', () => {
       expect(input.context_window.remaining_percentage).toBe(50);
       expect(input.context_window.current_usage).toBe(65536);
     });
+
+    it('includes per-model metrics and aggregated token counts', () => {
+      mockUIState.sessionStats.metrics.models = {
+        'test-model': {
+          api: { totalRequests: 5, totalErrors: 1, totalLatencyMs: 2000 },
+          tokens: {
+            prompt: 1000,
+            candidates: 500,
+            total: 1500,
+            cached: 200,
+            thoughts: 100,
+          },
+        },
+      } as never;
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.metrics.models['test-model'].api.total_requests).toBe(5);
+      expect(input.metrics.models['test-model'].api.total_errors).toBe(1);
+      expect(input.metrics.models['test-model'].tokens.prompt).toBe(1000);
+      expect(input.metrics.models['test-model'].tokens.completion).toBe(500);
+      expect(input.metrics.models['test-model'].tokens.cached).toBe(200);
+      expect(input.metrics.models['test-model'].tokens.thoughts).toBe(100);
+      expect(input.context_window.total_input_tokens).toBe(1000);
+      expect(input.context_window.total_output_tokens).toBe(500);
+    });
+
+    it('falls back to zero when contextWindowSize is unavailable', () => {
+      mockConfig.getContentGeneratorConfig.mockReturnValueOnce(null as never);
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.context_window.context_window_size).toBe(0);
+      expect(input.context_window.used_percentage).toBe(0);
+    });
+
+    it('falls back to "unknown" when getCliVersion returns empty', () => {
+      mockConfig.getCliVersion.mockReturnValueOnce('');
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.version).toBe('unknown');
+    });
+
+    it('falls back to model from config when currentModel is empty', () => {
+      mockUIState.currentModel = '';
+      setStatusLineConfig({ type: 'command', command: 'cat' });
+      renderHook(() => useStatusLine());
+
+      const input = JSON.parse(stdinWrittenData);
+      expect(input.model.display_name).toBe('test-model');
+    });
   });
 
   // --- Stale generation handling ---
@@ -335,13 +434,13 @@ describe('useStatusLine', () => {
       await act(async () => {
         firstCallback(null, 'stale output\n', '');
       });
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
 
       // Resolve the fresh second callback — should be accepted
       await act(async () => {
         secondCallback(null, 'fresh output\n', '');
       });
-      expect(result.current.text).toBe('fresh output');
+      expect(result.current.lines).toEqual(['fresh output']);
     });
   });
 
@@ -386,13 +485,36 @@ describe('useStatusLine', () => {
       await act(async () => {
         execCallback(null, 'hello\n', '');
       });
-      expect(result.current.text).toBe('hello');
+      expect(result.current.lines).toEqual(['hello']);
 
       // Remove config
       setStatusLineConfig(undefined);
       rerender();
 
-      expect(result.current.text).toBeNull();
+      expect(result.current.lines).toEqual([]);
+    });
+
+    it('cancels pending debounce and kills child when config is removed', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo hello' });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Trigger a debounced update (timer is pending)
+      mockUIState.currentModel = 'new-model';
+      rerender();
+
+      // Remove config before debounce fires
+      setStatusLineConfig(undefined);
+      rerender();
+
+      expect(mockKill).toHaveBeenCalled();
+
+      // Advancing past debounce should not trigger another exec
+      const callsBefore = vi.mocked(child_process.exec).mock.calls.length;
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(vi.mocked(child_process.exec).mock.calls.length).toBe(callsBefore);
     });
   });
 
@@ -477,6 +599,29 @@ describe('useStatusLine', () => {
       // Should re-execute immediately (not debounced)
       expect(child_process.exec).toHaveBeenCalledTimes(2);
       expect(lastExecCommand).toBe('echo second');
+    });
+
+    it('cancels pending debounce when command changes', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo first' });
+      const { rerender } = renderHook(() => useStatusLine());
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Trigger a debounced update
+      mockUIState.currentModel = 'new-model';
+      rerender();
+
+      // Change command before debounce fires
+      setStatusLineConfig({ type: 'command', command: 'echo second' });
+      rerender();
+
+      // Immediate re-exec from command change (mount + command change = 2)
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+
+      // Debounce fires but should not cause a third exec (was cleared)
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -579,6 +724,59 @@ describe('useStatusLine', () => {
       });
 
       expect(firstKill).toHaveBeenCalled();
+    });
+  });
+
+  // --- Spawn failure handling (issue #3264) ---
+  //
+  // On macOS with Node 22, exec() can throw synchronously with EBADF when
+  // stdio pipe setup fails. The throw must not escape doUpdate() — or the
+  // setTimeout callback — or the whole CLI crashes.
+
+  describe('spawn failure handling', () => {
+    it('does not crash when exec throws synchronously (EBADF)', () => {
+      vi.mocked(child_process.exec).mockImplementationOnce((() => {
+        const err = new Error('spawn EBADF') as NodeJS.ErrnoException;
+        err.code = 'EBADF';
+        throw err;
+      }) as unknown as typeof child_process.exec);
+
+      setStatusLineConfig({ type: 'command', command: 'echo test' });
+
+      let result: { current: { lines: string[] } } | undefined;
+      expect(() => {
+        result = renderHook(() => useStatusLine()).result;
+      }).not.toThrow();
+      expect(result!.current.lines).toEqual([]);
+    });
+
+    it('recovers on subsequent state changes after a sync exec failure', async () => {
+      // First call throws, subsequent calls succeed with the default mock.
+      // Verifies activeChildRef and generationRef don't get wedged.
+      vi.mocked(child_process.exec).mockImplementationOnce((() => {
+        const err = new Error('spawn EBADF') as NodeJS.ErrnoException;
+        err.code = 'EBADF';
+        throw err;
+      }) as unknown as typeof child_process.exec);
+
+      setStatusLineConfig({ type: 'command', command: 'echo test' });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      expect(result.current.lines).toEqual([]);
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // Trigger a re-execution via state change — should use the default mock.
+      mockUIState.currentModel = 'new-model';
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        execCallback(null, 'recovered\n', '');
+      });
+      expect(result.current.lines).toEqual(['recovered']);
     });
   });
 });

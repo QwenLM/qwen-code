@@ -34,6 +34,7 @@ import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 
 import type { FunctionDeclaration } from '@google/genai';
 import { mcpToTool } from '@google/genai';
+import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
@@ -1402,6 +1403,12 @@ export async function createTransport(
   }
 
   if (mcpServerConfig.command) {
+    if (mcpServerConfig.cwd && !existsSync(mcpServerConfig.cwd)) {
+      throw new Error(
+        `MCP server '${mcpServerName}': configured cwd does not exist: ${mcpServerConfig.cwd}`,
+      );
+    }
+
     const transport = new StdioClientTransport({
       command: mcpServerConfig.command,
       args: mcpServerConfig.args || [],

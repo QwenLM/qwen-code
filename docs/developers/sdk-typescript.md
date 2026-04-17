@@ -79,12 +79,12 @@ Creates a new query session with the Qwen Code.
 
 The SDK enforces the following default timeouts:
 
-| Timeout          | Default  | Description                                                                                                                  |
-| ---------------- | -------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `canUseTool`     | 1 minute | Maximum time for `canUseTool` callback to respond. If exceeded, the tool request is auto-denied.                             |
-| `mcpRequest`     | 1 minute | Maximum time for SDK MCP tool calls to complete.                                                                             |
-| `controlRequest` | 1 minute | Maximum time for control operations like `initialize()`, `setModel()`, `setPermissionMode()`, and `interrupt()` to complete. |
-| `streamClose`    | 1 minute | Maximum time to wait for initialization to complete before closing CLI stdin in multi-turn mode with SDK MCP servers.        |
+| Timeout          | Default  | Description                                                                                                                                       |
+| ---------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `canUseTool`     | 1 minute | Maximum time for `canUseTool` callback to respond. If exceeded, the tool request is auto-denied.                                                  |
+| `mcpRequest`     | 1 minute | Maximum time for SDK MCP tool calls to complete.                                                                                                  |
+| `controlRequest` | 1 minute | Maximum time for control operations like `initialize()`, `setModel()`, `setPermissionMode()`, `getContextUsage()`, and `interrupt()` to complete. |
+| `streamClose`    | 1 minute | Maximum time to wait for initialization to complete before closing CLI stdin in multi-turn mode with SDK MCP servers.                             |
 
 You can customize these timeouts via the `timeout` option:
 
@@ -142,6 +142,11 @@ await q.setPermissionMode('yolo');
 
 // Change model mid-session
 await q.setModel('qwen-max');
+
+// Get context window usage breakdown (token counts per category)
+const usage = await q.getContextUsage();
+// Pass true to hint that per-item details should be displayed
+const detail = await q.getContextUsage(true);
 
 // Close the session
 await q.close();

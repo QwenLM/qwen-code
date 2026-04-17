@@ -17,7 +17,6 @@ import { ThinkingMessage } from '../messages/ThinkingMessage.js';
 import {
   GenericToolCall,
   ThinkToolCall,
-  SaveMemoryToolCall,
   EditToolCall,
   WriteToolCall,
   SearchToolCall,
@@ -179,10 +178,6 @@ function getToolCallComponent(kind: string) {
     case 'think':
     case 'thinking':
       return ThinkToolCall;
-    case 'save_memory':
-    case 'savememory':
-    case 'memory':
-      return SaveMemoryToolCall;
     case 'fetch':
     case 'web_fetch':
     case 'webfetch':

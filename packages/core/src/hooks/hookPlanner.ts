@@ -108,6 +108,18 @@ export class HookPlanner {
           ? this.matchesTrigger(matcher, context.trigger)
           : true;
 
+      // PostCompact: match against trigger
+      case HookEventName.PostCompact:
+        return context.trigger
+          ? this.matchesTrigger(matcher, context.trigger)
+          : true;
+
+      // StopFailure: match against error type (fieldToMatch: 'error')
+      case HookEventName.StopFailure:
+        return context.error
+          ? this.matchesTrigger(matcher, context.error)
+          : true;
+
       // Notification: match against notification type
       case HookEventName.Notification:
         return context.notificationType
@@ -229,4 +241,6 @@ export interface HookEventContext {
   notificationType?: string;
   /** Agent type for SubagentStart/SubagentStop matcher filtering */
   agentType?: string;
+  /** Error type for StopFailure matcher filtering (fieldToMatch: 'error') */
+  error?: string;
 }
