@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -23,6 +23,22 @@ vi.mock('../../nonInteractiveCliCommands.js', () => ({
   getAvailableCommands: vi.fn(),
   handleSlashCommand: vi.fn(),
 }));
+
+// Helper to create empty async generator (avoids memory leak from inline generators)
+function createEmptyStream() {
+  return (async function* () {})();
+}
+
+// Helper to create async generator with chunks (avoids memory leak)
+function createStreamWithChunks(
+  chunks: Array<{ type: unknown; value: unknown }>,
+) {
+  return (async function* () {
+    for (const chunk of chunks) {
+      yield chunk;
+    }
+  })();
+}
 
 describe('Session', () => {
   let mockChat: GeminiChat;
@@ -49,6 +65,7 @@ describe('Session', () => {
     mockChat = {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
+      getHistory: vi.fn().mockReturnValue([]),
     } as unknown as GeminiChat;
 
     mockToolRegistry = { getTool: vi.fn() };
@@ -101,6 +118,22 @@ describe('Session', () => {
       mockClient,
       mockSettings,
     );
+  });
+
+  afterEach(() => {
+    // Reset global runtime base dir state to prevent state leakage between tests
+    core.Storage.setRuntimeBaseDir(null);
+    // Clear session reference to allow garbage collection
+    session = undefined as unknown as Session;
+    mockChat = undefined as unknown as GeminiChat;
+    mockConfig = undefined as unknown as Config;
+    mockClient = undefined as unknown as AgentSideConnection;
+    mockSettings = undefined as unknown as LoadedSettings;
+    mockToolRegistry = undefined as unknown as {
+      getTool: ReturnType<typeof vi.fn>;
+    };
+    vi.restoreAllMocks();
+    vi.clearAllTimers();
   });
 
   describe('setMode', () => {
@@ -209,20 +242,20 @@ describe('Session', () => {
       const fileName = 'README.md';
       const filePath = path.join(tempDir, fileName);
 
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: 'file content',
+          files: [],
+        });
+
       try {
         await fs.writeFile(filePath, '# Test\n', 'utf8');
-
-        const readManyFilesSpy = vi
-          .spyOn(core, 'readManyFiles')
-          .mockResolvedValue({
-            contentParts: 'file content',
-            files: [],
-          });
 
         mockConfig.getTargetDir = vi.fn().mockReturnValue(tempDir);
         mockChat.sendMessageStream = vi
           .fn()
-          .mockResolvedValue((async function* () {})());
+          .mockResolvedValue(createEmptyStream());
 
         const promptRequest: PromptRequest = {
           sessionId: 'test-session-id',
@@ -243,6 +276,7 @@ describe('Session', () => {
           signal: expect.any(AbortSignal),
         });
       } finally {
+        readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
       }
     });
@@ -262,22 +296,26 @@ describe('Session', () => {
         'runWithRuntimeBaseDir',
       );
 
-      mockChat.sendMessageStream = vi
-        .fn()
-        .mockResolvedValue((async function* () {})());
+      try {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
 
-      const promptRequest: PromptRequest = {
-        sessionId: 'test-session-id',
-        prompt: [{ type: 'text', text: 'hello' }],
-      };
+        const promptRequest: PromptRequest = {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        };
 
-      await session.prompt(promptRequest);
+        await session.prompt(promptRequest);
 
-      expect(runWithRuntimeBaseDirSpy).toHaveBeenCalledWith(
-        runtimeDir,
-        process.cwd(),
-        expect.any(Function),
-      );
+        expect(runWithRuntimeBaseDirSpy).toHaveBeenCalledWith(
+          runtimeDir,
+          process.cwd(),
+          expect.any(Function),
+        );
+      } finally {
+        runWithRuntimeBaseDirSpy.mockRestore();
+      }
     });
 
     it('hides allow-always options when confirmation already forbids them', async () => {
@@ -312,8 +350,8 @@ describe('Session', () => {
         .mockReturnValue(ApprovalMode.DEFAULT);
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-        (async function* () {
-          yield {
+        createStreamWithChunks([
+          {
             type: core.StreamEventType.CHUNK,
             value: {
               functionCalls: [
@@ -324,8 +362,8 @@ describe('Session', () => {
                 },
               ],
             },
-          };
-        })(),
+          },
+        ]),
       );
 
       await session.prompt({
@@ -381,8 +419,8 @@ describe('Session', () => {
       mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-        (async function* () {
-          yield {
+        createStreamWithChunks([
+          {
             type: core.StreamEventType.CHUNK,
             value: {
               functionCalls: [
@@ -396,8 +434,8 @@ describe('Session', () => {
                 },
               ],
             },
-          };
-        })(),
+          },
+        ]),
       );
 
       await session.prompt({
@@ -443,8 +481,8 @@ describe('Session', () => {
         isToolEnabled: vi.fn().mockResolvedValue(false),
       });
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-        (async function* () {
-          yield {
+        createStreamWithChunks([
+          {
             type: core.StreamEventType.CHUNK,
             value: {
               functionCalls: [
@@ -455,8 +493,8 @@ describe('Session', () => {
                 },
               ],
             },
-          };
-        })(),
+          },
+        ]),
       );
 
       await session.prompt({
@@ -511,8 +549,8 @@ describe('Session', () => {
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
       mockConfig.getMessageBus = vi.fn().mockReturnValue({});
       mockChat.sendMessageStream = vi.fn().mockResolvedValue(
-        (async function* () {
-          yield {
+        createStreamWithChunks([
+          {
             type: core.StreamEventType.CHUNK,
             value: {
               functionCalls: [
@@ -523,8 +561,8 @@ describe('Session', () => {
                 },
               ],
             },
-          };
-        })(),
+          },
+        ]),
       );
 
       try {
@@ -542,6 +580,483 @@ describe('Session', () => {
       );
       expect(invocation.params).toEqual({ path: '/tmp/updated.txt' });
       expect(executeSpy).toHaveBeenCalled();
+    });
+
+    describe('hooks', () => {
+      describe('UserPromptSubmit hook', () => {
+        it('fires UserPromptSubmit hook before sending prompt', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {},
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'response' }] } }],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(messageBus.request).toHaveBeenCalledWith(
+            expect.objectContaining({
+              eventName: 'UserPromptSubmit',
+              input: { prompt: 'hello' },
+            }),
+            expect.anything(),
+          );
+        });
+
+        it('blocks prompt when UserPromptSubmit hook returns blocking decision', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: { decision: 'block', reason: 'Blocked by hook' },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+
+          mockChat.sendMessageStream = vi.fn();
+
+          const result = await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'blocked prompt' }],
+          });
+
+          expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+          expect(result.stopReason).toBe('end_turn');
+        });
+      });
+
+      describe('Stop hook', () => {
+        it('fires Stop hook after model response completes', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {},
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+          mockChat.getHistory = vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'response text' }] },
+            ]);
+
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [{ content: { parts: [{ text: 'response' }] } }],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          expect(messageBus.request).toHaveBeenCalledWith(
+            expect.objectContaining({
+              eventName: 'Stop',
+              input: expect.objectContaining({
+                stop_hook_active: true,
+                last_assistant_message: 'response text',
+              }),
+            }),
+            expect.anything(),
+          );
+        });
+      });
+
+      describe('PreToolUse hook', () => {
+        it('fires PreToolUse hook before tool execution', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {},
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+
+          const executeSpy = vi.fn().mockResolvedValue({
+            llmContent: 'result',
+            returnDisplay: 'done',
+          });
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          expect(messageBus.request).toHaveBeenCalledWith(
+            expect.objectContaining({
+              eventName: 'PreToolUse',
+              input: expect.objectContaining({
+                tool_name: 'read_file',
+                tool_input: { path: '/tmp/test.txt' },
+              }),
+            }),
+            expect.anything(),
+          );
+        });
+
+        it('blocks tool execution when PreToolUse hook returns blocking decision', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: { decision: 'deny', reason: 'Tool blocked by hook' },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+
+          const executeSpy = vi.fn();
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          expect(executeSpy).not.toHaveBeenCalled();
+        });
+      });
+
+      describe('PostToolUse hook', () => {
+        it('fires PostToolUse hook after successful tool execution', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {},
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+
+          const executeSpy = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'success',
+          });
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          expect(messageBus.request).toHaveBeenCalledWith(
+            expect.objectContaining({
+              eventName: 'PostToolUse',
+              input: expect.objectContaining({
+                tool_name: 'read_file',
+                tool_response: expect.objectContaining({
+                  llmContent: 'file contents',
+                  returnDisplay: 'success',
+                }),
+              }),
+            }),
+            expect.anything(),
+          );
+        });
+
+        it('stops execution when PostToolUse hook returns shouldStop', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: { shouldStop: true, reason: 'Stopping per hook request' },
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+
+          const executeSpy = vi.fn().mockResolvedValue({
+            llmContent: 'file contents',
+            returnDisplay: 'success',
+          });
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+
+          // Only one call expected since shouldStop prevents continuation
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          // Tool should have been executed
+          expect(executeSpy).toHaveBeenCalled();
+          // PostToolUse hook should have been called
+          expect(messageBus.request).toHaveBeenCalledWith(
+            expect.objectContaining({
+              eventName: 'PostToolUse',
+            }),
+            expect.anything(),
+          );
+        });
+      });
+
+      describe('PostToolUseFailure hook', () => {
+        it('fires PostToolUseFailure hook when tool execution fails', async () => {
+          const messageBus = {
+            request: vi.fn().mockResolvedValue({
+              success: true,
+              output: {},
+            }),
+          };
+          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.getApprovalMode = vi
+            .fn()
+            .mockReturnValue(ApprovalMode.YOLO);
+
+          const executeSpy = vi
+            .fn()
+            .mockRejectedValue(new Error('Tool failed'));
+          const tool = {
+            name: 'read_file',
+            kind: core.Kind.Read,
+            build: vi.fn().mockReturnValue({
+              params: { path: '/tmp/test.txt' },
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              execute: executeSpy,
+            }),
+          };
+
+          mockToolRegistry.getTool.mockReturnValue(tool);
+          mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          );
+
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'read the file' }],
+          });
+
+          expect(messageBus.request).toHaveBeenCalledWith(
+            expect.objectContaining({
+              eventName: 'PostToolUseFailure',
+              input: expect.objectContaining({
+                tool_name: 'read_file',
+                error: 'Tool failed',
+              }),
+            }),
+            expect.anything(),
+          );
+        });
+      });
+
+      describe('StopFailure hook', () => {
+        it('fires StopFailure hook when API error occurs during sendMessageStream', async () => {
+          const mockFireStopFailureEvent = vi.fn().mockResolvedValue({
+            success: true,
+          });
+          mockConfig.getHookSystem = vi.fn().mockReturnValue({
+            fireStopFailureEvent: mockFireStopFailureEvent,
+          });
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+          mockConfig.hasHooksForEvent = vi.fn().mockReturnValue(true);
+
+          // Simulate API error (rate limit)
+          const apiError = new Error('Rate limit exceeded') as Error & {
+            status: number;
+          };
+          apiError.status = 429;
+
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            throw apiError;
+          });
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toThrow();
+
+          // StopFailure hook should be called with rate_limit error type
+          expect(mockFireStopFailureEvent).toHaveBeenCalledWith(
+            'rate_limit',
+            'Rate limit exceeded',
+          );
+        });
+
+        it('does not fire StopFailure hook when hooks are disabled', async () => {
+          const mockFireStopFailureEvent = vi.fn();
+          mockConfig.getHookSystem = vi.fn().mockReturnValue({
+            fireStopFailureEvent: mockFireStopFailureEvent,
+          });
+          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+
+          const apiError = new Error('Rate limit exceeded') as Error & {
+            status: number;
+          };
+          apiError.status = 429;
+
+          mockChat.sendMessageStream = vi.fn().mockImplementation(async () => {
+            throw apiError;
+          });
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'hello' }],
+            }),
+          ).rejects.toThrow();
+
+          expect(mockFireStopFailureEvent).not.toHaveBeenCalled();
+        });
+      });
     });
   });
 });

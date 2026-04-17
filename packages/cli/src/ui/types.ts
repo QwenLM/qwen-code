@@ -116,6 +116,8 @@ export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
 export type HistoryItemInfo = HistoryItemBase & {
   type: 'info';
   text: string;
+  linkUrl?: string;
+  linkText?: string;
 };
 
 export type HistoryItemError = HistoryItemBase & {
