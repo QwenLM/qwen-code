@@ -71,7 +71,9 @@ vi.mock('../nonInteractiveCliCommands.js', async () => {
           ];
 
           return filterCommandsForMode(
-            allCommands as Parameters<typeof filterCommandsForMode>[0],
+            allCommands as unknown as Parameters<
+              typeof filterCommandsForMode
+            >[0],
             mode as Parameters<typeof filterCommandsForMode>[1],
           );
         },
