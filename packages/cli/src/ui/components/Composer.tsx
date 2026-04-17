@@ -19,7 +19,6 @@ import { StreamingState, type HistoryItemToolGroup } from '../types.js';
 import { ConfigInitDisplay } from '../components/ConfigInitDisplay.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
 import { t } from '../../i18n/index.js';
-import { useAnimationFrame } from '../hooks/useAnimationFrame.js';
 
 export const Composer = () => {
   const config = useConfig();
@@ -34,19 +33,15 @@ export const Composer = () => {
     isReceivingContent,
   } = uiState;
 
-  // --- Real-time token estimation ---
-  // Poll streamingResponseLengthRef at 50ms; only re-renders when the value
-  // actually changes, avoiding unnecessary empty renders.
+  // Real-time token animation is performed inside LoadingIndicator itself, so
+  // the 100ms polling only re-renders that one component — keeping InputPrompt
+  // and Footer static avoids terminal flicker during streaming.
   const isStreaming =
     uiState.streamingState === StreamingState.Responding ||
     uiState.streamingState === StreamingState.WaitingForConfirmation;
-  const streamingChars = useAnimationFrame(
-    streamingResponseLengthRef,
-    isStreaming ? 50 : null,
-  );
-  const estimatedStreamingTokens = Math.round(streamingChars / 4);
 
-  // Aggregate agent tool tokens from executing tool calls
+  // Aggregate agent tool tokens from executing tool calls. Only changes when
+  // a subagent reports progress, so it doesn't drive the animation loop.
   let agentTokens = 0;
   for (const item of uiState.pendingGeminiHistoryItems ?? []) {
     if (item.type === 'tool_group') {
@@ -66,8 +61,6 @@ export const Composer = () => {
       }
     }
   }
-
-  const taskTokens = estimatedStreamingTokens + agentTokens;
 
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -104,7 +97,9 @@ export const Composer = () => {
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
-          candidatesTokens={taskTokens}
+          candidatesTokens={agentTokens}
+          streamingCharsRef={streamingResponseLengthRef}
+          isStreaming={isStreaming}
           isReceivingContent={isReceivingContent}
         />
       )}
