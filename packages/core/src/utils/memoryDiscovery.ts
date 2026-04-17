@@ -13,7 +13,7 @@ import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
 import { QWEN_DIR } from './paths.js';
 import { createDebugLogger } from './debugLogger.js';
-import { loadRules } from './rulesDiscovery.js';
+import { loadRules, type RuleFile } from './rulesDiscovery.js';
 
 const logger = createDebugLogger('MEMORY_DISCOVERY');
 
@@ -304,13 +304,20 @@ function concatenateInstructions(
 export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: string;
   fileCount: number;
+  /** Number of baseline rules injected at session start. */
   ruleCount: number;
+  /** Conditional rules (with `paths:`) for turn-level lazy injection. */
+  conditionalRules: RuleFile[];
+  /** Effective project root used for glob matching. */
+  projectRoot: string;
 }
 
 /**
  * Loads hierarchical QWEN.md files and concatenates their content.
  * Also loads path-based context rules from `.qwen/rules/` directories.
  * This function is intended for use by the server.
+ *
+ * @param contextRuleExcludes - Glob patterns to skip when loading rules.
  */
 export async function loadServerHierarchicalMemory(
   currentWorkingDirectory: string,
@@ -319,6 +326,7 @@ export async function loadServerHierarchicalMemory(
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   importFormat: 'flat' | 'tree' = 'tree',
+  contextRuleExcludes: string[] = [],
 ): Promise<LoadServerHierarchicalMemoryResponse> {
   logger.debug(
     `Loading server hierarchical memory for CWD: ${currentWorkingDirectory} (importFormat: ${importFormat})`,
@@ -357,14 +365,16 @@ export async function loadServerHierarchicalMemory(
 
   // Load path-based context rules from .qwen/rules/ directories
   const resolvedCwd = path.resolve(currentWorkingDirectory);
-  const projectRoot = await findProjectRoot(resolvedCwd);
-  const effectiveRoot = projectRoot ?? resolvedCwd;
+  const foundRoot = await findProjectRoot(resolvedCwd);
+  const effectiveRoot = foundRoot ?? resolvedCwd;
 
-  const { content: rulesContent, ruleCount } = await loadRules(
-    effectiveRoot,
-    folderTrust,
-  );
+  const {
+    content: rulesContent,
+    ruleCount,
+    conditionalRules,
+  } = await loadRules(effectiveRoot, folderTrust, contextRuleExcludes);
 
+  // Baseline rules go into the system prompt
   let memoryContent = combinedInstructions;
   if (rulesContent) {
     memoryContent = memoryContent
@@ -380,5 +390,7 @@ export async function loadServerHierarchicalMemory(
     memoryContent,
     fileCount,
     ruleCount,
+    conditionalRules,
+    projectRoot: effectiveRoot,
   };
 }

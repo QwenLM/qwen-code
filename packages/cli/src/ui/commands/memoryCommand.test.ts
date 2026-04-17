@@ -390,6 +390,8 @@ describe('memoryCommand', () => {
       const mockConfig = {
         setUserMemory: mockSetUserMemory,
         setGeminiMdFileCount: mockSetGeminiMdFileCount,
+        setConditionalRulesRegistry: vi.fn(),
+        getContextRuleExcludes: () => [] as string[],
         getWorkingDir: () => '/test/dir',
         getDebugMode: () => false,
         getFileService: () => ({}) as FileDiscoveryService,
@@ -423,6 +425,8 @@ describe('memoryCommand', () => {
         memoryContent: 'new memory content',
         fileCount: 2,
         ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
       };
       mockLoadServerHierarchicalMemory.mockResolvedValue(refreshResult);
 
@@ -456,7 +460,13 @@ describe('memoryCommand', () => {
     it('should display success message when memory is refreshed with no content', async () => {
       if (!refreshCommand.action) throw new Error('Command has no action');
 
-      const refreshResult = { memoryContent: '', fileCount: 0, ruleCount: 0 };
+      const refreshResult = {
+        memoryContent: '',
+        fileCount: 0,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot: '/tmp',
+      };
       mockLoadServerHierarchicalMemory.mockResolvedValue(refreshResult);
 
       await refreshCommand.action(mockContext, '');

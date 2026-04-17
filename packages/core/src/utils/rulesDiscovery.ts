@@ -6,24 +6,28 @@
 
 // Path-based context rule injection.
 //
-// Discovers .qwen/rules/*.md files with optional YAML frontmatter.
-// Rules declare applicable file paths via glob patterns in the
-// `paths:` frontmatter field.
+// Discovers .qwen/rules/ files (recursively) with optional YAML frontmatter.
+// Rules declare applicable file paths via glob patterns in `paths:`.
 //
-// - Rules WITH `paths:` load only when matching files exist in the project.
-// - Rules WITHOUT `paths:` always load (baseline rules).
+// - Rules WITHOUT `paths:` always load at session start (baseline rules).
+// - Rules WITH `paths:` are deferred and injected on-demand when the model
+//   reads or edits a matching file (turn-level lazy loading).
 // - HTML comments are stripped to save tokens.
 
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
-import { globIterate } from 'glob';
+import picomatch from 'picomatch';
 import { parse as parseYaml } from './yaml-parser.js';
 import { normalizeContent } from './textUtils.js';
 import { QWEN_DIR } from './paths.js';
 import { createDebugLogger } from './debugLogger.js';
 
 const logger = createDebugLogger('RULES_DISCOVERY');
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Types
+// ─────────────────────────────────────────────────────────────────────────────
 
 export interface RuleFile {
   filePath: string;
@@ -33,15 +37,20 @@ export interface RuleFile {
 }
 
 export interface LoadRulesResponse {
+  /** Formatted baseline rules (no `paths:`) for the system prompt. */
   content: string;
+  /** Number of baseline rules injected at session start. */
   ruleCount: number;
+  /** Conditional rules (with `paths:`) for turn-level lazy injection. */
+  conditionalRules: RuleFile[];
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Parsing
+// ─────────────────────────────────────────────────────────────────────────────
 
 const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/;
 
-/**
- * Strip HTML comments from content to save tokens.
- */
 function stripHtmlComments(content: string): string {
   return content.replace(/<!--[\s\S]*?-->/g, '');
 }
@@ -79,7 +88,6 @@ export function parseRuleFile(
       }
     } catch (error) {
       logger.warn(`Failed to parse frontmatter in ${filePath}: ${error}`);
-      // Treat as no-frontmatter baseline rule
     }
     body = rawBody;
   } else {
@@ -92,74 +100,68 @@ export function parseRuleFile(
   return { filePath, description, paths, content };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Directory scanning (recursive)
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * Check if any files in the project match the given glob patterns.
- * Uses globIterate to return as soon as the first match is found,
- * avoiding a full tree scan in large repos.
+ * Recursively collect all .md file paths under a directory.
+ * Returns sorted absolute paths for deterministic ordering.
  */
-export async function hasMatchingFiles(
-  patterns: string[],
-  projectRoot: string,
-): Promise<boolean> {
+async function collectMdFiles(dir: string): Promise<string[]> {
+  let entries;
   try {
-    for await (const _match of globIterate(patterns, {
-      cwd: projectRoot,
-      nodir: true,
-      dot: false,
-      ignore: ['**/node_modules/**', '**/.git/**'],
-    })) {
-      return true;
-    }
-    return false;
-  } catch (error) {
-    logger.warn(`Glob matching failed for patterns ${patterns}: ${error}`);
-    return false;
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
   }
+
+  const files: string[] = [];
+  for (const entry of entries) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      files.push(...(await collectMdFiles(fullPath)));
+    } else if (entry.isFile() && entry.name.endsWith('.md')) {
+      files.push(fullPath);
+    }
+  }
+  return files;
 }
 
 /**
  * Discover and load rule files from a single `.qwen/rules/` directory.
- * Files are sorted alphabetically for deterministic ordering.
+ * Scans recursively; files are sorted alphabetically for deterministic ordering.
+ *
+ * @param excludes - Glob patterns to skip (matched against absolute paths).
  */
 async function loadRulesFromDir(
   rulesDir: string,
-  projectRoot: string,
+  excludes: string[],
 ): Promise<RuleFile[]> {
-  let entries;
-  try {
-    entries = await fs.readdir(rulesDir, { withFileTypes: true });
-  } catch {
-    // Directory doesn't exist — not an error
-    return [];
-  }
+  const allPaths = await collectMdFiles(rulesDir);
+  if (allPaths.length === 0) return [];
 
-  const mdFiles = entries
-    .filter((e) => e.isFile() && e.name.endsWith('.md'))
-    .sort((a, b) => a.name.localeCompare(b.name));
+  // Sort for deterministic ordering
+  allPaths.sort((a, b) => a.localeCompare(b));
+
+  // Compile exclude matchers once
+  const excludeMatchers =
+    excludes.length > 0 ? excludes.map((p) => picomatch(p, { dot: true })) : [];
 
   const ruleFiles: RuleFile[] = [];
 
-  for (const entry of mdFiles) {
-    const filePath = path.join(rulesDir, entry.name);
+  for (const filePath of allPaths) {
+    // Gap 2: check excludes
+    if (excludeMatchers.some((m) => m(filePath))) {
+      logger.debug(`Excluding rule by setting: ${filePath}`);
+      continue;
+    }
+
     try {
       const rawContent = await fs.readFile(filePath, 'utf-8');
       const rule = parseRuleFile(rawContent, filePath);
-      if (!rule) continue;
-
-      // Baseline rule (no paths) — always include
-      if (!rule.paths) {
-        logger.debug(`Including baseline rule: ${filePath}`);
+      if (rule) {
         ruleFiles.push(rule);
-        continue;
-      }
-
-      // Conditional rule — check if matching files exist in the project
-      const matches = await hasMatchingFiles(rule.paths, projectRoot);
-      if (matches) {
-        logger.debug(`Including conditional rule (matched): ${filePath}`);
-        ruleFiles.push(rule);
-      } else {
-        logger.debug(`Skipping conditional rule (no match): ${filePath}`);
       }
     } catch (error) {
       logger.warn(`Failed to load rule file ${filePath}: ${error}`);
@@ -169,11 +171,15 @@ async function loadRulesFromDir(
   return ruleFiles;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Formatting
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Format loaded rules into a single string with source markers,
  * consistent with the `--- Context from: ... ---` format used for QWEN.md.
  */
-function formatRules(rules: RuleFile[], projectRoot: string): string {
+export function formatRules(rules: RuleFile[], projectRoot: string): string {
   return rules
     .map((rule) => {
       const displayPath = path.isAbsolute(rule.filePath)
@@ -188,26 +194,118 @@ function formatRules(rules: RuleFile[], projectRoot: string): string {
     .join('\n\n');
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// ConditionalRulesRegistry (Gap 3: turn-level lazy loading)
+// ─────────────────────────────────────────────────────────────────────────────
+
+interface CompiledRule {
+  rule: RuleFile;
+  matchers: picomatch.Matcher[];
+}
+
+/**
+ * Registry that holds conditional rules and injects them on-demand when
+ * the model accesses a file matching a rule's `paths:` patterns.
+ *
+ * Each rule is injected at most once per session. Patterns are pre-compiled
+ * with picomatch for efficient repeated matching.
+ */
+export class ConditionalRulesRegistry {
+  private readonly compiledRules: CompiledRule[];
+  private readonly injected = new Set<string>();
+  private readonly projectRoot: string;
+
+  constructor(rules: RuleFile[], projectRoot: string) {
+    this.projectRoot = projectRoot;
+    this.compiledRules = rules.map((rule) => ({
+      rule,
+      matchers: (rule.paths ?? []).map((p) => picomatch(p, { dot: false })),
+    }));
+    logger.debug(
+      `ConditionalRulesRegistry created with ${rules.length} rule(s)`,
+    );
+  }
+
+  /**
+   * Check if a file path matches any conditional rules that haven't been
+   * injected yet. Matched rules are marked as consumed and their formatted
+   * content is returned for injection into the conversation context.
+   *
+   * @param filePath - Absolute path of the file being accessed.
+   * @returns Formatted rule content, or undefined if no new rules match.
+   */
+  matchAndConsume(filePath: string): string | undefined {
+    if (this.compiledRules.length === 0) return undefined;
+
+    // Resolve first to handle both absolute and relative input paths,
+    // then compute the path relative to projectRoot for pattern matching.
+    const absolutePath = path.isAbsolute(filePath)
+      ? filePath
+      : path.resolve(this.projectRoot, filePath);
+    const relativePath = path
+      .relative(this.projectRoot, absolutePath)
+      .replace(/\\/g, '/');
+
+    // Paths outside the project root produce `../` prefixes — don't inject
+    // rules for files outside the project.
+    if (relativePath.startsWith('../')) return undefined;
+
+    const newMatches = this.compiledRules.filter(({ rule, matchers }) => {
+      if (this.injected.has(rule.filePath)) return false;
+      return matchers.some((m) => m(relativePath));
+    });
+
+    if (newMatches.length === 0) return undefined;
+
+    for (const { rule } of newMatches) {
+      this.injected.add(rule.filePath);
+      logger.debug(`Injecting conditional rule: ${rule.filePath}`);
+    }
+
+    return formatRules(
+      newMatches.map((m) => m.rule),
+      this.projectRoot,
+    );
+  }
+
+  get totalCount(): number {
+    return this.compiledRules.length;
+  }
+
+  get injectedCount(): number {
+    return this.injected.size;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main entry point
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Load rules from both global (`~/.qwen/rules/`) and project-level
  * (`.qwen/rules/`) directories.
  *
+ * Baseline rules (no `paths:`) are returned in `content` for immediate
+ * injection into the system prompt. Conditional rules (with `paths:`) are
+ * returned separately in `conditionalRules` for turn-level lazy loading.
+ *
  * @param projectRoot - Absolute path to the project root (git root or CWD).
  * @param folderTrust - Whether the project folder is trusted.
- *   Untrusted projects only get global rules.
+ * @param excludes - Glob patterns to skip (matched against absolute paths).
  */
 export async function loadRules(
   projectRoot: string,
   folderTrust: boolean,
+  excludes: string[] = [],
 ): Promise<LoadRulesResponse> {
   logger.debug(`Loading rules for project: ${projectRoot}`);
 
-  const rules: RuleFile[] = [];
+  const allRules: RuleFile[] = [];
 
   // 1. Global rules: ~/.qwen/rules/
   const globalRulesDir = path.join(homedir(), QWEN_DIR, 'rules');
-  const globalRules = await loadRulesFromDir(globalRulesDir, projectRoot);
-  rules.push(...globalRules);
+  const globalRules = await loadRulesFromDir(globalRulesDir, excludes);
+  allRules.push(...globalRules);
   logger.debug(`Loaded ${globalRules.length} global rule(s)`);
 
   // 2. Project-level rules: <projectRoot>/.qwen/rules/  (trusted only)
@@ -215,8 +313,8 @@ export async function loadRules(
   if (folderTrust) {
     const projectRulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
     if (path.resolve(projectRulesDir) !== path.resolve(globalRulesDir)) {
-      const projectRules = await loadRulesFromDir(projectRulesDir, projectRoot);
-      rules.push(...projectRules);
+      const projectRules = await loadRulesFromDir(projectRulesDir, excludes);
+      allRules.push(...projectRules);
       logger.debug(`Loaded ${projectRules.length} project rule(s)`);
     } else {
       logger.debug(
@@ -225,14 +323,23 @@ export async function loadRules(
     }
   }
 
-  if (rules.length === 0) {
-    return { content: '', ruleCount: 0 };
+  // Split into baseline (no paths) and conditional (has paths)
+  const baselineRules: RuleFile[] = [];
+  const conditionalRules: RuleFile[] = [];
+  for (const rule of allRules) {
+    if (rule.paths) {
+      conditionalRules.push(rule);
+    } else {
+      baselineRules.push(rule);
+    }
   }
 
-  const content = formatRules(rules, projectRoot);
   logger.debug(
-    `Total: ${rules.length} rule(s), content length: ${content.length}`,
+    `Split: ${baselineRules.length} baseline, ${conditionalRules.length} conditional`,
   );
 
-  return { content, ruleCount: rules.length };
+  const content =
+    baselineRules.length > 0 ? formatRules(baselineRules, projectRoot) : '';
+
+  return { content, ruleCount: baselineRules.length, conditionalRules };
 }

@@ -1594,6 +1594,21 @@ export class CoreToolScheduler {
           }
         }
 
+        // Inject conditional rules when the model accesses a matching file.
+        // Rules are injected at most once per session per rule file.
+        const filePath = toolInput?.['file_path'];
+        if (typeof filePath === 'string') {
+          const rulesCtx = this.config
+            .getConditionalRulesRegistry()
+            ?.matchAndConsume(filePath);
+          if (rulesCtx) {
+            content = appendAdditionalContext(
+              content,
+              `<system-reminder>\n${rulesCtx}\n</system-reminder>`,
+            );
+          }
+        }
+
         const response = convertToFunctionResponse(toolName, callId, content);
         const successResponse: ToolCallResponseInfo = {
           callId,

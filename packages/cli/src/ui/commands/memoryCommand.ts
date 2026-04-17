@@ -8,6 +8,7 @@ import {
   getErrorMessage,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
+  ConditionalRulesRegistry,
   QWEN_DIR,
 } from '@qwen-code/qwen-code-core';
 import path from 'node:path';
@@ -308,20 +309,28 @@ export const memoryCommand: SlashCommand = {
         try {
           const config = context.services.config;
           if (config) {
-            const { memoryContent, fileCount, ruleCount } =
-              await loadServerHierarchicalMemory(
-                config.getWorkingDir(),
-                config.shouldLoadMemoryFromIncludeDirectories()
-                  ? config.getWorkspaceContext().getDirectories()
-                  : [],
-                config.getFileService(),
-                config.getExtensionContextFilePaths(),
-                config.getFolderTrust(),
-                context.services.settings.merged.context?.importFormat ||
-                  'tree', // Use setting or default to 'tree'
-              );
+            const {
+              memoryContent,
+              fileCount,
+              ruleCount,
+              conditionalRules,
+              projectRoot,
+            } = await loadServerHierarchicalMemory(
+              config.getWorkingDir(),
+              config.shouldLoadMemoryFromIncludeDirectories()
+                ? config.getWorkspaceContext().getDirectories()
+                : [],
+              config.getFileService(),
+              config.getExtensionContextFilePaths(),
+              config.getFolderTrust(),
+              context.services.settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
+              config.getContextRuleExcludes(),
+            );
             config.setUserMemory(memoryContent);
             config.setGeminiMdFileCount(fileCount);
+            config.setConditionalRulesRegistry(
+              new ConditionalRulesRegistry(conditionalRules, projectRoot),
+            );
 
             let successMessage: string;
             if (memoryContent.length > 0) {

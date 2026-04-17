@@ -83,7 +83,13 @@ vi.mock('../tools/tool-registry', () => {
 vi.mock('../utils/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi
     .fn()
-    .mockResolvedValue({ memoryContent: '', fileCount: 0, ruleCount: 0 }),
+    .mockResolvedValue({
+      memoryContent: '',
+      fileCount: 0,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    }),
 }));
 
 // Mock individual tools if their constructors are complex or have side effects

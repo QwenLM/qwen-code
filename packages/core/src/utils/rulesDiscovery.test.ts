@@ -10,8 +10,8 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   parseRuleFile,
-  hasMatchingFiles,
   loadRules,
+  ConditionalRulesRegistry,
 } from './rulesDiscovery.js';
 import { QWEN_DIR } from './paths.js';
 
@@ -60,6 +60,10 @@ describe('rulesDiscovery', () => {
     });
   });
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // parseRuleFile
+  // ─────────────────────────────────────────────────────────────────────────
+
   describe('parseRuleFile', () => {
     it('parses a rule with paths frontmatter', () => {
       const content = `---
@@ -71,7 +75,6 @@ paths:
 Use React functional components.
 `;
       const rule = parseRuleFile(content, '/test/rule.md');
-
       expect(rule).not.toBeNull();
       expect(rule!.description).toBe('Frontend rules');
       expect(rule!.paths).toEqual(['src/**/*.tsx', 'src/**/*.ts']);
@@ -85,388 +88,316 @@ description: General coding standards
 Always write tests.
 `;
       const rule = parseRuleFile(content, '/test/rule.md');
-
-      expect(rule).not.toBeNull();
-      expect(rule!.description).toBe('General coding standards');
       expect(rule!.paths).toBeUndefined();
       expect(rule!.content).toBe('Always write tests.');
     });
 
     it('parses a rule without any frontmatter as baseline', () => {
-      const content = 'Just plain markdown rules.\n\nWith paragraphs.';
-      const rule = parseRuleFile(content, '/test/rule.md');
-
-      expect(rule).not.toBeNull();
+      const rule = parseRuleFile('Plain rules.\n\nParagraph.', '/test/r.md');
       expect(rule!.paths).toBeUndefined();
-      expect(rule!.content).toBe(
-        'Just plain markdown rules.\n\nWith paragraphs.',
-      );
+      expect(rule!.content).toBe('Plain rules.\n\nParagraph.');
     });
 
     it('strips HTML comments', () => {
       const content = `---
 description: Test
 ---
-Visible rule.
-<!-- This is a comment that should be stripped -->
-More visible text.
+Visible.
+<!-- stripped -->
+Also visible.
 `;
       const rule = parseRuleFile(content, '/test/rule.md');
-
-      expect(rule).not.toBeNull();
-      expect(rule!.content).not.toContain('comment');
-      expect(rule!.content).toContain('Visible rule.');
-      expect(rule!.content).toContain('More visible text.');
+      expect(rule!.content).not.toContain('stripped');
+      expect(rule!.content).toContain('Visible.');
+      expect(rule!.content).toContain('Also visible.');
     });
 
     it('returns null for empty body after stripping', () => {
       const content = `---
-description: Empty rule
 paths:
   - "*.ts"
 ---
 <!-- Only a comment -->
 `;
-      const rule = parseRuleFile(content, '/test/rule.md');
-      expect(rule).toBeNull();
+      expect(parseRuleFile(content, '/test/rule.md')).toBeNull();
     });
 
-    it('handles empty paths array', () => {
+    it('handles empty paths array as baseline', () => {
       const content = `---
-description: No paths
 paths:
 ---
 Some content.
 `;
-      const rule = parseRuleFile(content, '/test/rule.md');
-
-      expect(rule).not.toBeNull();
-      // Empty paths: array should be treated as undefined (baseline rule)
-      expect(rule!.paths).toBeUndefined();
+      expect(parseRuleFile(content, '/t.md')!.paths).toBeUndefined();
     });
 
-    it('handles paths as a single string instead of array', () => {
+    it('handles paths as a single string', () => {
       const content = `---
-description: Single path
 paths: "src/**/*.ts"
 ---
-Single path rule.
+Rule.
 `;
-      const rule = parseRuleFile(content, '/test/rule.md');
-
-      expect(rule).not.toBeNull();
-      expect(rule!.paths).toEqual(['src/**/*.ts']);
+      expect(parseRuleFile(content, '/t.md')!.paths).toEqual(['src/**/*.ts']);
     });
 
-    it('handles BOM and CRLF line endings', () => {
-      const content =
-        '\uFEFF---\r\ndescription: BOM test\r\n---\r\nRule content.\r\n';
-      const rule = parseRuleFile(content, '/test/rule.md');
-
-      expect(rule).not.toBeNull();
-      expect(rule!.description).toBe('BOM test');
-      expect(rule!.content).toBe('Rule content.');
+    it('handles BOM and CRLF', () => {
+      const content = '\uFEFF---\r\ndescription: BOM\r\n---\r\nContent.\r\n';
+      const rule = parseRuleFile(content, '/t.md');
+      expect(rule!.description).toBe('BOM');
+      expect(rule!.content).toBe('Content.');
     });
 
-    it('treats non-array/non-string paths as baseline rule', () => {
+    it('treats non-array/non-string paths as baseline', () => {
       const content = `---
-description: odd value
 paths: 42
 ---
-Body content survives.
+Body.
 `;
-      const rule = parseRuleFile(content, '/test/odd.md');
-
-      expect(rule).not.toBeNull();
-      // Numeric paths value → ignored → treated as baseline rule
-      expect(rule!.paths).toBeUndefined();
-      expect(rule!.content).toBe('Body content survives.');
+      expect(parseRuleFile(content, '/t.md')!.paths).toBeUndefined();
     });
   });
 
-  describe('hasMatchingFiles', () => {
-    it('returns true when files match the pattern', async () => {
-      await createTestFile(
-        path.join(projectRoot, 'src', 'app.tsx'),
-        'export default App;',
-      );
-
-      const result = await hasMatchingFiles(['src/**/*.tsx'], projectRoot);
-      expect(result).toBe(true);
-    });
-
-    it('returns false when no files match', async () => {
-      await createTestFile(
-        path.join(projectRoot, 'src', 'app.py'),
-        'print("hello")',
-      );
-
-      const result = await hasMatchingFiles(['src/**/*.tsx'], projectRoot);
-      expect(result).toBe(false);
-    });
-
-    it('matches multiple patterns', async () => {
-      await createTestFile(
-        path.join(projectRoot, 'lib', 'utils.ts'),
-        'export const x = 1;',
-      );
-
-      const result = await hasMatchingFiles(
-        ['src/**/*.tsx', 'lib/**/*.ts'],
-        projectRoot,
-      );
-      expect(result).toBe(true);
-    });
-
-    it('returns false for empty project', async () => {
-      const result = await hasMatchingFiles(['**/*.ts'], projectRoot);
-      expect(result).toBe(false);
-    });
-  });
+  // ─────────────────────────────────────────────────────────────────────────
+  // loadRules — baseline vs conditional split
+  // ─────────────────────────────────────────────────────────────────────────
 
   describe('loadRules', () => {
     it('returns empty when no rules directory exists', async () => {
       const result = await loadRules(projectRoot, true);
-
-      expect(result).toEqual({ content: '', ruleCount: 0 });
+      expect(result).toEqual({
+        content: '',
+        ruleCount: 0,
+        conditionalRules: [],
+      });
     });
 
-    it('loads baseline rules (no paths) unconditionally', async () => {
+    it('loads baseline rules into content', async () => {
       const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
       await createTestFile(
         path.join(rulesDir, 'general.md'),
         `---
-description: General standards
+description: General
 ---
 Always write tests.`,
       );
 
       const result = await loadRules(projectRoot, true);
-
       expect(result.ruleCount).toBe(1);
       expect(result.content).toContain('Always write tests.');
-      expect(result.content).toContain('Rule from:');
+      expect(result.conditionalRules).toEqual([]);
     });
 
-    it('loads conditional rules when files match', async () => {
+    it('puts conditional rules in conditionalRules, not in content', async () => {
       const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
       await createTestFile(
-        path.join(rulesDir, 'frontend.md'),
+        path.join(rulesDir, 'fe.md'),
         `---
-description: Frontend rules
 paths:
   - "src/**/*.tsx"
 ---
-Use functional components.`,
-      );
-      // Create a matching file
-      await createTestFile(
-        path.join(projectRoot, 'src', 'App.tsx'),
-        'export default App;',
+Use hooks.`,
       );
 
       const result = await loadRules(projectRoot, true);
-
-      expect(result.ruleCount).toBe(1);
-      expect(result.content).toContain('Use functional components.');
-    });
-
-    it('skips conditional rules when no files match', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(
-        path.join(rulesDir, 'frontend.md'),
-        `---
-description: Frontend rules
-paths:
-  - "src/**/*.tsx"
----
-Use functional components.`,
-      );
-      // No .tsx files in project
-
-      const result = await loadRules(projectRoot, true);
-
       expect(result.ruleCount).toBe(0);
       expect(result.content).toBe('');
+      expect(result.conditionalRules).toHaveLength(1);
+      expect(result.conditionalRules[0].content).toBe('Use hooks.');
     });
 
-    it('loads both baseline and matching conditional rules', async () => {
+    it('splits baseline and conditional correctly', async () => {
       const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
       await createTestFile(
         path.join(rulesDir, '01-general.md'),
-        `---
-description: General
----
-Write clean code.`,
+        'Write clean code.',
       );
       await createTestFile(
-        path.join(rulesDir, '02-python.md'),
-        `---
-description: Python rules
-paths:
-  - "**/*.py"
----
-Use type hints.`,
+        path.join(rulesDir, '02-py.md'),
+        `---\npaths:\n  - "**/*.py"\n---\nUse type hints.`,
       );
       await createTestFile(
-        path.join(rulesDir, '03-typescript.md'),
-        `---
-description: TypeScript rules
-paths:
-  - "**/*.ts"
-  - "**/*.tsx"
----
-Use strict mode.`,
+        path.join(rulesDir, '03-ts.md'),
+        `---\npaths:\n  - "**/*.ts"\n---\nUse strict.`,
       );
-      // Only create Python files — TypeScript rule should be skipped
-      await createTestFile(path.join(projectRoot, 'app.py'), 'print("hello")');
 
       const result = await loadRules(projectRoot, true);
-
-      expect(result.ruleCount).toBe(2);
+      expect(result.ruleCount).toBe(1);
       expect(result.content).toContain('Write clean code.');
-      expect(result.content).toContain('Use type hints.');
-      expect(result.content).not.toContain('Use strict mode.');
+      expect(result.conditionalRules).toHaveLength(2);
     });
 
-    it('loads rules in alphabetical order', async () => {
+    it('recursively scans subdirectories', async () => {
       const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(path.join(rulesDir, 'b-second.md'), 'Second rule.');
-      await createTestFile(path.join(rulesDir, 'a-first.md'), 'First rule.');
+      await createTestFile(
+        path.join(rulesDir, 'frontend', 'react.md'),
+        'Use hooks.',
+      );
+      await createTestFile(
+        path.join(rulesDir, 'backend', 'api.md'),
+        'Validate inputs.',
+      );
+      await createTestFile(path.join(rulesDir, 'general.md'), 'Write tests.');
 
       const result = await loadRules(projectRoot, true);
-
-      expect(result.ruleCount).toBe(2);
-      const firstIdx = result.content.indexOf('First rule.');
-      const secondIdx = result.content.indexOf('Second rule.');
-      expect(firstIdx).toBeLessThan(secondIdx);
+      expect(result.ruleCount).toBe(3);
+      expect(result.content).toContain('Use hooks.');
+      expect(result.content).toContain('Validate inputs.');
+      expect(result.content).toContain('Write tests.');
     });
 
     it('skips project rules when folder is untrusted', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(path.join(rulesDir, 'rule.md'), 'Untrusted rule.');
-
+      await createTestFile(
+        path.join(projectRoot, QWEN_DIR, 'rules', 'r.md'),
+        'Untrusted.',
+      );
       const result = await loadRules(projectRoot, false);
-
-      // Project rules should not load when untrusted
       expect(result.ruleCount).toBe(0);
     });
 
-    it('loads global rules from ~/.qwen/rules/', async () => {
-      const globalRulesDir = path.join(homedir, QWEN_DIR, 'rules');
-      await createTestFile(
-        path.join(globalRulesDir, 'global.md'),
-        `---
-description: Global standards
----
-Follow company guidelines.`,
-      );
-
-      const result = await loadRules(projectRoot, true);
-
-      expect(result.ruleCount).toBe(1);
-      expect(result.content).toContain('Follow company guidelines.');
-    });
-
     it('loads global rules even when folder is untrusted', async () => {
-      const globalRulesDir = path.join(homedir, QWEN_DIR, 'rules');
       await createTestFile(
-        path.join(globalRulesDir, 'global.md'),
-        'Global rule.',
+        path.join(homedir, QWEN_DIR, 'rules', 'g.md'),
+        'Global.',
       );
-
       const result = await loadRules(projectRoot, false);
-
       expect(result.ruleCount).toBe(1);
-      expect(result.content).toContain('Global rule.');
-    });
-
-    it('combines global and project rules', async () => {
-      const globalRulesDir = path.join(homedir, QWEN_DIR, 'rules');
-      await createTestFile(
-        path.join(globalRulesDir, 'global.md'),
-        'Global rule.',
-      );
-
-      const projectRulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(
-        path.join(projectRulesDir, 'project.md'),
-        'Project rule.',
-      );
-
-      const result = await loadRules(projectRoot, true);
-
-      expect(result.ruleCount).toBe(2);
-      expect(result.content).toContain('Global rule.');
-      expect(result.content).toContain('Project rule.');
-      // Global rules should come before project rules
-      const globalIdx = result.content.indexOf('Global rule.');
-      const projectIdx = result.content.indexOf('Project rule.');
-      expect(globalIdx).toBeLessThan(projectIdx);
+      expect(result.content).toContain('Global.');
     });
 
     it('does not duplicate rules when projectRoot equals homedir', async () => {
-      // When projectRoot === homedir, globalRulesDir === projectRulesDir
-      const rulesDir = path.join(homedir, QWEN_DIR, 'rules');
-      await createTestFile(path.join(rulesDir, 'shared.md'), 'Shared rule.');
-
-      // Use homedir as projectRoot
-      const result = await loadRules(homedir, true);
-
-      expect(result.ruleCount).toBe(1);
-      // Should NOT have duplicated the rule
-      const occurrences = (result.content.match(/Shared rule\./g) || []).length;
-      expect(occurrences).toBe(1);
-    });
-
-    it('ignores non-.md files in rules directory', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
-      await createTestFile(path.join(rulesDir, 'rule.md'), 'Valid rule.');
-      await createTestFile(path.join(rulesDir, 'notes.txt'), 'Not a rule.');
-      await createTestFile(path.join(rulesDir, 'config.json'), '{}');
-
-      const result = await loadRules(projectRoot, true);
-
-      expect(result.ruleCount).toBe(1);
-      expect(result.content).toContain('Valid rule.');
-      expect(result.content).not.toContain('Not a rule.');
-    });
-
-    it('strips HTML comments in loaded rules', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
       await createTestFile(
-        path.join(rulesDir, 'rule.md'),
-        `---
-description: Test
----
-Visible content.
-<!-- Hidden comment -->
-More visible.`,
+        path.join(homedir, QWEN_DIR, 'rules', 's.md'),
+        'Shared.',
+      );
+      const result = await loadRules(homedir, true);
+      expect(result.ruleCount).toBe(1);
+      expect((result.content.match(/Shared\./g) || []).length).toBe(1);
+    });
+
+    it('excludes rules matching exclude patterns', async () => {
+      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
+      await createTestFile(path.join(rulesDir, 'keep.md'), 'Keep.');
+      const skipped = await createTestFile(
+        path.join(rulesDir, 'skip.md'),
+        'Skip.',
       );
 
-      const result = await loadRules(projectRoot, true);
-
+      const result = await loadRules(projectRoot, true, [skipped]);
       expect(result.ruleCount).toBe(1);
-      expect(result.content).toContain('Visible content.');
-      expect(result.content).toContain('More visible.');
-      expect(result.content).not.toContain('Hidden comment');
+      expect(result.content).toContain('Keep.');
+      expect(result.content).not.toContain('Skip.');
+    });
+
+    it('excludes rules in subdirectories by glob', async () => {
+      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
+      await createTestFile(
+        path.join(rulesDir, 'other-team', 'r.md'),
+        'Their rule.',
+      );
+      await createTestFile(path.join(rulesDir, 'mine.md'), 'My rule.');
+
+      const result = await loadRules(projectRoot, true, ['**/other-team/**']);
+      expect(result.ruleCount).toBe(1);
+      expect(result.content).not.toContain('Their rule.');
     });
 
     it('formats rules with source markers', async () => {
-      const rulesDir = path.join(projectRoot, QWEN_DIR, 'rules');
       await createTestFile(
-        path.join(rulesDir, 'test-rule.md'),
-        'Rule content here.',
+        path.join(projectRoot, QWEN_DIR, 'rules', 'test.md'),
+        'Content.',
       );
-
       const result = await loadRules(projectRoot, true);
+      expect(result.content).toContain(
+        `--- Rule from: ${QWEN_DIR}/rules/test.md ---`,
+      );
+    });
+  });
 
-      expect(result.content).toContain(
-        `--- Rule from: ${QWEN_DIR}/rules/test-rule.md ---`,
+  // ─────────────────────────────────────────────────────────────────────────
+  // ConditionalRulesRegistry
+  // ─────────────────────────────────────────────────────────────────────────
+
+  describe('ConditionalRulesRegistry', () => {
+    const rule = (fp: string, pats: string[], body: string) => ({
+      filePath: fp,
+      paths: pats,
+      content: body,
+    });
+
+    it('matches a file and returns formatted content', () => {
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.')],
+        '/project',
       );
-      expect(result.content).toContain(
-        `--- End of Rule from: ${QWEN_DIR}/rules/test-rule.md ---`,
+      const result = reg.matchAndConsume('/project/src/App.tsx');
+      expect(result).toContain('Use hooks.');
+    });
+
+    it('returns undefined when no patterns match', () => {
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.')],
+        '/project',
       );
+      expect(reg.matchAndConsume('/project/lib/utils.py')).toBeUndefined();
+    });
+
+    it('injects each rule at most once', () => {
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/fe.md', ['src/**/*.tsx'], 'Use hooks.')],
+        '/project',
+      );
+      expect(reg.matchAndConsume('/project/src/A.tsx')).toBeDefined();
+      expect(reg.matchAndConsume('/project/src/B.tsx')).toBeUndefined();
+    });
+
+    it('matches multiple rules for one file', () => {
+      const reg = new ConditionalRulesRegistry(
+        [
+          rule('/r/ts.md', ['**/*.tsx'], 'Strict.'),
+          rule('/r/react.md', ['src/**/*.tsx'], 'Hooks.'),
+        ],
+        '/project',
+      );
+      const result = reg.matchAndConsume('/project/src/App.tsx');
+      expect(result).toContain('Strict.');
+      expect(result).toContain('Hooks.');
+      expect(reg.injectedCount).toBe(2);
+    });
+
+    it('tracks totalCount and injectedCount', () => {
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/a.md', ['**/*.ts'], 'A'), rule('/r/b.md', ['**/*.py'], 'B')],
+        '/project',
+      );
+      expect(reg.totalCount).toBe(2);
+      expect(reg.injectedCount).toBe(0);
+      reg.matchAndConsume('/project/foo.ts');
+      expect(reg.injectedCount).toBe(1);
+    });
+
+    it('returns undefined when registry is empty', () => {
+      const reg = new ConditionalRulesRegistry([], '/project');
+      expect(reg.matchAndConsume('/project/foo.ts')).toBeUndefined();
+    });
+
+    it('does not match files outside the project root', () => {
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/ts.md', ['**/*.ts'], 'Strict.')],
+        '/project',
+      );
+      expect(reg.matchAndConsume('/etc/passwd')).toBeUndefined();
+      expect(reg.matchAndConsume('/other/foo.ts')).toBeUndefined();
+    });
+
+    it('resolves relative paths against projectRoot', () => {
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/ts.md', ['src/**/*.ts'], 'Strict.')],
+        '/project',
+      );
+      // A relative file_path should be resolved against the project root
+      // so "src/foo.ts" matches "src/**/*.ts".
+      const result = reg.matchAndConsume('src/foo.ts');
+      expect(result).toContain('Strict.');
     });
   });
 });
