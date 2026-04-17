@@ -49,10 +49,12 @@ Qwen Code is an open-source AI agent for the terminal, optimized for Qwen series
 bash -c "$(curl -fsSL https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.sh)"
 ```
 
-#### Windows (Run as Administrator CMD)
+#### Windows (Run as Administrator)
+
+Works in both Command Prompt and PowerShell:
 
 ```cmd
-curl -fsSL -o %TEMP%\install-qwen.bat https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat && %TEMP%\install-qwen.bat
+powershell -Command "Invoke-WebRequest 'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen.bat' -OutFile (Join-Path $env:TEMP 'install-qwen.bat'); & (Join-Path $env:TEMP 'install-qwen.bat')"
 ```
 
 > **Note**: It's recommended to restart your terminal after installation to ensure environment variables take effect.
