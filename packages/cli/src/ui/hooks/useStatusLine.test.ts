@@ -937,14 +937,15 @@ describe('useStatusLine', () => {
     it('skips periodic ticks while a previous exec is still running', async () => {
       // Starvation regression (#3383 review): with refreshInterval < command
       // latency, if every tick called doUpdate() it would kill the in-flight
-      // child and the statusline would never update. The tick must yield
-      // when activeChildRef is non-empty.
+      // child, generation++ would stale the eventual callback, and the user
+      // would never see any output. This test asserts BOTH the guard (exec
+      // call count) AND the user-visible result (rendered lines).
       setStatusLineConfig({
         type: 'command',
         command: 'slow-command',
         refreshInterval: 1,
       });
-      renderHook(() => useStatusLine());
+      const { result } = renderHook(() => useStatusLine());
 
       // Mount exec: child is spawned, callback NOT yet resolved — child is
       // still "running" from the hook's perspective.
@@ -964,10 +965,13 @@ describe('useStatusLine', () => {
       });
       expect(child_process.exec).toHaveBeenCalledTimes(1);
 
-      // First exec finally completes — activeChildRef clears.
+      // First exec finally completes — activeChildRef clears. Without the
+      // guard, generationRef would have bumped 3 times above and the next
+      // line would be ignored as stale, leaving `lines` permanently empty.
       await act(async () => {
         pendingCallback(null, 'done\n', '');
       });
+      expect(result.current.lines).toEqual(['done']);
 
       // Next tick is now free to spawn a new exec.
       await act(async () => {
