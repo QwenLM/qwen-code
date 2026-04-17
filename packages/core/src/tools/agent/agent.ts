@@ -391,6 +391,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   readonly eventEmitter: AgentEventEmitter = new AgentEventEmitter();
   private currentDisplay: AgentResultDisplay | null = null;
   private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
+  private callId?: string;
 
   constructor(
     private readonly config: Config,
@@ -398,6 +399,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     params: AgentParams,
   ) {
     super(params);
+  }
+
+  /**
+   * Invoked by the tool scheduler after `build` to link this invocation
+   * back to the model's original tool-use request. Used so background
+   * agents carry the tool-use id through to completion notifications.
+   */
+  setCallId(callId: string): void {
+    this.callId = callId;
   }
 
   /**
@@ -660,10 +670,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
       // Inline FunctionDeclaration[] from the parent — passed verbatim
-      // including `agent` itself so the fork's tool-name set matches the
-      // parent's. prepareTools bypasses the exclusion filter for inline
-      // decls; `isInForkExecution()` (ALS-based) is the sole
-      // recursive-fork block at runtime.
+      // (including `agent` and cron tools) so the fork's system prompt,
+      // tools, and history exactly match the parent's and share its
+      // DashScope cache prefix. A fork is a context-sharing extension of
+      // the parent, not an isolated subagent, so the general subagent
+      // exclusion list does not apply. Recursive forks are blocked by the
+      // ALS-based `isInForkExecution()` guard.
       const parentToolDecls: FunctionDeclaration[] =
         (
           generationConfig.tools as Array<{
@@ -963,23 +975,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagentConfig.background === true;
 
       if (shouldRunInBackground) {
-        // Background agents are not supported in non-interactive mode
-        if (!this.config.isInteractive()) {
-          return {
-            llmContent:
-              'Background agents are not supported in non-interactive mode. Retry without run_in_background.',
-            returnDisplay: {
-              type: 'task_execution' as const,
-              subagentName: this.params.subagent_type || 'unknown',
-              taskDescription: this.params.description,
-              taskPrompt: this.params.prompt,
-              status: 'failed' as const,
-              terminateReason:
-                'Background agents are not supported in non-interactive mode',
-            },
-          };
-        }
-
         // Fire SubagentStart hook before background launch
         const hookSystem = this.config.getHookSystem();
         if (hookSystem) {
@@ -1005,6 +1000,38 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // survive ESC cancellation of the parent's current turn.
         const bgAbortController = new AbortController();
 
+        // Background agents can't show interactive permission prompts
+        // (no UI). Instead of YOLO (which would auto-approve everything),
+        // we set shouldAvoidPermissionPrompts so the tool scheduler
+        // auto-denies 'ask' decisions — matching claw-code's approach.
+        // PermissionRequest hooks still run and can override the denial.
+        // Base on agentConfig so the resolved approval mode override (e.g.
+        // subagent-level `approvalMode: auto-edit`) is preserved.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const bgConfig = Object.create(agentConfig) as any;
+        bgConfig.getShouldAvoidPermissionPrompts = () => true;
+
+        // Rebuild the subagent against bgConfig. For forks, go through
+        // createForkSubagent so the parent's rendered system prompt and
+        // inherited history are carried over; otherwise the background fork
+        // degrades to a plain FORK_AGENT without context.
+        //
+        // Register in the background task registry only AFTER init
+        // succeeds. If construction throws (e.g. invalid agent config or
+        // model setup), registering first would leave a phantom 'running'
+        // entry that the non-interactive hold-back loop would wait on
+        // forever.
+        let bgSubagent: AgentHeadless;
+        if (isFork) {
+          const fork = await this.createForkSubagent(bgConfig as Config);
+          bgSubagent = fork.subagent;
+        } else {
+          bgSubagent = await this.subagentManager.createAgentHeadless(
+            subagentConfig,
+            bgConfig as Config,
+          );
+        }
+
         const registry = this.config.getBackgroundTaskRegistry();
         registry.register({
           agentId: hookOpts.agentId,
@@ -1013,23 +1040,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'running',
           startTime: Date.now(),
           abortController: bgAbortController,
+          toolUseId: this.callId,
         });
 
-        // Background agents can't show interactive permission prompts
-        // (no UI). Instead of YOLO (which would auto-approve everything),
-        // we set shouldAvoidPermissionPrompts so the tool scheduler
-        // auto-denies 'ask' decisions — matching claw-code's approach.
-        // PermissionRequest hooks still run and can override the denial.
-        // Inherit from agentConfig so the resolved approval mode is preserved.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const bgConfig = Object.create(agentConfig) as any;
-        bgConfig.getShouldAvoidPermissionPrompts = () => true;
-
-        // Create a dedicated subagent that uses the bg-specific config.
-        const bgSubagent = await this.subagentManager.createAgentHeadless(
-          subagentConfig,
-          bgConfig as Config,
-        );
+        const getCompletionStats = () => {
+          const summary = bgSubagent.getExecutionSummary();
+          return {
+            totalTokens: summary.totalTokens,
+            toolUses: summary.totalToolCalls,
+            durationMs: summary.totalDurationMs,
+          };
+        };
 
         // Fire-and-forget: start the subagent without blocking the parent.
         void (async () => {
@@ -1104,12 +1125,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // model (and the UI) don't treat incomplete runs as completed.
             const terminateMode = bgSubagent.getTerminateMode();
             const finalText = bgSubagent.getFinalText();
+            const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
-              registry.complete(hookOpts.agentId, finalText);
+              registry.complete(hookOpts.agentId, finalText, completionStats);
             } else {
               registry.fail(
                 hookOpts.agentId,
                 finalText || `Agent terminated with mode: ${terminateMode}`,
+                completionStats,
               );
             }
           } catch (error) {
@@ -1117,7 +1140,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               error instanceof Error ? error.message : String(error);
             debugLogger.error(`[Agent] Background agent failed: ${errorMsg}`);
 
-            registry.fail(hookOpts.agentId, errorMsg);
+            registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
           }
         })();
 

@@ -17,12 +17,32 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
 const MAX_DESCRIPTION_LENGTH = 40;
+const MAX_RESULT_LENGTH = 2000;
+
+// Escape text so it is safe to interpolate into an XML element body.
+// Subagent-produced strings (description, result, error) can contain `<`,
+// `>`, or literal `</task-notification>` — without escaping, a subagent
+// summarizing HTML or another agent's notification could close the
+// envelope early and forge sibling tags (e.g. a faked <status>) that the
+// parent model would treat as trusted metadata.
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 
 export type BackgroundAgentStatus =
   | 'running'
   | 'completed'
   | 'failed'
   | 'cancelled';
+
+export interface AgentCompletionStats {
+  totalTokens: number;
+  toolUses: number;
+  durationMs: number;
+}
 
 export interface BackgroundAgentEntry {
   agentId: string;
@@ -35,16 +55,29 @@ export interface BackgroundAgentEntry {
   error?: string;
   abortController: AbortController;
   name?: string;
+  stats?: AgentCompletionStats;
+  toolUseId?: string;
+}
+
+export interface NotificationMeta {
+  agentId: string;
+  status: BackgroundAgentStatus;
+  stats?: AgentCompletionStats;
+  toolUseId?: string;
 }
 
 export type BackgroundNotificationCallback = (
   displayText: string,
   modelText: string,
+  meta: NotificationMeta,
 ) => void;
+
+export type BackgroundRegisterCallback = (entry: BackgroundAgentEntry) => void;
 
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, BackgroundAgentEntry>();
   private notificationCallback?: BackgroundNotificationCallback;
+  private registerCallback?: BackgroundRegisterCallback;
 
   /**
    * Register a new background agent.
@@ -52,6 +85,14 @@ export class BackgroundTaskRegistry {
   register(entry: BackgroundAgentEntry): void {
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
+
+    if (this.registerCallback) {
+      try {
+        this.registerCallback(entry);
+      } catch (error) {
+        debugLogger.error('Failed to emit register callback:', error);
+      }
+    }
   }
 
   /**
@@ -59,13 +100,18 @@ export class BackgroundTaskRegistry {
    * No-op if the agent is not in 'running' state (guards against race
    * with concurrent cancellation).
    */
-  complete(agentId: string, result: string): void {
+  complete(
+    agentId: string,
+    result: string,
+    stats?: AgentCompletionStats,
+  ): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return;
 
     entry.status = 'completed';
     entry.endTime = Date.now();
     entry.result = result;
+    entry.stats = stats;
     debugLogger.info(`Background agent completed: ${agentId}`);
 
     this.emitNotification(entry);
@@ -76,13 +122,14 @@ export class BackgroundTaskRegistry {
    * No-op if the agent is not in 'running' state (guards against race
    * with concurrent cancellation).
    */
-  fail(agentId: string, error: string): void {
+  fail(agentId: string, error: string, stats?: AgentCompletionStats): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return;
 
     entry.status = 'failed';
     entry.endTime = Date.now();
     entry.error = error;
+    entry.stats = stats;
     debugLogger.info(`Background agent failed: ${agentId}`);
 
     this.emitNotification(entry);
@@ -99,6 +146,12 @@ export class BackgroundTaskRegistry {
     entry.status = 'cancelled';
     entry.endTime = Date.now();
     debugLogger.info(`Background agent cancelled: ${agentId}`);
+
+    // Emit the terminal notification here — the fire-and-forget
+    // complete()/fail() path is guarded by `status !== 'running'` and
+    // will no-op, so without this the SDK contract breaks: consumers
+    // saw task_started but never receive a matching task_notification.
+    this.emitNotification(entry);
   }
 
   /**
@@ -133,8 +186,18 @@ export class BackgroundTaskRegistry {
    * Set the callback that delivers completion notifications to the CLI.
    * Called by AppContainer during initialization.
    */
-  setNotificationCallback(cb: BackgroundNotificationCallback): void {
+  setNotificationCallback(
+    cb: BackgroundNotificationCallback | undefined,
+  ): void {
     this.notificationCallback = cb;
+  }
+
+  /**
+   * Set the callback fired when a new background agent is registered.
+   * Used by the CLI to emit task_started SDK events.
+   */
+  setRegisterCallback(cb: BackgroundRegisterCallback | undefined): void {
+    this.registerCallback = cb;
   }
 
   /**
@@ -146,22 +209,16 @@ export class BackgroundTaskRegistry {
         entry.abortController.abort();
         entry.status = 'cancelled';
         entry.endTime = Date.now();
+        // Same reasoning as cancel(): emit the terminal notification
+        // here, because the fire-and-forget complete()/fail() will
+        // be no-op'd by the running-status guard.
+        this.emitNotification(entry);
       }
     }
     debugLogger.info('Aborted all background agents');
   }
 
-  private emitNotification(entry: BackgroundAgentEntry): void {
-    if (!this.notificationCallback) return;
-
-    const statusText =
-      entry.status === 'completed'
-        ? 'completed'
-        : entry.status === 'failed'
-          ? `failed`
-          : 'was cancelled';
-
-    // Build the label: "Explore: list ts files..." (truncated)
+  private buildDisplayLabel(entry: BackgroundAgentEntry): string {
     // Strip the subagent type prefix if the description already starts with it
     // to avoid duplication like "Explore: Explore: list ts files".
     let rawDesc = entry.description;
@@ -175,24 +232,67 @@ export class BackgroundTaskRegistry {
       rawDesc.length > MAX_DESCRIPTION_LENGTH
         ? rawDesc.slice(0, MAX_DESCRIPTION_LENGTH) + '...'
         : rawDesc;
-    const label = entry.subagentType ? `${entry.subagentType}: ${desc}` : desc;
+    return entry.subagentType ? `${entry.subagentType}: ${desc}` : desc;
+  }
 
-    // Short display line shown in the UI
+  private emitNotification(entry: BackgroundAgentEntry): void {
+    if (!this.notificationCallback) return;
+
+    const statusText =
+      entry.status === 'completed'
+        ? 'completed'
+        : entry.status === 'failed'
+          ? 'failed'
+          : 'was cancelled';
+
+    const label = this.buildDisplayLabel(entry);
     const displayLine = `Background agent "${label}" ${statusText}.`;
 
-    // Full model-facing text (includes result/error for the LLM to act on)
-    const modelLines: string[] = [
-      `Background agent "${entry.description}" (${entry.agentId}) ${statusText}.`,
+    // Truncate before escaping so we don't slice through an escape
+    // sequence (e.g. mid-`&amp;`) and emit malformed XML.
+    const rawResult = entry.result
+      ? entry.result.length > MAX_RESULT_LENGTH
+        ? entry.result.slice(0, MAX_RESULT_LENGTH) + '\n[truncated]'
+        : entry.result
+      : undefined;
+
+    const xmlParts: string[] = [
+      '<task-notification>',
+      `<task-id>${escapeXml(entry.agentId)}</task-id>`,
     ];
-    if (entry.result) {
-      modelLines.push('', entry.result);
+    if (entry.toolUseId) {
+      xmlParts.push(`<tool-use-id>${escapeXml(entry.toolUseId)}</tool-use-id>`);
+    }
+    xmlParts.push(
+      `<status>${escapeXml(entry.status)}</status>`,
+      `<summary>Agent "${escapeXml(entry.description)}" ${statusText}.</summary>`,
+    );
+    if (rawResult) {
+      xmlParts.push(`<result>${escapeXml(rawResult)}</result>`);
     }
     if (entry.error) {
-      modelLines.push('', `Error: ${entry.error}`);
+      xmlParts.push(`<result>Error: ${escapeXml(entry.error)}</result>`);
     }
+    if (entry.stats) {
+      xmlParts.push(
+        '<usage>',
+        `<total_tokens>${entry.stats.totalTokens}</total_tokens>`,
+        `<tool_uses>${entry.stats.toolUses}</tool_uses>`,
+        `<duration_ms>${entry.stats.durationMs}</duration_ms>`,
+        '</usage>',
+      );
+    }
+    xmlParts.push('</task-notification>');
+
+    const meta: NotificationMeta = {
+      agentId: entry.agentId,
+      status: entry.status,
+      stats: entry.stats,
+      toolUseId: entry.toolUseId,
+    };
 
     try {
-      this.notificationCallback(displayLine, modelLines.join('\n'));
+      this.notificationCallback(displayLine, xmlParts.join('\n'), meta);
     } catch (error) {
       debugLogger.error('Failed to emit background notification:', error);
     }

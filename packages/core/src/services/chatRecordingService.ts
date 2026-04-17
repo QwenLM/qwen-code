@@ -58,7 +58,8 @@ export interface ChatRecord {
     | 'slash_command'
     | 'ui_telemetry'
     | 'at_command'
-    | 'notification';
+    | 'notification'
+    | 'cron';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -301,15 +302,32 @@ export class ChatRecordingService {
   }
 
   /**
+   * Records a cron-fired prompt.
+   * Stored as a user-role message with subtype 'cron' so the UI
+   * restores it as a notification item instead of a user turn.
+   */
+  recordCronPrompt(message: PartListUnion, displayText?: string): void {
+    this.recordNotificationLike(message, 'cron', displayText);
+  }
+
+  /**
    * Records a background agent notification.
-   * Stored as a user-role message (so the API history includes it on resume)
-   * with subtype 'notification' (so the UI can restore it as an info item).
+   * Stored as a user-role message with subtype 'notification' so the
+   * UI restores it as an info item, not a user turn.
    */
   recordNotification(message: PartListUnion, displayText?: string): void {
+    this.recordNotificationLike(message, 'notification', displayText);
+  }
+
+  private recordNotificationLike(
+    message: PartListUnion,
+    subtype: 'notification' | 'cron',
+    displayText?: string,
+  ): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
-        subtype: 'notification',
+        subtype,
         message: createUserContent(message),
         systemPayload: displayText
           ? ({ displayText } as NotificationRecordPayload)
@@ -317,7 +335,7 @@ export class ChatRecordingService {
       };
       this.appendRecord(record);
     } catch (error) {
-      debugLogger.error('Error saving notification:', error);
+      debugLogger.error(`Error saving ${subtype} record:`, error);
     }
   }
 

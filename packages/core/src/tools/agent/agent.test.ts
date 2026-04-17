@@ -1439,12 +1439,12 @@ describe('AgentTool', () => {
       };
 
       vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
-      (config as Record<string, unknown>).isInteractive = vi
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(true);
-      (config as Record<string, unknown>).getBackgroundTaskRegistry = vi
-        .fn()
-        .mockReturnValue(mockRegistry);
+      (config as unknown as Record<string, unknown>)[
+        'getBackgroundTaskRegistry'
+      ] = vi.fn().mockReturnValue(mockRegistry);
 
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
       vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
@@ -1526,7 +1526,7 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).not.toHaveBeenCalled();
     });
 
-    it('should reject background when non-interactive, even with background: true config', async () => {
+    it('should allow background in non-interactive mode (headless support)', async () => {
       vi.mocked(
         config.isInteractive as ReturnType<typeof vi.fn>,
       ).mockReturnValue(false);
@@ -1543,9 +1543,28 @@ describe('AgentTool', () => {
       const result = await invocation.execute();
 
       const llmText = partToString(result.llmContent);
-      expect(llmText).toContain('not supported in non-interactive mode');
-      const display = result.returnDisplay as AgentResultDisplay;
-      expect(display.status).toBe('failed');
+      expect(llmText).toContain('Background agent launched');
+      expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('forwards the scheduler-provided callId as toolUseId on the registry entry', async () => {
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      (invocation as unknown as { setCallId: (id: string) => void }).setCallId(
+        'call-xyz-789',
+      );
+      await invocation.execute();
+
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ toolUseId: 'call-xyz-789' }),
+      );
     });
   });
 });

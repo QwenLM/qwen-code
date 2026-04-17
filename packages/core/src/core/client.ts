@@ -676,8 +676,14 @@ export class GeminiClient {
           });
       }
 
-      // record user message for session management
-      this.config.getChatRecordingService()?.recordUserMessage(request);
+      // record user/cron message for session management
+      if (messageType === SendMessageType.Cron) {
+        this.config
+          .getChatRecordingService()
+          ?.recordCronPrompt(request, options?.notificationDisplayText);
+      } else {
+        this.config.getChatRecordingService()?.recordUserMessage(request);
+      }
 
       // Idle cleanup: clear stale thinking blocks after idle period.
       // Latch: once triggered, never revert — prevents oscillation.
