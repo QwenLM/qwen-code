@@ -7,7 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import type { DoctorCheckResult } from '../../types.js';
+import type { DoctorCheckResult, DoctorCheckStatus } from '../../types.js';
 import { t } from '../../../i18n/index.js';
 
 interface DoctorReportProps {
@@ -22,7 +22,7 @@ const STATUS_ICONS: Record<string, string> = {
   fail: '\u2717', // X mark
 };
 
-function getStatusColor(status: string): string {
+function getStatusColor(status: DoctorCheckStatus): string {
   switch (status) {
     case 'pass':
       return theme.status.success;

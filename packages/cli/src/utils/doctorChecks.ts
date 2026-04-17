@@ -104,14 +104,14 @@ function checkAuth(context: CommandContext): DoctorCheckResult {
   };
 }
 
-async function checkApiConnectivity(
+async function checkApiClient(
   context: CommandContext,
 ): Promise<DoctorCheckResult> {
   const config = context.services.config;
   if (!config) {
     return {
       category: t('Authentication'),
-      name: t('API connectivity'),
+      name: t('API client'),
       status: 'fail',
       message: t('config not loaded'),
     };
@@ -122,14 +122,14 @@ async function checkApiConnectivity(
     if (client.isInitialized()) {
       return {
         category: t('Authentication'),
-        name: t('API connectivity'),
+        name: t('API client'),
         status: 'pass',
         message: t('client initialized'),
       };
     }
     return {
       category: t('Authentication'),
-      name: t('API connectivity'),
+      name: t('API client'),
       status: 'warn',
       message: t('client not initialized'),
       detail: t('The API client has not been initialized yet.'),
@@ -138,7 +138,7 @@ async function checkApiConnectivity(
     const errorMsg = error instanceof Error ? error.message : String(error);
     return {
       category: t('Authentication'),
-      name: t('API connectivity'),
+      name: t('API client'),
       status: 'warn',
       message: t('error'),
       detail: errorMsg,
@@ -320,10 +320,10 @@ export async function runDoctorChecks(
   context: CommandContext,
 ): Promise<DoctorCheckResult[]> {
   // Run async checks in parallel
-  const [npmResult, ripgrepResult, connectivityResult] = await Promise.all([
+  const [npmResult, ripgrepResult, apiClientResult] = await Promise.all([
     checkNpmVersion(),
     checkRipgrep(context),
-    checkApiConnectivity(context),
+    checkApiClient(context),
   ]);
 
   return [
@@ -333,7 +333,7 @@ export async function runDoctorChecks(
     checkPlatform(),
     // Authentication
     checkAuth(context),
-    connectivityResult,
+    apiClientResult,
     // Configuration
     checkSettings(context),
     checkModel(context),
