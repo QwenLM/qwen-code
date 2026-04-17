@@ -133,6 +133,10 @@ export class HookRegistry {
       return (config as { url?: string }).url || 'unknown-url';
     if (config.type === 'function')
       return (config as { id?: string }).id || 'unknown-function';
+    if (config.type === 'prompt')
+      return (
+        (config as { prompt?: string }).prompt?.slice(0, 30) || 'prompt-hook'
+      );
     return 'unknown-hook';
   }
 
@@ -277,7 +281,7 @@ export class HookRegistry {
   ): boolean {
     if (
       !config.type ||
-      !['command', 'http', 'function'].includes(config.type)
+      !['command', 'http', 'function', 'prompt'].includes(config.type)
     ) {
       debugLogger.warn(
         `Invalid hook ${eventName} from ${source} type: ${config.type}`,
@@ -302,6 +306,13 @@ export class HookRegistry {
     if (config.type === 'function' && typeof config.callback !== 'function') {
       debugLogger.warn(
         `Function hook ${eventName} from ${source} missing or invalid callback`,
+      );
+      return false;
+    }
+
+    if (config.type === 'prompt' && !config.prompt) {
+      debugLogger.warn(
+        `Prompt hook ${eventName} from ${source} missing prompt field`,
       );
       return false;
     }
