@@ -496,6 +496,41 @@ describe('ToolRegistry', () => {
     });
   });
 
+  describe('warmAll strict mode', () => {
+    it('throws when a factory fails and strict is true', async () => {
+      toolRegistry.registerFactory('bad-tool', async () => {
+        throw new Error('factory error');
+      });
+
+      await expect(toolRegistry.warmAll({ strict: true })).rejects.toThrow(
+        'factory error',
+      );
+    });
+
+    it('does not throw when a factory fails and strict is false (default)', async () => {
+      toolRegistry.registerFactory('bad-tool', async () => {
+        throw new Error('factory error');
+      });
+
+      await expect(toolRegistry.warmAll()).resolves.toBeUndefined();
+    });
+
+    it('still loads successful tools before throwing in strict mode', async () => {
+      const goodTool = new MockTool({ name: 'good-tool' });
+      toolRegistry.registerFactory('good-tool', async () => goodTool);
+      toolRegistry.registerFactory('bad-tool', async () => {
+        throw new Error('factory error');
+      });
+
+      await expect(toolRegistry.warmAll({ strict: true })).rejects.toThrow(
+        'factory error',
+      );
+
+      // The good tool should still have been loaded despite the failure.
+      expect(await toolRegistry.ensureTool('good-tool')).toBe(goodTool);
+    });
+  });
+
   describe('stop', () => {
     it('disposes tools that were still inflight when stop() was called', async () => {
       let resolveFactory!: (tool: MockTool) => void;
