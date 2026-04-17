@@ -10,29 +10,6 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { RemoteInputWatcher } from './RemoteInputWatcher.js';
 
-/**
- * Shorter poll interval for tests — 100 ms instead of the production 500 ms
- * to keep CI wall-clock time low while remaining reliable under load.
- */
-const TEST_POLL_INTERVAL_MS = 100;
-
-/**
- * Wait until `predicate` returns truthy or `timeoutMs` elapses. Polled at
- * `intervalMs`. Used to await filesystem-watcher driven side effects without
- * relying on watcher latency tuning in tests.
- */
-async function waitFor(
-  predicate: () => boolean,
-  { timeoutMs = 10_000, intervalMs = 50 } = {},
-): Promise<void> {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    if (predicate()) return;
-    await new Promise((r) => setTimeout(r, intervalMs));
-  }
-  throw new Error(`waitFor timed out after ${timeoutMs}ms`);
-}
-
 describe('RemoteInputWatcher', () => {
   let tmpDir: string;
   let inputFile: string;
@@ -44,16 +21,20 @@ describe('RemoteInputWatcher', () => {
     fs.writeFileSync(inputFile, '');
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     watcher?.shutdown();
     watcher = null;
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    // Give fs handles a tick to release (needed on Windows)
+    await new Promise((r) => setTimeout(r, 50));
+    try {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    } catch {
+      // Ignore cleanup errors on Windows where file handles may linger
+    }
   });
 
   it('forwards submit commands to the registered submit fn', async () => {
-    watcher = new RemoteInputWatcher(inputFile, {
-      pollIntervalMs: TEST_POLL_INTERVAL_MS,
-    });
+    watcher = new RemoteInputWatcher(inputFile);
     const submitted: string[] = [];
     watcher.setSubmitFn((text) => {
       submitted.push(text);
@@ -64,14 +45,12 @@ describe('RemoteInputWatcher', () => {
       JSON.stringify({ type: 'submit', text: 'hello' }) + '\n',
     );
 
-    await waitFor(() => submitted.length > 0);
+    await watcher.checkForNewInput();
     expect(submitted).toEqual(['hello']);
-  }, 15_000);
+  });
 
   it('dispatches confirmation_response immediately, bypassing the queue', async () => {
-    watcher = new RemoteInputWatcher(inputFile, {
-      pollIntervalMs: TEST_POLL_INTERVAL_MS,
-    });
+    watcher = new RemoteInputWatcher(inputFile);
     const handler = vi.fn();
     watcher.setConfirmationHandler(handler);
 
@@ -84,14 +63,12 @@ describe('RemoteInputWatcher', () => {
       }) + '\n',
     );
 
-    await waitFor(() => handler.mock.calls.length > 0);
+    await watcher.checkForNewInput();
     expect(handler).toHaveBeenCalledWith('req-7', true);
-  }, 15_000);
+  });
 
   it('retries queued submits when the TUI signals it has become idle', async () => {
-    watcher = new RemoteInputWatcher(inputFile, {
-      pollIntervalMs: TEST_POLL_INTERVAL_MS,
-    });
+    watcher = new RemoteInputWatcher(inputFile);
 
     let busy = true;
     const accepted: string[] = [];
@@ -106,21 +83,22 @@ describe('RemoteInputWatcher', () => {
       JSON.stringify({ type: 'submit', text: 'queued' }) + '\n',
     );
 
-    // Allow the watcher to read & try once (and fail because TUI is busy)
-    await new Promise((r) => setTimeout(r, 1500));
+    // Trigger read — command will be queued then submitted, but TUI rejects (busy)
+    await watcher.checkForNewInput();
+    // processQueue runs async; give it a tick
+    await new Promise((r) => setTimeout(r, 50));
     expect(accepted).toEqual([]);
 
     busy = false;
     watcher.notifyIdle();
 
-    await waitFor(() => accepted.length > 0);
+    // processQueue runs async; give it a tick
+    await new Promise((r) => setTimeout(r, 50));
     expect(accepted).toEqual(['queued']);
-  }, 15_000);
+  });
 
   it('skips malformed JSON lines without throwing', async () => {
-    watcher = new RemoteInputWatcher(inputFile, {
-      pollIntervalMs: TEST_POLL_INTERVAL_MS,
-    });
+    watcher = new RemoteInputWatcher(inputFile);
     const submitted: string[] = [];
     watcher.setSubmitFn((text) => {
       submitted.push(text);
@@ -132,14 +110,12 @@ describe('RemoteInputWatcher', () => {
       JSON.stringify({ type: 'submit', text: 'after-bad-line' }) + '\n',
     );
 
-    await waitFor(() => submitted.length > 0);
+    await watcher.checkForNewInput();
     expect(submitted).toEqual(['after-bad-line']);
-  }, 15_000);
+  });
 
   it('stops watching after shutdown', async () => {
-    watcher = new RemoteInputWatcher(inputFile, {
-      pollIntervalMs: TEST_POLL_INTERVAL_MS,
-    });
+    watcher = new RemoteInputWatcher(inputFile);
     const submitted: string[] = [];
     watcher.setSubmitFn((text) => {
       submitted.push(text);
@@ -151,7 +127,8 @@ describe('RemoteInputWatcher', () => {
       JSON.stringify({ type: 'submit', text: 'too-late' }) + '\n',
     );
 
-    await new Promise((r) => setTimeout(r, 800));
+    // checkForNewInput should be a no-op after shutdown (active=false)
+    await watcher.checkForNewInput();
     expect(submitted).toEqual([]);
-  }, 15_000);
+  });
 });

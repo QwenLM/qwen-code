@@ -107,18 +107,28 @@ export class RemoteInputWatcher {
     debugLogger.debug(`RemoteInput: watching ${this.filePath}`);
   }
 
-  private readNewLines(): void {
-    if (this.reading) return;
+  /**
+   * Manually trigger a check for new input. Returns a promise that resolves
+   * once any new lines have been read and processed. In production the
+   * `watchFile` poll calls this automatically; tests can call it directly
+   * to avoid depending on filesystem-polling timing.
+   */
+  checkForNewInput(): Promise<void> {
+    return this.readNewLines();
+  }
+
+  private readNewLines(): Promise<void> {
+    if (!this.active || this.reading) return Promise.resolve();
 
     let currentSize: number;
     try {
       const stat = statSync(this.filePath);
       currentSize = stat.size;
     } catch {
-      return;
+      return Promise.resolve();
     }
 
-    if (currentSize <= this.bytesRead) return;
+    if (currentSize <= this.bytesRead) return Promise.resolve();
 
     this.reading = true;
     const stream = createReadStream(this.filePath, {
@@ -166,10 +176,13 @@ export class RemoteInputWatcher {
       }
     });
 
-    rl.on('close', () => {
-      this.bytesRead = currentSize;
-      this.reading = false;
-      this.processQueue();
+    return new Promise<void>((resolve) => {
+      rl.on('close', () => {
+        this.bytesRead = currentSize;
+        this.reading = false;
+        this.processQueue();
+        resolve();
+      });
     });
   }
 
