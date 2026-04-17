@@ -11,8 +11,6 @@ on:
 jobs:
   stale:
     runs-on: 'ubuntu-latest'
-    if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' }}
     permissions:
       issues: 'write'
       pull-requests: 'write'
@@ -44,4 +42,6 @@ jobs:
           exempt-pr-labels: 'pinned,security,status/blocked,status/on-hold,status/ready-for-merge'
           remove-stale-when-updated: true
           ascending: true
+          # Cap per-run API operations to stay well under GitHub's hourly rate limit
+          # and give the current PR backlog (~150) enough headroom across a few runs.
           operations-per-run: 100
