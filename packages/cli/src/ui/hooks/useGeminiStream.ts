@@ -606,10 +606,15 @@ export const useGeminiStream = (
 
         localQueryToSendToGemini = trimmedQuery;
 
-        addItem(
-          { type: MessageType.USER, text: trimmedQuery },
-          userMessageTimestamp,
-        );
+        // Cron prompts are already rendered as a `● Cron: …` notification by
+        // the queue drain, so skip the user-message history item to avoid
+        // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
+        if (submitType !== SendMessageType.Cron) {
+          addItem(
+            { type: MessageType.USER, text: trimmedQuery },
+            userMessageTimestamp,
+          );
+        }
 
         // Handle @-commands (which might involve tool calls)
         if (isAtCommand(trimmedQuery)) {
