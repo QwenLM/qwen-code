@@ -2486,5 +2486,56 @@ describe('GeminiChat', async () => {
       // recovery message.
       expect(lastEntry.role).toBe('model');
     });
+
+    it('should stop recovery mid-loop when a later iteration emits functionCall', async () => {
+      // Covers the cross-iteration guard: iter 1 returns plain text (recovery
+      // proceeds), iter 2 returns a functionCall (recovery must break before
+      // iter 3 pushes another user turn after the functionCall).
+      const streams = [
+        makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'recovery 1 text' }], 'MAX_TOKENS')]),
+        makeStream([
+          makeChunk(
+            [
+              {
+                functionCall: { name: 'write_file', args: { file_path: '/x' } },
+              },
+            ],
+            'MAX_TOKENS',
+          ),
+        ]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'mixed recovery' },
+        'prompt-recovery-mixed',
+      );
+
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // Should call: 1 initial + 1 escalation + 2 recovery (iter 1 text,
+      // iter 2 functionCall) = 4 total. The guard fires at the start of
+      // iter 3 before any further API call.
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        4,
+      );
+
+      // History must end on the functionCall model turn (not a dangling
+      // recovery user turn).
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      expect(lastEntry.role).toBe('model');
+      expect(
+        lastEntry.parts?.some((p) => 'functionCall' in p && p.functionCall),
+      ).toBe(true);
+    });
   });
 });
