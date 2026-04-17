@@ -570,19 +570,29 @@ export async function runNonInteractive(
           // drain. A new drain starts only after the previous one finishes
           // its queue, which prevents overlapping turns when cron jobs fire
           // while an earlier queued item is still streaming.
+          //
+          // The null-clearing is attached via `.finally()` on the outer
+          // promise rather than inside the async body. When the queue is
+          // empty the async body runs to completion synchronously (no
+          // awaits) — an inner `finally { drainPromise = null }` would
+          // therefore fire BEFORE the outer `drainPromise = p` assignment,
+          // leaving drainPromise stuck holding a resolved Promise forever
+          // and making every future call return immediately without ever
+          // draining. Clearing via `p.finally()` schedules the null as a
+          // microtask that runs after the outer assignment.
           let drainPromise: Promise<void> | null = null;
           const drainLocalQueue = (): Promise<void> => {
             if (drainPromise) return drainPromise;
-            drainPromise = (async () => {
-              try {
-                while (localQueue.length > 0) {
-                  await drainOneItem();
-                }
-              } finally {
-                drainPromise = null;
+            const p = (async () => {
+              while (localQueue.length > 0) {
+                await drainOneItem();
               }
             })();
-            return drainPromise;
+            drainPromise = p;
+            void p.finally(() => {
+              if (drainPromise === p) drainPromise = null;
+            });
+            return p;
           };
 
           // Start cron scheduler — fires enqueue onto the shared queue.
