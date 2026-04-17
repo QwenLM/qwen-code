@@ -389,6 +389,16 @@ Use hooks.`,
       expect(reg.matchAndConsume('/other/foo.ts')).toBeUndefined();
     });
 
+    it('rejects the exact `..` relative path (parent of projectRoot)', () => {
+      // Pattern matches literal '..' — pathological but defensive
+      const reg = new ConditionalRulesRegistry(
+        [rule('/r/dot.md', ['..'], 'Parent rule.')],
+        '/project',
+      );
+      // Exact parent directory (unlikely but possible input)
+      expect(reg.matchAndConsume('/')).toBeUndefined();
+    });
+
     it('resolves relative paths against projectRoot', () => {
       const reg = new ConditionalRulesRegistry(
         [rule('/r/ts.md', ['src/**/*.ts'], 'Strict.')],

@@ -141,8 +141,10 @@ async function loadRulesFromDir(
   const allPaths = await collectMdFiles(rulesDir);
   if (allPaths.length === 0) return [];
 
-  // Sort for deterministic ordering
-  allPaths.sort((a, b) => a.localeCompare(b));
+  // Sort for deterministic ordering. Use Array.sort() default (UTF-16 code
+  // point comparison) rather than localeCompare — locale-dependent sorting
+  // can produce different orders on machines with different locales.
+  allPaths.sort();
 
   // Compile exclude matchers once
   const excludeMatchers =
@@ -251,9 +253,12 @@ export class ConditionalRulesRegistry {
       .relative(this.projectRoot, absolutePath)
       .replace(/\\/g, '/');
 
-    // Paths outside the project root produce `../` prefixes — don't inject
-    // rules for files outside the project.
-    if (relativePath.startsWith('../')) return undefined;
+    // Paths outside the project root produce `../` prefixes (or exact `..`
+    // when the target equals the parent of projectRoot) — don't inject rules
+    // for files outside the project boundary.
+    if (relativePath === '..' || relativePath.startsWith('../')) {
+      return undefined;
+    }
 
     const newMatches = this.compiledRules.filter(({ rule, matchers }) => {
       if (this.injected.has(rule.filePath)) return false;
