@@ -133,6 +133,7 @@ import {
 } from '../services/sessionService.js';
 import { randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
 import {
   createDebugLogger,
   setDebugLogSession,
@@ -477,6 +478,8 @@ export interface ConfigParameters {
   projectHooks?: Record<string, unknown>;
 
   hooks?: Record<string, unknown>;
+  /** Glob patterns to exclude from .qwen/rules/ loading. */
+  contextRuleExcludes?: string[];
   /** Warnings generated during configuration resolution */
   warnings?: string[];
   /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
@@ -574,6 +577,8 @@ export class Config {
   private userMemory: string;
   private sdkMode: boolean;
   private geminiMdFileCount: number;
+  private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
+  private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
@@ -709,6 +714,7 @@ export class Config {
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
+    this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.accessibility = params.accessibility ?? {};
     this.telemetrySettings = {
@@ -1076,16 +1082,18 @@ export class Config {
   }
 
   async refreshHierarchicalMemory(): Promise<void> {
-    const { memoryContent, fileCount } = await loadServerHierarchicalMemory(
-      this.getWorkingDir(),
-      this.shouldLoadMemoryFromIncludeDirectories()
-        ? this.getWorkspaceContext().getDirectories()
-        : [],
-      this.getFileService(),
-      this.getExtensionContextFilePaths(),
-      this.isTrustedFolder(),
-      this.getImportFormat(),
-    );
+    const { memoryContent, fileCount, conditionalRules, projectRoot } =
+      await loadServerHierarchicalMemory(
+        this.getWorkingDir(),
+        this.shouldLoadMemoryFromIncludeDirectories()
+          ? this.getWorkspaceContext().getDirectories()
+          : [],
+        this.getFileService(),
+        this.getExtensionContextFilePaths(),
+        this.isTrustedFolder(),
+        this.getImportFormat(),
+        this.contextRuleExcludes,
+      );
     if (this.getManagedAutoMemoryEnabled()) {
       const managedAutoMemoryIndex = await readAutoMemoryIndex(
         this.getProjectRoot(),
@@ -1101,6 +1109,29 @@ export class Config {
       this.setUserMemory(memoryContent);
     }
     this.setGeminiMdFileCount(fileCount);
+    this.conditionalRulesRegistry = new ConditionalRulesRegistry(
+      conditionalRules,
+      projectRoot,
+    );
+  }
+
+  getConditionalRulesRegistry(): ConditionalRulesRegistry | undefined {
+    return this.conditionalRulesRegistry;
+  }
+
+  /**
+   * Update the conditional rules registry. Called after external refresh
+   * paths (e.g. /memory refresh or /directory add) that bypass
+   * refreshHierarchicalMemory().
+   */
+  setConditionalRulesRegistry(
+    registry: ConditionalRulesRegistry | undefined,
+  ): void {
+    this.conditionalRulesRegistry = registry;
+  }
+
+  getContextRuleExcludes(): string[] {
+    return this.contextRuleExcludes;
   }
 
   getContentGenerator(): ContentGenerator {

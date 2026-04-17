@@ -12,6 +12,7 @@ import {
   FileDiscoveryService,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
+  type LoadServerHierarchicalMemoryResponse,
   setGeminiMdFilename as setServerGeminiMdFilename,
   resolveTelemetrySettings,
   FatalConfigError,
@@ -666,7 +667,8 @@ export async function loadHierarchicalGeminiMemory(
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
-): Promise<{ memoryContent: string; fileCount: number }> {
+  contextRuleExcludes: string[] = [],
+): Promise<LoadServerHierarchicalMemoryResponse> {
   // FIX: Use real, canonical paths for a reliable comparison to handle symlinks.
   const realCwd = fs.realpathSync(path.resolve(currentWorkingDirectory));
   const realHome = fs.realpathSync(path.resolve(homedir()));
@@ -684,6 +686,7 @@ export async function loadHierarchicalGeminiMemory(
     extensionContextFilePaths,
     folderTrust,
     memoryImportFormat,
+    contextRuleExcludes,
   );
 }
 

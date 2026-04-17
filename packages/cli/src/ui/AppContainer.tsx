@@ -52,6 +52,7 @@ import {
   type SpeculationState,
   IDLE_SPECULATION,
   ApprovalMode,
+  ConditionalRulesRegistry,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
@@ -688,19 +689,24 @@ export const AppContainer = (props: AppContainerProps) => {
       Date.now(),
     );
     try {
-      const { memoryContent, fileCount } = await loadHierarchicalGeminiMemory(
-        process.cwd(),
-        settings.merged.context?.loadFromIncludeDirectories
-          ? config.getWorkspaceContext().getDirectories()
-          : [],
-        config.getFileService(),
-        config.getExtensionContextFilePaths(),
-        config.isTrustedFolder(),
-        settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
-      );
+      const { memoryContent, fileCount, conditionalRules, projectRoot } =
+        await loadHierarchicalGeminiMemory(
+          process.cwd(),
+          settings.merged.context?.loadFromIncludeDirectories
+            ? config.getWorkspaceContext().getDirectories()
+            : [],
+          config.getFileService(),
+          config.getExtensionContextFilePaths(),
+          config.isTrustedFolder(),
+          settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
+          config.getContextRuleExcludes(),
+        );
 
       config.setUserMemory(memoryContent);
       config.setGeminiMdFileCount(fileCount);
+      config.setConditionalRulesRegistry(
+        new ConditionalRulesRegistry(conditionalRules, projectRoot),
+      );
       setGeminiMdFileCount(fileCount);
 
       historyManager.addItem(
