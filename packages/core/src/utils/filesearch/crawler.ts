@@ -156,6 +156,29 @@ function normalizePath(p: string): string {
   return toPosixPath(p);
 }
 
+function normalizeForComparison(p: string): string {
+  const normalized = normalizePath(p);
+  if (/^[A-Z]:/.test(normalized)) {
+    return `${normalized[0].toLowerCase()}${normalized.slice(1)}`;
+  }
+  return normalized;
+}
+
+function canonicalizePath(p: string): string {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+function getPosixRelative(from: string, to: string): string {
+  const canonicalFrom = normalizeForComparison(canonicalizePath(from));
+  const canonicalTo = normalizeForComparison(canonicalizePath(to));
+  const relative = path.posix.relative(canonicalFrom, canonicalTo);
+  return relative === '' ? '.' : relative;
+}
+
 function getEntryDepth(entry: string): number {
   if (entry === '.') {
     return -1;
@@ -290,11 +313,8 @@ async function crawlWithGitLsFiles(
     return { success: false, files: [], isGitRepo: false };
   }
 
-  const posixCwd = normalizePath(cwd);
-  const posixCrawlDir = normalizePath(crawlDirectory);
-  const relativeToCrawlDir = path.posix.relative(posixCwd, posixCrawlDir);
-
-  const relativeToGitRoot = path.posix.relative(gitRoot, posixCrawlDir);
+  const relativeToCrawlDir = getPosixRelative(cwd, crawlDirectory);
+  const relativeToGitRoot = getPosixRelative(gitRoot, crawlDirectory);
 
   const trackedArgs = ['ls-files', '--cached'];
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
@@ -393,9 +413,7 @@ async function crawlWithRipgrep(
     return { success: false, files: [] };
   }
 
-  const posixCwd = normalizePath(cwd);
-  const posixCrawlDir = normalizePath(crawlDirectory);
-  const relativeToCrawlDir = path.posix.relative(posixCwd, posixCrawlDir);
+  const relativeToCrawlDir = getPosixRelative(cwd, crawlDirectory);
 
   const fileSet = new Set<string>();
   let count = 0;
@@ -416,9 +434,13 @@ async function crawlWithRipgrep(
 }
 
 async function crawlWithFdir(options: CrawlOptions): Promise<string[]> {
-  const posixCwd = toPosixPath(options.cwd);
-  const posixCrawlDirectory = toPosixPath(options.crawlDirectory);
-  const relativeToCrawlDir = path.posix.relative(posixCwd, posixCrawlDirectory);
+  const relativeToCrawlDir = getPosixRelative(
+    options.cwd,
+    options.crawlDirectory,
+  );
+  const posixCrawlDirectory = normalizePath(
+    canonicalizePath(options.crawlDirectory),
+  );
 
   let results: string[];
   try {

@@ -45,6 +45,20 @@ async function runExecFile(
 async function initGitRepo(dir: string): Promise<void> {
   await runExecFile('git', ['init'], dir);
   await runExecFile('git', ['add', '.'], dir);
+  await runExecFile(
+    'git',
+    [
+      '-c',
+      'user.name=Qwen Test',
+      '-c',
+      'user.email=qwen-test@example.com',
+      'commit',
+      '--no-gpg-sign',
+      '-m',
+      'init',
+    ],
+    dir,
+  );
 }
 
 describe('crawler', () => {
