@@ -226,8 +226,6 @@ export interface AgentPathParams {
   systemPrompt: string;
   /** Model override (defaults to config.getFastModel() ?? config.getModel()). */
   model?: string;
-  /** Sampling temperature (default: 0 for deterministic output). */
-  temp?: number;
   /** Maximum number of agent turns (default: unlimited). */
   maxTurns?: number;
   /** Maximum execution time in minutes (default: unlimited). */
@@ -244,11 +242,6 @@ export interface AgentPathParams {
    * Must end with a `model` role entry; call buildAgentHistory() to enforce this.
    */
   extraHistory?: Content[];
-  /**
-   * Skip env bootstrap injection in createChat() when extraHistory already
-   * contains the env context from the parent conversation.
-   */
-  skipEnvHistory?: boolean;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
 }

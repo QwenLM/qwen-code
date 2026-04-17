@@ -5,14 +5,21 @@
 The status line lets you run a shell command whose output is displayed in the footer's left section. The command receives structured JSON context via stdin, so it can show session-aware information like the current model, token usage, git branch, or anything else you can script.
 
 ```
-With status line (default approval mode — 1 row):
+Single-line status (default approval mode — 1 row):
 ┌─────────────────────────────────────────────────────────────────┐
 │  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line
 └─────────────────────────────────────────────────────────────────┘
 
-With status line + non-default mode (2 rows):
+Multi-line status (up to 2 lines — 2 rows):
 ┌─────────────────────────────────────────────────────────────────┐
-│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line
+│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line 1
+│  ████████░░░░░░░░░░ 34% context                                │  ← status line 2
+└─────────────────────────────────────────────────────────────────┘
+
+Multi-line status + non-default mode (3 rows max):
+┌─────────────────────────────────────────────────────────────────┐
+│  user@host ~/project (main) ctx:34%   🔒 docker | Debug | 67%  │  ← status line 1
+│  ████████░░░░░░░░░░ 34% context                                │  ← status line 2
 │  auto-accept edits (shift + tab to cycle)                       │  ← mode indicator
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -53,10 +60,10 @@ Add a `statusLine` object under the `ui` key in `~/.qwen/settings.json`:
 }
 ```
 
-| Field     | Type        | Required | Description                                                                           |
-| --------- | ----------- | -------- | ------------------------------------------------------------------------------------- |
-| `type`    | `"command"` | Yes      | Must be `"command"`                                                                   |
-| `command` | string      | Yes      | Shell command to execute. Receives JSON via stdin, first line of stdout is displayed. |
+| Field     | Type        | Required | Description                                                                             |
+| --------- | ----------- | -------- | --------------------------------------------------------------------------------------- |
+| `type`    | `"command"` | Yes      | Must be `"command"`                                                                     |
+| `command` | string      | Yes      | Shell command to execute. Receives JSON via stdin, stdout is displayed (up to 2 lines). |
 
 ## JSON input
 
@@ -220,7 +227,7 @@ Then reference it in settings:
 
 - **Update triggers**: The status line updates when the model changes, a new message is sent (token count changes), vim mode is toggled, git branch changes, tool calls complete, or file changes occur. Updates are debounced (300ms).
 - **Timeout**: Commands that take longer than 5 seconds are killed. The status line clears on failure.
-- **Output**: Only the first line of stdout is used. The text is rendered with dimmed colors in the footer's left section and truncated if it exceeds the available width.
+- **Output**: Multi-line output is supported (up to 2 lines; extra lines are discarded). Each line is rendered as a separate row with dimmed colors in the footer's left section. Lines that exceed the available width are truncated.
 - **Hot reload**: Changes to `ui.statusLine` in settings take effect immediately — no restart required.
 - **Shell**: Commands run via `/bin/sh` on macOS/Linux. On Windows, `cmd.exe` is used by default — wrap POSIX commands with `bash -c "..."` or point to a bash script (e.g. `bash ~/.qwen/statusline-command.sh`).
 - **Removal**: Delete the `ui.statusLine` key from settings to disable. The "? for shortcuts" hint returns.

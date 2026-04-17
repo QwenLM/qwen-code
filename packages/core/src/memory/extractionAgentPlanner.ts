@@ -324,7 +324,6 @@ export async function runAutoMemoryExtractionByAgent(
       ToolNames.EDIT,
     ],
     extraHistory,
-    skipEnvHistory: true,
   });
 
   if (result.status !== 'completed') {
