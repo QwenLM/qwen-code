@@ -136,7 +136,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // MiniMax
   // -------------------
-  [/^minimax-m2\.7/i, LIMITS['200k']], // MiniMax-M2.7: 200K
+  [/^minimax-m2\.7/i, LIMITS['200k']], // MiniMax-M2.7 / M2.7-highspeed: 200K
   [/^minimax-m2\.5/i, LIMITS['192k']], // MiniMax-M2.5: 196,608
   [/^minimax-/i, LIMITS['200k']], // MiniMax fallback: 200K
 
@@ -186,7 +186,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^glm-4\.7/, LIMITS['16k']],
 
   // MiniMax
-  [/^minimax-m2\.7/i, LIMITS['64k']], // MiniMax-M2.7: 64K output
+  [/^minimax-m2\.7/i, LIMITS['64k']], // MiniMax-M2.7 / M2.7-highspeed: 64K output
   [/^minimax-m2\.5/i, LIMITS['64k']],
 
   // Kimi

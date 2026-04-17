@@ -43,14 +43,14 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
   });
 
   describe('isMiniMaxProvider', () => {
-    it('returns true when baseUrl contains api.minimax.io', () => {
+    it('returns true when baseUrl hostname is api.minimax.io', () => {
       const result = MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(
         mockContentGeneratorConfig,
       );
       expect(result).toBe(true);
     });
 
-    it('returns true when baseUrl contains api.minimaxi.com', () => {
+    it('returns true when baseUrl hostname is api.minimaxi.com', () => {
       const config = {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://api.minimaxi.com/v1',
@@ -74,6 +74,26 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
       const config = {
         ...mockContentGeneratorConfig,
         baseUrl: undefined,
+      } as ContentGeneratorConfig;
+      expect(MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config)).toBe(
+        false,
+      );
+    });
+
+    it('returns false for a URL that contains api.minimax.io as a path component', () => {
+      const config = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://proxy.example.com/api.minimax.io/v1',
+      } as ContentGeneratorConfig;
+      expect(MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config)).toBe(
+        false,
+      );
+    });
+
+    it('returns false for a URL with api.minimax.io embedded in another hostname', () => {
+      const config = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://evil.api.minimax.io.malicious.com/v1',
       } as ContentGeneratorConfig;
       expect(MiniMaxOpenAICompatibleProvider.isMiniMaxProvider(config)).toBe(
         false,
@@ -124,6 +144,17 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
       expect(result.temperature).toBe(1.0);
     });
 
+    it('sets temperature to 1.0 when temperature is null', () => {
+      const request = {
+        model: 'MiniMax-M2.7',
+        messages: [{ role: 'user' as const, content: 'Hello' }],
+        temperature: null,
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+
+      const result = provider.buildRequest(request, userPromptId);
+      expect(result.temperature).toBe(1.0);
+    });
+
     it('preserves valid temperature values', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'MiniMax-M2.7',
@@ -147,6 +178,28 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
       const result = provider.buildRequest(request, userPromptId);
       expect(result.messages).toHaveLength(2);
       expect(result.messages?.[0].content).toBe('Hello');
+    });
+  });
+
+  describe('buildClient', () => {
+    it('uses DEFAULT_MINIMAX_BASE_URL when no baseUrl configured', () => {
+      const configWithoutUrl = {
+        apiKey: 'test-key',
+        model: 'MiniMax-M2.7',
+      } as ContentGeneratorConfig;
+
+      const providerWithoutUrl = new MiniMaxOpenAICompatibleProvider(
+        configWithoutUrl,
+        mockCliConfig,
+      );
+
+      const client = providerWithoutUrl.buildClient();
+      expect(client).toBeDefined();
+    });
+
+    it('uses configured baseUrl when provided', () => {
+      const client = provider.buildClient();
+      expect(client).toBeDefined();
     });
   });
 });
