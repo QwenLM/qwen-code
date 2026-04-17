@@ -6,7 +6,10 @@
 
 import * as fs from 'node:fs/promises';
 import { getAutoMemoryIndexPath, getAutoMemoryMetadataPath } from './paths.js';
-import { scanAutoMemoryTopicDocuments, type ScannedAutoMemoryDocument } from './scan.js';
+import {
+  scanAutoMemoryTopicDocuments,
+  type ScannedAutoMemoryDocument,
+} from './scan.js';
 import type { AutoMemoryMetadata } from './types.js';
 
 const MAX_INDEX_LINE_CHARS = 150;
@@ -22,7 +25,10 @@ function truncateIndexLine(text: string): string {
 
 export function buildManagedAutoMemoryIndex(
   docs: ScannedAutoMemoryDocument[],
-  _metadata?: Pick<AutoMemoryMetadata, 'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'>,
+  _metadata?: Pick<
+    AutoMemoryMetadata,
+    'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'
+  >,
 ): string {
   const raw = docs
     .map((doc) =>
@@ -34,7 +40,9 @@ export function buildManagedAutoMemoryIndex(
 
   const lines = raw.split('\n');
   const wasLineTruncated = lines.length > MAX_INDEX_LINES;
-  let truncated = wasLineTruncated ? lines.slice(0, MAX_INDEX_LINES).join('\n') : raw;
+  let truncated = wasLineTruncated
+    ? lines.slice(0, MAX_INDEX_LINES).join('\n')
+    : raw;
 
   if (truncated.length > MAX_INDEX_BYTES) {
     const cutAt = truncated.lastIndexOf('\n', MAX_INDEX_BYTES);
@@ -52,7 +60,10 @@ async function readAutoMemoryMetadata(
   projectRoot: string,
 ): Promise<AutoMemoryMetadata | undefined> {
   try {
-    const content = await fs.readFile(getAutoMemoryMetadataPath(projectRoot), 'utf-8');
+    const content = await fs.readFile(
+      getAutoMemoryMetadataPath(projectRoot),
+      'utf-8',
+    );
     return JSON.parse(content) as AutoMemoryMetadata;
   } catch {
     return undefined;

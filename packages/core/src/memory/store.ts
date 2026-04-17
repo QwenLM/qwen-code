@@ -93,6 +93,4 @@ export async function readAutoMemoryIndex(
   }
 }
 
-export {
-  AUTO_MEMORY_INDEX_FILENAME,
-};
+export { AUTO_MEMORY_INDEX_FILENAME };
