@@ -112,6 +112,20 @@ Also visible.
       expect(rule!.content).toContain('Also visible.');
     });
 
+    it('strips adjacent and residual HTML comment markers', () => {
+      // Defensive cases that previously left residual <!-- in the output,
+      // flagged by CodeQL as incomplete multi-character sanitization.
+      const content = `---
+description: Test
+---
+A<!-- one --><!-- two -->B<!--unclosed
+`;
+      const rule = parseRuleFile(content, '/test/rule.md');
+      expect(rule!.content).not.toContain('<!--');
+      expect(rule!.content).toContain('A');
+      expect(rule!.content).toContain('B');
+    });
+
     it('returns null for empty body after stripping', () => {
       const content = `---
 paths:

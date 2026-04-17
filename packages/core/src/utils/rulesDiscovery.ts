@@ -52,7 +52,19 @@ export interface LoadRulesResponse {
 const FRONTMATTER_REGEX = /^---\n([\s\S]*?)\n---(?:\n|$)([\s\S]*)$/;
 
 function stripHtmlComments(content: string): string {
-  return content.replace(/<!--[\s\S]*?-->/g, '');
+  // Iteratively strip complete <!-- ... --> pairs so adjacent or
+  // malformed-looking sequences (e.g. <!-- A --><!-- B -->) fully clear.
+  let result = content;
+  let prev: string;
+  do {
+    prev = result;
+    result = prev.replace(/<!--[\s\S]*?-->/g, '');
+  } while (result !== prev);
+  // Strip any residual unclosed <!-- markers. Not a security issue in
+  // system-prompt context (output isn't rendered as HTML), but leaving
+  // them would waste tokens and trip static analyzers (CodeQL flags
+  // "incomplete multi-character sanitization" without this step).
+  return result.replace(/<!--/g, '');
 }
 
 /**
