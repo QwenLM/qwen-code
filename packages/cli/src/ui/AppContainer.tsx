@@ -883,29 +883,34 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [dualOutput, pendingToolCalls]);
 
+  // Keep latest state in refs so the confirmation handler (registered once)
+  // always reads current values without needing re-registration.
+  const pendingToolCallsRef = useRef(pendingToolCalls);
+  pendingToolCallsRef.current = pendingToolCalls;
+  const dualOutputRef = useRef(dualOutput);
+  dualOutputRef.current = dualOutput;
+
   // Route confirmation_response commands written to --input-file back into
-  // the tool's onConfirm handler. When the request_id is unknown or the
-  // underlying tool call has already resolved, reply with a control_error
-  // on the output channel so the consumer can surface or retry rather than
-  // waiting forever for an implicit ack.
+  // the tool's onConfirm handler. Registered once (deps: [remoteInput]) to
+  // avoid teardown/re-registration churn on every pendingToolCalls change.
   useEffect(() => {
     if (!remoteInput) return;
     remoteInput.setConfirmationHandler(
       (requestId: string, allowed: boolean) => {
         const callId = confirmRequestMap.current.get(requestId);
         if (!callId) {
-          dualOutput?.emitControlError(
+          dualOutputRef.current?.emitControlError(
             requestId,
             'unknown request_id (already resolved, cancelled, or never issued)',
           );
           return;
         }
-        const tc = pendingToolCalls.find(
+        const tc = pendingToolCallsRef.current.find(
           (t) =>
             t.request.callId === callId && t.status === 'awaiting_approval',
         );
         if (!tc) {
-          dualOutput?.emitControlError(
+          dualOutputRef.current?.emitControlError(
             requestId,
             'tool call is no longer awaiting approval',
           );
@@ -913,7 +918,7 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         const waitingTc = tc as WaitingToolCall;
         if (!waitingTc.confirmationDetails?.onConfirm) {
-          dualOutput?.emitControlError(
+          dualOutputRef.current?.emitControlError(
             requestId,
             'tool call has no onConfirm handler',
           );
@@ -924,16 +929,17 @@ export const AppContainer = (props: AppContainerProps) => {
             ? ToolConfirmationOutcome.ProceedOnce
             : ToolConfirmationOutcome.Cancel,
         );
-        confirmRequestMap.current.delete(requestId);
-        confirmCallIdMap.current.delete(callId);
-        confirmEmitted.current.delete(callId);
+        // Do NOT clean up maps here — let the mirror useEffect (line ~870)
+        // detect the state transition and emit control_response + clean up,
+        // keeping the emission path symmetric for both TUI-native and
+        // external-initiated resolutions.
       },
     );
 
     return () => {
       remoteInput.setConfirmationHandler(() => {});
     };
-  }, [remoteInput, pendingToolCalls, dualOutput]);
+  }, [remoteInput]);
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(

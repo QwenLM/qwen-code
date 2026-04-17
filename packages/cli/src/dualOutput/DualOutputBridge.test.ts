@@ -65,6 +65,21 @@ describe('DualOutputBridge', () => {
   });
 
   describe('--json-file output', () => {
+    it('creates the file automatically when it does not exist (ENOENT fallback)', async () => {
+      const newFile = path.join(tmpDir, 'does-not-exist.jsonl');
+      // newFile is NOT pre-created — tests the ENOENT fallback path
+      bridge = new DualOutputBridge(config, { filePath: newFile });
+      bridge.shutdown();
+      await new Promise((r) => setTimeout(r, 10));
+
+      const lines = readJsonl(newFile);
+      expect(lines.length).toBeGreaterThan(0);
+      expect(lines[0]).toMatchObject({
+        type: 'system',
+        subtype: 'session_start',
+      });
+    });
+
     it('emits a session_start event immediately on construction', async () => {
       bridge = new DualOutputBridge(config, { filePath: target });
       bridge.shutdown();

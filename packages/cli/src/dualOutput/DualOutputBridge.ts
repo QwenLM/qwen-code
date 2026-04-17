@@ -116,8 +116,10 @@ export class DualOutputBridge {
         );
         this.stream = createWriteStream('', { fd });
       } catch (err) {
-        // ENXIO: FIFO has no reader yet — fall back to blocking open
-        if ((err as NodeJS.ErrnoException).code === 'ENXIO') {
+        const code = (err as NodeJS.ErrnoException).code;
+        // ENXIO: FIFO has no reader yet — fall back to blocking open.
+        // ENOENT: regular file doesn't exist yet — create it.
+        if (code === 'ENXIO' || code === 'ENOENT') {
           this.stream = createWriteStream(target.filePath, { flags: 'w' });
         } else {
           throw err;
@@ -305,8 +307,8 @@ export class DualOutputBridge {
     this.active = false;
     try {
       this.stream.end();
-    } catch {
-      // ignore cleanup errors
+    } catch (err) {
+      debugLogger.debug('DualOutput: stream end error during shutdown:', err);
     }
   }
 }

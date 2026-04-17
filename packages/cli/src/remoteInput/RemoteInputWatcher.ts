@@ -51,6 +51,7 @@ export class RemoteInputWatcher {
   private processing = false;
   private active = true;
   private bytesRead = 0;
+  private reading = false;
   private filePath: string;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -105,6 +106,8 @@ export class RemoteInputWatcher {
   }
 
   private readNewLines(): void {
+    if (this.reading) return;
+
     let currentSize: number;
     try {
       const stat = statSync(this.filePath);
@@ -115,6 +118,7 @@ export class RemoteInputWatcher {
 
     if (currentSize <= this.bytesRead) return;
 
+    this.reading = true;
     const stream = createReadStream(this.filePath, {
       start: this.bytesRead,
       encoding: 'utf-8',
@@ -162,6 +166,7 @@ export class RemoteInputWatcher {
 
     rl.on('close', () => {
       this.bytesRead = currentSize;
+      this.reading = false;
       this.processQueue();
     });
   }
