@@ -1145,20 +1145,26 @@ export const useGeminiStream = (
             loopDetectedRef.current = true;
             break;
           case ServerGeminiEventType.Retry:
-            // Clear any pending partial content from the failed attempt
-            if (pendingHistoryItemRef.current) {
-              setPendingHistoryItem(null);
-            }
-            // Discard tool call requests from the truncated/failed attempt
-            // to prevent duplicate execution after escalation or recovery.
-            toolCallRequests.length = 0;
-            // For fresh restarts (escalation), reset buffers to avoid
-            // duplicating text from the discarded attempt. For continuations
-            // (recovery), keep buffers so the model's continuation appends.
+            // On fresh restart (escalation / rate-limit / invalid stream),
+            // clear pending content and buffers to discard the failed attempt.
+            // On continuation (recovery), keep the pending gemini item AND
+            // buffers so the model's continuation text appends to them —
+            // otherwise handleContentEvent would see a null pending item,
+            // create a fresh one, and reset the buffer to just the new chunk,
+            // losing the partial text we meant to preserve.
             if (!event.isContinuation) {
+              if (pendingHistoryItemRef.current) {
+                setPendingHistoryItem(null);
+              }
               geminiMessageBuffer = '';
               thoughtBuffer = '';
             }
+            // Always discard tool call requests from the truncated/failed
+            // attempt to prevent duplicate execution after escalation or
+            // recovery. The recovery path now skips turns that already
+            // contain a functionCall (see geminiChat.ts), so this only
+            // clears stale requests from pre-RETRY accumulation.
+            toolCallRequests.length = 0;
             // Show retry info if available (rate-limit / throttling errors)
             if (event.retryInfo) {
               startRetryCountdown(event.retryInfo);

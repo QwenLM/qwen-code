@@ -581,6 +581,23 @@ export class GeminiChat {
             escalatedFinishReason === FinishReason.MAX_TOKENS &&
             recoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
           ) {
+            // Skip recovery when the truncated turn already contains a
+            // functionCall. Injecting a plain user message between a
+            // functionCall and its functionResponse produces an invalid API
+            // sequence that providers commonly reject. The existing layer-3
+            // tool scheduler fallback handles these cases correctly.
+            const lastEntry = self.history[self.history.length - 1];
+            const hasFunctionCall =
+              lastEntry?.role === 'model' &&
+              lastEntry.parts?.some((p) => p.functionCall) === true;
+            if (hasFunctionCall) {
+              debugLogger.info(
+                'Skipping recovery: truncated turn contains functionCall; ' +
+                  'deferring to tool scheduler fallback.',
+              );
+              break;
+            }
+
             recoveryCount++;
             debugLogger.info(
               `Output still truncated after escalation. ` +
@@ -624,6 +641,22 @@ export class GeminiChat {
               debugLogger.warn(
                 `Recovery attempt ${recoveryCount} failed: ${recoveryError}`,
               );
+              // Emit a synthetic finish-reason chunk so the UI gets a
+              // terminal signal (Finished event) instead of a partial
+              // response with no end marker. Uses STOP because partial
+              // chunks from prior successful iterations are already in
+              // the transcript and represent the user-visible response.
+              yield {
+                type: StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: { role: 'model', parts: [] },
+                      finishReason: FinishReason.STOP,
+                    },
+                  ],
+                } as GenerateContentResponse,
+              };
               break;
             }
           }
