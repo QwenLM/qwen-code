@@ -208,6 +208,11 @@ export type HistoryItemToolGroup = HistoryItemBase & {
   isUserInitiated?: boolean;
 };
 
+export type HistoryItemNotification = HistoryItemBase & {
+  type: 'notification';
+  text: string;
+};
+
 export type HistoryItemUserShell = HistoryItemBase & {
   type: 'user_shell';
   text: string;
@@ -418,6 +423,7 @@ export type HistoryItemStopHookSystemMessage = HistoryItemBase & {
 // Individually exported types extending HistoryItemBase
 export type HistoryItemWithoutId =
   | HistoryItemUser
+  | HistoryItemNotification
   | HistoryItemUserShell
   | HistoryItemGemini
   | HistoryItemGeminiContent

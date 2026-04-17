@@ -1108,7 +1108,7 @@ describe('AgentTool', () => {
         .calls[0]?.[0] as string;
 
       expect(startAgentId).toBe(stopAgentId);
-      expect(startAgentId).toMatch(/^file-search-\d+$/);
+      expect(startAgentId).toMatch(/^file-search-[0-9a-f]{8}$/);
     });
   });
 
@@ -1400,6 +1400,171 @@ describe('AgentTool', () => {
 
       // The onConfirm callback should have cleared pendingConfirmation
       expect(snapshots.some((s) => !s.hasPendingConfirmation)).toBe(true);
+    });
+  });
+
+  describe('Agent-level background: true', () => {
+    let mockAgent: AgentHeadless;
+    let mockContextState: ContextState;
+    let mockRegistry: {
+      register: ReturnType<typeof vi.fn>;
+      complete: ReturnType<typeof vi.fn>;
+      fail: ReturnType<typeof vi.fn>;
+    };
+
+    const bgSubagent: SubagentConfig = {
+      name: 'monitor',
+      description: 'Background monitor agent',
+      systemPrompt: 'You are a monitor.',
+      level: 'project',
+      filePath: '/project/.qwen/agents/monitor.md',
+      background: true,
+    };
+
+    beforeEach(() => {
+      mockAgent = {
+        execute: vi.fn().mockResolvedValue(undefined),
+        getFinalText: vi.fn().mockReturnValue('Monitor done'),
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+        getExecutionSummary: vi.fn().mockReturnValue({}),
+      } as unknown as AgentHeadless;
+
+      mockContextState = { set: vi.fn() } as unknown as ContextState;
+      MockedContextState.mockImplementation(() => mockContextState);
+
+      mockRegistry = {
+        register: vi.fn(),
+        complete: vi.fn(),
+        fail: vi.fn(),
+      };
+
+      vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)[
+        'getBackgroundTaskRegistry'
+      ] = vi.fn().mockReturnValue(mockRegistry);
+
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
+        mockAgent,
+      );
+    });
+
+    it('should run in background when agent definition has background: true', async () => {
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('Background agent launched');
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: 'Start monitor',
+          subagentType: 'monitor',
+          status: 'running',
+        }),
+      );
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('background');
+    });
+
+    it('should run in background when run_in_background is true even without background config', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: true,
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('Background agent launched');
+      expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('should run in foreground when neither flag is set', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).not.toContain('Background agent launched');
+      expect(mockRegistry.register).not.toHaveBeenCalled();
+    });
+
+    it('should allow background in non-interactive mode (headless support)', async () => {
+      vi.mocked(
+        config.isInteractive as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(false);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('Background agent launched');
+      expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('forwards the scheduler-provided callId as toolUseId on the registry entry', async () => {
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      (invocation as unknown as { setCallId: (id: string) => void }).setCallId(
+        'call-xyz-789',
+      );
+      await invocation.execute();
+
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ toolUseId: 'call-xyz-789' }),
+      );
     });
   });
 });
