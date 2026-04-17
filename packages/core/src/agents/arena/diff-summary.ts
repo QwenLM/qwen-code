@@ -11,8 +11,6 @@ import type {
 } from './types.js';
 import { isSuccessStatus } from '../runtime/agent-types.js';
 
-const DIFF_GIT_RE = /^diff --git a\/(.+) b\/(.+)$/;
-
 /**
  * Parse a unified git diff into file-level and aggregate line-change stats.
  */
@@ -43,11 +41,11 @@ export function summarizeUnifiedDiff(
   };
 
   for (const line of diff.split('\n')) {
-    const gitMatch = DIFF_GIT_RE.exec(line);
-    if (gitMatch) {
+    const gitPath = parseDiffGitPath(line);
+    if (gitPath) {
       finishFile();
       current = {
-        path: gitMatch[2] ?? gitMatch[1] ?? 'unknown',
+        path: gitPath,
         additions: 0,
         deletions: 0,
       };
@@ -122,4 +120,24 @@ function normalizeDiffPath(path: string): string {
     return trimmed;
   }
   return trimmed.replace(/^[ab]\//, '');
+}
+
+function parseDiffGitPath(line: string): string | undefined {
+  const prefix = 'diff --git a/';
+  const separator = ' b/';
+  if (!line.startsWith(prefix)) {
+    return undefined;
+  }
+
+  const separatorIndex = line.lastIndexOf(separator);
+  if (separatorIndex < prefix.length) {
+    return undefined;
+  }
+
+  const pathStart = separatorIndex + separator.length;
+  if (pathStart >= line.length) {
+    return undefined;
+  }
+
+  return line.slice(pathStart);
 }

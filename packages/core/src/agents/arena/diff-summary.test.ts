@@ -48,6 +48,23 @@ index 333..444 100644
       deletions: 0,
     });
   });
+
+  it('parses repeated diff header text without relying on regex backtracking', () => {
+    const repeated = Array.from({ length: 200 }, () => 'a b/a').join('');
+    const path = `${repeated}.ts`;
+    const summary = summarizeUnifiedDiff(`diff --git a/${path} b/${path}
+--- a/${path}
++++ b/${path}
+@@ -1 +1 @@
+-old
++new`);
+
+    expect(summary).toEqual({
+      files: [{ path, additions: 1, deletions: 1 }],
+      additions: 1,
+      deletions: 1,
+    });
+  });
 });
 
 describe('buildFallbackApproachSummary', () => {
