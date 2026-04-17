@@ -19,7 +19,7 @@ export const runQwenCodeCommand = 'qwen-code.runQwenCode';
 export const showDiffCommand = 'qwenCode.showDiff';
 export const openChatCommand = 'qwen-code.openChat';
 export const openNewChatTabCommand = 'qwenCode.openNewChatTab';
-export const loginCommand = 'qwen-code.login';
+export const authCommand = 'qwen-code.auth';
 export const focusChatCommand = 'qwen-code.focusChat';
 export const newConversationCommand = 'qwen-code.newConversation';
 export const showLogsCommand = 'qwen-code.showLogs';
@@ -101,15 +101,12 @@ export function registerNewCommands(
   );
 
   disposables.push(
-    vscode.commands.registerCommand(loginCommand, async () => {
-      const providers = getWebViewProviders();
-      if (providers.length > 0) {
-        await providers[providers.length - 1].forceReLogin();
-      } else {
-        vscode.window.showInformationMessage(
-          'Please open Qwen Code chat first before logging in.',
-        );
-      }
+    vscode.commands.registerCommand(authCommand, async () => {
+      // Open VSCode Settings filtered to qwen-code configuration
+      await vscode.commands.executeCommand(
+        'workbench.action.openSettings',
+        '@ext:qwenlm.qwen-code-vscode-ide-companion',
+      );
     }),
   );
 

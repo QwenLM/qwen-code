@@ -111,8 +111,8 @@
         "icon": "./assets/icon.png"
       },
       {
-        "command": "qwen-code.login",
-        "title": "Qwen Code: Login"
+        "command": "qwen-code.auth",
+        "title": "Qwen Code: Auth"
       },
       {
         "command": "qwen-code.focusChat",
@@ -138,8 +138,7 @@
           "when": "qwen.diff.isVisible"
         },
         {
-          "command": "qwen-code.login",
-          "when": "false"
+          "command": "qwen-code.auth"
         }
       ],
       "editor/title": [
@@ -158,6 +157,66 @@
           "group": "navigation"
         }
       ]
+    },
+    "configuration": {
+      "title": "Qwen Code",
+      "properties": {
+        "qwen-code.provider": {
+          "order": 0,
+          "type": "string",
+          "enum": [
+            "coding-plan",
+            "api-key"
+          ],
+          "enumDescriptions": [
+            "Alibaba Cloud Coding Plan — auto-configures all Qwen models",
+            "Manual — add your own model providers below"
+          ],
+          "default": "coding-plan",
+          "markdownDescription": "**Coding Plan**: enter API Key + Region, models are auto-configured.\n\n**API Key**: manually add model providers in the list below."
+        },
+        "qwen-code.apiKey": {
+          "order": 1,
+          "type": "string",
+          "default": "",
+          "markdownDescription": "API key for authentication. Used by Coding Plan or as the default key for manually added providers."
+        },
+        "qwen-code.codingPlanRegion": {
+          "order": 2,
+          "type": "string",
+          "enum": [
+            "china",
+            "global"
+          ],
+          "enumDescriptions": [
+            "China — 阿里云百炼 (aliyun.com)",
+            "Global — Alibaba Cloud (alibabacloud.com)"
+          ],
+          "default": "china",
+          "markdownDescription": "Region for Coding Plan. _(Only used when Provider is `coding-plan`)_"
+        },
+        "qwen-code.modelProviders": {
+          "order": 3,
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "markdownDescription": "Model providers: **model ID** → **base URL**. When using **Coding Plan**, auto-populated after connecting. When using **API Key**, add your own entries.\n\nExample: `gpt-4o` → `https://api.openai.com/v1`"
+        },
+        "qwen-code.baseUrl": {
+          "order": 4,
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Default API base URL for model providers. Individual entries in **Model Providers** can override this."
+        },
+        "qwen-code.model": {
+          "order": 5,
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Active model ID to use. Should match an `id` from your **Model Providers** list above."
+        }
+      }
     },
     "keybindings": [
       {

@@ -165,11 +165,34 @@ export class MessageRouter {
   }
 
   /**
-   * Set login handler
+   * Set auth handler
    */
-  setLoginHandler(handler: () => Promise<void>): void {
-    this.authHandler.setLoginHandler(handler);
-    this.sessionHandler?.setLoginHandler?.(handler);
+  setAuthHandler(handler: () => Promise<void>): void {
+    this.authHandler.setAuthHandler(handler);
+    this.sessionHandler?.setAuthHandler?.(handler);
+  }
+
+  /**
+   * Set connect-with-settings handler.
+   */
+  setConnectWithSettingsHandler(handler: () => Promise<void>): void {
+    this.authHandler.setConnectWithSettingsHandler(handler);
+  }
+
+  /**
+   * Set auth2 handler — interactive auth flow.
+   */
+  setAuth2Handler(
+    handler: (
+      provider: string,
+      region?: string,
+      apiKey?: string,
+      baseUrl?: string,
+      model?: string,
+      modelIds?: string,
+    ) => Promise<void>,
+  ): void {
+    this.authHandler.setAuth2Handler(handler);
   }
 
   /**

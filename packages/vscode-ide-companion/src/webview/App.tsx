@@ -168,9 +168,9 @@ export const App: React.FC = () => {
         // Account group
         const accountGroupItems: CompletionItem[] = [
           {
-            id: 'login',
-            label: 'Login',
-            description: 'Login to Qwen Code',
+            id: 'auth2',
+            label: '/auth2',
+            description: 'Configure Coding Plan or API Key',
             type: 'command',
             group: 'Account',
           },
@@ -582,9 +582,9 @@ export const App: React.FC = () => {
           }
         };
 
-        if (itemId === 'login') {
+        if (itemId === 'auth2') {
           clearTriggerText();
-          vscode.postMessage({ type: 'login', data: {} });
+          vscode.postMessage({ type: 'auth2', data: {} });
           completion.closeCompletion();
           return;
         }
@@ -946,16 +946,23 @@ export const App: React.FC = () => {
       >
         {!hasContent && !isLoading ? (
           isAuthenticated === false ? (
-            <Onboarding
-              onLogin={() => {
-                vscode.postMessage({ type: 'login', data: {} });
-                messageHandling.setWaitingForResponse(
-                  'Logging in to Qwen Code...',
-                );
-              }}
-            />
+            <Onboarding />
           ) : isAuthenticated === null ? (
-            <EmptyState loadingMessage="Checking login status…" />
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <span
+                className="inline-block w-6 h-6 animate-spin rounded-full border-2"
+                style={{
+                  borderColor: 'var(--app-secondary-foreground)',
+                  borderTopColor: 'transparent',
+                }}
+              />
+              <span
+                className="text-sm"
+                style={{ color: 'var(--app-secondary-foreground)' }}
+              >
+                Preparing Qwen Code...
+              </span>
+            </div>
           ) : (
             <EmptyState isAuthenticated />
           )
@@ -979,87 +986,93 @@ export const App: React.FC = () => {
       </div>
 
       {isAuthenticated && (
-        <InputForm
-          inputText={inputText}
-          inputFieldRef={inputFieldRef}
-          isStreaming={messageHandling.isStreaming}
-          isWaitingForResponse={messageHandling.isWaitingForResponse}
-          isComposing={isComposing}
-          editMode={editMode}
-          thinkingEnabled={thinkingEnabled}
-          activeFileName={fileContext.activeFileName}
-          activeSelection={fileContext.activeSelection}
-          skipAutoActiveContext={skipAutoActiveContext}
-          contextUsage={contextUsage}
-          onInputChange={setInputText}
-          onCompositionStart={() => setIsComposing(true)}
-          onCompositionEnd={() => setIsComposing(false)}
-          onKeyDown={() => {}}
-          onSubmit={handleSubmitWithScroll}
-          onCancel={handleCancel}
-          onToggleEditMode={handleToggleEditMode}
-          onToggleThinking={handleToggleThinking}
-          onFocusActiveEditor={fileContext.focusActiveEditor}
-          onToggleSkipAutoActiveContext={() =>
-            setSkipAutoActiveContext((v) => !v)
-          }
-          onShowCommandMenu={async () => {
-            if (inputFieldRef.current) {
-              inputFieldRef.current.focus();
+        <>
+          <InputForm
+            inputText={inputText}
+            inputFieldRef={inputFieldRef}
+            isStreaming={messageHandling.isStreaming}
+            isWaitingForResponse={messageHandling.isWaitingForResponse}
+            isComposing={isComposing}
+            editMode={editMode}
+            thinkingEnabled={thinkingEnabled}
+            activeFileName={fileContext.activeFileName}
+            activeSelection={fileContext.activeSelection}
+            skipAutoActiveContext={skipAutoActiveContext}
+            contextUsage={contextUsage}
+            onInputChange={setInputText}
+            onCompositionStart={() => setIsComposing(true)}
+            onCompositionEnd={() => setIsComposing(false)}
+            onKeyDown={() => {}}
+            onSubmit={handleSubmitWithScroll}
+            onCancel={handleCancel}
+            onToggleEditMode={handleToggleEditMode}
+            onToggleThinking={handleToggleThinking}
+            onFocusActiveEditor={fileContext.focusActiveEditor}
+            onToggleSkipAutoActiveContext={() =>
+              setSkipAutoActiveContext((v) => !v)
+            }
+            onShowCommandMenu={async () => {
+              if (inputFieldRef.current) {
+                inputFieldRef.current.focus();
 
-              const selection = window.getSelection();
-              let position = { top: 0, left: 0 };
+                const selection = window.getSelection();
+                let position = { top: 0, left: 0 };
 
-              if (selection && selection.rangeCount > 0) {
-                try {
-                  const range = selection.getRangeAt(0);
-                  const rangeRect = range.getBoundingClientRect();
-                  if (rangeRect.top > 0 && rangeRect.left > 0) {
-                    position = {
-                      top: rangeRect.top,
-                      left: rangeRect.left,
-                    };
-                  } else {
+                if (selection && selection.rangeCount > 0) {
+                  try {
+                    const range = selection.getRangeAt(0);
+                    const rangeRect = range.getBoundingClientRect();
+                    if (rangeRect.top > 0 && rangeRect.left > 0) {
+                      position = {
+                        top: rangeRect.top,
+                        left: rangeRect.left,
+                      };
+                    } else {
+                      const inputRect =
+                        inputFieldRef.current.getBoundingClientRect();
+                      position = { top: inputRect.top, left: inputRect.left };
+                    }
+                  } catch (error) {
+                    console.error(
+                      '[App] Error getting cursor position:',
+                      error,
+                    );
                     const inputRect =
                       inputFieldRef.current.getBoundingClientRect();
                     position = { top: inputRect.top, left: inputRect.left };
                   }
-                } catch (error) {
-                  console.error('[App] Error getting cursor position:', error);
+                } else {
                   const inputRect =
                     inputFieldRef.current.getBoundingClientRect();
                   position = { top: inputRect.top, left: inputRect.left };
                 }
-              } else {
-                const inputRect = inputFieldRef.current.getBoundingClientRect();
-                position = { top: inputRect.top, left: inputRect.left };
-              }
 
-              await completion.openCompletion('/', '', position);
+                await completion.openCompletion('/', '', position);
+              }
+            }}
+            onAttachContext={handleAttachContextClick}
+            onPaste={handlePaste}
+            completionIsOpen={completion.isOpen}
+            completionItems={completion.items}
+            onCompletionSelect={handleCompletionSelect}
+            onCompletionFill={(item) => handleCompletionSelect(item, true)}
+            onCompletionClose={completion.closeCompletion}
+            canSubmit={canSubmit}
+            extraContent={
+              attachedImages.length > 0 ? (
+                <ImagePreview
+                  images={attachedImages}
+                  onRemove={handleRemoveImage}
+                />
+              ) : null
             }
-          }}
-          onAttachContext={handleAttachContextClick}
-          onPaste={handlePaste}
-          completionIsOpen={completion.isOpen}
-          completionItems={completion.items}
-          onCompletionSelect={handleCompletionSelect}
-          onCompletionFill={(item) => handleCompletionSelect(item, true)}
-          onCompletionClose={completion.closeCompletion}
-          canSubmit={canSubmit}
-          extraContent={
-            attachedImages.length > 0 ? (
-              <ImagePreview
-                images={attachedImages}
-                onRemove={handleRemoveImage}
-              />
-            ) : null
-          }
-          showModelSelector={showModelSelector}
-          availableModels={availableModels}
-          currentModelId={modelInfo?.modelId}
-          onSelectModel={handleModelSelect}
-          onCloseModelSelector={() => setShowModelSelector(false)}
-        />
+            showModelSelector={showModelSelector}
+            availableModels={availableModels}
+            currentModelId={modelInfo?.modelId}
+            onSelectModel={handleModelSelect}
+            onCloseModelSelector={() => setShowModelSelector(false)}
+          />
+        </>
       )}
 
       {isAuthenticated && permissionRequest && (
