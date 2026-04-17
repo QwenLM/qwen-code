@@ -250,6 +250,9 @@ export function getBestSlashCommandMatch(
   const query = partialCommand.toLowerCase();
   let best: { suffix: string; fullCommand: string } | null = null;
   for (const cmd of commands) {
+    // Only suggest model-invocable commands for mid-input completion,
+    // since built-in commands typed in the middle of text won't be executed.
+    if (!cmd.modelInvocable) continue;
     const name = cmd.name.toLowerCase();
     if (name.startsWith(query) && name !== query) {
       const suffix = cmd.name.slice(partialCommand.length);
