@@ -182,9 +182,14 @@ async function loadRulesFromDir(
 export function formatRules(rules: RuleFile[], projectRoot: string): string {
   return rules
     .map((rule) => {
-      const displayPath = path.isAbsolute(rule.filePath)
+      const rawDisplayPath = path.isAbsolute(rule.filePath)
         ? path.relative(projectRoot, rule.filePath)
         : rule.filePath;
+      // Normalize to forward slashes for cross-platform consistency in the
+      // system prompt. Glob patterns in `paths:` use forward slashes, so
+      // display paths should match — otherwise Windows shows `.qwen\rules\foo.md`
+      // and Linux shows `.qwen/rules/foo.md`, which is confusing in diffs/tests.
+      const displayPath = rawDisplayPath.replace(/\\/g, '/');
       return (
         `--- Rule from: ${displayPath} ---\n` +
         `${rule.content}\n` +
