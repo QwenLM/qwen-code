@@ -544,15 +544,14 @@ export const useGeminiStream = (
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
 
-        // Notification and cron messages are pre-processed by the unified
-        // notification drain loop which already added the display item
-        // to history. Just pass the model text through to the API.
-        if (
-          submitType === SendMessageType.Notification ||
-          submitType === SendMessageType.Cron
-        ) {
+        // Notification messages (e.g. background agent completions) are
+        // pre-processed by the notification drain loop which already
+        // added the display item to history. Just pass the model text
+        // through to the API. Cron prompts still go through the normal
+        // slash/@-command/shell preprocessing path below.
+        if (submitType === SendMessageType.Notification) {
           onDebugMessage(
-            `Received ${submitType} (${trimmedQuery.length} chars)`,
+            `Received notification (${trimmedQuery.length} chars)`,
           );
           return { queryToSend: trimmedQuery, shouldProceed: true };
         }

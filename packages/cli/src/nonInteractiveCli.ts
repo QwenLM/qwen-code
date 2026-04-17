@@ -483,6 +483,17 @@ export async function runNonInteractive(
                 if (event.type === GeminiEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
                 }
+                if (
+                  outputFormat === OutputFormat.TEXT &&
+                  event.type === GeminiEventType.Error
+                ) {
+                  const errorText = parseAndFormatApiError(
+                    event.value.error,
+                    config.getContentGeneratorConfig()?.authType,
+                  );
+                  process.stderr.write(`${errorText}\n`);
+                  throw new Error(errorText);
+                }
               }
 
               adapter.finalizeAssistantMessage();
@@ -492,6 +503,16 @@ export async function runNonInteractive(
                 const itemToolResponseParts: Part[] = [];
 
                 for (const requestInfo of itemToolCallRequests) {
+                  const itemInputFormat =
+                    typeof config.getInputFormat === 'function'
+                      ? config.getInputFormat()
+                      : InputFormat.TEXT;
+                  const itemToolCallUpdateCallback =
+                    itemInputFormat === InputFormat.STREAM_JSON &&
+                    options.controlService
+                      ? options.controlService.permission.getToolCallUpdateCallback()
+                      : undefined;
+
                   const isAgentTool = requestInfo.name === 'agent';
                   const { handler: outputUpdateHandler } = isAgentTool
                     ? createAgentToolProgressHandler(
@@ -505,7 +526,12 @@ export async function runNonInteractive(
                     config,
                     requestInfo,
                     abortController.signal,
-                    { outputUpdateHandler },
+                    {
+                      outputUpdateHandler,
+                      ...(itemToolCallUpdateCallback && {
+                        onToolCallsUpdate: itemToolCallUpdateCallback,
+                      }),
+                    },
                   );
 
                   if (toolResponse.error) {
@@ -587,9 +613,15 @@ export async function runNonInteractive(
 
           // ─── Terminal hold-back phase ──────────────────────────
           // Wait for running background agents to complete and drain
-          // their notifications before emitting the final result.
+          // their notifications before emitting the final result. If
+          // SIGINT/SIGTERM fires here, abort running background agents
+          // (they use their own AbortControllers) and exit the loop.
 
           while (true) {
+            if (abortController.signal.aborted) {
+              registry.abortAll();
+              break;
+            }
             await drainLocalQueue();
             const running = registry.getRunning();
             if (running.length === 0 && localQueue.length === 0) break;
