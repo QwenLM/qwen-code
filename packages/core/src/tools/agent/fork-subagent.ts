@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
@@ -15,17 +16,60 @@ export const FORK_AGENT = {
   level: 'session' as const,
 };
 
-export function isInForkChild(messages: Content[]): boolean {
-  return messages.some((m) => {
-    if (m.role !== 'user') return false;
-    return m.parts?.some(
-      (part) => part.text && part.text.includes(`<${FORK_BOILERPLATE_TAG}>`),
-    );
-  });
+// Recursive-fork guard. A fork child keeps the `agent` tool in its declarations
+// for byte-identical cache parity with the parent, so tool-availability
+// stripping is no longer an option. Instead, mark the async frame as "inside a
+// fork subagent" via AsyncLocalStorage when dispatching; AgentTool.execute()
+// reads the marker and rejects nested fork calls.
+//
+// Why ALS and not a history scan: the nested AgentTool's `this.config` is the
+// main process Config, so `getGeminiClient().getHistory()` returns the parent
+// conversation — not the fork child's chat — and cannot be used to detect
+// nesting. Async context propagation works naturally across the fork's
+// await chain and is scoped per-execution.
+const forkExecutionStorage = new AsyncLocalStorage<{ readonly marker: true }>();
+
+export function runInForkContext<T>(fn: () => Promise<T>): Promise<T> {
+  return forkExecutionStorage.run({ marker: true }, fn);
+}
+
+export function isInForkExecution(): boolean {
+  return forkExecutionStorage.getStore() !== undefined;
 }
 
 export const FORK_PLACEHOLDER_RESULT =
   'Fork started — processing in background';
+
+/**
+ * Build functionResponse parts for every open function call in a model message.
+ *
+ * Shared by the fork subagent (agent.ts) and background agent history
+ * construction (e.g. extractionAgentPlanner.ts) to close open tool calls
+ * before injecting history into a new agent session.
+ *
+ * @param assistantMessage - The model message that may contain functionCall parts.
+ * @param placeholderOutput - The placeholder string to use as each response's output.
+ */
+export function buildFunctionResponseParts(
+  assistantMessage: Content,
+  placeholderOutput: string,
+): Array<{
+  functionResponse: {
+    id: string | undefined;
+    name: string | undefined;
+    response: { output: string };
+  };
+}> {
+  return (
+    assistantMessage.parts?.filter((part) => part.functionCall) ?? []
+  ).map((part) => ({
+    functionResponse: {
+      id: part.functionCall!.id,
+      name: part.functionCall!.name,
+      response: { output: placeholderOutput },
+    },
+  }));
+}
 
 /**
  * Build extra history messages for a forked subagent.
@@ -65,13 +109,10 @@ export function buildForkedMessages(
   // Build tool_result blocks for every tool_use, all with identical placeholder text.
   // Include the directive text in the same user message to maintain
   // proper user/model alternation.
-  const toolResultParts = toolUseParts.map((part) => ({
-    functionResponse: {
-      id: part.functionCall!.id,
-      name: part.functionCall!.name,
-      response: { output: FORK_PLACEHOLDER_RESULT },
-    },
-  }));
+  const toolResultParts = buildFunctionResponseParts(
+    assistantMessage,
+    FORK_PLACEHOLDER_RESULT,
+  );
 
   const toolResultMessage: Content = {
     role: 'user',

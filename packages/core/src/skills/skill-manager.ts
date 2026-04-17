@@ -39,6 +39,21 @@ const QWEN_CONFIG_DIR = '.qwen';
 const SKILLS_CONFIG_DIR = 'skills';
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
+// Skills have a fixed layout (<skill-name>/SKILL.md), so depth 2 is enough to
+// detect any change. This keeps chokidar out of heavy subtrees like node_modules
+// that would otherwise exhaust file descriptors (see #3289).
+export const WATCHER_MAX_DEPTH = 2;
+
+// Reject special file types (sockets, FIFOs, devices) that cannot be watched
+// and would error with EOPNOTSUPP, plus .git directories.
+export function watcherIgnored(
+  filePath: string,
+  stats?: fsSync.Stats,
+): boolean {
+  if (stats && !stats.isFile() && !stats.isDirectory()) return true;
+  return filePath.split(path.sep).includes('.git');
+}
+
 /**
  * Manages skill configurations stored as directories containing SKILL.md files.
  * Provides discovery, parsing, validation, and caching for skills.
@@ -814,6 +829,8 @@ export class SkillManager {
       try {
         const watcher = watchFs(watchPath, {
           ignoreInitial: true,
+          ignored: watcherIgnored,
+          depth: WATCHER_MAX_DEPTH,
         })
           .on('all', () => {
             this.scheduleRefresh();

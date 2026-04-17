@@ -132,6 +132,16 @@ describe('SubagentManager', () => {
           runConfig: { max_time_minutes: 5, max_turns: 10 },
         };
       }
+      if (yamlString.includes('background:')) {
+        const bgMatch = yamlString.match(/background:\s*"?(true|false)"?/);
+        const bgValue = bgMatch?.[1] === 'true' ? true : false;
+        return {
+          name: yamlString.match(/name:\s*(\S+)/)?.[1] ?? 'test-agent',
+          description:
+            yamlString.match(/description:\s*(.+)/)?.[1] ?? 'A test subagent',
+          background: bgValue,
+        };
+      }
       if (yamlString.includes('name: agent1')) {
         return { name: 'agent1', description: 'First agent' };
       }
@@ -486,6 +496,73 @@ You are a helpful assistant.
 
       consoleSpy.mockRestore();
     });
+
+    it('should parse background: true from frontmatter', () => {
+      const markdownWithBackground = `---
+name: monitor
+description: A background monitor
+background: true
+---
+
+You are a monitor.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithBackground,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.background).toBe(true);
+    });
+
+    it('should parse background: "true" string from frontmatter', () => {
+      const markdownWithBgString = `---
+name: monitor
+description: A background monitor
+background: "true"
+---
+
+You are a monitor.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithBgString,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.background).toBe(true);
+    });
+
+    it('should not set background when background: false', () => {
+      const markdownWithBgFalse = `---
+name: monitor
+description: A foreground agent
+background: false
+---
+
+You are an agent.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithBgFalse,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.background).toBeUndefined();
+    });
+
+    it('should not set background when omitted', () => {
+      const config = manager.parseSubagentContent(
+        validMarkdown,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.background).toBeUndefined();
+    });
   });
 
   describe('serializeSubagent', () => {
@@ -563,6 +640,37 @@ You are a helpful assistant.
       );
 
       expect(parsed.disallowedTools).toEqual(['write_file', 'mcp__slack']);
+    });
+
+    it('should serialize background: true', () => {
+      const configWithBackground: SubagentConfig = {
+        ...validConfig,
+        background: true,
+      };
+
+      const serialized = manager.serializeSubagent(configWithBackground);
+      expect(serialized).toContain('background: true');
+    });
+
+    it('should not serialize background when undefined', () => {
+      const serialized = manager.serializeSubagent(validConfig);
+      expect(serialized).not.toContain('background');
+    });
+
+    it('should roundtrip background through serialize and parse', () => {
+      const configWithBackground: SubagentConfig = {
+        ...validConfig,
+        background: true,
+      };
+
+      const serialized = manager.serializeSubagent(configWithBackground);
+      const parsed = manager.parseSubagentContent(
+        serialized,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(parsed.background).toBe(true);
     });
   });
 

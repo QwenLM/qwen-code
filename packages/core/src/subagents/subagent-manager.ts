@@ -606,6 +606,10 @@ export class SubagentManager {
       frontmatter['approvalMode'] = config.approvalMode;
     }
 
+    if (config.background) {
+      frontmatter['background'] = true;
+    }
+
     // Serialize to YAML
     const yamlContent = stringifyYaml(frontmatter, {
       lineWidth: 0, // Disable line wrapping
@@ -1087,6 +1091,21 @@ function parseSubagentContent(
           ? legacyModelConfig['model']
           : undefined;
 
+    const backgroundRaw = frontmatter['background'];
+    if (
+      backgroundRaw !== undefined &&
+      backgroundRaw !== 'true' &&
+      backgroundRaw !== 'false' &&
+      backgroundRaw !== true &&
+      backgroundRaw !== false
+    ) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid background value '${backgroundRaw}'. Must be 'true', 'false', or omitted.`,
+      );
+    }
+    const background =
+      backgroundRaw === 'true' || backgroundRaw === true ? true : undefined;
+
     const config: SubagentConfig = {
       name,
       description,
@@ -1099,6 +1118,7 @@ function parseSubagentContent(
       runConfig: runConfig as Partial<RunConfig>,
       color,
       level,
+      ...(background ? { background } : {}),
     };
 
     // Validate the parsed configuration

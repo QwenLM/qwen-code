@@ -1131,6 +1131,9 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
+    enableManagedAutoMemory: settings.memory?.enableManagedAutoMemory ?? true,
+    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks: hooksConfig?.userHooks ?? settings.hooks,
     projectHooks: hooksConfig?.projectHooks,

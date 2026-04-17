@@ -47,7 +47,8 @@ import {
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
-import { AgentTool } from '../tools/agent.js';
+import { AgentTool } from '../tools/agent/agent.js';
+import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
 
 // Telemetry
 import {
@@ -56,11 +57,11 @@ import {
 } from '../telemetry/index.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
-// Forked query cache
+// Forked agent cache
 import {
   saveCacheSafeParams,
   clearCacheSafeParams,
-} from '../followup/forkedQuery.js';
+} from '../utils/forkedAgent.js';
 
 // Utilities
 import {
@@ -101,6 +102,8 @@ export enum SendMessageType {
   Hook = 'hook',
   /** Cron-fired prompt. Behaves like UserQuery but skips UserPromptSubmit hook. */
   Cron = 'cron',
+  /** Background agent notification. Display item is added by the drain loop. */
+  Notification = 'notification',
 }
 
 export interface SendMessageOptions {
@@ -110,13 +113,22 @@ export interface SendMessageOptions {
     iterationCount: number;
     reasons: string[];
   };
+  /** Display text for notification messages (persisted for session resume). */
+  notificationDisplayText?: string;
   /** Model override from skill execution. When present, overrides the session model for this turn. */
   modelOverride?: string;
 }
 
+const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
+  prompt: '',
+  selectedDocs: [],
+  strategy: 'none',
+};
+
 export class GeminiClient {
   private chat?: GeminiChat;
   private sessionTurnCount = 0;
+  private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -128,6 +140,13 @@ export class GeminiClient {
    * being forced and did it fail?
    */
   private hasFailedCompressionAttempt = false;
+
+  /**
+   * Promises for pending background memory tasks (dream / extract).
+   * Each promise resolves with a count of memory files touched (0 = nothing written).
+   * Consumed by the CLI via `consumePendingMemoryTaskPromises()`.
+   */
+  private pendingMemoryTaskPromises: Array<Promise<number>> = [];
 
   /**
    * Timestamp (epoch ms) of the last completed API call.
@@ -221,6 +240,7 @@ export class GeminiClient {
   }
 
   async resetChat(): Promise<void> {
+    this.surfacedRelevantAutoMemoryPaths.clear();
     // Reset thinking clear latch — fresh chat, no prior thinking to clean up
     this.thinkingClearLatched = false;
     this.lastApiCompletionTimestamp = null;
@@ -489,6 +509,77 @@ export class GeminiClient {
     }
   }
 
+  private runManagedAutoMemoryBackgroundTasks(
+    messageType: SendMessageType,
+  ): void {
+    if (messageType !== SendMessageType.UserQuery) {
+      return;
+    }
+
+    if (!this.config.getManagedAutoMemoryEnabled()) {
+      return;
+    }
+
+    const projectRoot = this.config.getProjectRoot();
+    const sessionId = this.config.getSessionId();
+    const history = this.getHistory();
+    const mgr = this.config.getMemoryManager();
+
+    const extractPromise = mgr
+      .scheduleExtract({
+        projectRoot,
+        sessionId,
+        history,
+        config: this.config,
+      })
+      .then((result) => result.touchedTopics.length)
+      .catch((error: unknown) => {
+        debugLogger.warn(
+          'Failed to schedule managed auto-memory extraction.',
+          error,
+        );
+        return 0;
+      });
+    this.pendingMemoryTaskPromises.push(extractPromise);
+
+    const dreamPromise = mgr
+      .scheduleDream({
+        projectRoot,
+        sessionId,
+        config: this.config,
+      })
+      .then((schedResult) => {
+        if (schedResult.status === 'scheduled' && schedResult.promise) {
+          return schedResult.promise.then((state) => {
+            const topics = state.metadata?.['touchedTopics'] as
+              | string[]
+              | undefined;
+            return topics ? topics.length : 0;
+          });
+        }
+        return 0;
+      })
+      .catch((error: unknown) => {
+        debugLogger.warn(
+          'Failed to schedule managed auto-memory dream.',
+          error,
+        );
+        return 0;
+      });
+    this.pendingMemoryTaskPromises.push(dreamPromise);
+  }
+
+  /**
+   * Returns and clears the list of pending background memory task promises.
+   * Each promise resolves with the number of memory files touched (0 = nothing
+   * was written, caller should ignore).
+   */
+  consumePendingMemoryTaskPromises(): Array<Promise<number>> {
+    const promises = this.pendingMemoryTaskPromises;
+    this.pendingMemoryTaskPromises = [];
+    return promises;
+  }
+
   async *sendMessageStream(
     request: PartListUnion,
     signal: AbortSignal,
@@ -497,6 +588,9 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    let relevantAutoMemoryPromise:
+      | Promise<RelevantAutoMemoryPromptResult>
+      | undefined;
 
     if (messageType === SendMessageType.Retry) {
       this.stripOrphanedUserEntriesFromHistory();
@@ -508,6 +602,7 @@ export class GeminiClient {
     if (
       messageType !== SendMessageType.Retry &&
       messageType !== SendMessageType.Cron &&
+      messageType !== SendMessageType.Notification &&
       hooksEnabled &&
       messageBus &&
       this.config.hasHooksForEvent('UserPromptSubmit')
@@ -552,15 +647,52 @@ export class GeminiClient {
       }
     }
 
+    if (messageType === SendMessageType.Notification) {
+      this.config
+        .getChatRecordingService()
+        ?.recordNotification(request, options?.notificationDisplayText);
+    }
+
+    // Notifications start a fresh Turn with a new prompt_id, so the loop
+    // detector must reset — otherwise a prior turn's count can trip
+    // LoopDetected early on the notification turn.
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification
+    ) {
+      this.loopDetector.reset(prompt_id);
+      this.lastPromptId = prompt_id;
+    }
+
     if (
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron
     ) {
-      this.loopDetector.reset(prompt_id);
-      this.lastPromptId = prompt_id;
+      if (this.config.getManagedAutoMemoryEnabled()) {
+        relevantAutoMemoryPromise = this.config
+          .getMemoryManager()
+          .recall(this.config.getProjectRoot(), partToString(request), {
+            config: this.config,
+            excludedFilePaths: this.surfacedRelevantAutoMemoryPaths,
+          })
+          .catch((error: unknown) => {
+            debugLogger.warn(
+              'Managed auto-memory recall prefetch failed.',
+              error,
+            );
+            return EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+          });
+      }
 
-      // record user message for session management
-      this.config.getChatRecordingService()?.recordUserMessage(request);
+      // record user/cron message for session management
+      if (messageType === SendMessageType.Cron) {
+        this.config
+          .getChatRecordingService()
+          ?.recordCronPrompt(request, options?.notificationDisplayText);
+      } else {
+        this.config.getChatRecordingService()?.recordUserMessage(request);
+      }
 
       // Idle cleanup: clear stale thinking blocks after idle period.
       // Latch: once triggered, never revert — prevents oscillation.
@@ -700,6 +832,17 @@ export class GeminiClient {
       messageType === SendMessageType.Cron
     ) {
       const systemReminders = [];
+      const relevantAutoMemory = relevantAutoMemoryPromise
+        ? await relevantAutoMemoryPromise
+        : EMPTY_RELEVANT_AUTO_MEMORY_RESULT;
+      const relevantAutoMemoryPrompt = relevantAutoMemory.prompt;
+
+      if (relevantAutoMemoryPrompt) {
+        systemReminders.push(relevantAutoMemoryPrompt);
+        for (const doc of relevantAutoMemory.selectedDocs) {
+          this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
+        }
+      }
 
       // add subagent system reminder if there are subagents
       const hasAgentTool = this.config
@@ -880,7 +1023,28 @@ export class GeminiClient {
     }
 
     if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
+      // Save cache-safe params here — before any early return — so that
+      // background extract/dream agents calling getCacheSafeParams() always
+      // see the current turn's history regardless of which path exits below.
+      try {
+        const chat = this.getChat();
+        const fullHistory = chat.getHistory(true);
+        const maxHistoryForCache = 40;
+        const cachedHistory =
+          fullHistory.length > maxHistoryForCache
+            ? fullHistory.slice(-maxHistoryForCache)
+            : fullHistory;
+        saveCacheSafeParams(
+          chat.getGenerationConfig(),
+          cachedHistory,
+          this.config.getModel(),
+        );
+      } catch {
+        // Best-effort — don't block the main flow
+      }
+
       if (this.config.getSkipNextSpeakerCheck()) {
+        this.runManagedAutoMemoryBackgroundTasks(messageType);
         // Report completed before returning — agent has no more work to do
         if (arenaAgentClient) {
           await arenaAgentClient.reportCompleted();
@@ -913,7 +1077,11 @@ export class GeminiClient {
           options,
           boundedTurns - 1,
         );
-      } else if (arenaAgentClient) {
+      }
+
+      this.runManagedAutoMemoryBackgroundTasks(messageType);
+
+      if (arenaAgentClient) {
         // No continuation needed — agent completed its task
         await arenaAgentClient.reportCompleted();
       }
@@ -922,27 +1090,6 @@ export class GeminiClient {
     // Report cancelled to arena when user cancelled mid-stream
     if (signal?.aborted && arenaAgentClient) {
       await arenaAgentClient.reportCancelled();
-    }
-
-    // Save cache-safe params on successful completion (non-abort) for forked queries
-    if (!signal?.aborted && this.isInitialized()) {
-      try {
-        const chat = this.getChat();
-        // Clone history then truncate to last 40 entries to avoid full-session deep copy overhead
-        const fullHistory = chat.getHistory(true);
-        const maxHistoryForCache = 40;
-        const cachedHistory =
-          fullHistory.length > maxHistoryForCache
-            ? fullHistory.slice(-maxHistoryForCache)
-            : fullHistory;
-        saveCacheSafeParams(
-          chat.getGenerationConfig(),
-          cachedHistory,
-          this.config.getModel(),
-        );
-      } catch {
-        // Best-effort — don't block the main flow
-      }
     }
 
     return turn;

@@ -610,6 +610,7 @@ export class CoreToolScheduler {
       const invocationOrError = this.buildInvocation(
         call.tool,
         args as Record<string, unknown>,
+        targetCallId,
       );
       if (invocationOrError instanceof Error) {
         const response = createErrorResponse(
@@ -646,9 +647,17 @@ export class CoreToolScheduler {
   private buildInvocation(
     tool: AnyDeclarativeTool,
     args: object,
+    callId?: string,
   ): AnyToolInvocation | Error {
     try {
-      return tool.build(structuredClone(args));
+      const invocation = tool.build(structuredClone(args));
+      if (callId) {
+        const maybeAware = invocation as { setCallId?: (id: string) => void };
+        if (typeof maybeAware.setCallId === 'function') {
+          maybeAware.setCallId(callId);
+        }
+      }
+      return invocation;
     } catch (e) {
       if (e instanceof Error) {
         return e;
@@ -827,6 +836,7 @@ export class CoreToolScheduler {
         const invocationOrError = this.buildInvocation(
           toolInstance,
           reqInfo.args,
+          reqInfo.callId,
         );
         if (invocationOrError instanceof Error) {
           const error = reqInfo.wasOutputTruncated
@@ -1011,12 +1021,12 @@ export class CoreToolScheduler {
             /**
              * In non-interactive mode, automatically deny.
              */
-            const shouldAutoDeny =
+            const isNonInteractiveDeny =
               !this.config.isInteractive() &&
               !this.config.getExperimentalZedIntegration() &&
               this.config.getInputFormat() !== InputFormat.STREAM_JSON;
 
-            if (shouldAutoDeny) {
+            if (isNonInteractiveDeny) {
               const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
               this.setStatusInternal(
                 reqInfo.callId,
@@ -1031,6 +1041,8 @@ export class CoreToolScheduler {
             }
 
             // Fire PermissionRequest hook before showing the permission dialog.
+            // Hooks run before the background-agent auto-deny so they can
+            // override the denial with policy-based decisions.
             const messageBus = this.config.getMessageBus() as
               | MessageBus
               | undefined;
@@ -1093,6 +1105,22 @@ export class CoreToolScheduler {
                 }
                 continue;
               }
+            }
+
+            // Background agents can't show interactive prompts.
+            // Auto-deny after hooks have had a chance to decide.
+            if (this.config.getShouldAvoidPermissionPrompts?.()) {
+              const errorMessage = `Tool "${reqInfo.name}" requires permission, but background agents cannot prompt for confirmation. The tool call was denied.`;
+              this.setStatusInternal(
+                reqInfo.callId,
+                'error',
+                createErrorResponse(
+                  reqInfo,
+                  new Error(errorMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+              );
+              continue;
             }
 
             // Allow IDE to resolve confirmation

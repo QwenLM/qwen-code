@@ -69,6 +69,8 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
+  /** If this tool call operated on a managed-auto-memory file, indicates whether it was a read or write. */
+  isMemoryOp?: 'read' | 'write';
 }
 
 export interface CompressionProps {
@@ -184,10 +186,31 @@ export type HistoryItemQuit = HistoryItemBase & {
   duration: string;
 };
 
+/**
+ * Displayed after a turn when managed-auto-memory files were written
+ * (either in-turn by the model, or by the post-turn dream/extract pipeline).
+ */
+export type HistoryItemMemorySaved = HistoryItemBase & {
+  type: 'memory_saved';
+  /** Number of memory files written / updated. */
+  writtenCount: number;
+  /** Verb to display, e.g. 'Saved' or 'Updated'. Defaults to 'Saved'. */
+  verb?: string;
+};
+
 export type HistoryItemToolGroup = HistoryItemBase & {
   type: 'tool_group';
   tools: IndividualToolCallDisplay[];
+  /** Count of tool calls that wrote to managed-auto-memory files. Pre-computed for badge rendering. */
+  memoryWriteCount?: number;
+  /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
+  memoryReadCount?: number;
   isUserInitiated?: boolean;
+};
+
+export type HistoryItemNotification = HistoryItemBase & {
+  type: 'notification';
+  text: string;
 };
 
 export type HistoryItemUserShell = HistoryItemBase & {
@@ -400,6 +423,7 @@ export type HistoryItemStopHookSystemMessage = HistoryItemBase & {
 // Individually exported types extending HistoryItemBase
 export type HistoryItemWithoutId =
   | HistoryItemUser
+  | HistoryItemNotification
   | HistoryItemUserShell
   | HistoryItemGemini
   | HistoryItemGeminiContent
@@ -429,6 +453,7 @@ export type HistoryItemWithoutId =
   | HistoryItemArenaSessionComplete
   | HistoryItemInsightProgress
   | HistoryItemBtw
+  | HistoryItemMemorySaved
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
   | HistoryItemStopHookSystemMessage;
@@ -554,6 +579,8 @@ export interface ConsoleMessageItem {
 export interface SubmitPromptResult {
   type: 'submit_prompt';
   content: PartListUnion;
+  /** Optional callback invoked after the agent turn completes successfully. */
+  onComplete?: () => Promise<void>;
 }
 
 /**
