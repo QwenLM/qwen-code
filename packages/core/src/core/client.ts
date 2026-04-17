@@ -653,13 +653,22 @@ export class GeminiClient {
         ?.recordNotification(request, options?.notificationDisplayText);
     }
 
+    // Notifications start a fresh Turn with a new prompt_id, so the loop
+    // detector must reset — otherwise a prior turn's count can trip
+    // LoopDetected early on the notification turn.
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification
+    ) {
+      this.loopDetector.reset(prompt_id);
+      this.lastPromptId = prompt_id;
+    }
+
     if (
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron
     ) {
-      this.loopDetector.reset(prompt_id);
-      this.lastPromptId = prompt_id;
-
       if (this.config.getManagedAutoMemoryEnabled()) {
         relevantAutoMemoryPromise = this.config
           .getMemoryManager()

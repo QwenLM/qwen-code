@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ChatRecord, AgentResultDisplay } from '@qwen-code/qwen-code-core';
+import type {
+  ChatRecord,
+  AgentResultDisplay,
+  NotificationRecordPayload,
+} from '@qwen-code/qwen-code-core';
 import type {
   Content,
   GenerateContentResponseUsageMetadata,
@@ -49,11 +53,19 @@ export class HistoryReplayer {
     this.setActiveRecordId(record.uuid, record.timestamp);
     switch (record.type) {
       case 'user':
-        // Notification / cron turns are persisted under type: 'user' with a
-        // subtype so the model's chat history keeps them for continuity.
-        // They were never user input though, so don't replay the raw
-        // task-notification XML (or cron prompt) back into the ACP session.
+        // Notification/cron records hold raw XML/prompt the user never
+        // typed; replay the friendly displayText so the assistant's reply
+        // has an antecedent in the ACP transcript.
         if (record.subtype === 'notification' || record.subtype === 'cron') {
+          const displayText = (
+            record.systemPayload as NotificationRecordPayload | undefined
+          )?.displayText;
+          if (displayText) {
+            await this.messageEmitter.emitUserMessage(
+              displayText,
+              record.timestamp,
+            );
+          }
           break;
         }
         if (record.message) {

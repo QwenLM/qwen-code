@@ -1108,7 +1108,7 @@ describe('AgentTool', () => {
         .calls[0]?.[0] as string;
 
       expect(startAgentId).toBe(stopAgentId);
-      expect(startAgentId).toMatch(/^file-search-\d+$/);
+      expect(startAgentId).toMatch(/^file-search-[0-9a-f]{8}$/);
     });
   });
 
