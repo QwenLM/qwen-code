@@ -32,11 +32,9 @@ Good: "The leader hangs because `hasActiveTeammates()` returns true after all ag
 have reported completed, likely because terminal status isn't being set on the agent
 object after the backend process exits."
 
-For bugs you expect to take more than one round, create a side note file for
-the investigation. Use whichever path the project conventionally uses for
-investigation notes (e.g., `notes/<issue>.md`, `docs/investigations/<issue>.md`)
-or fall back to `<repo>/.notes/<issue>.md`. In the qwen-code workspace this
-is `knowledge/qwen-code/investigations/<issue>.md`.
+For bugs you expect to take more than one round, create a side note file
+for the investigation in whichever location the project uses for such
+notes.
 
 Write your hypothesis there. This file persists across conversation turns and even
 across sessions — it's your investigation journal.
