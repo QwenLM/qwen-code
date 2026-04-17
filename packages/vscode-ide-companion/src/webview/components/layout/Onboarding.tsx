@@ -18,7 +18,14 @@ export const Onboarding: FC = () => {
   const iconUri = generateIconUrl('icon.png');
 
   return (
-    <div className="flex flex-col items-center justify-center flex-1 min-h-0 px-6">
+    <div
+      className="flex flex-col flex-1 min-h-0 px-6"
+      style={{
+        alignItems: 'center',
+        justifyContent: 'center',
+        textAlign: 'center',
+      }}
+    >
       {/* Logo + title block — sits above the card for visual breathing room */}
       <div className="flex flex-col items-center gap-3 mb-6">
         {iconUri && (
