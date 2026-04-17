@@ -168,8 +168,8 @@ export const App: React.FC = () => {
         // Account group
         const accountGroupItems: CompletionItem[] = [
           {
-            id: 'auth2',
-            label: '/auth2',
+            id: 'auth',
+            label: '/auth',
             description: 'Configure Coding Plan or API Key',
             type: 'command',
             group: 'Account',
@@ -582,9 +582,9 @@ export const App: React.FC = () => {
           }
         };
 
-        if (itemId === 'auth2') {
+        if (itemId === 'auth') {
           clearTriggerText();
-          vscode.postMessage({ type: 'auth2', data: {} });
+          vscode.postMessage({ type: 'auth', data: {} });
           completion.closeCompletion();
           return;
         }

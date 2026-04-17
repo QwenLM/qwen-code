@@ -35,7 +35,6 @@ export interface QwenSettingsForVSCode {
   apiKey: string;
   codingPlanRegion: 'china' | 'global';
   modelProviders: VSCodeModelProviders;
-  baseUrl: string;
   model: string;
 }
 
@@ -92,7 +91,9 @@ function ensureNestedObject(
 function findOpenaiModels(
   modelProviders: Record<string, unknown> | undefined,
 ): Array<Record<string, unknown>> {
-  if (!modelProviders) return [];
+  if (!modelProviders) {
+    return [];
+  }
   for (const key of [AuthType.USE_OPENAI, 'use_openai']) {
     const arr = modelProviders[key];
     if (Array.isArray(arr) && arr.length > 0) {
@@ -213,7 +214,9 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
 
   const security = settings.security as Record<string, unknown> | undefined;
   const auth = security?.auth as Record<string, unknown> | undefined;
-  if (!auth?.selectedType) return null;
+  if (!auth?.selectedType) {
+    return null;
+  }
 
   const env = (settings.env ?? {}) as Record<string, string>;
   const codingPlan = settings.codingPlan as Record<string, unknown> | undefined;
@@ -233,9 +236,6 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
     }
   }
 
-  // Extract baseUrl from first model
-  const firstBaseUrl = (openaiModels[0]?.baseUrl as string) || '';
-
   // Determine if this is a Coding Plan setup
   const hasCodingPlanKey = !!env[CODING_PLAN_ENV_KEY];
   const hasCodingPlanRegion = !!codingPlan?.region;
@@ -247,7 +247,6 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
       apiKey: env[CODING_PLAN_ENV_KEY] || '',
       codingPlanRegion: (codingPlan?.region as 'china' | 'global') || 'china',
       modelProviders: vsModelProviders,
-      baseUrl: firstBaseUrl,
       model: (model?.name as string) || '',
     };
   }
@@ -255,14 +254,15 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
   // Non-Coding-Plan
   const firstEnvKey = (openaiModels[0]?.envKey as string) || 'OPENAI_API_KEY';
   const apiKey = env[firstEnvKey] || '';
-  if (!apiKey && Object.keys(vsModelProviders).length === 0) return null;
+  if (!apiKey && Object.keys(vsModelProviders).length === 0) {
+    return null;
+  }
 
   return {
     provider: 'api-key',
     apiKey,
     codingPlanRegion: 'china',
     modelProviders: vsModelProviders,
-    baseUrl: firstBaseUrl,
     model: (model?.name as string) || '',
   };
 }

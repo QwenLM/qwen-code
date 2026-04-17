@@ -13,9 +13,8 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
  * Handles all authentication-related messages
  */
 export class AuthMessageHandler extends BaseMessageHandler {
-  private authHandler: (() => Promise<void>) | null = null;
   private connectWithSettingsHandler: (() => Promise<void>) | null = null;
-  private auth2Handler:
+  private authInteractiveHandler:
     | ((
         provider: string,
         region?: string,
@@ -27,31 +26,19 @@ export class AuthMessageHandler extends BaseMessageHandler {
     | null = null;
 
   canHandle(messageType: string): boolean {
-    return [
-      'auth',
-      'auth2',
-      'getAccountInfo',
-      'openProviderSettings',
-      'connectWithSettings',
-    ].includes(messageType);
+    return ['auth', 'getAccountInfo', 'connectWithSettings'].includes(
+      messageType,
+    );
   }
 
   async handle(message: { type: string; data?: unknown }): Promise<void> {
     switch (message.type) {
       case 'auth':
-        await this.handleAuth();
-        break;
-
-      case 'auth2':
-        await this.handleAuth2();
+        await this.handleAuthInteractive();
         break;
 
       case 'getAccountInfo':
         await this.handleGetAccountInfo();
-        break;
-
-      case 'openProviderSettings':
-        await this.handleOpenProviderSettings();
         break;
 
       case 'connectWithSettings':
@@ -68,13 +55,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Set auth handler
-   */
-  setAuthHandler(handler: () => Promise<void>): void {
-    this.authHandler = handler;
-  }
-
-  /**
    * Set connect-with-settings handler.
    */
   setConnectWithSettingsHandler(handler: () => Promise<void>): void {
@@ -82,9 +62,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Set auth2 handler — interactive auth flow.
+   * Set auth interactive handler — interactive auth flow.
    */
-  setAuth2Handler(
+  setAuthInteractiveHandler(
     handler: (
       provider: string,
       region?: string,
@@ -94,7 +74,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       modelIds?: string,
     ) => Promise<void>,
   ): void {
-    this.auth2Handler = handler;
+    this.authInteractiveHandler = handler;
   }
 
   /**
@@ -123,16 +103,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Handle openProviderSettings
-   */
-  private async handleOpenProviderSettings(): Promise<void> {
-    await vscode.commands.executeCommand(
-      'workbench.action.openSettings',
-      '@ext:qwenlm.qwen-code-vscode-ide-companion',
-    );
-  }
-
-  /**
    * Handle connectWithSettings
    */
   private async handleConnectWithSettings(): Promise<void> {
@@ -154,30 +124,8 @@ export class AuthMessageHandler extends BaseMessageHandler {
     }
   }
 
-  /**
-   * Handle auth — open settings page
-   */
-  private async handleAuth(): Promise<void> {
-    try {
-      if (this.authHandler) {
-        await this.authHandler();
-      } else {
-        await vscode.commands.executeCommand(
-          'workbench.action.openSettings',
-          '@ext:qwenlm.qwen-code-vscode-ide-companion',
-        );
-      }
-    } catch (error) {
-      const errorMsg = getErrorMessage(error);
-      this.sendToWebView({
-        type: 'authError',
-        data: { message: `Auth failed: ${errorMsg}` },
-      });
-    }
-  }
-
   // ---------------------------------------------------------------------------
-  // auth2: Interactive auth flow (mirrors CLI's /auth)
+  // auth: Interactive auth flow (mirrors CLI's /auth)
   // ---------------------------------------------------------------------------
 
   // Alibaba Standard API Key region endpoints
@@ -229,15 +177,15 @@ export class AuthMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Handle auth2 — full interactive auth flow.
+   * Handle auth — full interactive auth flow.
    *
    * Tree (mirrors CLI AuthDialog):
-   *   ├─ Coding Plan → Region (China/Global) → API Key → done
-   *   └─ API Key
-   *      ├─ Alibaba Standard → Region (4 regions) → API Key → Model IDs → done
-   *      └─ Custom → Base URL → API Key → Model → done
+   *   |- Coding Plan -> Region (China/Global) -> API Key -> done
+   *   \- API Key
+   *      |- Alibaba Standard -> Region (4 regions) -> API Key -> Model IDs -> done
+   *      \- Custom -> Base URL -> API Key -> Model -> done
    */
-  private async handleAuth2(): Promise<void> {
+  private async handleAuthInteractive(): Promise<void> {
     try {
       // Main menu
       const provider = await this.pick(
@@ -257,16 +205,18 @@ export class AuthMessageHandler extends BaseMessageHandler {
         'Qwen Code: Auth',
         'Select authentication method',
       );
-      if (!provider) return;
+      if (!provider) {
+        return;
+      }
 
       if (provider === 'coding-plan') {
-        await this.auth2CodingPlan();
+        await this.authCodingPlan();
       } else {
-        await this.auth2ApiKey();
+        await this.authApiKey();
       }
     } catch (error) {
       const errorMsg = getErrorMessage(error);
-      console.error('[AuthMessageHandler] auth2 failed:', error);
+      console.error('[AuthMessageHandler] auth failed:', error);
       this.sendToWebView({
         type: 'authError',
         data: { message: `Auth failed: ${errorMsg}` },
@@ -275,9 +225,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Coding Plan: region → API key → connect.
+   * Coding Plan: region -> API key -> connect.
    */
-  private async auth2CodingPlan(): Promise<void> {
+  private async authCodingPlan(): Promise<void> {
     const region = await this.pick(
       [
         {
@@ -294,7 +244,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
       'Qwen Code: Coding Plan Region',
       'Select region',
     );
-    if (!region) return;
+    if (!region) {
+      return;
+    }
 
     const apiKey = await this.input({
       title: 'Qwen Code: API Key',
@@ -303,17 +255,19 @@ export class AuthMessageHandler extends BaseMessageHandler {
       password: true,
       required: true,
     });
-    if (!apiKey) return;
+    if (!apiKey) {
+      return;
+    }
 
-    if (this.auth2Handler) {
-      await this.auth2Handler('coding-plan', region, apiKey);
+    if (this.authInteractiveHandler) {
+      await this.authInteractiveHandler('coding-plan', region, apiKey);
     }
   }
 
   /**
-   * API Key: select type → Alibaba Standard or Custom.
+   * API Key: select type -> Alibaba Standard or Custom.
    */
-  private async auth2ApiKey(): Promise<void> {
+  private async authApiKey(): Promise<void> {
     const keyType = await this.pick(
       [
         {
@@ -331,19 +285,21 @@ export class AuthMessageHandler extends BaseMessageHandler {
       'Qwen Code: Select API Key Type',
       'Select API key type',
     );
-    if (!keyType) return;
+    if (!keyType) {
+      return;
+    }
 
     if (keyType === 'alibaba-standard') {
-      await this.auth2AlibabaStandard();
+      await this.authAlibabaStandard();
     } else {
-      await this.auth2Custom();
+      await this.authCustom();
     }
   }
 
   /**
-   * Alibaba Standard: region → API key → model IDs → connect.
+   * Alibaba Standard: region -> API key -> model IDs -> connect.
    */
-  private async auth2AlibabaStandard(): Promise<void> {
+  private async authAlibabaStandard(): Promise<void> {
     const endpoints = AuthMessageHandler.ALIBABA_STANDARD_ENDPOINTS;
 
     const region = await this.pick(
@@ -362,7 +318,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
       'Qwen Code: Select Region',
       'Select region for Alibaba Cloud ModelStudio',
     );
-    if (!region) return;
+    if (!region) {
+      return;
+    }
 
     const apiKey = await this.input({
       title: 'Qwen Code: API Key',
@@ -371,7 +329,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
       password: true,
       required: true,
     });
-    if (!apiKey) return;
+    if (!apiKey) {
+      return;
+    }
 
     const modelIds = await this.input({
       title: 'Qwen Code: Model IDs',
@@ -380,13 +340,15 @@ export class AuthMessageHandler extends BaseMessageHandler {
       value: 'qwen3.5-plus',
       required: true,
     });
-    if (!modelIds) return;
+    if (!modelIds) {
+      return;
+    }
 
     const baseUrl = endpoints[region] || endpoints['cn-beijing'];
     const firstModel = modelIds.split(',')[0]?.trim() || 'qwen3.5-plus';
 
-    if (this.auth2Handler) {
-      await this.auth2Handler(
+    if (this.authInteractiveHandler) {
+      await this.authInteractiveHandler(
         'alibaba-standard',
         region,
         apiKey,
@@ -398,16 +360,18 @@ export class AuthMessageHandler extends BaseMessageHandler {
   }
 
   /**
-   * Custom: base URL → API key → model → connect.
+   * Custom: base URL -> API key -> model -> connect.
    */
-  private async auth2Custom(): Promise<void> {
+  private async authCustom(): Promise<void> {
     const baseUrl = await this.input({
       title: 'Qwen Code: Base URL',
       prompt: 'Enter API base URL',
       placeHolder: 'https://api.openai.com/v1',
       value: 'https://api.openai.com/v1',
     });
-    if (baseUrl === undefined) return;
+    if (baseUrl === undefined) {
+      return;
+    }
 
     const apiKey = await this.input({
       title: 'Qwen Code: API Key',
@@ -416,7 +380,9 @@ export class AuthMessageHandler extends BaseMessageHandler {
       password: true,
       required: true,
     });
-    if (!apiKey) return;
+    if (!apiKey) {
+      return;
+    }
 
     const model = await this.input({
       title: 'Qwen Code: Model',
@@ -424,10 +390,18 @@ export class AuthMessageHandler extends BaseMessageHandler {
       placeHolder: 'gpt-4o',
       required: true,
     });
-    if (!model) return;
+    if (!model) {
+      return;
+    }
 
-    if (this.auth2Handler) {
-      await this.auth2Handler('api-key', undefined, apiKey, baseUrl, model);
+    if (this.authInteractiveHandler) {
+      await this.authInteractiveHandler(
+        'api-key',
+        undefined,
+        apiKey,
+        baseUrl,
+        model,
+      );
     }
   }
 }

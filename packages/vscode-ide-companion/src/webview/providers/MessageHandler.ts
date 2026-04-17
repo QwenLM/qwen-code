@@ -75,24 +75,9 @@ export class MessageHandler {
   }
 
   /**
-   * Set auth handler
+   * Set auth interactive handler — interactive auth flow.
    */
-  setAuthHandler(handler: () => Promise<void>): void {
-    this.router.setAuthHandler(handler);
-  }
-
-  /**
-   * Set connect-with-settings handler.
-   * Reads VSCode settings, writes to ~/.qwen/settings.json, and reconnects.
-   */
-  setConnectWithSettingsHandler(handler: () => Promise<void>): void {
-    this.router.setConnectWithSettingsHandler(handler);
-  }
-
-  /**
-   * Set auth2 handler — interactive auth flow.
-   */
-  setAuth2Handler(
+  setAuthInteractiveHandler(
     handler: (
       provider: string,
       region?: string,
@@ -102,7 +87,15 @@ export class MessageHandler {
       modelIds?: string,
     ) => Promise<void>,
   ): void {
-    this.router.setAuth2Handler(handler);
+    this.router.setAuthInteractiveHandler(handler);
+  }
+
+  /**
+   * Set connect-with-settings handler.
+   * Reads VSCode settings, writes to ~/.qwen/settings.json, and reconnects.
+   */
+  setConnectWithSettingsHandler(handler: () => Promise<void>): void {
+    this.router.setConnectWithSettingsHandler(handler);
   }
 
   /**

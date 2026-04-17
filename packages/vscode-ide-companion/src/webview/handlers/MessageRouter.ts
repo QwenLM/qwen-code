@@ -165,24 +165,11 @@ export class MessageRouter {
   }
 
   /**
-   * Set auth handler
+   * Set auth interactive handler — interactive auth flow.
+   * Also registers the handler on the session handler so
+   * "Configure" prompts in session flows trigger the interactive flow.
    */
-  setAuthHandler(handler: () => Promise<void>): void {
-    this.authHandler.setAuthHandler(handler);
-    this.sessionHandler?.setAuthHandler?.(handler);
-  }
-
-  /**
-   * Set connect-with-settings handler.
-   */
-  setConnectWithSettingsHandler(handler: () => Promise<void>): void {
-    this.authHandler.setConnectWithSettingsHandler(handler);
-  }
-
-  /**
-   * Set auth2 handler — interactive auth flow.
-   */
-  setAuth2Handler(
+  setAuthInteractiveHandler(
     handler: (
       provider: string,
       region?: string,
@@ -192,7 +179,19 @@ export class MessageRouter {
       modelIds?: string,
     ) => Promise<void>,
   ): void {
-    this.authHandler.setAuth2Handler(handler);
+    this.authHandler.setAuthInteractiveHandler(handler);
+    // SessionMessageHandler's authHandler is a simple () => Promise<void>.
+    // Wrap so "Configure" prompts trigger the full interactive auth QuickPick.
+    this.sessionHandler?.setAuthHandler?.(() =>
+      this.authHandler.handle({ type: 'auth' }),
+    );
+  }
+
+  /**
+   * Set connect-with-settings handler.
+   */
+  setConnectWithSettingsHandler(handler: () => Promise<void>): void {
+    this.authHandler.setConnectWithSettingsHandler(handler);
   }
 
   /**

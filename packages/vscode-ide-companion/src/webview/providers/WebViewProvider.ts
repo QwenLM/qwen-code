@@ -98,20 +98,15 @@ export class WebViewProvider {
       (message) => this.sendMessageToWebView(message),
     );
 
-    // Set auth handler for /auth command - open auth settings
-    this.messageHandler.setAuthHandler(async () => {
-      await this.openAuthSettings();
-    });
-
     // Set connect-with-settings handler — reads VSCode config, writes ~/.qwen/settings.json, reconnects
     this.messageHandler.setConnectWithSettingsHandler(async () => {
       await this.handleConnectWithSettings();
     });
 
-    // Set auth2 handler — interactive auth flow (QuickPick → InputBox → write settings → reconnect)
-    this.messageHandler.setAuth2Handler(
+    // Set auth interactive handler — interactive auth flow (QuickPick → InputBox → write settings → reconnect)
+    this.messageHandler.setAuthInteractiveHandler(
       async (provider, region, apiKey, baseUrl, model, modelIds) => {
-        await this.handleAuth2(
+        await this.handleAuthInteractive(
           provider,
           region,
           apiKey,
@@ -125,12 +120,12 @@ export class WebViewProvider {
     // Watch for VSCode settings changes — auto-sync and reconnect when qwen-code.* changes.
     // The isSyncingToVSCode guard prevents a loop when we programmatically populate VSCode settings.
     const configChangeDisposable = vscode.workspace.onDidChangeConfiguration(
-      (e) => {
+      async (e) => {
         if (e.affectsConfiguration('qwen-code') && !this.isSyncingToVSCode) {
           console.log(
             '[WebViewProvider] qwen-code settings changed by user, syncing...',
           );
-          const synced = this.syncVSCodeSettingsToQwenConfig();
+          const synced = await this.syncVSCodeSettingsToQwenConfig();
           if (synced && this.agentInitialized) {
             // Settings changed and we have an active connection — reconnect
             void this.handleConnectWithSettings();
@@ -835,7 +830,7 @@ export class WebViewProvider {
    *
    * @returns true if settings were synced (apiKey is configured), false otherwise
    */
-  private syncVSCodeSettingsToQwenConfig(): boolean {
+  private async syncVSCodeSettingsToQwenConfig(): Promise<boolean> {
     const config = vscode.workspace.getConfiguration('qwen-code');
     const apiKey = config.get<string>('apiKey', '');
 
@@ -860,12 +855,15 @@ export class WebViewProvider {
         // Populate VSCode modelProviders setting with the injected models
         this.isSyncingToVSCode = true;
         const target = vscode.ConfigurationTarget.Global;
-        void config.update('modelProviders', injectedModelMap, target);
         const firstModelId = Object.keys(injectedModelMap)[0] || '';
-        void config.update('model', firstModelId, target);
-        setTimeout(() => {
+        try {
+          await Promise.all([
+            config.update('modelProviders', injectedModelMap, target),
+            config.update('model', firstModelId, target),
+          ]);
+        } finally {
           this.isSyncingToVSCode = false;
-        }, 500);
+        }
       } else {
         // API Key mode — read modelProviders from VSCode settings
         const modelProviders = config.get<VSCodeModelProviders>(
@@ -895,7 +893,7 @@ export class WebViewProvider {
    * This makes existing CLI-configured settings visible in the VSCode Settings page.
    * Only populates VSCode settings that are currently empty/default.
    */
-  private syncQwenConfigToVSCodeSettings(): void {
+  private async syncQwenConfigToVSCodeSettings(): Promise<void> {
     try {
       const qwenSettings = readQwenSettingsForVSCode();
       if (!qwenSettings) {
@@ -912,27 +910,27 @@ export class WebViewProvider {
       const config = vscode.workspace.getConfiguration('qwen-code');
       const target = vscode.ConfigurationTarget.Global;
 
-      void config.update('provider', qwenSettings.provider, target);
-      void config.update('apiKey', qwenSettings.apiKey, target);
-      void config.update(
-        'codingPlanRegion',
-        qwenSettings.codingPlanRegion,
-        target,
-      );
-      void config.update(
-        'modelProviders',
-        Object.keys(qwenSettings.modelProviders).length > 0
-          ? qwenSettings.modelProviders
-          : undefined,
-        target,
-      );
-      void config.update('baseUrl', qwenSettings.baseUrl || undefined, target);
-      void config.update('model', qwenSettings.model || undefined, target);
-
-      // Release guard after a short delay to let config change events settle
-      setTimeout(() => {
+      try {
+        await Promise.all([
+          config.update('provider', qwenSettings.provider, target),
+          config.update('apiKey', qwenSettings.apiKey, target),
+          config.update(
+            'codingPlanRegion',
+            qwenSettings.codingPlanRegion,
+            target,
+          ),
+          config.update(
+            'modelProviders',
+            Object.keys(qwenSettings.modelProviders).length > 0
+              ? qwenSettings.modelProviders
+              : undefined,
+            target,
+          ),
+          config.update('model', qwenSettings.model || undefined, target),
+        ]);
+      } finally {
         this.isSyncingToVSCode = false;
-      }, 500);
+      }
     } catch (error) {
       console.error(
         '[WebViewProvider] Failed to sync qwen config to VSCode settings:',
@@ -959,7 +957,7 @@ export class WebViewProvider {
         // This populates the Settings UI with existing config without overwriting anything.
         // Writing to ~/.qwen/settings.json only happens when user explicitly
         // changes VSCode settings (onDidChangeConfiguration) or clicks "Connect".
-        this.syncQwenConfigToVSCodeSettings();
+        await this.syncQwenConfigToVSCodeSettings();
 
         console.log('[WebViewProvider] Attempting connection...');
         // Attempt a connection to detect prior auth without forcing login
@@ -1030,7 +1028,7 @@ export class WebViewProvider {
         // send authState message and return without creating session
         if (connectResult.requiresAuth && !autoAuthenticate) {
           console.log(
-            '[WebViewProvider] Authentication required, launching auth2 flow...',
+            '[WebViewProvider] Authentication required, launching auth flow...',
           );
           this.sendMessageToWebView({
             type: 'authState',
@@ -1044,7 +1042,7 @@ export class WebViewProvider {
           // mirroring CLI's behavior of showing AuthDialog on first run.
           // Deferred to avoid conflicting with the current connection init.
           setTimeout(() => {
-            void this.messageHandler.route({ type: 'auth2' });
+            void this.messageHandler.route({ type: 'auth' });
           }, 100);
           return;
         }
@@ -1093,24 +1091,11 @@ export class WebViewProvider {
   }
 
   /**
-   * Open VSCode Settings for provider configuration and sync + reconnect.
-   * Called when user explicitly uses /login command or webview auth message.
-   */
-  async openAuthSettings(): Promise<void> {
-    console.log('[WebViewProvider] Opening auth settings');
-    // Open VSCode settings filtered to qwen-code
-    await vscode.commands.executeCommand(
-      'workbench.action.openSettings',
-      '@ext:qwenlm.qwen-code-vscode-ide-companion',
-    );
-  }
-
-  /**
-   * Handle auth2 — interactive auth flow result.
+   * Handle auth interactive — interactive auth flow result.
    * Writes provider config to ~/.qwen/settings.json and reconnects.
    * Mirrors the CLI's `qwen auth coding-plan` / `qwen auth` flow.
    */
-  private async handleAuth2(
+  private async handleAuthInteractive(
     provider: string,
     region?: string,
     apiKey?: string,
@@ -1127,7 +1112,7 @@ export class WebViewProvider {
     }
 
     console.log(
-      `[WebViewProvider] auth2: provider=${provider}, region=${region}, model=${model}`,
+      `[WebViewProvider] authInteractive: provider=${provider}, region=${region}, model=${model}`,
     );
 
     try {
@@ -1180,7 +1165,7 @@ export class WebViewProvider {
       });
     } catch (error) {
       const errorMsg = getErrorMessage(error);
-      console.error('[WebViewProvider] auth2 failed:', error);
+      console.error('[WebViewProvider] authInteractive failed:', error);
       this.sendMessageToWebView({
         type: 'authError',
         data: { message: `Configuration failed: ${errorMsg}` },
@@ -1218,7 +1203,7 @@ export class WebViewProvider {
       }
 
       // 2. Sync VSCode settings → ~/.qwen/settings.json
-      this.syncVSCodeSettingsToQwenConfig();
+      await this.syncVSCodeSettingsToQwenConfig();
 
       // 3. Disconnect existing connection
       if (this.agentInitialized) {

@@ -3,7 +3,7 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  *
- * Provider Setup — triggers the auth2 interactive flow (QuickPick + InputBox).
+ * Provider Setup — triggers the auth interactive flow (QuickPick + InputBox).
  */
 
 import { useState, useEffect, type FC } from 'react';
@@ -56,7 +56,7 @@ export const ProviderSetupForm: FC = () => {
     setError(null);
     setIsConnecting(true);
     // Trigger the interactive auth flow (QuickPick → InputBox → connect)
-    vscode.postMessage({ type: 'auth2' });
+    vscode.postMessage({ type: 'auth' });
   };
 
   return (
