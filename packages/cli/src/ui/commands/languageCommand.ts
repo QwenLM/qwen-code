@@ -78,8 +78,8 @@ function formatUiLanguageDisplay(lang: SupportedLanguage): string {
     : `${option.fullName} [${option.id}]`;
 }
 
-function getDynamicTranslationService(context: CommandContext) {
-  return context.services.dynamicCommandTranslationService;
+function getCommandDescriptionProvider(context: CommandContext) {
+  return context.services.commandDescriptionProvider;
 }
 
 /**
@@ -117,7 +117,7 @@ async function setUiLanguage(
   context.ui.refreshStatic?.();
   // After the UI language changes, requeue the currently tracked dynamic
   // descriptions so their runtime translations follow the new UI language.
-  getDynamicTranslationService(context)?.refreshTrackedDescriptions();
+  getCommandDescriptionProvider(context)?.refreshTrackedDescriptions();
 
   return {
     type: 'message',
@@ -461,7 +461,7 @@ export const languageCommand: SlashCommand = {
               };
             }
 
-            const translationService = getDynamicTranslationService(context);
+            const translationService = getCommandDescriptionProvider(context);
             if (!translationService) {
               return {
                 type: 'message',
@@ -503,7 +503,7 @@ export const languageCommand: SlashCommand = {
               };
             }
 
-            const translationService = getDynamicTranslationService(context);
+            const translationService = getCommandDescriptionProvider(context);
             if (!translationService) {
               return {
                 type: 'message',

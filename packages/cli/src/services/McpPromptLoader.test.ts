@@ -11,7 +11,6 @@ import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import * as cliCore from '@qwen-code/qwen-code-core';
 import { setLanguageAsync } from '../i18n/index.js';
-import type { DynamicCommandTranslationService } from './DynamicCommandTranslationService.js';
 
 // Define the mock prompt data at a higher scope
 const mockPrompt = {
@@ -180,21 +179,11 @@ describe('McpPromptLoader', () => {
       expect(commands[0].kind).toBe(CommandKind.MCP_PROMPT);
     });
 
-    it('should resolve server-provided descriptions through the dynamic translation service', async () => {
-      const dynamicTranslationService = {
-        getDescription: vi.fn(() => '一个测试提示。'),
-      } as unknown as DynamicCommandTranslationService;
-      const loader = new McpPromptLoader(
-        mockConfigWithPrompts,
-        dynamicTranslationService,
-      );
+    it('should preserve server-provided descriptions before provider resolution', async () => {
+      const loader = new McpPromptLoader(mockConfigWithPrompts);
       const commands = await loader.loadCommands(new AbortController().signal);
 
-      expect(commands[0].description).toBe('一个测试提示。');
-      expect(dynamicTranslationService.getDescription).toHaveBeenCalledWith(
-        CommandKind.MCP_PROMPT,
-        'A test prompt.',
-      );
+      expect(commands[0].description).toBe('A test prompt.');
     });
 
     it('should localize fallback description and help text in zh', async () => {

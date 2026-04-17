@@ -20,7 +20,7 @@ import type {
   ExtensionUpdateAction,
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
-import type { DynamicCommandTranslationService } from '../../services/DynamicCommandTranslationService.js';
+import type { CommandDescriptionProvider } from '../../services/CommandDescriptionProvider.js';
 
 // Grouped dependencies for clarity and easier mocking
 export interface CommandContext {
@@ -48,7 +48,7 @@ export interface CommandContext {
     settings: LoadedSettings;
     git: GitService | undefined;
     logger: Logger | null;
-    dynamicCommandTranslationService?: DynamicCommandTranslationService;
+    commandDescriptionProvider?: CommandDescriptionProvider;
   };
   // UI state and history management
   ui: {

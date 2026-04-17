@@ -15,11 +15,7 @@ import type {
   SlashCommandActionReturn,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
-import type {
-  DynamicCommandTranslationService} from './DynamicCommandTranslationService.js';
-import {
-  markDynamicDescriptionSource,
-} from './DynamicCommandTranslationService.js';
+import { markDynamicDescriptionSource } from './commandDescriptionMetadata.js';
 
 const debugLogger = createDebugLogger('BUNDLED_SKILL_LOADER');
 
@@ -28,10 +24,7 @@ const debugLogger = createDebugLogger('BUNDLED_SKILL_LOADER');
  * via /<skill-name> (e.g., /review).
  */
 export class BundledSkillLoader implements ICommandLoader {
-  constructor(
-    private readonly config: Config | null,
-    private readonly dynamicTranslationService?: DynamicCommandTranslationService,
-  ) {}
+  constructor(private readonly config: Config | null) {}
 
   async loadCommands(_signal: AbortSignal): Promise<SlashCommand[]> {
     const skillManager = this.config?.getSkillManager();
@@ -62,17 +55,11 @@ export class BundledSkillLoader implements ICommandLoader {
         `Loaded ${skills.length} bundled skill(s) as slash commands`,
       );
 
-      const dynamicTranslationService = this.dynamicTranslationService;
       return skills.map((skill) => {
         const command: SlashCommand = {
           name: skill.name,
           get description() {
-            return (
-              dynamicTranslationService?.getDescription(
-                CommandKind.SKILL,
-                skill.description,
-              ) ?? skill.description
-            );
+            return skill.description;
           },
           kind: CommandKind.SKILL,
           action: async (context, _args): Promise<SlashCommandActionReturn> => {

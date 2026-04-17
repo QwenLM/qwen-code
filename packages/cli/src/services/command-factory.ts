@@ -18,11 +18,7 @@ import type {
   SlashCommandActionReturn,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
-import type {
-  DynamicCommandTranslationService} from './DynamicCommandTranslationService.js';
-import {
-  markDynamicDescriptionSource,
-} from './DynamicCommandTranslationService.js';
+import { markDynamicDescriptionSource } from './commandDescriptionMetadata.js';
 import { DefaultArgumentProcessor } from './prompt-processors/argumentProcessor.js';
 import type {
   IPromptProcessor,
@@ -50,16 +46,12 @@ function getLocalizedDescription(
   filePath: string,
   description: string | undefined,
   extensionName: string | undefined,
-  dynamicTranslationService: DynamicCommandTranslationService | undefined,
 ): string {
-  const baseDescription = description
-    ? (dynamicTranslationService?.getDescription(
-        CommandKind.FILE,
-        description,
-      ) ?? description)
-    : t('Custom command from {{file}}', {
-        file: path.basename(filePath),
-      });
+  const baseDescription =
+    description ||
+    t('Custom command from {{file}}', {
+      file: path.basename(filePath),
+    });
 
   return extensionName
     ? `[${extensionName}] ${baseDescription}`
@@ -83,7 +75,6 @@ export function createSlashCommandFromDefinition(
   definition: CommandDefinition,
   extensionName: string | undefined,
   fileExtension: string,
-  dynamicTranslationService?: DynamicCommandTranslationService,
 ): SlashCommand {
   const relativePathWithExt = path.relative(baseDir, filePath);
   const relativePath = relativePathWithExt.substring(
@@ -134,7 +125,6 @@ export function createSlashCommandFromDefinition(
         filePath,
         definition.description,
         extensionName,
-        dynamicTranslationService,
       );
     },
     kind: CommandKind.FILE,
@@ -188,6 +178,11 @@ export function createSlashCommandFromDefinition(
       command,
       CommandKind.FILE,
       definition.description,
+      {
+        formatResolvedText: extensionName
+          ? (resolvedText) => `[${extensionName}] ${resolvedText}`
+          : undefined,
+      },
     );
   }
 

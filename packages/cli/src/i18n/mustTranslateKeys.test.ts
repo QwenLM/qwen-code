@@ -14,7 +14,9 @@ import { btwCommand } from '../ui/commands/btwCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { languageCommand } from '../ui/commands/languageCommand.js';
 import { mcpCommand } from '../ui/commands/mcpCommand.js';
+import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
+import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 
 const NON_ENGLISH_LANGUAGES = SUPPORTED_LANGUAGES.filter(
@@ -72,6 +74,10 @@ describe('must-translate locale coverage', () => {
       );
       expect(extensionSubcommands.get('explore')).not.toBe(
         'Open extensions page in your browser',
+      );
+      expect(memoryCommand.description).not.toBe('Open the memory manager.');
+      expect(rememberCommand.description).not.toBe(
+        'Save a durable memory to the memory system.',
       );
       expect(statuslineCommand.description).not.toBe(
         "Set up Qwen Code's status line UI",

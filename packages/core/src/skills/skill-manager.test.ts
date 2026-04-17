@@ -995,6 +995,77 @@ Skill content`;
       }
     });
 
+    it('should preserve supported hook fields from frontmatter', () => {
+      const markdown = `---
+name: rich-hook-skill
+description: Skill with advanced hook fields
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      sequential: true
+      hooks:
+        - type: command
+          command: 'echo "checking"'
+          name: "command-hook"
+          description: "Command hook description"
+          env:
+            EXISTING: "1"
+          async: true
+          shell: bash
+          timeout: 5
+          statusMessage: "Running command hook"
+        - type: http
+          url: 'https://example.com/hook'
+          if: "tool_name == 'Bash'"
+          name: "http-hook"
+          description: "HTTP hook description"
+          headers:
+            Authorization: 'Bearer token'
+          allowedEnvVars:
+            - API_KEY
+          timeout: 10
+          statusMessage: "Running HTTP hook"
+          once: true
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      const definition = config.hooks?.PreToolUse?.[0];
+      expect(definition?.matcher).toBe('Bash');
+      expect(definition?.sequential).toBe(true);
+      expect(definition?.hooks).toHaveLength(2);
+
+      const commandHook = definition?.hooks[0];
+      expect(commandHook?.type).toBe('command');
+      if (commandHook?.type === 'command') {
+        expect(commandHook.name).toBe('command-hook');
+        expect(commandHook.description).toBe('Command hook description');
+        expect(commandHook.env).toEqual({ EXISTING: '1' });
+        expect(commandHook.async).toBe(true);
+        expect(commandHook.shell).toBe('bash');
+        expect(commandHook.timeout).toBe(5);
+        expect(commandHook.statusMessage).toBe('Running command hook');
+      }
+
+      const httpHook = definition?.hooks[1];
+      expect(httpHook?.type).toBe('http');
+      if (httpHook?.type === 'http') {
+        expect(httpHook.if).toBe("tool_name == 'Bash'");
+        expect(httpHook.name).toBe('http-hook');
+        expect(httpHook.description).toBe('HTTP hook description');
+        expect(httpHook.headers).toEqual({ Authorization: 'Bearer token' });
+        expect(httpHook.allowedEnvVars).toEqual(['API_KEY']);
+        expect(httpHook.timeout).toBe(10);
+        expect(httpHook.statusMessage).toBe('Running HTTP hook');
+        expect(httpHook.once).toBe(true);
+      }
+    });
+
     it('should ignore unknown hook events', () => {
       const markdown = `---
 name: unknown-event-skill

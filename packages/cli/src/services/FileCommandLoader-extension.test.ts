@@ -10,7 +10,6 @@ import mock from 'mock-fs';
 import { FileCommandLoader } from './FileCommandLoader.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { Storage } from '@qwen-code/qwen-code-core';
-import type { DynamicCommandTranslationService } from './DynamicCommandTranslationService.js';
 
 describe('FileCommandLoader - Extension Commands Support', () => {
   const projectRoot = '/test/project';
@@ -321,16 +320,12 @@ describe('FileCommandLoader - Extension Commands Support', () => {
         },
       ]),
     } as unknown as Config;
-    const dynamicTranslationService = {
-      getDescription: vi.fn(() => '将已暂存的变更部署到生产环境'),
-    } as unknown as DynamicCommandTranslationService;
-
-    const loader = new FileCommandLoader(mockConfig, dynamicTranslationService);
+    const loader = new FileCommandLoader(mockConfig);
     const commands = await loader.loadCommands(new AbortController().signal);
 
     expect(commands).toHaveLength(1);
     expect(commands[0].description).toBe(
-      '[translated-ext] 将已暂存的变更部署到生产环境',
+      '[translated-ext] Deploy staged changes to production',
     );
   });
 

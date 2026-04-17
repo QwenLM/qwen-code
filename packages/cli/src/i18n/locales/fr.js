@@ -2123,6 +2123,9 @@ export default {
     'Retraduire les descriptions dynamiques de commandes slash actuellement chargées pour la langue UI active',
   'Clear cached translations for the current UI language':
     'Effacer les traductions en cache pour la langue UI active',
+  'Open the memory manager.': 'Ouvrir le gestionnaire de mémoire.',
+  'Save a durable memory to the memory system.':
+    'Enregistrer une mémoire durable dans le système de mémoire.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
     'Afficher le détail de l’utilisation de la fenêtre de contexte. Utilisez "/context detail" pour le détail par élément.',
   'Show per-item context usage breakdown.':

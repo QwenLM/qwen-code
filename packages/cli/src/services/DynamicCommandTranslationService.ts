@@ -12,24 +12,16 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import { Storage, createDebugLogger } from '@qwen-code/qwen-code-core';
 import { getCurrentLanguage } from '../i18n/index.js';
 import { getLanguageNameFromLocale } from '../i18n/languages.js';
-import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
+import { CommandKind } from '../ui/commands/types.js';
+import type {
+  DynamicCommandDescriptionKind,
+  TrackedDynamicDescriptionSource,
+} from './commandDescriptionMetadata.js';
 
 const debugLogger = createDebugLogger('DYNAMIC_COMMAND_TRANSLATION');
 const CACHE_SCHEMA_VERSION = 1;
 const DEFAULT_FAILURE_COOLDOWN_MS = 60_000;
 const PROMPT_ID = 'dynamic_command_translation';
-
-const DYNAMIC_DESCRIPTION_SOURCE = Symbol('dynamicDescriptionSource');
-
-type DynamicCommandKind =
-  | CommandKind.SKILL
-  | CommandKind.FILE
-  | CommandKind.MCP_PROMPT;
-
-interface DynamicDescriptionSource {
-  kind: DynamicCommandKind;
-  sourceText: string;
-}
 
 interface TranslationCacheEntry {
   sourceText: string;
@@ -58,7 +50,9 @@ const TRANSLATION_SCHEMA: Record<string, unknown> = {
   required: ['translation'],
 };
 
-function isDynamicCommandKind(kind: CommandKind): kind is DynamicCommandKind {
+function isDynamicCommandKind(
+  kind: CommandKind,
+): kind is DynamicCommandDescriptionKind {
   return (
     kind === CommandKind.SKILL ||
     kind === CommandKind.FILE ||
@@ -119,36 +113,6 @@ function buildTranslationPrompt(
   ].join('\n');
 }
 
-export function markDynamicDescriptionSource(
-  command: SlashCommand,
-  kind: DynamicCommandKind,
-  sourceText: string,
-): void {
-  Object.defineProperty(command, DYNAMIC_DESCRIPTION_SOURCE, {
-    value: {
-      kind,
-      sourceText,
-    } satisfies DynamicDescriptionSource,
-    enumerable: false,
-    configurable: true,
-    writable: false,
-  });
-}
-
-function getDynamicDescriptionSource(
-  command: SlashCommand,
-): DynamicDescriptionSource | null {
-  const metadata = (
-    command as SlashCommand & {
-      [DYNAMIC_DESCRIPTION_SOURCE]?: DynamicDescriptionSource;
-    }
-  )[DYNAMIC_DESCRIPTION_SOURCE];
-  if (!metadata || !isDynamicCommandKind(metadata.kind)) {
-    return null;
-  }
-  return metadata;
-}
-
 export class DynamicCommandTranslationService {
   private readonly cacheByLanguage = new Map<
     string,
@@ -157,7 +121,7 @@ export class DynamicCommandTranslationService {
   private readonly inFlight = new Map<string, Promise<void>>();
   private readonly failureCooldownUntil = new Map<string, number>();
   private readonly languageGeneration = new Map<string, number>();
-  private trackedSources: DynamicDescriptionSource[] = [];
+  private trackedSources: TrackedDynamicDescriptionSource[] = [];
 
   constructor(
     private readonly config: Config | null,
@@ -167,11 +131,14 @@ export class DynamicCommandTranslationService {
     } = {},
   ) {}
 
-  getDescription(kind: CommandKind, sourceText: string): string {
-    if (!this.shouldTranslate(kind, sourceText)) {
-      return sourceText;
-    }
-    if (!isDynamicCommandKind(kind)) {
+  getDescription(
+    kind: DynamicCommandDescriptionKind | CommandKind,
+    sourceText: string,
+  ): string {
+    if (
+      !this.shouldTranslate(kind, sourceText) ||
+      !isDynamicCommandKind(kind)
+    ) {
       return sourceText;
     }
 
@@ -186,26 +153,8 @@ export class DynamicCommandTranslationService {
     return sourceText;
   }
 
-  setTrackedCommands(commands: readonly SlashCommand[]): void {
-    const tracked = new Map<string, DynamicDescriptionSource>();
-
-    const visit = (commandList: readonly SlashCommand[]) => {
-      for (const command of commandList) {
-        const source = getDynamicDescriptionSource(command);
-        if (source) {
-          tracked.set(
-            `${source.kind}:${hashSourceText(source.sourceText)}`,
-            source,
-          );
-        }
-        if (command.subCommands?.length) {
-          visit(command.subCommands);
-        }
-      }
-    };
-
-    visit(commands);
-    this.trackedSources = Array.from(tracked.values());
+  setTrackedSources(sources: readonly TrackedDynamicDescriptionSource[]): void {
+    this.trackedSources = [...sources];
   }
 
   refreshTrackedDescriptions(): number {
@@ -307,7 +256,7 @@ export class DynamicCommandTranslationService {
   }
 
   private queueTranslation(
-    kind: DynamicCommandKind,
+    kind: DynamicCommandDescriptionKind,
     sourceText: string,
     language: string,
     force: boolean = false,
@@ -343,7 +292,7 @@ export class DynamicCommandTranslationService {
   }
 
   private async translateAndPersist(
-    kind: DynamicCommandKind,
+    kind: DynamicCommandDescriptionKind,
     sourceText: string,
     language: string,
     hash: string,

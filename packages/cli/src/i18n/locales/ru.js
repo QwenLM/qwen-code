@@ -933,8 +933,11 @@ export default {
   'Managed auto-memory dream found nothing to improve.':
     'Консолидация автопамяти не нашла чего улучшать.',
   'Deduplicated entries: {{count}}': 'Удалено дубликатов: {{count}}',
+  'Open the memory manager.': 'Открыть менеджер памяти.',
   'Save a durable memory using the save_memory tool.':
     'Сохранить долгосрочную память с помощью инструмента save_memory.',
+  'Save a durable memory to the memory system.':
+    'Сохранить долгосрочную память в системе памяти.',
   'Usage: /remember [--global|--project] <text to remember>':
     'Использование: /remember [--global|--project] <текст для запоминания>',
 

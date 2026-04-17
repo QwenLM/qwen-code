@@ -687,8 +687,11 @@ export default {
   'Managed auto-memory dream found nothing to improve.':
     '自動メモリ統合で改善するものは見つかりませんでした。',
   'Deduplicated entries: {{count}}': '重複除去したエントリ: {{count}}',
+  'Open the memory manager.': 'メモリマネージャーを開く。',
   'Save a durable memory using the save_memory tool.':
     'save_memoryツールを使用して永続メモリを保存する。',
+  'Save a durable memory to the memory system.':
+    '永続メモリをメモリシステムに保存する。',
   'Usage: /remember [--global|--project] <text to remember>':
     '使い方: /remember [--global|--project] <覚えておくテキスト>',
   // MCP

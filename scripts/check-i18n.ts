@@ -11,8 +11,10 @@ import * as path from 'node:path';
 import { dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { glob } from 'glob';
-import { SUPPORTED_LANGUAGES } from '../packages/cli/src/i18n/languages.ts';
-import { MUST_TRANSLATE_KEYS } from '../packages/cli/src/i18n/mustTranslateKeys.ts';
+import {
+  MUST_TRANSLATE_KEYS,
+  SUPPORTED_LANGUAGES,
+} from '../packages/cli/src/i18n/index.js';
 
 type TranslationValue = string | string[];
 type TranslationDict = Record<string, TranslationValue>;

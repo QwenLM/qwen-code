@@ -7,6 +7,10 @@
 import type { SlashCommand } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  bindCommandDescriptionProvider,
+  type CommandDescriptionProvider,
+} from './CommandDescriptionProvider.js';
 
 const debugLogger = createDebugLogger('CLI_COMMANDS');
 
@@ -50,6 +54,7 @@ export class CommandService {
   static async create(
     loaders: ICommandLoader[],
     signal: AbortSignal,
+    descriptionProvider?: CommandDescriptionProvider,
   ): Promise<CommandService> {
     const results = await Promise.allSettled(
       loaders.map((loader) => loader.loadCommands(signal)),
@@ -82,13 +87,17 @@ export class CommandService {
         finalName = renamedName;
       }
 
+      const clonedCommand = cloneCommandPreservingDescriptors(cmd, finalName);
       commandMap.set(
         finalName,
-        cloneCommandPreservingDescriptors(cmd, finalName),
+        descriptionProvider
+          ? bindCommandDescriptionProvider(clonedCommand, descriptionProvider)
+          : clonedCommand,
       );
     }
 
     const finalCommands = Object.freeze(Array.from(commandMap.values()));
+    descriptionProvider?.trackCommands(finalCommands);
     return new CommandService(finalCommands);
   }
 

@@ -18,24 +18,14 @@ import { CommandKind } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import type { PromptArgument } from '@modelcontextprotocol/sdk/types.js';
 import { t } from '../i18n/index.js';
-import type {
-  DynamicCommandTranslationService} from './DynamicCommandTranslationService.js';
-import {
-  markDynamicDescriptionSource,
-} from './DynamicCommandTranslationService.js';
+import { markDynamicDescriptionSource } from './commandDescriptionMetadata.js';
 
 function getPromptDescription(
   promptName: string,
   promptDescription?: string,
-  dynamicTranslationService?: DynamicCommandTranslationService,
 ): string {
   if (promptDescription) {
-    return (
-      dynamicTranslationService?.getDescription(
-        CommandKind.MCP_PROMPT,
-        promptDescription,
-      ) ?? promptDescription
-    );
+    return promptDescription;
   }
 
   return t('Invoke prompt {{name}}', { name: promptName });
@@ -93,10 +83,7 @@ function buildPromptHelpMessage(
  * Model-Context-Protocol (MCP) servers.
  */
 export class McpPromptLoader implements ICommandLoader {
-  constructor(
-    private readonly config: Config | null,
-    private readonly dynamicTranslationService?: DynamicCommandTranslationService,
-  ) {}
+  constructor(private readonly config: Config | null) {}
 
   /**
    * Loads all available prompts from all configured MCP servers and adapts
@@ -111,7 +98,6 @@ export class McpPromptLoader implements ICommandLoader {
       return Promise.resolve([]);
     }
     const mcpServers = this.config.getMcpServers() || {};
-    const dynamicTranslationService = this.dynamicTranslationService;
     for (const serverName in mcpServers) {
       const prompts = getMCPServerPrompts(this.config, serverName) || [];
       for (const prompt of prompts) {
@@ -119,11 +105,7 @@ export class McpPromptLoader implements ICommandLoader {
         const newPromptCommand: SlashCommand = {
           name: commandName,
           get description() {
-            return getPromptDescription(
-              prompt.name,
-              prompt.description,
-              dynamicTranslationService,
-            );
+            return getPromptDescription(prompt.name, prompt.description);
           },
           kind: CommandKind.MCP_PROMPT,
           subCommands: [
@@ -132,13 +114,10 @@ export class McpPromptLoader implements ICommandLoader {
               description: t('Show help for this prompt'),
               kind: CommandKind.MCP_PROMPT,
               action: async (): Promise<SlashCommandActionReturn> => ({
-                  type: 'message',
-                  messageType: 'info',
-                  content: buildPromptHelpMessage(
-                    prompt.name,
-                    prompt.arguments,
-                  ),
-                }),
+                type: 'message',
+                messageType: 'info',
+                content: buildPromptHelpMessage(prompt.name, prompt.arguments),
+              }),
             },
           ],
           action: async (

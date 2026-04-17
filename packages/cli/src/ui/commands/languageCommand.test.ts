@@ -89,7 +89,7 @@ describe('languageCommand', () => {
         config: {
           getModel: vi.fn().mockReturnValue('test-model'),
         },
-        dynamicCommandTranslationService: {
+        commandDescriptionProvider: {
           refreshTrackedDescriptions: vi.fn(() => 2),
           clearCurrentLanguageCache: vi.fn(),
         },
@@ -303,7 +303,7 @@ describe('languageCommand', () => {
       expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
       expect(mockContext.ui.refreshStatic).toHaveBeenCalled();
       expect(
-        mockContext.services.dynamicCommandTranslationService
+        mockContext.services.commandDescriptionProvider
           ?.refreshTrackedDescriptions,
       ).toHaveBeenCalledTimes(1);
       expect(result).toEqual({
@@ -323,7 +323,7 @@ describe('languageCommand', () => {
       expect(mockContext.ui.reloadCommands).toHaveBeenCalledTimes(1);
       expect(mockContext.ui.refreshStatic).toHaveBeenCalledTimes(1);
       expect(
-        mockContext.services.dynamicCommandTranslationService
+        mockContext.services.commandDescriptionProvider
           ?.refreshTrackedDescriptions,
       ).toHaveBeenCalledTimes(1);
     });
@@ -342,8 +342,9 @@ describe('languageCommand', () => {
         typeof vi.fn
       >;
       const refreshTrackedDescriptionsMock = mockContext.services
-        .dynamicCommandTranslationService
-        ?.refreshTrackedDescriptions as ReturnType<typeof vi.fn>;
+        .commandDescriptionProvider?.refreshTrackedDescriptions as ReturnType<
+        typeof vi.fn
+      >;
 
       const reloadOrder = reloadCommandsMock.mock.invocationCallOrder[0];
       const refreshStaticOrder = refreshStaticMock.mock.invocationCallOrder[0];
@@ -593,7 +594,7 @@ describe('languageCommand', () => {
       const result = await languageCommand.action(mockContext, 'cache refresh');
 
       expect(
-        mockContext.services.dynamicCommandTranslationService
+        mockContext.services.commandDescriptionProvider
           ?.refreshTrackedDescriptions,
       ).toHaveBeenCalledTimes(1);
       expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
@@ -615,7 +616,7 @@ describe('languageCommand', () => {
       const result = await languageCommand.action(mockContext, 'cache clear');
 
       expect(
-        mockContext.services.dynamicCommandTranslationService
+        mockContext.services.commandDescriptionProvider
           ?.clearCurrentLanguageCache,
       ).toHaveBeenCalledTimes(1);
       expect(mockContext.ui.reloadCommands).toHaveBeenCalled();

@@ -932,8 +932,11 @@ export default {
   'Managed auto-memory dream found nothing to improve.':
     'A consolidação de memória automática não encontrou nada para melhorar.',
   'Deduplicated entries: {{count}}': 'Entradas desduplicadas: {{count}}',
+  'Open the memory manager.': 'Abrir o gerenciador de memória.',
   'Save a durable memory using the save_memory tool.':
     'Salvar uma memória durável usando a ferramenta save_memory.',
+  'Save a durable memory to the memory system.':
+    'Salvar uma memória durável no sistema de memória.',
   'Usage: /remember [--global|--project] <text to remember>':
     'Uso: /remember [--global|--project] <texto a lembrar>',
 

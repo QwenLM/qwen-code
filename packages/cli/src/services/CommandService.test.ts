@@ -8,6 +8,8 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { CommandService } from './CommandService.js';
 import { type ICommandLoader } from './types.js';
 import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
+import type { CommandDescriptionProvider } from './CommandDescriptionProvider.js';
+import { markDynamicDescriptionSource } from './commandDescriptionMetadata.js';
 
 const createMockCommand = (name: string, kind: CommandKind): SlashCommand => ({
   name,
@@ -390,5 +392,32 @@ describe('CommandService', () => {
       .getCommands()
       .find((cmd) => cmd.name === 'firebase.deploy');
     expect(renamedCommand?.description).toBe('dynamic:firebase.deploy');
+  });
+
+  it('should resolve descriptions through an injected command description provider', async () => {
+    const provider: CommandDescriptionProvider = {
+      resolve: vi.fn((source) =>
+        source.type === 'dynamic' ? '审查代码变更' : source.getText(),
+      ),
+      trackCommands: vi.fn(),
+      refreshTrackedDescriptions: vi.fn(() => 0),
+      clearCurrentLanguageCache: vi.fn(),
+    };
+    const dynamicCommand = createMockCommand('review', CommandKind.SKILL);
+    markDynamicDescriptionSource(
+      dynamicCommand,
+      CommandKind.SKILL,
+      'Review code changes',
+    );
+
+    const service = await CommandService.create(
+      [new MockCommandLoader([dynamicCommand])],
+      new AbortController().signal,
+      provider,
+    );
+
+    const command = service.getCommands().find((cmd) => cmd.name === 'review');
+    expect(command?.description).toBe('审查代码变更');
+    expect(provider.trackCommands).toHaveBeenCalledTimes(1);
   });
 });

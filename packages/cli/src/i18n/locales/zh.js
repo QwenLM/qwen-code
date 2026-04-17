@@ -1017,8 +1017,11 @@ export default {
   'Managed auto-memory dream found nothing to improve.':
     '托管自动记忆 dream 未发现可改进内容。',
   'Deduplicated entries: {{count}}': '去重条目数：{{count}}',
+  'Open the memory manager.': '打开记忆管理器。',
   'Save a durable memory using the save_memory tool.':
     '使用 save_memory 工具保存一条持久记忆',
+  'Save a durable memory to the memory system.':
+    '将一条持久记忆保存到记忆系统。',
   'Usage: /remember [--global|--project] <text to remember>':
     '用法：/remember [--global|--project] <要记住的文本>',
 

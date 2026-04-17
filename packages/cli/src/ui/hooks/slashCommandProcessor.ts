@@ -36,7 +36,7 @@ import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
-import { DynamicCommandTranslationService } from '../../services/DynamicCommandTranslationService.js';
+import { UnifiedCommandDescriptionProvider } from '../../services/CommandDescriptionProvider.js';
 import { parseSlashCommand } from '../../utils/commands.js';
 import { isBtwCommand } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
@@ -118,9 +118,9 @@ export const useSlashCommandProcessor = (
   const reloadCommands = useCallback(() => {
     setReloadTrigger((v) => v + 1);
   }, []);
-  const dynamicCommandTranslationService = useMemo(
+  const commandDescriptionProvider = useMemo(
     () =>
-      new DynamicCommandTranslationService(config, {
+      new UnifiedCommandDescriptionProvider(config, {
         onTranslationsUpdated: () => {
           reloadCommands();
           refreshStatic();
@@ -266,7 +266,7 @@ export const useSlashCommandProcessor = (
         settings,
         git: gitService,
         logger,
-        dynamicCommandTranslationService,
+        commandDescriptionProvider,
       },
       ui: {
         addItem,
@@ -303,7 +303,7 @@ export const useSlashCommandProcessor = (
       settings,
       gitService,
       logger,
-      dynamicCommandTranslationService,
+      commandDescriptionProvider,
       loadHistory,
       addItem,
       clearItems,
@@ -351,20 +351,19 @@ export const useSlashCommandProcessor = (
     const load = async () => {
       try {
         const loaders = [
-          new McpPromptLoader(config, dynamicCommandTranslationService),
+          new McpPromptLoader(config),
           new BuiltinCommandLoader(config),
-          new BundledSkillLoader(config, dynamicCommandTranslationService),
-          new FileCommandLoader(config, dynamicCommandTranslationService),
+          new BundledSkillLoader(config),
+          new FileCommandLoader(config),
         ];
         const commandService = await CommandService.create(
           loaders,
           controller.signal,
+          commandDescriptionProvider,
         );
         // Avoid overwriting newer results from a subsequent effect run
         if (!controller.signal.aborted) {
-          const loadedCommands = commandService.getCommands();
-          dynamicCommandTranslationService.setTrackedCommands(loadedCommands);
-          setCommands(loadedCommands);
+          setCommands(commandService.getCommands());
         }
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
@@ -376,12 +375,7 @@ export const useSlashCommandProcessor = (
     return () => {
       controller.abort();
     };
-  }, [
-    config,
-    dynamicCommandTranslationService,
-    reloadTrigger,
-    isConfigInitialized,
-  ]);
+  }, [config, commandDescriptionProvider, reloadTrigger, isConfigInitialized]);
 
   const handleSlashCommand = useCallback(
     async (

@@ -982,8 +982,11 @@ export default {
   'Managed auto-memory dream found nothing to improve.':
     'Managed auto-memory dream found nothing to improve.',
   'Deduplicated entries: {{count}}': 'Deduplicated entries: {{count}}',
+  'Open the memory manager.': 'Open the memory manager.',
   'Save a durable memory using the save_memory tool.':
     'Save a durable memory using the save_memory tool.',
+  'Save a durable memory to the memory system.':
+    'Save a durable memory to the memory system.',
   'Usage: /remember [--global|--project] <text to remember>':
     'Usage: /remember [--global|--project] <text to remember>',
 

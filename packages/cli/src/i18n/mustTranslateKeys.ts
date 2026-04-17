@@ -35,6 +35,8 @@ export const MUST_TRANSLATE_KEYS = [
   'Manage dynamic translation cache',
   'Re-translate currently loaded dynamic slash descriptions for the current UI language',
   'Clear cached translations for the current UI language',
+  'Open the memory manager.',
+  'Save a durable memory to the memory system.',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.',
   'Show per-item context usage breakdown.',
   'Manage extensions',

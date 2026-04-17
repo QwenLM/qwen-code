@@ -12,11 +12,8 @@ import path from 'node:path';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { Storage } from '@qwen-code/qwen-code-core';
 import { setLanguageAsync } from '../i18n/index.js';
-import { CommandKind, type SlashCommand } from '../ui/commands/types.js';
-import {
-  DynamicCommandTranslationService,
-  markDynamicDescriptionSource,
-} from './DynamicCommandTranslationService.js';
+import { CommandKind } from '../ui/commands/types.js';
+import { DynamicCommandTranslationService } from './DynamicCommandTranslationService.js';
 
 function makeResponse(translation: string) {
   return {
@@ -234,18 +231,9 @@ describe('DynamicCommandTranslationService', () => {
 
     await setLanguageAsync('zh');
     const service = new DynamicCommandTranslationService(config);
-    const command = {
-      name: 'review',
-      description: 'Review code changes',
-      kind: CommandKind.SKILL,
-    } as SlashCommand;
-
-    markDynamicDescriptionSource(
-      command,
-      CommandKind.SKILL,
-      'Review code changes',
-    );
-    service.setTrackedCommands([command]);
+    service.setTrackedSources([
+      { kind: CommandKind.SKILL, sourceText: 'Review code changes' },
+    ]);
 
     expect(service.refreshTrackedDescriptions()).toBe(1);
     await flushMicrotasks();

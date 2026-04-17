@@ -46,3 +46,12 @@ describe('bundled locale fallback', () => {
     );
   }, 10000);
 });
+
+describe('public i18n exports', () => {
+  it('re-exports supported languages and required translation keys', async () => {
+    const i18n = await import('./index.js');
+
+    expect(i18n.SUPPORTED_LANGUAGES.length).toBeGreaterThan(0);
+    expect(i18n.MUST_TRANSLATE_KEYS.length).toBeGreaterThan(0);
+  });
+});
