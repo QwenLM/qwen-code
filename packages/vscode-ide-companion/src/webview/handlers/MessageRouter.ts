@@ -188,13 +188,6 @@ export class MessageRouter {
   }
 
   /**
-   * Set connect-with-settings handler.
-   */
-  setConnectWithSettingsHandler(handler: () => Promise<void>): void {
-    this.authHandler.setConnectWithSettingsHandler(handler);
-  }
-
-  /**
    * Append stream content
    */
   appendStreamContent(chunk: string): void {

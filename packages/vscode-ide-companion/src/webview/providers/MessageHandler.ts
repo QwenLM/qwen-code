@@ -91,14 +91,6 @@ export class MessageHandler {
   }
 
   /**
-   * Set connect-with-settings handler.
-   * Reads VSCode settings, writes to ~/.qwen/settings.json, and reconnects.
-   */
-  setConnectWithSettingsHandler(handler: () => Promise<void>): void {
-    this.router.setConnectWithSettingsHandler(handler);
-  }
-
-  /**
    * Append stream content
    */
   appendStreamContent(chunk: string): void {

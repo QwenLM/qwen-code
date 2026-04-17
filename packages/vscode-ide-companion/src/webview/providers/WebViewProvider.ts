@@ -29,7 +29,6 @@ import {
   writeCodingPlanConfig,
   writeModelProvidersConfig,
   readQwenSettingsForVSCode,
-  type VSCodeModelProviders,
 } from '../../services/settingsWriter.js';
 
 export class WebViewProvider {
@@ -98,11 +97,6 @@ export class WebViewProvider {
       (message) => this.sendMessageToWebView(message),
     );
 
-    // Set connect-with-settings handler — reads VSCode config, writes ~/.qwen/settings.json, reconnects
-    this.messageHandler.setConnectWithSettingsHandler(async () => {
-      await this.handleConnectWithSettings();
-    });
-
     // Set auth interactive handler — interactive auth flow (QuickPick → InputBox → write settings → reconnect)
     this.messageHandler.setAuthInteractiveHandler(
       async (provider, region, apiKey, baseUrl, model, modelIds) => {
@@ -128,7 +122,19 @@ export class WebViewProvider {
           const synced = await this.syncVSCodeSettingsToQwenConfig();
           if (synced && this.agentInitialized) {
             // Settings changed and we have an active connection — reconnect
-            void this.handleConnectWithSettings();
+            try {
+              this.agentManager.disconnect();
+              this.agentInitialized = false;
+              await new Promise((resolve) => setTimeout(resolve, 300));
+              await this.doInitializeAgentConnection({
+                autoAuthenticate: false,
+              });
+            } catch (e) {
+              console.error(
+                '[WebViewProvider] Reconnect after settings change failed:',
+                e,
+              );
+            }
           }
         }
       },
@@ -835,9 +841,6 @@ export class WebViewProvider {
     const apiKey = config.get<string>('apiKey', '');
 
     if (!apiKey) {
-      console.log(
-        '[WebViewProvider] No API key in VSCode settings, skipping sync',
-      );
       return false;
     }
 
@@ -849,37 +852,13 @@ export class WebViewProvider {
           'codingPlanRegion',
           'china',
         );
-        // Write coding plan config and get the injected model map
-        const injectedModelMap = writeCodingPlanConfig(region, apiKey);
-
-        // Populate VSCode modelProviders setting with the injected models
-        this.isSyncingToVSCode = true;
-        const target = vscode.ConfigurationTarget.Global;
-        const firstModelId = Object.keys(injectedModelMap)[0] || '';
-        try {
-          await Promise.all([
-            config.update('modelProviders', injectedModelMap, target),
-            config.update('model', firstModelId, target),
-          ]);
-        } finally {
-          this.isSyncingToVSCode = false;
-        }
-      } else {
-        // API Key mode — read modelProviders from VSCode settings
-        const modelProviders = config.get<VSCodeModelProviders>(
-          'modelProviders',
-          {},
-        );
-        const activeModel = config.get<string>('model', '');
-        writeModelProvidersConfig({
-          apiKey,
-          modelProviders,
-          activeModel,
-        });
+        writeCodingPlanConfig(region, apiKey);
       }
+      // For api-key mode, model providers are configured via /auth flow,
+      // not via VSCode Settings — no action needed here.
 
       console.log(
-        `[WebViewProvider] Synced VSCode settings to ~/.qwen/settings.json (provider=${provider})`,
+        `[WebViewProvider] Synced VSCode settings → ~/.qwen/settings.json (provider=${provider})`,
       );
       return true;
     } catch (error) {
@@ -919,14 +898,6 @@ export class WebViewProvider {
             qwenSettings.codingPlanRegion,
             target,
           ),
-          config.update(
-            'modelProviders',
-            Object.keys(qwenSettings.modelProviders).length > 0
-              ? qwenSettings.modelProviders
-              : undefined,
-            target,
-          ),
-          config.update('model', qwenSettings.model || undefined, target),
         ]);
       } finally {
         this.isSyncingToVSCode = false;
@@ -1169,76 +1140,6 @@ export class WebViewProvider {
       this.sendMessageToWebView({
         type: 'authError',
         data: { message: `Configuration failed: ${errorMsg}` },
-      });
-    }
-  }
-
-  /**
-   * Read VSCode settings, write to ~/.qwen/settings.json, and reconnect CLI.
-   * Called when the user clicks "Connect" in the Onboarding ProviderSetupForm.
-   *
-   * Flow:
-   * 1. Read qwen-code.* settings from VSCode configuration
-   * 2. Write to ~/.qwen/settings.json via settingsWriter
-   * 3. Disconnect existing CLI connection
-   * 4. Reconnect — CLI reads new settings on startup, no OAuth needed
-   */
-  private async handleConnectWithSettings(): Promise<void> {
-    console.log('[WebViewProvider] connectWithSettings requested');
-
-    try {
-      // 1. Read VSCode settings
-      const config = vscode.workspace.getConfiguration('qwen-code');
-      const apiKey = config.get<string>('apiKey', '');
-
-      if (!apiKey) {
-        this.sendMessageToWebView({
-          type: 'authError',
-          data: {
-            message:
-              'API Key is not configured. Please open Settings and set "Qwen Code: Api Key".',
-          },
-        });
-        return;
-      }
-
-      // 2. Sync VSCode settings → ~/.qwen/settings.json
-      await this.syncVSCodeSettingsToQwenConfig();
-
-      // 3. Disconnect existing connection
-      if (this.agentInitialized) {
-        try {
-          this.agentManager.disconnect();
-          console.log('[WebViewProvider] Existing connection disconnected');
-        } catch (disconnectError) {
-          console.log(
-            '[WebViewProvider] Error disconnecting:',
-            disconnectError,
-          );
-        }
-        this.agentInitialized = false;
-      }
-
-      // Wait for cleanup
-      await new Promise((resolve) => setTimeout(resolve, 300));
-
-      // 4. Reconnect with autoAuthenticate=false — CLI reads new settings
-      console.log('[WebViewProvider] Reconnecting with new settings...');
-      await this.doInitializeAgentConnection({ autoAuthenticate: false });
-
-      // Send success
-      this.sendMessageToWebView({
-        type: 'authSuccess',
-        data: { message: 'Provider configured successfully!' },
-      });
-      console.log('[WebViewProvider] Connected with new settings');
-    } catch (error) {
-      const errorMsg = getErrorMessage(error);
-      console.error('[WebViewProvider] connectWithSettings failed:', error);
-
-      this.sendMessageToWebView({
-        type: 'authError',
-        data: { message: `Connection failed: ${errorMsg}` },
       });
     }
   }

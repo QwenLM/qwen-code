@@ -194,21 +194,6 @@
           ],
           "default": "china",
           "markdownDescription": "Region for Coding Plan. _(Only used when Provider is `coding-plan`)_"
-        },
-        "qwen-code.modelProviders": {
-          "order": 3,
-          "type": "object",
-          "default": {},
-          "additionalProperties": {
-            "type": "string"
-          },
-          "markdownDescription": "Model providers: **model ID** → **base URL**. When using **Coding Plan**, auto-populated after connecting. When using **API Key**, add your own entries.\n\nExample: `gpt-4o` → `https://api.openai.com/v1`"
-        },
-        "qwen-code.model": {
-          "order": 4,
-          "type": "string",
-          "default": "",
-          "markdownDescription": "Active model ID to use. Should match an `id` from your **Model Providers** list above."
         }
       }
     },

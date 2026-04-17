@@ -34,8 +34,6 @@ export interface QwenSettingsForVSCode {
   provider: 'coding-plan' | 'api-key';
   apiKey: string;
   codingPlanRegion: 'china' | 'global';
-  modelProviders: VSCodeModelProviders;
-  model: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -220,41 +218,28 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
 
   const env = (settings.env ?? {}) as Record<string, string>;
   const codingPlan = settings.codingPlan as Record<string, unknown> | undefined;
-  const modelProviders = settings.modelProviders as
-    | Record<string, unknown>
-    | undefined;
-  const model = settings.model as Record<string, unknown> | undefined;
-  const openaiModels = findOpenaiModels(modelProviders);
-
-  // Build key-value map: modelId → baseUrl
-  const vsModelProviders: VSCodeModelProviders = {};
-  for (const m of openaiModels) {
-    const id = m.id as string;
-    const baseUrl = m.baseUrl as string;
-    if (id) {
-      vsModelProviders[id] = baseUrl || '';
-    }
-  }
 
   // Determine if this is a Coding Plan setup
   const hasCodingPlanKey = !!env[CODING_PLAN_ENV_KEY];
   const hasCodingPlanRegion = !!codingPlan?.region;
-  const isCodingPlan = hasCodingPlanKey && hasCodingPlanRegion;
 
-  if (isCodingPlan) {
+  if (hasCodingPlanKey && hasCodingPlanRegion) {
     return {
       provider: 'coding-plan',
       apiKey: env[CODING_PLAN_ENV_KEY] || '',
       codingPlanRegion: (codingPlan?.region as 'china' | 'global') || 'china',
-      modelProviders: vsModelProviders,
-      model: (model?.name as string) || '',
     };
   }
 
-  // Non-Coding-Plan
+  // Non-Coding-Plan — find API key from model providers
+  const modelProviders = settings.modelProviders as
+    | Record<string, unknown>
+    | undefined;
+  const openaiModels = findOpenaiModels(modelProviders);
   const firstEnvKey = (openaiModels[0]?.envKey as string) || 'OPENAI_API_KEY';
   const apiKey = env[firstEnvKey] || '';
-  if (!apiKey && Object.keys(vsModelProviders).length === 0) {
+
+  if (!apiKey) {
     return null;
   }
 
@@ -262,7 +247,5 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
     provider: 'api-key',
     apiKey,
     codingPlanRegion: 'china',
-    modelProviders: vsModelProviders,
-    model: (model?.name as string) || '',
   };
 }

@@ -13,7 +13,6 @@ import { getErrorMessage } from '../../utils/errorMessage.js';
  * Handles all authentication-related messages
  */
 export class AuthMessageHandler extends BaseMessageHandler {
-  private connectWithSettingsHandler: (() => Promise<void>) | null = null;
   private authInteractiveHandler:
     | ((
         provider: string,
@@ -26,9 +25,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     | null = null;
 
   canHandle(messageType: string): boolean {
-    return ['auth', 'getAccountInfo', 'connectWithSettings'].includes(
-      messageType,
-    );
+    return ['auth', 'getAccountInfo'].includes(messageType);
   }
 
   async handle(message: { type: string; data?: unknown }): Promise<void> {
@@ -41,10 +38,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
         await this.handleGetAccountInfo();
         break;
 
-      case 'connectWithSettings':
-        await this.handleConnectWithSettings();
-        break;
-
       default:
         console.warn(
           '[AuthMessageHandler] Unknown message type:',
@@ -52,13 +45,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
         );
         break;
     }
-  }
-
-  /**
-   * Set connect-with-settings handler.
-   */
-  setConnectWithSettingsHandler(handler: () => Promise<void>): void {
-    this.connectWithSettingsHandler = handler;
   }
 
   /**
@@ -98,28 +84,6 @@ export class AuthMessageHandler extends BaseMessageHandler {
       this.sendToWebView({
         type: 'accountInfo',
         data: { error: errorMsg },
-      });
-    }
-  }
-
-  /**
-   * Handle connectWithSettings
-   */
-  private async handleConnectWithSettings(): Promise<void> {
-    try {
-      if (this.connectWithSettingsHandler) {
-        await this.connectWithSettingsHandler();
-      } else {
-        this.sendToWebView({
-          type: 'authError',
-          data: { message: 'Connection handler not available.' },
-        });
-      }
-    } catch (error) {
-      const errorMsg = getErrorMessage(error);
-      this.sendToWebView({
-        type: 'authError',
-        data: { message: `Connection failed: ${errorMsg}` },
       });
     }
   }

@@ -109,7 +109,6 @@ vi.mock('./MessageHandler.js', () => ({
       _sendToWebView: (message: unknown) => void,
     ) {}
     setAuthInteractiveHandler = vi.fn();
-    setConnectWithSettingsHandler = vi.fn();
     setPermissionHandler = vi.fn();
     setAskUserQuestionHandler = vi.fn();
     setCurrentConversationId = vi.fn();

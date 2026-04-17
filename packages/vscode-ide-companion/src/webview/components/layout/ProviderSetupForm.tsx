@@ -25,15 +25,12 @@ const Spinner: FC<{ size?: number }> = ({ size = 14 }) => (
 
 /**
  * ProviderSetupForm — Single button that launches the interactive auth flow.
- * The actual UI (QuickPick for provider/region, InputBox for API key) is
- * handled on the extension host side via VSCode native dialogs.
  */
 export const ProviderSetupForm: FC = () => {
   const vscode = useVSCode();
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Listen for auth results
   useEffect(() => {
     const handler = (event: MessageEvent) => {
       const msg = event.data;
@@ -55,16 +52,15 @@ export const ProviderSetupForm: FC = () => {
   const handleGetStarted = () => {
     setError(null);
     setIsConnecting(true);
-    // Trigger the interactive auth flow (QuickPick → InputBox → connect)
     vscode.postMessage({ type: 'auth' });
   };
 
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-2.5">
       <button
         onClick={handleGetStarted}
         disabled={isConnecting}
-        className="w-full py-2.5 rounded-lg text-sm font-medium flex items-center justify-center gap-2 transition-all"
+        className="w-full py-2 rounded-md text-[13px] font-medium flex items-center justify-center gap-2 transition-all"
         style={{
           backgroundColor: isConnecting
             ? 'var(--app-input-secondary-background)'
@@ -84,14 +80,27 @@ export const ProviderSetupForm: FC = () => {
             Connecting...
           </>
         ) : (
-          'Get Started'
+          <>
+            Get Started
+            <svg
+              width="12"
+              height="12"
+              viewBox="0 0 12 12"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M4.5 2.5L8 6L4.5 9.5" />
+            </svg>
+          </>
         )}
       </button>
 
-      {/* Error message */}
       {error && (
         <div
-          className="text-[11px] leading-snug px-2 py-1.5 rounded"
+          className="text-[11px] leading-snug px-2.5 py-2 rounded"
           style={{
             backgroundColor: 'color-mix(in srgb, #ef4444 10%, transparent)',
             color: '#f87171',
