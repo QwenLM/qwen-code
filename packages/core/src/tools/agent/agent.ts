@@ -1000,17 +1000,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // survive ESC cancellation of the parent's current turn.
         const bgAbortController = new AbortController();
 
-        const registry = this.config.getBackgroundTaskRegistry();
-        registry.register({
-          agentId: hookOpts.agentId,
-          description: this.params.description,
-          subagentType: subagentConfig.name,
-          status: 'running',
-          startTime: Date.now(),
-          abortController: bgAbortController,
-          toolUseId: this.callId,
-        });
-
         // Background agents can't show interactive permission prompts
         // (no UI). Instead of YOLO (which would auto-approve everything),
         // we set shouldAvoidPermissionPrompts so the tool scheduler
@@ -1026,6 +1015,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // createForkSubagent so the parent's rendered system prompt and
         // inherited history are carried over; otherwise the background fork
         // degrades to a plain FORK_AGENT without context.
+        //
+        // Register in the background task registry only AFTER init
+        // succeeds. If construction throws (e.g. invalid agent config or
+        // model setup), registering first would leave a phantom 'running'
+        // entry that the non-interactive hold-back loop would wait on
+        // forever.
         let bgSubagent: AgentHeadless;
         if (isFork) {
           const fork = await this.createForkSubagent(bgConfig as Config);
@@ -1036,6 +1031,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             bgConfig as Config,
           );
         }
+
+        const registry = this.config.getBackgroundTaskRegistry();
+        registry.register({
+          agentId: hookOpts.agentId,
+          description: this.params.description,
+          subagentType: subagentConfig.name,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: bgAbortController,
+          toolUseId: this.callId,
+        });
 
         const getCompletionStats = () => {
           const summary = bgSubagent.getExecutionSummary();

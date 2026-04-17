@@ -601,7 +601,7 @@ export async function runNonInteractive(
             : config.getCronScheduler();
 
           if (scheduler && scheduler.size > 0) {
-            await new Promise<void>((resolve) => {
+            await new Promise<void>((resolve, reject) => {
               // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
               // drop scheduler.size to 0 on their own, so without this the
               // hold-back loop below is unreachable after an abort.
@@ -625,6 +625,16 @@ export async function runNonInteractive(
                 }
               };
 
+              // Propagate drain failures. Without this, a rejected
+              // drainLocalQueue() (e.g. a text-mode API error surfacing
+              // out of drainOneItem) would be swallowed by `void` and
+              // checkCronDone would never fire — hanging the run.
+              const onDrainError = (err: unknown) => {
+                abortController.signal.removeEventListener('abort', onAbort);
+                scheduler.stop();
+                reject(err);
+              };
+
               scheduler.start((job: { prompt: string }) => {
                 const label = job.prompt.slice(0, 40);
                 localQueue.push({
@@ -632,7 +642,7 @@ export async function runNonInteractive(
                   modelText: job.prompt,
                   sendMessageType: SendMessageType.Cron,
                 });
-                void drainLocalQueue().then(checkCronDone);
+                drainLocalQueue().then(checkCronDone, onDrainError);
               });
 
               // Check immediately in case jobs were already deleted
@@ -644,12 +654,15 @@ export async function runNonInteractive(
           // Wait for running background agents to complete and drain
           // their notifications before emitting the final result. If
           // SIGINT/SIGTERM fires here, abort running background agents
-          // (they use their own AbortControllers) and exit the loop.
+          // (they use their own AbortControllers) and route through
+          // handleCancellationError so the run exits non-zero — falling
+          // through to the success emitResult below would silently
+          // convert cancellation into a successful completion.
 
           while (true) {
             if (abortController.signal.aborted) {
               registry.abortAll();
-              break;
+              handleCancellationError(config);
             }
             await drainLocalQueue();
             const running = registry.getRunning();
