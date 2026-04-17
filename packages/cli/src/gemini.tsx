@@ -66,6 +66,10 @@ import { computeWindowTitle } from './utils/windowTitle.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import { DualOutputBridge } from './dualOutput/DualOutputBridge.js';
+import { DualOutputContext } from './dualOutput/DualOutputContext.js';
+import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
+import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -152,35 +156,84 @@ export async function startInteractiveUI(
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
 
+  // Create dual output bridge if --json-fd or --json-file is specified.
+  // Errors are caught so a bad fd/path degrades gracefully instead of
+  // preventing the TUI from launching.
+  let dualOutputBridge: DualOutputBridge | null = null;
+  const jsonFd = config.getJsonFd?.();
+  const jsonFile = config.getJsonFile?.();
+  try {
+    if (jsonFd != null) {
+      dualOutputBridge = new DualOutputBridge(
+        config,
+        { fd: jsonFd },
+        { version },
+      );
+    } else if (jsonFile != null) {
+      dualOutputBridge = new DualOutputBridge(
+        config,
+        { filePath: jsonFile },
+        { version },
+      );
+    }
+  } catch (err) {
+    debugLogger.error('Failed to initialize dual output bridge:', err);
+    writeStderrLine(
+      `Warning: dual output disabled — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Create remote input watcher if --input-file is specified.
+  // This enables bidirectional sync: an external process writes JSONL
+  // commands to this file, and the TUI processes them as user messages.
+  let remoteInputWatcher: RemoteInputWatcher | null = null;
+  const inputFile = config.getInputFile?.();
+  if (inputFile) {
+    try {
+      remoteInputWatcher = new RemoteInputWatcher(inputFile);
+    } catch (err) {
+      debugLogger.error('Failed to initialize remote input watcher:', err);
+      writeStderrLine(
+        `Warning: remote input disabled — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
     const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
     return (
-      <SettingsContext.Provider value={settings}>
-        <KeypressProvider
-          kittyProtocolEnabled={kittyProtocolStatus.enabled}
-          config={config}
-          debugKeystrokeLogging={settings.merged.general?.debugKeystrokeLogging}
-          pasteWorkaround={
-            process.platform === 'win32' || nodeMajorVersion < 20
-          }
-        >
-          <SessionStatsProvider sessionId={config.getSessionId()}>
-            <VimModeProvider settings={settings}>
-              <AgentViewProvider config={config}>
-                <AppContainer
-                  config={config}
-                  settings={settings}
-                  startupWarnings={startupWarnings}
-                  version={version}
-                  initializationResult={initializationResult}
-                />
-              </AgentViewProvider>
-            </VimModeProvider>
-          </SessionStatsProvider>
-        </KeypressProvider>
-      </SettingsContext.Provider>
+      <RemoteInputContext.Provider value={remoteInputWatcher}>
+        <DualOutputContext.Provider value={dualOutputBridge}>
+          <SettingsContext.Provider value={settings}>
+            <KeypressProvider
+              kittyProtocolEnabled={kittyProtocolStatus.enabled}
+              config={config}
+              debugKeystrokeLogging={
+                settings.merged.general?.debugKeystrokeLogging
+              }
+              pasteWorkaround={
+                process.platform === 'win32' || nodeMajorVersion < 20
+              }
+            >
+              <SessionStatsProvider sessionId={config.getSessionId()}>
+                <VimModeProvider settings={settings}>
+                  <AgentViewProvider config={config}>
+                    <AppContainer
+                      config={config}
+                      settings={settings}
+                      startupWarnings={startupWarnings}
+                      version={version}
+                      initializationResult={initializationResult}
+                    />
+                  </AgentViewProvider>
+                </VimModeProvider>
+              </SessionStatsProvider>
+            </KeypressProvider>
+          </SettingsContext.Provider>
+        </DualOutputContext.Provider>
+      </RemoteInputContext.Provider>
     );
   };
 
@@ -211,7 +264,11 @@ export async function startInteractiveUI(
       });
   }
 
-  registerCleanup(() => instance.unmount());
+  registerCleanup(() => {
+    remoteInputWatcher?.shutdown();
+    dualOutputBridge?.shutdown();
+    instance.unmount();
+  });
 }
 
 export async function main() {

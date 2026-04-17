@@ -76,6 +76,7 @@ import path from 'node:path';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
+import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -219,6 +220,7 @@ export const useGeminiStream = (
   const isSubmittingQueryRef = useRef(false);
   const lastPromptRef = useRef<PartListUnion | null>(null);
   const lastPromptErroredRef = useRef(false);
+  const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
@@ -1110,7 +1112,9 @@ export const useGeminiStream = (
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
       const toolCallRequests: ToolCallRequestInfo[] = [];
+      dualOutput?.startAssistantMessage();
       for await (const event of stream) {
+        dualOutput?.processEvent(event);
         switch (event.type) {
           case ServerGeminiEventType.Thought:
             // If the thought has a subject, it's a discrete status update rather than
@@ -1212,6 +1216,7 @@ export const useGeminiStream = (
           }
         }
       }
+      dualOutput?.finalizeAssistantMessage();
       if (toolCallRequests.length > 0) {
         scheduleToolCalls(toolCallRequests, signal);
       }
@@ -1236,6 +1241,7 @@ export const useGeminiStream = (
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
       addItem,
+      dualOutput,
     ],
   );
 
@@ -1382,6 +1388,22 @@ export const useGeminiStream = (
         setInitError(null);
 
         try {
+          // Emit user message to dual output sidecar (if enabled).
+          // Skip for tool-result submissions — those are emitted separately
+          // when the tool completes.
+          if (dualOutput && submitType !== SendMessageType.ToolResult) {
+            const rawParts =
+              typeof finalQueryToSend === 'string'
+                ? [finalQueryToSend]
+                : Array.isArray(finalQueryToSend)
+                  ? finalQueryToSend
+                  : [finalQueryToSend];
+            const userParts: Part[] = rawParts.map((p) =>
+              typeof p === 'string' ? { text: p } : p,
+            );
+            dualOutput.emitUserMessage(userParts);
+          }
+
           const stream = geminiClient.sendMessageStream(
             finalQueryToSend,
             abortSignal,
@@ -1489,6 +1511,7 @@ export const useGeminiStream = (
       pendingRetryCountdownItemRef,
       pendingRetryErrorItemRef,
       setPendingRetryErrorItem,
+      dualOutput,
     ],
   );
 
@@ -1694,6 +1717,13 @@ export const useGeminiStream = (
         }
       }
 
+      // Emit tool results to dual output sidecar (if enabled)
+      if (dualOutput) {
+        for (const toolCall of geminiTools) {
+          dualOutput.emitToolResult(toolCall.request, toolCall.response);
+        }
+      }
+
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
       // Don't continue if model was switched due to quota error
@@ -1730,6 +1760,7 @@ export const useGeminiStream = (
       config,
       midTurnDrainRef,
       addItem,
+      dualOutput,
     ],
   );
 
