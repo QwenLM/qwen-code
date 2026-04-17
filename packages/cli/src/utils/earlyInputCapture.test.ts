@@ -255,22 +255,22 @@ describe('earlyInputCapture', () => {
       expect(input.toString()).toBe('\x1b[A');
     });
 
-    it('should keep ESC[ prefix on capture end', () => {
+    it('should drop incomplete ESC[ prefix on capture end', () => {
       startEarlyInputCapture();
       mockStdin.write(Buffer.from('\x1b['));
       stopEarlyInputCapture();
 
       const input = getAndClearCapturedInput();
-      expect(input.toString()).toBe('\x1b[');
+      expect(input.toString()).toBe('');
     });
 
-    it('should keep standalone ESC on capture end', () => {
+    it('should drop standalone ESC on capture end', () => {
       startEarlyInputCapture();
       mockStdin.write(Buffer.from('\x1b'));
       stopEarlyInputCapture();
 
       const input = getAndClearCapturedInput();
-      expect(input.toString()).toBe('\x1b');
+      expect(input.toString()).toBe('');
     });
   });
 

@@ -223,7 +223,7 @@ function shouldReplayPendingAtStop(pending: Buffer): boolean {
   if (pending.length === 0) {
     return false;
   }
-  return classifyEscapeSequence(pending, 0) !== 'terminal';
+  return classifyEscapeSequence(pending, 0) === 'user';
 }
 
 /**
