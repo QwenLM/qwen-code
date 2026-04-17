@@ -169,17 +169,17 @@
             "api-key"
           ],
           "enumDescriptions": [
-            "Alibaba Cloud Coding Plan — auto-configures all Qwen models",
-            "Manual — add your own model providers below"
+            "Alibaba Cloud Coding Plan — configurable from VS Code Settings",
+            "Configured via Qwen Code: Auth or the onboarding button"
           ],
           "default": "coding-plan",
-          "markdownDescription": "**Coding Plan**: enter API Key + Region, models are auto-configured.\n\n**API Key**: manually add model providers in the list below."
+          "markdownDescription": "**Coding Plan**: enter API Key + Region here to sync `~/.qwen/settings.json`.\n\n**API Key**: use **Qwen Code: Auth** or the onboarding button to configure ModelStudio or custom OpenAI-compatible providers."
         },
         "qwen-code.apiKey": {
           "order": 1,
           "type": "string",
           "default": "",
-          "markdownDescription": "API key for authentication. Used by Coding Plan or as the default key for manually added providers."
+          "markdownDescription": "API key used for **Coding Plan** settings sync. For **API Key** providers, configure the full provider details through **Qwen Code: Auth**."
         },
         "qwen-code.codingPlanRegion": {
           "order": 2,

@@ -8,18 +8,28 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   mockCreateImagePathResolver,
+  mockConfigGet,
+  mockConfigUpdate,
   mockGetGlobalTempDir,
   mockGetPanel,
   mockOnDidChangeActiveTextEditor,
   mockOnDidChangeTextEditorSelection,
+  mockReadQwenSettingsForVSCode,
+  mockWriteCodingPlanConfig,
+  mockWriteModelProvidersConfig,
 } = vi.hoisted(() => ({
   mockCreateImagePathResolver: vi.fn(),
+  mockConfigGet: vi.fn(),
+  mockConfigUpdate: vi.fn(),
   mockGetGlobalTempDir: vi.fn(() => '/global-temp'),
   mockGetPanel: vi.fn<() => { webview: { postMessage: unknown } } | null>(
     () => null,
   ),
   mockOnDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
   mockOnDidChangeTextEditorSelection: vi.fn(() => ({ dispose: vi.fn() })),
+  mockReadQwenSettingsForVSCode: vi.fn(() => null),
+  mockWriteCodingPlanConfig: vi.fn(() => ({})),
+  mockWriteModelProvidersConfig: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
@@ -44,13 +54,19 @@ vi.mock('vscode', () => ({
     workspaceFolders: [{ uri: { fsPath: '/workspace-root' } }],
     onDidChangeConfiguration: vi.fn(() => ({ dispose: vi.fn() })),
     getConfiguration: vi.fn(() => ({
-      get: vi.fn(() => ''),
-      update: vi.fn(),
+      get: mockConfigGet,
+      update: mockConfigUpdate,
     })),
   },
   commands: {
     executeCommand: vi.fn(),
   },
+}));
+
+vi.mock('../../services/settingsWriter.js', () => ({
+  writeCodingPlanConfig: mockWriteCodingPlanConfig,
+  writeModelProvidersConfig: mockWriteModelProvidersConfig,
+  readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,
 }));
 
 vi.mock('../../services/qwenAgentManager.js', () => ({
@@ -152,6 +168,7 @@ describe('WebViewProvider.attachToView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetPanel.mockReturnValue(null);
+    mockConfigGet.mockImplementation((_key: string, defaultValue: unknown) => defaultValue);
     mockCreateImagePathResolver.mockReturnValue((paths: string[]) =>
       paths.map((entry) => ({
         path: entry,
@@ -306,6 +323,40 @@ describe('WebViewProvider.attachToView', () => {
       },
     });
     expect(panelPostMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('WebViewProvider settings sync', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfigGet.mockImplementation((_key: string, defaultValue: unknown) => defaultValue);
+  });
+
+  it('does not report success for api-key settings without interactive auth data', async () => {
+    mockConfigGet.mockImplementation((key: string, defaultValue: unknown) => {
+      if (key === 'apiKey') {
+        return 'sk-test';
+      }
+      if (key === 'provider') {
+        return 'api-key';
+      }
+      return defaultValue;
+    });
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    const synced = await (
+      provider as unknown as {
+        syncVSCodeSettingsToQwenConfig: () => Promise<boolean>;
+      }
+    ).syncVSCodeSettingsToQwenConfig();
+
+    expect(synced).toBe(false);
+    expect(mockWriteCodingPlanConfig).not.toHaveBeenCalled();
+    expect(mockWriteModelProvidersConfig).not.toHaveBeenCalled();
   });
 });
 

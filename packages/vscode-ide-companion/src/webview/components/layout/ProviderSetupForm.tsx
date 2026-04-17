@@ -40,6 +40,10 @@ export const ProviderSetupForm: FC = () => {
           msg.data?.message || 'Connection failed. Check your settings.',
         );
       }
+      if (msg?.type === 'authCancelled') {
+        setIsConnecting(false);
+        setError(null);
+      }
       if (msg?.type === 'authSuccess' || msg?.type === 'agentConnected') {
         setIsConnecting(false);
         setError(null);

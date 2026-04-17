@@ -9,13 +9,13 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { Storage } from '@qwen-code/qwen-code-core/src/config/storage.js';
-import { AuthType } from '@qwen-code/qwen-code-core/src/core/contentGenerator.js';
 import {
+  AuthType,
+  Storage,
   CodingPlanRegion,
   CODING_PLAN_ENV_KEY,
   getCodingPlanConfig,
-} from '@qwen-code/qwen-code-core/src/constants/codingPlan.js';
+} from '@qwen-code/qwen-code-core';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -178,6 +178,7 @@ export function writeModelProvidersConfig(params: {
   // API key
   const env = ensureNestedObject(settings, 'env');
   env['OPENAI_API_KEY'] = params.apiKey;
+  delete env[CODING_PLAN_ENV_KEY];
 
   // Convert key-value map to CLI's array format
   const providers = ensureNestedObject(settings, 'modelProviders');
@@ -195,6 +196,8 @@ export function writeModelProvidersConfig(params: {
   if (params.activeModel) {
     settings.model = { name: params.activeModel };
   }
+
+  delete settings.codingPlan;
 
   writeSettings(settings);
 }

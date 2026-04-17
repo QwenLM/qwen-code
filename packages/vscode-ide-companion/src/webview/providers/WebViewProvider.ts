@@ -847,15 +847,18 @@ export class WebViewProvider {
     try {
       const provider = config.get<string>('provider', 'coding-plan');
 
-      if (provider === 'coding-plan') {
-        const region = config.get<'china' | 'global'>(
-          'codingPlanRegion',
-          'china',
+      if (provider !== 'coding-plan') {
+        console.log(
+          '[WebViewProvider] Skipping VSCode settings sync for api-key provider; interactive auth owns provider details',
         );
-        writeCodingPlanConfig(region, apiKey);
+        return false;
       }
-      // For api-key mode, model providers are configured via /auth flow,
-      // not via VSCode Settings — no action needed here.
+
+      const region = config.get<'china' | 'global'>(
+        'codingPlanRegion',
+        'china',
+      );
+      writeCodingPlanConfig(region, apiKey);
 
       console.log(
         `[WebViewProvider] Synced VSCode settings → ~/.qwen/settings.json (provider=${provider})`,

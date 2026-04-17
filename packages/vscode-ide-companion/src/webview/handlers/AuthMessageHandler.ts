@@ -102,6 +102,13 @@ export class AuthMessageHandler extends BaseMessageHandler {
   };
 
   /**
+   * Notify the webview that the interactive auth flow was dismissed.
+   */
+  private notifyAuthCancelled(): void {
+    this.sendToWebView({ type: 'authCancelled' });
+  }
+
+  /**
    * Helper: show a QuickPick and return the selected item's `value`.
    * Returns undefined if the user cancels.
    */
@@ -114,7 +121,11 @@ export class AuthMessageHandler extends BaseMessageHandler {
       title,
       placeHolder,
     });
-    return choice ? (choice as { value: T }).value : undefined;
+    if (!choice) {
+      this.notifyAuthCancelled();
+      return undefined;
+    }
+    return (choice as { value: T }).value;
   }
 
   /**
@@ -128,7 +139,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     password?: boolean;
     required?: boolean;
   }): Promise<string | undefined> {
-    return vscode.window.showInputBox({
+    const value = await vscode.window.showInputBox({
       title: opts.title,
       prompt: opts.prompt,
       placeHolder: opts.placeHolder,
@@ -138,6 +149,11 @@ export class AuthMessageHandler extends BaseMessageHandler {
         ? (v) => (!v?.trim() ? 'This field is required' : null)
         : undefined,
     });
+    if (value === undefined) {
+      this.notifyAuthCancelled();
+      return undefined;
+    }
+    return value;
   }
 
   /**
