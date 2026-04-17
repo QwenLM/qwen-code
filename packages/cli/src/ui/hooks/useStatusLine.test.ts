@@ -795,12 +795,19 @@ describe('useStatusLine', () => {
 
       // Mount executes once immediately
       expect(child_process.exec).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        execCallback(null, 'tick 1\n', '');
+      });
 
-      // First interval tick after 2s
+      // First interval tick after 2s — previous exec has completed, so
+      // the tick is free to spawn a new one.
       await act(async () => {
         vi.advanceTimersByTime(2000);
       });
       expect(child_process.exec).toHaveBeenCalledTimes(2);
+      await act(async () => {
+        execCallback(null, 'tick 2\n', '');
+      });
 
       // Second interval tick after another 2s
       await act(async () => {
@@ -882,6 +889,9 @@ describe('useStatusLine', () => {
       });
       const { rerender } = renderHook(() => useStatusLine());
       expect(child_process.exec).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        execCallback(null, 'tick\n', '');
+      });
 
       // 2s passes — not yet a tick on the 5s schedule.
       await act(async () => {
@@ -922,6 +932,48 @@ describe('useStatusLine', () => {
       expect(vi.mocked(child_process.exec).mock.calls.length).toBe(
         callsAfterUnmount,
       );
+    });
+
+    it('skips periodic ticks while a previous exec is still running', async () => {
+      // Starvation regression (#3383 review): with refreshInterval < command
+      // latency, if every tick called doUpdate() it would kill the in-flight
+      // child and the statusline would never update. The tick must yield
+      // when activeChildRef is non-empty.
+      setStatusLineConfig({
+        type: 'command',
+        command: 'slow-command',
+        refreshInterval: 1,
+      });
+      renderHook(() => useStatusLine());
+
+      // Mount exec: child is spawned, callback NOT yet resolved — child is
+      // still "running" from the hook's perspective.
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+      const pendingCallback = execCallback;
+
+      // Several interval ticks pass while the first exec is in flight.
+      // Each tick must detect the running child and skip doUpdate().
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(1);
+
+      // First exec finally completes — activeChildRef clears.
+      await act(async () => {
+        pendingCallback(null, 'done\n', '');
+      });
+
+      // Next tick is now free to spawn a new exec.
+      await act(async () => {
+        vi.advanceTimersByTime(1000);
+      });
+      expect(child_process.exec).toHaveBeenCalledTimes(2);
     });
   });
 });

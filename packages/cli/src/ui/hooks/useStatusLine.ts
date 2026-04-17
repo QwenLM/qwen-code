@@ -98,7 +98,6 @@ function getStatusLineConfig(
       command: raw.command,
     };
     if (
-      'refreshInterval' in raw &&
       typeof raw.refreshInterval === 'number' &&
       Number.isFinite(raw.refreshInterval) &&
       raw.refreshInterval >= 1
@@ -406,11 +405,16 @@ export function useStatusLine(): {
   }, [statusLineCommand]);
 
   // Periodic refresh — re-run the command every `refreshInterval` seconds.
-  // Independent of state-change debounce: doUpdate already kills the prior
-  // child and bumps the generation counter, so overlapping ticks are safe.
+  // The tick yields if a previous exec is still running: unlike state-change
+  // triggers (which legitimately need to preempt stale data), the periodic
+  // tick exists only to keep external data fresh, so killing an in-flight
+  // child would starve commands that run longer than `refreshInterval` and
+  // the statusline would never update. The 5s exec timeout still caps the
+  // wait, and state-change triggers still go through `doUpdate` directly.
   useEffect(() => {
     if (!statusLineCommand || !refreshInterval) return;
     const timer = setInterval(() => {
+      if (activeChildRef.current) return;
       doUpdate();
     }, refreshInterval * 1000);
     return () => {
