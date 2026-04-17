@@ -263,6 +263,7 @@ export async function runNonInteractive(
         sendMessageType: SendMessageType;
         sdkNotification?: {
           task_id: string;
+          tool_use_id?: string;
           status: BackgroundAgentStatus;
           usage?: {
             total_tokens: number;
@@ -280,6 +281,7 @@ export async function runNonInteractive(
           sendMessageType: SendMessageType.Notification,
           sdkNotification: {
             task_id: meta.agentId,
+            tool_use_id: meta.toolUseId,
             status: meta.status,
             usage: meta.stats
               ? {
@@ -295,6 +297,7 @@ export async function runNonInteractive(
       registry.setRegisterCallback((entry) => {
         adapter.emitSystemMessage('task_started', {
           task_id: entry.agentId,
+          tool_use_id: entry.toolUseId,
           description: entry.description,
           subagent_type: entry.subagentType,
         });

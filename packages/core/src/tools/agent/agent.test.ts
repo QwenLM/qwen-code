@@ -1546,6 +1546,26 @@ describe('AgentTool', () => {
       expect(llmText).toContain('Background agent launched');
       expect(mockRegistry.register).toHaveBeenCalled();
     });
+
+    it('forwards the scheduler-provided callId as toolUseId on the registry entry', async () => {
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      (invocation as unknown as { setCallId: (id: string) => void }).setCallId(
+        'call-xyz-789',
+      );
+      await invocation.execute();
+
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ toolUseId: 'call-xyz-789' }),
+      );
+    });
   });
 });
 

@@ -391,6 +391,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   readonly eventEmitter: AgentEventEmitter = new AgentEventEmitter();
   private currentDisplay: AgentResultDisplay | null = null;
   private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
+  private callId?: string;
 
   constructor(
     private readonly config: Config,
@@ -398,6 +399,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     params: AgentParams,
   ) {
     super(params);
+  }
+
+  /**
+   * Invoked by the tool scheduler after `build` to link this invocation
+   * back to the model's original tool-use request. Used so background
+   * agents carry the tool-use id through to completion notifications.
+   */
+  setCallId(callId: string): void {
+    this.callId = callId;
   }
 
   /**
@@ -998,6 +1008,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           status: 'running',
           startTime: Date.now(),
           abortController: bgAbortController,
+          toolUseId: this.callId,
         });
 
         // Background agents can't show interactive permission prompts

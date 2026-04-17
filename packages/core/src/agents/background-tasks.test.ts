@@ -229,4 +229,44 @@ describe('BackgroundTaskRegistry', () => {
     registry.complete('test-1', 'done');
     expect(registry.get('test-1')!.status).toBe('completed');
   });
+
+  it('propagates toolUseId through XML and notification meta', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'test-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      toolUseId: 'call-abc-123',
+    });
+
+    registry.complete('test-1', 'done');
+
+    expect(callback).toHaveBeenCalledOnce();
+    const [, modelText, meta] = callback.mock.calls[0];
+    expect(modelText).toContain('<tool-use-id>call-abc-123</tool-use-id>');
+    expect(meta.toolUseId).toBe('call-abc-123');
+  });
+
+  it('omits tool-use-id XML tag when toolUseId is absent', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'test-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.complete('test-1', 'done');
+
+    const [, modelText, meta] = callback.mock.calls[0];
+    expect(modelText).not.toContain('<tool-use-id>');
+    expect(meta.toolUseId).toBeUndefined();
+  });
 });

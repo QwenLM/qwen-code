@@ -610,6 +610,7 @@ export class CoreToolScheduler {
       const invocationOrError = this.buildInvocation(
         call.tool,
         args as Record<string, unknown>,
+        targetCallId,
       );
       if (invocationOrError instanceof Error) {
         const response = createErrorResponse(
@@ -646,9 +647,17 @@ export class CoreToolScheduler {
   private buildInvocation(
     tool: AnyDeclarativeTool,
     args: object,
+    callId?: string,
   ): AnyToolInvocation | Error {
     try {
-      return tool.build(structuredClone(args));
+      const invocation = tool.build(structuredClone(args));
+      if (callId) {
+        const maybeAware = invocation as { setCallId?: (id: string) => void };
+        if (typeof maybeAware.setCallId === 'function') {
+          maybeAware.setCallId(callId);
+        }
+      }
+      return invocation;
     } catch (e) {
       if (e instanceof Error) {
         return e;
@@ -827,6 +836,7 @@ export class CoreToolScheduler {
         const invocationOrError = this.buildInvocation(
           toolInstance,
           reqInfo.args,
+          reqInfo.callId,
         );
         if (invocationOrError instanceof Error) {
           const error = reqInfo.wasOutputTruncated

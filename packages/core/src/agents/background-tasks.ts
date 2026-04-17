@@ -43,12 +43,14 @@ export interface BackgroundAgentEntry {
   abortController: AbortController;
   name?: string;
   stats?: AgentCompletionStats;
+  toolUseId?: string;
 }
 
 export interface NotificationMeta {
   agentId: string;
   status: BackgroundAgentStatus;
   stats?: AgentCompletionStats;
+  toolUseId?: string;
 }
 
 export type BackgroundNotificationCallback = (
@@ -226,9 +228,14 @@ export class BackgroundTaskRegistry {
     const xmlParts: string[] = [
       '<task-notification>',
       `<task-id>${entry.agentId}</task-id>`,
+    ];
+    if (entry.toolUseId) {
+      xmlParts.push(`<tool-use-id>${entry.toolUseId}</tool-use-id>`);
+    }
+    xmlParts.push(
       `<status>${entry.status}</status>`,
       `<summary>Agent "${entry.description}" ${statusText}.</summary>`,
-    ];
+    );
     if (entry.result) {
       const truncated =
         entry.result.length > MAX_RESULT_LENGTH
@@ -254,6 +261,7 @@ export class BackgroundTaskRegistry {
       agentId: entry.agentId,
       status: entry.status,
       stats: entry.stats,
+      toolUseId: entry.toolUseId,
     };
 
     try {
