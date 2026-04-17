@@ -19,6 +19,19 @@ const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 const MAX_DESCRIPTION_LENGTH = 40;
 const MAX_RESULT_LENGTH = 2000;
 
+// Escape text so it is safe to interpolate into an XML element body.
+// Subagent-produced strings (description, result, error) can contain `<`,
+// `>`, or literal `</task-notification>` — without escaping, a subagent
+// summarizing HTML or another agent's notification could close the
+// envelope early and forge sibling tags (e.g. a faked <status>) that the
+// parent model would treat as trusted metadata.
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
 export type BackgroundAgentStatus =
   | 'running'
   | 'completed'
@@ -133,6 +146,12 @@ export class BackgroundTaskRegistry {
     entry.status = 'cancelled';
     entry.endTime = Date.now();
     debugLogger.info(`Background agent cancelled: ${agentId}`);
+
+    // Emit the terminal notification here — the fire-and-forget
+    // complete()/fail() path is guarded by `status !== 'running'` and
+    // will no-op, so without this the SDK contract breaks: consumers
+    // saw task_started but never receive a matching task_notification.
+    this.emitNotification(entry);
   }
 
   /**
@@ -190,6 +209,10 @@ export class BackgroundTaskRegistry {
         entry.abortController.abort();
         entry.status = 'cancelled';
         entry.endTime = Date.now();
+        // Same reasoning as cancel(): emit the terminal notification
+        // here, because the fire-and-forget complete()/fail() will
+        // be no-op'd by the running-status guard.
+        this.emitNotification(entry);
       }
     }
     debugLogger.info('Aborted all background agents');
@@ -225,26 +248,30 @@ export class BackgroundTaskRegistry {
     const label = this.buildDisplayLabel(entry);
     const displayLine = `Background agent "${label}" ${statusText}.`;
 
+    // Truncate before escaping so we don't slice through an escape
+    // sequence (e.g. mid-`&amp;`) and emit malformed XML.
+    const rawResult = entry.result
+      ? entry.result.length > MAX_RESULT_LENGTH
+        ? entry.result.slice(0, MAX_RESULT_LENGTH) + '\n[truncated]'
+        : entry.result
+      : undefined;
+
     const xmlParts: string[] = [
       '<task-notification>',
-      `<task-id>${entry.agentId}</task-id>`,
+      `<task-id>${escapeXml(entry.agentId)}</task-id>`,
     ];
     if (entry.toolUseId) {
-      xmlParts.push(`<tool-use-id>${entry.toolUseId}</tool-use-id>`);
+      xmlParts.push(`<tool-use-id>${escapeXml(entry.toolUseId)}</tool-use-id>`);
     }
     xmlParts.push(
-      `<status>${entry.status}</status>`,
-      `<summary>Agent "${entry.description}" ${statusText}.</summary>`,
+      `<status>${escapeXml(entry.status)}</status>`,
+      `<summary>Agent "${escapeXml(entry.description)}" ${statusText}.</summary>`,
     );
-    if (entry.result) {
-      const truncated =
-        entry.result.length > MAX_RESULT_LENGTH
-          ? entry.result.slice(0, MAX_RESULT_LENGTH) + '\n[truncated]'
-          : entry.result;
-      xmlParts.push(`<result>${truncated}</result>`);
+    if (rawResult) {
+      xmlParts.push(`<result>${escapeXml(rawResult)}</result>`);
     }
     if (entry.error) {
-      xmlParts.push(`<result>Error: ${entry.error}</result>`);
+      xmlParts.push(`<result>Error: ${escapeXml(entry.error)}</result>`);
     }
     if (entry.stats) {
       xmlParts.push(

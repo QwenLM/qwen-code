@@ -193,8 +193,11 @@ describe('BackgroundTaskRegistry', () => {
 
     // Status should remain 'cancelled', not flip to 'completed'
     expect(registry.get('test-1')!.status).toBe('cancelled');
-    // No notification should have been sent
-    expect(callback).not.toHaveBeenCalled();
+    // Exactly one notification, emitted by cancel() itself — the late
+    // complete() must be no-op'd by the running-status guard.
+    expect(callback).toHaveBeenCalledTimes(1);
+    const [, modelText] = callback.mock.calls[0];
+    expect(modelText).toContain('<status>cancelled</status>');
   });
 
   it('fail is a no-op after cancellation (state race guard)', () => {
@@ -213,7 +216,9 @@ describe('BackgroundTaskRegistry', () => {
     registry.fail('test-1', 'late error');
 
     expect(registry.get('test-1')!.status).toBe('cancelled');
-    expect(callback).not.toHaveBeenCalled();
+    expect(callback).toHaveBeenCalledTimes(1);
+    const [, modelText] = callback.mock.calls[0];
+    expect(modelText).toContain('<status>cancelled</status>');
   });
 
   it('does not send notification without callback', () => {
@@ -268,5 +273,29 @@ describe('BackgroundTaskRegistry', () => {
     const [, modelText, meta] = callback.mock.calls[0];
     expect(modelText).not.toContain('<tool-use-id>');
     expect(meta.toolUseId).toBeUndefined();
+  });
+
+  it('escapes XML metacharacters in interpolated fields', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'test-1',
+      description: 'summarize </result> & </task-notification>',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.complete('test-1', 'here is <b>bold</b> & </task-notification>');
+
+    const [, modelText] = callback.mock.calls[0];
+    // No injected closing tags — subagent text is escaped so the
+    // parent envelope stays a single task-notification element.
+    expect(modelText.match(/<\/task-notification>/g)!.length).toBe(1);
+    expect(modelText).toContain('&lt;/result&gt;');
+    expect(modelText).toContain('&lt;/task-notification&gt;');
+    expect(modelText).toContain('&lt;b&gt;bold&lt;/b&gt;');
+    expect(modelText).toContain('&amp;');
   });
 });

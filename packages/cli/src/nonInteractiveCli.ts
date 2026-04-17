@@ -451,6 +451,17 @@ export async function runNonInteractive(
             }
 
             turnCount++;
+            // Symmetry with the main turn loop: drain-turns (cron fires and
+            // background-agent notification replies) count toward the
+            // configured budget too, otherwise a looping cron or a model
+            // that keeps replying to notifications can exceed the cap
+            // silently in headless runs.
+            if (
+              config.getMaxSessionTurns() >= 0 &&
+              turnCount > config.getMaxSessionTurns()
+            ) {
+              handleMaxTurnsExceededError(config);
+            }
             let itemMessages: Content[] = [
               { role: 'user', parts: [{ text: item.modelText }] },
             ];
@@ -480,6 +491,9 @@ export async function runNonInteractive(
 
               for await (const event of itemStream) {
                 if (abortController.signal.aborted) {
+                  // Pair the startAssistantMessage() above so stream-json
+                  // mode doesn't leave an unterminated message_start.
+                  adapter.finalizeAssistantMessage();
                   return;
                 }
                 adapter.processEvent(event);
