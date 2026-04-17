@@ -655,7 +655,7 @@ export class GeminiChat {
                       finishReason: FinishReason.STOP,
                     },
                   ],
-                } as GenerateContentResponse,
+                } as unknown as GenerateContentResponse,
               };
               break;
             }
