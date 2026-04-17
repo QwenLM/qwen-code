@@ -286,6 +286,40 @@ describe('<AskUserQuestionDialog />', () => {
 
   describe('multiple questions', () => {
     it.skipIf(process.platform === 'win32')(
+      'does not auto-submit when pressing number key on Submit tab',
+      async () => {
+        const onConfirm = vi.fn();
+        const details = createConfirmationDetails({
+          questions: [
+            createSingleQuestion({ header: 'Q1' }),
+            createSingleQuestion({ header: 'Q2' }),
+          ],
+        });
+
+        const { stdin, unmount } = renderWithProviders(
+          <AskUserQuestionDialog
+            confirmationDetails={details}
+            onConfirm={onConfirm}
+          />,
+        );
+        await wait();
+
+        // Navigate to Submit tab
+        stdin.write('\u001B[C'); // Right
+        await wait();
+        stdin.write('\u001B[C'); // Right
+        await wait();
+
+        // Press '1' on Submit tab — should only highlight, not submit
+        stdin.write('1');
+        await wait();
+
+        expect(onConfirm).not.toHaveBeenCalled();
+        unmount();
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
       'shows unanswered questions as (not answered) in Submit tab',
       async () => {
         const onConfirm = vi.fn();
