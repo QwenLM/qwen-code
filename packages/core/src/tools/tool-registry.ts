@@ -266,8 +266,13 @@ export class ToolRegistry {
    * Loads all pending tool factories in parallel. Safe to call multiple times
    * (no-op when all factories have been resolved). Call this before any bulk
    * access such as {@link getAllTools} or {@link getFunctionDeclarations}.
+   *
+   * @param options.strict - When `true`, re-throws the first factory failure
+   *   instead of swallowing it. Use this during startup (e.g. in
+   *   `Config.initialize`) so a broken built-in tool surfaces immediately
+   *   rather than leaving the session partially initialised.
    */
-  async warmAll(): Promise<void> {
+  async warmAll(options?: { strict?: boolean }): Promise<void> {
     const pending = Array.from(this.factories.keys());
     if (pending.length === 0) return;
     const results = await Promise.allSettled(
@@ -275,6 +280,7 @@ export class ToolRegistry {
     );
     for (const result of results) {
       if (result.status === 'rejected') {
+        if (options?.strict) throw result.reason as Error;
         debugLogger.warn('Failed to warm tool factory:', result.reason);
       }
     }

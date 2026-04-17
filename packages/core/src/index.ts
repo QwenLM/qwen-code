@@ -87,6 +87,44 @@ export * from './tools/modifiable-tool.js';
 export type { WebSearchProviderConfig } from './tools/web-search/types.js';
 export { buildSkillLlmContent } from './tools/skill-utils.js';
 
+// Backward-compatible type re-exports for tool classes removed from eager loading.
+// These preserve TypeScript type compatibility for downstream consumers.
+// Note: runtime value imports (e.g. `new EditTool(...)`) must use the direct
+// module path (e.g. `@qwen-code/qwen-code-core/dist/tools/edit.js`) as these
+// classes are now lazy-loaded and are not exported as values from the package root.
+export type { EditTool, EditToolParams } from './tools/edit.js';
+export type {
+  ExitPlanModeTool,
+  ExitPlanModeParams,
+} from './tools/exitPlanMode.js';
+export type { GlobTool, GlobToolParams, GlobPath } from './tools/glob.js';
+export type { GrepTool, GrepToolParams } from './tools/grep.js';
+export type { LSTool, LSToolParams, FileEntry } from './tools/ls.js';
+export type { LspTool, LspToolParams, LspOperation } from './tools/lsp.js';
+export type {
+  ShellTool,
+  ShellToolParams,
+  ShellToolInvocation,
+} from './tools/shell.js';
+export type { SkillTool, SkillParams } from './tools/skill.js';
+export type { AgentTool, AgentParams } from './tools/agent/agent.js';
+export type {
+  TodoWriteTool,
+  TodoItem,
+  TodoWriteParams,
+} from './tools/todoWrite.js';
+export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
+export type {
+  WebSearchTool,
+  WebSearchToolParams,
+  WebSearchToolResult,
+  WebSearchConfig,
+} from './tools/web-search/index.js';
+export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
+export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
+export type { CronListTool, CronListParams } from './tools/cron-list.js';
+export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
+
 // ============================================================================
 // Services
 // ============================================================================

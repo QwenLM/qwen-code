@@ -1051,8 +1051,9 @@ export class Config {
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
     this.modelsConfig.detectAndCaptureRuntimeModel();
 
-    // Warm all lazy tool factories so telemetry can access tool metadata synchronously
-    await this.toolRegistry.warmAll();
+    // Warm all lazy tool factories so telemetry can access tool metadata synchronously.
+    // Use strict mode so a broken built-in tool surfaces immediately at startup.
+    await this.toolRegistry.warmAll({ strict: true });
 
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
