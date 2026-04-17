@@ -72,7 +72,7 @@ describe('runDoctorChecks', () => {
     expect(categories).toContain('Git');
   });
 
-  it('should pass Node.js version check for v18+', async () => {
+  it('should pass Node.js version check for v20+', async () => {
     const results = await runDoctorChecks(mockContext);
     const nodeCheck = results.find((r) => r.name === 'Node.js version');
     expect(nodeCheck).toBeDefined();
@@ -161,5 +161,35 @@ describe('runDoctorChecks', () => {
     const results = await runDoctorChecks(mockContext);
     const gitCheck = results.find((r) => r.name === 'Git');
     expect(gitCheck!.status).toBe('warn');
+  });
+
+  it('should report disabled MCP servers as pass instead of fail', async () => {
+    mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getAuthType: vi.fn().mockReturnValue('openai'),
+          getGeminiClient: vi.fn().mockReturnValue({
+            isInitialized: vi.fn().mockReturnValue(true),
+          }),
+          getModel: vi.fn().mockReturnValue('gpt-4'),
+          getMcpServers: vi
+            .fn()
+            .mockReturnValue({ 'my-server': { command: 'node' } }),
+          isMcpServerDisabled: vi.fn().mockReturnValue(true),
+          getToolRegistry: vi.fn().mockReturnValue({
+            getAllTools: vi.fn().mockReturnValue([]),
+          }),
+          getUseBuiltinRipgrep: vi.fn().mockReturnValue(false),
+        },
+        settings: { merged: {} },
+        git: {} as never,
+      },
+    } as unknown as CommandContext);
+
+    const results = await runDoctorChecks(mockContext);
+    const mcpCheck = results.find((r) => r.name === 'my-server');
+    expect(mcpCheck).toBeDefined();
+    expect(mcpCheck!.status).toBe('pass');
+    expect(mcpCheck!.message).toBe('disabled');
   });
 });

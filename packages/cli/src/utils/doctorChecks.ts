@@ -17,7 +17,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { t } from '../i18n/index.js';
 
-const MIN_NODE_MAJOR = 18;
+const MIN_NODE_MAJOR = 20;
 
 function checkNodeVersion(): DoctorCheckResult {
   const version = process.version;
@@ -187,7 +187,8 @@ function checkModel(context: CommandContext): DoctorCheckResult {
 }
 
 function checkMcpServers(context: CommandContext): DoctorCheckResult[] {
-  const servers = context.services.config?.getMcpServers();
+  const config = context.services.config;
+  const servers = config?.getMcpServers();
   if (!servers || Object.keys(servers).length === 0) {
     return [
       {
@@ -200,6 +201,16 @@ function checkMcpServers(context: CommandContext): DoctorCheckResult[] {
   }
 
   return Object.keys(servers).map((name) => {
+    // Skip disabled servers — report as informational pass
+    if (config?.isMcpServerDisabled(name)) {
+      return {
+        category: t('MCP Servers'),
+        name,
+        status: 'pass' as const,
+        message: t('disabled'),
+      };
+    }
+
     const status = getMCPServerStatus(name);
     switch (status) {
       case MCPServerStatus.CONNECTED:
