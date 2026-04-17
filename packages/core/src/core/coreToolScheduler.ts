@@ -50,7 +50,7 @@ import type {
 } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
-import { isShellCommandReadOnly } from '../utils/shellReadOnlyChecker.js';
+import { isShellCommandReadOnlySync } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
   buildPermissionCheckContext,
@@ -356,7 +356,7 @@ function isConcurrencySafe(call: ScheduledToolCall): boolean {
     const command = (call.request.args as { command?: string }).command;
     if (typeof command !== 'string') return false;
     try {
-      return isShellCommandReadOnly(stripShellWrapper(command));
+      return isShellCommandReadOnlySync(stripShellWrapper(command)) ?? false;
     } catch {
       return false; // fail-closed
     }

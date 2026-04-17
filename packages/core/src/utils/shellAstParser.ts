@@ -26,7 +26,6 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -941,10 +940,10 @@ export async function isShellCommandReadOnlyAST(
   if (typeof command !== 'string' || !command.trim()) return false;
 
   // If the WASM parser is permanently unavailable (e.g. WASM file missing
-  // after a symlinked install), fall back to the regex-based checker so the
-  // agent remains functional instead of hanging or crashing.
+  // after a symlinked install), return false (conservative: requires permission)
+  // so the agent remains functional instead of hanging or crashing.
   if (parserInitFailed) {
-    return isShellCommandReadOnly(command);
+    return false;
   }
 
   try {
@@ -966,8 +965,8 @@ export async function isShellCommandReadOnlyAST(
     return true;
   } catch {
     // Unexpected runtime failure (e.g. WASM init error on first call) –
-    // fall back to the regex-based checker rather than propagating the error.
-    return isShellCommandReadOnly(command);
+    // conservatively return false (requires permission) rather than propagating.
+    return false;
   }
 }
 
