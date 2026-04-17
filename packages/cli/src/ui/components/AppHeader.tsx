@@ -5,13 +5,12 @@
  */
 
 import { Box } from 'ink';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType , isCodingPlanConfig } from '@qwen-code/qwen-code-core';
 import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
-import { isCodingPlanConfig } from '../../constants/codingPlan.js';
 
 interface AppHeaderProps {
   version: string;
