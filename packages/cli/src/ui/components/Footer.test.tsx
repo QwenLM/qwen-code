@@ -5,9 +5,10 @@
  */
 
 import { render } from 'ink-testing-library';
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { Footer } from './Footer.js';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
+import * as useStatusLineModule from '../hooks/useStatusLine.js';
 import { type UIState, UIStateContext } from '../contexts/UIStateContext.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { VimModeProvider } from '../contexts/VimModeContext.js';
@@ -17,9 +18,30 @@ import type { LoadedSettings } from '../../config/settings.js';
 vi.mock('../hooks/useTerminalSize.js');
 const useTerminalSizeMock = vi.mocked(useTerminalSize.useTerminalSize);
 
+vi.mock('../hooks/useStatusLine.js');
+const useStatusLineMock = vi.mocked(useStatusLineModule.useStatusLine);
+
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+  const registry = {
+    list: vi.fn(() => []),
+    subscribe: vi.fn(() => () => {}),
+  };
+  return {
+    ...actual,
+    getManagedAutoMemoryDreamTaskRegistry: vi.fn(() => registry),
+  };
+});
+
 const defaultProps = {
   model: 'gemini-pro',
 };
+
+const createMockMemoryManager = () => ({
+  subscribe: vi.fn(() => () => {}),
+  listTasksByType: vi.fn(() => []),
+});
 
 const createMockConfig = (overrides = {}) => ({
   getModel: vi.fn(() => defaultProps.model),
@@ -27,6 +49,8 @@ const createMockConfig = (overrides = {}) => ({
   getContentGeneratorConfig: vi.fn(() => ({ contextWindowSize: 131072 })),
   getMcpServers: vi.fn(() => ({})),
   getBlockedMcpServers: vi.fn(() => []),
+  getProjectRoot: vi.fn(() => '/test/project'),
+  getMemoryManager: vi.fn(createMockMemoryManager),
   ...overrides,
 });
 
@@ -83,6 +107,10 @@ const renderWithWidth = (width: number, uiState: UIState) => {
 };
 
 describe('<Footer />', () => {
+  beforeEach(() => {
+    useStatusLineMock.mockReturnValue({ lines: [] });
+  });
+
   it('renders the component', () => {
     const { lastFrame } = renderWithWidth(120, createMockUIState());
     expect(lastFrame()).toBeDefined();
@@ -101,6 +129,24 @@ describe('<Footer />', () => {
   it('displays the abbreviated context percentage on narrow terminal', () => {
     const { lastFrame } = renderWithWidth(99, createMockUIState());
     expect(lastFrame()).toMatch(/\d+%/);
+  });
+
+  describe('status line rendering', () => {
+    it('renders multi-line status line output', () => {
+      useStatusLineMock.mockReturnValue({
+        lines: ['model-name (main) ctx:34%', '████░░░░ 34% context'],
+      });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      const frame = lastFrame()!;
+      expect(frame).toContain('model-name (main) ctx:34%');
+      expect(frame).toContain('████░░░░ 34% context');
+    });
+
+    it('suppresses hint when status line is active', () => {
+      useStatusLineMock.mockReturnValue({ lines: ['status info'] });
+      const { lastFrame } = renderWithWidth(120, createMockUIState());
+      expect(lastFrame()).not.toContain('? for shortcuts');
+    });
   });
 
   describe('footer rendering (golden snapshots)', () => {

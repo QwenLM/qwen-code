@@ -88,6 +88,7 @@ export default {
   'to search history': 'поиск в истории',
   'to paste images': 'вставить изображения',
   'for external editor': 'внешний редактор',
+  'to toggle compact mode': 'переключить компактный режим',
 
   // ============================================================================
   // Поля системной информации
@@ -661,6 +662,7 @@ export default {
   'User Settings': 'Пользовательские настройки',
   'System Settings': 'Системные настройки',
   Extensions: 'Расширения',
+  'Session (temporary)': 'Сессия (временно)',
   // Hooks - Status
   '✓ Enabled': '✓ Включен',
   '✗ Disabled': '✗ Отключен',
@@ -894,6 +896,44 @@ export default {
     'Использование: /memory add [--global|--project] <текст для запоминания>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Попытка сохранить в память {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Открыть папку автопамяти',
+  'Auto-memory: {{status}}': 'Автопамять: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Автоконсолидация: {{status}} · {{lastDream}} · /dream для запуска',
+  never: 'никогда',
+  on: 'вкл',
+  off: 'выкл',
+  '❆ dreaming': '❆ консолидация',
+  'Remove matching entries from managed auto-memory.':
+    'Удалить совпадающие записи из управляемой автопамяти.',
+  'Usage: /forget <memory text to remove>':
+    'Использование: /forget <текст воспоминания для удаления>',
+  'No managed auto-memory entries matched: {{query}}':
+    'Не найдено совпадающих записей автопамяти: {{query}}',
+  'Show managed auto-memory status.': 'Показать статус управляемой автопамяти.',
+  'Run managed auto-memory extraction for the current session.':
+    'Запустить извлечение управляемой автопамяти для текущей сессии.',
+  'Managed auto-memory root: {{root}}':
+    'Корневая директория управляемой автопамяти: {{root}}',
+  'Managed auto-memory topics:': 'Темы управляемой автопамяти:',
+  'No extraction cursor found yet.': 'Курсор извлечения ещё не найден.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Курсор: сессия={{sessionId}}, смещение={{offset}}, обновлено={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'Нет доступного чат-клиента для извлечения памяти.',
+  'Managed auto-memory extraction is already running.':
+    'Извлечение управляемой автопамяти уже выполняется.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Извлечение управляемой автопамяти не нашло новых долгосрочных воспоминаний.',
+  'Consolidate managed auto-memory topic files.':
+    'Консолидировать файлы тем управляемой автопамяти.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Консолидация автопамяти не нашла чего улучшать.',
+  'Deduplicated entries: {{count}}': 'Удалено дубликатов: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Сохранить долгосрочную память с помощью инструмента save_memory.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Использование: /remember [--global|--project] <текст для запоминания>',
 
   // ============================================================================
   // Команды - MCP
@@ -1175,10 +1215,16 @@ export default {
   'Terms of Services and Privacy Notice':
     'Условия обслуживания и уведомление о конфиденциальности',
   'Qwen OAuth': 'Qwen OAuth',
-  'Free \u00B7 100 requests/day \u00B7 Ending 2026-04-15':
-    'Бесплатно \u00B7 100 запросов/день \u00B7 Завершение 2026-04-15',
-  'Login with QwenChat account to use daily free quota.':
-    'Войдите с помощью аккаунта QwenChat, чтобы использовать ежедневную бесплатную квоту.',
+  'Discontinued — switch to Coding Plan or API Key':
+    'Прекращено — переключитесь на Coding Plan или API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выполните /auth для смены провайдера.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выберите Coding Plan или API Key.',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Бесплатный уровень Qwen OAuth был прекращен 2026-04-15. Пожалуйста, выберите модель от другого провайдера или выполните /auth для переключения.',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выберите другую опцию.\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     'Платно \u00B7 До 6 000 запросов/5 часов \u00B7 Все модели Alibaba Cloud Coding Plan',
   'Alibaba Cloud Coding Plan': 'Alibaba Cloud Coding Plan',
@@ -1708,6 +1754,8 @@ export default {
     'Вы можете быстро переключать режим разрешений с помощью Tab или /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Попробуйте /insight, чтобы получить персонализированные выводы из истории чатов.',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    'Нажмите Ctrl+O для переключения компактного режима — скрыть вывод инструментов и рассуждения.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Добавьте файл QWEN.md, чтобы предоставить Qwen Code постоянный контекст проекта.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1946,17 +1994,19 @@ export default {
     '⚠️  Метод аутентификации не настроен.\n',
   'Run one of the following commands to get started:\n':
     'Выполните одну из следующих команд для начала:\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - Аутентификация через Qwen OAuth (бесплатно)',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - Аутентификация через Qwen OAuth (прекращено)',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - Аутентификация через Alibaba Cloud Coding Plan\n',
   'Or simply run:': 'Или просто выполните:',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - Интерактивная настройка аутентификации\n',
   '✓ Authentication Method: Qwen OAuth': '✓ Метод аутентификации: Qwen OAuth',
-  '  Type: Free tier (ending 2026-04-15)':
-    '  Тип: Бесплатный (завершение 2026-04-15)',
-  '  Limit: 100 requests/day': '  Лимит: 100 запросов/день',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  Тип: Бесплатный уровень (прекращено 2026-04-15)',
+  '  Limit: No longer available': '  Лимит: Больше не доступен',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'Бесплатный уровень Qwen OAuth прекращён 2026-04-15. Выполните /auth для переключения на Coding Plan, OpenRouter, Fireworks AI или другого провайдера.',
   '  Models: Qwen latest models\n': '  Модели: Последние модели Qwen\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ Метод аутентификации: Alibaba Cloud Coding Plan',
@@ -1982,6 +2032,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ стрелки для навигации, Enter для выбора, Ctrl+C для выхода)\n',
   compact: 'компактный',
+  'compact mode: on (Ctrl+O off)': 'компактный режим: вкл (Ctrl+O выкл)',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     'Скрывать вывод инструментов и процесс рассуждений для более чистого вида (переключить с помощью Ctrl+O).',
   'Press Ctrl+O to show full tool output':

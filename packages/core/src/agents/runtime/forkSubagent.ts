@@ -28,6 +28,37 @@ export const FORK_PLACEHOLDER_RESULT =
   'Fork started — processing in background';
 
 /**
+ * Build functionResponse parts for every open function call in a model message.
+ *
+ * Shared by the fork subagent (agent.ts) and background agent history
+ * construction (e.g. extractionAgentPlanner.ts) to close open tool calls
+ * before injecting history into a new agent session.
+ *
+ * @param assistantMessage - The model message that may contain functionCall parts.
+ * @param placeholderOutput - The placeholder string to use as each response's output.
+ */
+export function buildFunctionResponseParts(
+  assistantMessage: Content,
+  placeholderOutput: string,
+): Array<{
+  functionResponse: {
+    id: string | undefined;
+    name: string | undefined;
+    response: { output: string };
+  };
+}> {
+  return (
+    assistantMessage.parts?.filter((part) => part.functionCall) ?? []
+  ).map((part) => ({
+    functionResponse: {
+      id: part.functionCall!.id,
+      name: part.functionCall!.name,
+      response: { output: placeholderOutput },
+    },
+  }));
+}
+
+/**
  * Build extra history messages for a forked subagent.
  *
  * When the last model message has function calls, we must include matching
@@ -65,13 +96,10 @@ export function buildForkedMessages(
   // Build tool_result blocks for every tool_use, all with identical placeholder text.
   // Include the directive text in the same user message to maintain
   // proper user/model alternation.
-  const toolResultParts = toolUseParts.map((part) => ({
-    functionResponse: {
-      id: part.functionCall!.id,
-      name: part.functionCall!.name,
-      response: { output: FORK_PLACEHOLDER_RESULT },
-    },
-  }));
+  const toolResultParts = buildFunctionResponseParts(
+    assistantMessage,
+    FORK_PLACEHOLDER_RESULT,
+  );
 
   const toolResultMessage: Content = {
     role: 'user',

@@ -181,7 +181,7 @@ describe('validateNonInterActiveAuth', () => {
     expect(refreshAuthMock).toHaveBeenCalledWith(AuthType.USE_OPENAI);
   });
 
-  it('uses configured QWEN_OAUTH if provided', async () => {
+  it('exits with error for QWEN_OAUTH (free tier discontinued)', async () => {
     const nonInteractiveConfig = createMockConfig({
       refreshAuth: refreshAuthMock,
       getModelsConfig: vi.fn().mockReturnValue({
@@ -190,12 +190,12 @@ describe('validateNonInterActiveAuth', () => {
         getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
     });
-    await validateNonInteractiveAuth(
-      undefined,
-      nonInteractiveConfig,
-      mockSettings,
+    await expect(
+      validateNonInteractiveAuth(undefined, nonInteractiveConfig, mockSettings),
+    ).rejects.toThrow('process.exit(1)');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('discontinued'),
     );
-    expect(refreshAuthMock).toHaveBeenCalledWith(AuthType.QWEN_OAUTH);
   });
 
   it('exits if validateAuthMethod returns error', async () => {
