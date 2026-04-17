@@ -444,7 +444,11 @@ export class SystemController extends BaseController {
     }
 
     try {
-      const commands = await getAvailableCommands(this.context.config, signal);
+      const commands = await getAvailableCommands(
+        this.context.config,
+        signal,
+        'non_interactive',
+      );
 
       if (signal.aborted) {
         return [];

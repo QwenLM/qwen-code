@@ -201,7 +201,11 @@ export function computeUsageFromMetrics(metrics: SessionMetrics): Usage {
 async function loadSlashCommandNames(config: Config): Promise<string[]> {
   const controller = new AbortController();
   try {
-    const commands = await getAvailableCommands(config, controller.signal);
+    const commands = await getAvailableCommands(
+      config,
+      controller.signal,
+      'non_interactive',
+    );
 
     // Extract command names and sort
     return commands.map((cmd) => cmd.name).sort();
