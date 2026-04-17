@@ -10,7 +10,7 @@ Make sure you have:
 
 - A **terminal** or command prompt open
 - A code project to work with
-- A [Qwen Code](https://chat.qwen.ai/auth?mode=register) account
+- An API key from Alibaba Cloud Model Studio ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/)), or an Alibaba Cloud Coding Plan ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) / [intl](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index)) subscription
 
 ## Step 1: Install Qwen Code
 
@@ -52,21 +52,26 @@ npm install -g @qwen-code/qwen-code@latest
 brew install qwen-code
 ```
 
-## Step 2: Log in to your account
+## Step 2: Set up authentication
 
-Qwen Code requires an account to use. When you start an interactive session with the `qwen` command, you'll be prompted to log in:
+When you start an interactive session with the `qwen` command, you'll be prompted to configure authentication:
 
 ```bash
-# You'll be prompted to log in on first use
+# You'll be prompted to set up authentication on first use
 qwen
 ```
 
 ```bash
-# Follow the prompts to log in with your account
+# Or run /auth anytime to change authentication method
 /auth
 ```
 
-Select `Qwen OAuth`, log in to your account and follow the prompts to confirm. Once logged in, your credentials are stored and you won't need to log in again.
+Choose your preferred authentication method:
+
+- **Alibaba Cloud Coding Plan**: Select `Alibaba Cloud Coding Plan` for a fixed monthly fee with diverse model options. See the [Coding Plan guide](https://bailian.console.aliyun.com/cn-beijing/?tab=coding-plan#/efm/coding-plan-index) ([intl](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index)) for setup instructions.
+- **API Key**: Select `API Key`, then enter your API key from Alibaba Cloud Model Studio ([Beijing](https://bailian.console.aliyun.com/) / [intl](https://modelstudio.console.alibabacloud.com/)). See the API setup guide ([Beijing](https://bailian.console.aliyun.com/cn-beijing/?tab=doc#/doc/?type=model&url=3023091) / [intl](https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model&url=2974721)) for details.
+
+> ⚠️ **Note**: Qwen OAuth was discontinued on April 15, 2026. If you were previously using Qwen OAuth, please switch to one of the methods above.
 
 > [!note]
 >
