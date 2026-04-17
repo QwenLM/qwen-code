@@ -18,9 +18,11 @@ import {
   MCP_OAUTH_CLIENT_NAME,
   OAUTH_REDIRECT_PORT,
   OAUTH_REDIRECT_PATH,
+  getOAuthRedirectUri,
 } from './constants.js';
 
 export const OAUTH_DISPLAY_MESSAGE_EVENT = 'oauth-display-message' as const;
+export const OAUTH_AUTH_URL_EVENT = 'oauth-auth-url' as const;
 
 /**
  * Structured display message for i18n support.
@@ -356,9 +358,7 @@ export class MCPOAuthProvider {
     pkceParams: PKCEParams,
     mcpServerUrl?: string,
   ): string {
-    const redirectUri =
-      config.redirectUri ||
-      `http://localhost:${OAUTH_REDIRECT_PORT}${OAUTH_REDIRECT_PATH}`;
+    const redirectUri = config.redirectUri || getOAuthRedirectUri();
 
     const params = new URLSearchParams({
       client_id: config.clientId!,
@@ -818,6 +818,9 @@ export class MCPOAuthProvider {
     displayMessage({
       key: 'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.',
     });
+    if (events) {
+      events.emit(OAUTH_AUTH_URL_EVENT, authUrl.toString());
+    }
 
     // Start callback server
     const callbackPromise = this.startCallbackServer(pkceParams.state);
