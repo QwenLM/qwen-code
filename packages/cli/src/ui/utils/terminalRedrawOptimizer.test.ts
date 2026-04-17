@@ -13,16 +13,22 @@ import {
 const ESC = '\u001B[';
 const ERASE_LINE = `${ESC}2K`;
 const CURSOR_UP_ONE = `${ESC}1A`;
+const CURSOR_DOWN_ONE = `${ESC}1B`;
 const CURSOR_LEFT = `${ESC}G`;
-const ERASE_DOWN = `${ESC}J`;
 
 describe('optimizeMultilineEraseLines', () => {
-  it('collapses repeated clear-line cursor-up sequences', () => {
+  it('collapses repeated cursor-up movement without erasing below', () => {
     const input = `${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_LEFT}next frame`;
 
     expect(optimizeMultilineEraseLines(input)).toBe(
-      `${ESC}2A${ERASE_DOWN}${CURSOR_LEFT}next frame`,
+      `${ESC}2A${ERASE_LINE}${CURSOR_DOWN_ONE}${ERASE_LINE}${CURSOR_DOWN_ONE}${ERASE_LINE}${ESC}2A${CURSOR_LEFT}next frame`,
     );
+  });
+
+  it('leaves two-line erase sequences unchanged', () => {
+    const input = `${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_LEFT}next frame`;
+
+    expect(optimizeMultilineEraseLines(input)).toBe(input);
   });
 
   it('leaves single-line erase sequences unchanged', () => {
@@ -36,8 +42,14 @@ describe('optimizeMultilineEraseLines', () => {
     const second = `${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_LEFT}`;
 
     expect(optimizeMultilineEraseLines(`${first}a${second}b`)).toBe(
-      `${ESC}1A${ERASE_DOWN}${CURSOR_LEFT}a${ESC}2A${ERASE_DOWN}${CURSOR_LEFT}b`,
+      `${first}a${ESC}2A${ERASE_LINE}${CURSOR_DOWN_ONE}${ERASE_LINE}${CURSOR_DOWN_ONE}${ERASE_LINE}${ESC}2A${CURSOR_LEFT}b`,
     );
+  });
+
+  it('does not emit erase-down sequences', () => {
+    const input = `${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_LEFT}`;
+
+    expect(optimizeMultilineEraseLines(input)).not.toContain(`${ESC}J`);
   });
 });
 
@@ -50,12 +62,12 @@ describe('installTerminalRedrawOptimizer', () => {
     const write = vi.fn(() => true);
     const stdout = { write } as unknown as NodeJS.WriteStream;
     const restore = installTerminalRedrawOptimizer(stdout);
-    const input = `${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_LEFT}`;
+    const input = `${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_UP_ONE}${ERASE_LINE}${CURSOR_LEFT}`;
 
     stdout.write(input);
 
     expect(write).toHaveBeenCalledWith(
-      `${ESC}1A${ERASE_DOWN}${CURSOR_LEFT}`,
+      `${ESC}2A${ERASE_LINE}${CURSOR_DOWN_ONE}${ERASE_LINE}${CURSOR_DOWN_ONE}${ERASE_LINE}${ESC}2A${CURSOR_LEFT}`,
       undefined,
       undefined,
     );

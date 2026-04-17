@@ -7,8 +7,8 @@
 const ESC = '\u001B[';
 const ERASE_LINE = `${ESC}2K`;
 const CURSOR_UP_ONE = `${ESC}1A`;
+const CURSOR_DOWN_ONE = `${ESC}1B`;
 const CURSOR_LEFT = `${ESC}G`;
-const ERASE_DOWN = `${ESC}J`;
 
 const MULTILINE_ERASE_LINES_PATTERN = new RegExp(
   `(?:${escapeRegExp(ERASE_LINE + CURSOR_UP_ONE)})+${escapeRegExp(
@@ -36,15 +36,29 @@ function countOccurrences(value: string, search: string): number {
 /**
  * Ink clears dynamic output via ansi-escapes.eraseLines(), which emits a
  * clear-line + cursor-up pair for every previous line. That can make terminal
- * scrollback bounce during frequent streaming renders. Collapse that exact
- * multiline erase sequence into one relative cursor move and erase-down.
+ * scrollback bounce during frequent streaming renders. Collapse the repeated
+ * upward cursor movement while still clearing only the same old frame lines.
  */
 export function optimizeMultilineEraseLines(output: string): string {
   return output.replace(MULTILINE_ERASE_LINES_PATTERN, (sequence) => {
     const lineCount = countOccurrences(sequence, ERASE_LINE);
     const cursorUpCount = lineCount - 1;
 
-    return `${ESC}${cursorUpCount}A${ERASE_DOWN}${CURSOR_LEFT}`;
+    if (cursorUpCount <= 1) {
+      return sequence;
+    }
+
+    let boundedErase = `${ESC}${cursorUpCount}A`;
+
+    for (let line = 0; line < lineCount; line++) {
+      boundedErase += ERASE_LINE;
+
+      if (line < lineCount - 1) {
+        boundedErase += CURSOR_DOWN_ONE;
+      }
+    }
+
+    return `${boundedErase}${ESC}${cursorUpCount}A${CURSOR_LEFT}`;
   });
 }
 
