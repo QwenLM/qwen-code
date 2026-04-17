@@ -4,28 +4,44 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolNames, ToolDisplayNames } from './tool-names.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
+import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import type {
   ToolResult,
   ToolResultDisplay,
   AgentResultDisplay,
-} from './tools.js';
-import { ToolConfirmationOutcome } from './tools.js';
+} from '../tools.js';
+import { ToolConfirmationOutcome } from '../tools.js';
 import type {
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
-} from './tools.js';
-import type { Config } from '../config/config.js';
-import type { SubagentManager } from '../subagents/subagent-manager.js';
-import type { SubagentConfig } from '../subagents/types.js';
-import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
-import { ContextState } from '../agents/runtime/agent-headless.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from '../agents/runtime/agent-core.js';
+} from '../tools.js';
+import type { Config } from '../../config/config.js';
+import type { SubagentManager } from '../../subagents/subagent-manager.js';
+import type { SubagentConfig } from '../../subagents/types.js';
+import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
+import type {
+  PromptConfig,
+  RunConfig,
+  ToolConfig,
+} from '../../agents/runtime/agent-types.js';
+import {
+  AgentHeadless,
+  ContextState,
+} from '../../agents/runtime/agent-headless.js';
+import type { Content, FunctionDeclaration } from '@google/genai';
+import {
+  FORK_AGENT,
+  FORK_PLACEHOLDER_RESULT,
+  buildForkedMessages,
+  buildChildMessage,
+  isInForkExecution,
+  runInForkContext,
+} from './fork-subagent.js';
 import {
   AgentEventEmitter,
   AgentEventType,
-} from '../agents/runtime/agent-events.js';
+} from '../../agents/runtime/agent-events.js';
 import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
@@ -33,12 +49,12 @@ import type {
   AgentErrorEvent,
   AgentApprovalRequestEvent,
   AgentUsageEvent,
-} from '../agents/runtime/agent-events.js';
-import { BuiltinAgentRegistry } from '../subagents/builtin-agents.js';
-import { createDebugLogger } from '../utils/debugLogger.js';
-import { PermissionMode } from '../hooks/types.js';
-import type { StopHookOutput } from '../hooks/types.js';
-import { ApprovalMode } from '../config/config.js';
+} from '../../agents/runtime/agent-events.js';
+import { BuiltinAgentRegistry } from '../../subagents/builtin-agents.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+import { PermissionMode } from '../../hooks/types.js';
+import type { StopHookOutput } from '../../hooks/types.js';
+import { ApprovalMode } from '../../config/config.js';
 
 export interface AgentParams {
   description: string;
@@ -593,143 +609,307 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     return this.params.description;
   }
 
+  /**
+   * Creates a fork subagent that inherits the parent's conversation context
+   * and cache-safe generation params.
+   */
+  private async createForkSubagent(agentConfig: Config): Promise<{
+    subagent: AgentHeadless;
+    taskPrompt: string;
+  }> {
+    const geminiClient = this.config.getGeminiClient();
+    const rawHistory = geminiClient ? geminiClient.getHistory(true) : [];
+
+    // Build the history that will seed the fork's chat. Must end with a
+    // model message so agent-headless can send the task_prompt as a user
+    // message without creating consecutive user messages.
+    let initialMessages: Content[] | undefined;
+    let taskPrompt: string | undefined;
+    if (rawHistory.length > 0) {
+      const lastMessage = rawHistory[rawHistory.length - 1];
+      if (lastMessage.role === 'model') {
+        const forkedMessages = buildForkedMessages(
+          this.params.prompt,
+          lastMessage,
+        );
+        if (forkedMessages.length > 0) {
+          // Model had function calls: append tool responses + directive,
+          // then a model ack so history ends with model.
+          initialMessages = [
+            ...rawHistory.slice(0, -1),
+            ...forkedMessages,
+            {
+              role: 'model' as const,
+              parts: [{ text: 'Understood. Executing directive now.' }],
+            },
+          ];
+          // task_prompt is a trigger to start execution
+          taskPrompt = 'Begin.';
+        } else {
+          // Model had no function calls: history ends with model,
+          // directive goes via task_prompt.
+          initialMessages = [...rawHistory];
+        }
+      } else {
+        // History ends with user (unusual) — drop the trailing user
+        // message to avoid consecutive user messages when agent-headless
+        // sends the task_prompt.
+        initialMessages = rawHistory.slice(0, -1);
+      }
+    }
+
+    // Default: directive with fork boilerplate as task_prompt
+    if (!taskPrompt) {
+      taskPrompt = buildChildMessage(this.params.prompt);
+    }
+
+    // Read the parent's live generationConfig (systemInstruction + tool
+    // declarations) so the fork's API requests share the parent's exact
+    // cache prefix for DashScope prompt caching. When the client isn't
+    // available (first turn edge case), fall back to the fork agent's own
+    // system prompt and wildcard tools.
+    let promptConfig: PromptConfig;
+    let toolConfig: ToolConfig;
+
+    const generationConfig = geminiClient?.getChat().getGenerationConfig();
+    if (generationConfig?.systemInstruction) {
+      // Inline FunctionDeclaration[] from the parent — passed verbatim
+      // including `agent` itself so the fork's tool-name set matches the
+      // parent's. prepareTools bypasses the exclusion filter for inline
+      // decls; `isInForkExecution()` (ALS-based) is the sole
+      // recursive-fork block at runtime.
+      const parentToolDecls: FunctionDeclaration[] =
+        (
+          generationConfig.tools as Array<{
+            functionDeclarations?: FunctionDeclaration[];
+          }>
+        )?.flatMap((t) => t.functionDeclarations ?? []) ?? [];
+
+      promptConfig = {
+        renderedSystemPrompt: generationConfig.systemInstruction as
+          | string
+          | Content,
+        initialMessages,
+      };
+      toolConfig = {
+        tools:
+          parentToolDecls.length > 0 ? parentToolDecls : (['*'] as string[]),
+      };
+    } else {
+      promptConfig = {
+        systemPrompt: FORK_AGENT.systemPrompt,
+        initialMessages,
+      };
+      toolConfig = { tools: ['*'] };
+    }
+
+    const subagent = await AgentHeadless.create(
+      FORK_AGENT.name,
+      agentConfig,
+      promptConfig,
+      {},
+      {} as RunConfig,
+      toolConfig,
+      this.eventEmitter,
+    );
+
+    return { subagent, taskPrompt };
+  }
+
+  /**
+   * Runs a subagent with start/stop hook lifecycle, updating the display
+   * as execution progresses.
+   */
+  private async runSubagentWithHooks(
+    subagent: AgentHeadless,
+    contextState: ContextState,
+    opts: {
+      agentId: string;
+      agentType: string;
+      resolvedMode: PermissionMode;
+      signal?: AbortSignal;
+      updateOutput?: (output: ToolResultDisplay) => void;
+    },
+  ): Promise<void> {
+    const { agentId, agentType, resolvedMode, signal, updateOutput } = opts;
+    const hookSystem = this.config.getHookSystem();
+
+    try {
+      if (hookSystem) {
+        try {
+          const startHookOutput = await hookSystem.fireSubagentStartEvent(
+            agentId,
+            agentType,
+            resolvedMode,
+            signal,
+          );
+
+          // Inject additional context from hook output into subagent context
+          const additionalContext = startHookOutput?.getAdditionalContext();
+          if (additionalContext) {
+            contextState.set('hook_context', additionalContext);
+          }
+        } catch (hookError) {
+          debugLogger.warn(
+            `[Agent] SubagentStart hook failed, continuing execution: ${hookError}`,
+          );
+        }
+      }
+
+      // Execute the subagent (blocking)
+      await subagent.execute(contextState, signal);
+
+      // Fire SubagentStop hook after execution and handle block decisions
+      if (hookSystem && !signal?.aborted) {
+        const transcriptPath = this.config.getTranscriptPath();
+        let stopHookActive = false;
+
+        // Loop to handle "block" decisions (prevent subagent from stopping)
+        let continueExecution = true;
+        let iterationCount = 0;
+        const maxIterations = 5; // Prevent infinite loops from hook misconfigurations
+
+        while (continueExecution) {
+          iterationCount++;
+
+          // Safety check to prevent infinite loops
+          if (iterationCount >= maxIterations) {
+            debugLogger.warn(
+              `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
+            );
+            continueExecution = false;
+            break;
+          }
+
+          try {
+            const stopHookOutput = await hookSystem.fireSubagentStopEvent(
+              agentId,
+              agentType,
+              transcriptPath,
+              subagent.getFinalText(),
+              stopHookActive,
+              resolvedMode,
+              signal,
+            );
+
+            const typedStopOutput = stopHookOutput as
+              | StopHookOutput
+              | undefined;
+
+            if (
+              typedStopOutput?.isBlockingDecision() ||
+              typedStopOutput?.shouldStopExecution()
+            ) {
+              // Feed the reason back to the subagent and continue execution
+              const continueReason = typedStopOutput.getEffectiveReason();
+              stopHookActive = true;
+
+              const continueContext = new ContextState();
+              continueContext.set('task_prompt', continueReason);
+              await subagent.execute(continueContext, signal);
+
+              if (signal?.aborted) {
+                continueExecution = false;
+              }
+              // Loop continues to re-check SubagentStop hook
+            } else {
+              continueExecution = false;
+            }
+          } catch (hookError) {
+            debugLogger.warn(
+              `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
+            );
+            continueExecution = false;
+          }
+        }
+      }
+
+      // Get the results
+      const finalText = subagent.getFinalText();
+      const terminateMode = subagent.getTerminateMode();
+      const success = terminateMode === AgentTerminateMode.GOAL;
+      const executionSummary = subagent.getExecutionSummary();
+
+      if (signal?.aborted) {
+        this.updateDisplay(
+          {
+            status: 'cancelled',
+            terminateReason: 'Agent was cancelled by user',
+            executionSummary,
+          },
+          updateOutput,
+        );
+      } else {
+        this.updateDisplay(
+          {
+            status: success ? 'completed' : 'failed',
+            terminateReason: terminateMode,
+            result: finalText,
+            executionSummary,
+          },
+          updateOutput,
+        );
+      }
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      debugLogger.error(
+        `[AgentTool] Error inside subagent background task: ${errorMessage}`,
+      );
+      this.updateDisplay(
+        {
+          status: 'failed',
+          terminateReason: `Failed to run subagent: ${errorMessage}`,
+        },
+        updateOutput,
+      );
+    }
+  }
+
   async execute(
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     try {
+      const isFork = !this.params.subagent_type;
       let subagentConfig: SubagentConfig;
-      let extraHistory: Array<import('@google/genai').Content> | undefined;
-      let forkPlaceholderResult: string | undefined;
-      let forkTaskPrompt: string | undefined;
-      let forkGenerationConfig:
-        | import('@google/genai').GenerateContentConfig
-        | undefined;
-      let forkToolsOverride:
-        | Array<import('@google/genai').FunctionDeclaration>
-        | undefined;
 
-      if (!this.params.subagent_type) {
-        const {
-          FORK_AGENT,
-          FORK_PLACEHOLDER_RESULT,
-          buildForkedMessages,
-          buildChildMessage,
-          isInForkChild,
-        } = await import('../agents/runtime/forkSubagent.js');
-        forkPlaceholderResult = FORK_PLACEHOLDER_RESULT;
+      if (isFork) {
         subagentConfig = FORK_AGENT;
 
-        // Retrieve the parent's cached generationConfig (systemInstruction +
-        // tools) so the fork's API requests share the same prefix for
-        // DashScope prompt cache hits.
-        const { getCacheSafeParams } = await import(
-          '../followup/forkedQuery.js'
-        );
-        const cacheSafeParams = getCacheSafeParams();
-        if (cacheSafeParams) {
-          forkGenerationConfig = cacheSafeParams.generationConfig;
-          const tools = cacheSafeParams.generationConfig.tools;
-          if (tools && tools.length > 0) {
-            forkToolsOverride = tools
-              .flatMap(
-                (t) =>
-                  (
-                    t as {
-                      functionDeclarations?: Array<
-                        import('@google/genai').FunctionDeclaration
-                      >;
-                    }
-                  ).functionDeclarations ?? [],
-              )
-              .filter(
-                (decl) =>
-                  !(decl.name && EXCLUDED_TOOLS_FOR_SUBAGENTS.has(decl.name)),
-              );
-          }
-        }
-
-        const geminiClient = this.config.getGeminiClient();
-        if (geminiClient) {
-          const rawHistory = geminiClient.getHistory(true);
-
-          if (isInForkChild(rawHistory)) {
-            const errorDisplay = {
+        // Recursive-fork guard. A fork child's reasoning loop runs inside
+        // an AsyncLocalStorage frame set by `runInForkContext`; when its
+        // model calls the `agent` tool, this check fires before any history
+        // or config is touched.
+        if (isInForkExecution()) {
+          return {
+            llmContent:
+              'Error: Cannot create a fork from within an existing fork child. Please execute tasks directly.',
+            returnDisplay: {
               type: 'task_execution' as const,
               subagentName: FORK_AGENT.name,
               taskDescription: this.params.description,
               taskPrompt: this.params.prompt,
               status: 'failed' as const,
               terminateReason: 'Recursive forking is not allowed',
-            };
-
-            return {
-              llmContent:
-                'Error: Cannot create a fork from within an existing fork child. Please execute tasks directly.',
-              returnDisplay: errorDisplay,
-            };
-          }
-
-          // Build extraHistory ensuring it ends with a model message so
-          // agent-headless can send the task_prompt as a user message
-          // without creating consecutive user messages.
-          if (rawHistory.length > 0) {
-            const lastMessage = rawHistory[rawHistory.length - 1];
-            if (lastMessage.role === 'model') {
-              const forkedMessages = buildForkedMessages(
-                this.params.prompt,
-                lastMessage,
-              );
-              if (forkedMessages.length > 0) {
-                // Model had function calls: append tool responses + directive,
-                // then a model ack so history ends with model.
-                extraHistory = [
-                  ...rawHistory.slice(0, -1),
-                  ...forkedMessages,
-                  {
-                    role: 'model' as const,
-                    parts: [{ text: 'Understood. Executing directive now.' }],
-                  },
-                ];
-                // task_prompt is a trigger to start execution
-                forkTaskPrompt = 'Begin.';
-              } else {
-                // Model had no function calls: history ends with model,
-                // directive goes via task_prompt.
-                extraHistory = [...rawHistory];
-              }
-            } else {
-              // History ends with user (unusual) — drop the trailing user
-              // message to avoid consecutive user messages when agent-headless
-              // sends the task_prompt.
-              extraHistory = rawHistory.slice(0, -1);
-            }
-          }
-        }
-
-        // Default: directive with fork boilerplate as task_prompt
-        if (!forkTaskPrompt) {
-          forkTaskPrompt = buildChildMessage(this.params.prompt);
+            },
+          };
         }
       } else {
-        // Load the subagent configuration
         const loadedConfig = await this.subagentManager.loadSubagent(
-          this.params.subagent_type,
+          this.params.subagent_type!,
         );
-
         if (!loadedConfig) {
-          const errorDisplay = {
-            type: 'task_execution' as const,
-            subagentName: this.params.subagent_type,
-            taskDescription: this.params.description,
-            taskPrompt: this.params.prompt,
-            status: 'failed' as const,
-            terminateReason: `Subagent "${this.params.subagent_type}" not found`,
-          };
-
           return {
             llmContent: `Subagent "${this.params.subagent_type}" not found`,
-            returnDisplay: errorDisplay,
+            returnDisplay: {
+              type: 'task_execution' as const,
+              subagentName: this.params.subagent_type!,
+              taskDescription: this.params.description,
+              taskPrompt: this.params.prompt,
+              status: 'failed' as const,
+              terminateReason: `Subagent "${this.params.subagent_type}" not found`,
+            },
           };
         }
         subagentConfig = loadedConfig;
@@ -744,198 +924,64 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         status: 'running' as const,
         subagentColor: subagentConfig.color,
       };
-
-      // Set up event listeners for real-time updates
       this.setupEventListeners(updateOutput);
-
-      // Send initial display
       if (updateOutput) {
         updateOutput(this.currentDisplay);
       }
+
       // Resolve the subagent's permission mode before creating it
       const resolvedMode = resolveSubagentApprovalMode(
         this.config.getApprovalMode(),
         subagentConfig.approvalMode,
         this.config.isTrustedFolder(),
       );
-
-      // Create a config override with the resolved approval mode so the
-      // subagent's tool scheduler uses the correct mode for permission checks.
       const resolvedApprovalMode = permissionModeToApprovalMode(resolvedMode);
       const agentConfig =
         resolvedApprovalMode !== this.config.getApprovalMode()
           ? createApprovalModeOverride(this.config, resolvedApprovalMode)
           : this.config;
 
-      const subagent = await this.subagentManager.createAgentHeadless(
-        subagentConfig,
-        agentConfig,
-        { eventEmitter: this.eventEmitter },
-      );
+      // Create the subagent. Fork bypasses SubagentManager because its
+      // runtime configs are synthesized from the parent's cache-safe params.
+      let subagent: AgentHeadless;
+      let taskPrompt: string;
 
-      // Create context state with the task prompt
-      // For fork agents, use the fork directive (with boilerplate) as the task
-      // prompt so it's sent as the first user message by agent-headless.
+      if (isFork) {
+        const fork = await this.createForkSubagent(agentConfig);
+        subagent = fork.subagent;
+        taskPrompt = fork.taskPrompt;
+      } else {
+        subagent = await this.subagentManager.createAgentHeadless(
+          subagentConfig,
+          agentConfig,
+          { eventEmitter: this.eventEmitter },
+        );
+        taskPrompt = this.params.prompt;
+      }
+
       const contextState = new ContextState();
-      contextState.set('task_prompt', forkTaskPrompt || this.params.prompt);
+      contextState.set('task_prompt', taskPrompt);
 
-      // Fire SubagentStart hook before execution
-      const hookSystem = this.config.getHookSystem();
-      const agentId = `${subagentConfig.name}-${Date.now()}`;
-      const agentType = this.params.subagent_type || subagentConfig.name;
-
-      const executeSubagent = async () => {
-        try {
-          if (hookSystem) {
-            try {
-              const startHookOutput = await hookSystem.fireSubagentStartEvent(
-                agentId,
-                agentType,
-                resolvedMode,
-                signal,
-              );
-
-              // Inject additional context from hook output into subagent context
-              const additionalContext = startHookOutput?.getAdditionalContext();
-              if (additionalContext) {
-                contextState.set('hook_context', additionalContext);
-              }
-            } catch (hookError) {
-              debugLogger.warn(
-                `[Agent] SubagentStart hook failed, continuing execution: ${hookError}`,
-              );
-            }
-          }
-
-          // Execute the subagent (blocking)
-          await subagent.execute(contextState, signal, {
-            extraHistory,
-            generationConfigOverride: forkGenerationConfig,
-            toolsOverride: forkToolsOverride,
-            skipEnvHistory: !!extraHistory && extraHistory.length > 0,
-          });
-
-          // Fire SubagentStop hook after execution and handle block decisions
-          if (hookSystem && !signal?.aborted) {
-            const transcriptPath = this.config.getTranscriptPath();
-            let stopHookActive = false;
-
-            // Loop to handle "block" decisions (prevent subagent from stopping)
-            let continueExecution = true;
-            let iterationCount = 0;
-            const maxIterations = 5; // Prevent infinite loops from hook misconfigurations
-
-            while (continueExecution) {
-              iterationCount++;
-
-              // Safety check to prevent infinite loops
-              if (iterationCount >= maxIterations) {
-                debugLogger.warn(
-                  `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
-                );
-                continueExecution = false;
-                break;
-              }
-
-              try {
-                const stopHookOutput = await hookSystem.fireSubagentStopEvent(
-                  agentId,
-                  agentType,
-                  transcriptPath,
-                  subagent.getFinalText(),
-                  stopHookActive,
-                  resolvedMode,
-                  signal,
-                );
-
-                const typedStopOutput = stopHookOutput as
-                  | StopHookOutput
-                  | undefined;
-
-                if (
-                  typedStopOutput?.isBlockingDecision() ||
-                  typedStopOutput?.shouldStopExecution()
-                ) {
-                  // Feed the reason back to the subagent and continue execution
-                  const continueReason = typedStopOutput.getEffectiveReason();
-                  stopHookActive = true;
-
-                  const continueContext = new ContextState();
-                  continueContext.set('task_prompt', continueReason);
-                  await subagent.execute(continueContext, signal, {
-                    extraHistory,
-                    generationConfigOverride: forkGenerationConfig,
-                    toolsOverride: forkToolsOverride,
-                    skipEnvHistory: !!extraHistory && extraHistory.length > 0,
-                  });
-
-                  if (signal?.aborted) {
-                    continueExecution = false;
-                  }
-                  // Loop continues to re-check SubagentStop hook
-                } else {
-                  continueExecution = false;
-                }
-              } catch (hookError) {
-                debugLogger.warn(
-                  `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
-                );
-                continueExecution = false;
-              }
-            }
-          }
-
-          // Get the results
-          const finalText = subagent.getFinalText();
-          const terminateMode = subagent.getTerminateMode();
-          const success = terminateMode === AgentTerminateMode.GOAL;
-          const executionSummary = subagent.getExecutionSummary();
-
-          if (signal?.aborted) {
-            this.updateDisplay(
-              {
-                status: 'cancelled',
-                terminateReason: 'Agent was cancelled by user',
-                executionSummary,
-              },
-              updateOutput,
-            );
-          } else {
-            this.updateDisplay(
-              {
-                status: success ? 'completed' : 'failed',
-                terminateReason: terminateMode,
-                result: finalText,
-                executionSummary,
-              },
-              updateOutput,
-            );
-          }
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
-          debugLogger.error(
-            `[AgentTool] Error inside subagent background task: ${errorMessage}`,
-          );
-          this.updateDisplay(
-            {
-              status: 'failed',
-              terminateReason: `Failed to run subagent: ${errorMessage}`,
-            },
-            updateOutput,
-          );
-        }
+      const hookOpts = {
+        agentId: `${subagentConfig.name}-${Date.now()}`,
+        agentType: this.params.subagent_type || subagentConfig.name,
+        resolvedMode,
+        signal,
+        updateOutput,
       };
 
-      if (!this.params.subagent_type) {
-        // Background fork execution
-        void executeSubagent();
+      if (isFork) {
+        // Background fork execution. Run under an AsyncLocalStorage frame so
+        // nested `agent` tool calls by the fork's model can be detected.
+        void runInForkContext(() =>
+          this.runSubagentWithHooks(subagent, contextState, hookOpts),
+        );
         return {
-          llmContent: [{ text: forkPlaceholderResult! }],
+          llmContent: [{ text: FORK_PLACEHOLDER_RESULT }],
           returnDisplay: this.currentDisplay!,
         };
       } else {
-        await executeSubagent();
+        await this.runSubagentWithHooks(subagent, contextState, hookOpts);
         const finalText = subagent.getFinalText();
         const terminateMode = subagent.getTerminateMode();
         if (terminateMode === AgentTerminateMode.ERROR) {

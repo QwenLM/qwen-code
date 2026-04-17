@@ -896,6 +896,44 @@ export default {
     'Использование: /memory add [--global|--project] <текст для запоминания>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     'Попытка сохранить в память {{scope}}: "{{fact}}"',
+  'Open auto-memory folder': 'Открыть папку автопамяти',
+  'Auto-memory: {{status}}': 'Автопамять: {{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    'Автоконсолидация: {{status}} · {{lastDream}} · /dream для запуска',
+  never: 'никогда',
+  on: 'вкл',
+  off: 'выкл',
+  '❆ dreaming': '❆ консолидация',
+  'Remove matching entries from managed auto-memory.':
+    'Удалить совпадающие записи из управляемой автопамяти.',
+  'Usage: /forget <memory text to remove>':
+    'Использование: /forget <текст воспоминания для удаления>',
+  'No managed auto-memory entries matched: {{query}}':
+    'Не найдено совпадающих записей автопамяти: {{query}}',
+  'Show managed auto-memory status.': 'Показать статус управляемой автопамяти.',
+  'Run managed auto-memory extraction for the current session.':
+    'Запустить извлечение управляемой автопамяти для текущей сессии.',
+  'Managed auto-memory root: {{root}}':
+    'Корневая директория управляемой автопамяти: {{root}}',
+  'Managed auto-memory topics:': 'Темы управляемой автопамяти:',
+  'No extraction cursor found yet.': 'Курсор извлечения ещё не найден.',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    'Курсор: сессия={{sessionId}}, смещение={{offset}}, обновлено={{updatedAt}}',
+  'No chat client available to extract memory.':
+    'Нет доступного чат-клиента для извлечения памяти.',
+  'Managed auto-memory extraction is already running.':
+    'Извлечение управляемой автопамяти уже выполняется.',
+  'Managed auto-memory extraction found no new durable memories.':
+    'Извлечение управляемой автопамяти не нашло новых долгосрочных воспоминаний.',
+  'Consolidate managed auto-memory topic files.':
+    'Консолидировать файлы тем управляемой автопамяти.',
+  'Managed auto-memory dream found nothing to improve.':
+    'Консолидация автопамяти не нашла чего улучшать.',
+  'Deduplicated entries: {{count}}': 'Удалено дубликатов: {{count}}',
+  'Save a durable memory using the save_memory tool.':
+    'Сохранить долгосрочную память с помощью инструмента save_memory.',
+  'Usage: /remember [--global|--project] <text to remember>':
+    'Использование: /remember [--global|--project] <текст для запоминания>',
 
   // ============================================================================
   // Команды - MCP

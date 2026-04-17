@@ -237,6 +237,7 @@ export const useGeminiStream = (
     null,
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
+  const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
   // --- Real-time token display ---
   // Accumulates output character count across the whole turn (not per API call).
@@ -263,13 +264,13 @@ export const useGeminiStream = (
       async (completedToolCallsFromScheduler) => {
         // This onComplete is called when ALL scheduled tools for a given batch are done.
         if (completedToolCallsFromScheduler.length > 0) {
+          const projectRoot = config.getProjectRoot();
           // Add the final state of these tools to the history for display.
-          addItem(
-            mapTrackedToolCallsToDisplay(
-              completedToolCallsFromScheduler as TrackedToolCall[],
-            ),
-            Date.now(),
+          const toolGroupDisplay = mapTrackedToolCallsToDisplay(
+            completedToolCallsFromScheduler as TrackedToolCall[],
+            projectRoot,
           );
+          addItem(toolGroupDisplay, Date.now());
 
           // Handle tool response submission immediately when tools complete
           await handleCompletedTools(
@@ -284,8 +285,10 @@ export const useGeminiStream = (
 
   const pendingToolCallGroupDisplay = useMemo(
     () =>
-      toolCalls.length ? mapTrackedToolCallsToDisplay(toolCalls) : undefined,
-    [toolCalls],
+      toolCalls.length
+        ? mapTrackedToolCallsToDisplay(toolCalls, config.getProjectRoot())
+        : undefined,
+    [toolCalls, config],
   );
 
   const activeToolPtyId = useMemo(() => {
@@ -569,6 +572,8 @@ export const useGeminiStream = (
             }
             case 'submit_prompt': {
               localQueryToSendToGemini = slashCommandResult.content;
+              submitPromptOnCompleteRef.current =
+                slashCommandResult.onComplete ?? null;
 
               return {
                 queryToSend: localQueryToSendToGemini,
@@ -1412,6 +1417,35 @@ export const useGeminiStream = (
           if (loopDetectedRef.current) {
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
+          }
+
+          // If the turn was initiated by a submit_prompt with an onComplete
+          // callback (e.g. /dream recording lastDreamAt), fire it now.
+          const onComplete = submitPromptOnCompleteRef.current;
+          if (onComplete) {
+            submitPromptOnCompleteRef.current = null;
+            void onComplete();
+          }
+
+          // After the turn completes, wire up notifications for any background
+          // dream / extraction tasks that were kicked off by the client.
+          if (geminiClient) {
+            const memoryTaskPromises =
+              geminiClient.consumePendingMemoryTaskPromises();
+            for (const p of memoryTaskPromises) {
+              void p.then((count) => {
+                if (count > 0) {
+                  addItem(
+                    {
+                      type: 'memory_saved',
+                      writtenCount: count,
+                      verb: 'Updated',
+                    } as HistoryItemWithoutId,
+                    Date.now(),
+                  );
+                }
+              });
+            }
           }
         } catch (error: unknown) {
           if (error instanceof UnauthorizedError) {

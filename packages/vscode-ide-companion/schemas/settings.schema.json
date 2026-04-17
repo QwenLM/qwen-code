@@ -177,7 +177,7 @@
           }
         },
         "enableWelcomeBack": {
-          "description": "Show welcome back dialog when returning to a project with conversation history.",
+          "description": "Show welcome back dialog when returning to a project with conversation history. Choosing \"Start new chat session\" suppresses the dialog for that project until the project summary changes.",
           "type": "boolean",
           "default": true
         },
@@ -415,6 +415,22 @@
               "default": true
             }
           }
+        }
+      }
+    },
+    "memory": {
+      "description": "Settings for managed auto-memory.",
+      "type": "object",
+      "properties": {
+        "enableManagedAutoMemory": {
+          "description": "Enable background extraction of memories from conversations.",
+          "type": "boolean",
+          "default": true
+        },
+        "enableManagedAutoDream": {
+          "description": "Enable automatic consolidation (dream) of collected memories.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
