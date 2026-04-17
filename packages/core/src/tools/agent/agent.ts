@@ -401,11 +401,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     super(params);
   }
 
-  /**
-   * Invoked by the tool scheduler after `build` to link this invocation
-   * back to the model's original tool-use request. Used so background
-   * agents carry the tool-use id through to completion notifications.
-   */
+  // Background agents carry the tool-use id through to completion notifications.
   setCallId(callId: string): void {
     this.callId = callId;
   }
@@ -714,6 +710,69 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     return { subagent, taskPrompt };
   }
 
+  // Runs the SubagentStop hook after execution. On a blocking decision, feeds the
+  // reason back and re-executes — up to 5 iterations to defend against a
+  // misconfigured hook looping forever.
+  private async runSubagentStopHookLoop(
+    subagent: AgentHeadless,
+    opts: {
+      agentId: string;
+      agentType: string;
+      resolvedMode: PermissionMode;
+      signal?: AbortSignal;
+    },
+  ): Promise<void> {
+    const { agentId, agentType, resolvedMode, signal } = opts;
+    const hookSystem = this.config.getHookSystem();
+    if (!hookSystem) return;
+
+    const transcriptPath = this.config.getTranscriptPath();
+    let stopHookActive = false;
+    const maxIterations = 5;
+
+    for (let i = 0; i < maxIterations; i++) {
+      try {
+        const stopHookOutput = await hookSystem.fireSubagentStopEvent(
+          agentId,
+          agentType,
+          transcriptPath,
+          subagent.getFinalText(),
+          stopHookActive,
+          resolvedMode,
+          signal,
+        );
+
+        const typedStopOutput = stopHookOutput as StopHookOutput | undefined;
+
+        if (
+          !typedStopOutput?.isBlockingDecision() &&
+          !typedStopOutput?.shouldStopExecution()
+        ) {
+          return;
+        }
+
+        stopHookActive = true;
+        const continueContext = new ContextState();
+        continueContext.set(
+          'task_prompt',
+          typedStopOutput.getEffectiveReason(),
+        );
+        await subagent.execute(continueContext, signal);
+
+        if (signal?.aborted) return;
+      } catch (hookError) {
+        debugLogger.warn(
+          `[Agent] SubagentStop hook failed, allowing stop: ${hookError}`,
+        );
+        return;
+      }
+    }
+
+    debugLogger.warn(
+      `[Agent] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop`,
+    );
+  }
+
   /**
    * Runs a subagent with start/stop hook lifecycle, updating the display
    * as execution progresses.
@@ -757,69 +816,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Execute the subagent (blocking)
       await subagent.execute(contextState, signal);
 
-      // Fire SubagentStop hook after execution and handle block decisions
       if (hookSystem && !signal?.aborted) {
-        const transcriptPath = this.config.getTranscriptPath();
-        let stopHookActive = false;
-
-        // Loop to handle "block" decisions (prevent subagent from stopping)
-        let continueExecution = true;
-        let iterationCount = 0;
-        const maxIterations = 5; // Prevent infinite loops from hook misconfigurations
-
-        while (continueExecution) {
-          iterationCount++;
-
-          // Safety check to prevent infinite loops
-          if (iterationCount >= maxIterations) {
-            debugLogger.warn(
-              `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
-            );
-            continueExecution = false;
-            break;
-          }
-
-          try {
-            const stopHookOutput = await hookSystem.fireSubagentStopEvent(
-              agentId,
-              agentType,
-              transcriptPath,
-              subagent.getFinalText(),
-              stopHookActive,
-              resolvedMode,
-              signal,
-            );
-
-            const typedStopOutput = stopHookOutput as
-              | StopHookOutput
-              | undefined;
-
-            if (
-              typedStopOutput?.isBlockingDecision() ||
-              typedStopOutput?.shouldStopExecution()
-            ) {
-              // Feed the reason back to the subagent and continue execution
-              const continueReason = typedStopOutput.getEffectiveReason();
-              stopHookActive = true;
-
-              const continueContext = new ContextState();
-              continueContext.set('task_prompt', continueReason);
-              await subagent.execute(continueContext, signal);
-
-              if (signal?.aborted) {
-                continueExecution = false;
-              }
-              // Loop continues to re-check SubagentStop hook
-            } else {
-              continueExecution = false;
-            }
-          } catch (hookError) {
-            debugLogger.warn(
-              `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
-            );
-            continueExecution = false;
-          }
-        }
+        await this.runSubagentStopHookLoop(subagent, {
+          agentId,
+          agentType,
+          resolvedMode,
+          signal,
+        });
       }
 
       // Get the results
@@ -1000,27 +1003,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // survive ESC cancellation of the parent's current turn.
         const bgAbortController = new AbortController();
 
-        // Background agents can't show interactive permission prompts
-        // (no UI). Instead of YOLO (which would auto-approve everything),
-        // we set shouldAvoidPermissionPrompts so the tool scheduler
-        // auto-denies 'ask' decisions — matching claw-code's approach.
-        // PermissionRequest hooks still run and can override the denial.
-        // Base on agentConfig so the resolved approval mode override (e.g.
-        // subagent-level `approvalMode: auto-edit`) is preserved.
+        // Background agents have no UI, so interactive permission prompts must be
+        // auto-denied rather than auto-approved (YOLO). PermissionRequest hooks
+        // still run and can override. Use Object.create so the resolved approval
+        // mode override (e.g. subagent-level `approvalMode: auto-edit`) is preserved.
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const bgConfig = Object.create(agentConfig) as any;
         bgConfig.getShouldAvoidPermissionPrompts = () => true;
 
-        // Rebuild the subagent against bgConfig. For forks, go through
-        // createForkSubagent so the parent's rendered system prompt and
-        // inherited history are carried over; otherwise the background fork
-        // degrades to a plain FORK_AGENT without context.
-        //
-        // Register in the background task registry only AFTER init
-        // succeeds. If construction throws (e.g. invalid agent config or
-        // model setup), registering first would leave a phantom 'running'
-        // entry that the non-interactive hold-back loop would wait on
-        // forever.
+        // Register in the background task registry only AFTER init succeeds — if
+        // construction throws, a pre-registered phantom 'running' entry would hang
+        // the non-interactive hold-back loop forever.
         let bgSubagent: AgentHeadless;
         if (isFork) {
           const fork = await this.createForkSubagent(bgConfig as Config);
@@ -1061,67 +1054,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           try {
             await bgSubagent.execute(contextState, bgAbortController.signal);
 
-            // Fire SubagentStop hook with blocking-decision loop (mirrors
-            // foreground runSubagentWithHooks): if the hook blocks, feed the
-            // reason back and re-execute up to maxIterations times.
             if (hookSystem && !bgAbortController.signal.aborted) {
-              const transcriptPath = this.config.getTranscriptPath();
-              let stopHookActive = false;
-              let continueExecution = true;
-              let iterationCount = 0;
-              const maxIterations = 5;
-
-              while (continueExecution) {
-                iterationCount++;
-                if (iterationCount >= maxIterations) {
-                  debugLogger.warn(
-                    `[Agent] Background SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop`,
-                  );
-                  break;
-                }
-
-                try {
-                  const stopHookOutput = await hookSystem.fireSubagentStopEvent(
-                    hookOpts.agentId,
-                    hookOpts.agentType,
-                    transcriptPath,
-                    bgSubagent.getFinalText(),
-                    stopHookActive,
-                    resolvedMode,
-                    bgAbortController.signal,
-                  );
-
-                  const typedStopOutput = stopHookOutput as
-                    | StopHookOutput
-                    | undefined;
-
-                  if (
-                    typedStopOutput?.isBlockingDecision() ||
-                    typedStopOutput?.shouldStopExecution()
-                  ) {
-                    const continueReason = typedStopOutput.getEffectiveReason();
-                    stopHookActive = true;
-
-                    const continueContext = new ContextState();
-                    continueContext.set('task_prompt', continueReason);
-                    await bgSubagent.execute(
-                      continueContext,
-                      bgAbortController.signal,
-                    );
-
-                    if (bgAbortController.signal.aborted) {
-                      continueExecution = false;
-                    }
-                  } else {
-                    continueExecution = false;
-                  }
-                } catch (hookError) {
-                  debugLogger.warn(
-                    `[Agent] Background SubagentStop hook failed, allowing stop: ${hookError}`,
-                  );
-                  continueExecution = false;
-                }
-              }
+              await this.runSubagentStopHookLoop(bgSubagent, {
+                agentId: hookOpts.agentId,
+                agentType: hookOpts.agentType,
+                resolvedMode,
+                signal: bgAbortController.signal,
+              });
             }
 
             // Report terminate mode: only GOAL counts as success. ERROR,

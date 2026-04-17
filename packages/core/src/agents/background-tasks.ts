@@ -54,7 +54,6 @@ export interface BackgroundAgentEntry {
   result?: string;
   error?: string;
   abortController: AbortController;
-  name?: string;
   stats?: AgentCompletionStats;
   toolUseId?: string;
 }
@@ -79,9 +78,6 @@ export class BackgroundTaskRegistry {
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
 
-  /**
-   * Register a new background agent.
-   */
   register(entry: BackgroundAgentEntry): void {
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
@@ -95,11 +91,7 @@ export class BackgroundTaskRegistry {
     }
   }
 
-  /**
-   * Mark a background agent as completed.
-   * No-op if the agent is not in 'running' state (guards against race
-   * with concurrent cancellation).
-   */
+  // No-op if not 'running' — guards against race with concurrent cancellation.
   complete(
     agentId: string,
     result: string,
@@ -117,11 +109,7 @@ export class BackgroundTaskRegistry {
     this.emitNotification(entry);
   }
 
-  /**
-   * Mark a background agent as failed.
-   * No-op if the agent is not in 'running' state (guards against race
-   * with concurrent cancellation).
-   */
+  // No-op if not 'running' — guards against race with concurrent cancellation.
   fail(agentId: string, error: string, stats?: AgentCompletionStats): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return;
@@ -135,9 +123,10 @@ export class BackgroundTaskRegistry {
     this.emitNotification(entry);
   }
 
-  /**
-   * Abort and mark a background agent as cancelled.
-   */
+  // Emit the terminal notification here — the fire-and-forget complete()/fail()
+  // path is guarded by `status !== 'running'` and will no-op, so without this the
+  // SDK contract breaks: consumers saw task_started but never receive a matching
+  // task_notification.
   cancel(agentId: string): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return;
@@ -147,73 +136,32 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     debugLogger.info(`Background agent cancelled: ${agentId}`);
 
-    // Emit the terminal notification here — the fire-and-forget
-    // complete()/fail() path is guarded by `status !== 'running'` and
-    // will no-op, so without this the SDK contract breaks: consumers
-    // saw task_started but never receive a matching task_notification.
     this.emitNotification(entry);
   }
 
-  /**
-   * Look up a background agent by ID.
-   */
   get(agentId: string): BackgroundAgentEntry | undefined {
     return this.agents.get(agentId);
   }
 
-  /**
-   * List all currently running background agents.
-   */
   getRunning(): BackgroundAgentEntry[] {
     return Array.from(this.agents.values()).filter(
       (e) => e.status === 'running',
     );
   }
 
-  /**
-   * Look up a background agent by name (for SendMessage routing).
-   */
-  findByName(name: string): BackgroundAgentEntry | undefined {
-    for (const entry of this.agents.values()) {
-      if (entry.name === name && entry.status === 'running') {
-        return entry;
-      }
-    }
-    return undefined;
-  }
-
-  /**
-   * Set the callback that delivers completion notifications to the CLI.
-   * Called by AppContainer during initialization.
-   */
   setNotificationCallback(
     cb: BackgroundNotificationCallback | undefined,
   ): void {
     this.notificationCallback = cb;
   }
 
-  /**
-   * Set the callback fired when a new background agent is registered.
-   * Used by the CLI to emit task_started SDK events.
-   */
   setRegisterCallback(cb: BackgroundRegisterCallback | undefined): void {
     this.registerCallback = cb;
   }
 
-  /**
-   * Abort all running background agents. Called during session cleanup.
-   */
   abortAll(): void {
-    for (const entry of this.agents.values()) {
-      if (entry.status === 'running') {
-        entry.abortController.abort();
-        entry.status = 'cancelled';
-        entry.endTime = Date.now();
-        // Same reasoning as cancel(): emit the terminal notification
-        // here, because the fire-and-forget complete()/fail() will
-        // be no-op'd by the running-status guard.
-        this.emitNotification(entry);
-      }
+    for (const entry of Array.from(this.agents.values())) {
+      this.cancel(entry.agentId);
     }
     debugLogger.info('Aborted all background agents');
   }

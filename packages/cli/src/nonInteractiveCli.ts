@@ -254,9 +254,8 @@ export async function runNonInteractive(
       const initialParts = normalizePartList(initialPartList);
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
-      // ─── Shared notification queue (cron + background agents) ──────
-      // Register the callback early so background agents launched during
-      // the main tool-call chain can push completions onto the queue.
+      // Register the callback early so background agents launched during the main
+      // tool-call chain can push completions onto the queue.
       interface LocalQueueItem {
         displayText: string;
         modelText: string;
@@ -399,9 +398,6 @@ export async function runNonInteractive(
               },
             );
 
-            // Note: In JSON mode, subagent messages are automatically added to the main
-            // adapter's messages array and will be output together on emitResult()
-
             if (toolResponse.error) {
               // In JSON/STREAM_JSON mode, tool errors are tolerated and formatted
               // as tool_result blocks. handleToolError will detect JSON/STREAM_JSON mode
@@ -433,12 +429,8 @@ export async function runNonInteractive(
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
-          // No more tool calls — drain notifications and cron, then exit.
-
-          // Emit the SDK-visible portion of a notification item: the user
-          // message + task_notification system message. Shared between the
-          // normal drain and the cancellation flush so stream-json consumers
-          // always see a terminal task_notification paired with task_started.
+          // Shared between the normal drain and the cancellation flush so stream-json
+          // consumers always see a terminal task_notification paired with task_started.
           const emitNotificationToSdk = (item: LocalQueueItem) => {
             if (item.sendMessageType !== SendMessageType.Notification) return;
             adapter.emitUserMessage([{ text: item.displayText }]);
@@ -450,7 +442,9 @@ export async function runNonInteractive(
             }
           };
 
-          // Process one queue item through the full turn loop.
+          // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
+          // loop — otherwise a looping cron or a model that keeps replying to
+          // notifications could exceed the cap silently in headless runs.
           const drainOneItem = async () => {
             if (localQueue.length === 0) return;
             const item = localQueue.shift()!;
@@ -458,17 +452,22 @@ export async function runNonInteractive(
             emitNotificationToSdk(item);
 
             turnCount++;
-            // Symmetry with the main turn loop: drain-turns (cron fires and
-            // background-agent notification replies) count toward the
-            // configured budget too, otherwise a looping cron or a model
-            // that keeps replying to notifications can exceed the cap
-            // silently in headless runs.
             if (
               config.getMaxSessionTurns() >= 0 &&
               turnCount > config.getMaxSessionTurns()
             ) {
               handleMaxTurnsExceededError(config);
             }
+
+            const inputFormat =
+              typeof config.getInputFormat === 'function'
+                ? config.getInputFormat()
+                : InputFormat.TEXT;
+            const toolCallUpdateCallback =
+              inputFormat === InputFormat.STREAM_JSON && options.controlService
+                ? options.controlService.permission.getToolCallUpdateCallback()
+                : undefined;
+
             let itemMessages: Content[] = [
               { role: 'user', parts: [{ text: item.modelText }] },
             ];
@@ -498,8 +497,8 @@ export async function runNonInteractive(
 
               for await (const event of itemStream) {
                 if (abortController.signal.aborted) {
-                  // Pair the startAssistantMessage() above so stream-json
-                  // mode doesn't leave an unterminated message_start.
+                  // Pair the startAssistantMessage() above so stream-json mode doesn't
+                  // leave an unterminated message_start.
                   adapter.finalizeAssistantMessage();
                   return;
                 }
@@ -527,16 +526,6 @@ export async function runNonInteractive(
                 const itemToolResponseParts: Part[] = [];
 
                 for (const requestInfo of itemToolCallRequests) {
-                  const itemInputFormat =
-                    typeof config.getInputFormat === 'function'
-                      ? config.getInputFormat()
-                      : InputFormat.TEXT;
-                  const itemToolCallUpdateCallback =
-                    itemInputFormat === InputFormat.STREAM_JSON &&
-                    options.controlService
-                      ? options.controlService.permission.getToolCallUpdateCallback()
-                      : undefined;
-
                   const isAgentTool = requestInfo.name === 'agent';
                   const { handler: outputUpdateHandler } = isAgentTool
                     ? createAgentToolProgressHandler(
@@ -552,8 +541,8 @@ export async function runNonInteractive(
                     abortController.signal,
                     {
                       outputUpdateHandler,
-                      ...(itemToolCallUpdateCallback && {
-                        onToolCallsUpdate: itemToolCallUpdateCallback,
+                      ...(toolCallUpdateCallback && {
+                        onToolCallsUpdate: toolCallUpdateCallback,
                       }),
                     },
                   );
@@ -587,20 +576,13 @@ export async function runNonInteractive(
             }
           };
 
-          // Single-flight drain: concurrent callers wait for the running
-          // drain. A new drain starts only after the previous one finishes
-          // its queue, which prevents overlapping turns when cron jobs fire
-          // while an earlier queued item is still streaming.
+          // Single-flight drain: concurrent callers wait for the running drain so
+          // cron jobs firing mid-stream don't produce overlapping turns.
           //
-          // The null-clearing is attached via `.finally()` on the outer
-          // promise rather than inside the async body. When the queue is
-          // empty the async body runs to completion synchronously (no
-          // awaits) — an inner `finally { drainPromise = null }` would
-          // therefore fire BEFORE the outer `drainPromise = p` assignment,
-          // leaving drainPromise stuck holding a resolved Promise forever
-          // and making every future call return immediately without ever
-          // draining. Clearing via `p.finally()` schedules the null as a
-          // microtask that runs after the outer assignment.
+          // Clear via outer `.finally()` rather than inside the async body: when the
+          // queue is empty the body runs synchronously, so an inner finally would
+          // null the slot BEFORE the outer `drainPromise = p` assignment and leave
+          // it stuck forever.
           let drainPromise: Promise<void> | null = null;
           const drainLocalQueue = (): Promise<void> => {
             if (drainPromise) return drainPromise;
@@ -671,21 +653,16 @@ export async function runNonInteractive(
             });
           }
 
-          // ─── Terminal hold-back phase ──────────────────────────
-          // Wait for running background agents to complete and drain
-          // their notifications before emitting the final result. If
-          // SIGINT/SIGTERM fires here, abort running background agents
-          // (they use their own AbortControllers) and route through
-          // handleCancellationError so the run exits non-zero — falling
-          // through to the success emitResult below would silently
-          // convert cancellation into a successful completion.
-
+          // Wait for running background agents to complete before emitting the final
+          // result. On SIGINT/SIGTERM, abort them and route through
+          // handleCancellationError — otherwise the success emitResult below would
+          // silently convert a cancellation into a completion.
           while (true) {
             if (abortController.signal.aborted) {
               registry.abortAll();
-              // Emit queued terminal notifications before handleCancellationError
-              // exits — otherwise stream-json consumers that saw task_started
-              // never receive the matching task_notification for cancelled tasks.
+              // Flush queued terminal notifications before handleCancellationError
+              // exits so stream-json consumers always see a task_notification paired
+              // with every task_started.
               while (localQueue.length > 0) {
                 emitNotificationToSdk(localQueue.shift()!);
               }
@@ -746,13 +723,9 @@ export async function runNonInteractive(
       });
       handleError(error, config);
     } finally {
-      try {
-        const reg = config.getBackgroundTaskRegistry();
-        reg.setNotificationCallback(undefined);
-        reg.setRegisterCallback(undefined);
-      } catch {
-        // Ignore — registry may not be initialized if we failed early.
-      }
+      const reg = config.getBackgroundTaskRegistry();
+      reg.setNotificationCallback(undefined);
+      reg.setRegisterCallback(undefined);
 
       process.stdout.removeListener('error', stdoutErrorHandler);
       // Cleanup signal handlers

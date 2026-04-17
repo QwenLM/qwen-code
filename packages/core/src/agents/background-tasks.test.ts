@@ -135,20 +135,6 @@ describe('BackgroundTaskRegistry', () => {
     expect(running[0].agentId).toBe('b');
   });
 
-  it('finds agent by name', () => {
-    registry.register({
-      agentId: 'test-1',
-      description: 'test agent',
-      status: 'running',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      name: 'my-agent',
-    });
-
-    expect(registry.findByName('my-agent')?.agentId).toBe('test-1');
-    expect(registry.findByName('nonexistent')).toBeUndefined();
-  });
-
   it('aborts all running agents', () => {
     const ac1 = new AbortController();
     const ac2 = new AbortController();
