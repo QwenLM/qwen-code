@@ -484,6 +484,45 @@ describe('Server Config (config.ts)', () => {
       ).toHaveBeenCalledTimes(2);
       expect(vi.mocked(createContentGenerator)).toHaveBeenCalledTimes(1);
     });
+
+    it('should strip thoughts from history on model switch (#3304)', async () => {
+      const config = new Config(baseParams);
+
+      const mockContentConfig: ContentGeneratorConfig = {
+        authType: AuthType.QWEN_OAUTH,
+        model: 'coder-model',
+        apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN',
+        baseUrl: DEFAULT_DASHSCOPE_BASE_URL,
+        timeout: 60000,
+        maxRetries: 3,
+      } as ContentGeneratorConfig;
+
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockImplementation(
+        (_config, authType, generationConfig) => ({
+          config: {
+            ...mockContentConfig,
+            authType,
+            model: generationConfig?.model ?? mockContentConfig.model,
+          } as ContentGeneratorConfig,
+          sources: {},
+        }),
+      );
+      vi.mocked(createContentGenerator).mockResolvedValue({
+        generateContent: vi.fn(),
+        generateContentStream: vi.fn(),
+        countTokens: vi.fn(),
+        embedContent: vi.fn(),
+      } as unknown as ContentGenerator);
+
+      await config.refreshAuth(AuthType.QWEN_OAUTH);
+
+      const stripSpy = config.getGeminiClient().stripThoughtsFromHistory;
+      vi.mocked(stripSpy).mockClear();
+
+      await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
+
+      expect(stripSpy).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe('model switching with different credentials (OpenAI)', () => {
