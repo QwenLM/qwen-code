@@ -30,8 +30,11 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { initCommand } from '../ui/commands/initCommand.js';
 import { languageCommand } from '../ui/commands/languageCommand.js';
 import { mcpCommand } from '../ui/commands/mcpCommand.js';
+import { dreamCommand } from '../ui/commands/dreamCommand.js';
+import { forgetCommand } from '../ui/commands/forgetCommand.js';
 import { memoryCommand } from '../ui/commands/memoryCommand.js';
 import { modelCommand } from '../ui/commands/modelCommand.js';
+import { rememberCommand } from '../ui/commands/rememberCommand.js';
 import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
@@ -103,8 +106,12 @@ export class BuiltinCommandLoader implements ICommandLoader {
       initCommand,
       languageCommand,
       mcpCommand,
+      ...(this.config?.getManagedAutoMemoryEnabled()
+        ? [dreamCommand, forgetCommand]
+        : []),
       memoryCommand,
       modelCommand,
+      rememberCommand,
       planCommand,
       permissionsCommand,
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),

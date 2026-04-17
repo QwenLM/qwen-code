@@ -20,6 +20,11 @@ if (process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
 // Disable 429 simulation globally for all tests
 setSimulate429(false);
 
+// Keep managed auto-memory test fixtures under per-test temp project roots.
+if (process.env['QWEN_CODE_MEMORY_LOCAL'] === undefined) {
+  process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+}
+
 // Some dependencies (e.g., undici) expect a global File constructor in Node.
 // Provide a minimal shim for test environment if missing.
 if (typeof (globalThis as unknown as { File?: unknown }).File === 'undefined') {

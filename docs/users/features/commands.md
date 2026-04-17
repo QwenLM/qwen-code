@@ -71,7 +71,10 @@ Commands for managing AI tools and models.
 | `/model`         | Switch model used in current session          | `/model`                                      |
 | `/model --fast`  | Set a lighter model for prompt suggestions    | `/model --fast qwen3-coder-flash`             |
 | `/extensions`    | List all active extensions in current session | `/extensions`                                 |
-| `/memory`        | Manage AI's instruction context               | `/memory add Important Info`                  |
+| `/memory`        | Open the Memory Manager dialog                | `/memory`                                     |
+| `/remember`      | Save a durable memory                         | `/remember Prefer terse responses`            |
+| `/forget`        | Remove matching entries from auto-memory      | `/forget <query>`                             |
+| `/dream`         | Manually run auto-memory consolidation        | `/dream`                                      |
 
 ### 1.5 Built-in Skills
 
