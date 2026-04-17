@@ -50,10 +50,8 @@ import type {
 } from '@google/genai';
 import { ToolNames } from '../tools/tool-names.js';
 import { CONCURRENCY_SAFE_KINDS } from '../tools/tools.js';
-import {
-  isCommandNeedsPermission,
-  stripShellWrapper,
-} from '../utils/shell-utils.js';
+import { isShellCommandReadOnlySync } from '../utils/shellAstParser.js';
+import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
   buildPermissionCheckContext,
   evaluatePermissionRules,
@@ -350,15 +348,18 @@ function isConcurrencySafe(call: ScheduledToolCall): boolean {
   // Agent tools spawn independent sub-agents with no shared state.
   if (call.request.name === ToolNames.AGENT) return true;
   // Shell commands: check if the command is read-only (e.g., git log, cat).
-  // Uses the three-tier sync check from isCommandNeedsPermission:
-  //   1. AST-based (isShellCommandReadOnlySync) when parser is ready
-  //   2. BASIC_READ_ONLY_COMMANDS + git subcommand check when parser not ready
-  //   3. Conservative false (requires permission) otherwise
+  // Uses the synchronous regex+shell-quote checker (not the async AST-based
+  // one) because partitioning runs synchronously. The sync checker covers
+  // the same command whitelist and is fail-closed — unknown commands remain
+  // sequential. The AST version is used separately for permission decisions.
   if (call.tool.kind === Kind.Execute) {
     const command = (call.request.args as { command?: string }).command;
     if (typeof command !== 'string') return false;
-    return !isCommandNeedsPermission(stripShellWrapper(command))
-      .requiresPermission;
+    try {
+      return isShellCommandReadOnlySync(stripShellWrapper(command)) ?? false;
+    } catch {
+      return false; // fail-closed
+    }
   }
   return CONCURRENCY_SAFE_KINDS.has(call.tool.kind);
 }

@@ -1154,19 +1154,6 @@ export function isCommandNeedsPermission(command: string): {
     return { requiresPermission: false };
   }
 
-  // Special case: git with a known read-only subcommand
-  if (root === 'git') {
-    const tokens = command.trim().split(/\s+/);
-    // Skip env assignments and flags before subcommand
-    const subIdx = tokens.findIndex(
-      (t, i) => i > 0 && !t.startsWith('-') && !ENV_ASSIGNMENT_REGEX.test(t),
-    );
-    const sub = subIdx !== -1 ? tokens[subIdx]?.toLowerCase() : undefined;
-    if (sub && GIT_READ_ONLY_SUBCOMMANDS.has(sub)) {
-      return { requiresPermission: false };
-    }
-  }
-
   // Conservatively require permission for anything else
   return {
     requiresPermission: true,
@@ -1209,33 +1196,6 @@ const BASIC_READ_ONLY_COMMANDS = new Set([
   'whoami',
   'basename',
   'column',
-]);
-
-/**
- * Git subcommands that are known to be read-only (no writes to repo or remote).
- * Used by the lightweight fallback in `isCommandNeedsPermission` when the
- * AST parser has not been initialised yet.
- */
-const GIT_READ_ONLY_SUBCOMMANDS = new Set([
-  'blame',
-  'branch',
-  'cat-file',
-  'describe',
-  'diff',
-  'grep',
-  'log',
-  'ls-files',
-  'ls-remote',
-  'ls-tree',
-  'remote',
-  'rev-parse',
-  'shortlog',
-  'show',
-  'show-ref',
-  'stash',
-  'status',
-  'tag',
-  'whatchanged',
 ]);
 
 /**
