@@ -49,6 +49,13 @@ export class HistoryReplayer {
     this.setActiveRecordId(record.uuid, record.timestamp);
     switch (record.type) {
       case 'user':
+        // Notification / cron turns are persisted under type: 'user' with a
+        // subtype so the model's chat history keeps them for continuity.
+        // They were never user input though, so don't replay the raw
+        // task-notification XML (or cron prompt) back into the ACP session.
+        if (record.subtype === 'notification' || record.subtype === 'cron') {
+          break;
+        }
         if (record.message) {
           await this.replayContent(record.message, 'user', record.timestamp);
         }

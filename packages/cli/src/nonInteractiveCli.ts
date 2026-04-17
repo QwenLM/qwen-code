@@ -435,20 +435,27 @@ export async function runNonInteractive(
         } else {
           // No more tool calls — drain notifications and cron, then exit.
 
+          // Emit the SDK-visible portion of a notification item: the user
+          // message + task_notification system message. Shared between the
+          // normal drain and the cancellation flush so stream-json consumers
+          // always see a terminal task_notification paired with task_started.
+          const emitNotificationToSdk = (item: LocalQueueItem) => {
+            if (item.sendMessageType !== SendMessageType.Notification) return;
+            adapter.emitUserMessage([{ text: item.displayText }]);
+            if (item.sdkNotification) {
+              adapter.emitSystemMessage(
+                'task_notification',
+                item.sdkNotification,
+              );
+            }
+          };
+
           // Process one queue item through the full turn loop.
           const drainOneItem = async () => {
             if (localQueue.length === 0) return;
             const item = localQueue.shift()!;
 
-            if (item.sendMessageType === SendMessageType.Notification) {
-              adapter.emitUserMessage([{ text: item.displayText }]);
-              if (item.sdkNotification) {
-                adapter.emitSystemMessage(
-                  'task_notification',
-                  item.sdkNotification,
-                );
-              }
-            }
+            emitNotificationToSdk(item);
 
             turnCount++;
             // Symmetry with the main turn loop: drain-turns (cron fires and
@@ -676,6 +683,12 @@ export async function runNonInteractive(
           while (true) {
             if (abortController.signal.aborted) {
               registry.abortAll();
+              // Emit queued terminal notifications before handleCancellationError
+              // exits — otherwise stream-json consumers that saw task_started
+              // never receive the matching task_notification for cancelled tasks.
+              while (localQueue.length > 0) {
+                emitNotificationToSdk(localQueue.shift()!);
+              }
               handleCancellationError(config);
             }
             await drainLocalQueue();

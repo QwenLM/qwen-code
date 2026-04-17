@@ -1053,7 +1053,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         };
 
         // Fire-and-forget: start the subagent without blocking the parent.
-        void (async () => {
+        // For forks, wrap the body in runInForkContext so the recursive-fork
+        // guard in execute() fires if the fork child's model calls `agent`
+        // again — otherwise background forks bypass the ALS marker and can
+        // spawn nested implicit forks.
+        const bgBody = async () => {
           try {
             await bgSubagent.execute(contextState, bgAbortController.signal);
 
@@ -1142,7 +1146,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
             registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
           }
-        })();
+        };
+        void (isFork ? runInForkContext(bgBody) : bgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
         return {
