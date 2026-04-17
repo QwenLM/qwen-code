@@ -1,6 +1,6 @@
 ---
 name: structured-debugging
-description:
+description: >
   Hypothesis-driven debugging methodology for hard bugs. Use this skill whenever
   you're investigating non-trivial bugs, unexpected behavior, flaky tests, or
   tracing issues through complex systems. Activate proactively when debugging
@@ -35,7 +35,7 @@ object after the backend process exits."
 Create a side note file for the investigation:
 
 ```
-~/.qwen/investigations/<project>-<issue>.md
+knowledge/qwen-code/investigations/<issue>.md
 ```
 
 Write your hypothesis there. This file persists across conversation turns and even
@@ -164,3 +164,10 @@ Fix: [what you're changing and why it addresses the root cause]
 ```
 
 Then apply the fix, remove instrumentation, and verify with a clean run.
+
+## Worked examples
+
+- [`examples/headless-bg-agent-empty-stdout.md`](examples/headless-bg-agent-empty-stdout.md)
+  — pipe-captured runs all passed; the user's TTY printed nothing. The
+  contradiction _was_ the bug. Illustrates _reproduction contradiction is
+  data_ and _instrument data, not code paths_.
