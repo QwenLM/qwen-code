@@ -782,6 +782,57 @@ describe('useStatusLine', () => {
     });
   });
 
+  // --- Output deduplication (cuts unnecessary Footer re-renders) ---
+
+  describe('output deduplication', () => {
+    it('preserves the same lines array reference when output is unchanged', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo same' });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'same output\n', '');
+      });
+      const firstRef = result.current.lines;
+      expect(firstRef).toEqual(['same output']);
+
+      // Trigger another exec with identical output (e.g. via state change).
+      mockUIState.currentModel = 'new-model';
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => {
+        execCallback(null, 'same output\n', '');
+      });
+
+      // Reference preserved → React can skip the Footer re-render.
+      expect(result.current.lines).toBe(firstRef);
+    });
+
+    it('produces a new reference when output changes', async () => {
+      setStatusLineConfig({ type: 'command', command: 'echo tick' });
+      const { result, rerender } = renderHook(() => useStatusLine());
+
+      await act(async () => {
+        execCallback(null, 'first\n', '');
+      });
+      const firstRef = result.current.lines;
+      expect(firstRef).toEqual(['first']);
+
+      mockUIState.currentModel = 'new-model';
+      rerender();
+      await act(async () => {
+        vi.advanceTimersByTime(300);
+      });
+      await act(async () => {
+        execCallback(null, 'second\n', '');
+      });
+
+      expect(result.current.lines).not.toBe(firstRef);
+      expect(result.current.lines).toEqual(['second']);
+    });
+  });
+
   // --- refreshInterval (periodic refresh) ---
 
   describe('refreshInterval', () => {

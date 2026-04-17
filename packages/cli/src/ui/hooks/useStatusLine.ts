@@ -300,15 +300,27 @@ export function useStatusLine(): {
         (error, stdout) => {
           if (gen !== generationRef.current) return; // stale
           activeChildRef.current = undefined;
-          if (!error && stdout) {
-            const lines = stdout
-              .replace(/\r?\n$/, '')
-              .split(/\r?\n/)
-              .filter(Boolean);
-            setOutput(lines.slice(0, MAX_STATUS_LINES));
-          } else {
-            setOutput([]);
-          }
+          const nextLines =
+            !error && stdout
+              ? stdout
+                  .replace(/\r?\n$/, '')
+                  .split(/\r?\n/)
+                  .filter(Boolean)
+                  .slice(0, MAX_STATUS_LINES)
+              : [];
+          // Skip the state update if the output is unchanged — avoids a
+          // Footer re-render each periodic tick, which cuts wasted work
+          // and reduces the window for Ink to miscount rows in narrow
+          // terminals when `refreshInterval` runs at 1s (see #3383).
+          setOutput((prev) => {
+            if (
+              prev.length === nextLines.length &&
+              prev.every((v, i) => v === nextLines[i])
+            ) {
+              return prev;
+            }
+            return nextLines;
+          });
         },
       );
     } catch (err) {
