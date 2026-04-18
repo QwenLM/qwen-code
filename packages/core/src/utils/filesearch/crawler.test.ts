@@ -995,5 +995,76 @@ describe('crawler', () => {
       const results2 = await crawl(options);
       expect(results2.length).toBeGreaterThanOrEqual(results1.length);
     });
+
+    it('should re-crawl git worktrees when the gitdir index changes', async () => {
+      const worktreeDir = path.join(tmpDir, 'worktree');
+      const gitDir = path.join(tmpDir, 'gitdir');
+
+      await fs.mkdir(worktreeDir, { recursive: true });
+      await fs.mkdir(gitDir, { recursive: true });
+      await fs.writeFile(path.join(gitDir, 'index'), 'initial');
+      await fs.writeFile(path.join(worktreeDir, '.git'), 'gitdir: ../gitdir\n');
+      await fs.writeFile(path.join(worktreeDir, 'tracked.txt'), '');
+
+      let includeExtraFile = false;
+      __setCommandRunnerForTests(
+        async (
+          command: string,
+          args: string[],
+          cwd: string,
+        ): Promise<{ success: boolean; lines: string[] }> => {
+          if (command !== 'git') {
+            return { success: false, lines: [] };
+          }
+
+          if (args[0] === 'rev-parse' && args.includes('--show-toplevel')) {
+            expect(cwd).toBe(worktreeDir);
+            return { success: true, lines: [worktreeDir] };
+          }
+
+          if (args[0] === 'ls-files' && args.includes('--cached')) {
+            return {
+              success: true,
+              lines: includeExtraFile
+                ? ['tracked.txt', 'new-file.txt']
+                : ['tracked.txt'],
+            };
+          }
+
+          if (args[0] === 'ls-files' && args.includes('--others')) {
+            return { success: true, lines: [] };
+          }
+
+          return { success: false, lines: [] };
+        },
+      );
+
+      const ignore = loadIgnoreRules({
+        projectRoot: worktreeDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: worktreeDir,
+        cwd: worktreeDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      const first = await crawl(options);
+      expect(first).toEqual(expect.arrayContaining(['.', 'tracked.txt']));
+      expect(first).not.toContain('new-file.txt');
+
+      includeExtraFile = true;
+      const futureTime = new Date(Date.now() + 60_000);
+      await fs.utimes(path.join(gitDir, 'index'), futureTime, futureTime);
+
+      const second = await crawl(options);
+      expect(second).toEqual(
+        expect.arrayContaining(['.', 'tracked.txt', 'new-file.txt']),
+      );
+    });
   });
 });

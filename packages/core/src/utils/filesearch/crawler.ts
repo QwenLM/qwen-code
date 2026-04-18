@@ -60,41 +60,55 @@ interface ChangeState {
 
 const changeStateMap = new Map<string, ChangeState>();
 
-function getGitRootMtime(crawlDirectory: string): number | null {
+function resolveGitDir(crawlDirectory: string): string | null {
   try {
     let current = crawlDirectory;
     while (current) {
-      const gitDir = path.join(current, '.git');
-      const stat = fs.statSync(gitDir);
+      const gitPath = path.join(current, '.git');
+      const stat = fs.statSync(gitPath);
+
       if (stat.isDirectory()) {
-        const indexPath = path.join(gitDir, 'index');
-        const indexStat = fs.statSync(indexPath);
-        return indexStat.mtimeMs;
+        return gitPath;
       }
+
+      if (stat.isFile()) {
+        const contents = fs.readFileSync(gitPath, 'utf8').trim();
+        const match = contents.match(/^gitdir:\s*(.+)$/i);
+        if (!match) {
+          return null;
+        }
+
+        const resolvedGitDir = match[1].trim();
+        return path.isAbsolute(resolvedGitDir)
+          ? resolvedGitDir
+          : path.resolve(current, resolvedGitDir);
+      }
+
       const parent = path.dirname(current);
       if (parent === current) break;
       current = parent;
     }
   } catch {
-    // Ignore errors when .git directory or index file doesn't exist
+    // Ignore errors when .git metadata is missing or unreadable.
+  }
+
+  return null;
+}
+
+function getGitRootMtime(crawlDirectory: string): number | null {
+  try {
+    const gitDir = resolveGitDir(crawlDirectory);
+    if (!gitDir) {
+      return null;
+    }
+
+    const indexPath = path.join(gitDir, 'index');
+    const indexStat = fs.statSync(indexPath);
+    return indexStat.mtimeMs;
+  } catch {
+    // Ignore errors when .git metadata or index file doesn't exist.
   }
   return null;
-function hasFileListChanged(stateKey: string, crawlDirectory: string): boolean {
-  const currentMtime = getGitRootMtime(crawlDirectory);
-  const state = changeStateMap.get(stateKey);
-
-  if (!state) return true;
-
-  if (currentMtime !== null && state.gitRootMtimeMs !== null) {
-    return currentMtime > state.gitRootMtimeMs || !isThrottled(stateKey);
-  }
-
-  // For non-git paths, we can only rely on time-based throttling.
-  if (currentMtime === null && state.gitRootMtimeMs === null) {
-    return !isThrottled(stateKey);
-  }
-
-  return true;
 }
 
 function hasFileListChanged(stateKey: string, crawlDirectory: string): boolean {
@@ -104,7 +118,7 @@ function hasFileListChanged(stateKey: string, crawlDirectory: string): boolean {
   if (!state) return true;
 
   if (currentMtime !== null && state.gitRootMtimeMs !== null) {
-    return currentMtime > state.gitRootMtimeMs;
+    return currentMtime > state.gitRootMtimeMs || !isThrottled(stateKey);
   }
 
   // For non-git paths, we can only rely on time-based throttling.
@@ -552,13 +566,6 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
   }
 
   if (!options.cache) {
-    if (isThrottled(stateKey)) {
-      const state = changeStateMap.get(stateKey);
-      if (state) {
-        return applyMaxFilesLimit(state.fileList, options.maxFiles);
-      }
-    }
-
     const needReCrawl = hasFileListChanged(stateKey, options.crawlDirectory);
 
     if (!needReCrawl) {
