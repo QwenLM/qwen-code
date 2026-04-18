@@ -23,24 +23,22 @@ export const InsightProgressCard: FC<InsightProgressCardProps> = ({
 
   return (
     <div className="w-full px-[30px] py-2">
-      <div className="flex items-start justify-between gap-3">
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-sm text-[var(--vscode-foreground)]">
-            {stage}
-          </div>
-          {detail ? (
-            <div className="mt-1 truncate text-xs text-[var(--vscode-descriptionForeground)]">
-              {detail}
-            </div>
-          ) : (
-            <div className="mt-1 text-xs text-[var(--vscode-descriptionForeground)]">
-              Processing your chat history…
-            </div>
-          )}
+      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1">
+        <div className="min-w-0 truncate text-sm leading-6 text-[var(--vscode-foreground)]">
+          {stage}
         </div>
-        <div className="shrink-0 text-xs tabular-nums text-[var(--vscode-descriptionForeground)]">
+        <div className="row-span-2 shrink-0 self-center text-xs leading-none tabular-nums text-[var(--vscode-descriptionForeground)]">
           {percent}%
         </div>
+        {detail ? (
+          <div className="min-w-0 truncate text-xs leading-5 text-[var(--vscode-descriptionForeground)]">
+            {detail}
+          </div>
+        ) : (
+          <div className="text-xs leading-5 text-[var(--vscode-descriptionForeground)]">
+            Processing your chat history…
+          </div>
+        )}
       </div>
 
       <div className="mt-2 h-1 overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--vscode-widget-border,var(--vscode-panel-border,#2a2f3a))_70%,transparent)]">

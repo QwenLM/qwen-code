@@ -27,6 +27,11 @@ import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
 import { parseInsightMessage } from '@qwen-code/qwen-code-core';
 
+function isInsightCommand(command: string): boolean {
+  const [firstToken = ''] = command.trim().split(/\s+/, 1);
+  return firstToken.replace(/^\/+/, '') === 'insight';
+}
+
 export class WebViewProvider {
   private panelManager: PanelManager;
   private messageHandler: MessageHandler;
@@ -136,7 +141,7 @@ export class WebViewProvider {
     });
 
     this.agentManager.onSlashCommandNotification((event) => {
-      if (event.command === '/insight' && event.messageType === 'error') {
+      if (isInsightCommand(event.command) && event.messageType === 'error') {
         this.sendMessageToWebView({
           type: 'insightProgressCleared',
           data: {},
@@ -144,7 +149,7 @@ export class WebViewProvider {
       }
 
       // Try to parse as structured insight message
-      if (event.command === '/insight' && event.messageType === 'info') {
+      if (isInsightCommand(event.command) && event.messageType === 'info') {
         const parsed = parseInsightMessage(event.message);
         if (parsed?.type === 'insight_progress') {
           this.sendMessageToWebView({

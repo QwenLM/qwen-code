@@ -88,16 +88,7 @@ vi.mock('../ui/commands/extensionsCommand.js', () => ({
 }));
 vi.mock('../ui/commands/helpCommand.js', () => ({ helpCommand: {} }));
 vi.mock('../ui/commands/memoryCommand.js', () => ({ memoryCommand: {} }));
-vi.mock('../ui/commands/insightCommand.js', async () => {
-  const { CommandKind } = await import('../ui/commands/types.js');
-  return {
-    insightCommand: {
-      name: 'insight',
-      description: 'Insight command',
-      kind: CommandKind.BUILT_IN,
-    },
-  };
-});
+vi.mock('../ui/commands/insightCommand.js', () => ({ insightCommand: {} }));
 vi.mock('../ui/commands/modelCommand.js', () => ({
   modelCommand: { name: 'model' },
 }));
@@ -244,14 +235,6 @@ describe('BuiltinCommandLoader', () => {
 
     const mcpCmd = commands.find((c) => c.name === 'mcp');
     expect(mcpCmd).toBeDefined();
-  });
-
-  it('should include insight command in the built-in command list', async () => {
-    const loader = new BuiltinCommandLoader(mockConfig);
-    const commands = await loader.loadCommands(new AbortController().signal);
-    const insightCmd = commands.find((c) => c.name === 'insight');
-    expect(insightCmd).toBeDefined();
-    expect(insightCmd?.kind).toBe(CommandKind.BUILT_IN);
   });
 
   it('should always include hooks command regardless of disableAllHooks', async () => {

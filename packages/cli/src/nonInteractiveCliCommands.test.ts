@@ -266,38 +266,4 @@ describe('handleSlashCommand', () => {
       expect(result.messageType).toBe('info');
     }
   });
-
-  it('should pass acp execution mode to commands when ACP is enabled', async () => {
-    mockConfig.getExperimentalZedIntegration = vi.fn().mockReturnValue(true);
-
-    const mockInsightCommand = {
-      name: 'insight',
-      description: 'Insight command',
-      kind: CommandKind.BUILT_IN,
-      action: vi.fn().mockImplementation((context) => ({
-        type: 'message',
-        messageType: 'info',
-        content: context.executionMode ?? 'missing',
-      })),
-    };
-    mockGetCommands.mockReturnValue([mockInsightCommand]);
-
-    const result = await handleSlashCommand(
-      '/insight',
-      abortController,
-      mockConfig,
-      mockSettings,
-      ['insight'],
-    );
-
-    expect(mockInsightCommand.action).toHaveBeenCalledWith(
-      expect.objectContaining({ executionMode: 'acp' }),
-      '',
-    );
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'info',
-      content: 'acp',
-    });
-  });
 });

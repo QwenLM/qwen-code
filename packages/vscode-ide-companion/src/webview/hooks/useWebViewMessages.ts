@@ -309,6 +309,7 @@ export const useWebViewMessages = ({
   }) => {
     activeInsightRunRef.current = true;
     handlersRef.current.setInsightReportPath?.(null);
+    handlersRef.current.messageHandling.clearWaitingForResponse();
     handlersRef.current.setInsightProgress?.(progress);
   };
 

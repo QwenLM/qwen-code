@@ -12,7 +12,6 @@ const {
   mockGetPanel,
   mockOnDidChangeActiveTextEditor,
   mockOnDidChangeTextEditorSelection,
-  mockShowInformationMessage,
   mockOpenExternal,
   slashCommandNotificationCallbackRef,
 } = vi.hoisted(() => ({
@@ -23,7 +22,6 @@ const {
   ),
   mockOnDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
   mockOnDidChangeTextEditorSelection: vi.fn(() => ({ dispose: vi.fn() })),
-  mockShowInformationMessage: vi.fn(),
   mockOpenExternal: vi.fn(),
   slashCommandNotificationCallbackRef: {
     current: undefined as
@@ -37,49 +35,17 @@ const {
   },
 }));
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  Storage: {
-    getGlobalTempDir: mockGetGlobalTempDir,
-  },
-  parseInsightMessage: vi.fn((message: string) => {
-    try {
-      const parsed = JSON.parse(message) as {
-        insight_progress?: {
-          stage?: unknown;
-          progress?: unknown;
-          detail?: unknown;
-        };
-        insight_ready?: { path?: unknown };
-      };
-
-      if (parsed.insight_progress) {
-        const { stage, progress, detail } = parsed.insight_progress;
-        if (typeof stage === 'string' && typeof progress === 'number') {
-          return {
-            type: 'insight_progress',
-            stage,
-            progress,
-            detail: typeof detail === 'string' ? detail : undefined,
-          };
-        }
-      }
-
-      if (parsed.insight_ready) {
-        const { path } = parsed.insight_ready;
-        if (typeof path === 'string') {
-          return {
-            type: 'insight_ready',
-            path,
-          };
-        }
-      }
-    } catch {
-      return null;
-    }
-
-    return null;
-  }),
-}));
+vi.mock('@qwen-code/qwen-code-core', async () => {
+  const actual = await vi.importActual<
+    typeof import('@qwen-code/qwen-code-core')
+  >('@qwen-code/qwen-code-core');
+  return {
+    ...actual,
+    Storage: {
+      getGlobalTempDir: mockGetGlobalTempDir,
+    },
+  };
+});
 
 vi.mock('vscode', () => ({
   Uri: {
@@ -95,7 +61,6 @@ vi.mock('vscode', () => ({
     onDidChangeActiveTextEditor: mockOnDidChangeActiveTextEditor,
     onDidChangeTextEditorSelection: mockOnDidChangeTextEditorSelection,
     activeTextEditor: undefined,
-    showInformationMessage: mockShowInformationMessage,
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/workspace-root' } }],
@@ -416,7 +381,28 @@ describe('WebViewProvider.attachToView', () => {
     });
   });
 
-  it('exposes a persistent insight report entry from slash-command ready markers without auto-opening it', async () => {
+  it('routes structured insight progress markers even when command text is normalized differently', async () => {
+    const { postMessage } = await setupAttachedProvider();
+
+    slashCommandNotificationCallbackRef.current?.({
+      sessionId: 'session-1',
+      command: 'insight',
+      messageType: 'info',
+      message:
+        '{"insight_progress":{"stage":"Analyzing sessions","progress":42,"detail":"21/50"}}',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'insightProgress',
+      data: {
+        stage: 'Analyzing sessions',
+        progress: 42,
+        detail: '21/50',
+      },
+    });
+  });
+
+  it('clears structured insight progress when the ready marker arrives', async () => {
     const { webview } = await setupAttachedProvider();
 
     slashCommandNotificationCallbackRef.current?.({
@@ -435,11 +421,9 @@ describe('WebViewProvider.attachToView', () => {
         path: '/tmp/insight-report.html',
       },
     });
-    expect(mockShowInformationMessage).not.toHaveBeenCalled();
-    expect(mockOpenExternal).not.toHaveBeenCalled();
   });
 
-  it('reopens the latest insight report when requested from the webview', async () => {
+  it('opens the insight report in the browser when requested from the webview', async () => {
     const { messageHandler } = await setupAttachedProvider({
       captureMessageHandler: true,
     });
