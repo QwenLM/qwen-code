@@ -65,6 +65,46 @@ index 333..444 100644
       deletions: 1,
     });
   });
+
+  it('includes binary diffs without textual line changes', () => {
+    const summary =
+      summarizeUnifiedDiff(`diff --git a/assets/logo.png b/assets/logo.png
+new file mode 100644
+index 0000000..abc1234
+Binary files /dev/null and b/assets/logo.png differ`);
+
+    expect(summary).toEqual({
+      files: [{ path: 'assets/logo.png', additions: 0, deletions: 0 }],
+      additions: 0,
+      deletions: 0,
+    });
+  });
+
+  it('includes rename-only diffs without textual line changes', () => {
+    const summary = summarizeUnifiedDiff(`diff --git a/src/old.ts b/src/new.ts
+similarity index 100%
+rename from src/old.ts
+rename to src/new.ts`);
+
+    expect(summary).toEqual({
+      files: [{ path: 'src/new.ts', additions: 0, deletions: 0 }],
+      additions: 0,
+      deletions: 0,
+    });
+  });
+
+  it('includes mode-only diffs without textual line changes', () => {
+    const summary =
+      summarizeUnifiedDiff(`diff --git a/scripts/run.sh b/scripts/run.sh
+old mode 100644
+new mode 100755`);
+
+    expect(summary).toEqual({
+      files: [{ path: 'scripts/run.sh', additions: 0, deletions: 0 }],
+      additions: 0,
+      deletions: 0,
+    });
+  });
 });
 
 describe('buildFallbackApproachSummary', () => {

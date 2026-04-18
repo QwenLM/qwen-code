@@ -26,9 +26,7 @@ export function summarizeUnifiedDiff(
 
   const finishFile = () => {
     if (!current) return;
-    if (current.additions > 0 || current.deletions > 0) {
-      files.push(current);
-    }
+    files.push(current);
     current = undefined;
   };
 
