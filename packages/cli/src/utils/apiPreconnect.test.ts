@@ -12,17 +12,20 @@ const mockFetch = vi.fn().mockResolvedValue(undefined);
 global.fetch = mockFetch;
 
 // Mock the shared dispatcher functions from core
-const { mockGetOrCreateSharedDispatcher } = vi.hoisted(() => {
-  const dispatcher = { fake: 'dispatcher' };
-  return {
-    mockGetOrCreateSharedDispatcher: vi.fn(() => dispatcher),
-  };
-});
+const { mockGetOrCreateSharedDispatcher, mockDetectRuntime } = vi.hoisted(
+  () => {
+    const dispatcher = { fake: 'dispatcher' };
+    return {
+      mockGetOrCreateSharedDispatcher: vi.fn(() => dispatcher),
+      mockDetectRuntime: vi.fn(() => 'node' as const),
+    };
+  },
+);
 vi.mock('@qwen-code/qwen-code-core', async () => {
   const { createDebugLogger } = await import('@qwen-code/qwen-code-core');
   return {
     createDebugLogger,
-    detectRuntime: () => 'node',
+    detectRuntime: mockDetectRuntime,
     getOrCreateSharedDispatcher: mockGetOrCreateSharedDispatcher,
   };
 });
@@ -33,6 +36,7 @@ describe('apiPreconnect', () => {
     mockFetch.mockClear();
     mockFetch.mockResolvedValue(undefined);
     mockGetOrCreateSharedDispatcher.mockClear();
+    mockDetectRuntime.mockReturnValue('node');
     delete process.env['HTTPS_PROXY'];
     delete process.env['https_proxy'];
     delete process.env['HTTP_PROXY'];
@@ -47,28 +51,10 @@ describe('apiPreconnect', () => {
   });
 
   describe('shouldSkipPreconnect', () => {
-    it('should skip when HTTPS_PROXY is set', () => {
+    it('should NOT skip when HTTPS_PROXY is set (proxy routed via shared dispatcher)', () => {
       process.env['HTTPS_PROXY'] = 'http://proxy.example.com:8080';
       preconnectApi('qwen-oauth');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('should skip when https_proxy is set', () => {
-      process.env['https_proxy'] = 'http://proxy.example.com:8080';
-      preconnectApi('qwen-oauth');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('should skip when HTTP_PROXY is set', () => {
-      process.env['HTTP_PROXY'] = 'http://proxy.example.com:8080';
-      preconnectApi('qwen-oauth');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('should skip when http_proxy is set', () => {
-      process.env['http_proxy'] = 'http://proxy.example.com:8080';
-      preconnectApi('qwen-oauth');
-      expect(mockFetch).not.toHaveBeenCalled();
+      expect(mockFetch).toHaveBeenCalled();
     });
 
     it('should skip when NODE_EXTRA_CA_CERTS is set', () => {
@@ -179,6 +165,12 @@ describe('apiPreconnect', () => {
 
     it('should skip in sandbox mode', () => {
       process.env['SANDBOX'] = '1';
+      preconnectApi('qwen-oauth');
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('should skip on non-Node runtime (e.g. Bun)', () => {
+      mockDetectRuntime.mockReturnValue('bun');
       preconnectApi('qwen-oauth');
       expect(mockFetch).not.toHaveBeenCalled();
     });

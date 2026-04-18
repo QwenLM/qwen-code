@@ -32,28 +32,15 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
   openai: 'https://api.openai.com',
   'qwen-oauth': 'https://coding.dashscope.aliyuncs.com',
   anthropic: 'https://api.anthropic.com',
-  gemini: 'https://generativelanguage.googleapis.com',
-  'vertex-ai': 'https://us-central1-aiplatform.googleapis.com',
+  // gemini and vertex-ai use different HTTP client paths that don't share
+  // the undici dispatcher pool, so preconnecting to them has no benefit
 };
 
 /**
  * Check if preconnect should be skipped due to environment conditions
  */
 function shouldSkipPreconnect(): boolean {
-  // 1. Check proxy environment variables
-  // Note: If NO_PROXY is set and target URL is in it, we don't need to skip
-  // But for simplicity: skip if any proxy config is present
-  if (
-    process.env['HTTPS_PROXY'] ||
-    process.env['https_proxy'] ||
-    process.env['HTTP_PROXY'] ||
-    process.env['http_proxy']
-  ) {
-    debugLogger.debug('Skipping preconnect: proxy environment variable set');
-    return true;
-  }
-
-  // 2. Check custom CA certificate (may use enterprise TLS inspection)
+  // Check custom CA certificate (enterprise TLS inspection may interfere with preconnect)
   if (process.env['NODE_EXTRA_CA_CERTS']) {
     debugLogger.debug('Skipping preconnect: custom CA certificate configured');
     return true;
@@ -154,7 +141,14 @@ export function preconnectApi(
     return;
   }
 
-  // Check environment skip conditions (proxy, custom CA)
+  // Skip on non-Node runtimes: Bun uses independent connection pools,
+  // so the warmed connection is never reused by subsequent SDK calls
+  if (detectRuntime() !== 'node') {
+    debugLogger.debug('Skipping preconnect: unsupported runtime');
+    return;
+  }
+
+  // Check environment skip conditions (custom CA)
   if (shouldSkipPreconnect()) {
     return;
   }
@@ -168,24 +162,19 @@ export function preconnectApi(
 
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
 
-  // Build fetch options with shared dispatcher for connection pool reuse.
-  // On Node.js, use the same undici dispatcher that SDK clients will use,
-  // so the warmed TCP+TLS connection is reused by subsequent API calls.
-  const dispatcherOptions: Record<string, unknown> =
-    detectRuntime() === 'node'
-      ? { dispatcher: getOrCreateSharedDispatcher(options.proxy) }
-      : {};
+  // Use the shared undici dispatcher so the warmed TCP+TLS connection
+  // is reused by subsequent SDK API calls (same connection pool).
+  const dispatcher = getOrCreateSharedDispatcher(options.proxy);
 
   // Fire HEAD request to warm connection (fire-and-forget)
   fetch(targetUrl, {
     method: 'HEAD',
     signal: AbortSignal.timeout(5_000),
-    // Don't send any authentication info
     headers: {
       'User-Agent': 'QwenCode-Preconnect/1.0',
     },
-    ...dispatcherOptions,
-  })
+    dispatcher,
+  } as RequestInit)
     .then(() => {
       debugLogger.debug('Preconnect completed');
     })

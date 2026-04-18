@@ -50,6 +50,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(dispatcher?.options).toMatchObject({
       headersTimeout: 0,
       bodyTimeout: 0,
+      keepAliveTimeout: 60_000,
     });
   });
 
@@ -66,6 +67,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       uri: 'http://proxy.local',
       headersTimeout: 0,
       bodyTimeout: 0,
+      keepAliveTimeout: 60_000,
     });
   });
 
@@ -81,6 +83,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect(dispatcher?.options).toMatchObject({
       headersTimeout: 0,
       bodyTimeout: 0,
+      keepAliveTimeout: 60_000,
     });
   });
 
@@ -97,6 +100,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       uri: 'http://proxy.local',
       headersTimeout: 0,
       bodyTimeout: 0,
+      keepAliveTimeout: 60_000,
     });
   });
 });
@@ -131,5 +135,14 @@ describe('getOrCreateSharedDispatcher', () => {
       result as { fetchOptions?: { dispatcher?: unknown } }
     ).fetchOptions?.dispatcher;
     expect(sdkDispatcher).toBe(shared);
+  });
+
+  it('sets keepAliveTimeout to 60s for connection reuse', () => {
+    const dispatcher = getOrCreateSharedDispatcher() as unknown as {
+      options: UndiciOptions;
+    };
+    expect(dispatcher.options).toMatchObject({
+      keepAliveTimeout: 60_000,
+    });
   });
 });
