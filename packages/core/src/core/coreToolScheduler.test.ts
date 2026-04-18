@@ -24,8 +24,8 @@ import {
   ToolConfirmationOutcome,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
-  SkillTool,
 } from '../index.js';
+import { SkillTool } from '../tools/skill.js';
 import type { ToolCall, WaitingToolCall } from './coreToolScheduler.js';
 import {
   CoreToolScheduler,
@@ -239,6 +239,7 @@ describe('CoreToolScheduler', () => {
     const declarativeTool = mockTool;
     const mockToolRegistry = {
       getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
       discovery: {},
@@ -318,6 +319,7 @@ describe('CoreToolScheduler', () => {
 
     const mockToolRegistry = {
       getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
       discovery: {},
@@ -395,6 +397,7 @@ describe('CoreToolScheduler', () => {
       const mockToolRegistry = {
         getAllToolNames: () => ['list_files', 'read_file', 'write_file'],
         getTool: () => undefined, // No SkillTool in this test
+        ensureTool: async () => undefined,
       } as unknown as ToolRegistry;
       const mockConfig = {
         getToolRegistry: () => mockToolRegistry,
@@ -436,6 +439,7 @@ describe('CoreToolScheduler', () => {
       const mockToolRegistry = {
         getAllToolNames: () => ['list_files', 'read_file'],
         getTool: () => undefined, // No SkillTool in this test
+        ensureTool: async () => undefined,
       } as unknown as ToolRegistry;
 
       // Create mocked config with excluded tools
@@ -468,6 +472,7 @@ describe('CoreToolScheduler', () => {
       const mockToolRegistry = {
         getAllToolNames: () => ['list_files', 'read_file'],
         getTool: () => undefined, // No SkillTool in this test
+        ensureTool: async () => undefined,
       } as unknown as ToolRegistry;
 
       // Create mocked config with excluded tools
@@ -497,7 +502,7 @@ describe('CoreToolScheduler', () => {
       );
     });
 
-    it('should suggest using Skill tool when unknown tool name matches a skill name', () => {
+    it('should suggest using Skill tool when unknown tool name matches a skill name', async () => {
       // Create a mock that passes instanceof SkillTool check
       const mockSkillTool = Object.create(SkillTool.prototype);
       mockSkillTool.getAvailableSkillNames = () => [
@@ -510,6 +515,8 @@ describe('CoreToolScheduler', () => {
       const mockToolRegistry = {
         getAllToolNames: () => ['skill', 'list_files', 'read_file'],
         getTool: (name: string) =>
+          name === 'skill' ? mockSkillTool : undefined,
+        ensureTool: async (name: string) =>
           name === 'skill' ? mockSkillTool : undefined,
       } as unknown as ToolRegistry;
 
@@ -533,7 +540,7 @@ describe('CoreToolScheduler', () => {
 
       // Test that when unknown tool name matches a skill name, we get skill-specific message
       // @ts-expect-error accessing private method
-      const skillMessage = scheduler.getToolNotFoundMessage('pdf');
+      const skillMessage = await scheduler.getToolNotFoundMessage('pdf');
       expect(skillMessage).toContain('is a skill name, not a tool name');
       expect(skillMessage).toContain('skill');
       expect(skillMessage).toContain('skill: "pdf"');
@@ -542,13 +549,14 @@ describe('CoreToolScheduler', () => {
 
       // Test another skill name
       // @ts-expect-error accessing private method
-      const xlsxMessage = scheduler.getToolNotFoundMessage('xlsx');
+      const xlsxMessage = await scheduler.getToolNotFoundMessage('xlsx');
       expect(xlsxMessage).toContain('is a skill name, not a tool name');
       expect(xlsxMessage).toContain('skill: "xlsx"');
 
       // Test that non-skill names still use standard message with Levenshtein suggestions
-      // @ts-expect-error accessing private method
-      const nonSkillMessage = scheduler.getToolNotFoundMessage('list_fils');
+      const nonSkillMessage =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await (scheduler as any).getToolNotFoundMessage('list_fils');
       expect(nonSkillMessage).toContain('not found in registry');
       expect(nonSkillMessage).toContain('Did you mean');
       expect(nonSkillMessage).not.toContain('is a skill name');
@@ -562,6 +570,7 @@ describe('CoreToolScheduler', () => {
 
       const mockToolRegistry = {
         getTool: () => undefined, // Tool not in registry
+        ensureTool: async () => undefined,
         getAllToolNames: () => ['list_files', 'read_file'],
         getFunctionDeclarations: () => [],
         tools: new Map(),
@@ -650,6 +659,7 @@ describe('CoreToolScheduler', () => {
 
       const mockToolRegistry = {
         getTool: () => undefined, // Tool not in registry
+        ensureTool: async () => undefined,
         getAllToolNames: () => ['list_files', 'read_file'],
         getFunctionDeclarations: () => [],
         tools: new Map(),
@@ -740,6 +750,7 @@ describe('CoreToolScheduler with payload', () => {
     const declarativeTool = mockTool;
     const mockToolRegistry = {
       getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
       discovery: {},
@@ -1085,6 +1096,7 @@ describe('CoreToolScheduler edit cancellation', () => {
     const mockEditTool = new MockEditTool();
     const mockToolRegistry = {
       getTool: () => mockEditTool,
+      ensureTool: async () => mockEditTool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
       discovery: {},
@@ -1192,6 +1204,7 @@ describe('CoreToolScheduler YOLO mode', () => {
 
     const mockToolRegistry = {
       getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
       getToolByName: () => declarativeTool,
       // Other properties are not needed for this test but are included for type consistency.
       getFunctionDeclarations: () => [],
@@ -1346,6 +1359,7 @@ describe('CoreToolScheduler cancellation during executing with live output', () 
     const tool = new StreamingTool();
     const mockToolRegistry = {
       getTool: () => tool,
+      ensureTool: async () => tool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
       discovery: {},
@@ -1439,6 +1453,7 @@ describe('CoreToolScheduler request queueing', () => {
 
     const mockToolRegistry = {
       getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
       getToolByName: () => declarativeTool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
@@ -1564,6 +1579,7 @@ describe('CoreToolScheduler request queueing', () => {
     const declarativeTool = mockTool;
     const mockToolRegistry = {
       getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
       getToolByName: () => declarativeTool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
@@ -1686,6 +1702,7 @@ describe('CoreToolScheduler request queueing', () => {
     const testTool = new TestApprovalTool(mockConfig);
     const toolRegistry = {
       getTool: () => testTool,
+      ensureTool: async () => testTool,
       getFunctionDeclarations: () => [],
       getFunctionDeclarationsFiltered: () => [],
       registerTool: () => {},
@@ -1813,6 +1830,7 @@ describe('CoreToolScheduler truncated output protection', () => {
 
     const mockToolRegistry = {
       getTool: () => tool,
+      ensureTool: async () => tool,
       getAllToolNames: () => toolNames,
       getFunctionDeclarations: () => [],
       tools: new Map(),
@@ -2004,6 +2022,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
 
     const mockToolRegistry = {
       getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
       getToolByName: () => declarativeTool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
@@ -2126,6 +2145,7 @@ describe('CoreToolScheduler Sequential Execution', () => {
 
     const mockToolRegistry = {
       getTool: () => declarativeTool,
+      ensureTool: async () => declarativeTool,
       getToolByName: () => declarativeTool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
@@ -2302,6 +2322,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
   ) {
     const mockToolRegistry = {
       getTool: () => tool,
+      ensureTool: async () => tool,
       getToolByName: () => tool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
@@ -3025,6 +3046,7 @@ describe('Fire hook functions integration', () => {
     ) {
       const mockToolRegistry = {
         getTool: (name: string) => tools.get(name),
+        ensureTool: async (name: string) => tools.get(name),
         getFunctionDeclarations: () => [],
         tools,
         discovery: {},
@@ -3467,6 +3489,7 @@ describe('CoreToolScheduler IDE interaction', () => {
 
     const mockToolRegistry = {
       getTool: () => mockModifiableTool,
+      ensureTool: async () => mockModifiableTool,
       getFunctionDeclarations: () => [],
       tools: new Map(),
       discovery: {},

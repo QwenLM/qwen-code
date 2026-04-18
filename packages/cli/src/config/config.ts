@@ -24,9 +24,7 @@ import {
   type ResumedSessionData,
   type LspClient,
   type ToolName,
-  EditTool,
-  ShellTool,
-  WriteFileTool,
+  ToolNames,
   NativeLspClient,
   createDebugLogger,
   NativeLspService,
@@ -955,13 +953,13 @@ export async function loadCliConfig(
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:
         // Deny all write/execute tools unless explicitly allowed.
-        denyUnlessAllowed(ShellTool.Name as ToolName);
-        denyUnlessAllowed(EditTool.Name as ToolName);
-        denyUnlessAllowed(WriteFileTool.Name as ToolName);
+        denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.EDIT as ToolName);
+        denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
         break;
       case ApprovalMode.AUTO_EDIT:
         // Only shell requires a prompt in auto-edit mode.
-        denyUnlessAllowed(ShellTool.Name as ToolName);
+        denyUnlessAllowed(ToolNames.SHELL as ToolName);
         break;
       case ApprovalMode.YOLO:
         // No extra denials for YOLO mode.

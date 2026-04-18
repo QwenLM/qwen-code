@@ -30,13 +30,11 @@ import {
 import { GeminiClient } from '../core/client.js';
 import { GitService } from '../services/gitService.js';
 import { ShellTool } from '../tools/shell.js';
-import { ReadFileTool } from '../tools/read-file.js';
-import { GrepTool } from '../tools/grep.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { RipGrepTool } from '../tools/ripGrep.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
@@ -74,6 +72,9 @@ vi.mock('node:fs', async (importOriginal) => {
 vi.mock('../tools/tool-registry', () => {
   const ToolRegistryMock = vi.fn();
   ToolRegistryMock.prototype.registerTool = vi.fn();
+  ToolRegistryMock.prototype.registerFactory = vi.fn();
+  ToolRegistryMock.prototype.ensureTool = vi.fn();
+  ToolRegistryMock.prototype.warmAll = vi.fn();
   ToolRegistryMock.prototype.discoverAllTools = vi.fn();
   ToolRegistryMock.prototype.getAllTools = vi.fn(() => []); // Mock methods if needed
   ToolRegistryMock.prototype.getAllToolNames = vi.fn(() => []);
@@ -136,6 +137,15 @@ vi.mock('../memory/const.js', () => ({
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
   QWEN_CONFIG_DIR: '.qwen',
+}));
+vi.mock('../tools/memory-config', () => ({
+  setGeminiMdFilename: vi.fn(),
+  getCurrentGeminiMdFilename: vi.fn(() => 'QWEN.md'),
+  getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
+  DEFAULT_CONTEXT_FILENAME: 'QWEN.md',
+  AGENT_CONTEXT_FILENAME: 'AGENTS.md',
+  QWEN_CONFIG_DIR: '.qwen',
+  MEMORY_SECTION_HEADER: '## Qwen Added Memories',
 }));
 
 vi.mock('../core/contentGenerator.js');
@@ -962,20 +972,20 @@ describe('Server Config (config.ts)', () => {
       // The ToolRegistry class is mocked, so we can inspect its prototype's methods.
       const registerToolMock = (
         (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerTool: Mock } };
+          ToolRegistry: { prototype: { registerFactory: Mock } };
         }
-      ).ToolRegistry.prototype.registerTool;
+      ).ToolRegistry.prototype.registerFactory;
 
       // Check that registerTool was called for ShellTool
       const wasShellToolRegistered = (registerToolMock as Mock).mock.calls.some(
-        (call) => call[0] instanceof vi.mocked(ShellTool),
+        (call) => call[0] === ToolNames.SHELL,
       );
       expect(wasShellToolRegistered).toBe(true);
 
       // Check that registerTool was NOT called for ReadFileTool
       const wasReadFileToolRegistered = (
         registerToolMock as Mock
-      ).mock.calls.some((call) => call[0] instanceof vi.mocked(ReadFileTool));
+      ).mock.calls.some((call) => call[0] === ToolNames.READ_FILE);
       expect(wasReadFileToolRegistered).toBe(false);
     });
 
@@ -989,12 +999,12 @@ describe('Server Config (config.ts)', () => {
 
       const registerToolMock = (
         (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerTool: Mock } };
+          ToolRegistry: { prototype: { registerFactory: Mock } };
         }
-      ).ToolRegistry.prototype.registerTool;
+      ).ToolRegistry.prototype.registerFactory;
 
       const wasShellToolRegistered = (registerToolMock as Mock).mock.calls.some(
-        (call) => call[0] instanceof vi.mocked(ShellTool),
+        (call) => call[0] === ToolNames.SHELL,
       );
       expect(wasShellToolRegistered).toBe(true);
     });
@@ -1009,12 +1019,12 @@ describe('Server Config (config.ts)', () => {
 
       const registerToolMock = (
         (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerTool: Mock } };
+          ToolRegistry: { prototype: { registerFactory: Mock } };
         }
-      ).ToolRegistry.prototype.registerTool;
+      ).ToolRegistry.prototype.registerFactory;
 
       const wasShellToolRegistered = (registerToolMock as Mock).mock.calls.some(
-        (call) => call[0] instanceof vi.mocked(ShellTool),
+        (call) => call[0] === ToolNames.SHELL,
       );
       expect(wasShellToolRegistered).toBe(true);
     });
@@ -1030,12 +1040,12 @@ describe('Server Config (config.ts)', () => {
 
       const registerToolMock = (
         (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerTool: Mock } };
+          ToolRegistry: { prototype: { registerFactory: Mock } };
         }
-      ).ToolRegistry.prototype.registerTool;
+      ).ToolRegistry.prototype.registerFactory;
 
       const wasGrepToolRegistered = (registerToolMock as Mock).mock.calls.some(
-        (call) => call[0] instanceof vi.mocked(GrepTool),
+        (call) => call[0] === ToolNames.GREP,
       );
       expect(wasGrepToolRegistered).toBe(true);
     });
@@ -1052,12 +1062,12 @@ describe('Server Config (config.ts)', () => {
 
       const registerToolMock = (
         (await vi.importMock('../tools/tool-registry')) as {
-          ToolRegistry: { prototype: { registerTool: Mock } };
+          ToolRegistry: { prototype: { registerFactory: Mock } };
         }
-      ).ToolRegistry.prototype.registerTool;
+      ).ToolRegistry.prototype.registerFactory;
 
       const wasGrepToolRegistered = (registerToolMock as Mock).mock.calls.some(
-        (call) => call[0] instanceof vi.mocked(GrepTool),
+        (call) => call[0] === ToolNames.GREP,
       );
       expect(wasGrepToolRegistered).toBe(false);
     });
@@ -1094,13 +1104,13 @@ describe('Server Config (config.ts)', () => {
 
         const registerToolMock = (
           (await vi.importMock('../tools/tool-registry')) as {
-            ToolRegistry: { prototype: { registerTool: Mock } };
+            ToolRegistry: { prototype: { registerFactory: Mock } };
           }
-        ).ToolRegistry.prototype.registerTool;
+        ).ToolRegistry.prototype.registerFactory;
 
         const wasShellToolRegistered = (
           registerToolMock as Mock
-        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        ).mock.calls.some((call) => call[0] === ToolNames.SHELL);
         expect(wasShellToolRegistered).toBe(true);
       });
 
@@ -1114,13 +1124,13 @@ describe('Server Config (config.ts)', () => {
 
         const registerToolMock = (
           (await vi.importMock('../tools/tool-registry')) as {
-            ToolRegistry: { prototype: { registerTool: Mock } };
+            ToolRegistry: { prototype: { registerFactory: Mock } };
           }
-        ).ToolRegistry.prototype.registerTool;
+        ).ToolRegistry.prototype.registerFactory;
 
         const wasShellToolRegistered = (
           registerToolMock as Mock
-        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        ).mock.calls.some((call) => call[0] === ToolNames.SHELL);
         expect(wasShellToolRegistered).toBe(true);
       });
 
@@ -1135,13 +1145,13 @@ describe('Server Config (config.ts)', () => {
 
         const registerToolMock = (
           (await vi.importMock('../tools/tool-registry')) as {
-            ToolRegistry: { prototype: { registerTool: Mock } };
+            ToolRegistry: { prototype: { registerFactory: Mock } };
           }
-        ).ToolRegistry.prototype.registerTool;
+        ).ToolRegistry.prototype.registerFactory;
 
         const wasShellToolRegistered = (
           registerToolMock as Mock
-        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        ).mock.calls.some((call) => call[0] === ToolNames.SHELL);
         expect(wasShellToolRegistered).toBe(false);
       });
 
@@ -1156,13 +1166,13 @@ describe('Server Config (config.ts)', () => {
 
         const registerToolMock = (
           (await vi.importMock('../tools/tool-registry')) as {
-            ToolRegistry: { prototype: { registerTool: Mock } };
+            ToolRegistry: { prototype: { registerFactory: Mock } };
           }
-        ).ToolRegistry.prototype.registerTool;
+        ).ToolRegistry.prototype.registerFactory;
 
         const wasShellToolRegistered = (
           registerToolMock as Mock
-        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        ).mock.calls.some((call) => call[0] === ToolNames.SHELL);
         expect(wasShellToolRegistered).toBe(false);
       });
 
@@ -1176,13 +1186,13 @@ describe('Server Config (config.ts)', () => {
 
         const registerToolMock = (
           (await vi.importMock('../tools/tool-registry')) as {
-            ToolRegistry: { prototype: { registerTool: Mock } };
+            ToolRegistry: { prototype: { registerFactory: Mock } };
           }
-        ).ToolRegistry.prototype.registerTool;
+        ).ToolRegistry.prototype.registerFactory;
 
         const wasShellToolRegistered = (
           registerToolMock as Mock
-        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        ).mock.calls.some((call) => call[0] === ToolNames.SHELL);
         expect(wasShellToolRegistered).toBe(true);
       });
 
@@ -1196,13 +1206,13 @@ describe('Server Config (config.ts)', () => {
 
         const registerToolMock = (
           (await vi.importMock('../tools/tool-registry')) as {
-            ToolRegistry: { prototype: { registerTool: Mock } };
+            ToolRegistry: { prototype: { registerFactory: Mock } };
           }
-        ).ToolRegistry.prototype.registerTool;
+        ).ToolRegistry.prototype.registerFactory;
 
         const wasShellToolRegistered = (
           registerToolMock as Mock
-        ).mock.calls.some((call) => call[0] instanceof vi.mocked(ShellTool));
+        ).mock.calls.some((call) => call[0] === ToolNames.SHELL);
         expect(wasShellToolRegistered).toBe(true);
       });
     });
@@ -1397,25 +1407,22 @@ describe('setApprovalMode with folder trust', () => {
       vi.clearAllMocks();
     });
 
-    it('should register RipGrepTool when useRipgrep is true and it is available', async () => {
+    it('should register grep tool when useRipgrep is true and it is available', async () => {
       (canUseRipgrep as Mock).mockResolvedValue(true);
       const config = new Config({ ...baseParams, useRipgrep: true });
       await config.initialize();
 
-      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
-      const wasRipGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(RipGrepTool),
-      );
-      const wasGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(GrepTool),
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      const grepRegistrations = calls.filter(
+        (call) => call[0] === ToolNames.GREP,
       );
 
-      expect(wasRipGrepRegistered).toBe(true);
-      expect(wasGrepRegistered).toBe(false);
+      // Exactly one grep tool should be registered
+      expect(grepRegistrations.length).toBe(1);
       expect(canUseRipgrep).toHaveBeenCalledWith(true);
     });
 
-    it('should register RipGrepTool with system ripgrep when useBuiltinRipgrep is false', async () => {
+    it('should register grep tool with system ripgrep when useBuiltinRipgrep is false', async () => {
       (canUseRipgrep as Mock).mockResolvedValue(true);
       const config = new Config({
         ...baseParams,
@@ -1424,16 +1431,12 @@ describe('setApprovalMode with folder trust', () => {
       });
       await config.initialize();
 
-      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
-      const wasRipGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(RipGrepTool),
-      );
-      const wasGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(GrepTool),
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      const grepRegistrations = calls.filter(
+        (call) => call[0] === ToolNames.GREP,
       );
 
-      expect(wasRipGrepRegistered).toBe(true);
-      expect(wasGrepRegistered).toBe(false);
+      expect(grepRegistrations.length).toBe(1);
       expect(canUseRipgrep).toHaveBeenCalledWith(false);
     });
 
@@ -1446,16 +1449,12 @@ describe('setApprovalMode with folder trust', () => {
       });
       await config.initialize();
 
-      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
-      const wasRipGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(RipGrepTool),
-      );
-      const wasGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(GrepTool),
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      const grepRegistrations = calls.filter(
+        (call) => call[0] === ToolNames.GREP,
       );
 
-      expect(wasRipGrepRegistered).toBe(false);
-      expect(wasGrepRegistered).toBe(true);
+      expect(grepRegistrations.length).toBe(1);
       expect(canUseRipgrep).toHaveBeenCalledWith(false);
       expect(logRipgrepFallback).toHaveBeenCalledWith(
         config,
@@ -1470,16 +1469,12 @@ describe('setApprovalMode with folder trust', () => {
       const config = new Config({ ...baseParams, useRipgrep: true });
       await config.initialize();
 
-      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
-      const wasRipGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(RipGrepTool),
-      );
-      const wasGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(GrepTool),
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      const grepRegistrations = calls.filter(
+        (call) => call[0] === ToolNames.GREP,
       );
 
-      expect(wasRipGrepRegistered).toBe(false);
-      expect(wasGrepRegistered).toBe(true);
+      expect(grepRegistrations.length).toBe(1);
       expect(canUseRipgrep).toHaveBeenCalledWith(true);
       expect(logRipgrepFallback).toHaveBeenCalledWith(
         config,
@@ -1495,16 +1490,12 @@ describe('setApprovalMode with folder trust', () => {
       const config = new Config({ ...baseParams, useRipgrep: true });
       await config.initialize();
 
-      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
-      const wasRipGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(RipGrepTool),
-      );
-      const wasGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(GrepTool),
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      const grepRegistrations = calls.filter(
+        (call) => call[0] === ToolNames.GREP,
       );
 
-      expect(wasRipGrepRegistered).toBe(false);
-      expect(wasGrepRegistered).toBe(true);
+      expect(grepRegistrations.length).toBe(1);
       expect(logRipgrepFallback).toHaveBeenCalledWith(
         config,
         expect.any(RipgrepFallbackEvent),
@@ -1517,16 +1508,12 @@ describe('setApprovalMode with folder trust', () => {
       const config = new Config({ ...baseParams, useRipgrep: false });
       await config.initialize();
 
-      const calls = (ToolRegistry.prototype.registerTool as Mock).mock.calls;
-      const wasRipGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(RipGrepTool),
-      );
-      const wasGrepRegistered = calls.some(
-        (call) => call[0] instanceof vi.mocked(GrepTool),
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      const grepRegistrations = calls.filter(
+        (call) => call[0] === ToolNames.GREP,
       );
 
-      expect(wasRipGrepRegistered).toBe(false);
-      expect(wasGrepRegistered).toBe(true);
+      expect(grepRegistrations.length).toBe(1);
       expect(canUseRipgrep).not.toHaveBeenCalled();
     });
   });

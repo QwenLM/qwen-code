@@ -66,6 +66,7 @@ describe('SubagentManager', () => {
 
   beforeEach(() => {
     mockToolRegistry = {
+      warmAll: vi.fn().mockResolvedValue(undefined),
       getAllTools: vi.fn().mockReturnValue([
         { name: 'read_file', displayName: 'Read File' },
         { name: 'write_file', displayName: 'Write File' },
@@ -1296,8 +1297,8 @@ System prompt 3`);
 
   describe('Runtime Configuration Methods', () => {
     describe('convertToRuntimeConfig', () => {
-      it('should convert basic configuration', () => {
-        const runtimeConfig = manager.convertToRuntimeConfig(validConfig);
+      it('should convert basic configuration', async () => {
+        const runtimeConfig = await manager.convertToRuntimeConfig(validConfig);
 
         expect(runtimeConfig.promptConfig.systemPrompt).toBe(
           validConfig.systemPrompt,
@@ -1307,13 +1308,14 @@ System prompt 3`);
         expect(runtimeConfig.toolConfig).toBeUndefined();
       });
 
-      it('should include tool configuration when tools are specified', () => {
+      it('should include tool configuration when tools are specified', async () => {
         const configWithTools: SubagentConfig = {
           ...validConfig,
           tools: ['read_file', 'write_file'],
         };
 
-        const runtimeConfig = manager.convertToRuntimeConfig(configWithTools);
+        const runtimeConfig =
+          await manager.convertToRuntimeConfig(configWithTools);
 
         expect(runtimeConfig.toolConfig).toBeDefined();
         expect(runtimeConfig.toolConfig!.tools).toEqual([
@@ -1322,13 +1324,13 @@ System prompt 3`);
         ]);
       });
 
-      it('should transform display names to tool names in tool configuration', () => {
+      it('should transform display names to tool names in tool configuration', async () => {
         const configWithDisplayNames: SubagentConfig = {
           ...validConfig,
           tools: ['Read File', 'write_file', 'Search Files', 'unknown_tool'],
         };
 
-        const runtimeConfig = manager.convertToRuntimeConfig(
+        const runtimeConfig = await manager.convertToRuntimeConfig(
           configWithDisplayNames,
         );
 
@@ -1341,26 +1343,27 @@ System prompt 3`);
         ]);
       });
 
-      it('should set modelConfig.model from model selector and merge run configurations', () => {
+      it('should set modelConfig.model from model selector and merge run configurations', async () => {
         const configWithCustom: SubagentConfig = {
           ...validConfig,
           model: 'custom-model',
           runConfig: { max_time_minutes: 5 },
         };
 
-        const runtimeConfig = manager.convertToRuntimeConfig(configWithCustom);
+        const runtimeConfig =
+          await manager.convertToRuntimeConfig(configWithCustom);
 
         expect(runtimeConfig.modelConfig.model).toBe('custom-model');
         expect(runtimeConfig.runConfig.max_time_minutes).toBe(5);
       });
 
-      it('should accept cross-provider model selectors', () => {
+      it('should accept cross-provider model selectors', async () => {
         const configWithCrossProvider: SubagentConfig = {
           ...validConfig,
           model: 'openai:gpt-4',
         };
 
-        const runtimeConfig = manager.convertToRuntimeConfig(
+        const runtimeConfig = await manager.convertToRuntimeConfig(
           configWithCrossProvider,
         );
         expect(runtimeConfig.modelConfig.model).toBe('gpt-4');

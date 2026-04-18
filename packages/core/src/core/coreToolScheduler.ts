@@ -40,7 +40,6 @@ import {
   ToolCallEvent,
   InputFormat,
   Kind,
-  SkillTool,
 } from '../index.js';
 import type {
   FunctionResponse,
@@ -682,13 +681,18 @@ export class CoreToolScheduler {
    * Generates error message for unknown tool. Returns early with skill-specific
    * message if the name matches a skill, otherwise uses Levenshtein suggestions.
    */
-  private getToolNotFoundMessage(unknownToolName: string, topN = 3): string {
+  private async getToolNotFoundMessage(
+    unknownToolName: string,
+    topN = 3,
+  ): Promise<string> {
     // Check if the unknown tool name matches an available skill name.
     // This handles the case where the model tries to invoke a skill as a tool
     // (e.g., Tool: "pdf" instead of Tool: "Skill" with skill: "pdf")
-    const skillTool = this.toolRegistry.getTool(ToolNames.SKILL);
-    if (skillTool instanceof SkillTool) {
-      const availableSkillNames = skillTool.getAvailableSkillNames();
+    const skillTool = await this.toolRegistry.ensureTool(ToolNames.SKILL);
+    if (skillTool && 'getAvailableSkillNames' in skillTool) {
+      const availableSkillNames = (
+        skillTool as { getAvailableSkillNames(): string[] }
+      ).getAvailableSkillNames();
       if (availableSkillNames.includes(unknownToolName)) {
         return `"${unknownToolName}" is a skill name, not a tool name. To use this skill, invoke the "${ToolNames.SKILL}" tool with parameter: skill: "${unknownToolName}"`;
       }
@@ -859,10 +863,10 @@ export class CoreToolScheduler {
           }
         }
 
-        const toolInstance = this.toolRegistry.getTool(reqInfo.name);
+        const toolInstance = await this.toolRegistry.ensureTool(reqInfo.name);
         if (!toolInstance) {
           // Tool is not in registry and not excluded - likely hallucinated or typo
-          const errorMessage = this.getToolNotFoundMessage(reqInfo.name);
+          const errorMessage = await this.getToolNotFoundMessage(reqInfo.name);
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
