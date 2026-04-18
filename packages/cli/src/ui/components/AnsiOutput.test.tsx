@@ -29,9 +29,7 @@ describe('<AnsiOutputText />', () => {
         createAnsiToken({ text: 'world!' }),
       ],
     ];
-    const { lastFrame } = render(
-      <AnsiOutputText data={data} maxWidth={80} />,
-    );
+    const { lastFrame } = render(<AnsiOutputText data={data} maxWidth={80} />);
     expect(lastFrame()).toBe('Hello, world!');
   });
 
@@ -47,9 +45,7 @@ describe('<AnsiOutputText />', () => {
     ];
     // Note: ink-testing-library doesn't render styles, so we can only check the text.
     // We are testing that it renders without crashing.
-    const { lastFrame } = render(
-      <AnsiOutputText data={data} maxWidth={80} />,
-    );
+    const { lastFrame } = render(<AnsiOutputText data={data} maxWidth={80} />);
     expect(lastFrame()).toBe('BoldItalicUnderlineDimInverse');
   });
 
@@ -62,9 +58,7 @@ describe('<AnsiOutputText />', () => {
     ];
     // Note: ink-testing-library doesn't render colors, so we can only check the text.
     // We are testing that it renders without crashing.
-    const { lastFrame } = render(
-      <AnsiOutputText data={data} maxWidth={80} />,
-    );
+    const { lastFrame } = render(<AnsiOutputText data={data} maxWidth={80} />);
     expect(lastFrame()).toBe('Red FGBlue BG');
   });
 
@@ -75,14 +69,15 @@ describe('<AnsiOutputText />', () => {
       [createAnsiToken({ text: 'Third line' })],
       [createAnsiToken({ text: '' })],
     ];
-    const { lastFrame } = render(
-      <AnsiOutputText data={data} maxWidth={80} />,
-    );
+    const { lastFrame } = render(<AnsiOutputText data={data} maxWidth={80} />);
     const output = lastFrame();
     expect(output).toBeDefined();
     const lines = output!.split('\n');
     expect(lines[0]).toBe('First line');
-    expect(lines[1]).toBe('Third line');
+    // Empty AnsiLines are preserved as blank rows so shell output layout
+    // matches the terminal it came from.
+    expect(lines[1]).toBe('');
+    expect(lines[2]).toBe('Third line');
   });
 
   it('respects the availableTerminalHeight prop and slices the lines correctly', () => {
@@ -117,9 +112,7 @@ describe('<AnsiOutputText />', () => {
   it('truncates wide lines to fit within maxWidth', () => {
     const wideText = 'A'.repeat(100);
     const data: AnsiOutput = [[createAnsiToken({ text: wideText })]];
-    const { lastFrame } = render(
-      <AnsiOutputText data={data} maxWidth={20} />,
-    );
+    const { lastFrame } = render(<AnsiOutputText data={data} maxWidth={20} />);
     const output = lastFrame()!;
     // The line should be truncated to fit within maxWidth
     expect(output.length).toBeLessThanOrEqual(20);

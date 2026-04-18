@@ -33,11 +33,10 @@ export const AnsiOutputText: React.FC<AnsiOutputProps> = ({
   );
   return (
     <MaxSizedBox maxHeight={availableTerminalHeight} maxWidth={maxWidth}>
-      <Box flexDirection="column">
-        {lastLines.map((line: AnsiLine, lineIndex: number) => (
-          <Box key={lineIndex}>
-            {line.length > 0 ? (
-              line.map((token: AnsiToken, tokenIndex: number) => (
+      {lastLines.map((line: AnsiLine, lineIndex: number) => (
+        <Box key={lineIndex}>
+          {line.length > 0
+            ? line.map((token: AnsiToken, tokenIndex: number) => (
                 <Text
                   key={tokenIndex}
                   color={token.inverse ? token.bg : token.fg}
@@ -51,10 +50,9 @@ export const AnsiOutputText: React.FC<AnsiOutputProps> = ({
                   {token.text}
                 </Text>
               ))
-            ) : null}
-          </Box>
-        ))}
-      </Box>
+            : null}
+        </Box>
+      ))}
     </MaxSizedBox>
   );
 };
