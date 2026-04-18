@@ -656,6 +656,26 @@ describe('LoopDetectionService', () => {
       expect(isLoop).toBe(false);
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
+
+    it('should not detect a loop when an earlier thought reappears after progress', () => {
+      service.reset('');
+
+      // Regression: earlier counting-based implementation fired as soon as
+      // any thought appeared >= THRESHOLD times anywhere in the retained
+      // history. A healthy long-running session where the model revisits
+      // the same phrase after making progress on unrelated steps should
+      // *not* trip this detector — only a sustained consecutive run does.
+      service.addAndCheck(createContentEvent('Thinking about the schema.'));
+      service.addAndCheck(createContentEvent('Considering the migration.'));
+      service.addAndCheck(createContentEvent('Analyzing the indexes.'));
+      service.addAndCheck(createContentEvent('Thinking about the schema.'));
+      service.addAndCheck(createContentEvent('Considering rollout risks.'));
+      const isLoop = service.addAndCheck(
+        createContentEvent('Thinking about the schema.'),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
   });
 
   describe('Read File Loop Detection', () => {
@@ -685,25 +705,29 @@ describe('LoopDetectionService', () => {
       );
     });
 
-    it('should detect other read-like operations', () => {
+    it('should detect other read-like operations (exact names + read_/list_ prefixes)', () => {
       service.reset('');
 
-      // Mix of different read operations
+      // Mix of read-like tool names that either appear in the exact allowlist
+      // (read_file, read_many_files, list_directory) or match the read_/list_
+      // prefix fallback used for MCP-provided tools.
       service.addAndCheck(
-        createToolCallRequestEvent('cat_file', { path: 'file1.txt' }),
+        createToolCallRequestEvent('read_many_files', {
+          paths: ['file1.txt'],
+        }),
       );
       service.addAndCheck(
-        createToolCallRequestEvent('view_file', { path: 'file2.txt' }),
+        createToolCallRequestEvent('list_directory', { path: '.' }),
       );
       service.addAndCheck(
-        createToolCallRequestEvent('list_files', { dir: '.' }),
+        createToolCallRequestEvent('read_resource', { uri: 'a' }),
       );
       service.addAndCheck(
         createToolCallRequestEvent('read_file', { path: 'file3.txt' }),
       );
 
       const isLoop = service.addAndCheck(
-        createToolCallRequestEvent('cat_file', { path: 'file4.txt' }),
+        createToolCallRequestEvent('list_projects', {}),
       );
       expect(isLoop).toBe(true);
       expect(loggers.logLoopDetected).toHaveBeenCalledWith(
@@ -711,6 +735,32 @@ describe('LoopDetectionService', () => {
         expect.objectContaining({
           loop_type: 'read_file_loop',
         }),
+      );
+    });
+
+    it('should not treat tools that merely contain read-like substrings as file reads', () => {
+      service.reset('');
+
+      // Regression: the earlier substring heuristic treated any name
+      // containing 'read'/'cat'/'view'/'list' as a file read, so `review`
+      // (contains 'view') and `concat_chunks` (contains 'cat') contributed
+      // to READ_FILE_LOOP even though no file-read loop was happening.
+      const nonReadLikeNames = [
+        'review',
+        'concat_chunks',
+        'viewport_set',
+        'listener_bind',
+      ];
+      for (let i = 0; i < 6; i++) {
+        const name = nonReadLikeNames[i % nonReadLikeNames.length];
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent(name, { i }),
+        );
+        expect(isLoop).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
       );
     });
 

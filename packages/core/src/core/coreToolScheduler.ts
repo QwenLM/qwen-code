@@ -794,20 +794,20 @@ export class CoreToolScheduler {
       }
       const requestsToProcess = Array.isArray(request) ? request : [request];
 
-      // Check if this batch continues a validation retry loop.
-      // Keys are "<toolName>:<errorMessage>"; if no request reuses a tool name
-      // that previously failed validation, reset the tracker.
+      // Prune validation retry state per-tool, not wholesale. Keys are
+      // "<toolName>:<errorMessage>"; retain counters only for tools actually
+      // present in the current batch. Keeping every tracked tool's counters
+      // whenever any current request matched caused stale counts for
+      // unrelated tools to survive and fire RETRY LOOP DETECTED prematurely
+      // the next time those tools were used.
       if (this.validationRetryCounts.size > 0) {
-        const prevTools = new Set<string>();
-        for (const key of this.validationRetryCounts.keys()) {
+        const currentToolNames = new Set(requestsToProcess.map((r) => r.name));
+        for (const key of [...this.validationRetryCounts.keys()]) {
           const sep = key.indexOf(':');
-          prevTools.add(sep === -1 ? key : key.slice(0, sep));
-        }
-        const hasPrevFailingTool = requestsToProcess.some((r) =>
-          prevTools.has(r.name),
-        );
-        if (!hasPrevFailingTool) {
-          this.validationRetryCounts.clear();
+          const toolName = sep === -1 ? key : key.slice(0, sep);
+          if (!currentToolNames.has(toolName)) {
+            this.validationRetryCounts.delete(key);
+          }
         }
       }
 

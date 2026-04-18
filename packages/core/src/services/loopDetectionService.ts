@@ -352,35 +352,54 @@ export class LoopDetectionService {
 
   /**
    * Checks for repetitive thoughts pattern.
+   *
+   * Only fires when the last `THOUGHT_REPEAT_THRESHOLD` thoughts are the same
+   * string. Earlier implementations counted repeats across the full retained
+   * history, which caused false positives whenever the model revisited an
+   * earlier phrase after making progress on an unrelated step.
    */
   private checkRepetitiveThoughts(): boolean {
     if (this.thoughtHistory.length < THOUGHT_REPEAT_THRESHOLD) {
       return false;
     }
 
-    // Fire if any thought appears >= THRESHOLD times in the history. The
-    // repeated thought doesn't need to be the most recent one — the model may
-    // rephrase slightly while still fixating on the same underlying idea.
-    const counts = new Map<string, number>();
-    for (const thought of this.thoughtHistory) {
-      const next = (counts.get(thought) ?? 0) + 1;
-      counts.set(thought, next);
-      if (next >= THOUGHT_REPEAT_THRESHOLD) {
-        logLoopDetected(
-          this.config,
-          new LoopDetectedEvent(LoopType.REPETITIVE_THOUGHTS, this.promptId),
-        );
-        return true;
-      }
+    const recentThoughts = this.thoughtHistory.slice(-THOUGHT_REPEAT_THRESHOLD);
+    const firstThought = recentThoughts[0];
+    if (recentThoughts.every((thought) => thought === firstThought)) {
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.REPETITIVE_THOUGHTS, this.promptId),
+      );
+      return true;
     }
     return false;
   }
 
-  private static readonly READ_LIKE_TOKENS = ['read', 'cat', 'view', 'list'];
+  // Exact tool names that read content from the filesystem. A plain substring
+  // match on tokens like "view" or "list" is unsafe because unrelated tools
+  // (e.g. "review", "checklist_update") can incidentally contain those
+  // tokens and get miscounted as file reads.
+  private static readonly READ_LIKE_TOOL_NAMES: ReadonlySet<string> = new Set([
+    'read_file',
+    'read_many_files',
+    'list_directory',
+  ]);
+
+  // Prefix fallback for MCP-provided tools that follow the same naming
+  // convention (e.g. `read_resource`, `list_projects`). The trailing
+  // underscore anchors the match to a name segment so "review" and
+  // "listener" are not treated as read-like.
+  private static readonly READ_LIKE_NAME_PREFIXES: readonly string[] = [
+    'read_',
+    'list_',
+  ];
 
   private isReadLikeTool(toolName: string): boolean {
-    return LoopDetectionService.READ_LIKE_TOKENS.some((token) =>
-      toolName.includes(token),
+    if (LoopDetectionService.READ_LIKE_TOOL_NAMES.has(toolName)) {
+      return true;
+    }
+    return LoopDetectionService.READ_LIKE_NAME_PREFIXES.some((prefix) =>
+      toolName.startsWith(prefix),
     );
   }
 
