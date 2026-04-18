@@ -299,6 +299,15 @@ function toParts(input: PartListUnion): Part[] {
   return parts;
 }
 
+const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
+
+/** Directive injected when a tool call repeatedly fails validation. */
+const RETRY_LOOP_STOP_DIRECTIVE =
+  '\n\n⚠️ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
+  'STOP retrying the same approach. Re-examine the tool schema and parameter requirements, then try a ' +
+  'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
+  'instead of retrying.';
+
 const createErrorResponse = (
   request: ToolCallRequestInfo,
   error: Error,
@@ -397,6 +406,7 @@ export class CoreToolScheduler {
   private chatRecordingService?: ChatRecordingService;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
+  private validationRetryCounts = new Map<string, number>();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
@@ -463,6 +473,8 @@ export class CoreToolScheduler {
 
       switch (newStatus) {
         case 'success': {
+          // Successful execution only resets retry state for this tool
+          this.clearRetryCountsForTool(currentCall.request.name);
           const durationMs = existingStartTime
             ? Date.now() - existingStartTime
             : undefined;
@@ -751,6 +763,20 @@ export class CoreToolScheduler {
     return this._schedule(request, signal);
   }
 
+  /**
+   * Removes all validation retry counters for the given tool. Keys are
+   * "<toolName>:<errorMessage>", so a plain `Map.delete(toolName)` would not
+   * match anything.
+   */
+  private clearRetryCountsForTool(toolName: string): void {
+    const prefix = `${toolName}:`;
+    for (const key of this.validationRetryCounts.keys()) {
+      if (key.startsWith(prefix)) {
+        this.validationRetryCounts.delete(key);
+      }
+    }
+  }
+
   private async _schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
@@ -763,6 +789,23 @@ export class CoreToolScheduler {
         );
       }
       const requestsToProcess = Array.isArray(request) ? request : [request];
+
+      // Check if this batch continues a validation retry loop.
+      // Keys are "<toolName>:<errorMessage>"; if no request reuses a tool name
+      // that previously failed validation, reset the tracker.
+      if (this.validationRetryCounts.size > 0) {
+        const prevTools = new Set<string>();
+        for (const key of this.validationRetryCounts.keys()) {
+          const sep = key.indexOf(':');
+          prevTools.add(sep === -1 ? key : key.slice(0, sep));
+        }
+        const hasPrevFailingTool = requestsToProcess.some((r) =>
+          prevTools.has(r.name),
+        );
+        if (!hasPrevFailingTool) {
+          this.validationRetryCounts.clear();
+        }
+      }
 
       const newToolCalls: ToolCall[] = [];
       for (const reqInfo of requestsToProcess) {
@@ -839,24 +882,45 @@ export class CoreToolScheduler {
           reqInfo.callId,
         );
         if (invocationOrError instanceof Error) {
-          const error = reqInfo.wasOutputTruncated
+          const baseError = reqInfo.wasOutputTruncated
             ? new Error(
                 `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
               )
             : invocationOrError;
+
+          // Track validation retry for loop detection. Counts accumulate per
+          // (tool, error message) pair so a different validation mistake on
+          // the same tool starts fresh rather than tripping the threshold.
+          const errorKey = `${reqInfo.name}:${baseError.message}`;
+          const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
+          for (const key of this.validationRetryCounts.keys()) {
+            if (key.startsWith(`${reqInfo.name}:`) && key !== errorKey) {
+              this.validationRetryCounts.delete(key);
+            }
+          }
+          this.validationRetryCounts.set(errorKey, count);
+
+          const finalError =
+            count >= VALIDATION_RETRY_LOOP_THRESHOLD
+              ? new Error(`${baseError.message}${RETRY_LOOP_STOP_DIRECTIVE}`)
+              : baseError;
+
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
             tool: toolInstance,
             response: createErrorResponse(
               reqInfo,
-              error,
+              finalError,
               ToolErrorType.INVALID_TOOL_PARAMS,
             ),
             durationMs: 0,
           });
           continue;
         }
+
+        // Reset all validation retry counters for this tool since it passed validation
+        this.clearRetryCountsForTool(reqInfo.name);
 
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content.

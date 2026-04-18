@@ -3849,3 +3849,236 @@ describe('CoreToolScheduler IDE interaction', () => {
     expect(mockIdeClient.openDiff).not.toHaveBeenCalled();
   });
 });
+
+describe('CoreToolScheduler validation retry loop detection', () => {
+  const RETRY_LOOP_STOP_DIRECTIVE = 'RETRY LOOP DETECTED';
+
+  /** Tool with a schema that requires a string `value` param. */
+  class StrictStringTool extends BaseDeclarativeTool<
+    { value: string },
+    ToolResult
+  > {
+    static readonly Name = 'strictStringTool';
+
+    constructor() {
+      super(
+        StrictStringTool.Name,
+        'StrictStringTool',
+        'A tool that requires a string value param.',
+        Kind.Other,
+        {
+          type: 'object',
+          properties: { value: { type: 'string' } },
+          required: ['value'],
+        },
+      );
+    }
+
+    protected createInvocation(params: {
+      value: string;
+    }): ToolInvocation<{ value: string }, ToolResult> {
+      return new (class extends BaseToolInvocation<
+        { value: string },
+        ToolResult
+      > {
+        constructor(p: { value: string }) {
+          super(p);
+        }
+        getDescription(): string {
+          return 'strictStringTool invocation';
+        }
+        async execute(): Promise<ToolResult> {
+          return { llmContent: 'ok', returnDisplay: 'ok' };
+        }
+      })(params);
+    }
+  }
+
+  function createSchedulerWithTool(tool: StrictStringTool) {
+    const mockToolRegistry = {
+      getTool: () => tool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: () => tool,
+      getToolByDisplayName: () => tool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () => 100,
+      getTruncateToolOutputLines: () => 10,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    return { scheduler, onToolCallsUpdate, onAllToolCallsComplete };
+  }
+
+  function makeRequest(
+    callId: string,
+    name: string,
+    args: Record<string, unknown>,
+  ) {
+    return {
+      callId,
+      name,
+      args,
+      isClientInitiated: false,
+      prompt_id: `prompt-${callId}`,
+    };
+  }
+
+  function getLastErrorMessage(onToolCallsUpdate: Mock): string | undefined {
+    const calls = onToolCallsUpdate.mock.calls;
+    for (let i = calls.length - 1; i >= 0; i--) {
+      const toolCalls = calls[i][0] as ToolCall[];
+      for (const call of toolCalls) {
+        if (call.status === 'error' && call.response?.responseParts) {
+          for (const part of call.response.responseParts) {
+            if ('functionResponse' in part) {
+              const resp = part.functionResponse as {
+                response?: { error?: string };
+              };
+              if (resp.response?.error) return resp.response.error;
+            }
+          }
+        }
+      }
+    }
+    return undefined;
+  }
+
+  it('should inject RETRY LOOP DETECTED directive after 3 consecutive validation failures', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    // Turn 1: bad params (value is number, not string)
+    await scheduler.schedule(
+      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+    let msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toBeDefined();
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    // Turn 2: same bad params
+    await scheduler.schedule(
+      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    // Turn 3: same bad params — should trigger directive
+    await scheduler.schedule(
+      [makeRequest('c3', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('should reset retry counter when a different tool is called', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    // Turn 1-2: tool fails twice
+    await scheduler.schedule(
+      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+    await scheduler.schedule(
+      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+
+    // Turn 3: switch to a different tool that also fails
+    // We simulate by calling with a tool name that won't be found
+    await scheduler.schedule(
+      [makeRequest('c3', 'nonexistentTool', {})],
+      new AbortController().signal,
+    );
+
+    // Turn 4: back to tool — should be count 1 again (no directive)
+    await scheduler.schedule(
+      [makeRequest('c4', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+    const msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toBeDefined();
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('should reset retry counter after a successful invocation of the same tool', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    // Two validation failures with the same error.
+    await scheduler.schedule(
+      [makeRequest('c1', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+    await scheduler.schedule(
+      [makeRequest('c2', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+
+    // A valid invocation succeeds, which must clear the per-tool counter.
+    await scheduler.schedule(
+      [makeRequest('c3', 'strictStringTool', { value: 'ok' })],
+      new AbortController().signal,
+    );
+
+    // Two more failures — count should restart at 1, not jump to 3+.
+    await scheduler.schedule(
+      [makeRequest('c4', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+    await scheduler.schedule(
+      [makeRequest('c5', 'strictStringTool', { value: 123 })],
+      new AbortController().signal,
+    );
+
+    const msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toBeDefined();
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+});
