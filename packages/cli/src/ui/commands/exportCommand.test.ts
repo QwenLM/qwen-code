@@ -103,7 +103,7 @@ describe('exportCommand', () => {
     it('should have correct name and description', () => {
       expect(exportCommand.name).toBe('export');
       expect(exportCommand.description).toBe(
-        'Export current session to HTML by default. Other formats: md, json, jsonl.',
+        'Export current session message history to a file',
       );
     });
 

@@ -116,10 +116,10 @@ describe('sessionExportService', () => {
 
     it('rejects unsupported export arguments', () => {
       expect(() => parseExportSlashCommand('/export csv')).toThrow(
-        'Unsupported /export format',
+        'Unsupported /export format. Use /export html, /export md, /export json, or /export jsonl.',
       );
       expect(() => parseExportSlashCommand('/export md extra')).toThrow(
-        'Unsupported /export format',
+        'Unsupported /export format. Use /export html, /export md, /export json, or /export jsonl.',
       );
     });
   });

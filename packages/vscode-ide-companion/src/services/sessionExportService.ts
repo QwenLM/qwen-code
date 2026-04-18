@@ -61,7 +61,7 @@ export function parseExportSlashCommand(
   }
 
   throw new Error(
-    'Unsupported /export format. Use /export, /export html, /export md, /export json, or /export jsonl.',
+    'Unsupported /export format. Use /export html, /export md, /export json, or /export jsonl.',
   );
 }
 
