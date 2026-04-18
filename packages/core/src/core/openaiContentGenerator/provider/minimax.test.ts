@@ -166,6 +166,28 @@ describe('MiniMaxOpenAICompatibleProvider', () => {
       expect(result.temperature).toBe(0.7);
     });
 
+    it('clamps temperature above 1.0 down to 1.0', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'MiniMax-M2.7',
+        messages: [{ role: 'user', content: 'Hello' }],
+        temperature: 1.5,
+      };
+
+      const result = provider.buildRequest(request, userPromptId);
+      expect(result.temperature).toBe(1.0);
+    });
+
+    it('preserves temperature exactly at 1.0', () => {
+      const request: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'MiniMax-M2.7',
+        messages: [{ role: 'user', content: 'Hello' }],
+        temperature: 1.0,
+      };
+
+      const result = provider.buildRequest(request, userPromptId);
+      expect(result.temperature).toBe(1.0);
+    });
+
     it('preserves messages unchanged', () => {
       const request: OpenAI.Chat.ChatCompletionCreateParams = {
         model: 'MiniMax-M2.7',

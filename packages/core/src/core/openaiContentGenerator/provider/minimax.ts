@@ -15,16 +15,20 @@ import {
   DEFAULT_MAX_RETRIES,
 } from '../constants.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import { createDebugLogger } from '../../../utils/debugLogger.js';
 
 /** Hostnames that identify the MiniMax API (global and domestic mirror). */
 const MINIMAX_HOSTNAMES = new Set(['api.minimax.io', 'api.minimaxi.com']);
+
+const debugLogger = createDebugLogger('MINIMAX');
 
 /**
  * Provider for MiniMax API (OpenAI-compatible interface).
  *
  * MiniMax-specific constraints:
- * - temperature must be in the range (0.0, 1.0]; 0 and null are not allowed,
- *   defaults to 1.0
+ * - temperature must be in the range (0.0, 1.0]; values of 0, null, or above
+ *   1.0 are rewritten/clamped to 1.0 (with a debug log when an explicit value
+ *   was changed)
  * - response_format is not supported and must be removed from requests
  */
 export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
@@ -90,6 +94,10 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
    * Build a MiniMax-compatible request by:
    * 1. Removing the unsupported `response_format` parameter
    * 2. Ensuring temperature is within the allowed range (0.0, 1.0]
+   *    - `0`/`null`/`undefined` are rewritten to 1.0
+   *    - values above 1.0 are clamped down to 1.0
+   *    Both rewrites are logged at debug level so users can see when their
+   *    explicit value was adjusted.
    */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
@@ -100,11 +108,25 @@ export class MiniMaxOpenAICompatibleProvider extends DefaultOpenAICompatibleProv
     // Remove unsupported response_format via typed destructuring (no `any` cast)
     const { response_format: _rf, ...rest } = baseRequest;
 
-    // MiniMax does not accept temperature = 0 or null; default to 1.0
-    const temperature =
-      rest.temperature == null || rest.temperature === 0
-        ? 1.0
-        : rest.temperature;
+    // MiniMax accepts temperature only in (0.0, 1.0]; rewrite invalid values.
+    const original = rest.temperature;
+    let temperature: number;
+    if (original == null || original === 0) {
+      temperature = 1.0;
+      if (original === 0) {
+        // Only log when the user explicitly set 0; null/undefined is a default fill.
+        debugLogger.debug(
+          `temperature=0 is not supported; using 1.0 instead (request ${userPromptId})`,
+        );
+      }
+    } else if (original > 1.0) {
+      temperature = 1.0;
+      debugLogger.debug(
+        `temperature=${original} exceeds the 1.0 max; clamping to 1.0 (request ${userPromptId})`,
+      );
+    } else {
+      temperature = original;
+    }
 
     return { ...rest, temperature };
   }
