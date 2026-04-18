@@ -19,12 +19,82 @@ export interface SnapshotFileChange {
   deletions: number;
 }
 
+export interface RestoreProjectOptions {
+  untrackedPathsToDelete?: string[];
+}
+
 function countTextLines(content: string): number {
   if (content.length === 0) {
     return 0;
   }
   const lines = content.split(/\r?\n/).length;
   return content.endsWith('\n') ? lines - 1 : lines;
+}
+
+function isLikelyBinary(content: Buffer): boolean {
+  if (content.includes(0)) {
+    return true;
+  }
+
+  const text = content.toString('utf8');
+  let replacementChars = 0;
+  for (const char of text) {
+    if (char === '\uFFFD') {
+      replacementChars++;
+    }
+  }
+
+  return replacementChars > Math.max(1, text.length * 0.01);
+}
+
+const MAX_UNTRACKED_FILE_LINE_COUNT_BYTES = 1024 * 1024;
+
+async function countUntrackedFileAdditions(filePath: string): Promise<number> {
+  const stats = await fs.stat(filePath);
+  if (!stats.isFile() || stats.size > MAX_UNTRACKED_FILE_LINE_COUNT_BYTES) {
+    return 0;
+  }
+
+  const content = await fs.readFile(filePath);
+  if (isLikelyBinary(content)) {
+    return 0;
+  }
+
+  return countTextLines(content.toString('utf8'));
+}
+
+function resolveProjectRelativePath(
+  projectRoot: string,
+  relativePath: string,
+): string | undefined {
+  if (!relativePath || path.isAbsolute(relativePath)) {
+    return undefined;
+  }
+
+  const absolutePath = path.resolve(projectRoot, relativePath);
+  const pathWithinProject = path.relative(projectRoot, absolutePath);
+  if (
+    pathWithinProject === '' ||
+    pathWithinProject.startsWith('..') ||
+    path.isAbsolute(pathWithinProject)
+  ) {
+    return undefined;
+  }
+
+  return absolutePath;
+}
+
+async function snapshotContainsPath(
+  repo: SimpleGit,
+  commitHash: string,
+  relativePath: string,
+): Promise<boolean> {
+  try {
+    await repo.raw('cat-file', '-e', `${commitHash}:${relativePath}`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export class GitService {
@@ -165,9 +235,33 @@ export class GitService {
     }
   }
 
-  async restoreProjectFromSnapshot(commitHash: string): Promise<void> {
+  async restoreProjectFromSnapshot(
+    commitHash: string,
+    options: RestoreProjectOptions = {},
+  ): Promise<void> {
     const repo = this.shadowGitRepository;
     await repo.raw(['restore', '--source', commitHash, '.']);
+
+    const untrackedPathsToDelete = options.untrackedPathsToDelete ?? [];
+    if (untrackedPathsToDelete.length === 0) {
+      return;
+    }
+
+    for (const relativePath of new Set(untrackedPathsToDelete)) {
+      const absolutePath = resolveProjectRelativePath(
+        this.projectRoot,
+        relativePath,
+      );
+      if (!absolutePath) {
+        continue;
+      }
+
+      if (await snapshotContainsPath(repo, commitHash, relativePath)) {
+        continue;
+      }
+
+      await fs.rm(absolutePath, { recursive: true, force: true });
+    }
   }
 
   async getSnapshotDiffSummary(
@@ -219,10 +313,12 @@ export class GitService {
         const absolutePath = path.join(this.projectRoot, relativePath);
         let additions = 0;
         try {
-          const content = await fs.readFile(absolutePath, 'utf8');
-          additions = countTextLines(content);
+          additions = await countUntrackedFileAdditions(absolutePath);
         } catch (error) {
-          if (!isNodeError(error) || error.code !== 'ENOENT') {
+          if (
+            !isNodeError(error) ||
+            (error.code !== 'ENOENT' && error.code !== 'EISDIR')
+          ) {
             throw error;
           }
         }

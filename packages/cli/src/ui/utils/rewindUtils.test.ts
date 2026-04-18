@@ -173,9 +173,8 @@ describe('rewindUtils', () => {
           summaryText: 'No code changes',
         }),
         restoreCodeSummary: expect.objectContaining({
-          hasChanges: true,
-          summaryText: 'test.py +10 -2',
-          checkpointCommitHash: 'snap-1',
+          hasChanges: false,
+          summaryText: 'No code changes',
         }),
       }),
       expect.objectContaining({
@@ -186,9 +185,8 @@ describe('rewindUtils', () => {
           summaryText: 'No code changes',
         }),
         restoreCodeSummary: expect.objectContaining({
-          hasChanges: true,
-          summaryText: 'test.py +10 -2',
-          checkpointCommitHash: 'snap-1',
+          hasChanges: false,
+          summaryText: 'No code changes',
         }),
       }),
       expect.objectContaining({
@@ -212,6 +210,136 @@ describe('rewindUtils', () => {
     ]);
     expect(getSnapshotDiffSummary).toHaveBeenCalledTimes(1);
     expect(getSnapshotDiffSummary).toHaveBeenCalledWith('snap-1');
+  });
+
+  it('does not let newer checkpoints from other sessions hide this session', async () => {
+    for (let index = 0; index < 501; index++) {
+      await fs.writeFile(
+        path.join(checkpointsDir, `z-other-${index}.json`),
+        JSON.stringify({
+          sessionId: 'other-session',
+          createdAt: `2025-01-01T00:10:${String(index % 60).padStart(2, '0')}.000Z`,
+          commitHash: `snap-other-${index}`,
+        }),
+      );
+    }
+    await fs.writeFile(
+      path.join(checkpointsDir, 'a-current-session.json'),
+      JSON.stringify({
+        sessionId: 'session-1',
+        createdAt: '2025-01-01T00:00:30.000Z',
+        commitHash: 'snap-current',
+      }),
+    );
+
+    const getSnapshotDiffSummary = vi
+      .fn()
+      .mockResolvedValue([{ path: 'current.py', additions: 1, deletions: 0 }]);
+    const config = {
+      getCheckpointingEnabled: () => true,
+      getSessionId: () => 'session-1',
+      getResumedSessionData: () => undefined,
+      storage: {
+        getProjectTempCheckpointsDir: () => checkpointsDir,
+      },
+      getSessionService: () => ({
+        loadSession: vi.fn().mockResolvedValue({
+          conversation: {
+            sessionId: 'session-1',
+            projectHash: 'project-1',
+            startTime: '2025-01-01T00:00:00.000Z',
+            lastUpdated: '2025-01-01T00:01:00.000Z',
+            messages: [
+              {
+                uuid: 'u1',
+                parentUuid: null,
+                sessionId: 'session-1',
+                timestamp: '2025-01-01T00:00:00.000Z',
+                type: 'user',
+                message: { role: 'user', parts: [{ text: 'make current' }] },
+                cwd: '/tmp/project',
+                version: '1.0.0',
+              },
+            ],
+          },
+          filePath: '/tmp/project/chats/session-1.jsonl',
+          lastCompletedUuid: 'u1',
+        }),
+      }),
+      getGitService: vi.fn().mockResolvedValue({
+        getSnapshotDiffSummary,
+      }),
+    } as unknown as Config;
+
+    const entries = await buildRewindEntries(config, 'session-1');
+
+    expect(entries[0]?.restoreCodeSummary).toEqual(
+      expect.objectContaining({
+        checkpointCommitHash: 'snap-current',
+        summaryText: 'current.py +1 -0',
+      }),
+    );
+    expect(getSnapshotDiffSummary).toHaveBeenCalledWith('snap-current');
+  });
+
+  it('skips corrupt checkpoint files without hiding valid checkpoints', async () => {
+    await fs.writeFile(path.join(checkpointsDir, 'bad.json'), '{not-json');
+    await fs.writeFile(
+      path.join(checkpointsDir, 'valid.json'),
+      JSON.stringify({
+        sessionId: 'session-1',
+        createdAt: '2025-01-01T00:00:30.000Z',
+        commitHash: 'snap-valid',
+      }),
+    );
+
+    const getSnapshotDiffSummary = vi
+      .fn()
+      .mockResolvedValue([{ path: 'valid.py', additions: 2, deletions: 1 }]);
+    const config = {
+      getCheckpointingEnabled: () => true,
+      getSessionId: () => 'session-1',
+      getResumedSessionData: () => undefined,
+      storage: {
+        getProjectTempCheckpointsDir: () => checkpointsDir,
+      },
+      getSessionService: () => ({
+        loadSession: vi.fn().mockResolvedValue({
+          conversation: {
+            sessionId: 'session-1',
+            projectHash: 'project-1',
+            startTime: '2025-01-01T00:00:00.000Z',
+            lastUpdated: '2025-01-01T00:01:00.000Z',
+            messages: [
+              {
+                uuid: 'u1',
+                parentUuid: null,
+                sessionId: 'session-1',
+                timestamp: '2025-01-01T00:00:00.000Z',
+                type: 'user',
+                message: { role: 'user', parts: [{ text: 'make valid' }] },
+                cwd: '/tmp/project',
+                version: '1.0.0',
+              },
+            ],
+          },
+          filePath: '/tmp/project/chats/session-1.jsonl',
+          lastCompletedUuid: 'u1',
+        }),
+      }),
+      getGitService: vi.fn().mockResolvedValue({
+        getSnapshotDiffSummary,
+      }),
+    } as unknown as Config;
+
+    const entries = await buildRewindEntries(config, 'session-1');
+
+    expect(entries[0]?.restoreCodeSummary).toEqual(
+      expect.objectContaining({
+        checkpointCommitHash: 'snap-valid',
+        summaryText: 'valid.py +2 -1',
+      }),
+    );
   });
 
   it('skips checkpoint loading when checkpointing is disabled', async () => {
@@ -410,5 +538,128 @@ describe('rewindUtils', () => {
       'who are you ?',
       '(current)',
     ]);
+  });
+
+  it('uses only the active branch when building history and turn changes', async () => {
+    const config = {
+      getCheckpointingEnabled: () => false,
+      getSessionId: () => 'session-1',
+      getResumedSessionData: () => undefined,
+      storage: {
+        getProjectTempCheckpointsDir: () => checkpointsDir,
+      },
+      getSessionService: () => ({
+        loadSession: vi.fn().mockResolvedValue({
+          conversation: {
+            sessionId: 'session-1',
+            projectHash: 'project-1',
+            startTime: '2025-01-01T00:00:00.000Z',
+            lastUpdated: '2025-01-01T00:04:00.000Z',
+            messages: [
+              {
+                uuid: 'u1',
+                parentUuid: null,
+                sessionId: 'session-1',
+                timestamp: '2025-01-01T00:00:00.000Z',
+                type: 'user',
+                message: { role: 'user', parts: [{ text: 'start' }] },
+                cwd: '/tmp/project',
+                version: '1.0.0',
+              },
+              {
+                uuid: 'a1',
+                parentUuid: 'u1',
+                sessionId: 'session-1',
+                timestamp: '2025-01-01T00:00:10.000Z',
+                type: 'assistant',
+                message: { role: 'model', parts: [{ text: 'ok' }] },
+                cwd: '/tmp/project',
+                version: '1.0.0',
+              },
+              {
+                uuid: 'u-stale',
+                parentUuid: 'a1',
+                sessionId: 'session-1',
+                timestamp: '2025-01-01T00:01:00.000Z',
+                type: 'user',
+                message: { role: 'user', parts: [{ text: 'stale branch' }] },
+                cwd: '/tmp/project',
+                version: '1.0.0',
+              },
+              {
+                uuid: 'tool-stale',
+                parentUuid: 'u-stale',
+                sessionId: 'session-1',
+                timestamp: '2025-01-01T00:01:10.000Z',
+                type: 'tool_result',
+                message: { role: 'user', parts: [] },
+                cwd: '/tmp/project',
+                version: '1.0.0',
+                toolCallResult: {
+                  status: 'success',
+                  resultDisplay: {
+                    fileName: 'stale.py',
+                    diffStat: {
+                      model_added_lines: 99,
+                      model_removed_lines: 0,
+                    },
+                  },
+                },
+              },
+              {
+                uuid: 'u-current',
+                parentUuid: 'a1',
+                sessionId: 'session-1',
+                timestamp: '2025-01-01T00:02:00.000Z',
+                type: 'user',
+                message: {
+                  role: 'user',
+                  parts: [{ text: 'current branch' }],
+                },
+                cwd: '/tmp/project',
+                version: '1.0.0',
+              },
+              {
+                uuid: 'tool-current',
+                parentUuid: 'u-current',
+                sessionId: 'session-1',
+                timestamp: '2025-01-01T00:02:10.000Z',
+                type: 'tool_result',
+                message: { role: 'user', parts: [] },
+                cwd: '/tmp/project',
+                version: '1.0.0',
+                toolCallResult: {
+                  status: 'success',
+                  resultDisplay: {
+                    fileName: 'current.py',
+                    diffStat: {
+                      model_added_lines: 3,
+                      model_removed_lines: 1,
+                    },
+                  },
+                },
+              },
+            ],
+          },
+          filePath: '/tmp/project/chats/session-1.jsonl',
+          lastCompletedUuid: 'tool-current',
+        }),
+      }),
+      getGitService: vi.fn(),
+    } as unknown as Config;
+
+    const entries = await buildRewindEntries(config, 'session-1');
+
+    expect(entries.map((entry) => entry.label)).toEqual([
+      'start',
+      'current branch',
+      '(current)',
+    ]);
+    expect(entries[1]?.codeSummary).toEqual(
+      expect.objectContaining({
+        summaryText: 'current.py +3 -1',
+      }),
+    );
+    expect(JSON.stringify(entries)).not.toContain('stale.py');
   });
 });

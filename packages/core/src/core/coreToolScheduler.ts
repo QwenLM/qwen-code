@@ -185,6 +185,10 @@ export type AllToolCallsCompleteHandler = (
 
 export type ToolCallsUpdateHandler = (toolCalls: ToolCall[]) => void;
 
+export type BeforeToolExecutionHandler = (
+  toolCall: ScheduledToolCall,
+) => Promise<void> | void;
+
 /**
  * Formats tool output for a Gemini FunctionResponse.
  */
@@ -333,6 +337,7 @@ interface CoreToolSchedulerOptions {
   outputUpdateHandler?: OutputUpdateHandler;
   onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   onToolCallsUpdate?: ToolCallsUpdateHandler;
+  onBeforeToolExecution?: BeforeToolExecutionHandler;
   getPreferredEditor: () => EditorType | undefined;
   onEditorClose: () => void;
   /**
@@ -399,6 +404,7 @@ export class CoreToolScheduler {
   private outputUpdateHandler?: OutputUpdateHandler;
   private onAllToolCallsComplete?: AllToolCallsCompleteHandler;
   private onToolCallsUpdate?: ToolCallsUpdateHandler;
+  private onBeforeToolExecution?: BeforeToolExecutionHandler;
   private getPreferredEditor: () => EditorType | undefined;
   private config: Config;
   private onEditorClose: () => void;
@@ -419,6 +425,7 @@ export class CoreToolScheduler {
     this.outputUpdateHandler = options.outputUpdateHandler;
     this.onAllToolCallsComplete = options.onAllToolCallsComplete;
     this.onToolCallsUpdate = options.onToolCallsUpdate;
+    this.onBeforeToolExecution = options.onBeforeToolExecution;
     this.getPreferredEditor = options.getPreferredEditor;
     this.onEditorClose = options.onEditorClose;
     this.chatRecordingService = options.chatRecordingService;
@@ -1568,6 +1575,16 @@ export class CoreToolScheduler {
         this.setStatusInternal(callId, 'error', errorResponse);
         return;
       }
+    }
+
+    try {
+      await this.onBeforeToolExecution?.(scheduledCall);
+    } catch (error) {
+      debugLogger.warn(
+        `Before tool execution hook failed for ${toolName}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
 
     this.setStatusInternal(callId, 'executing');

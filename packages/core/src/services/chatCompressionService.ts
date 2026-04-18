@@ -39,6 +39,8 @@ export const COMPRESSION_PRESERVE_THRESHOLD = 0.3;
  * model receives almost no context and generates a useless summary.
  */
 export const MIN_COMPRESSION_FRACTION = 0.05;
+export const COMPRESSION_SUMMARY_ACK =
+  'Got it. Thanks for the additional context!';
 
 /**
  * Returns the index of the oldest item to keep when compressing. May return
@@ -272,7 +274,7 @@ export class ChatCompressionService {
         },
         {
           role: 'model',
-          parts: [{ text: 'Got it. Thanks for the additional context!' }],
+          parts: [{ text: COMPRESSION_SUMMARY_ACK }],
         },
         ...historyToKeep,
       ];

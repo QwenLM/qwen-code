@@ -166,4 +166,50 @@ describe('ConversationHistoryPicker', () => {
 
     expect(onCancel).toHaveBeenCalledTimes(1);
   });
+
+  it('shows an error when rewind entries fail to load', async () => {
+    buildRewindEntries.mockRejectedValueOnce(new Error('history unavailable'));
+
+    const { lastFrame } = render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <ConversationHistoryPicker
+          config={config}
+          sessionId="session-1"
+          onSelect={vi.fn()}
+          onCancel={vi.fn()}
+        />
+      </KeypressProvider>,
+    );
+
+    await waitFor(() => {
+      expect(lastFrame()).toContain('Failed to load conversation history.');
+    });
+    expect(lastFrame()).toContain('history unavailable');
+  });
+
+  it('does not reload entries on terminal resize', async () => {
+    render(
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <ConversationHistoryPicker
+          config={config}
+          sessionId="session-1"
+          onSelect={vi.fn()}
+          onCancel={vi.fn()}
+        />
+      </KeypressProvider>,
+    );
+
+    await waitFor(() => {
+      expect(buildRewindEntries).toHaveBeenCalledTimes(1);
+    });
+
+    Object.defineProperty(process.stdout, 'rows', {
+      value: 12,
+      configurable: true,
+    });
+    process.stdout.emit('resize');
+    await wait(50);
+
+    expect(buildRewindEntries).toHaveBeenCalledTimes(1);
+  });
 });

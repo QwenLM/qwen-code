@@ -5,7 +5,11 @@
  */
 
 import * as fs from 'node:fs/promises';
-import type { Config, ResumedSessionData } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  ResumedSessionData,
+  SessionService,
+} from '@qwen-code/qwen-code-core';
 import type {
   RewindCodeSummary,
   RewindFileChange,
@@ -19,9 +23,7 @@ interface RewindCheckpoint {
   commitHash?: string;
 }
 
-interface RewindSessionService {
-  loadSession(sessionId: string): Promise<ResumedSessionData | undefined>;
-}
+type RewindSessionService = Pick<SessionService, 'loadSession'>;
 
 interface SnapshotFileChange {
   path: string;
@@ -35,6 +37,16 @@ interface RewindGitService {
     targetCommitHash?: string,
   ): Promise<SnapshotFileChange[]>;
 }
+
+type ConversationMessage =
+  ResumedSessionData['conversation']['messages'][number];
+
+const MAX_SESSION_REWIND_CHECKPOINTS = 500;
+const MAX_CHECKPOINT_CACHE_ENTRIES = 20;
+const checkpointCache = new Map<
+  string,
+  { directoryMtimeMs: number; checkpoints: RewindCheckpoint[] }
+>();
 
 function formatAggregateChangeText(changes: RewindFileChange[]): string {
   const additions = changes.reduce((sum, change) => sum + change.additions, 0);
@@ -94,6 +106,39 @@ function parseCheckpointTimestamp(
   };
 }
 
+async function loadCheckpointFile(
+  checkpointDir: string,
+  fileName: string,
+): Promise<RewindCheckpoint | undefined> {
+  try {
+    const filePath = `${checkpointDir}/${fileName}`;
+    const [data, stats] = await Promise.all([
+      fs.readFile(filePath, 'utf8'),
+      fs.stat(filePath),
+    ]);
+    const parsed = JSON.parse(data) as Record<string, unknown>;
+    const timestamp = parseCheckpointTimestamp(
+      parsed['createdAt'],
+      stats.mtimeMs,
+    );
+
+    return {
+      createdAt: timestamp.createdAt,
+      timestampMs: timestamp.timestampMs,
+      sessionId:
+        typeof parsed['sessionId'] === 'string'
+          ? parsed['sessionId']
+          : undefined,
+      commitHash:
+        typeof parsed['commitHash'] === 'string'
+          ? parsed['commitHash']
+          : undefined,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 async function loadRewindCheckpoints(
   config: Config,
   sessionId: string,
@@ -104,45 +149,49 @@ async function loadRewindCheckpoints(
 
   const checkpointDir = config.storage.getProjectTempCheckpointsDir();
   try {
-    const files = await fs.readdir(checkpointDir);
-    const checkpoints = await Promise.all(
-      files
-        .filter((fileName) => fileName.endsWith('.json'))
-        .map(async (fileName) => {
-          const filePath = `${checkpointDir}/${fileName}`;
-          const [data, stats] = await Promise.all([
-            fs.readFile(filePath, 'utf8'),
-            fs.stat(filePath),
-          ]);
-          const parsed = JSON.parse(data) as Record<string, unknown>;
-          const timestamp = parseCheckpointTimestamp(
-            parsed['createdAt'],
-            stats.mtimeMs,
-          );
+    const [files, dirStats] = await Promise.all([
+      fs.readdir(checkpointDir),
+      fs.stat(checkpointDir),
+    ]);
+    const cacheKey = `${checkpointDir}:${sessionId}`;
+    const cached = checkpointCache.get(cacheKey);
+    if (cached && cached.directoryMtimeMs === dirStats.mtimeMs) {
+      return cached.checkpoints;
+    }
 
-          return {
-            createdAt: timestamp.createdAt,
-            timestampMs: timestamp.timestampMs,
-            sessionId:
-              typeof parsed['sessionId'] === 'string'
-                ? parsed['sessionId']
-                : undefined,
-            commitHash:
-              typeof parsed['commitHash'] === 'string'
-                ? parsed['commitHash']
-                : undefined,
-          } satisfies RewindCheckpoint;
-        }),
+    const checkpoints = (
+      await Promise.all(
+        files
+          .filter((fileName) => fileName.endsWith('.json'))
+          .map((fileName) => loadCheckpointFile(checkpointDir, fileName)),
+      )
+    ).filter(
+      (checkpoint): checkpoint is RewindCheckpoint => checkpoint !== undefined,
     );
 
-    return checkpoints
+    const filteredCheckpoints = checkpoints
       .filter(
         (checkpoint) =>
           checkpoint.commitHash &&
           (checkpoint.sessionId === undefined ||
             checkpoint.sessionId === sessionId),
       )
+      .sort((a, b) => b.timestampMs - a.timestampMs)
+      .slice(0, MAX_SESSION_REWIND_CHECKPOINTS)
       .sort((a, b) => a.timestampMs - b.timestampMs);
+
+    checkpointCache.set(cacheKey, {
+      directoryMtimeMs: dirStats.mtimeMs,
+      checkpoints: filteredCheckpoints,
+    });
+    if (checkpointCache.size > MAX_CHECKPOINT_CACHE_ENTRIES) {
+      const oldestKey = checkpointCache.keys().next().value;
+      if (oldestKey) {
+        checkpointCache.delete(oldestKey);
+      }
+    }
+
+    return filteredCheckpoints;
   } catch {
     return [];
   }
@@ -158,20 +207,61 @@ function toRewindFileChanges(
   }));
 }
 
-function extractHistoryNodes(
+function getBranchMessages(
   sessionData: ResumedSessionData | undefined,
-): Array<{
+): ConversationMessage[] {
+  const messages = sessionData?.conversation.messages ?? [];
+  if (!sessionData || messages.length === 0 || !sessionData.lastCompletedUuid) {
+    return messages;
+  }
+
+  const messagesByUuid = new Map<string, ConversationMessage>();
+  for (const message of messages) {
+    if (!messagesByUuid.has(message.uuid)) {
+      messagesByUuid.set(message.uuid, message);
+    }
+  }
+
+  if (!messagesByUuid.has(sessionData.lastCompletedUuid)) {
+    return messages;
+  }
+
+  const chain: ConversationMessage[] = [];
+  const visited = new Set<string>();
+  let currentUuid: string | null = sessionData.lastCompletedUuid;
+  let foundIncompleteParentChain = false;
+
+  while (currentUuid && !visited.has(currentUuid)) {
+    visited.add(currentUuid);
+    const message = messagesByUuid.get(currentUuid);
+    if (!message) {
+      foundIncompleteParentChain = true;
+      break;
+    }
+    chain.push(message);
+    const parentUuid = message.parentUuid;
+    if (parentUuid && !messagesByUuid.has(parentUuid)) {
+      foundIncompleteParentChain = true;
+      break;
+    }
+    currentUuid = parentUuid;
+  }
+
+  if (foundIncompleteParentChain) {
+    return messages;
+  }
+
+  return chain.reverse();
+}
+
+function extractHistoryNodes(messages: ConversationMessage[]): Array<{
   uuid: string;
   parentUuid: string | null;
   sessionId: string;
   timestamp: string;
   prompt: string;
 }> {
-  if (!sessionData) {
-    return [];
-  }
-
-  return sessionData.conversation.messages
+  return messages
     .filter((message) => message.type === 'user')
     .map((message) => {
       const prompt =
@@ -195,8 +285,7 @@ export async function buildRewindEntries(
   config: Config,
   sessionId: string,
 ): Promise<RewindHistoryEntry[]> {
-  const sessionService =
-    config.getSessionService() as unknown as RewindSessionService;
+  const sessionService: RewindSessionService = config.getSessionService();
   const resumedSessionData =
     config.getSessionId() === sessionId &&
     config.getResumedSessionData()?.conversation.sessionId === sessionId
@@ -226,14 +315,15 @@ export async function buildRewindEntries(
   }
 
   const diffCache = new Map<string, RewindCodeSummary>();
-  const chronologicalNodes = extractHistoryNodes(currentSessionData).sort(
+  const currentBranchMessages = getBranchMessages(currentSessionData);
+  const chronologicalNodes = extractHistoryNodes(currentBranchMessages).sort(
     (a, b) => a.timestamp.localeCompare(b.timestamp),
   );
   const historicalTurnChanges = new Map<string, RewindFileChange[]>();
 
   if (currentSessionData) {
     let activePromptUuid: string | null = null;
-    for (const message of currentSessionData.conversation.messages) {
+    for (const message of currentBranchMessages) {
       if (message.type === 'user') {
         activePromptUuid = message.uuid;
         if (!historicalTurnChanges.has(message.uuid)) {
@@ -289,10 +379,16 @@ export async function buildRewindEntries(
   }
 
   const entries: RewindHistoryEntry[] = [];
-  for (const node of chronologicalNodes) {
+  for (const [index, node] of chronologicalNodes.entries()) {
     const nodeTimestampMs = Date.parse(node.timestamp);
+    const nextNode = chronologicalNodes[index + 1];
+    const nextNodeTimestampMs = nextNode
+      ? Date.parse(nextNode.timestamp)
+      : Number.POSITIVE_INFINITY;
     const restoreCheckpoint = checkpoints.find(
-      (candidate) => candidate.timestampMs > nodeTimestampMs,
+      (candidate) =>
+        candidate.timestampMs > nodeTimestampMs &&
+        candidate.timestampMs < nextNodeTimestampMs,
     );
 
     const historicalChanges = historicalTurnChanges.get(node.uuid) ?? [];

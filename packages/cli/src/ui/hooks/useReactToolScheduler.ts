@@ -40,6 +40,9 @@ export type ScheduleFn = (
   signal: AbortSignal,
 ) => void;
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
+export type BeforeToolExecutionHandler = (
+  toolCall: ScheduledToolCall,
+) => Promise<void> | void;
 
 export type TrackedScheduledToolCall = ScheduledToolCall & {
   responseSubmittedToGemini?: boolean;
@@ -74,6 +77,7 @@ export function useReactToolScheduler(
   config: Config,
   getPreferredEditor: () => EditorType | undefined,
   onEditorClose: () => void,
+  onBeforeToolExecution?: BeforeToolExecutionHandler,
 ): [TrackedToolCall[], ScheduleFn, MarkToolsAsSubmittedFn] {
   const [toolCallsForDisplay, setToolCallsForDisplay] = useState<
     TrackedToolCall[]
@@ -137,26 +141,28 @@ export function useReactToolScheduler(
     [setToolCallsForDisplay],
   );
 
-  const scheduler = useMemo(
-    () =>
-      new CoreToolScheduler({
-        config,
-        chatRecordingService: config.getChatRecordingService(),
-        outputUpdateHandler,
-        onAllToolCallsComplete: allToolCallsCompleteHandler,
-        onToolCallsUpdate: toolCallsUpdateHandler,
-        getPreferredEditor,
-        onEditorClose,
-      }),
-    [
+  const scheduler = useMemo(() => {
+    const schedulerOptions = {
       config,
+      chatRecordingService: config.getChatRecordingService(),
       outputUpdateHandler,
-      allToolCallsCompleteHandler,
-      toolCallsUpdateHandler,
+      onAllToolCallsComplete: allToolCallsCompleteHandler,
+      onToolCallsUpdate: toolCallsUpdateHandler,
+      onBeforeToolExecution,
       getPreferredEditor,
       onEditorClose,
-    ],
-  );
+    };
+
+    return new CoreToolScheduler(schedulerOptions);
+  }, [
+    config,
+    outputUpdateHandler,
+    allToolCallsCompleteHandler,
+    toolCallsUpdateHandler,
+    onBeforeToolExecution,
+    getPreferredEditor,
+    onEditorClose,
+  ]);
 
   const schedule: ScheduleFn = useCallback(
     (

@@ -1302,6 +1302,100 @@ describe('CoreToolScheduler YOLO mode', () => {
       expect(completedCall.response.resultDisplay).toBe('Tool executed');
     }
   });
+
+  it('should run before-execution hooks before executing yolo tools', async () => {
+    const order: string[] = [];
+    const executeFn = vi.fn().mockImplementation(async () => {
+      order.push('execute');
+      return {
+        llmContent: 'Tool executed',
+        returnDisplay: 'Tool executed',
+      };
+    });
+    const beforeExecution = vi.fn().mockImplementation(async () => {
+      order.push('before-start');
+      await Promise.resolve();
+      order.push('before-end');
+    });
+    const mockTool = new MockTool({
+      name: 'mockTool',
+      execute: executeFn,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+    });
+
+    const mockToolRegistry = {
+      getTool: () => mockTool,
+      ensureTool: async () => mockTool,
+      getToolByName: () => mockTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByDisplayName: () => mockTool,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+      },
+      getToolRegistry: () => mockToolRegistry,
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate: vi.fn(),
+      onBeforeToolExecution: beforeExecution,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: 'mockTool',
+          args: { param: 'value' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-yolo',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(executeFn).toHaveBeenCalled();
+    });
+
+    expect(beforeExecution).toHaveBeenCalledTimes(1);
+    expect(order).toEqual(['before-start', 'before-end', 'execute']);
+  });
 });
 
 describe('CoreToolScheduler cancellation during executing with live output', () => {

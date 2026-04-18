@@ -31,7 +31,6 @@ import {
   ApprovalMode,
   AuthType,
   GeminiEventType as ServerGeminiEventType,
-  GitService,
   SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
@@ -408,11 +407,8 @@ describe('useGeminiStream', () => {
       createFileSnapshot: vi.fn().mockResolvedValue('snapshot-1'),
       getCurrentCommitHash: vi.fn().mockResolvedValue('head-1'),
     };
-    vi.mocked(GitService).mockImplementation(
-      () => mockGitService as unknown as GitService,
-    );
-
     mockConfig.getCheckpointingEnabled = vi.fn(() => true);
+    mockConfig.getGitService = vi.fn().mockResolvedValue(mockGitService);
     (mockConfig as unknown as { storage: unknown }).storage = {
       getProjectTempCheckpointsDir: () => checkpointsDir,
     };
@@ -488,6 +484,66 @@ describe('useGeminiStream', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(mockGitService.createFileSnapshot).toHaveBeenCalledTimes(1);
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('creates a rewind checkpoint before edit tool execution in yolo flows', async () => {
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-rewind-before-execute-'),
+    );
+    const checkpointsDir = path.join(tempDir, 'checkpoints');
+
+    const mockGitService = {
+      createFileSnapshot: vi.fn().mockResolvedValue('snapshot-before-execute'),
+      getCurrentCommitHash: vi.fn().mockResolvedValue('head-before-execute'),
+    };
+
+    mockConfig.getCheckpointingEnabled = vi.fn(() => true);
+    mockConfig.getGitService = vi.fn().mockResolvedValue(mockGitService);
+    (mockConfig as unknown as { storage: unknown }).storage = {
+      getProjectTempCheckpointsDir: () => checkpointsDir,
+    };
+
+    const client = {
+      ...mockConfig.getGeminiClient(),
+      getHistory: vi
+        .fn()
+        .mockResolvedValue([
+          { role: 'user', parts: [{ text: 'create a yolo file' }] },
+        ]),
+    };
+
+    try {
+      renderTestHook([], client);
+
+      const beforeToolExecution = mockUseReactToolScheduler.mock
+        .calls[0][4] as (toolCall: TrackedToolCall) => Promise<void>;
+
+      await beforeToolExecution({
+        request: {
+          callId: 'call-write-before-execute',
+          name: 'write_file',
+          args: {
+            file_path: '/test/dir/yolo.py',
+            content: 'print("yolo")\n',
+          },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-yolo',
+        },
+      } as TrackedToolCall);
+
+      const [checkpointName] = await fs.readdir(checkpointsDir);
+      const checkpoint = JSON.parse(
+        await fs.readFile(path.join(checkpointsDir, checkpointName), 'utf8'),
+      ) as Record<string, unknown>;
+
+      expect(checkpoint['commitHash']).toBe('snapshot-before-execute');
+      expect(checkpoint['filePath']).toBe('/test/dir/yolo.py');
+      expect(mockGitService.createFileSnapshot).toHaveBeenCalledWith(
+        'Snapshot for write_file',
+      );
     } finally {
       await fs.rm(tempDir, { recursive: true, force: true });
     }

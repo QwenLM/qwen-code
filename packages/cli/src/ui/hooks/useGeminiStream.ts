@@ -18,6 +18,7 @@ import type {
   ToolCallRequestInfo,
   GeminiErrorEventValue,
   StopFailureErrorType,
+  ScheduledToolCall,
 } from '@qwen-code/qwen-code-core';
 import {
   GeminiEventType as ServerGeminiEventType,
@@ -28,7 +29,6 @@ import {
   MessageSenderType,
   logUserPrompt,
   logUserRetry,
-  GitService,
   UnauthorizedError,
   UserPromptEvent,
   UserRetryEvent,
@@ -254,12 +254,122 @@ export const useGeminiStream = (
   } = useSessionStats();
   const storage = config.storage;
   const logger = useLogger(storage, sessionStates.sessionId);
-  const gitService = useMemo(() => {
-    if (!config.getProjectRoot()) {
-      return;
-    }
-    return new GitService(config.getProjectRoot(), storage);
-  }, [config, storage]);
+  const createRewindCheckpoint = useCallback(
+    async (toolCall: Pick<ScheduledToolCall, 'request'>) => {
+      if (!config.getCheckpointingEnabled()) {
+        return;
+      }
+
+      if (!EDIT_TOOL_NAMES.has(toolCall.request.name)) {
+        return;
+      }
+
+      const callId = toolCall.request.callId;
+      if (checkpointedToolCallIdsRef.current.has(callId)) {
+        return;
+      }
+
+      const filePath = (toolCall.request.args['file_path'] ??
+        toolCall.request.args['path']) as string | undefined;
+      if (!filePath) {
+        onDebugMessage(
+          `Skipping restorable tool call due to missing file_path: ${toolCall.request.name}`,
+        );
+        return;
+      }
+
+      checkpointedToolCallIdsRef.current.add(callId);
+
+      try {
+        const checkpointDir = storage.getProjectTempCheckpointsDir();
+
+        if (!checkpointDir) {
+          return;
+        }
+
+        try {
+          await fs.mkdir(checkpointDir, { recursive: true });
+        } catch (error) {
+          if (!isNodeError(error) || error.code !== 'EEXIST') {
+            onDebugMessage(
+              `Failed to create checkpoint directory: ${getErrorMessage(error)}`,
+            );
+            return;
+          }
+        }
+
+        let gitService;
+        try {
+          gitService = await config.getGitService();
+        } catch (error) {
+          onDebugMessage(
+            `Checkpointing is enabled but Git service is not available. Failed to create snapshot for ${filePath}: ${getErrorMessage(error)}`,
+          );
+          return;
+        }
+
+        let commitHash: string | undefined;
+        try {
+          commitHash = await gitService.createFileSnapshot(
+            `Snapshot for ${toolCall.request.name}`,
+          );
+        } catch (error) {
+          onDebugMessage(
+            `Failed to create new snapshot: ${getErrorMessage(error)}. Attempting to use current commit.`,
+          );
+        }
+
+        if (!commitHash) {
+          commitHash = await gitService.getCurrentCommitHash();
+        }
+
+        if (!commitHash) {
+          onDebugMessage(
+            `Failed to create snapshot for ${filePath}. Checkpointing may not be working properly. Ensure Git is installed and the project directory is accessible.`,
+          );
+          return;
+        }
+
+        const createdAt = new Date().toISOString();
+        const timestamp = createdAt.replace(/:/g, '-').replace(/\./g, '_');
+        const toolName = toolCall.request.name;
+        const fileName = path.basename(filePath);
+        const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
+        const clientHistory = await geminiClient?.getHistory();
+        const toolCallWithSnapshotFilePath = path.join(
+          checkpointDir,
+          toolCallWithSnapshotFileName,
+        );
+
+        await fs.writeFile(
+          toolCallWithSnapshotFilePath,
+          JSON.stringify(
+            {
+              createdAt,
+              sessionId: config.getSessionId(),
+              history,
+              clientHistory,
+              toolCall: {
+                name: toolCall.request.name,
+                args: toolCall.request.args,
+              },
+              commitHash,
+              filePath,
+            },
+            null,
+            2,
+          ),
+        );
+      } catch (error) {
+        onDebugMessage(
+          `Failed to create checkpoint for ${filePath}: ${getErrorMessage(
+            error,
+          )}. This may indicate a problem with Git or file system permissions.`,
+        );
+      }
+    },
+    [config, geminiClient, history, onDebugMessage, storage],
+  );
 
   const [toolCalls, scheduleToolCalls, markToolsAsSubmitted] =
     useReactToolScheduler(
@@ -283,6 +393,7 @@ export const useGeminiStream = (
       config,
       getPreferredEditor,
       onEditorClose,
+      createRewindCheckpoint,
     );
 
   const pendingToolCallGroupDisplay = useMemo(
@@ -1799,116 +1910,13 @@ export const useGeminiStream = (
       );
 
       if (restorableToolCalls.length > 0) {
-        const checkpointDir = storage.getProjectTempCheckpointsDir();
-
-        if (!checkpointDir) {
-          return;
-        }
-
-        try {
-          await fs.mkdir(checkpointDir, { recursive: true });
-        } catch (error) {
-          if (!isNodeError(error) || error.code !== 'EEXIST') {
-            onDebugMessage(
-              `Failed to create checkpoint directory: ${getErrorMessage(error)}`,
-            );
-            return;
-          }
-        }
-
         for (const toolCall of restorableToolCalls) {
-          const filePath = (toolCall.request.args['file_path'] ??
-            toolCall.request.args['path']) as string | undefined;
-          if (!filePath) {
-            onDebugMessage(
-              `Skipping restorable tool call due to missing file_path: ${toolCall.request.name}`,
-            );
-            continue;
-          }
-
-          try {
-            if (!gitService) {
-              onDebugMessage(
-                `Checkpointing is enabled but Git service is not available. Failed to create snapshot for ${filePath}. Ensure Git is installed and working properly.`,
-              );
-              continue;
-            }
-
-            let commitHash: string | undefined;
-            try {
-              commitHash = await gitService.createFileSnapshot(
-                `Snapshot for ${toolCall.request.name}`,
-              );
-            } catch (error) {
-              onDebugMessage(
-                `Failed to create new snapshot: ${getErrorMessage(error)}. Attempting to use current commit.`,
-              );
-            }
-
-            if (!commitHash) {
-              commitHash = await gitService.getCurrentCommitHash();
-            }
-
-            if (!commitHash) {
-              onDebugMessage(
-                `Failed to create snapshot for ${filePath}. Checkpointing may not be working properly. Ensure Git is installed and the project directory is accessible.`,
-              );
-              continue;
-            }
-
-            const timestamp = new Date()
-              .toISOString()
-              .replace(/:/g, '-')
-              .replace(/\./g, '_');
-            const toolName = toolCall.request.name;
-            const fileName = path.basename(filePath);
-            const toolCallWithSnapshotFileName = `${timestamp}-${fileName}-${toolName}.json`;
-            const clientHistory = await geminiClient?.getHistory();
-            const toolCallWithSnapshotFilePath = path.join(
-              checkpointDir,
-              toolCallWithSnapshotFileName,
-            );
-
-            await fs.writeFile(
-              toolCallWithSnapshotFilePath,
-              JSON.stringify(
-                {
-                  createdAt: new Date().toISOString(),
-                  sessionId: config.getSessionId(),
-                  history,
-                  clientHistory,
-                  toolCall: {
-                    name: toolCall.request.name,
-                    args: toolCall.request.args,
-                  },
-                  commitHash,
-                  filePath,
-                },
-                null,
-                2,
-              ),
-            );
-            checkpointedToolCallIdsRef.current.add(toolCall.request.callId);
-          } catch (error) {
-            onDebugMessage(
-              `Failed to create checkpoint for ${filePath}: ${getErrorMessage(
-                error,
-              )}. This may indicate a problem with Git or file system permissions.`,
-            );
-          }
+          await createRewindCheckpoint(toolCall);
         }
       }
     };
     saveRestorableToolCalls();
-  }, [
-    toolCalls,
-    config,
-    onDebugMessage,
-    gitService,
-    history,
-    geminiClient,
-    storage,
-  ]);
+  }, [toolCalls, config, createRewindCheckpoint]);
 
   // ─── Unified notification queue (cron + background agents) ──────
   const notificationQueueRef = useRef<

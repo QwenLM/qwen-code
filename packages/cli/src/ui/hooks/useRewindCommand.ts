@@ -11,6 +11,7 @@ import {
   type Config,
   type PermissionMode,
   type ResumedSessionData,
+  type SessionService,
   CompressionStatus,
   buildApiHistoryFromConversation,
   getCompressionPrompt,
@@ -19,11 +20,16 @@ import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { RewindAction, RewindHistoryEntry } from '../types/rewind.js';
 
-interface RewindSessionService {
-  loadSession(
-    sessionId: string,
-    options?: { leafUuid?: string | null },
-  ): Promise<ResumedSessionData | undefined>;
+type RewindSessionService = Pick<SessionService, 'loadSession'>;
+type HistoryItem = Parameters<UseHistoryManagerReturn['addItem']>[0];
+const REWIND_COMPRESSION_SUMMARY_ACK =
+  'Got it. Thanks for the additional context!';
+
+interface RewindGitRestoreService {
+  restoreProjectFromSnapshot(
+    commitHash: string,
+    options?: { untrackedPathsToDelete?: string[] },
+  ): Promise<void>;
 }
 
 export interface UseRewindCommandOptions {
@@ -59,6 +65,103 @@ function extractResponseText(response: {
   );
 }
 
+function getErrorHint(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function buildRewindSummaryHistory(summaryText: string): Content[] {
+  return [
+    {
+      role: 'user',
+      parts: [{ text: summaryText }],
+    },
+    {
+      role: 'model',
+      parts: [{ text: REWIND_COMPRESSION_SUMMARY_ACK }],
+    },
+  ];
+}
+
+function derivePrefixSessionData(
+  currentSessionData: ResumedSessionData,
+  leafUuid: string | null,
+): ResumedSessionData | undefined {
+  if (leafUuid === null) {
+    return {
+      ...currentSessionData,
+      conversation: {
+        ...currentSessionData.conversation,
+        messages: [],
+      },
+      lastCompletedUuid: null,
+    };
+  }
+
+  const endIndex = currentSessionData.conversation.messages.findIndex(
+    (message) => message.uuid === leafUuid,
+  );
+  if (endIndex < 0) {
+    return undefined;
+  }
+
+  const messages = currentSessionData.conversation.messages.slice(
+    0,
+    endIndex + 1,
+  );
+  return {
+    ...currentSessionData,
+    conversation: {
+      ...currentSessionData.conversation,
+      messages,
+    },
+    lastCompletedUuid: messages.at(-1)?.uuid ?? null,
+  };
+}
+
+function buildHistoryToSummarize(
+  currentSessionData: ResumedSessionData,
+  startUuid: string,
+): Content[] | undefined {
+  const currentMessages = currentSessionData.conversation.messages;
+  const startIndex = currentMessages.findIndex(
+    (message) => message.uuid === startUuid,
+  );
+
+  if (startIndex < 0) {
+    return undefined;
+  }
+
+  return currentMessages
+    .slice(startIndex + 1)
+    .filter((message) => message.type !== 'system' && message.message)
+    .map((message) => structuredClone(message.message as Content));
+}
+
+function getLastUpdatedMs(sessionData: ResumedSessionData): number {
+  const parsed = Date.parse(sessionData.conversation.lastUpdated);
+  return Number.isNaN(parsed) ? 0 : parsed;
+}
+
+function selectCurrentSessionData(
+  config: Config,
+  sessionId: string,
+  persistedSessionData: ResumedSessionData | undefined,
+): ResumedSessionData | undefined {
+  const resumedSessionData = config.getResumedSessionData?.();
+  const activeSessionData =
+    config.getSessionId() === sessionId &&
+    resumedSessionData?.conversation.sessionId === sessionId
+      ? resumedSessionData
+      : undefined;
+
+  return activeSessionData &&
+    (!persistedSessionData ||
+      getLastUpdatedMs(persistedSessionData) <=
+        getLastUpdatedMs(activeSessionData))
+    ? activeSessionData
+    : persistedSessionData;
+}
+
 export function useRewindCommand(
   options?: UseRewindCommandOptions,
 ): UseRewindCommandResult {
@@ -83,6 +186,21 @@ export function useRewindCommand(
   const { config, historyManager, startNewSession, setInputText, remount } =
     options ?? {};
 
+  const addRewindError = useCallback(
+    (text: string, error?: unknown) => {
+      historyManager?.addItem(
+        {
+          type: 'error',
+          text,
+          hint: error === undefined ? undefined : getErrorHint(error),
+        } as HistoryItem,
+        Date.now(),
+      );
+      remount?.();
+    },
+    [historyManager, remount],
+  );
+
   const fireSessionStartEvent = useCallback(async () => {
     if (!config) {
       return;
@@ -101,28 +219,44 @@ export function useRewindCommand(
     }
   }, [config]);
 
-  const restoreConversation = useCallback(
-    async (entry: RewindHistoryEntry) => {
-      if (
-        !config ||
-        !historyManager ||
-        !startNewSession ||
-        !setInputText ||
-        !entry.node
-      ) {
-        return;
+  const loadConversationSession = useCallback(
+    async (entry: RewindHistoryEntry): Promise<ResumedSessionData> => {
+      if (!config) {
+        throw new Error('Rewind configuration is unavailable.');
       }
-
+      if (!entry.node) {
+        throw new Error('Rewind target is missing conversation data.');
+      }
       const sessionId = config.getSessionId();
-      const sessionService =
-        config.getSessionService() as unknown as RewindSessionService;
+      const sessionService: RewindSessionService = config.getSessionService();
       const sessionData = await sessionService.loadSession(sessionId, {
         leafUuid: entry.node.parentUuid,
       });
 
       if (!sessionData) {
-        return;
+        throw new Error('Failed to load rewind session data.');
       }
+
+      return sessionData;
+    },
+    [config],
+  );
+
+  const restoreConversation = useCallback(
+    async (
+      entry: RewindHistoryEntry,
+      loadedSessionData?: ResumedSessionData,
+    ) => {
+      if (!config || !historyManager || !startNewSession || !setInputText) {
+        throw new Error('Rewind conversation restore is unavailable.');
+      }
+      if (!entry.node) {
+        throw new Error('Rewind target is missing conversation data.');
+      }
+
+      const sessionData =
+        loadedSessionData ?? (await loadConversationSession(entry));
+      const sessionId = config.getSessionId();
 
       startNewSession(sessionId);
 
@@ -140,6 +274,7 @@ export function useRewindCommand(
       config,
       fireSessionStartEvent,
       historyManager,
+      loadConversationSession,
       remount,
       setInputText,
       startNewSession,
@@ -149,13 +284,24 @@ export function useRewindCommand(
   const restoreCode = useCallback(
     async (entry: RewindHistoryEntry, addInfoMessage: boolean) => {
       const restoreCodeSummary = entry.restoreCodeSummary ?? entry.codeSummary;
-      if (!config || !restoreCodeSummary.checkpointCommitHash) {
-        return;
+      if (!config) {
+        throw new Error('Rewind code restore is unavailable.');
+      }
+      if (!restoreCodeSummary.checkpointCommitHash) {
+        throw new Error(
+          'No code checkpoint is available for this rewind point.',
+        );
       }
 
-      const gitService = await config.getGitService();
+      const gitService =
+        (await config.getGitService()) as unknown as RewindGitRestoreService;
       await gitService.restoreProjectFromSnapshot(
         restoreCodeSummary.checkpointCommitHash,
+        {
+          untrackedPathsToDelete: restoreCodeSummary.changes.map(
+            (change) => change.path,
+          ),
+        },
       );
 
       if (addInfoMessage) {
@@ -198,56 +344,65 @@ export function useRewindCommand(
       );
       remount?.();
 
-      const sessionId = config.getSessionId();
-      const sessionService =
-        config.getSessionService() as unknown as RewindSessionService;
-      const [prefixSessionData, currentSessionData] = await Promise.all([
-        sessionService.loadSession(sessionId, {
-          leafUuid: entry.node.parentUuid,
-        }),
-        sessionService.loadSession(sessionId),
-      ]);
-
-      if (!prefixSessionData || !currentSessionData) {
-        return;
-      }
-
-      const currentMessages = currentSessionData.conversation.messages;
-      const startIndex = currentMessages.findIndex(
-        (message) => message.uuid === entry.node?.uuid,
-      );
-
-      if (startIndex < 0) {
-        await restoreConversation(entry);
-        return;
-      }
-
-      const historyToSummarize: Content[] = currentMessages
-        .slice(startIndex + 1)
-        .filter((message) => message.type !== 'system' && message.message)
-        .map((message) => structuredClone(message.message as Content));
-
-      if (historyToSummarize.length === 0) {
-        await restoreConversation(entry);
-        return;
-      }
-
-      const contentGenerator = config.getContentGenerator();
-      if (!contentGenerator) {
-        const unavailableErrorUpdate = {
+      const updatePendingWithError = (hint: string) => {
+        const errorUpdate = {
           type: 'error',
           text: 'Failed to summarize messages from this point.',
-          hint: 'Content generator unavailable',
+          hint,
         } as Parameters<NonNullable<typeof historyManager.updateItem>>[1];
-        historyManager.updateItem?.(
-          pendingCompressionId,
-          unavailableErrorUpdate,
-        );
+        if (historyManager.updateItem) {
+          historyManager.updateItem(pendingCompressionId, errorUpdate);
+        } else {
+          historyManager.addItem(errorUpdate as HistoryItem, Date.now());
+        }
         remount?.();
-        return;
-      }
+      };
 
       try {
+        const sessionId = config.getSessionId();
+        const sessionService: RewindSessionService = config.getSessionService();
+        const currentSessionData = selectCurrentSessionData(
+          config,
+          sessionId,
+          await sessionService.loadSession(sessionId),
+        );
+
+        if (!currentSessionData) {
+          updatePendingWithError('Session data unavailable');
+          return;
+        }
+
+        const prefixSessionData = derivePrefixSessionData(
+          currentSessionData,
+          entry.node.parentUuid,
+        );
+
+        if (!prefixSessionData) {
+          updatePendingWithError('Rewind point is not in the current branch');
+          return;
+        }
+
+        const historyToSummarize = buildHistoryToSummarize(
+          currentSessionData,
+          entry.node.uuid,
+        );
+
+        if (!historyToSummarize) {
+          updatePendingWithError('Rewind point is not in the current branch');
+          return;
+        }
+
+        if (historyToSummarize.length === 0) {
+          await restoreConversation(entry, prefixSessionData);
+          return;
+        }
+
+        const contentGenerator = config.getContentGenerator();
+        if (!contentGenerator) {
+          updatePendingWithError('Content generator unavailable');
+          return;
+        }
+
         const response = await contentGenerator.generateContent(
           {
             model: config.getModel(),
@@ -271,32 +426,14 @@ export function useRewindCommand(
 
         const summaryText = extractResponseText(response).trim();
         if (!summaryText) {
-          const emptySummaryErrorUpdate = {
-            type: 'error',
-            text: 'Failed to summarize messages from this point.',
-            hint: 'Empty summary',
-          } as Parameters<NonNullable<typeof historyManager.updateItem>>[1];
-          historyManager.updateItem?.(
-            pendingCompressionId,
-            emptySummaryErrorUpdate,
-          );
-          remount?.();
+          updatePendingWithError('Empty summary');
           return;
         }
 
         const prefixHistory = buildApiHistoryFromConversation(
           prefixSessionData.conversation,
         );
-        const summaryHistory: Content[] = [
-          {
-            role: 'user',
-            parts: [{ text: summaryText }],
-          },
-          {
-            role: 'model',
-            parts: [{ text: 'Got it. Thanks for the additional context!' }],
-          },
-        ];
+        const summaryHistory = buildRewindSummaryHistory(summaryText);
         const compressedHistory = [...prefixHistory, ...summaryHistory];
 
         startNewSession(sessionId);
@@ -337,6 +474,8 @@ export function useRewindCommand(
         config.startNewSession(sessionId, prefixSessionData);
         await config.getGeminiClient()?.initialize?.();
         config.getGeminiClient()?.setHistory(compressedHistory);
+        // Fetch after startNewSession because the config may recreate
+        // session-scoped services for the newly restored branch.
         config.getChatRecordingService()?.recordChatCompression({
           info: {
             originalTokenCount:
@@ -354,13 +493,7 @@ export function useRewindCommand(
         await fireSessionStartEvent();
         remount?.();
       } catch (error) {
-        const summarizeErrorUpdate = {
-          type: 'error',
-          text: 'Failed to summarize messages from this point.',
-          hint: error instanceof Error ? error.message : String(error),
-        } as Parameters<NonNullable<typeof historyManager.updateItem>>[1];
-        historyManager.updateItem?.(pendingCompressionId, summarizeErrorUpdate);
-        remount?.();
+        updatePendingWithError(getErrorHint(error));
       }
     },
     [
@@ -398,26 +531,40 @@ export function useRewindCommand(
 
       closeRewindConfirmation();
 
-      if (action === 'restore_code') {
-        await restoreCode(rewindTarget, true);
-        return;
-      }
+      let codeRestoredBeforeFailure = false;
+      try {
+        if (action === 'restore_code') {
+          await restoreCode(rewindTarget, true);
+          return;
+        }
 
-      if (action === 'restore_code_and_conversation') {
-        await restoreCode(rewindTarget, false);
+        if (action === 'restore_code_and_conversation') {
+          const sessionData = await loadConversationSession(rewindTarget);
+          await restoreCode(rewindTarget, false);
+          codeRestoredBeforeFailure = true;
+          await restoreConversation(rewindTarget, sessionData);
+          return;
+        }
+
+        if (action === 'summarize_from_here') {
+          await summarizeFromHere(rewindTarget);
+          return;
+        }
+
         await restoreConversation(rewindTarget);
-        return;
+      } catch (error) {
+        addRewindError(
+          codeRestoredBeforeFailure
+            ? 'Failed to restore conversation after restoring code. Code was already restored to the selected checkpoint.'
+            : 'Failed to rewind session.',
+          error,
+        );
       }
-
-      if (action === 'summarize_from_here') {
-        await summarizeFromHere(rewindTarget);
-        return;
-      }
-
-      await restoreConversation(rewindTarget);
     },
     [
+      addRewindError,
       closeRewindConfirmation,
+      loadConversationSession,
       restoreCode,
       restoreConversation,
       rewindTarget,

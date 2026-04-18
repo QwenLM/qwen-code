@@ -322,7 +322,8 @@ describe('GitService', () => {
   });
 
   describe('restoreProjectFromSnapshot', () => {
-    it('should restore tracked files without cleaning untracked files', async () => {
+    it('should restore tracked files without deleting untracked files by default', async () => {
+      await fs.writeFile(path.join(projectRoot, 'new-file.ts'), 'new file');
       const service = new GitService(projectRoot, storage);
 
       await service.restoreProjectFromSnapshot('abc123');
@@ -333,7 +334,75 @@ describe('GitService', () => {
         'abc123',
         '.',
       ]);
+      await expect(
+        fs.readFile(path.join(projectRoot, 'new-file.ts'), 'utf8'),
+      ).resolves.toBe('new file');
       expect(hoistedMockClean).not.toHaveBeenCalled();
+    });
+
+    it('should delete requested untracked paths that are absent from the target snapshot', async () => {
+      hoistedMockRaw
+        .mockResolvedValueOnce('')
+        .mockRejectedValueOnce(new Error('missing path'));
+      await fs.writeFile(path.join(projectRoot, 'new-file.ts'), 'new file');
+      const service = new GitService(projectRoot, storage);
+
+      await service.restoreProjectFromSnapshot('abc123', {
+        untrackedPathsToDelete: ['new-file.ts'],
+      });
+
+      expect(hoistedMockRaw).toHaveBeenNthCalledWith(1, [
+        'restore',
+        '--source',
+        'abc123',
+        '.',
+      ]);
+      expect(hoistedMockRaw).toHaveBeenNthCalledWith(
+        2,
+        'cat-file',
+        '-e',
+        'abc123:new-file.ts',
+      );
+      await expect(
+        fs.access(path.join(projectRoot, 'new-file.ts')),
+      ).rejects.toThrow();
+    });
+
+    it('should keep requested paths that exist in the target snapshot', async () => {
+      hoistedMockRaw.mockResolvedValue('');
+      await fs.writeFile(path.join(projectRoot, 'existing-file.ts'), 'content');
+      const service = new GitService(projectRoot, storage);
+
+      await service.restoreProjectFromSnapshot('abc123', {
+        untrackedPathsToDelete: ['existing-file.ts'],
+      });
+
+      expect(hoistedMockRaw).toHaveBeenNthCalledWith(
+        2,
+        'cat-file',
+        '-e',
+        'abc123:existing-file.ts',
+      );
+      await expect(
+        fs.readFile(path.join(projectRoot, 'existing-file.ts'), 'utf8'),
+      ).resolves.toBe('content');
+    });
+
+    it('should ignore unsafe untracked cleanup paths', async () => {
+      hoistedMockRaw.mockResolvedValue('');
+      const service = new GitService(projectRoot, storage);
+
+      await service.restoreProjectFromSnapshot('abc123', {
+        untrackedPathsToDelete: ['../outside.ts', '/tmp/outside.ts'],
+      });
+
+      expect(hoistedMockRaw).toHaveBeenCalledTimes(1);
+      expect(hoistedMockRaw).toHaveBeenCalledWith([
+        'restore',
+        '--source',
+        'abc123',
+        '.',
+      ]);
     });
   });
 
@@ -393,6 +462,48 @@ describe('GitService', () => {
       expect(result).toEqual([
         {
           path: 'image.png',
+          additions: 0,
+          deletions: 0,
+        },
+      ]);
+    });
+
+    it('treats untracked binary files as zero line counts', async () => {
+      hoistedMockRaw
+        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce('image.png\n');
+      await fs.writeFile(
+        path.join(projectRoot, 'image.png'),
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00]),
+      );
+
+      const service = new GitService(projectRoot, storage);
+      const result = await service.getSnapshotDiffSummary('abc123');
+
+      expect(result).toEqual([
+        {
+          path: 'image.png',
+          additions: 0,
+          deletions: 0,
+        },
+      ]);
+    });
+
+    it('treats large untracked files as zero line counts', async () => {
+      hoistedMockRaw
+        .mockResolvedValueOnce('')
+        .mockResolvedValueOnce('large.txt\n');
+      await fs.writeFile(
+        path.join(projectRoot, 'large.txt'),
+        Buffer.alloc(1024 * 1024 + 1, 0x61),
+      );
+
+      const service = new GitService(projectRoot, storage);
+      const result = await service.getSnapshotDiffSummary('abc123');
+
+      expect(result).toEqual([
+        {
+          path: 'large.txt',
           additions: 0,
           deletions: 0,
         },

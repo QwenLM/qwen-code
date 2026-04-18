@@ -81,6 +81,7 @@ export function ConversationHistoryPicker({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [scrollOffset, setScrollOffset] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
 
   const boxWidth = width - 4;
   const reservedLines = 8;
@@ -91,25 +92,61 @@ export function ConversationHistoryPicker({
   );
 
   useEffect(() => {
+    let isMounted = true;
+
     const loadEntries = async () => {
+      setIsLoading(true);
+      setLoadError(null);
+
       try {
         const result = await buildRewindEntries(config, sessionId);
+        if (!isMounted) {
+          return;
+        }
         setEntries(result);
         setSelectedIndex(Math.max(0, result.length - 1));
-        setScrollOffset(Math.max(0, result.length - maxVisibleItems));
+        setScrollOffset(0);
+      } catch (error) {
+        if (!isMounted) {
+          return;
+        }
+        setEntries([]);
+        setSelectedIndex(0);
+        setScrollOffset(0);
+        setLoadError(error instanceof Error ? error.message : String(error));
       } finally {
-        setIsLoading(false);
+        if (isMounted) {
+          setIsLoading(false);
+        }
       }
     };
 
     void loadEntries();
-  }, [config, maxVisibleItems, sessionId]);
+
+    return () => {
+      isMounted = false;
+    };
+  }, [config, sessionId]);
 
   useEffect(() => {
     if (selectedIndex >= entries.length && entries.length > 0) {
       setSelectedIndex(entries.length - 1);
     }
   }, [entries.length, selectedIndex]);
+
+  useEffect(() => {
+    setScrollOffset((currentOffset) => {
+      const maxOffset = Math.max(0, entries.length - maxVisibleItems);
+      const clampedOffset = Math.min(currentOffset, maxOffset);
+      if (selectedIndex < clampedOffset) {
+        return selectedIndex;
+      }
+      if (selectedIndex >= clampedOffset + maxVisibleItems) {
+        return Math.min(maxOffset, selectedIndex - maxVisibleItems + 1);
+      }
+      return clampedOffset;
+    });
+  }, [entries.length, maxVisibleItems, selectedIndex]);
 
   const visibleEntries = useMemo(
     () => entries.slice(scrollOffset, scrollOffset + maxVisibleItems),
@@ -193,6 +230,13 @@ export function ConversationHistoryPicker({
               <Text color={theme.text.secondary}>
                 {t('Loading conversation history...')}
               </Text>
+            </Box>
+          ) : loadError ? (
+            <Box paddingY={1} flexDirection="column">
+              <Text color={theme.status.error}>
+                {t('Failed to load conversation history.')}
+              </Text>
+              <Text color={theme.text.secondary}>{loadError}</Text>
             </Box>
           ) : (
             visibleEntries.map((entry, visibleIndex) => {
