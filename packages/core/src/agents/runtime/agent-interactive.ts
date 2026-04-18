@@ -110,7 +110,7 @@ export class AgentInteractive {
       return;
     }
 
-    this.toolsList = this.core.prepareTools();
+    this.toolsList = await this.core.prepareTools();
     this.core.stats.start(Date.now());
 
     if (this.config.chatHistory?.length) {
