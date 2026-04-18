@@ -12,11 +12,11 @@ Use `web_fetch` to fetch content from a specified URL and process it using an AI
 
 - `url` (string, required): The URL to fetch content from. Must be a fully-formed valid URL starting with `http://` or `https://`.
 - `prompt` (string, required): The prompt describing what information you want to extract from the page content.
-- `format` (string, optional): The preferred content format. Defaults to `"auto"` if not specified.
-  - `"auto"` (default): Requests markdown first, falls back to HTML if the server doesn't support markdown. **Recommended for most use cases** as it can reduce token usage by up to 80% for servers that support markdown.
-  - `"markdown"`: Requests markdown format only. Use when you explicitly need markdown content.
-  - `"html"`: Requests HTML format only. Use when you need the full HTML structure.
-  - `"text"`: Requests plain text only. Use when you specifically need plain text content.
+- `format` (string, optional): Controls the `Accept` header sent to the server. All content is normalized to text for LLM processing regardless of format. Defaults to `"auto"` if not specified.
+  - `"auto"` (default): Prefers markdown via content negotiation (`Accept: text/markdown, text/html`), accepts HTML as fallback. **Recommended for most use cases** as it can reduce token usage by up to 80% for servers that support markdown.
+  - `"markdown"`: Sends `Accept: text/markdown`. Use when you explicitly need markdown content.
+  - `"html"`: Sends `Accept: text/html`. Content is still normalized to text for LLM processing.
+  - `"text"`: Sends `Accept: text/plain`. Use when you specifically need plain text content.
 
 ## How to use `web_fetch` with Qwen Code
 
@@ -82,10 +82,15 @@ Qwen Code's `web_fetch` tool implements support for [Cloudflare's Markdown for A
 
 ### How it works
 
-1. When `format="auto"` (default), the tool sends `Accept: text/markdown, text/html` headers
+1. The `format` parameter controls the `Accept` header sent to the server:
+   - `format="auto"`: sends `Accept: text/markdown, text/html`
+   - `format="markdown"`: sends `Accept: text/markdown`
+   - `format="html"`: sends `Accept: text/html`
+   - `format="text"`: sends `Accept: text/plain`
 2. If the server supports markdown, it returns `Content-Type: text/markdown`
-3. The tool uses the markdown content directly without HTML conversion
-4. If the server doesn't support markdown, it returns HTML as usual
+3. The tool uses markdown or plain text content directly without conversion
+4. If the server returns HTML, it converts to readable text format for LLM processing
+5. All content is normalized to text before being processed by the AI model
 
 ### Benefits
 
