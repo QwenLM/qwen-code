@@ -288,7 +288,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
                   totalBytes = event.chunk.reduce(
                     (sum, line) =>
                       sum +
-                      line.reduce((ls, token) => ls + token.text.length, 0),
+                      line.reduce(
+                        (ls, token) =>
+                          ls + Buffer.byteLength(token.text, 'utf-8'),
+                        0,
+                      ),
                     0,
                   );
                 }

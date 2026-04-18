@@ -10,8 +10,10 @@ import { StreamingState } from '../types.js';
 
 /**
  * OSC 9;4 progress sequences for terminal tab/title bar progress.
- * Supported terminals: iTerm2 3.6.6+, Ghostty 1.2.0+, ConEmu.
+ * Supported terminals: iTerm2 3.6.6+, Ghostty 1.2.0+, ConEmu,
+ * Windows Terminal 1.6+.
  * @see https://iterm2.com/documentation-escape-codes.html
+ * @see https://learn.microsoft.com/en-us/windows/terminal/tutorials/progress-bar-sequences
  */
 const OSC = '\x1b]';
 const BEL = '\x07';
@@ -42,8 +44,7 @@ function isProgressBarSupported(): boolean {
   if (term === 'iTerm.app') return true;
   if (term === 'ghostty') return true;
   if (process.env['ConEmuPID']) return true;
-  // Windows Terminal interprets OSC 9;4 as notifications, not progress
-  if (process.env['WT_SESSION']) return false;
+  if (process.env['WT_SESSION']) return true;
   return false;
 }
 
@@ -75,10 +76,25 @@ export function useTerminalProgress(
     }
 
     return () => {
-      // Only clear if we actually wrote sequences (i.e., terminal supports it)
-      if (isProgressBarSupported()) {
-        writeProgress(PROGRESS_CLEAR);
-      }
+      writeProgress(PROGRESS_CLEAR);
     };
   }, [streamingState, hasToolExecuting, writeProgress]);
+
+  // Ensure the progress bar is cleared if the process exits abruptly (Ctrl+C,
+  // SIGTERM) — otherwise a terminal tab can remain stuck showing progress
+  // after qwen exits.
+  useEffect(() => {
+    if (!isProgressBarSupported()) return;
+    const clearOnExit = () => {
+      stdout?.write(PROGRESS_CLEAR);
+    };
+    process.on('exit', clearOnExit);
+    process.on('SIGINT', clearOnExit);
+    process.on('SIGTERM', clearOnExit);
+    return () => {
+      process.removeListener('exit', clearOnExit);
+      process.removeListener('SIGINT', clearOnExit);
+      process.removeListener('SIGTERM', clearOnExit);
+    };
+  }, [stdout]);
 }
