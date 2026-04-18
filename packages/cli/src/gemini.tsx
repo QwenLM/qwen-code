@@ -269,9 +269,9 @@ export async function startInteractiveUI(
       });
   }
 
-  registerCleanup(() => {
+  registerCleanup(async () => {
     remoteInputWatcher?.shutdown();
-    dualOutputBridge?.shutdown();
+    await dualOutputBridge?.shutdown();
     instance.unmount();
     restoreTerminalRedrawOptimizer();
   });

@@ -44,10 +44,8 @@ describe('DualOutputBridge', () => {
   });
 
   afterEach(async () => {
-    bridge?.shutdown();
+    await bridge?.shutdown();
     bridge = null;
-    // Give the stream a tick to flush before removing the directory
-    await new Promise((r) => setTimeout(r, 10));
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
@@ -69,8 +67,7 @@ describe('DualOutputBridge', () => {
       const newFile = path.join(tmpDir, 'does-not-exist.jsonl');
       // newFile is NOT pre-created — tests the ENOENT fallback path
       bridge = new DualOutputBridge(config, { filePath: newFile });
-      bridge.shutdown();
-      await new Promise((r) => setTimeout(r, 10));
+      await bridge.shutdown();
 
       const lines = readJsonl(newFile);
       expect(lines.length).toBeGreaterThan(0);
@@ -82,8 +79,7 @@ describe('DualOutputBridge', () => {
 
     it('emits a session_start event immediately on construction', async () => {
       bridge = new DualOutputBridge(config, { filePath: target });
-      bridge.shutdown();
-      await new Promise((r) => setTimeout(r, 10));
+      await bridge.shutdown();
 
       const lines = readJsonl(target);
       expect(lines.length).toBeGreaterThan(0);
@@ -100,8 +96,7 @@ describe('DualOutputBridge', () => {
         { filePath: target },
         { version: '1.2.3' },
       );
-      bridge.shutdown();
-      await new Promise((r) => setTimeout(r, 10));
+      await bridge.shutdown();
 
       const lines = readJsonl(target);
       const start = lines.find(
@@ -116,8 +111,7 @@ describe('DualOutputBridge', () => {
 
     it('emits session_end on shutdown for a clean termination signal', async () => {
       bridge = new DualOutputBridge(config, { filePath: target });
-      bridge.shutdown();
-      await new Promise((r) => setTimeout(r, 10));
+      await bridge.shutdown();
 
       const lines = readJsonl(target);
       const end = lines.find(
@@ -132,9 +126,8 @@ describe('DualOutputBridge', () => {
 
     it('shutdown is idempotent — calling it twice emits session_end only once', async () => {
       bridge = new DualOutputBridge(config, { filePath: target });
-      bridge.shutdown();
-      bridge.shutdown();
-      await new Promise((r) => setTimeout(r, 10));
+      await bridge.shutdown();
+      await bridge.shutdown();
 
       const lines = readJsonl(target);
       const endEvents = lines.filter(
@@ -146,8 +139,7 @@ describe('DualOutputBridge', () => {
     it('emitControlError routes through the adapter as a control_response error', async () => {
       bridge = new DualOutputBridge(config, { filePath: target });
       bridge.emitControlError('req-missing', 'unknown request_id');
-      bridge.shutdown();
-      await new Promise((r) => setTimeout(r, 10));
+      await bridge.shutdown();
 
       const lines = readJsonl(target);
       const errorResponse = lines.find(
@@ -169,8 +161,7 @@ describe('DualOutputBridge', () => {
       bridge = new DualOutputBridge(config, { filePath: target });
       bridge.emitPermissionRequest('req-1', 'shell', 'tu-1', { cmd: 'ls' });
       bridge.emitControlResponse('req-1', false);
-      bridge.shutdown();
-      await new Promise((r) => setTimeout(r, 10));
+      await bridge.shutdown();
 
       const lines = readJsonl(target);
       const request = lines.find((l) => l['type'] === 'control_request');
@@ -198,7 +189,7 @@ describe('DualOutputBridge', () => {
 
     it('reports isConnected=false after shutdown and silently drops further events', async () => {
       bridge = new DualOutputBridge(config, { filePath: target });
-      bridge.shutdown();
+      await bridge.shutdown();
       expect(bridge.isConnected).toBe(false);
 
       // Should not throw
