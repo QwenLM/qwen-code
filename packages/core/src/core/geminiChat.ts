@@ -800,7 +800,9 @@ export class GeminiChat {
       isSchemaDepthError(error.message) ||
       isInvalidArgumentError(error.message)
     ) {
-      const tools = this.config.getToolRegistry().getAllTools();
+      const toolRegistry = this.config.getToolRegistry();
+      await toolRegistry.warmAll();
+      const tools = toolRegistry.getAllTools();
       const cyclicSchemaTools: string[] = [];
       for (const tool of tools) {
         if (
