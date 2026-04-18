@@ -1083,6 +1083,12 @@ export default {
     'Press Enter to start authentication, Esc to go back',
   'Authenticating... Please complete the login in your browser.':
     'Authenticating... Please complete the login in your browser.',
+  'Press c to copy the authorization URL to your clipboard.':
+    'Press c to copy the authorization URL to your clipboard.',
+  'Copy request sent to your terminal. If paste is empty, copy the URL above manually.':
+    'Copy request sent to your terminal. If paste is empty, copy the URL above manually.',
+  'Cannot write to terminal — copy the URL above manually.':
+    'Cannot write to terminal — copy the URL above manually.',
   'Press Enter or Esc to go back': 'Press Enter or Esc to go back',
 
   // MCP Tool List

@@ -133,11 +133,16 @@ async function createMockConfig(
   await config.refreshAuth(AuthType.USE_GEMINI);
 
   // Mock ToolRegistry
-  const mockToolRegistry = {
+  const mockToolRegistryBase = {
+    warmAll: vi.fn().mockResolvedValue(undefined),
     getTool: vi.fn(),
     getFunctionDeclarations: vi.fn().mockReturnValue([]),
     getFunctionDeclarationsFiltered: vi.fn().mockReturnValue([]),
     getAllToolNames: vi.fn().mockReturnValue([]),
+  };
+  const mockToolRegistry = {
+    ...mockToolRegistryBase,
+    ensureTool: vi.fn(async (name: string) => mockToolRegistry.getTool(name)),
     ...toolRegistryMocks,
   } as unknown as ToolRegistry;
 
