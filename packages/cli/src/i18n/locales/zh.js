@@ -1023,6 +1023,12 @@ export default {
     '按 Enter 开始认证，Esc 返回',
   'Authenticating... Please complete the login in your browser.':
     '认证中... 请在浏览器中完成登录。',
+  'Press c to copy the authorization URL to your clipboard.':
+    '按 c 复制授权 URL 到剪贴板。',
+  'Copy request sent to your terminal. If paste is empty, copy the URL above manually.':
+    '已向终端发送复制请求；若粘贴为空，请手动复制上方 URL。',
+  'Cannot write to terminal — copy the URL above manually.':
+    '无法写入终端，请手动复制上方 URL。',
   'Press Enter or Esc to go back': '按 Enter 或 Esc 返回',
 
   // MCP Server Detail

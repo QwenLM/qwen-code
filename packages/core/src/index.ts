@@ -182,7 +182,11 @@ export * from './lsp/types.js';
 // MCP (Model Context Protocol)
 // ============================================================================
 
-export { MCPOAuthProvider } from './mcp/oauth-provider.js';
+export {
+  MCPOAuthProvider,
+  OAUTH_AUTH_URL_EVENT,
+  OAUTH_DISPLAY_MESSAGE_EVENT,
+} from './mcp/oauth-provider.js';
 export type {
   MCPOAuthConfig,
   OAuthDisplayMessage,
