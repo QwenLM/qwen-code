@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
+  availableCommandsCallbackRef,
   mockCreateImagePathResolver,
   mockGetGlobalTempDir,
   mockGetPanel,
@@ -15,6 +16,11 @@ const {
   mockOpenExternal,
   slashCommandNotificationCallbackRef,
 } = vi.hoisted(() => ({
+  availableCommandsCallbackRef: {
+    current: undefined as
+      | ((commands: Array<{ name: string; description?: string }>) => void)
+      | undefined,
+  },
   mockCreateImagePathResolver: vi.fn(),
   mockGetGlobalTempDir: vi.fn(() => '/global-temp'),
   mockGetPanel: vi.fn<() => { webview: { postMessage: unknown } } | null>(
@@ -85,7 +91,15 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onUsageUpdate = vi.fn();
     onModelInfo = vi.fn();
     onModelChanged = vi.fn();
-    onAvailableCommands = vi.fn();
+    onAvailableCommands = vi.fn(
+      (
+        callback: (
+          commands: Array<{ name: string; description?: string }>,
+        ) => void,
+      ) => {
+        availableCommandsCallbackRef.current = callback;
+      },
+    );
     onAvailableModels = vi.fn();
     onSlashCommandNotification = vi.fn(
       (
@@ -232,6 +246,7 @@ describe('WebViewProvider.attachToView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockGetPanel.mockReturnValue(null);
+    availableCommandsCallbackRef.current = undefined;
     slashCommandNotificationCallbackRef.current = undefined;
     mockCreateImagePathResolver.mockReturnValue((paths: string[]) =>
       paths.map((entry) => ({
@@ -338,6 +353,37 @@ describe('WebViewProvider.attachToView', () => {
       type: 'streamChunk',
       data: {
         chunk: 'Generating project summary...\n',
+      },
+    });
+  });
+
+  it('re-sends cached available commands when the webview becomes ready', async () => {
+    const { postMessage, messageHandler } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+
+    availableCommandsCallbackRef.current?.([
+      {
+        name: 'insight',
+        description: 'Generate personalized insights',
+      },
+    ]);
+    postMessage.mockClear();
+
+    await messageHandler?.({
+      type: 'webviewReady',
+      data: {},
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'availableCommands',
+      data: {
+        commands: [
+          {
+            name: 'insight',
+            description: 'Generate personalized insights',
+          },
+        ],
       },
     });
   });

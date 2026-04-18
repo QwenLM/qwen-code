@@ -40,13 +40,6 @@ export const InsightProgressCard: FC<InsightProgressCardProps> = ({
           </div>
         )}
       </div>
-
-      <div className="mt-2 h-1 overflow-hidden rounded-full bg-[color-mix(in_srgb,var(--vscode-widget-border,var(--vscode-panel-border,#2a2f3a))_70%,transparent)]">
-        <div
-          className="h-full rounded-full bg-[var(--vscode-progressBar-background,#0e70c0)] transition-[width] duration-300 ease-out"
-          style={{ width: `${percent}%` }}
-        />
-      </div>
     </div>
   );
 };
