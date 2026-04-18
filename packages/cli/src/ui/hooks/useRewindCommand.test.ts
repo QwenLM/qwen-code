@@ -462,6 +462,11 @@ describe('useRewindCommand', () => {
     });
     expect(sessionService.loadSession).toHaveBeenNthCalledWith(2, 'session-1');
     expect(contentGenerator.generateContent).toHaveBeenCalledTimes(1);
+    const summarizeRequest = contentGenerator.generateContent.mock.calls[0]![0];
+    const summarizedContents = JSON.stringify(summarizeRequest.contents);
+    expect(summarizedContents).not.toContain('who are you ?');
+    expect(summarizedContents).toContain('I am Qwen Code.');
+    expect(summarizedContents).toContain('show me your skills');
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
     expect(historyManager.addItem).toHaveBeenNthCalledWith(
@@ -502,7 +507,7 @@ describe('useRewindCommand', () => {
       4,
       {
         type: 'info',
-        text: 'Summarized 3 messages from this point. Context: “who are you ?”',
+        text: 'Summarized 2 messages from this point. Context: “who are you ?”',
       },
       expect.any(Number),
     );
@@ -552,6 +557,16 @@ describe('useRewindCommand', () => {
         timestamp: '2025-01-01T00:02:00.000Z',
         type: 'user',
         message: { role: 'user', parts: [{ text: 'who are you ?' }] },
+        cwd: '/tmp/project',
+        version: '1.0.0',
+      },
+      {
+        uuid: 'assistant-2',
+        parentUuid: 'user-2',
+        sessionId: 'session-1',
+        timestamp: '2025-01-01T00:02:10.000Z',
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'I am Qwen Code.' }] },
         cwd: '/tmp/project',
         version: '1.0.0',
       },

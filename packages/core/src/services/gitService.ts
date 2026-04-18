@@ -91,8 +91,6 @@ export class GitService {
       await repo.commit('Initial commit', { '--allow-empty': null });
     }
 
-    await this.ensureBaselineSnapshot();
-
     const userGitIgnorePath = path.join(this.projectRoot, '.gitignore');
     const shadowGitIgnorePath = path.join(repoDir, '.gitignore');
 
@@ -106,6 +104,8 @@ export class GitService {
     }
 
     await fs.writeFile(shadowGitIgnorePath, userGitIgnoreContent);
+
+    await this.ensureBaselineSnapshot();
   }
 
   private async ensureBaselineSnapshot(): Promise<void> {
@@ -168,8 +168,6 @@ export class GitService {
   async restoreProjectFromSnapshot(commitHash: string): Promise<void> {
     const repo = this.shadowGitRepository;
     await repo.raw(['restore', '--source', commitHash, '.']);
-    // Removes any untracked files that were introduced post snapshot.
-    await repo.clean('f', ['-d']);
   }
 
   async getSnapshotDiffSummary(

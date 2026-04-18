@@ -32,6 +32,7 @@ const hoistedMockInit = vi.hoisted(() => vi.fn());
 const hoistedMockRaw = vi.hoisted(() => vi.fn());
 const hoistedMockAdd = vi.hoisted(() => vi.fn());
 const hoistedMockCommit = vi.hoisted(() => vi.fn());
+const hoistedMockClean = vi.hoisted(() => vi.fn());
 vi.mock('simple-git', () => ({
   simpleGit: hoistedMockSimpleGit.mockImplementation(() => ({
     checkIsRepo: hoistedMockCheckIsRepo,
@@ -39,6 +40,7 @@ vi.mock('simple-git', () => ({
     raw: hoistedMockRaw,
     add: hoistedMockAdd,
     commit: hoistedMockCommit,
+    clean: hoistedMockClean,
     env: hoistedMockEnv,
   })),
   CheckRepoActions: { IS_REPO_ROOT: 'is-repo-root' },
@@ -86,6 +88,7 @@ describe('GitService', () => {
       raw: hoistedMockRaw,
       add: hoistedMockAdd,
       commit: hoistedMockCommit,
+      clean: hoistedMockClean,
     }));
     hoistedMockSimpleGit.mockImplementation(() => ({
       checkIsRepo: hoistedMockCheckIsRepo,
@@ -93,6 +96,7 @@ describe('GitService', () => {
       raw: hoistedMockRaw,
       add: hoistedMockAdd,
       commit: hoistedMockCommit,
+      clean: hoistedMockClean,
       env: hoistedMockEnv,
     }));
     hoistedMockCheckIsRepo.mockResolvedValue(false);
@@ -102,6 +106,7 @@ describe('GitService', () => {
     hoistedMockCommit.mockResolvedValue({
       commit: 'initial',
     });
+    hoistedMockClean.mockResolvedValue(undefined);
     storage = new Storage(projectRoot);
   });
 
@@ -237,6 +242,26 @@ describe('GitService', () => {
       expect(copiedContent).toBe(gitignoreContent);
     });
 
+    it('should copy .gitignore before creating the baseline snapshot', async () => {
+      const gitignoreContent = 'node_modules/\n.env\n';
+      await fs.writeFile(
+        path.join(projectRoot, '.gitignore'),
+        gitignoreContent,
+      );
+      hoistedMockRaw.mockResolvedValueOnce('');
+      hoistedMockAdd.mockImplementationOnce(async () => {
+        await expect(
+          fs.readFile(path.join(repoDir, '.gitignore'), 'utf-8'),
+        ).resolves.toBe(gitignoreContent);
+      });
+
+      const service = new GitService(projectRoot, storage);
+      await service.setupShadowGitRepository();
+
+      expect(hoistedMockAdd).toHaveBeenCalledWith('.');
+      expect(hoistedMockCommit).toHaveBeenCalledWith('Initial snapshot');
+    });
+
     it('should not create a .gitignore in shadow repo if project .gitignore does not exist', async () => {
       const service = new GitService(projectRoot, storage);
       await service.setupShadowGitRepository();
@@ -293,6 +318,22 @@ describe('GitService', () => {
 
       expect(hoistedMockAdd).toHaveBeenCalledWith('.');
       expect(hoistedMockCommit).toHaveBeenCalledWith('Initial snapshot');
+    });
+  });
+
+  describe('restoreProjectFromSnapshot', () => {
+    it('should restore tracked files without cleaning untracked files', async () => {
+      const service = new GitService(projectRoot, storage);
+
+      await service.restoreProjectFromSnapshot('abc123');
+
+      expect(hoistedMockRaw).toHaveBeenCalledWith([
+        'restore',
+        '--source',
+        'abc123',
+        '.',
+      ]);
+      expect(hoistedMockClean).not.toHaveBeenCalled();
     });
   });
 

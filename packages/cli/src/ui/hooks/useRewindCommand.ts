@@ -223,7 +223,7 @@ export function useRewindCommand(
       }
 
       const historyToSummarize: Content[] = currentMessages
-        .slice(startIndex)
+        .slice(startIndex + 1)
         .filter((message) => message.type !== 'system' && message.message)
         .map((message) => structuredClone(message.message as Content));
 
