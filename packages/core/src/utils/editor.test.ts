@@ -735,10 +735,6 @@ describe('editor utils', () => {
       });
 
       it('should prefer CLI in PATH over app bundle', () => {
-        toEqual(['--wait', '--diff', 'old.txt', 'new.txt']);
-      });
-
-      it('should prefer CLI in PATH over app bundle', () => {
         Object.defineProperty(process, 'platform', { value: 'darwin' });
         (execSync as Mock).mockReturnValue(Buffer.from('/usr/local/bin/zed'));
         (existsSync as Mock).mockReturnValue(true); // App also exists
