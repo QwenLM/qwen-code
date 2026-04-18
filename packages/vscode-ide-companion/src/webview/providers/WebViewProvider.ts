@@ -11,6 +11,7 @@ import type {
   RequestPermissionRequest,
   AvailableCommand,
   ModelInfo,
+  AvailableCommand,
 } from '@agentclientprotocol/sdk';
 import type { AskUserQuestionRequest } from '../../types/acpTypes.js';
 import type {

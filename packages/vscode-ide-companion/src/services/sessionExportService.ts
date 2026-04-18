@@ -17,35 +17,25 @@ import {
   toJsonl,
   toMarkdown,
 } from '../../../cli/src/ui/utils/export/index.js';
+import {
+  EXPORT_SESSION_FORMATS,
+  getExportSubcommandRequiredMessage,
+  isSessionExportFormat,
+  type SessionExportFormat,
+} from '../utils/exportSlashCommand.js';
 
-export const SESSION_EXPORT_FORMATS = ['html', 'md', 'json', 'jsonl'] as const;
-
-export type SessionExportFormat = (typeof SESSION_EXPORT_FORMATS)[number];
+export { EXPORT_SESSION_FORMATS as SESSION_EXPORT_FORMATS };
+export type { SessionExportFormat } from '../utils/exportSlashCommand.js';
 
 export interface SessionExportResult {
-  cancelled: boolean;
-  filename?: string;
-  uri?: vscode.Uri;
+  filename: string;
+  uri: vscode.Uri;
 }
 
 const EXPORT_CONFIG = {
   getChannel: () => 'vscode-companion',
   getToolRegistry: () => undefined,
 } as unknown as Config;
-
-const SAVE_DIALOG_FILTERS: Record<
-  SessionExportFormat,
-  Record<string, string[]>
-> = {
-  html: { HTML: ['html'] },
-  md: { Markdown: ['md'] },
-  json: { JSON: ['json'] },
-  jsonl: { JSONL: ['jsonl'] },
-};
-
-function isSessionExportFormat(value: string): value is SessionExportFormat {
-  return SESSION_EXPORT_FORMATS.includes(value as SessionExportFormat);
-}
 
 export function parseExportSlashCommand(
   text: string,
@@ -62,7 +52,7 @@ export function parseExportSlashCommand(
   }
 
   if (!format) {
-    return 'html';
+    throw new Error(getExportSubcommandRequiredMessage());
   }
 
   const normalizedFormat = format.toLowerCase();
@@ -119,22 +109,12 @@ export async function exportSessionToFile(options: {
   );
   const content = renderExportContent(format, normalizedData);
   const filename = generateExportFilename(format);
-  const uri = await vscode.window.showSaveDialog({
-    defaultUri: vscode.Uri.file(path.join(cwd, filename)),
-    filters: SAVE_DIALOG_FILTERS[format],
-    saveLabel: 'Export Session',
-    title: 'Export Session',
-  });
-
-  if (!uri) {
-    return { cancelled: true };
-  }
+  const uri = vscode.Uri.file(path.join(cwd, filename));
 
   await fs.writeFile(uri.fsPath, content, 'utf-8');
 
   return {
-    cancelled: false,
-    filename: path.basename(uri.fsPath),
+    filename,
     uri,
   };
 }

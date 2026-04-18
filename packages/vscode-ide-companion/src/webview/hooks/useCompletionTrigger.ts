@@ -7,6 +7,7 @@
 import type { RefObject } from 'react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { CompletionItem } from '../../types/completionItemTypes.js';
+import { shouldAllowCompletionQuery } from '../utils/slashCommandUtils.js';
 
 interface CompletionTriggerState {
   isOpen: boolean;
@@ -325,8 +326,7 @@ export function useCompletionTrigger(
         if (isValidTrigger) {
           const query = text.substring(triggerPos + 1, effectiveCursorPosition);
 
-          // Only show if query doesn't contain spaces (still typing the reference)
-          if (!query.includes(' ') && !query.includes('\n')) {
+          if (shouldAllowCompletionQuery(triggerChar, query)) {
             // Get precise cursor position for menu
             const cursorPos = getCursorPosition();
             if (cursorPos) {

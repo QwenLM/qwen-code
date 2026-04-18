@@ -9,12 +9,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const {
   mockProcessImageAttachments,
   mockShowErrorMessage,
-  mockShowInformationMessage,
   mockExportSessionToFile,
 } = vi.hoisted(() => ({
   mockProcessImageAttachments: vi.fn(),
   mockShowErrorMessage: vi.fn(),
-  mockShowInformationMessage: vi.fn(),
   mockExportSessionToFile: vi.fn(),
 }));
 const { mockExecuteCommand } = vi.hoisted(() => ({
@@ -25,7 +23,6 @@ vi.mock('vscode', () => ({
   window: {
     showWarningMessage: vi.fn(),
     showErrorMessage: mockShowErrorMessage,
-    showInformationMessage: mockShowInformationMessage,
   },
   commands: {
     executeCommand: mockExecuteCommand,
@@ -47,11 +44,14 @@ vi.mock('../utils/imageHandler.js', async (importOriginal) => {
 vi.mock('../../services/sessionExportService.js', () => ({
   parseExportSlashCommand: (text: string) => {
     const trimmed = text.trim();
-    if (trimmed === '/export') {
+    if (trimmed === '/export html') {
       return 'html';
     }
     if (trimmed === '/export md') {
       return 'md';
+    }
+    if (trimmed === '/export') {
+      throw new Error("Command '/export' requires a subcommand.");
     }
     return null;
   },
@@ -69,9 +69,7 @@ describe('SessionMessageHandler', () => {
       savedImageCount: 0,
       promptImages: [],
     });
-    mockShowInformationMessage.mockResolvedValue(undefined);
     mockExportSessionToFile.mockResolvedValue({
-      cancelled: false,
       filename: 'export.html',
       uri: { fsPath: '/workspace/export.html' },
     });
@@ -246,7 +244,7 @@ describe('SessionMessageHandler', () => {
     });
   });
 
-  it('intercepts /export and uses the VSCode export flow instead of sending a prompt', async () => {
+  it('intercepts /export html and uses the VSCode export flow instead of sending a prompt', async () => {
     const agentManager = {
       isConnected: true,
       currentSessionId: 'session-1',
@@ -272,7 +270,7 @@ describe('SessionMessageHandler', () => {
     await handler.handle({
       type: 'sendMessage',
       data: {
-        text: '/export',
+        text: '/export html',
       },
     });
 
@@ -283,10 +281,14 @@ describe('SessionMessageHandler', () => {
     });
     expect(conversationStore.addMessage).not.toHaveBeenCalled();
     expect(agentManager.sendMessage).not.toHaveBeenCalled();
-    expect(mockShowInformationMessage).toHaveBeenCalledWith(
-      'Session exported to HTML: export.html',
-      'Open File',
-    );
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'assistant',
+        content:
+          'Session exported to HTML: [export.html](/workspace/export.html)',
+      }),
+    });
   });
 
   it('prefers the active ACP session id over the local conversation id when exporting', async () => {
@@ -315,7 +317,7 @@ describe('SessionMessageHandler', () => {
     await handler.handle({
       type: 'sendMessage',
       data: {
-        text: '/export',
+        text: '/export html',
       },
     });
 
@@ -323,6 +325,42 @@ describe('SessionMessageHandler', () => {
       sessionId: 'session-1',
       cwd: '/workspace',
       format: 'html',
+    });
+    expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('reports bare /export as a missing subcommand instead of exporting', async () => {
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi.fn(),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export',
+      },
+    });
+
+    expect(mockExportSessionToFile).not.toHaveBeenCalled();
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'error',
+      data: { message: "Command '/export' requires a subcommand." },
     });
     expect(agentManager.sendMessage).not.toHaveBeenCalled();
   });
@@ -359,9 +397,6 @@ describe('SessionMessageHandler', () => {
       },
     });
 
-    expect(mockShowErrorMessage).toHaveBeenCalledWith(
-      'Failed to export session: disk full',
-    );
     expect(sendToWebView).toHaveBeenCalledWith({
       type: 'error',
       data: { message: 'Failed to export session: disk full' },

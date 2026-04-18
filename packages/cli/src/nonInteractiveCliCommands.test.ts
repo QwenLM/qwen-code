@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { handleSlashCommand } from './nonInteractiveCliCommands.js';
+import {
+  getAvailableCommands,
+  handleSlashCommand,
+} from './nonInteractiveCliCommands.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './config/settings.js';
 import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
@@ -275,5 +278,50 @@ describe('handleSlashCommand', () => {
       expect(result.content).toBe('Command executed successfully.');
       expect(result.messageType).toBe('info');
     }
+  });
+});
+
+describe('getAvailableCommands', () => {
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    mockCommandServiceCreate.mockResolvedValue({
+      getCommands: mockGetCommands,
+    });
+
+    mockConfig = {
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(false),
+      getSessionId: vi.fn().mockReturnValue('test-session'),
+      getFolderTrustFeature: vi.fn().mockReturnValue(false),
+      getFolderTrust: vi.fn().mockReturnValue(false),
+      getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      storage: {},
+    } as unknown as Config;
+  });
+
+  it('includes /export in the default non-interactive command list', async () => {
+    mockGetCommands.mockReturnValue([
+      {
+        name: 'export',
+        description: 'Export current session',
+        kind: CommandKind.BUILT_IN,
+        action: vi.fn(),
+      },
+      {
+        name: 'help',
+        description: 'Show help',
+        kind: CommandKind.BUILT_IN,
+        action: vi.fn(),
+      },
+    ]);
+
+    const commands = await getAvailableCommands(
+      mockConfig,
+      new AbortController().signal,
+    );
+
+    expect(commands.map((command) => command.name)).toContain('export');
+    expect(commands.map((command) => command.name)).not.toContain('help');
   });
 });

@@ -15,7 +15,6 @@ const {
   mockToJson,
   mockToJsonl,
   mockGenerateExportFilename,
-  mockShowSaveDialog,
   mockWriteFile,
 } = vi.hoisted(() => ({
   mockLoadSession: vi.fn(),
@@ -26,7 +25,6 @@ const {
   mockToJson: vi.fn(),
   mockToJsonl: vi.fn(),
   mockGenerateExportFilename: vi.fn(),
-  mockShowSaveDialog: vi.fn(),
   mockWriteFile: vi.fn(),
 }));
 
@@ -61,9 +59,6 @@ vi.mock('node:fs/promises', () => ({
 vi.mock('vscode', () => ({
   Uri: {
     file: (fsPath: string) => ({ fsPath }),
-  },
-  window: {
-    showSaveDialog: mockShowSaveDialog,
   },
 }));
 
@@ -104,12 +99,17 @@ describe('sessionExportService', () => {
       expect(parseExportSlashCommand('/model')).toBeNull();
     });
 
-    it('defaults to html for bare /export', () => {
-      expect(parseExportSlashCommand('/export')).toBe('html');
-      expect(parseExportSlashCommand('/export   ')).toBe('html');
+    it('requires an explicit subcommand for bare /export', () => {
+      expect(() => parseExportSlashCommand('/export')).toThrow(
+        "Command '/export' requires a subcommand.",
+      );
+      expect(() => parseExportSlashCommand('/export   ')).toThrow(
+        "Command '/export' requires a subcommand.",
+      );
     });
 
     it('returns the requested export format', () => {
+      expect(parseExportSlashCommand('/export html')).toBe('html');
       expect(parseExportSlashCommand('/export md')).toBe('md');
       expect(parseExportSlashCommand('/export JSON')).toBe('json');
     });
@@ -125,11 +125,7 @@ describe('sessionExportService', () => {
   });
 
   describe('exportSessionToFile', () => {
-    it('writes the exported session to the user-selected file', async () => {
-      mockShowSaveDialog.mockResolvedValue({
-        fsPath: '/workspace/custom-export.html',
-      });
-
+    it('writes the exported session to the default CLI export path', async () => {
       const result = await exportSessionToFile({
         sessionId: 'session-1',
         cwd: '/workspace',
@@ -143,28 +139,14 @@ describe('sessionExportService', () => {
       expect(mockNormalizeSessionData).toHaveBeenCalled();
       expect(mockToHtml).toHaveBeenCalled();
       expect(mockWriteFile).toHaveBeenCalledWith(
-        '/workspace/custom-export.html',
+        '/workspace/qwen-export.html',
         '<html>export</html>',
         'utf-8',
       );
       expect(result).toEqual({
-        cancelled: false,
-        filename: 'custom-export.html',
-        uri: { fsPath: '/workspace/custom-export.html' },
+        filename: 'qwen-export.html',
+        uri: { fsPath: '/workspace/qwen-export.html' },
       });
-    });
-
-    it('returns cancelled when the save dialog is dismissed', async () => {
-      mockShowSaveDialog.mockResolvedValue(undefined);
-
-      const result = await exportSessionToFile({
-        sessionId: 'session-1',
-        cwd: '/workspace',
-        format: 'md',
-      });
-
-      expect(mockWriteFile).not.toHaveBeenCalled();
-      expect(result).toEqual({ cancelled: true });
     });
 
     it('throws when the target session cannot be loaded', async () => {

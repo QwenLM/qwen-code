@@ -21,6 +21,15 @@ import {
   type SessionExportFormat,
 } from '../../services/sessionExportService.js';
 
+function formatExportSuccessMessage(
+  formatLabel: string,
+  filename: string,
+  filePath: string,
+): string {
+  const markdownLinkPath = filePath.replace(/\\/g, '/');
+  return `Session exported to ${formatLabel}: [${filename}](${markdownLinkPath})`;
+}
+
 /**
  * Session message handler
  * Handles all session-related messages
@@ -309,7 +318,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
       this.agentManager.currentSessionId ?? this.currentConversationId;
     if (!sessionId) {
       const errorMsg = 'No active session found to export.';
-      vscode.window.showErrorMessage(errorMsg);
       this.sendToWebView({
         type: 'error',
         data: { message: errorMsg },
@@ -320,23 +328,22 @@ export class SessionMessageHandler extends BaseMessageHandler {
     try {
       const cwd = await this.resolveSessionWorkingDir(sessionId);
       const result = await exportSessionToFile({ sessionId, cwd, format });
-      if (result.cancelled || !result.filename || !result.uri) {
-        return;
-      }
-
       const formatLabel = format.toUpperCase();
-      const selection = await vscode.window.showInformationMessage(
-        `Session exported to ${formatLabel}: ${result.filename}`,
-        'Open File',
-      );
-
-      if (selection === 'Open File') {
-        await vscode.commands.executeCommand('vscode.open', result.uri);
-      }
+      this.sendToWebView({
+        type: 'message',
+        data: {
+          role: 'assistant',
+          content: formatExportSuccessMessage(
+            formatLabel,
+            result.filename,
+            result.uri.fsPath,
+          ),
+          timestamp: Date.now(),
+        },
+      });
     } catch (error) {
       const errorMsg = this.getErrorMessage(error);
       console.error('[SessionMessageHandler] Failed to export session:', error);
-      vscode.window.showErrorMessage(`Failed to export session: ${errorMsg}`);
       this.sendToWebView({
         type: 'error',
         data: { message: `Failed to export session: ${errorMsg}` },
@@ -383,7 +390,6 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
     } catch (error) {
       const errorMsg = this.getErrorMessage(error);
-      vscode.window.showErrorMessage(errorMsg);
       this.sendToWebView({
         type: 'error',
         data: { message: errorMsg },
