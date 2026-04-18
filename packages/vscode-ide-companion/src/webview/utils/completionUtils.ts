@@ -30,8 +30,17 @@ export function isSkillsSecondaryQuery(query: string): boolean {
  * secondary skills picker instead of sending the command immediately.
  *
  * @param item - The completion item the user selected
- * @returns true when the item represents the /skills command
+ * @param availableSkills - Skills advertised by the backend for the picker
+ * @returns true when the item represents the /skills command and there are
+ * available skills to show
  */
-export function shouldOpenSkillsSecondaryPicker(item: CompletionItem): boolean {
-  return item.type === 'command' && item.id === 'skills';
+export function shouldOpenSkillsSecondaryPicker(
+  item: CompletionItem,
+  availableSkills: string[],
+): boolean {
+  return (
+    item.type === 'command' &&
+    item.id === 'skills' &&
+    availableSkills.length > 0
+  );
 }
