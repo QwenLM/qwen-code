@@ -76,7 +76,7 @@ class WebFetchToolInvocation extends BaseToolInvocation<
         return 'text/plain';
       case 'auto':
       default:
-        return 'text/markdown, text/html';
+        return 'text/markdown, text/html, text/plain';
     }
   }
 
