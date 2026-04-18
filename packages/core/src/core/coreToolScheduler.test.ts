@@ -3919,16 +3919,22 @@ describe('CoreToolScheduler validation retry loop detection', () => {
 
   function createSchedulerWithTool(tool: StrictStringTool) {
     const mockToolRegistry = {
-      getTool: () => tool,
+      ensureTool: async (name: string) =>
+        name === StrictStringTool.Name ? tool : undefined,
+      getTool: (name: string) =>
+        name === StrictStringTool.Name ? tool : undefined,
       getFunctionDeclarations: () => [],
       tools: new Map(),
       discovery: {},
       registerTool: () => {},
-      getToolByName: () => tool,
-      getToolByDisplayName: () => tool,
+      getToolByName: (name: string) =>
+        name === StrictStringTool.Name ? tool : undefined,
+      getToolByDisplayName: (name: string) =>
+        name === 'StrictStringTool' ? tool : undefined,
       getTools: () => [],
       discoverTools: async () => {},
       getAllTools: () => [],
+      getAllToolNames: () => [StrictStringTool.Name],
       getToolsByServer: () => [],
     } as unknown as ToolRegistry;
 
