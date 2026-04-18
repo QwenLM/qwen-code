@@ -70,6 +70,7 @@ import { DualOutputBridge } from './dualOutput/DualOutputBridge.js';
 import { DualOutputContext } from './dualOutput/DualOutputContext.js';
 import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
 import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
+import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -155,6 +156,10 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
+  const restoreTerminalRedrawOptimizer =
+    process.stdout.isTTY && !config.getScreenReader()
+      ? installTerminalRedrawOptimizer(process.stdout)
+      : () => {};
 
   // Create dual output bridge if --json-fd or --json-file is specified.
   // Errors are caught so a bad fd/path degrades gracefully instead of
@@ -268,6 +273,7 @@ export async function startInteractiveUI(
     remoteInputWatcher?.shutdown();
     dualOutputBridge?.shutdown();
     instance.unmount();
+    restoreTerminalRedrawOptimizer();
   });
 }
 
