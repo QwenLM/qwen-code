@@ -44,30 +44,12 @@ import {
 import { GitService } from '../services/gitService.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 
-// Tools
-import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
-import { EditTool } from '../tools/edit.js';
-import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
-import { GlobTool } from '../tools/glob.js';
-import { GrepTool } from '../tools/grep.js';
-import { LSTool } from '../tools/ls.js';
+// Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
 import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
 import { setGeminiMdFilename } from '../memory/const.js';
-import { ReadFileTool } from '../tools/read-file.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { RipGrepTool } from '../tools/ripGrep.js';
-import { ShellTool } from '../tools/shell.js';
-import { SkillTool } from '../tools/skill.js';
-import { AgentTool } from '../tools/agent/agent.js';
-import { TodoWriteTool } from '../tools/todoWrite.js';
-import { ToolRegistry } from '../tools/tool-registry.js';
-import { WebFetchTool } from '../tools/web-fetch.js';
-import { WebSearchTool } from '../tools/web-search/index.js';
-import { WriteFileTool } from '../tools/write-file.js';
-import { LspTool } from '../tools/lsp.js';
-import { CronCreateTool } from '../tools/cron-create.js';
-import { CronListTool } from '../tools/cron-list.js';
-import { CronDeleteTool } from '../tools/cron-delete.js';
+import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type { LspClient } from '../lsp/types.js';
 
 // Other modules
@@ -78,6 +60,7 @@ import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
+import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -132,6 +115,7 @@ import {
 } from '../services/sessionService.js';
 import { randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
 import {
   createDebugLogger,
   setDebugLogSession,
@@ -441,6 +425,26 @@ export interface ConfigParameters {
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
+  /**
+   * File descriptor number for structured JSON event output (dual output mode).
+   * When set, Qwen Code outputs structured JSON events to this fd while
+   * continuing to render the TUI on stdout. The caller must provide this fd
+   * via spawn stdio configuration.
+   * Mutually exclusive with jsonFile.
+   */
+  jsonFd?: number;
+  /**
+   * File path for structured JSON event output (dual output mode).
+   * Can be a regular file, FIFO (named pipe), or /dev/fd/N.
+   * Mutually exclusive with jsonFd.
+   */
+  jsonFile?: string;
+  /**
+   * File path for receiving remote input commands (bidirectional sync mode).
+   * An external process writes JSONL commands to this file, and the TUI
+   * watches it to process messages as if the user typed them.
+   */
+  inputFile?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
@@ -476,6 +480,8 @@ export interface ConfigParameters {
   projectHooks?: Record<string, unknown>;
 
   hooks?: Record<string, unknown>;
+  /** Glob patterns to exclude from .qwen/rules/ loading. */
+  contextRuleExcludes?: string[];
   /** Warnings generated during configuration resolution */
   warnings?: string[];
   /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
@@ -533,6 +539,7 @@ export class Config {
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
+  private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -572,6 +579,8 @@ export class Config {
   private userMemory: string;
   private sdkMode: boolean;
   private geminiMdFileCount: number;
+  private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
+  private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
@@ -651,6 +660,9 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
+  private readonly jsonFd: number | undefined;
+  private readonly jsonFile: string | undefined;
+  private readonly inputFile: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
@@ -707,6 +719,7 @@ export class Config {
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
+    this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.accessibility = params.accessibility ?? {};
     this.telemetrySettings = {
@@ -793,6 +806,9 @@ export class Config {
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.channel = params.channel;
+    this.jsonFd = params.jsonFd;
+    this.jsonFile = params.jsonFile;
+    this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -1069,21 +1085,27 @@ export class Config {
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
     this.modelsConfig.detectAndCaptureRuntimeModel();
 
+    // Warm all lazy tool factories so telemetry can access tool metadata synchronously.
+    // Use strict mode so a broken built-in tool surfaces immediately at startup.
+    await this.toolRegistry.warmAll({ strict: true });
+
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
   }
 
   async refreshHierarchicalMemory(): Promise<void> {
-    const { memoryContent, fileCount } = await loadServerHierarchicalMemory(
-      this.getWorkingDir(),
-      this.shouldLoadMemoryFromIncludeDirectories()
-        ? this.getWorkspaceContext().getDirectories()
-        : [],
-      this.getFileService(),
-      this.getExtensionContextFilePaths(),
-      this.isTrustedFolder(),
-      this.getImportFormat(),
-    );
+    const { memoryContent, fileCount, conditionalRules, projectRoot } =
+      await loadServerHierarchicalMemory(
+        this.getWorkingDir(),
+        this.shouldLoadMemoryFromIncludeDirectories()
+          ? this.getWorkspaceContext().getDirectories()
+          : [],
+        this.getFileService(),
+        this.getExtensionContextFilePaths(),
+        this.isTrustedFolder(),
+        this.getImportFormat(),
+        this.contextRuleExcludes,
+      );
     if (this.getManagedAutoMemoryEnabled()) {
       const managedAutoMemoryIndex = await readAutoMemoryIndex(
         this.getProjectRoot(),
@@ -1099,6 +1121,29 @@ export class Config {
       this.setUserMemory(memoryContent);
     }
     this.setGeminiMdFileCount(fileCount);
+    this.conditionalRulesRegistry = new ConditionalRulesRegistry(
+      conditionalRules,
+      projectRoot,
+    );
+  }
+
+  getConditionalRulesRegistry(): ConditionalRulesRegistry | undefined {
+    return this.conditionalRulesRegistry;
+  }
+
+  /**
+   * Update the conditional rules registry. Called after external refresh
+   * paths (e.g. /memory refresh or /directory add) that bypass
+   * refreshHierarchicalMemory().
+   */
+  setConditionalRulesRegistry(
+    registry: ConditionalRulesRegistry | undefined,
+  ): void {
+    this.conditionalRulesRegistry = registry;
+  }
+
+  getContextRuleExcludes(): string[] {
+    return this.contextRuleExcludes;
   }
 
   getContentGenerator(): ContentGenerator {
@@ -1507,6 +1552,8 @@ export class Config {
       if (this.toolRegistry) {
         await this.toolRegistry.stop();
       }
+
+      this.backgroundTaskRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
     } catch (error) {
@@ -2170,6 +2217,31 @@ export class Config {
   }
 
   /**
+   * Get the file descriptor for dual output JSON event stream.
+   * When set, the TUI mode will also emit structured JSON events to this fd.
+   */
+  getJsonFd(): number | undefined {
+    return this.jsonFd;
+  }
+
+  /**
+   * Get the file path for dual output JSON event stream.
+   * When set, the TUI mode will also emit structured JSON events to this file.
+   */
+  getJsonFile(): string | undefined {
+    return this.jsonFile;
+  }
+
+  /**
+   * Get the file path for remote input commands (bidirectional sync).
+   * When set, the TUI mode will watch this file for JSONL commands written
+   * by an external process and submit them as user messages.
+   */
+  getInputFile(): string | undefined {
+    return this.inputFile;
+  }
+
+  /**
    * Get the default file encoding for new files.
    * @returns FileEncodingType
    */
@@ -2315,6 +2387,19 @@ export class Config {
     return this.subagentManager;
   }
 
+  getBackgroundTaskRegistry(): BackgroundTaskRegistry {
+    return this.backgroundTaskRegistry;
+  }
+
+  /**
+   * Whether interactive permission prompts should be auto-denied.
+   * True for background agents that have no UI to show prompts.
+   * PermissionRequest hooks still run and can override the denial.
+   */
+  getShouldAvoidPermissionPrompts(): boolean {
+    return false;
+  }
+
   getSkillManager(): SkillManager | null {
     return this.skillManager;
   }
@@ -2347,45 +2432,51 @@ export class Config {
       sendSdkMcpMessage,
     );
 
-    // Helper to create & register core tools that are enabled
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const registerCoreTool = async (ToolClass: any, ...args: unknown[]) => {
-      const toolName = ToolClass?.Name as ToolName | undefined;
-      const className = ToolClass?.name ?? 'UnknownTool';
-
-      if (!toolName) {
-        // Log warning and skip this tool instead of crashing
+    // Helper: check permission then register a lazy factory (no module import
+    // happens here — the dynamic import() only runs when the tool is first used).
+    const registerLazy = async (
+      toolName: ToolName,
+      factory: ToolFactory,
+    ): Promise<void> => {
+      // PermissionManager handles both the coreTools allowlist (registry-level)
+      // and deny rules (runtime-level) in a single check.
+      let pmEnabled = true;
+      try {
+        pmEnabled = this.permissionManager
+          ? await this.permissionManager.isToolEnabled(toolName)
+          : true; // Should never reach here after initialize(), but safe default.
+      } catch (error) {
         this.debugLogger.warn(
-          `Skipping tool registration: ${className} is missing static Name property. ` +
-            `Tools must define a static Name property to be registered.`,
+          `Failed to check permissions for tool "${toolName}", skipping registration:`,
+          error,
         );
         return;
       }
 
-      // PermissionManager handles both the coreTools allowlist (registry-level)
-      // and deny rules (runtime-level) in a single check.
-      const pmEnabled = this.permissionManager
-        ? await this.permissionManager.isToolEnabled(toolName)
-        : true; // Should never reach here after initialize(), but safe default.
-
       if (pmEnabled) {
-        try {
-          registry.registerTool(new ToolClass(...args));
-        } catch (error) {
-          this.debugLogger.error(
-            `Failed to register tool ${className} (${toolName}):`,
-            error,
-          );
-          throw error; // Re-throw after logging context
-        }
+        registry.registerFactory(toolName, factory);
       }
     };
 
-    await registerCoreTool(AgentTool, this);
-    await registerCoreTool(SkillTool, this);
-    await registerCoreTool(LSTool, this);
-    await registerCoreTool(ReadFileTool, this);
+    // --- Core tools (always registered) ---
+    await registerLazy(ToolNames.AGENT, async () => {
+      const { AgentTool } = await import('../tools/agent/agent.js');
+      return new AgentTool(this);
+    });
+    await registerLazy(ToolNames.SKILL, async () => {
+      const { SkillTool } = await import('../tools/skill.js');
+      return new SkillTool(this);
+    });
+    await registerLazy(ToolNames.LS, async () => {
+      const { LSTool } = await import('../tools/ls.js');
+      return new LSTool(this);
+    });
+    await registerLazy(ToolNames.READ_FILE, async () => {
+      const { ReadFileTool } = await import('../tools/read-file.js');
+      return new ReadFileTool(this);
+    });
 
+    // --- Grep / RipGrep (conditional) ---
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
       let errorString: undefined | string = undefined;
@@ -2395,9 +2486,11 @@ export class Config {
         errorString = getErrorMessage(error);
       }
       if (useRipgrep) {
-        await registerCoreTool(RipGrepTool, this);
+        await registerLazy(ToolNames.GREP, async () => {
+          const { RipGrepTool } = await import('../tools/ripGrep.js');
+          return new RipGrepTool(this);
+        });
       } else {
-        // Log for telemetry
         logRipgrepFallback(
           this,
           new RipgrepFallbackEvent(
@@ -2406,34 +2499,82 @@ export class Config {
             errorString || 'ripgrep is not available',
           ),
         );
-        await registerCoreTool(GrepTool, this);
+        await registerLazy(ToolNames.GREP, async () => {
+          const { GrepTool } = await import('../tools/grep.js');
+          return new GrepTool(this);
+        });
       }
     } else {
-      await registerCoreTool(GrepTool, this);
+      await registerLazy(ToolNames.GREP, async () => {
+        const { GrepTool } = await import('../tools/grep.js');
+        return new GrepTool(this);
+      });
     }
 
-    await registerCoreTool(GlobTool, this);
-    await registerCoreTool(EditTool, this);
-    await registerCoreTool(WriteFileTool, this);
-    await registerCoreTool(ShellTool, this);
-    await registerCoreTool(TodoWriteTool, this);
-    await registerCoreTool(AskUserQuestionTool, this);
-    !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
-    await registerCoreTool(WebFetchTool, this);
+    await registerLazy(ToolNames.GLOB, async () => {
+      const { GlobTool } = await import('../tools/glob.js');
+      return new GlobTool(this);
+    });
+    await registerLazy(ToolNames.EDIT, async () => {
+      const { EditTool } = await import('../tools/edit.js');
+      return new EditTool(this);
+    });
+    await registerLazy(ToolNames.WRITE_FILE, async () => {
+      const { WriteFileTool } = await import('../tools/write-file.js');
+      return new WriteFileTool(this);
+    });
+    await registerLazy(ToolNames.SHELL, async () => {
+      const { ShellTool } = await import('../tools/shell.js');
+      return new ShellTool(this);
+    });
+    await registerLazy(ToolNames.TODO_WRITE, async () => {
+      const { TodoWriteTool } = await import('../tools/todoWrite.js');
+      return new TodoWriteTool(this);
+    });
+    await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
+      const { AskUserQuestionTool } = await import(
+        '../tools/askUserQuestion.js'
+      );
+      return new AskUserQuestionTool(this);
+    });
+    if (!this.sdkMode) {
+      await registerLazy(ToolNames.EXIT_PLAN_MODE, async () => {
+        const { ExitPlanModeTool } = await import('../tools/exitPlanMode.js');
+        return new ExitPlanModeTool(this);
+      });
+    }
+    await registerLazy(ToolNames.WEB_FETCH, async () => {
+      const { WebFetchTool } = await import('../tools/web-fetch.js');
+      return new WebFetchTool(this);
+    });
     // Conditionally register web search tool if web search provider is configured
     if (this.getWebSearchConfig()) {
-      await registerCoreTool(WebSearchTool, this);
+      await registerLazy(ToolNames.WEB_SEARCH, async () => {
+        const { WebSearchTool } = await import('../tools/web-search/index.js');
+        return new WebSearchTool(this);
+      });
     }
     if (this.isLspEnabled() && this.getLspClient()) {
-      // Register the unified LSP tool
-      await registerCoreTool(LspTool, this);
+      await registerLazy(ToolNames.LSP, async () => {
+        const { LspTool } = await import('../tools/lsp.js');
+        return new LspTool(this);
+      });
     }
 
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {
-      await registerCoreTool(CronCreateTool, this);
-      await registerCoreTool(CronListTool, this);
-      await registerCoreTool(CronDeleteTool, this);
+      await registerLazy(ToolNames.CRON_CREATE, async () => {
+        const { CronCreateTool } = await import('../tools/cron-create.js');
+        return new CronCreateTool(this);
+      });
+      await registerLazy(ToolNames.CRON_LIST, async () => {
+        const { CronListTool } = await import('../tools/cron-list.js');
+        return new CronListTool(this);
+      });
+      await registerLazy(ToolNames.CRON_DELETE, async () => {
+        const { CronDeleteTool } = await import('../tools/cron-delete.js');
+        return new CronDeleteTool(this);
+      });
     }
 
     if (!options?.skipDiscovery) {

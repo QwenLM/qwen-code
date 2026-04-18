@@ -12,6 +12,7 @@ import {
   FileDiscoveryService,
   getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
+  type LoadServerHierarchicalMemoryResponse,
   setGeminiMdFilename as setServerGeminiMdFilename,
   resolveTelemetrySettings,
   FatalConfigError,
@@ -23,9 +24,7 @@ import {
   type ResumedSessionData,
   type LspClient,
   type ToolName,
-  EditTool,
-  ShellTool,
-  WriteFileTool,
+  ToolNames,
   NativeLspClient,
   createDebugLogger,
   NativeLspService,
@@ -161,6 +160,9 @@ export interface CliArgs {
   excludeTools: string[] | undefined;
   authType: string | undefined;
   channel: string | undefined;
+  jsonFd?: number | undefined;
+  jsonFile?: string | undefined;
+  inputFile?: string | undefined;
 }
 
 function normalizeOutputFormat(
@@ -459,6 +461,25 @@ export async function parseArguments(): Promise<CliArgs> {
             'Include partial assistant messages when using stream-json output.',
           default: false,
         })
+        .option('json-fd', {
+          type: 'number',
+          description:
+            'File descriptor for structured JSON event output (dual output mode). ' +
+            'The TUI renders normally on stdout while JSON events are written to this fd. ' +
+            'The caller must provide this fd via spawn stdio configuration.',
+        })
+        .option('json-file', {
+          type: 'string',
+          description:
+            'File path for structured JSON event output (dual output mode). ' +
+            'Can be a regular file, FIFO (named pipe), or /dev/fd/N.',
+        })
+        .option('input-file', {
+          type: 'string',
+          description:
+            'File path for receiving remote input commands (bidirectional sync). ' +
+            'An external process writes JSONL commands; the TUI watches and processes them.',
+        })
         .option('continue', {
           alias: 'c',
           type: 'boolean',
@@ -574,6 +595,9 @@ export async function parseArguments(): Promise<CliArgs> {
           if (argv['resume'] && !isValidSessionId(argv['resume'] as string)) {
             return `Invalid --resume: "${argv['resume']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
           }
+          if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
+            return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
+          }
           return true;
         }),
     )
@@ -666,7 +690,8 @@ export async function loadHierarchicalGeminiMemory(
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
-): Promise<{ memoryContent: string; fileCount: number }> {
+  contextRuleExcludes: string[] = [],
+): Promise<LoadServerHierarchicalMemoryResponse> {
   // FIX: Use real, canonical paths for a reliable comparison to handle symlinks.
   const realCwd = fs.realpathSync(path.resolve(currentWorkingDirectory));
   const realHome = fs.realpathSync(path.resolve(homedir()));
@@ -684,6 +709,7 @@ export async function loadHierarchicalGeminiMemory(
     extensionContextFilePaths,
     folderTrust,
     memoryImportFormat,
+    contextRuleExcludes,
   );
 }
 
@@ -927,13 +953,13 @@ export async function loadCliConfig(
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:
         // Deny all write/execute tools unless explicitly allowed.
-        denyUnlessAllowed(ShellTool.Name as ToolName);
-        denyUnlessAllowed(EditTool.Name as ToolName);
-        denyUnlessAllowed(WriteFileTool.Name as ToolName);
+        denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.EDIT as ToolName);
+        denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
         break;
       case ApprovalMode.AUTO_EDIT:
         // Only shell requires a prompt in auto-edit mode.
-        denyUnlessAllowed(ShellTool.Name as ToolName);
+        denyUnlessAllowed(ToolNames.SHELL as ToolName);
         break;
       case ApprovalMode.YOLO:
         // No extra denials for YOLO mode.
@@ -1137,6 +1163,13 @@ export async function loadCliConfig(
     hooks: settings.hooks, // Keep for backward compatibility
     disableAllHooks: settings.disableAllHooks ?? false,
     channel: argv.channel,
+    // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
+    // equivalent — fd passing is a spawn-time concern). `--json-file` and
+    // `--input-file` fall back to settings.dualOutput.* when the flag is
+    // absent.
+    jsonFd: argv.jsonFd,
+    jsonFile: argv.jsonFile ?? settings.dualOutput?.jsonFile,
+    inputFile: argv.inputFile ?? settings.dualOutput?.inputFile,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
     // always be true and the settings file can never disable recording.

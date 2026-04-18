@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, ToolCallRequestInfo } from '@qwen-code/qwen-code-core';
+import type {
+  BackgroundAgentStatus,
+  Config,
+  ToolCallRequestInfo,
+} from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
@@ -250,6 +254,54 @@ export async function runNonInteractive(
       const initialParts = normalizePartList(initialPartList);
       let currentMessages: Content[] = [{ role: 'user', parts: initialParts }];
 
+      // Register the callback early so background agents launched during the main
+      // tool-call chain can push completions onto the queue.
+      interface LocalQueueItem {
+        displayText: string;
+        modelText: string;
+        sendMessageType: SendMessageType;
+        sdkNotification?: {
+          task_id: string;
+          tool_use_id?: string;
+          status: BackgroundAgentStatus;
+          usage?: {
+            total_tokens: number;
+            tool_uses: number;
+            duration_ms: number;
+          };
+        };
+      }
+      const localQueue: LocalQueueItem[] = [];
+      const registry = config.getBackgroundTaskRegistry();
+      registry.setNotificationCallback((displayText, modelText, meta) => {
+        localQueue.push({
+          displayText,
+          modelText,
+          sendMessageType: SendMessageType.Notification,
+          sdkNotification: {
+            task_id: meta.agentId,
+            tool_use_id: meta.toolUseId,
+            status: meta.status,
+            usage: meta.stats
+              ? {
+                  total_tokens: meta.stats.totalTokens,
+                  tool_uses: meta.stats.toolUses,
+                  duration_ms: meta.stats.durationMs,
+                }
+              : undefined,
+          },
+        });
+      });
+
+      registry.setRegisterCallback((entry) => {
+        adapter.emitSystemMessage('task_started', {
+          task_id: entry.agentId,
+          tool_use_id: entry.toolUseId,
+          description: entry.description,
+          subagent_type: entry.subagentType,
+        });
+      });
+
       let isFirstTurn = true;
       let modelOverride: string | undefined;
       while (true) {
@@ -346,9 +398,6 @@ export async function runNonInteractive(
               },
             );
 
-            // Note: In JSON mode, subagent messages are automatically added to the main
-            // adapter's messages array and will be output together on emitResult()
-
             if (toolResponse.error) {
               // In JSON/STREAM_JSON mode, tool errors are tolerated and formatted
               // as tool_result blocks. handleToolError will detect JSON/STREAM_JSON mode
@@ -380,142 +429,249 @@ export async function runNonInteractive(
           }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
         } else {
-          // No more tool calls — check if cron jobs are keeping us alive
+          // Shared between the normal drain and the cancellation flush so stream-json
+          // consumers always see a terminal task_notification paired with task_started.
+          const emitNotificationToSdk = (item: LocalQueueItem) => {
+            if (item.sendMessageType !== SendMessageType.Notification) return;
+            adapter.emitUserMessage([{ text: item.displayText }]);
+            if (item.sdkNotification) {
+              adapter.emitSystemMessage(
+                'task_notification',
+                item.sdkNotification,
+              );
+            }
+          };
+
+          // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
+          // loop — otherwise a looping cron or a model that keeps replying to
+          // notifications could exceed the cap silently in headless runs.
+          const drainOneItem = async () => {
+            if (localQueue.length === 0) return;
+            const item = localQueue.shift()!;
+
+            emitNotificationToSdk(item);
+
+            turnCount++;
+            if (
+              config.getMaxSessionTurns() >= 0 &&
+              turnCount > config.getMaxSessionTurns()
+            ) {
+              handleMaxTurnsExceededError(config);
+            }
+
+            const inputFormat =
+              typeof config.getInputFormat === 'function'
+                ? config.getInputFormat()
+                : InputFormat.TEXT;
+            const toolCallUpdateCallback =
+              inputFormat === InputFormat.STREAM_JSON && options.controlService
+                ? options.controlService.permission.getToolCallUpdateCallback()
+                : undefined;
+
+            let itemMessages: Content[] = [
+              { role: 'user', parts: [{ text: item.modelText }] },
+            ];
+            let itemIsFirstTurn = true;
+            let itemModelOverride: string | undefined;
+
+            while (true) {
+              const itemToolCallRequests: ToolCallRequestInfo[] = [];
+              const itemApiStartTime = Date.now();
+              const itemStream = geminiClient.sendMessageStream(
+                itemMessages[0]?.parts || [],
+                abortController.signal,
+                prompt_id,
+                {
+                  type: itemIsFirstTurn
+                    ? item.sendMessageType
+                    : SendMessageType.ToolResult,
+                  modelOverride: itemModelOverride,
+                  ...(itemIsFirstTurn && {
+                    notificationDisplayText: item.displayText,
+                  }),
+                },
+              );
+              itemIsFirstTurn = false;
+
+              adapter.startAssistantMessage();
+
+              for await (const event of itemStream) {
+                if (abortController.signal.aborted) {
+                  // Pair the startAssistantMessage() above so stream-json mode doesn't
+                  // leave an unterminated message_start.
+                  adapter.finalizeAssistantMessage();
+                  return;
+                }
+                adapter.processEvent(event);
+                if (event.type === GeminiEventType.ToolCallRequest) {
+                  itemToolCallRequests.push(event.value);
+                }
+                if (
+                  outputFormat === OutputFormat.TEXT &&
+                  event.type === GeminiEventType.Error
+                ) {
+                  const errorText = parseAndFormatApiError(
+                    event.value.error,
+                    config.getContentGeneratorConfig()?.authType,
+                  );
+                  process.stderr.write(`${errorText}\n`);
+                  throw new Error(errorText);
+                }
+              }
+
+              adapter.finalizeAssistantMessage();
+              totalApiDurationMs += Date.now() - itemApiStartTime;
+
+              if (itemToolCallRequests.length > 0) {
+                const itemToolResponseParts: Part[] = [];
+
+                for (const requestInfo of itemToolCallRequests) {
+                  const isAgentTool = requestInfo.name === 'agent';
+                  const { handler: outputUpdateHandler } = isAgentTool
+                    ? createAgentToolProgressHandler(
+                        config,
+                        requestInfo.callId,
+                        adapter,
+                      )
+                    : createToolProgressHandler(requestInfo, adapter);
+
+                  const toolResponse = await executeToolCall(
+                    config,
+                    requestInfo,
+                    abortController.signal,
+                    {
+                      outputUpdateHandler,
+                      ...(toolCallUpdateCallback && {
+                        onToolCallsUpdate: toolCallUpdateCallback,
+                      }),
+                    },
+                  );
+
+                  if (toolResponse.error) {
+                    handleToolError(
+                      requestInfo.name,
+                      toolResponse.error,
+                      config,
+                      toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
+                      typeof toolResponse.resultDisplay === 'string'
+                        ? toolResponse.resultDisplay
+                        : undefined,
+                    );
+                  }
+
+                  adapter.emitToolResult(requestInfo, toolResponse);
+
+                  if (toolResponse.responseParts) {
+                    itemToolResponseParts.push(...toolResponse.responseParts);
+                  }
+
+                  if ('modelOverride' in toolResponse) {
+                    itemModelOverride = toolResponse.modelOverride;
+                  }
+                }
+                itemMessages = [{ role: 'user', parts: itemToolResponseParts }];
+              } else {
+                break;
+              }
+            }
+          };
+
+          // Single-flight drain: concurrent callers wait for the running drain so
+          // cron jobs firing mid-stream don't produce overlapping turns.
+          //
+          // Clear via outer `.finally()` rather than inside the async body: when the
+          // queue is empty the body runs synchronously, so an inner finally would
+          // null the slot BEFORE the outer `drainPromise = p` assignment and leave
+          // it stuck forever.
+          let drainPromise: Promise<void> | null = null;
+          const drainLocalQueue = (): Promise<void> => {
+            if (drainPromise) return drainPromise;
+            const p = (async () => {
+              while (localQueue.length > 0) {
+                await drainOneItem();
+              }
+            })();
+            drainPromise = p;
+            void p.finally(() => {
+              if (drainPromise === p) drainPromise = null;
+            });
+            return p;
+          };
+
+          // Start cron scheduler — fires enqueue onto the shared queue.
           const scheduler = !config.isCronEnabled()
             ? null
             : config.getCronScheduler();
-          if (scheduler && scheduler.size > 0) {
-            // Start the scheduler and wait for all jobs to complete or be deleted.
-            // Each fired prompt is processed as a new turn through the same loop.
-            await new Promise<void>((resolve) => {
-              const cronQueue: string[] = [];
-              let processing = false;
 
-              const checkDone = () => {
-                if (scheduler.size === 0 && !processing) {
+          if (scheduler && scheduler.size > 0) {
+            await new Promise<void>((resolve, reject) => {
+              // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
+              // drop scheduler.size to 0 on their own, so without this the
+              // hold-back loop below is unreachable after an abort.
+              const onAbort = () => {
+                scheduler.stop();
+                resolve();
+              };
+              if (abortController.signal.aborted) {
+                onAbort();
+                return;
+              }
+              abortController.signal.addEventListener('abort', onAbort, {
+                once: true,
+              });
+
+              const checkCronDone = () => {
+                if (scheduler.size === 0 && !drainPromise) {
+                  abortController.signal.removeEventListener('abort', onAbort);
                   scheduler.stop();
                   resolve();
                 }
               };
 
-              const drainQueue = async () => {
-                if (processing) return;
-                processing = true;
-                try {
-                  while (cronQueue.length > 0) {
-                    const cronPrompt = cronQueue.shift()!;
-                    turnCount++;
-                    let cronMessages: Content[] = [
-                      { role: 'user', parts: [{ text: cronPrompt }] },
-                    ];
-                    let cronIsFirstTurn = true;
-                    let cronModelOverride: string | undefined;
-
-                    while (true) {
-                      const cronToolCallRequests: ToolCallRequestInfo[] = [];
-                      const cronApiStartTime = Date.now();
-                      const cronStream = geminiClient.sendMessageStream(
-                        cronMessages[0]?.parts || [],
-                        abortController.signal,
-                        prompt_id,
-                        {
-                          type: cronIsFirstTurn
-                            ? SendMessageType.Cron
-                            : SendMessageType.ToolResult,
-                          modelOverride: cronModelOverride,
-                        },
-                      );
-                      cronIsFirstTurn = false;
-
-                      adapter.startAssistantMessage();
-
-                      for await (const event of cronStream) {
-                        if (abortController.signal.aborted) {
-                          const summary = scheduler.getExitSummary();
-                          scheduler.stop();
-                          if (summary) {
-                            process.stderr.write(summary + '\n');
-                          }
-                          resolve();
-                          return;
-                        }
-                        adapter.processEvent(event);
-                        if (event.type === GeminiEventType.ToolCallRequest) {
-                          cronToolCallRequests.push(event.value);
-                        }
-                      }
-
-                      adapter.finalizeAssistantMessage();
-                      totalApiDurationMs += Date.now() - cronApiStartTime;
-
-                      if (cronToolCallRequests.length > 0) {
-                        const cronToolResponseParts: Part[] = [];
-
-                        for (const requestInfo of cronToolCallRequests) {
-                          const isAgentTool = requestInfo.name === 'agent';
-                          const { handler: outputUpdateHandler } = isAgentTool
-                            ? createAgentToolProgressHandler(
-                                config,
-                                requestInfo.callId,
-                                adapter,
-                              )
-                            : createToolProgressHandler(requestInfo, adapter);
-
-                          const toolResponse = await executeToolCall(
-                            config,
-                            requestInfo,
-                            abortController.signal,
-                            { outputUpdateHandler },
-                          );
-
-                          if (toolResponse.error) {
-                            handleToolError(
-                              requestInfo.name,
-                              toolResponse.error,
-                              config,
-                              toolResponse.errorType || 'TOOL_EXECUTION_ERROR',
-                              typeof toolResponse.resultDisplay === 'string'
-                                ? toolResponse.resultDisplay
-                                : undefined,
-                            );
-                          }
-
-                          adapter.emitToolResult(requestInfo, toolResponse);
-
-                          if (toolResponse.responseParts) {
-                            cronToolResponseParts.push(
-                              ...toolResponse.responseParts,
-                            );
-                          }
-
-                          if ('modelOverride' in toolResponse) {
-                            cronModelOverride = toolResponse.modelOverride;
-                          }
-                        }
-                        cronMessages = [
-                          { role: 'user', parts: cronToolResponseParts },
-                        ];
-                      } else {
-                        break;
-                      }
-                    }
-                  }
-                } catch (error) {
-                  debugLogger.error('Error processing cron prompt:', error);
-                } finally {
-                  processing = false;
-                  checkDone();
-                }
+              // Propagate drain failures. Without this, a rejected
+              // drainLocalQueue() (e.g. a text-mode API error surfacing
+              // out of drainOneItem) would be swallowed by `void` and
+              // checkCronDone would never fire — hanging the run.
+              const onDrainError = (err: unknown) => {
+                abortController.signal.removeEventListener('abort', onAbort);
+                scheduler.stop();
+                reject(err);
               };
 
               scheduler.start((job: { prompt: string }) => {
-                cronQueue.push(job.prompt);
-                void drainQueue();
+                const label = job.prompt.slice(0, 40);
+                localQueue.push({
+                  displayText: `Cron: ${label}`,
+                  modelText: job.prompt,
+                  sendMessageType: SendMessageType.Cron,
+                });
+                drainLocalQueue().then(checkCronDone, onDrainError);
               });
 
-              // Also check immediately in case jobs were already deleted
-              checkDone();
+              // Check immediately in case jobs were already deleted
+              checkCronDone();
             });
+          }
+
+          // Wait for running background agents to complete before emitting the final
+          // result. On SIGINT/SIGTERM, abort them and route through
+          // handleCancellationError — otherwise the success emitResult below would
+          // silently convert a cancellation into a completion.
+          while (true) {
+            if (abortController.signal.aborted) {
+              registry.abortAll();
+              // Flush queued terminal notifications before handleCancellationError
+              // exits so stream-json consumers always see a task_notification paired
+              // with every task_started.
+              while (localQueue.length > 0) {
+                emitNotificationToSdk(localQueue.shift()!);
+              }
+              handleCancellationError(config);
+            }
+            await drainLocalQueue();
+            const running = registry.getRunning();
+            if (running.length === 0 && localQueue.length === 0) break;
+            await new Promise((r) => setTimeout(r, 100));
           }
 
           const metrics = uiTelemetryService.getMetrics();
@@ -567,6 +723,10 @@ export async function runNonInteractive(
       });
       handleError(error, config);
     } finally {
+      const reg = config.getBackgroundTaskRegistry();
+      reg.setNotificationCallback(undefined);
+      reg.setRegisterCallback(undefined);
+
       process.stdout.removeListener('error', stdoutErrorHandler);
       // Cleanup signal handlers
       process.removeListener('SIGINT', shutdownHandler);

@@ -256,6 +256,22 @@ function convertToHistoryItems(
     }
     switch (record.type) {
       case 'user': {
+        // Restore notification items (background agent completions and cron fires)
+        if (record.subtype === 'notification' || record.subtype === 'cron') {
+          const payload = record.systemPayload as
+            | { displayText?: string }
+            | undefined;
+          const fallback =
+            record.subtype === 'cron'
+              ? 'Cron job fired'
+              : 'Background agent completed';
+          const text =
+            payload?.displayText ||
+            extractTextFromParts(record.message?.parts as Part[]) ||
+            fallback;
+          items.push({ type: 'notification', text });
+          break;
+        }
         if (pendingAtCommands.length > 0) {
           // Flush any pending tool group before user message
           if (currentToolGroup.length > 0) {
