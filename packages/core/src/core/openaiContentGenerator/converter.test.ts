@@ -1143,6 +1143,176 @@ describe('OpenAIContentConverter', () => {
       );
     });
 
+    it('should extract leading MiniMax <think> tags into thought parts for non-streaming responses', () => {
+      const minimaxConverter = new OpenAIContentConverter('MiniMax-M2.5');
+      const response = minimaxConverter.convertOpenAIResponseToGemini({
+        object: 'chat.completion',
+        id: 'chatcmpl-minimax-think',
+        created: 123,
+        model: 'MiniMax-M2.5',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: '<think>chain-of-thought</think>\n\nfinal answer',
+            },
+            finish_reason: 'stop',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      const parts = response.candidates?.[0]?.content?.parts;
+      expect(parts?.[0]).toEqual(
+        expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
+      );
+      expect(parts?.[1]).toEqual(
+        expect.objectContaining({ text: '\n\nfinal answer' }),
+      );
+    });
+
+    it('should extract MiniMax <think> tags that appear after visible text', () => {
+      const minimaxConverter = new OpenAIContentConverter('MiniMax-M2.5');
+      const response = minimaxConverter.convertOpenAIResponseToGemini({
+        object: 'chat.completion',
+        id: 'chatcmpl-minimax-inline-think',
+        created: 123,
+        model: 'MiniMax-M2.5',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: 'preface <think>chain-of-thought</think>final answer',
+            },
+            finish_reason: 'stop',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      const parts = response.candidates?.[0]?.content?.parts;
+      expect(parts?.[0]).toEqual(expect.objectContaining({ text: 'preface ' }));
+      expect(parts?.[1]).toEqual(
+        expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
+      );
+      expect(parts?.[2]).toEqual(
+        expect.objectContaining({ text: 'final answer' }),
+      );
+    });
+
+    it('should leave non-MiniMax <think> tags in visible text', () => {
+      const response = converter.convertOpenAIResponseToGemini({
+        object: 'chat.completion',
+        id: 'chatcmpl-generic-think',
+        created: 123,
+        model: 'gpt-test',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: '<think>chain-of-thought</think>final answer',
+            },
+            finish_reason: 'stop',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      const parts = response.candidates?.[0]?.content?.parts;
+      expect(parts).toEqual([
+        expect.objectContaining({
+          text: '<think>chain-of-thought</think>final answer',
+        }),
+      ]);
+    });
+
+    it('should preserve earlier MiniMax thought parts when a later <think> block is unterminated', () => {
+      const minimaxConverter = new OpenAIContentConverter('MiniMax-M2.5');
+      const response = minimaxConverter.convertOpenAIResponseToGemini({
+        object: 'chat.completion',
+        id: 'chatcmpl-minimax-partial-think',
+        created: 123,
+        model: 'MiniMax-M2.5',
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content:
+                'preface <think>chain-of-thought</think>tail <think>unterminated',
+            },
+            finish_reason: 'stop',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      const parts = response.candidates?.[0]?.content?.parts;
+      expect(parts?.[0]).toEqual(expect.objectContaining({ text: 'preface ' }));
+      expect(parts?.[1]).toEqual(
+        expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
+      );
+      expect(parts?.[2]).toEqual(expect.objectContaining({ text: 'tail ' }));
+      expect(parts?.[3]).toEqual(
+        expect.objectContaining({ text: '<think>unterminated' }),
+      );
+    });
+
+    it('should extract streaming MiniMax <think> tags into thought parts', () => {
+      const minimaxConverter = new OpenAIContentConverter('MiniMax-M2.5');
+      minimaxConverter.resetStreamingToolCalls();
+
+      const firstChunk = minimaxConverter.convertOpenAIChunkToGemini({
+        object: 'chat.completion.chunk',
+        id: 'chunk-minimax-think-1',
+        created: 456,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              content: '<think>chain-',
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+        model: 'MiniMax-M2.5',
+      } as unknown as OpenAI.Chat.ChatCompletionChunk);
+
+      const secondChunk = minimaxConverter.convertOpenAIChunkToGemini({
+        object: 'chat.completion.chunk',
+        id: 'chunk-minimax-think-2',
+        created: 457,
+        choices: [
+          {
+            index: 0,
+            delta: {
+              content: 'of-thought</think>\n\nfinal answer',
+            },
+            finish_reason: 'stop',
+            logprobs: null,
+          },
+        ],
+        model: 'MiniMax-M2.5',
+      } as unknown as OpenAI.Chat.ChatCompletionChunk);
+
+      const firstParts = firstChunk.candidates?.[0]?.content?.parts;
+      const secondParts = secondChunk.candidates?.[0]?.content?.parts;
+
+      expect(firstParts?.[0]).toEqual(
+        expect.objectContaining({ thought: true, text: 'chain-' }),
+      );
+      expect(secondParts?.[0]).toEqual(
+        expect.objectContaining({ thought: true, text: 'of-thought' }),
+      );
+      expect(secondParts?.[1]).toEqual(
+        expect.objectContaining({ text: '\n\nfinal answer' }),
+      );
+    });
+
     it('should not throw when streaming chunk has no delta', () => {
       const chunk = converter.convertOpenAIChunkToGemini({
         object: 'chat.completion.chunk',

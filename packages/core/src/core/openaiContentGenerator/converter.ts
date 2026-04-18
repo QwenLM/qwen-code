@@ -29,6 +29,8 @@ import {
 } from '../../utils/schemaConverter.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
+const THINK_OPEN_TAG = '<think>';
+const THINK_CLOSE_TAG = '</think>';
 
 /**
  * Extended usage type that supports both OpenAI standard format and alternative formats
@@ -99,6 +101,8 @@ export class OpenAIContentConverter {
   private modalities: InputModalities;
   private streamingToolCallParser: StreamingToolCallParser =
     new StreamingToolCallParser();
+  private streamingThinkBuffer = '';
+  private streamingInsideThinkTag = false;
 
   constructor(
     model: string,
@@ -132,6 +136,115 @@ export class OpenAIContentConverter {
    */
   resetStreamingToolCalls(): void {
     this.streamingToolCallParser.reset();
+    this.streamingThinkBuffer = '';
+    this.streamingInsideThinkTag = false;
+  }
+
+  private isMiniMaxModel(): boolean {
+    return /^minimax-/i.test(this.model);
+  }
+
+  private splitMiniMaxThinkParts(content: string): Part[] {
+    if (!this.isMiniMaxModel()) {
+      return [{ text: content }];
+    }
+
+    const parts: Part[] = [];
+    let cursor = 0;
+    let matchedThinkBlock = false;
+
+    while (cursor < content.length) {
+      const openIndex = content.indexOf(THINK_OPEN_TAG, cursor);
+      if (openIndex === -1) {
+        const visibleText = content.slice(cursor);
+        if (visibleText) {
+          parts.push({ text: visibleText });
+        }
+        break;
+      }
+
+      const visibleText = content.slice(cursor, openIndex);
+      if (visibleText) {
+        parts.push({ text: visibleText });
+      }
+
+      const closeIndex = content.indexOf(
+        THINK_CLOSE_TAG,
+        openIndex + THINK_OPEN_TAG.length,
+      );
+      if (closeIndex === -1) {
+        const trailingText = content.slice(openIndex);
+        if (trailingText) {
+          parts.push({ text: trailingText });
+        }
+        break;
+      }
+
+      matchedThinkBlock = true;
+
+      const thoughtText = content.slice(
+        openIndex + THINK_OPEN_TAG.length,
+        closeIndex,
+      );
+      if (thoughtText) {
+        parts.push({ text: thoughtText, thought: true });
+      }
+
+      cursor = closeIndex + THINK_CLOSE_TAG.length;
+    }
+
+    return matchedThinkBlock ? parts : [{ text: content }];
+  }
+
+  private extractMiniMaxStreamingParts(fragment: string): Part[] {
+    if (!this.isMiniMaxModel() || fragment === '') {
+      return fragment ? [{ text: fragment }] : [];
+    }
+
+    let buffer = this.streamingThinkBuffer + fragment;
+    this.streamingThinkBuffer = '';
+    const parts: Part[] = [];
+
+    while (buffer) {
+      const targetTag = this.streamingInsideThinkTag
+        ? THINK_CLOSE_TAG
+        : THINK_OPEN_TAG;
+      const tagIndex = buffer.indexOf(targetTag);
+
+      if (tagIndex === -1) {
+        const suffixLength = this.getTrailingTagPrefixLength(buffer, targetTag);
+        const text = buffer.slice(0, buffer.length - suffixLength);
+        if (text) {
+          parts.push(
+            this.streamingInsideThinkTag ? { text, thought: true } : { text },
+          );
+        }
+        this.streamingThinkBuffer = buffer.slice(buffer.length - suffixLength);
+        return parts;
+      }
+
+      const text = buffer.slice(0, tagIndex);
+      if (text) {
+        parts.push(
+          this.streamingInsideThinkTag ? { text, thought: true } : { text },
+        );
+      }
+
+      buffer = buffer.slice(tagIndex + targetTag.length);
+      this.streamingInsideThinkTag = !this.streamingInsideThinkTag;
+    }
+
+    return parts;
+  }
+
+  private getTrailingTagPrefixLength(text: string, tag: string): number {
+    const maxLength = Math.min(text.length, tag.length - 1);
+    for (let length = maxLength; length > 0; length -= 1) {
+      if (text.endsWith(tag.slice(0, length))) {
+        return length;
+      }
+    }
+    return 0;
   }
 
   /**
@@ -827,7 +940,6 @@ export class OpenAIContentConverter {
     if (choice) {
       const parts: Part[] = [];
 
-      // Handle reasoning content (thoughts)
       const reasoningText =
         (choice.message as ExtendedCompletionMessage).reasoning_content ??
         (choice.message as ExtendedCompletionMessage).reasoning;
@@ -837,7 +949,11 @@ export class OpenAIContentConverter {
 
       // Handle text content
       if (choice.message.content) {
-        parts.push({ text: choice.message.content });
+        if (!reasoningText && typeof choice.message.content === 'string') {
+          parts.push(...this.splitMiniMaxThinkParts(choice.message.content));
+        } else {
+          parts.push({ text: choice.message.content });
+        }
       }
 
       // Handle tool calls
@@ -947,7 +1063,13 @@ export class OpenAIContentConverter {
       // Handle text content
       if (choice.delta?.content) {
         if (typeof choice.delta.content === 'string') {
-          parts.push({ text: choice.delta.content });
+          if (reasoningText) {
+            parts.push({ text: choice.delta.content });
+          } else {
+            parts.push(
+              ...this.extractMiniMaxStreamingParts(choice.delta.content),
+            );
+          }
         }
       }
 
