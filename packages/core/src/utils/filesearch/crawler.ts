@@ -79,6 +79,22 @@ function getGitRootMtime(crawlDirectory: string): number | null {
     // Ignore errors when .git directory or index file doesn't exist
   }
   return null;
+function hasFileListChanged(stateKey: string, crawlDirectory: string): boolean {
+  const currentMtime = getGitRootMtime(crawlDirectory);
+  const state = changeStateMap.get(stateKey);
+
+  if (!state) return true;
+
+  if (currentMtime !== null && state.gitRootMtimeMs !== null) {
+    return currentMtime > state.gitRootMtimeMs || !isThrottled(stateKey);
+  }
+
+  // For non-git paths, we can only rely on time-based throttling.
+  if (currentMtime === null && state.gitRootMtimeMs === null) {
+    return !isThrottled(stateKey);
+  }
+
+  return true;
 }
 
 function hasFileListChanged(stateKey: string, crawlDirectory: string): boolean {
