@@ -36,6 +36,7 @@ import {
   ToolStatusIndicator,
   STATUS_INDICATOR_WIDTH,
 } from '../shared/ToolStatusIndicator.js';
+import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
@@ -364,11 +365,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
       <Box minHeight={1}>
-        <ToolStatusIndicator
-          status={status}
-          name={name}
-          executionStartTime={executionStartTime}
-        />
+        <ToolStatusIndicator status={status} name={name} />
         <ToolInfo
           name={name}
           status={status}
@@ -382,6 +379,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
             </Text>
           </Box>
         )}
+        <ToolElapsedTime
+          status={status}
+          executionStartTime={executionStartTime}
+        />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
       {effectiveDisplayRenderer.type !== 'none' && (
@@ -479,7 +480,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
     }
   }, [emphasis]);
   return (
-    <Box>
+    <Box flexGrow={1}>
       <Text
         wrap="truncate-end"
         strikethrough={status === ToolCallStatus.Canceled}

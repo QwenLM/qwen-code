@@ -12,6 +12,7 @@ import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 import { t } from '../../../i18n/index.js';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
+import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 
 interface CompactToolGroupDisplayProps {
   toolCalls: IndividualToolCallDisplay[];
@@ -83,13 +84,9 @@ export const CompactToolGroupDisplay: React.FC<
       borderColor={borderColor}
       gap={0}
     >
-      {/* Status line: icon + tool name + count + description */}
+      {/* Status line: icon + tool name + count + description + elapsed */}
       <Box flexDirection="row">
-        <ToolStatusIndicator
-          status={overallStatus}
-          name={activeTool.name}
-          executionStartTime={activeTool.executionStartTime}
-        />
+        <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>
           <Text wrap="truncate-end">
             <Text bold>{activeTool.name}</Text>
@@ -107,6 +104,10 @@ export const CompactToolGroupDisplay: React.FC<
             ) : null}
           </Text>
         </Box>
+        <ToolElapsedTime
+          status={overallStatus}
+          executionStartTime={activeTool.executionStartTime}
+        />
       </Box>
 
       {/* Hint line */}
