@@ -995,6 +995,35 @@ describe('useSlashCommandProcessor', () => {
     });
   });
 
+  describe('UI State Management', () => {
+    it('should dismiss the active /btw item when ui.clear is called', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.slashCommands).toBeDefined());
+
+      const activeBtwItem = {
+        type: 'btw' as const,
+        btw: {
+          question: 'What is the difference between let and var?',
+          answer: 'let is block-scoped, var is function-scoped.',
+          isPending: false,
+        },
+      };
+
+      act(() => {
+        result.current.setBtwItem(activeBtwItem);
+      });
+
+      expect(result.current.btwItem).toEqual(activeBtwItem);
+
+      act(() => {
+        result.current.commandContext.ui.clear();
+      });
+
+      expect(mockClearItems).toHaveBeenCalledTimes(1);
+      expect(result.current.btwItem).toBeNull();
+    });
+  });
+
   describe('Slash Command Logging', () => {
     const mockCommandAction = vi.fn().mockResolvedValue({ type: 'handled' });
     const loggingTestCommands: SlashCommand[] = [
