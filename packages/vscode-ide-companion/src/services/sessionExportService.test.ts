@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
@@ -126,6 +127,8 @@ describe('sessionExportService', () => {
 
   describe('exportSessionToFile', () => {
     it('writes the exported session to the default CLI export path', async () => {
+      const expectedFilePath = path.join('/workspace', 'qwen-export.html');
+
       const result = await exportSessionToFile({
         sessionId: 'session-1',
         cwd: '/workspace',
@@ -139,13 +142,13 @@ describe('sessionExportService', () => {
       expect(mockNormalizeSessionData).toHaveBeenCalled();
       expect(mockToHtml).toHaveBeenCalled();
       expect(mockWriteFile).toHaveBeenCalledWith(
-        '/workspace/qwen-export.html',
+        expectedFilePath,
         '<html>export</html>',
         'utf-8',
       );
       expect(result).toEqual({
         filename: 'qwen-export.html',
-        uri: { fsPath: '/workspace/qwen-export.html' },
+        uri: { fsPath: expectedFilePath },
       });
     });
 
