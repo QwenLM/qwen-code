@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-weixin",
-  "version": "0.14.5",
+  "version": "0.14.5-nightly.20260418.418acc548",
   "description": "WeChat (Weixin) channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
