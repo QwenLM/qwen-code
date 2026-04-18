@@ -29,6 +29,7 @@ export interface ToolCallUpdateData {
   title?: string;
   status?: string;
   rawInput?: unknown;
+  rawOutput?: unknown;
   content?: Array<Record<string, unknown>>;
   locations?: Array<{ path: string; line?: number | null }>;
   timestamp?: number;
@@ -88,6 +89,7 @@ export interface ToolCallUpdate {
   title?: string;
   status?: 'pending' | 'in_progress' | 'completed' | 'failed';
   rawInput?: unknown;
+  rawOutput?: unknown;
   content?: Array<{
     type: 'content' | 'diff';
     content?: {

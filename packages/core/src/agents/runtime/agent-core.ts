@@ -57,7 +57,7 @@ import type {
 } from './agent-events.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { AgentStatistics, type AgentStatsSummary } from './agent-statistics.js';
-import { AgentTool } from '../../tools/agent.js';
+import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
@@ -65,6 +65,18 @@ import { type ContextState, templateString } from './agent-headless.js';
 /**
  * Result of a single reasoning loop invocation.
  */
+/**
+ * Tools that must never be available to subagents (including forked agents).
+ * - AgentTool prevents recursive subagent spawning.
+ * - Cron tools are session-scoped and should only run from the main session.
+ */
+export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
+  ToolNames.AGENT,
+  ToolNames.CRON_CREATE,
+  ToolNames.CRON_LIST,
+  ToolNames.CRON_DELETE,
+]);
+
 export interface ReasoningLoopResult {
   /** The final model text response (empty if terminated by abort/limits). */
   text: string;
@@ -98,7 +110,7 @@ export interface CreateChatOptions {
   /**
    * Optional conversation history from a parent session. When provided,
    * this history is prepended to the chat so the agent has prior
-   * conversational context (e.g., from the main session that spawned it).
+   * conversational context (e.g., from AgentInteractive.start()).
    */
   extraHistory?: Content[];
 }
@@ -211,18 +223,33 @@ export class AgentCore {
     context: ContextState,
     options?: CreateChatOptions,
   ): Promise<GeminiChat | undefined> {
-    if (!this.promptConfig.systemPrompt && !this.promptConfig.initialMessages) {
+    if (
+      !this.promptConfig.systemPrompt &&
+      !this.promptConfig.renderedSystemPrompt &&
+      !this.promptConfig.initialMessages
+    ) {
       throw new Error(
-        'PromptConfig must have either `systemPrompt` or `initialMessages` defined.',
+        'PromptConfig must have `systemPrompt`, `renderedSystemPrompt`, or `initialMessages` defined.',
       );
     }
-    if (this.promptConfig.systemPrompt && this.promptConfig.initialMessages) {
+    if (
+      this.promptConfig.systemPrompt &&
+      this.promptConfig.renderedSystemPrompt
+    ) {
       throw new Error(
-        'PromptConfig cannot have both `systemPrompt` and `initialMessages` defined.',
+        'PromptConfig cannot have both `systemPrompt` and `renderedSystemPrompt` defined.',
       );
     }
 
-    const envHistory = await getInitialChatHistory(this.runtimeContext);
+    // When initialMessages is set, the caller owns the full prior history
+    // (including any env bootstrap it wants). Fork relies on this to inherit
+    // the parent conversation verbatim without duplicating env messages.
+    const hasInitialMessages =
+      !!this.promptConfig.initialMessages &&
+      this.promptConfig.initialMessages.length > 0;
+    const envHistory = hasInitialMessages
+      ? []
+      : await getInitialChatHistory(this.runtimeContext);
 
     const startHistory = [
       ...envHistory,
@@ -230,22 +257,25 @@ export class AgentCore {
       ...(this.promptConfig.initialMessages ?? []),
     ];
 
-    const systemInstruction = this.promptConfig.systemPrompt
-      ? this.buildChatSystemPrompt(context, options)
-      : undefined;
-
-    try {
-      const generationConfig: GenerateContentConfig & {
-        systemInstruction?: string | Content;
-      } = {
-        temperature: this.modelConfig.temp,
-        topP: this.modelConfig.top_p,
-      };
-
+    // Build generationConfig. For fork subagents, `renderedSystemPrompt`
+    // carries the parent's exact rendered systemInstruction so the fork
+    // shares a byte-identical cache prefix. Otherwise, template
+    // `systemPrompt` via buildChatSystemPrompt (which may throw — kept
+    // outside the try/catch so template errors surface to the caller).
+    const generationConfig: GenerateContentConfig & {
+      systemInstruction?: string | Content;
+    } = {};
+    if (this.promptConfig.renderedSystemPrompt !== undefined) {
+      generationConfig.systemInstruction =
+        this.promptConfig.renderedSystemPrompt;
+    } else if (this.promptConfig.systemPrompt) {
+      const systemInstruction = this.buildChatSystemPrompt(context, options);
       if (systemInstruction) {
         generationConfig.systemInstruction = systemInstruction;
       }
+    }
 
+    try {
       return new GeminiChat(
         this.runtimeContext,
         generationConfig,
@@ -270,18 +300,12 @@ export class AgentCore {
    * If no explicit toolConfig or it contains "*" or is empty,
    * inherits all tools (excluding AgentTool to prevent recursion).
    */
-  prepareTools(): FunctionDeclaration[] {
+  async prepareTools(): Promise<FunctionDeclaration[]> {
     const toolRegistry = this.runtimeContext.getToolRegistry();
+    await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
-    // Tools excluded from subagents: AgentTool (prevent recursion) and
-    // cron tools (session-scoped, should only be used by the main session).
-    const excludedFromSubagents = new Set<string>([
-      AgentTool.Name,
-      ToolNames.CRON_CREATE,
-      ToolNames.CRON_LIST,
-      ToolNames.CRON_DELETE,
-    ]);
+    const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
 
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
@@ -292,7 +316,10 @@ export class AgentCore {
         (t): t is FunctionDeclaration => typeof t !== 'string',
       );
 
-      if (hasWildcard || asStrings.length === 0) {
+      if (
+        hasWildcard ||
+        (asStrings.length === 0 && onlyInlineDecls.length === 0)
+      ) {
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations()
@@ -313,6 +340,19 @@ export class AgentCore {
           .getFunctionDeclarations()
           .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
       );
+    }
+
+    // Apply disallowedTools blocklist (supports MCP server-level patterns).
+    if (this.toolConfig?.disallowedTools?.length) {
+      const disallowed = this.toolConfig.disallowedTools;
+      return toolsList.filter((t) => {
+        if (!t.name) return true;
+        return !disallowed.some((pattern) =>
+          t.name!.startsWith('mcp__')
+            ? matchesMcpPattern(pattern, t.name!)
+            : pattern === t.name,
+        );
+      });
     }
 
     return toolsList;
@@ -902,6 +942,7 @@ export class AgentCore {
   /**
    * Safely retrieves the description of a tool by attempting to build it.
    * Returns an empty string if any error occurs during the process.
+   * Note: Assumes tools are warmed via warmAll() before the reasoning loop.
    */
   getToolDescription(toolName: string, args: Record<string, unknown>): string {
     try {

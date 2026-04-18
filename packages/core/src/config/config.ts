@@ -44,30 +44,12 @@ import {
 import { GitService } from '../services/gitService.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 
-// Tools
-import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
-import { EditTool } from '../tools/edit.js';
-import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
-import { GlobTool } from '../tools/glob.js';
-import { GrepTool } from '../tools/grep.js';
-import { LSTool } from '../tools/ls.js';
+// Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
 import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
-import { MemoryTool, setGeminiMdFilename } from '../tools/memoryTool.js';
-import { ReadFileTool } from '../tools/read-file.js';
+import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { RipGrepTool } from '../tools/ripGrep.js';
-import { ShellTool } from '../tools/shell.js';
-import { SkillTool } from '../tools/skill.js';
-import { AgentTool } from '../tools/agent.js';
-import { TodoWriteTool } from '../tools/todoWrite.js';
-import { ToolRegistry } from '../tools/tool-registry.js';
-import { WebFetchTool } from '../tools/web-fetch.js';
-import { WebSearchTool } from '../tools/web-search/index.js';
-import { WriteFileTool } from '../tools/write-file.js';
-import { LspTool } from '../tools/lsp.js';
-import { CronCreateTool } from '../tools/cron-create.js';
-import { CronListTool } from '../tools/cron-list.js';
-import { CronDeleteTool } from '../tools/cron-delete.js';
+import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type { LspClient } from '../lsp/types.js';
 
 // Other modules
@@ -78,6 +60,7 @@ import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
+import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -103,6 +86,8 @@ import {
   PermissionMode,
   NotificationType,
   type PermissionSuggestion,
+  type HookEventName,
+  type HookDefinition,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
@@ -130,11 +115,15 @@ import {
 } from '../services/sessionService.js';
 import { randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
 import {
   createDebugLogger,
   setDebugLogSession,
   type DebugLogger,
 } from '../utils/debugLogger.js';
+import { getAutoMemoryRoot } from '../memory/paths.js';
+import { readAutoMemoryIndex } from '../memory/store.js';
+import { MemoryManager } from '../memory/manager.js';
 
 import {
   ModelsConfig,
@@ -207,6 +196,19 @@ export interface BugCommandSettings {
 
 export interface ChatCompressionSettings {
   contextPercentageThreshold?: number;
+}
+
+/**
+ * Settings for clearing stale context after idle periods.
+ * Threshold values of -1 mean "never clear" (disabled).
+ */
+export interface ClearContextOnIdleSettings {
+  /** Minutes idle before clearing old thinking blocks. Default 5. Use -1 to disable. */
+  thinkingThresholdMinutes?: number;
+  /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
+  toolResultsThresholdMinutes?: number;
+  /** Number of most-recent tool results to preserve. Default 5. */
+  toolResultsNumToKeep?: number;
 }
 
 export interface TelemetrySettings {
@@ -371,8 +373,7 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
-  /** Minutes of inactivity before clearing retained thinking blocks. */
-  thinkingIdleThresholdMinutes?: number;
+  clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
@@ -424,10 +425,41 @@ export interface ConfigParameters {
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
+  /**
+   * File descriptor number for structured JSON event output (dual output mode).
+   * When set, Qwen Code outputs structured JSON events to this fd while
+   * continuing to render the TUI on stdout. The caller must provide this fd
+   * via spawn stdio configuration.
+   * Mutually exclusive with jsonFile.
+   */
+  jsonFd?: number;
+  /**
+   * File path for structured JSON event output (dual output mode).
+   * Can be a regular file, FIFO (named pipe), or /dev/fd/N.
+   * Mutually exclusive with jsonFd.
+   */
+  jsonFile?: string;
+  /**
+   * File path for receiving remote input commands (bidirectional sync mode).
+   * An external process writes JSONL commands to this file, and the TUI
+   * watches it to process messages as if the user typed them.
+   */
+  inputFile?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
   agents?: AgentsCollabSettings;
+  /** Enable managed auto-memory background extraction and dream. Defaults to true. */
+  enableManagedAutoMemory?: boolean;
+  /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
+  enableManagedAutoDream?: boolean;
+  /**
+   * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
+   * When set and valid for the current auth type, forked agents use this model instead of
+   * the main session model, reducing latency and cost.
+   * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
+   */
+  fastModel?: string;
   /**
    * Disable all hooks (default: false, hooks enabled).
    * Migration note: This replaces the deprecated hooksConfig.enabled setting.
@@ -435,10 +467,25 @@ export interface ConfigParameters {
    * to use disableAllHooks instead (note: inverted logic - enabled:true → disableAllHooks:false).
    */
   disableAllHooks?: boolean;
-  /** Hooks configuration from settings */
+  /**
+   * User-level hooks configuration (from user settings).
+   * These hooks are always loaded regardless of folder trust status.
+   */
+  userHooks?: Record<string, unknown>;
+  /**
+   * Project-level hooks configuration (from workspace settings).
+   * These hooks are only loaded in trusted folders.
+   * When undefined or the folder is untrusted, project hooks are skipped.
+   */
+  projectHooks?: Record<string, unknown>;
+
   hooks?: Record<string, unknown>;
+  /** Glob patterns to exclude from .qwen/rules/ loading. */
+  contextRuleExcludes?: string[];
   /** Warnings generated during configuration resolution */
   warnings?: string[];
+  /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
+  allowedHttpHookUrls?: string[];
   /**
    * Callback for persisting a permission rule to settings.
    * Injected by the CLI layer; core uses this to write allow/ask/deny rules
@@ -492,6 +539,7 @@ export class Config {
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
+  private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -531,6 +579,8 @@ export class Config {
   private userMemory: string;
   private sdkMode: boolean;
   private geminiMdFileCount: number;
+  private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
+  private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
@@ -561,7 +611,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
-  private readonly thinkingIdleThresholdMs: number;
+  private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
   private readonly overrideExtensions?: string[];
@@ -597,6 +647,7 @@ export class Config {
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
   private readonly warnings: string[];
+  private readonly allowedHttpHookUrls: string[];
   private readonly onPersistPermissionRuleCallback?: (
     scope: 'project' | 'user',
     ruleType: 'allow' | 'ask' | 'deny',
@@ -609,11 +660,23 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
+  private readonly jsonFd: number | undefined;
+  private readonly jsonFile: string | undefined;
+  private readonly inputFile: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
+  private readonly enableManagedAutoMemory: boolean;
+  private readonly enableManagedAutoDream: boolean;
+  private fastModel?: string;
   private readonly disableAllHooks: boolean;
+  /** User-level hooks (always loaded regardless of trust) */
+  private readonly userHooks?: Record<string, unknown>;
+  /** Project-level hooks (only loaded in trusted folders) */
+  private readonly projectHooks?: Record<string, unknown>;
+  /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
   private readonly hooks?: Record<string, unknown>;
   private hookSystem?: HookSystem;
   private messageBus?: MessageBus;
+  private readonly memoryManager: MemoryManager;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
@@ -656,6 +719,7 @@ export class Config {
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
+    this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.accessibility = params.accessibility ?? {};
     this.telemetrySettings = {
@@ -688,8 +752,14 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
-    this.thinkingIdleThresholdMs =
-      (params.thinkingIdleThresholdMinutes ?? 5) * 60 * 1000;
+    this.clearContextOnIdle = {
+      thinkingThresholdMinutes:
+        params.clearContextOnIdle?.thinkingThresholdMinutes ?? 5,
+      toolResultsThresholdMinutes:
+        params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
+      toolResultsNumToKeep:
+        params.clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+    };
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
@@ -714,6 +784,7 @@ export class Config {
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.warnings = params.warnings ?? [];
+    this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // Web search
@@ -735,6 +806,9 @@ export class Config {
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.channel = params.channel;
+    this.jsonFd = params.jsonFd;
+    this.jsonFile = params.jsonFile;
+    this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -779,8 +853,16 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
+    this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
+    this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
+    this.fastModel = params.fastModel || undefined;
     this.disableAllHooks = params.disableAllHooks ?? false;
+    // Store user and project hooks separately for proper source attribution
+    this.userHooks = params.userHooks;
+    this.projectHooks = params.projectHooks;
+    // Legacy: fall back to merged hooks if new fields are not provided
     this.hooks = params.hooks;
+    this.memoryManager = new MemoryManager();
   }
 
   /**
@@ -1003,23 +1085,65 @@ export class Config {
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
     this.modelsConfig.detectAndCaptureRuntimeModel();
 
+    // Warm all lazy tool factories so telemetry can access tool metadata synchronously.
+    // Use strict mode so a broken built-in tool surfaces immediately at startup.
+    await this.toolRegistry.warmAll({ strict: true });
+
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
   }
 
   async refreshHierarchicalMemory(): Promise<void> {
-    const { memoryContent, fileCount } = await loadServerHierarchicalMemory(
-      this.getWorkingDir(),
-      this.shouldLoadMemoryFromIncludeDirectories()
-        ? this.getWorkspaceContext().getDirectories()
-        : [],
-      this.getFileService(),
-      this.getExtensionContextFilePaths(),
-      this.isTrustedFolder(),
-      this.getImportFormat(),
-    );
-    this.setUserMemory(memoryContent);
+    const { memoryContent, fileCount, conditionalRules, projectRoot } =
+      await loadServerHierarchicalMemory(
+        this.getWorkingDir(),
+        this.shouldLoadMemoryFromIncludeDirectories()
+          ? this.getWorkspaceContext().getDirectories()
+          : [],
+        this.getFileService(),
+        this.getExtensionContextFilePaths(),
+        this.isTrustedFolder(),
+        this.getImportFormat(),
+        this.contextRuleExcludes,
+      );
+    if (this.getManagedAutoMemoryEnabled()) {
+      const managedAutoMemoryIndex = await readAutoMemoryIndex(
+        this.getProjectRoot(),
+      );
+      this.setUserMemory(
+        this.memoryManager.appendToUserMemory(
+          memoryContent,
+          getAutoMemoryRoot(this.getProjectRoot()),
+          managedAutoMemoryIndex,
+        ),
+      );
+    } else {
+      this.setUserMemory(memoryContent);
+    }
     this.setGeminiMdFileCount(fileCount);
+    this.conditionalRulesRegistry = new ConditionalRulesRegistry(
+      conditionalRules,
+      projectRoot,
+    );
+  }
+
+  getConditionalRulesRegistry(): ConditionalRulesRegistry | undefined {
+    return this.conditionalRulesRegistry;
+  }
+
+  /**
+   * Update the conditional rules registry. Called after external refresh
+   * paths (e.g. /memory refresh or /directory add) that bypass
+   * refreshHierarchicalMemory().
+   */
+  setConditionalRulesRegistry(
+    registry: ConditionalRulesRegistry | undefined,
+  ): void {
+    this.conditionalRulesRegistry = registry;
+  }
+
+  getContextRuleExcludes(): string[] {
+    return this.contextRuleExcludes;
   }
 
   getContentGenerator(): ContentGenerator {
@@ -1206,6 +1330,29 @@ export class Config {
   }
 
   /**
+   * Returns the fast model if one is configured and valid for the current auth type,
+   * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
+   * use this as a cheaper alternative to the main session model.
+   */
+  getFastModel(): string | undefined {
+    if (!this.fastModel) return undefined;
+    const authType = this.contentGeneratorConfig?.authType;
+    if (!authType) return undefined;
+    const available = this.getAvailableModelsForAuthType(authType);
+    return available.some((m) => m.id === this.fastModel)
+      ? this.fastModel
+      : undefined;
+  }
+
+  /**
+   * Update the fast model at runtime (e.g., when the user runs `/model --fast <model>`).
+   * Pass undefined or an empty string to clear the fast model override.
+   */
+  setFastModel(model: string | undefined): void {
+    this.fastModel = model || undefined;
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Delegates to ModelsConfig.
    */
@@ -1231,6 +1378,12 @@ export class Config {
     if (!this.contentGeneratorConfig) {
       return;
     }
+
+    // Strip thinking blocks from conversation history on model switch.
+    // reasoning_content is a non-standard field that causes strict
+    // OpenAI-compatible providers to reject requests with 422 errors
+    // when thought parts from a previous model leak into the payload (#3304).
+    this.geminiClient.stripThoughtsFromHistory();
 
     // Hot update path: only supported for qwen-oauth.
     // For other auth types we always refresh to recreate the ContentGenerator.
@@ -1336,8 +1489,8 @@ export class Config {
     return this.maxSessionTurns;
   }
 
-  getThinkingIdleThresholdMs(): number {
-    return this.thinkingIdleThresholdMs;
+  getClearContextOnIdle(): ClearContextOnIdleSettings {
+    return this.clearContextOnIdle;
   }
 
   getSessionTokenLimit(): number {
@@ -1399,6 +1552,8 @@ export class Config {
       if (this.toolRegistry) {
         await this.toolRegistry.stop();
       }
+
+      this.backgroundTaskRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
     } catch (error) {
@@ -1883,6 +2038,24 @@ export class Config {
     return this.disableAllHooks;
   }
 
+  getManagedAutoMemoryEnabled(): boolean {
+    return this.enableManagedAutoMemory;
+  }
+
+  getManagedAutoDreamEnabled(): boolean {
+    return this.enableManagedAutoDream;
+  }
+
+  /**
+   * Return the MemoryManager instance created for this Config.
+   * Use this to share background-task state (registry, drainer) with memory
+   * module runtimes (extract, dream) instead of relying on module-level
+   * globals.
+   */
+  getMemoryManager(): MemoryManager {
+    return this.memoryManager;
+  }
+
   /**
    * Get the message bus instance.
    * Returns undefined if not set.
@@ -1901,20 +2074,28 @@ export class Config {
 
   /**
    * Get project-level hooks configuration.
-   * This is used by the HookRegistry to load project-specific hooks.
+   * Returns hooks from workspace settings, only in trusted folders.
+   * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
-  getProjectHooks(): Record<string, unknown> | undefined {
-    // This will be populated from settings by the CLI layer
-    // The core Config doesn't have direct access to settings
-    return undefined;
+  getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    // Only return project hooks if workspace is trusted
+    if (!this.isTrustedFolder()) {
+      return undefined;
+    }
+    // Prefer new projectHooks field, fall back to hooks for backward compatibility
+    const hooks = this.projectHooks ?? this.hooks;
+    return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
   /**
-   * Get all hooks configuration (merged from all sources).
-   * This is used by the HookRegistry to load hooks.
+   * Get user-level hooks configuration.
+   * Returns hooks from user settings, always available regardless of folder trust.
+   * Used by HookRegistry to load user-specific hooks with proper source attribution.
    */
-  getHooks(): Record<string, unknown> | undefined {
-    return this.hooks;
+  getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    // Prefer new userHooks field, fall back to hooks for backward compatibility
+    const hooks = this.userHooks ?? this.hooks;
+    return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
   }
 
   getExtensions(): Extension[] {
@@ -1992,6 +2173,14 @@ export class Config {
     return this.folderTrust;
   }
 
+  /**
+   * Returns the whitelist of allowed HTTP hook URL patterns.
+   * If empty, all URLs are allowed (subject to SSRF protection).
+   */
+  getAllowedHttpHookUrls(): string[] {
+    return this.allowedHttpHookUrls;
+  }
+
   isTrustedFolder(): boolean {
     // isWorkspaceTrusted in cli/src/config/trustedFolder.js returns undefined
     // when the file based trust value is unavailable, since it is mainly used
@@ -2025,6 +2214,31 @@ export class Config {
 
   getChannel(): string | undefined {
     return this.channel;
+  }
+
+  /**
+   * Get the file descriptor for dual output JSON event stream.
+   * When set, the TUI mode will also emit structured JSON events to this fd.
+   */
+  getJsonFd(): number | undefined {
+    return this.jsonFd;
+  }
+
+  /**
+   * Get the file path for dual output JSON event stream.
+   * When set, the TUI mode will also emit structured JSON events to this file.
+   */
+  getJsonFile(): string | undefined {
+    return this.jsonFile;
+  }
+
+  /**
+   * Get the file path for remote input commands (bidirectional sync).
+   * When set, the TUI mode will watch this file for JSONL commands written
+   * by an external process and submit them as user messages.
+   */
+  getInputFile(): string | undefined {
+    return this.inputFile;
   }
 
   /**
@@ -2173,6 +2387,19 @@ export class Config {
     return this.subagentManager;
   }
 
+  getBackgroundTaskRegistry(): BackgroundTaskRegistry {
+    return this.backgroundTaskRegistry;
+  }
+
+  /**
+   * Whether interactive permission prompts should be auto-denied.
+   * True for background agents that have no UI to show prompts.
+   * PermissionRequest hooks still run and can override the denial.
+   */
+  getShouldAvoidPermissionPrompts(): boolean {
+    return false;
+  }
+
   getSkillManager(): SkillManager | null {
     return this.skillManager;
   }
@@ -2205,45 +2432,51 @@ export class Config {
       sendSdkMcpMessage,
     );
 
-    // Helper to create & register core tools that are enabled
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const registerCoreTool = async (ToolClass: any, ...args: unknown[]) => {
-      const toolName = ToolClass?.Name as ToolName | undefined;
-      const className = ToolClass?.name ?? 'UnknownTool';
-
-      if (!toolName) {
-        // Log warning and skip this tool instead of crashing
+    // Helper: check permission then register a lazy factory (no module import
+    // happens here — the dynamic import() only runs when the tool is first used).
+    const registerLazy = async (
+      toolName: ToolName,
+      factory: ToolFactory,
+    ): Promise<void> => {
+      // PermissionManager handles both the coreTools allowlist (registry-level)
+      // and deny rules (runtime-level) in a single check.
+      let pmEnabled = true;
+      try {
+        pmEnabled = this.permissionManager
+          ? await this.permissionManager.isToolEnabled(toolName)
+          : true; // Should never reach here after initialize(), but safe default.
+      } catch (error) {
         this.debugLogger.warn(
-          `Skipping tool registration: ${className} is missing static Name property. ` +
-            `Tools must define a static Name property to be registered.`,
+          `Failed to check permissions for tool "${toolName}", skipping registration:`,
+          error,
         );
         return;
       }
 
-      // PermissionManager handles both the coreTools allowlist (registry-level)
-      // and deny rules (runtime-level) in a single check.
-      const pmEnabled = this.permissionManager
-        ? await this.permissionManager.isToolEnabled(toolName)
-        : true; // Should never reach here after initialize(), but safe default.
-
       if (pmEnabled) {
-        try {
-          registry.registerTool(new ToolClass(...args));
-        } catch (error) {
-          this.debugLogger.error(
-            `Failed to register tool ${className} (${toolName}):`,
-            error,
-          );
-          throw error; // Re-throw after logging context
-        }
+        registry.registerFactory(toolName, factory);
       }
     };
 
-    await registerCoreTool(AgentTool, this);
-    await registerCoreTool(SkillTool, this);
-    await registerCoreTool(LSTool, this);
-    await registerCoreTool(ReadFileTool, this);
+    // --- Core tools (always registered) ---
+    await registerLazy(ToolNames.AGENT, async () => {
+      const { AgentTool } = await import('../tools/agent/agent.js');
+      return new AgentTool(this);
+    });
+    await registerLazy(ToolNames.SKILL, async () => {
+      const { SkillTool } = await import('../tools/skill.js');
+      return new SkillTool(this);
+    });
+    await registerLazy(ToolNames.LS, async () => {
+      const { LSTool } = await import('../tools/ls.js');
+      return new LSTool(this);
+    });
+    await registerLazy(ToolNames.READ_FILE, async () => {
+      const { ReadFileTool } = await import('../tools/read-file.js');
+      return new ReadFileTool(this);
+    });
 
+    // --- Grep / RipGrep (conditional) ---
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
       let errorString: undefined | string = undefined;
@@ -2253,9 +2486,11 @@ export class Config {
         errorString = getErrorMessage(error);
       }
       if (useRipgrep) {
-        await registerCoreTool(RipGrepTool, this);
+        await registerLazy(ToolNames.GREP, async () => {
+          const { RipGrepTool } = await import('../tools/ripGrep.js');
+          return new RipGrepTool(this);
+        });
       } else {
-        // Log for telemetry
         logRipgrepFallback(
           this,
           new RipgrepFallbackEvent(
@@ -2264,37 +2499,82 @@ export class Config {
             errorString || 'ripgrep is not available',
           ),
         );
-        await registerCoreTool(GrepTool, this);
+        await registerLazy(ToolNames.GREP, async () => {
+          const { GrepTool } = await import('../tools/grep.js');
+          return new GrepTool(this);
+        });
       }
     } else {
-      await registerCoreTool(GrepTool, this);
+      await registerLazy(ToolNames.GREP, async () => {
+        const { GrepTool } = await import('../tools/grep.js');
+        return new GrepTool(this);
+      });
     }
 
-    await registerCoreTool(GlobTool, this);
-    await registerCoreTool(EditTool, this);
-    await registerCoreTool(WriteFileTool, this);
-    await registerCoreTool(ShellTool, this);
-    await registerCoreTool(MemoryTool);
-    await registerCoreTool(TodoWriteTool, this);
-    await registerCoreTool(AskUserQuestionTool, this);
-    !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
-    await registerCoreTool(WebFetchTool, this);
+    await registerLazy(ToolNames.GLOB, async () => {
+      const { GlobTool } = await import('../tools/glob.js');
+      return new GlobTool(this);
+    });
+    await registerLazy(ToolNames.EDIT, async () => {
+      const { EditTool } = await import('../tools/edit.js');
+      return new EditTool(this);
+    });
+    await registerLazy(ToolNames.WRITE_FILE, async () => {
+      const { WriteFileTool } = await import('../tools/write-file.js');
+      return new WriteFileTool(this);
+    });
+    await registerLazy(ToolNames.SHELL, async () => {
+      const { ShellTool } = await import('../tools/shell.js');
+      return new ShellTool(this);
+    });
+    await registerLazy(ToolNames.TODO_WRITE, async () => {
+      const { TodoWriteTool } = await import('../tools/todoWrite.js');
+      return new TodoWriteTool(this);
+    });
+    await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
+      const { AskUserQuestionTool } = await import(
+        '../tools/askUserQuestion.js'
+      );
+      return new AskUserQuestionTool(this);
+    });
+    if (!this.sdkMode) {
+      await registerLazy(ToolNames.EXIT_PLAN_MODE, async () => {
+        const { ExitPlanModeTool } = await import('../tools/exitPlanMode.js');
+        return new ExitPlanModeTool(this);
+      });
+    }
+    await registerLazy(ToolNames.WEB_FETCH, async () => {
+      const { WebFetchTool } = await import('../tools/web-fetch.js');
+      return new WebFetchTool(this);
+    });
     // Conditionally register web search tool if web search provider is configured
-    // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
-    // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
-      await registerCoreTool(WebSearchTool, this);
+      await registerLazy(ToolNames.WEB_SEARCH, async () => {
+        const { WebSearchTool } = await import('../tools/web-search/index.js');
+        return new WebSearchTool(this);
+      });
     }
     if (this.isLspEnabled() && this.getLspClient()) {
-      // Register the unified LSP tool
-      await registerCoreTool(LspTool, this);
+      await registerLazy(ToolNames.LSP, async () => {
+        const { LspTool } = await import('../tools/lsp.js');
+        return new LspTool(this);
+      });
     }
 
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {
-      await registerCoreTool(CronCreateTool, this);
-      await registerCoreTool(CronListTool, this);
-      await registerCoreTool(CronDeleteTool, this);
+      await registerLazy(ToolNames.CRON_CREATE, async () => {
+        const { CronCreateTool } = await import('../tools/cron-create.js');
+        return new CronCreateTool(this);
+      });
+      await registerLazy(ToolNames.CRON_LIST, async () => {
+        const { CronListTool } = await import('../tools/cron-list.js');
+        return new CronListTool(this);
+      });
+      await registerLazy(ToolNames.CRON_DELETE, async () => {
+        const { CronDeleteTool } = await import('../tools/cron-delete.js');
+        return new CronDeleteTool(this);
+      });
     }
 
     if (!options?.skipDiscovery) {

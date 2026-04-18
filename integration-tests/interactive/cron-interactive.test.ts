@@ -55,15 +55,15 @@ function makeEnv(): NodeJS.ProcessEnv {
     );
 
     await session.waitForScreen(
-      (scr) => scr.split('\n').some((l) => l.trim() === '> PONG7742'),
-      'cron-injected prompt "> PONG7742"',
+      (scr) => scr.includes('Cron: PONG7742'),
+      'cron notification "Cron: PONG7742"',
       90_000,
     );
 
     await session.idle(5000);
     const finalScreen = await session.screen();
     const afterPrompt = finalScreen.slice(
-      finalScreen.lastIndexOf('> PONG7742'),
+      finalScreen.lastIndexOf('Cron: PONG7742'),
     );
     expect(afterPrompt).toContain('✦');
   });
@@ -79,8 +79,8 @@ function makeEnv(): NodeJS.ProcessEnv {
     );
 
     await session.waitForScreen(
-      (scr) => scr.split('\n').some((l) => l.trim() === '> CRONTICK99'),
-      'first cron fire "> CRONTICK99"',
+      (scr) => scr.includes('Cron: CRONTICK99'),
+      'first cron fire "Cron: CRONTICK99"',
       90_000,
     );
 

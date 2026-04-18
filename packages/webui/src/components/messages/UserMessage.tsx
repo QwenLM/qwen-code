@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { FC } from 'react';
+import { type FC, memo } from 'react';
 import { CollapsibleFileContent } from './CollapsibleFileContent.js';
 
 export interface FileContext {
@@ -21,7 +21,7 @@ export interface UserMessageProps {
   fileContext?: FileContext;
 }
 
-export const UserMessage: FC<UserMessageProps> = ({
+const UserMessageBase: FC<UserMessageProps> = ({
   content,
   timestamp: _timestamp,
   onFileClick,
@@ -32,7 +32,6 @@ export const UserMessage: FC<UserMessageProps> = ({
       return null;
     }
     const { fileName, startLine, endLine } = fileContext;
-    // Use != null to handle line number 0 and support start-only line
     if (startLine != null) {
       if (endLine != null && endLine !== startLine) {
         return `${fileName}#${startLine}-${endLine}`;
@@ -89,3 +88,7 @@ export const UserMessage: FC<UserMessageProps> = ({
     </div>
   );
 };
+
+UserMessageBase.displayName = 'UserMessage';
+
+export const UserMessage = memo(UserMessageBase);

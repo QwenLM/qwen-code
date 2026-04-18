@@ -82,8 +82,6 @@ export class DingtalkChannel extends ChannelBase {
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
-  /** Map messageId → conversationId for reaction attach/recall in hooks. */
-  private reactionContext: Map<string, string> = new Map();
 
   constructor(
     name: string,
@@ -146,11 +144,12 @@ export class DingtalkChannel extends ChannelBase {
     const chunks = normalizeDingTalkMarkdown(text);
     const title = extractTitle(text);
 
-    for (const chunk of chunks) {
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]!;
       const body = {
         msgtype: 'markdown',
         markdown: {
-          title: chunks.length > 1 ? `${title} (cont.)` : title,
+          title: i === 0 ? title : `${title} (cont.)`,
           text: chunk,
         },
       };
@@ -239,29 +238,31 @@ export class DingtalkChannel extends ChannelBase {
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
 
+  /**
+   * The chatId passed to onPromptStart/onPromptEnd is `conversationId ||
+   * sessionWebhook` (see message handler below). Reactions require a real
+   * conversation ID — skip the webhook-URL fallback case.
+   */
+  private isConversationId(chatId: string): boolean {
+    return !!chatId && !chatId.startsWith('http');
+  }
+
   protected override onPromptStart(
-    _chatId: string,
+    chatId: string,
     _sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId) return;
-    const convId = this.reactionContext.get(messageId);
-    if (convId) {
-      this.attachReaction(messageId, convId).catch(() => {});
-    }
+    if (!messageId || !this.isConversationId(chatId)) return;
+    this.attachReaction(messageId, chatId).catch(() => {});
   }
 
   protected override onPromptEnd(
-    _chatId: string,
+    chatId: string,
     _sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId) return;
-    const convId = this.reactionContext.get(messageId);
-    if (convId) {
-      this.recallReaction(messageId, convId).catch(() => {});
-      this.reactionContext.delete(messageId);
-    }
+    if (!messageId || !this.isConversationId(chatId)) return;
+    this.recallReaction(messageId, chatId).catch(() => {});
   }
 
   /**
@@ -532,23 +533,26 @@ export class DingtalkChannel extends ChannelBase {
 
       const chatId = conversationId || sessionWebhook;
 
+      // After stripping the bot @mention, cleanText may legitimately be empty
+      // (user pinged the bot with no other text). Don't fall back to the
+      // original text in that case — it would re-introduce the @mention.
+      const envelopeText = isMentioned ? cleanText : cleanText || content.text;
+
       const envelope: Envelope = {
         channelName: this.name,
-        senderId: data.senderId || data.senderStaffId || '',
+        senderId: data.senderStaffId || data.senderId || '',
         senderName: data.senderNick || 'Unknown',
         chatId,
-        text: cleanText || content.text,
+        text: envelopeText,
         isGroup,
         isMentioned,
         isReplyToBot: quoted.isReplyToBot,
         referencedText: quoted.referencedText,
       };
 
-      // Store messageId + conversationId for reaction hooks
+      // Reactions are resolved later via the chatId passed to
+      // onPromptStart/onPromptEnd — no extra bookkeeping needed.
       envelope.messageId = msgId;
-      if (msgId && conversationId) {
-        this.reactionContext.set(msgId, conversationId);
-      }
 
       const processMessage = async () => {
         // Download media if present (first downloadCode only for images)
@@ -560,9 +564,6 @@ export class DingtalkChannel extends ChannelBase {
             content.fileName,
           );
         }
-        // reactionContext cleanup is handled by onPromptEnd (not here),
-        // because in collect mode handleInbound returns immediately after
-        // buffering — the context must survive until the prompt actually runs.
         await this.handleInbound(envelope);
       };
 

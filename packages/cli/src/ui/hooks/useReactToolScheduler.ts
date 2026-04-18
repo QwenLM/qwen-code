@@ -23,7 +23,9 @@ import type {
 import {
   CoreToolScheduler,
   createDebugLogger,
+  isAutoMemPath,
 } from '@qwen-code/qwen-code-core';
+import * as path from 'node:path';
 import { useCallback, useState, useMemo } from 'react';
 import type {
   HistoryItemToolGroup,
@@ -210,10 +212,31 @@ function mapCoreStatusToDisplayStatus(coreStatus: CoreStatus): ToolCallStatus {
 }
 
 /**
+ * Returns 'read' or 'write' if the tool call operates on a managed-auto-memory
+ * file; returns undefined otherwise.
+ */
+function detectMemoryOp(
+  toolName: string,
+  args: Record<string, unknown>,
+  projectRoot: string,
+): 'read' | 'write' | undefined {
+  const WRITE_TOOLS = new Set(['write_file', 'edit']);
+  const READ_TOOLS = new Set(['read_file']);
+  const filePath = args?.['file_path'] as string | undefined;
+  if (!filePath) return undefined;
+  const resolved = path.resolve(filePath);
+  if (!isAutoMemPath(resolved, projectRoot)) return undefined;
+  if (WRITE_TOOLS.has(toolName)) return 'write';
+  if (READ_TOOLS.has(toolName)) return 'read';
+  return undefined;
+}
+
+/**
  * Transforms `TrackedToolCall` objects into `HistoryItemToolGroup` objects for UI display.
  */
 export function mapToDisplay(
   toolOrTools: TrackedToolCall[] | TrackedToolCall,
+  projectRoot?: string,
 ): HistoryItemToolGroup {
   const toolCalls = Array.isArray(toolOrTools) ? toolOrTools : [toolOrTools];
 
@@ -243,6 +266,14 @@ export function mapToDisplay(
         name: displayName,
         description,
         renderOutputAsMarkdown,
+        isMemoryOp:
+          projectRoot && trackedCall.status !== 'error'
+            ? detectMemoryOp(
+                trackedCall.request.name,
+                trackedCall.request.args as Record<string, unknown>,
+                projectRoot,
+              )
+            : undefined,
       };
 
       switch (trackedCall.status) {
@@ -312,5 +343,9 @@ export function mapToDisplay(
   return {
     type: 'tool_group',
     tools: toolDisplays,
+    memoryWriteCount:
+      toolDisplays.filter((t) => t.isMemoryOp === 'write').length || undefined,
+    memoryReadCount:
+      toolDisplays.filter((t) => t.isMemoryOp === 'read').length || undefined,
   };
 }

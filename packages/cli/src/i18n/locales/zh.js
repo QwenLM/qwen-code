@@ -57,6 +57,7 @@ export default {
   'to search history': '搜索历史',
   'to paste images': '粘贴图片',
   'for external editor': '外部编辑器',
+  'to toggle compact mode': '切换紧凑模式',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':
     '关闭对话框、取消请求或退出应用程序',
@@ -686,6 +687,7 @@ export default {
   'User Settings': '用户设置',
   'System Settings': '系统设置',
   Extensions: '扩展',
+  'Session (temporary)': '会话（临时）',
   // Hooks - Status
   '✓ Enabled': '✓ 已启用',
   '✗ Disabled': '✗ 已禁用',
@@ -897,6 +899,41 @@ export default {
     '用法：/memory add [--global|--project] <要记住的文本>',
   'Attempting to save to memory {{scope}}: "{{fact}}"':
     '正在尝试保存到记忆 {{scope}}："{{fact}}"',
+  'Open auto-memory folder': '打开自动记忆文件夹',
+  'Auto-memory: {{status}}': '自动记忆：{{status}}',
+  'Auto-dream: {{status}} · {{lastDream}} · /dream to run':
+    '自动整理：{{status}} · {{lastDream}} · /dream 立即运行',
+  never: '从未',
+  on: '开',
+  off: '关',
+  '✦ dreaming': '✦ 整理中',
+  'Remove matching entries from managed auto-memory.':
+    '从托管自动记忆中删除匹配的条目。',
+  'Usage: /forget <memory text to remove>': '用法：/forget <要删除的记忆文本>',
+  'No managed auto-memory entries matched: {{query}}':
+    '没有匹配的托管自动记忆条目：{{query}}',
+  'Show managed auto-memory status.': '显示托管自动记忆状态',
+  'Run managed auto-memory extraction for the current session.':
+    '为当前会话运行托管自动记忆提炼',
+  'Managed auto-memory root: {{root}}': '托管自动记忆根目录：{{root}}',
+  'Managed auto-memory topics:': '托管自动记忆主题：',
+  'No extraction cursor found yet.': '尚未找到提炼游标。',
+  'Cursor: session={{sessionId}}, offset={{offset}}, updated={{updatedAt}}':
+    '游标：session={{sessionId}}，offset={{offset}}，updated={{updatedAt}}',
+  'No chat client available to extract memory.':
+    '没有可用于提炼记忆的聊天客户端。',
+  'Managed auto-memory extraction is already running.':
+    '托管自动记忆提炼已在运行中。',
+  'Managed auto-memory extraction found no new durable memories.':
+    '托管自动记忆提炼未发现新的持久记忆。',
+  'Consolidate managed auto-memory topic files.': '整理托管自动记忆主题文件',
+  'Managed auto-memory dream found nothing to improve.':
+    '托管自动记忆 dream 未发现可改进内容。',
+  'Deduplicated entries: {{count}}': '去重条目数：{{count}}',
+  'Save a durable memory using the save_memory tool.':
+    '使用 save_memory 工具保存一条持久记忆',
+  'Usage: /remember [--global|--project] <text to remember>':
+    '用法：/remember [--global|--project] <要记住的文本>',
 
   // ============================================================================
   // Commands - MCP
@@ -986,6 +1023,12 @@ export default {
     '按 Enter 开始认证，Esc 返回',
   'Authenticating... Please complete the login in your browser.':
     '认证中... 请在浏览器中完成登录。',
+  'Press c to copy the authorization URL to your clipboard.':
+    '按 c 复制授权 URL 到剪贴板。',
+  'Copy request sent to your terminal. If paste is empty, copy the URL above manually.':
+    '已向终端发送复制请求；若粘贴为空，请手动复制上方 URL。',
+  'Cannot write to terminal — copy the URL above manually.':
+    '无法写入终端，请手动复制上方 URL。',
   'Press Enter or Esc to go back': '按 Enter 或 Esc 返回',
 
   // MCP Server Detail
@@ -1227,10 +1270,16 @@ export default {
     '您必须选择认证方法才能继续。再次按 Ctrl+C 退出',
   'Terms of Services and Privacy Notice': '服务条款和隐私声明',
   'Qwen OAuth': 'Qwen OAuth (免费)',
-  'Free \u00B7 Up to 1,000 requests/day \u00B7 Qwen latest models':
-    '免费 \u00B7 每天最多 1,000 次请求 \u00B7 Qwen 最新模型',
-  'Login with QwenChat account to use daily free quota.':
-    '使用 QwenChat 账号登录，享受每日免费额度。',
+  'Discontinued — switch to Coding Plan or API Key':
+    '已停用 — 请切换到 Coding Plan 或 API Key',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch provider.':
+    'Qwen OAuth 免费额度已于 2026-04-15 停用。请运行 /auth 切换服务商。',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select Coding Plan or API Key instead.':
+    'Qwen OAuth 免费额度已于 2026-04-15 停用。请选择 Coding Plan 或 API Key。',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Please select a model from another provider or run /auth to switch.':
+    'Qwen OAuth免费层已于2026-04-15停止服务。请选择其他提供商的模型或运行 /auth 切换。',
+  '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n':
+    '\n⚠ Qwen OAuth 免费额度已于 2026-04-15 停用。请选择其他选项。\n',
   'Paid \u00B7 Up to 6,000 requests/5 hrs \u00B7 All Alibaba Cloud Coding Plan Models':
     '付费 \u00B7 每 5 小时最多 6,000 次请求 \u00B7 支持阿里云百炼 Coding Plan 全部模型',
   'Alibaba Cloud Coding Plan': '阿里云百炼 Coding Plan',
@@ -1474,6 +1523,18 @@ export default {
     '按 Tab 或输入 /approval-mode 可快速切换权限模式。',
   'Try /insight to generate personalized insights from your chat history.':
     '试试 /insight，从聊天记录中生成个性化洞察。',
+  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
+    '按 Ctrl+O 切换紧凑模式 ── 隐藏工具输出和思考过程，界面更简洁。',
+  'Add a QWEN.md file to give Qwen Code persistent project context.':
+    '添加 QWEN.md 文件，为 Qwen Code 提供持久的项目上下文。',
+  'Use /btw to ask a quick side question without disrupting the conversation.':
+    '用 /btw 快速问一个小问题，不会打断当前对话。',
+  'Context is almost full! Run /compress now or start /new to continue.':
+    '上下文即将用满！请立即执行 /compress 或使用 /new 开启新会话。',
+  'Context is getting full. Use /compress to free up space.':
+    '上下文空间不足，用 /compress 释放空间。',
+  'Long conversation? /compress summarizes history to free context.':
+    '对话太长？用 /compress 总结历史，释放上下文。',
 
   // ============================================================================
   // Exit Screen / Stats
@@ -1785,16 +1846,19 @@ export default {
   '⚠️  No authentication method configured.\n': '⚠️  未配置认证方式。\n',
   'Run one of the following commands to get started:\n':
     '运行以下命令之一开始配置：\n',
-  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (free tier)':
-    '  qwen auth qwen-oauth     - 使用 Qwen OAuth 认证（免费）',
+  '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
+    '  qwen auth qwen-oauth     - 使用 Qwen OAuth 登录（已停用）',
   '  qwen auth coding-plan      - Authenticate with Alibaba Cloud Coding Plan\n':
     '  qwen auth coding-plan      - 使用阿里云百炼 Coding Plan 认证\n',
   'Or simply run:': '或者直接运行：',
   '  qwen auth                - Interactive authentication setup\n':
     '  qwen auth                - 交互式认证配置\n',
   '✓ Authentication Method: Qwen OAuth': '✓ 认证方式：Qwen OAuth',
-  '  Type: Free tier': '  类型：免费版',
-  '  Limit: Up to 1,000 requests/day': '  限额：每天最多 1,000 次请求',
+  '  Type: Free tier (discontinued 2026-04-15)':
+    '  类型：免费额度（2026-04-15 已停用）',
+  '  Limit: No longer available': '  限额：已不可用',
+  'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan, OpenRouter, Fireworks AI, or another provider.':
+    'Qwen OAuth 免费额度已于 2026-04-15 停用。请运行 /auth 切换到 Coding Plan、OpenRouter、Fireworks AI 或其他服务商。',
   '  Models: Qwen latest models\n': '  模型：Qwen 最新模型\n',
   '✓ Authentication Method: Alibaba Cloud Coding Plan':
     '✓ 认证方式：阿里云百炼 Coding Plan',
@@ -1820,6 +1884,7 @@ export default {
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
   compact: '紧凑',
+  'compact mode: on (Ctrl+O off)': '紧凑模式：开（Ctrl+O 关闭）',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
     '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',

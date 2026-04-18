@@ -1,4 +1,8 @@
-import type { SkillConfig, SkillValidationResult } from './types.js';
+import {
+  type SkillConfig,
+  type SkillValidationResult,
+  parseModelField,
+} from './types.js';
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { parse as parseYaml } from '../utils/yaml-parser.js';
@@ -108,10 +112,14 @@ export function parseSkillContent(
     }
   }
 
+  // Extract optional model field
+  const model = parseModelField(frontmatter);
+
   const config: SkillConfig = {
     name,
     description,
     allowedTools,
+    model,
     filePath,
     body: body.trim(),
     level: 'extension',

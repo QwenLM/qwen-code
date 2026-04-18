@@ -83,7 +83,7 @@ export const CompactToolGroupDisplay: React.FC<
       borderColor={borderColor}
       gap={0}
     >
-      {/* Status line: icon + tool name + description */}
+      {/* Status line: icon + tool name + count + description */}
       <Box flexDirection="row">
         <ToolStatusIndicator
           status={overallStatus}
@@ -93,6 +93,12 @@ export const CompactToolGroupDisplay: React.FC<
         <Box flexGrow={1}>
           <Text wrap="truncate-end">
             <Text bold>{activeTool.name}</Text>
+            {toolCalls.length > 1 ? (
+              <Text color={theme.text.secondary}>
+                {' × '}
+                {toolCalls.length}
+              </Text>
+            ) : null}
             {activeToolDescription ? (
               <Text color={theme.text.secondary}>
                 {'  '}
