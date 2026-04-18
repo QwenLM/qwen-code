@@ -38,10 +38,11 @@ export interface WebFetchToolParams {
    */
   prompt: string;
   /**
-   * Preferred content format
-   * - auto: Try markdown first, fall back to HTML (default)
+   * Preferred content format (controls only the Accept header)
+   * All content is normalized to plain text for LLM processing
+   * - auto: Prefers markdown via content negotiation (default)
    * - markdown: Request markdown format only
-   * - html: Request HTML format only
+   * - html: Request HTML format only (still converted to text)
    * - text: Request plain text format
    */
   format?: 'auto' | 'markdown' | 'html' | 'text';
@@ -266,7 +267,7 @@ export class WebFetchTool extends BaseDeclarativeTool<
     super(
       WebFetchTool.Name,
       ToolDisplayNames.WEB_FETCH,
-      'Fetches content from a specified URL and processes it using an AI model\n- Takes a URL and a prompt as input\n- Supports content negotiation for markdown (reduces tokens by ~80%)\n- Fetches the URL content, converts HTML to text if needed\n- Processes the content with the prompt using a small, fast model\n- Returns the model\'s response about the content\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions. All MCP-provided tools start with "mcp__".\n  - The URL must be a fully-formed valid URL\n  - The prompt should describe what information you want to extract from the page\n  - format parameter (optional): controls the Accept header sent to the server. All formats are normalized to text for LLM processing.\n  - "auto" (default): Prefers markdown via content negotiation, accepts HTML as fallback. Use when user does NOT specify a format.\n  - "markdown": Sends Accept: text/markdown. Use when user explicitly asks for markdown content.\n  - "html": Sends Accept: text/html. Content is still normalized to text for LLM processing.\n  - "text": Sends Accept: text/plain. Use when user explicitly asks for plain text.\n  - IMPORTANT: If user says "markdown", "原始内容", or "原始 markdown", use format="markdown".\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n  - Supports both public and private/localhost URLs using direct fetch',
+      'Fetches content from a specified URL and processes it using an AI model\n- Takes a URL and a prompt as input\n- Supports content negotiation for markdown (reduces tokens by ~80%)\n- Fetches the URL content, converts HTML to text if needed\n- Processes the content with the prompt using a small, fast model\n- Returns the model\'s response about the content\n- Use this tool when you need to retrieve and analyze web content\n\nUsage notes:\n  - IMPORTANT: If an MCP-provided web fetch tool is available, prefer using that tool instead of this one, as it may have fewer restrictions. All MCP-provided tools start with "mcp__".\n  - The URL must be a fully-formed valid URL\n  - The prompt should describe what information you want to extract from the page\n  - format parameter (optional): controls only the Accept header sent to the server. All content is normalized to plain text for LLM processing, regardless of format.\n  - "auto" (default): Prefers markdown via content negotiation, accepts HTML as fallback. Use when user does NOT specify a format.\n  - "markdown": Sends Accept: text/markdown. Use when user explicitly asks for markdown content.\n  - "html": Sends Accept: text/html. Content is still converted to plain text for LLM processing.\n  - "text": Sends Accept: text/plain. Use when user explicitly asks for plain text.\n  - IMPORTANT: If user says "markdown", "原始内容", or "原始 markdown", use format="markdown".\n  - This tool is read-only and does not modify any files\n  - Results may be summarized if the content is very large\n  - Supports both public and private/localhost URLs using direct fetch',
       Kind.Fetch,
       {
         properties: {
@@ -280,7 +281,7 @@ export class WebFetchTool extends BaseDeclarativeTool<
           },
           format: {
             description:
-              'Preferred content format: auto (default, prefers markdown), markdown, html, or text',
+              'Preferred content format (Accept header only): auto (default, prefers markdown), markdown, html, or text. All content is normalized to plain text.',
             type: 'string',
             enum: ['auto', 'markdown', 'html', 'text'],
           },

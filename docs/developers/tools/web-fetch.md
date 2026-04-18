@@ -12,10 +12,10 @@ Use `web_fetch` to fetch content from a specified URL and process it using an AI
 
 - `url` (string, required): The URL to fetch content from. Must be a fully-formed valid URL starting with `http://` or `https://`.
 - `prompt` (string, required): The prompt describing what information you want to extract from the page content.
-- `format` (string, optional): Controls the `Accept` header sent to the server. All content is normalized to text for LLM processing regardless of format. Defaults to `"auto"` if not specified.
+- `format` (string, optional): Controls only the `Accept` header sent to the server, indicating your content preference. **All fetched content is normalized to plain text for LLM processing**, regardless of the format specified. Defaults to `"auto"` if not specified.
   - `"auto"` (default): Prefers markdown via content negotiation (`Accept: text/markdown, text/html`), accepts HTML as fallback. **Recommended for most use cases** as it can reduce token usage by up to 80% for servers that support markdown.
   - `"markdown"`: Sends `Accept: text/markdown`. Use when you explicitly need markdown content.
-  - `"html"`: Sends `Accept: text/html`. Content is still normalized to text for LLM processing.
+  - `"html"`: Sends `Accept: text/html`. Use when the server requires HTML in the Accept header. Content is still converted to plain text for LLM processing.
   - `"text"`: Sends `Accept: text/plain`. Use when you specifically need plain text content.
 
 ## How to use `web_fetch` with Qwen Code
@@ -82,7 +82,7 @@ Qwen Code's `web_fetch` tool implements support for [Cloudflare's Markdown for A
 
 ### How it works
 
-1. The `format` parameter controls the `Accept` header sent to the server:
+1. The `format` parameter controls **only** the `Accept` header sent to the server (it does not affect the output format):
    - `format="auto"`: sends `Accept: text/markdown, text/html`
    - `format="markdown"`: sends `Accept: text/markdown`
    - `format="html"`: sends `Accept: text/html`
