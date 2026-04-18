@@ -33,6 +33,31 @@ const FILE_PATH_WITH_LINES_REGEX =
 const KNOWN_FILE_EXTENSIONS =
   /\.(tsx?|jsx?|css|scss|json|md|py|java|go|rs|c|cpp|h|hpp|sh|ya?ml|toml|xml|html|vue|svelte)$/i;
 
+const safeDecodePath = (value: string): string => {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+};
+
+const normalizeExplicitFileLink = (raw: string): string => {
+  const decoded = safeDecodePath(raw).replace(/\\/g, '/');
+  const hashIndex = decoded.indexOf('#');
+  if (hashIndex < 0) {
+    return decoded;
+  }
+
+  const base = decoded.slice(0, hashIndex);
+  const fragment = decoded.slice(hashIndex + 1);
+  const lineMatch = fragment.match(/^L?(\d+)(?:-\d+)?$/i);
+  if (lineMatch) {
+    return `${base}:${parseInt(lineMatch[1], 10)}`;
+  }
+
+  return base;
+};
+
 /**
  * Escape HTML characters for security
  */
@@ -98,7 +123,6 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       'gi',
     );
 
-    // Convert a "path#fragment" into VS Code friendly "path:line"
     const normalizePathAndLine = (
       raw: string,
     ): { displayText: string; dataPath: string } => {
@@ -293,14 +317,12 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
   // Event delegation: intercept clicks on generated file-path links
   const handleContainerClick = useCallback(
     (e: React.MouseEvent<HTMLDivElement, MouseEvent>) => {
-      if (!enableFileLinks) {
-        return;
-      }
       const target = e.target as HTMLElement | null;
       if (!target) {
         return;
       }
 
+      // Check for file-path-link (created by processFilePaths when enableFileLinks=true)
       const anchor = (target.closest &&
         target.closest('a.file-path-link')) as HTMLAnchorElement | null;
       if (anchor) {
@@ -314,6 +336,8 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         return;
       }
 
+      // Check for explicit markdown links (e.g. [filename](path)) even when enableFileLinks=false
+      // This allows intentional links like Export Session output to be clickable
       const anyAnchor = (target.closest &&
         target.closest('a')) as HTMLAnchorElement | null;
       if (!anyAnchor) {
@@ -321,28 +345,26 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       }
 
       const href = anyAnchor.getAttribute('href') || '';
-      if (!/^https?:\/\//i.test(href)) {
+      // Skip external links - let browser handle them normally
+      if (/^(https?|mailto|ftp|data):/i.test(href)) {
         return;
       }
-      try {
-        const url = new URL(href);
-        const host = url.hostname || '';
-        const path = url.pathname || '';
-        const noPath = path === '' || path === '/';
 
-        // Only treat as file if host has a known file extension
-        if (noPath && KNOWN_FILE_EXTENSIONS.test(host)) {
-          const text = (anyAnchor.textContent || '').trim();
-          const candidate = KNOWN_FILE_EXTENSIONS.test(text) ? text : host;
-          e.preventDefault();
-          e.stopPropagation();
-          onFileClick?.(candidate);
-        }
-      } catch {
-        // ignore
+      const text = (anyAnchor.textContent || '').trim();
+      const candidate = normalizeExplicitFileLink(href || text);
+
+      const isAbsolutePath = /^(?:[a-zA-Z]:[/\\]|[/\\])/i.test(candidate);
+      const isRelativeFile =
+        !isAbsolutePath &&
+        KNOWN_FILE_EXTENSIONS.test(candidate.replace(/:\d+(?::\d+)?$/, ''));
+
+      if ((isAbsolutePath || isRelativeFile) && onFileClick) {
+        e.preventDefault();
+        e.stopPropagation();
+        onFileClick?.(candidate);
       }
     },
-    [enableFileLinks, onFileClick],
+    [onFileClick],
   );
 
   return (
