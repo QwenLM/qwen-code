@@ -13,21 +13,11 @@ import { join } from 'path';
 import { StaticInsightGenerator } from '../../services/insight/generators/StaticInsightGenerator.js';
 import {
   createDebugLogger,
-  INSIGHT_PROGRESS_MARKER,
-  INSIGHT_READY_MARKER,
+  encodeInsightProgressMessage,
+  encodeInsightReadyMessage,
   Storage,
 } from '@qwen-code/qwen-code-core';
 import open from 'open';
-
-interface AcpInsightProgressPayload {
-  stage: string;
-  progress: number;
-  detail?: string;
-}
-
-function encodeAcpInsightProgress(payload: AcpInsightProgressPayload): string {
-  return `${INSIGHT_PROGRESS_MARKER}${JSON.stringify(payload)}`;
-}
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -105,10 +95,10 @@ export const insightCommand: SlashCommand = {
             });
             pushMessage({
               messageType: 'info',
-              content: encodeAcpInsightProgress({
-                stage: t('Starting insight generation...'),
-                progress: 0,
-              }),
+              content: encodeInsightProgressMessage(
+                t('Starting insight generation...'),
+                0,
+              ),
             });
 
             const outputPath = await insightGenerator.generateStaticInsight(
@@ -116,18 +106,18 @@ export const insightCommand: SlashCommand = {
               (stage, progress, detail) => {
                 pushMessage({
                   messageType: 'info',
-                  content: encodeAcpInsightProgress({
+                  content: encodeInsightProgressMessage(
                     stage,
                     progress,
                     detail,
-                  }),
+                  ),
                 });
               },
             );
 
             pushMessage({
               messageType: 'info',
-              content: `${INSIGHT_READY_MARKER}${outputPath}`,
+              content: encodeInsightReadyMessage(outputPath),
             });
           } catch (error) {
             pushMessage({
@@ -173,16 +163,13 @@ export const insightCommand: SlashCommand = {
         Date.now(),
       );
 
-      // Initial progress
       updateProgress(t('Starting insight generation...'), 0);
 
-      // Generate the static insight HTML file
       const outputPath = await insightGenerator.generateStaticInsight(
         projectsDir,
         updateProgress,
       );
 
-      // Clear pending item
       context.ui.setPendingItem(null);
 
       context.ui.addItem(
@@ -193,7 +180,6 @@ export const insightCommand: SlashCommand = {
         Date.now(),
       );
 
-      // Open the file in the default browser
       try {
         await open(outputPath);
 
@@ -226,7 +212,6 @@ export const insightCommand: SlashCommand = {
       context.ui.setDebugMessage(t('Insights ready.'));
       return;
     } catch (error) {
-      // Clear pending item on error
       context.ui.setPendingItem(null);
 
       context.ui.addItem(

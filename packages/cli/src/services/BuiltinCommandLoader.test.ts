@@ -88,7 +88,16 @@ vi.mock('../ui/commands/extensionsCommand.js', () => ({
 }));
 vi.mock('../ui/commands/helpCommand.js', () => ({ helpCommand: {} }));
 vi.mock('../ui/commands/memoryCommand.js', () => ({ memoryCommand: {} }));
-vi.mock('../ui/commands/insightCommand.js', () => ({ insightCommand: {} }));
+vi.mock('../ui/commands/insightCommand.js', async () => {
+  const { CommandKind } = await import('../ui/commands/types.js');
+  return {
+    insightCommand: {
+      name: 'insight',
+      description: 'Insight command',
+      kind: CommandKind.BUILT_IN,
+    },
+  };
+});
 vi.mock('../ui/commands/modelCommand.js', () => ({
   modelCommand: { name: 'model' },
 }));

@@ -25,67 +25,7 @@ import { createImagePathResolver } from '../utils/imageHandler.js';
 import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
-import {
-  INSIGHT_PROGRESS_MARKER,
-  INSIGHT_READY_MARKER,
-} from '@qwen-code/qwen-code-core/src/core/insightProtocol.js';
-
-type ParsedInsightSlashCommandMessage =
-  | {
-      type: 'progress';
-      stage: string;
-      progress: number;
-      detail?: string;
-    }
-  | {
-      type: 'ready';
-      path: string;
-    };
-
-function parseInsightSlashCommandMessage(event: {
-  command: string;
-  messageType: 'info' | 'error';
-  message: string;
-}): ParsedInsightSlashCommandMessage | null {
-  if (event.command !== '/insight' || event.messageType !== 'info') {
-    return null;
-  }
-
-  if (event.message.startsWith(INSIGHT_PROGRESS_MARKER)) {
-    try {
-      const parsed = JSON.parse(
-        event.message.slice(INSIGHT_PROGRESS_MARKER.length),
-      ) as {
-        stage?: unknown;
-        progress?: unknown;
-        detail?: unknown;
-      };
-
-      if (
-        typeof parsed.stage === 'string' &&
-        typeof parsed.progress === 'number'
-      ) {
-        return {
-          type: 'progress',
-          stage: parsed.stage,
-          progress: parsed.progress,
-          detail: typeof parsed.detail === 'string' ? parsed.detail : undefined,
-        };
-      }
-    } catch {
-      return null;
-    }
-  }
-
-  if (event.message.startsWith(INSIGHT_READY_MARKER)) {
-    return {
-      type: 'ready',
-      path: event.message.slice(INSIGHT_READY_MARKER.length),
-    };
-  }
-
-  return null;
-}
+import { parseInsightMessage } from '@qwen-code/qwen-code-core';
 
 export class WebViewProvider {
   private panelManager: PanelManager;
@@ -203,27 +143,30 @@ export class WebViewProvider {
         });
       }
 
-      const parsedInsightMessage = parseInsightSlashCommandMessage(event);
-      if (parsedInsightMessage?.type === 'progress') {
-        this.sendMessageToWebView({
-          type: 'insightProgress',
-          data: {
-            stage: parsedInsightMessage.stage,
-            progress: parsedInsightMessage.progress,
-            detail: parsedInsightMessage.detail,
-          },
-        });
-        return;
-      }
+      // Try to parse as structured insight message
+      if (event.command === '/insight' && event.messageType === 'info') {
+        const parsed = parseInsightMessage(event.message);
+        if (parsed?.type === 'insight_progress') {
+          this.sendMessageToWebView({
+            type: 'insightProgress',
+            data: {
+              stage: parsed.stage,
+              progress: parsed.progress,
+              detail: parsed.detail,
+            },
+          });
+          return;
+        }
 
-      if (parsedInsightMessage?.type === 'ready') {
-        this.sendMessageToWebView({
-          type: 'insightReportReady',
-          data: {
-            path: parsedInsightMessage.path,
-          },
-        });
-        return;
+        if (parsed?.type === 'insight_ready') {
+          this.sendMessageToWebView({
+            type: 'insightReportReady',
+            data: {
+              path: parsed.path,
+            },
+          });
+          return;
+        }
       }
 
       const chunk = event.message.endsWith('\n')

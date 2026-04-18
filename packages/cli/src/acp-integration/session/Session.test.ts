@@ -57,8 +57,6 @@ describe('Session', () => {
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockToolRegistry: { getTool: ReturnType<typeof vi.fn> };
-  let handleSlashCommandSpy: ReturnType<typeof vi.fn>;
-
   beforeEach(() => {
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;

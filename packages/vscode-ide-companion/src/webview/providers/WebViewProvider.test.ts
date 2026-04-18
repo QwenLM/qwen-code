@@ -41,6 +41,44 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   Storage: {
     getGlobalTempDir: mockGetGlobalTempDir,
   },
+  parseInsightMessage: vi.fn((message: string) => {
+    try {
+      const parsed = JSON.parse(message) as {
+        insight_progress?: {
+          stage?: unknown;
+          progress?: unknown;
+          detail?: unknown;
+        };
+        insight_ready?: { path?: unknown };
+      };
+
+      if (parsed.insight_progress) {
+        const { stage, progress, detail } = parsed.insight_progress;
+        if (typeof stage === 'string' && typeof progress === 'number') {
+          return {
+            type: 'insight_progress',
+            stage,
+            progress,
+            detail: typeof detail === 'string' ? detail : undefined,
+          };
+        }
+      }
+
+      if (parsed.insight_ready) {
+        const { path } = parsed.insight_ready;
+        if (typeof path === 'string') {
+          return {
+            type: 'insight_ready',
+            path,
+          };
+        }
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
+  }),
 }));
 
 vi.mock('vscode', () => ({
@@ -365,7 +403,7 @@ describe('WebViewProvider.attachToView', () => {
       command: '/insight',
       messageType: 'info',
       message:
-        '__QWEN_INSIGHT_PROGRESS__:{"stage":"Analyzing sessions","progress":42,"detail":"21/50"}',
+        '{"insight_progress":{"stage":"Analyzing sessions","progress":42,"detail":"21/50"}}',
     });
 
     expect(postMessage).toHaveBeenCalledWith({
@@ -385,7 +423,7 @@ describe('WebViewProvider.attachToView', () => {
       sessionId: 'session-1',
       command: '/insight',
       messageType: 'info',
-      message: '__QWEN_INSIGHT_READY__:/tmp/insight-report.html',
+      message: '{"insight_ready":{"path":"/tmp/insight-report.html"}}',
     });
 
     await Promise.resolve();
