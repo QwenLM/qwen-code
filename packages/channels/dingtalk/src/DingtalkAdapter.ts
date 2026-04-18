@@ -146,11 +146,12 @@ export class DingtalkChannel extends ChannelBase {
     const chunks = normalizeDingTalkMarkdown(text);
     const title = extractTitle(text);
 
-    for (const chunk of chunks) {
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]!;
       const body = {
         msgtype: 'markdown',
         markdown: {
-          title: chunks.length > 1 ? `${title} (cont.)` : title,
+          title: i === 0 ? title : `${title} (cont.)`,
           text: chunk,
         },
       };
