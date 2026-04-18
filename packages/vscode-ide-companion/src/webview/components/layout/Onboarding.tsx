@@ -8,16 +8,14 @@
  */
 
 import type { FC } from 'react';
-import { generateIconUrl } from '../../utils/resourceUrl.js';
+// eslint-disable-next-line import/no-internal-modules -- bundle the webview logo as a data URL
+import iconUrl from '../../../../assets/icon.png';
 import { ProviderSetupForm } from './ProviderSetupForm.js';
 
 /**
  * VSCode Onboarding page.
  */
-export const Onboarding: FC = () => {
-  const iconUri = generateIconUrl('icon.png');
-
-  return (
+export const Onboarding: FC = () => (
     <div
       className="flex flex-col flex-1 min-h-0 px-6"
       style={{
@@ -28,13 +26,11 @@ export const Onboarding: FC = () => {
     >
       {/* Logo + title block — sits above the card for visual breathing room */}
       <div className="flex flex-col items-center gap-3 mb-6">
-        {iconUri && (
-          <img
-            src={iconUri}
-            alt="Qwen Code"
-            className="w-12 h-12 object-contain"
-          />
-        )}
+        <img
+          src={iconUrl}
+          alt="Qwen Code"
+          className="w-12 h-12 object-contain"
+        />
         <div className="text-center">
           <h1
             className="text-base font-semibold"
@@ -78,4 +74,3 @@ export const Onboarding: FC = () => {
       </p>
     </div>
   );
-};
