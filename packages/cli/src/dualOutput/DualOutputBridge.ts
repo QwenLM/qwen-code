@@ -77,7 +77,7 @@ export class DualOutputBridge {
   private readonly stream: WriteStream;
   private readonly sessionId: string;
   private active = true;
-  private shutdownCalled = false;
+  private shutdownPromise: Promise<void> | null = null;
 
   constructor(
     config: Config,
@@ -288,9 +288,8 @@ export class DualOutputBridge {
     }
   }
 
-  shutdown(): void {
-    if (this.shutdownCalled) return;
-    this.shutdownCalled = true;
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
     // Try to emit session_end before tearing the stream down so consumers
     // get a definitive termination signal rather than inferring it from
     // EPIPE. Failures here are swallowed — the stream may already be in an
@@ -305,10 +304,35 @@ export class DualOutputBridge {
       }
     }
     this.active = false;
-    try {
-      this.stream.end();
-    } catch (err) {
-      debugLogger.debug('DualOutput: stream end error during shutdown:', err);
-    }
+    this.shutdownPromise = new Promise((resolve) => {
+      if (this.stream.closed) {
+        resolve();
+        return;
+      }
+
+      const cleanup = () => {
+        this.stream.off('close', onClose);
+        this.stream.off('error', onError);
+      };
+      const onClose = () => {
+        cleanup();
+        resolve();
+      };
+      const onError = (err: Error) => {
+        debugLogger.debug('DualOutput: stream error during shutdown:', err);
+      };
+
+      this.stream.once('close', onClose);
+      this.stream.once('error', onError);
+
+      try {
+        this.stream.end();
+      } catch (err) {
+        cleanup();
+        debugLogger.debug('DualOutput: stream end error during shutdown:', err);
+        resolve();
+      }
+    });
+    return this.shutdownPromise;
   }
 }
