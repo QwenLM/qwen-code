@@ -161,7 +161,7 @@ function runCommand(
         }
         const lines = stdout
           .split('\n')
-          .map((l) => l.trim())
+          .map((l) => l)
           .filter((l) => l.length > 0);
         resolve({ success: true, lines });
       },
