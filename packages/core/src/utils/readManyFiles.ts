@@ -168,11 +168,27 @@ async function readFileContent(
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
     const fileReadResult = await processSingleFileContent(filePath, config);
-    if (fileReadResult.error) {
-      return null;
-    }
 
     const prefixText: Part = { text: `\nContent from ${filePath}:\n` };
+
+    // Surface any error produced by processSingleFileContent instead of
+    // silently skipping the file. This preserves actionable guidance
+    // (e.g. "pdftotext is not installed, install poppler-utils...",
+    // password-protected PDFs, file-too-large) across batch reads.
+    if (fileReadResult.error) {
+      const errorText =
+        typeof fileReadResult.llmContent === 'string'
+          ? fileReadResult.llmContent
+          : `Failed to read ${filePath}: ${fileReadResult.error}`;
+      return {
+        contentParts: [prefixText, { text: errorText }],
+        info: {
+          filePath,
+          content: errorText,
+          isDirectory: false,
+        },
+      };
+    }
 
     if (typeof fileReadResult.llmContent === 'string') {
       let fileContentForLlm = '';

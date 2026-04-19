@@ -297,4 +297,25 @@ describe('readManyFiles', () => {
       expect(result.error).toBeDefined();
     });
   });
+
+  describe('per-file error surfacing', () => {
+    it('should surface processSingleFileContent errors instead of silently skipping the file', async () => {
+      // Trigger the >10MB file-size error path in processSingleFileContent.
+      const relativePath = 'huge.bin';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      // 10MB + 1 byte to cross the 9.9MB threshold.
+      await fs.writeFile(absolutePath, Buffer.alloc(10 * 1024 * 1024 + 1));
+
+      const mockConfig = createMockConfig(tempRootDir);
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const content = contentToString(result.contentParts);
+      expect(content).toContain('File size exceeds the 10MB limit');
+      expect(content).not.toContain(
+        'No files matching the criteria were found',
+      );
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.filePath).toBe(absolutePath);
+    });
+  });
 });
