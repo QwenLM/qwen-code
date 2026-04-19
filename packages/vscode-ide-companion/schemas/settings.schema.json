@@ -149,7 +149,7 @@
           "default": "Qwen Dark"
         },
         "statusLine": {
-          "description": "Custom status line display configuration.",
+          "description": "Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
           "type": "object",
           "additionalProperties": true
         },

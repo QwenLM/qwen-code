@@ -509,8 +509,15 @@ const SETTINGS_SCHEMA = {
         label: 'Status Line',
         category: 'UI',
         requiresRestart: false,
-        default: undefined as { type: 'command'; command: string } | undefined,
-        description: 'Custom status line display configuration.',
+        default: undefined as
+          | {
+              type: 'command';
+              command: string;
+              refreshInterval?: number;
+            }
+          | undefined,
+        description:
+          'Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
         showInDialog: false,
       },
       customThemes: {
