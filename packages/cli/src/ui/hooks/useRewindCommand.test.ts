@@ -240,7 +240,7 @@ describe('useRewindCommand', () => {
     expect(gitService.restoreProjectFromSnapshot).toHaveBeenCalledWith(
       'snapshot-1',
       {
-        untrackedPathsToDelete: ['test.py'],
+        untrackedFiles: { mode: 'deleteListed', paths: ['test.py'] },
       },
     );
     expect(historyManager.addItem).toHaveBeenCalledWith(
@@ -332,7 +332,7 @@ describe('useRewindCommand', () => {
     expect(gitService.restoreProjectFromSnapshot).toHaveBeenCalledWith(
       'snapshot-1',
       {
-        untrackedPathsToDelete: ['test.py'],
+        untrackedFiles: { mode: 'deleteListed', paths: ['test.py'] },
       },
     );
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
@@ -454,7 +454,7 @@ describe('useRewindCommand', () => {
     expect(gitService.restoreProjectFromSnapshot).toHaveBeenCalledWith(
       'snapshot-1',
       {
-        untrackedPathsToDelete: ['test.py'],
+        untrackedFiles: { mode: 'deleteListed', paths: ['test.py'] },
       },
     );
     expect(historyManager.addItem).toHaveBeenCalledWith(

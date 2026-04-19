@@ -15,6 +15,19 @@ import {
 import type { Config } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
+type RestoreProjectOptions = {
+  untrackedFiles:
+    | { mode: 'preserve' }
+    | { mode: 'deleteListed'; paths: string[] };
+};
+
+interface RestoreGitService {
+  restoreProjectFromSnapshot(
+    commitHash: string,
+    options: RestoreProjectOptions,
+  ): Promise<void>;
+}
+
 async function restoreAction(
   context: CommandContext,
   args: string,
@@ -94,11 +107,20 @@ async function restoreAction(
     }
 
     if (toolCallData.commitHash) {
-      await gitService?.restoreProjectFromSnapshot(toolCallData.commitHash);
+      const restoreGitService = gitService as
+        | RestoreGitService
+        | null
+        | undefined;
+      await restoreGitService?.restoreProjectFromSnapshot(
+        toolCallData.commitHash,
+        {
+          untrackedFiles: { mode: 'preserve' },
+        },
+      );
       addItem(
         {
           type: 'info',
-          text: 'Restored project to the state before the tool call.',
+          text: 'Restored tracked project files to the state before the tool call. New untracked files were preserved.',
         },
         Date.now(),
       );

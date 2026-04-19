@@ -173,11 +173,14 @@ describe('restoreCommand', () => {
       expect(mockSetHistory).toHaveBeenCalledWith(toolCallData.clientHistory);
       expect(mockGitService.restoreProjectFromSnapshot).toHaveBeenCalledWith(
         toolCallData.commitHash,
+        {
+          untrackedFiles: { mode: 'preserve' },
+        },
       );
       expect(mockContext.ui.addItem).toHaveBeenCalledWith(
         {
           type: 'info',
-          text: 'Restored project to the state before the tool call.',
+          text: 'Restored tracked project files to the state before the tool call. New untracked files were preserved.',
         },
         expect.any(Number),
       );

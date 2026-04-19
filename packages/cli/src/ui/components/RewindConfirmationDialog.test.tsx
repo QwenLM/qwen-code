@@ -101,7 +101,7 @@ describe('RewindConfirmationDialog', () => {
     ).toBeDefined();
     expect(
       screen.getByText(
-        'Rewinding does not affect files edited manually or via bash.',
+        'Only files in the restore summary are changed; later manual or bash edits to those same paths may be overwritten or removed.',
       ),
     ).toBeDefined();
   });

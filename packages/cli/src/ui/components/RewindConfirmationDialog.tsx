@@ -197,7 +197,9 @@ export function RewindConfirmationDialog({
       {(entry.restoreCodeSummary ?? entry.codeSummary).hasChanges && (
         <Box marginTop={1}>
           <Text color={theme.status.warning}>
-            {t('Rewinding does not affect files edited manually or via bash.')}
+            {t(
+              'Only files in the restore summary are changed; later manual or bash edits to those same paths may be overwritten or removed.',
+            )}
           </Text>
         </Box>
       )}

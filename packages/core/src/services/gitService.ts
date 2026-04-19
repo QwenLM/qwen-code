@@ -19,8 +19,19 @@ export interface SnapshotFileChange {
   deletions: number;
 }
 
+export type RestoreUntrackedFilesPolicy =
+  | { mode: 'preserve' }
+  | { mode: 'deleteListed'; paths: string[] };
+
 export interface RestoreProjectOptions {
-  untrackedPathsToDelete?: string[];
+  /**
+   * Controls files that are absent from the target snapshot.
+   *
+   * - `preserve`: restore tracked snapshot content only.
+   * - `deleteListed`: delete the listed project-relative paths when they are
+   *   absent from the target snapshot.
+   */
+  untrackedFiles: RestoreUntrackedFilesPolicy;
 }
 
 function countTextLines(content: string): number {
@@ -237,17 +248,16 @@ export class GitService {
 
   async restoreProjectFromSnapshot(
     commitHash: string,
-    options: RestoreProjectOptions = {},
+    options: RestoreProjectOptions,
   ): Promise<void> {
     const repo = this.shadowGitRepository;
     await repo.raw(['restore', '--source', commitHash, '.']);
 
-    const untrackedPathsToDelete = options.untrackedPathsToDelete ?? [];
-    if (untrackedPathsToDelete.length === 0) {
+    if (options.untrackedFiles.mode === 'preserve') {
       return;
     }
 
-    for (const relativePath of new Set(untrackedPathsToDelete)) {
+    for (const relativePath of new Set(options.untrackedFiles.paths)) {
       const absolutePath = resolveProjectRelativePath(
         this.projectRoot,
         relativePath,

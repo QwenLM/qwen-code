@@ -47,6 +47,12 @@ export interface DialogCloseOptions {
   isMemoryDialogOpen: boolean;
   closeMemoryDialog: () => void;
 
+  // Rewind dialogs
+  isRewindDialogOpen: boolean;
+  isRewindConfirmationOpen: boolean;
+  closeRewindDialog: () => void;
+  closeRewindConfirmation: () => void;
+
   // Arena dialogs
   activeArenaDialog: ArenaDialogType;
   closeArenaDialog: () => void;
@@ -94,6 +100,16 @@ export function useDialogClose(options: DialogCloseOptions) {
 
     if (options.isMemoryDialogOpen) {
       options.closeMemoryDialog();
+      return true;
+    }
+
+    if (options.isRewindConfirmationOpen) {
+      options.closeRewindConfirmation();
+      return true;
+    }
+
+    if (options.isRewindDialogOpen) {
+      options.closeRewindDialog();
       return true;
     }
 

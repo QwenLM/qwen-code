@@ -326,7 +326,9 @@ describe('GitService', () => {
       await fs.writeFile(path.join(projectRoot, 'new-file.ts'), 'new file');
       const service = new GitService(projectRoot, storage);
 
-      await service.restoreProjectFromSnapshot('abc123');
+      await service.restoreProjectFromSnapshot('abc123', {
+        untrackedFiles: { mode: 'preserve' },
+      });
 
       expect(hoistedMockRaw).toHaveBeenCalledWith([
         'restore',
@@ -348,7 +350,7 @@ describe('GitService', () => {
       const service = new GitService(projectRoot, storage);
 
       await service.restoreProjectFromSnapshot('abc123', {
-        untrackedPathsToDelete: ['new-file.ts'],
+        untrackedFiles: { mode: 'deleteListed', paths: ['new-file.ts'] },
       });
 
       expect(hoistedMockRaw).toHaveBeenNthCalledWith(1, [
@@ -374,7 +376,7 @@ describe('GitService', () => {
       const service = new GitService(projectRoot, storage);
 
       await service.restoreProjectFromSnapshot('abc123', {
-        untrackedPathsToDelete: ['existing-file.ts'],
+        untrackedFiles: { mode: 'deleteListed', paths: ['existing-file.ts'] },
       });
 
       expect(hoistedMockRaw).toHaveBeenNthCalledWith(
@@ -393,7 +395,10 @@ describe('GitService', () => {
       const service = new GitService(projectRoot, storage);
 
       await service.restoreProjectFromSnapshot('abc123', {
-        untrackedPathsToDelete: ['../outside.ts', '/tmp/outside.ts'],
+        untrackedFiles: {
+          mode: 'deleteListed',
+          paths: ['../outside.ts', '/tmp/outside.ts'],
+        },
       });
 
       expect(hoistedMockRaw).toHaveBeenCalledTimes(1);

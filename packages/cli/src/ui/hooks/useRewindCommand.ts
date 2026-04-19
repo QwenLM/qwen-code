@@ -11,7 +11,6 @@ import {
   type Config,
   type PermissionMode,
   type ResumedSessionData,
-  type SessionService,
   CompressionStatus,
   buildApiHistoryFromConversation,
   getCompressionPrompt,
@@ -20,7 +19,17 @@ import { buildResumedHistoryItems } from '../utils/resumeHistoryUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { RewindAction, RewindHistoryEntry } from '../types/rewind.js';
 
-type RewindSessionService = Pick<SessionService, 'loadSession'>;
+type RewindSessionService = {
+  loadSession(
+    sessionId: string,
+    options?: { leafUuid?: string | null },
+  ): Promise<ResumedSessionData | undefined>;
+};
+type RewindRestoreProjectOptions = {
+  untrackedFiles:
+    | { mode: 'preserve' }
+    | { mode: 'deleteListed'; paths: string[] };
+};
 type HistoryItem = Parameters<UseHistoryManagerReturn['addItem']>[0];
 const REWIND_COMPRESSION_SUMMARY_ACK =
   'Got it. Thanks for the additional context!';
@@ -28,7 +37,7 @@ const REWIND_COMPRESSION_SUMMARY_ACK =
 interface RewindGitRestoreService {
   restoreProjectFromSnapshot(
     commitHash: string,
-    options?: { untrackedPathsToDelete?: string[] },
+    options: RewindRestoreProjectOptions,
   ): Promise<void>;
 }
 
@@ -298,9 +307,10 @@ export function useRewindCommand(
       await gitService.restoreProjectFromSnapshot(
         restoreCodeSummary.checkpointCommitHash,
         {
-          untrackedPathsToDelete: restoreCodeSummary.changes.map(
-            (change) => change.path,
-          ),
+          untrackedFiles: {
+            mode: 'deleteListed',
+            paths: restoreCodeSummary.changes.map((change) => change.path),
+          },
         },
       );
 
