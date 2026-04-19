@@ -21,6 +21,7 @@ export interface UseHistoryManagerReturn {
   ) => void;
   clearItems: () => void;
   loadHistory: (newHistory: HistoryItem[]) => void;
+  truncateToItem: (itemId: number) => void;
 }
 
 /**
@@ -101,11 +102,20 @@ export function useHistory(): UseHistoryManagerReturn {
     messageIdCounterRef.current = 0;
   }, []);
 
+  // Truncates history to exclude the item with the given ID and everything after it.
+  const truncateToItem = useCallback((itemId: number) => {
+    setHistory((prev) => {
+      const index = prev.findIndex((h) => h.id === itemId);
+      return index === -1 ? prev : prev.slice(0, index);
+    });
+  }, []);
+
   return {
     history,
     addItem,
     updateItem,
     clearItems,
     loadHistory,
+    truncateToItem,
   };
 }

@@ -89,6 +89,7 @@ interface SlashCommandProcessorActions {
   openExtensionsManagerDialog: () => void;
   openMcpDialog: () => void;
   openHooksDialog: () => void;
+  openRewindSelector: () => void;
 }
 
 /**
@@ -550,6 +551,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'extensions_manage':
                       actions.openExtensionsManagerDialog();
+                      return { type: 'handled' };
+                    case 'rewind':
+                      actions.openRewindSelector();
                       return { type: 'handled' };
                     case 'help':
                       return { type: 'handled' };

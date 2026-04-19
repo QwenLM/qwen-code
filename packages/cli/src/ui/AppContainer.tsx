@@ -73,6 +73,8 @@ import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
+import { useDoublePress } from './hooks/useDoublePress.js';
+import { computeApiTruncationIndex } from './utils/historyMapping.js';
 import { useVimMode } from './contexts/VimModeContext.js';
 import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
@@ -625,6 +627,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openMcpDialog,
       openHooksDialog,
       openResumeDialog,
+      openRewindSelector: () => setIsRewindSelectorOpen(true),
     }),
     [
       openAuthDialog,
@@ -1469,6 +1472,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [escapePressedOnce, setEscapePressedOnce] = useState(false);
   const escapeTimerRef = useRef<NodeJS.Timeout | null>(null);
   const dialogsVisibleRef = useRef(false);
+  const [isRewindSelectorOpen, setIsRewindSelectorOpen] = useState(false);
+  const [rewindEscPending, setRewindEscPending] = useState(false);
   const [constrainHeight, setConstrainHeight] = useState<boolean>(true);
   const [ideContextState, setIdeContextState] = useState<
     IdeContext | undefined
@@ -1515,6 +1520,69 @@ export const AppContainer = (props: AppContainerProps) => {
   const handleEscapePromptChange = useCallback((showPrompt: boolean) => {
     setShowEscapePrompt(showPrompt);
   }, []);
+
+  // --- Rewind selector callbacks ---
+  const openRewindSelector = useCallback(() => {
+    if (streamingState !== StreamingState.Idle) return;
+    if (dialogsVisibleRef.current) return;
+    const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
+    if (!hasUserTurns) return;
+    setIsRewindSelectorOpen(true);
+  }, [streamingState, historyManager.history]);
+
+  const closeRewindSelector = useCallback(() => {
+    setIsRewindSelectorOpen(false);
+  }, []);
+
+  const handleRewindConfirm = useCallback(
+    (userItem: HistoryItem) => {
+      const geminiClient = config.getGeminiClient();
+      if (!geminiClient) return;
+
+      // 1. Compute API truncation point
+      const apiHistory = geminiClient.getHistory();
+      const apiTruncateIndex = computeApiTruncationIndex(
+        historyManager.history,
+        userItem.id,
+        apiHistory,
+      );
+
+      // 2. Truncate API history and strip stale thinking blocks
+      geminiClient.truncateHistory(apiTruncateIndex);
+      geminiClient.stripThoughtsFromHistory();
+
+      // 3. Truncate UI history (keep everything before the target item)
+      const truncatedUi = historyManager.history.filter(
+        (h) => h.id < userItem.id,
+      );
+      historyManager.loadHistory(truncatedUi);
+
+      // 4. Re-render the terminal
+      refreshStatic();
+
+      // 5. Pre-populate input with the original user text
+      if (userItem.type === 'user' && userItem.text) {
+        buffer.setText(userItem.text);
+      }
+
+      // 6. Add info message
+      historyManager.addItem(
+        {
+          type: 'info',
+          text: 'Conversation rewound. Edit your prompt and press Enter to continue.',
+        },
+        Date.now(),
+      );
+
+      // 7. Close the selector
+      setIsRewindSelectorOpen(false);
+    },
+    [config, historyManager, refreshStatic, buffer],
+  );
+
+  const handleDoubleEscRewind = useDoublePress(openRewindSelector, (pending) =>
+    setRewindEscPending(pending),
+  );
 
   const handleIdePromptComplete = useCallback(
     (result: IdeIntegrationNudgeResult) => {
@@ -1809,6 +1877,20 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
 
+        // Input is empty and idle — double-ESC opens rewind selector
+        if (
+          streamingState === StreamingState.Idle &&
+          !dialogsVisibleRef.current
+        ) {
+          if (escapeTimerRef.current) {
+            clearTimeout(escapeTimerRef.current);
+            escapeTimerRef.current = null;
+          }
+          setEscapePressedOnce(false);
+          handleDoubleEscRewind();
+          return;
+        }
+
         // No action available, reset the flag
         if (escapeTimerRef.current) {
           clearTimeout(escapeTimerRef.current);
@@ -1905,6 +1987,7 @@ export const AppContainer = (props: AppContainerProps) => {
       compactMode,
       setCompactMode,
       refreshStatic,
+      handleDoubleEscRewind,
     ],
   );
 
@@ -1977,7 +2060,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isHooksDialogOpen ||
     isApprovalModeDialogOpen ||
     isResumeDialogOpen ||
-    isExtensionsManagerDialogOpen;
+    isExtensionsManagerDialogOpen ||
+    isRewindSelectorOpen;
   dialogsVisibleRef.current = dialogsVisible;
 
   const {
@@ -2103,6 +2187,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
+      // Rewind selector
+      isRewindSelectorOpen,
+      rewindEscPending,
     }),
     [
       isThemeDialogOpen,
@@ -2211,6 +2298,9 @@ export const AppContainer = (props: AppContainerProps) => {
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
+      // Rewind selector
+      isRewindSelectorOpen,
+      rewindEscPending,
     ],
   );
 
@@ -2276,6 +2366,10 @@ export const AppContainer = (props: AppContainerProps) => {
       closeFeedbackDialog,
       temporaryCloseFeedbackDialog,
       submitFeedback,
+      // Rewind selector
+      openRewindSelector,
+      closeRewindSelector,
+      handleRewindConfirm,
     }),
     [
       openThemeDialog,
@@ -2336,6 +2430,10 @@ export const AppContainer = (props: AppContainerProps) => {
       closeFeedbackDialog,
       temporaryCloseFeedbackDialog,
       submitFeedback,
+      // Rewind selector
+      openRewindSelector,
+      closeRewindSelector,
+      handleRewindConfirm,
     ],
   );
 

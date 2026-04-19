@@ -228,6 +228,11 @@ export class GeminiClient {
     this.forceFullIdeContext = true;
   }
 
+  truncateHistory(keepCount: number) {
+    this.getChat().truncateHistory(keepCount);
+    this.forceFullIdeContext = true;
+  }
+
   async setTools(): Promise<void> {
     if (!this.isInitialized()) {
       return;

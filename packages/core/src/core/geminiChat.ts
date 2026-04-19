@@ -644,6 +644,10 @@ export class GeminiChat {
     this.history = history;
   }
 
+  truncateHistory(keepCount: number): void {
+    this.history = this.history.slice(0, keepCount);
+  }
+
   stripThoughtsFromHistory(): void {
     this.history = this.history
       .map((content) => {

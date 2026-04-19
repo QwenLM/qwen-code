@@ -43,6 +43,7 @@ import { ExtensionsManagerDialog } from './extensions/ExtensionsManagerDialog.js
 import { MCPManagementDialog } from './mcp/MCPManagementDialog.js';
 import { HooksManagementDialog } from './hooks/HooksManagementDialog.js';
 import { SessionPicker } from './SessionPicker.js';
+import { RewindSelector } from './RewindSelector.js';
 import { MemoryDialog } from './MemoryDialog.js';
 
 interface DialogManagerProps {
@@ -379,6 +380,16 @@ export const DialogManager = ({
         currentBranch={uiState.branchName}
         onSelect={uiActions.handleResume}
         onCancel={uiActions.closeResumeDialog}
+      />
+    );
+  }
+
+  if (uiState.isRewindSelectorOpen) {
+    return (
+      <RewindSelector
+        history={uiState.history}
+        onRewind={uiActions.handleRewindConfirm}
+        onCancel={uiActions.closeRewindSelector}
       />
     );
   }

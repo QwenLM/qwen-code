@@ -59,7 +59,8 @@ export interface ChatRecord {
     | 'ui_telemetry'
     | 'at_command'
     | 'notification'
-    | 'cron';
+    | 'cron'
+    | 'rewind';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -100,7 +101,8 @@ export interface ChatRecord {
     | SlashCommandRecordPayload
     | UiTelemetryRecordPayload
     | AtCommandRecordPayload
-    | NotificationRecordPayload;
+    | NotificationRecordPayload
+    | RewindRecordPayload;
 }
 
 export interface NotificationRecordPayload {
@@ -153,6 +155,16 @@ export interface AtCommandRecordPayload {
  */
 export interface UiTelemetryRecordPayload {
   uiEvent: UiEvent;
+}
+
+/**
+ * Stored payload for conversation rewind events.
+ */
+export interface RewindRecordPayload {
+  /** UUID of the record being rewound to. */
+  targetUuid: string;
+  /** Number of records truncated. */
+  truncatedCount: number;
 }
 
 /**
@@ -478,6 +490,28 @@ export class ChatRecordingService {
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving ui telemetry record:', error);
+    }
+  }
+
+  /**
+   * Records a conversation rewind event. Updates lastRecordUuid to the target
+   * record's UUID, creating a branch in the parentUuid tree structure.
+   */
+  recordRewind(payload: RewindRecordPayload): void {
+    try {
+      // Branch the tree: set parent to the rewind target before creating the record
+      this.lastRecordUuid = payload.targetUuid;
+
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'rewind',
+        systemPayload: payload,
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving rewind record:', error);
     }
   }
 
