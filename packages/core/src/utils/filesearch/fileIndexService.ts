@@ -64,9 +64,13 @@ function createWorkerTransport(options: FileSearchOptions): IndexTransport {
   worker.on('error', (err) => {
     // Surface the crash to stderr once so it's diagnosable, then drive the
     // normal exit-cleanup path. Without this handler Node re-emits the
-    // error on the main process and tears down the CLI.
+    // error on the main process and tears down the CLI. Log only name +
+    // message (not the full Error with its stack of absolute paths) to
+    // keep the output transcript clean if the CLI is run under a wrapper.
+    const summary =
+      err instanceof Error ? `${err.name}: ${err.message}` : String(err);
     // eslint-disable-next-line no-console
-    console.error('[fileIndexWorker] uncaught error:', err);
+    console.error('[fileIndexWorker] uncaught error:', summary);
     forwardExit(1);
   });
   worker.on('exit', (code) => forwardExit(code));

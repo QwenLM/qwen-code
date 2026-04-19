@@ -42,11 +42,22 @@ export async function filter(
   pattern: string,
   signal: AbortSignal | undefined,
 ): Promise<string[]> {
-  const patternFilter = picomatch(pattern, {
-    dot: true,
-    contains: true,
-    nocase: true,
-  });
+  // picomatch throws on malformed globs (unmatched `[`, pathological
+  // extglob nesting, etc.). A user typing inside the @-picker can easily
+  // hit an interim state like `foo[` that isn't valid yet — we treat that
+  // as "no matches" rather than propagating a TypeError that would crash
+  // the caller. picomatch errors are synchronous at compile time; runtime
+  // matching cannot throw.
+  let patternFilter: (p: string) => boolean;
+  try {
+    patternFilter = picomatch(pattern, {
+      dot: true,
+      contains: true,
+      nocase: true,
+    });
+  } catch {
+    return [];
+  }
 
   const results: string[] = [];
   for (const [i, p] of allPaths.entries()) {

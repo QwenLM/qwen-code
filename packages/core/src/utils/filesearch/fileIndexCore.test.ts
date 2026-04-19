@@ -81,6 +81,19 @@ describe('FileIndexCore', () => {
     expect(results.some((p) => p.includes('LoadingIndicator'))).toBe(true);
   });
 
+  it('returns empty results for malformed glob patterns', async () => {
+    tmpDir = await createTmpDir({ 'a.txt': '', 'b.txt': '' });
+    const core = new FileIndexCore(baseOptions(tmpDir));
+    await core.startCrawl();
+    core.buildFzfIndex();
+    // An unmatched `[` is a common interim state while the user is typing a
+    // character class; picomatch throws on compile. The core should absorb
+    // that and return an empty list instead of propagating the TypeError.
+    // Use a wildcard path so the glob branch (not fzf) handles it.
+    const results = await core.search('foo[*');
+    expect(results).toEqual([]);
+  });
+
   it('respects maxResults during snapshot-phase searches', async () => {
     const structure: Record<string, string> = {};
     for (let i = 0; i < 30; i++) structure[`match${i}.txt`] = '';
