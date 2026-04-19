@@ -10,6 +10,20 @@ const LARGE_OUTPUT_THRESHOLD = 10000;
 const MAX_NOTEBOOK_OUTPUT_CHARS = 100000;
 
 /**
+ * Strip ANSI CSI / SGR escape sequences so terminal colour codes emitted
+ * by ipykernel (e.g. in error tracebacks) don't leak into the LLM prompt.
+ * Uses a conservative pattern that matches the common CSI sequences
+ * without trying to be a full ANSI parser. Matching ESC (\x1B) is
+ * intentional, so the no-control-regex lint rule is disabled for this
+ * expression only.
+ */
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE_RE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+function stripAnsi(input: string): string {
+  return input.replace(ANSI_ESCAPE_RE, '');
+}
+
+/**
  * Jupyter Notebook cell output types.
  */
 interface NotebookCellOutput {
@@ -59,13 +73,20 @@ function processOutputText(text: string | string[] | undefined): string {
 function processOutput(output: NotebookCellOutput): string {
   switch (output.output_type) {
     case 'stream':
-      return processOutputText(output.text);
+      return stripAnsi(processOutputText(output.text));
     case 'execute_result':
     case 'display_data': {
       const textData = output.data?.['text/plain'];
-      if (typeof textData === 'string') return textData;
-      if (Array.isArray(textData)) return textData.join('');
-      // Skip image/html-only outputs
+      if (typeof textData === 'string') return stripAnsi(textData);
+      if (Array.isArray(textData)) return stripAnsi(textData.join(''));
+      // Non-textual output (image/png, text/html, application/json, widget
+      // views, ...): we don't render the payload but don't silently drop
+      // it either — surface a placeholder so the LLM knows something
+      // was in the cell.
+      const mimeTypes = output.data ? Object.keys(output.data) : [];
+      if (mimeTypes.length > 0) {
+        return `[non-text output: ${mimeTypes.join(', ')}]`;
+      }
       return '';
     }
     case 'error': {
@@ -75,7 +96,8 @@ function processOutput(output: NotebookCellOutput): string {
       if (output.traceback?.length) {
         parts.push(output.traceback.join('\n'));
       }
-      return parts.join(': ');
+      // ipykernel emits ANSI colour codes in tracebacks by default.
+      return stripAnsi(parts.join(': '));
     }
     default:
       return '';

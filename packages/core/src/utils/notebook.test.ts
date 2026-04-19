@@ -204,7 +204,7 @@ describe('notebook utilities', () => {
     expect(result).toContain('jq');
   });
 
-  it('should skip image-only outputs gracefully', async () => {
+  it('should surface non-text outputs with a placeholder', async () => {
     const filePath = await writeNotebook('image-output.ipynb', {
       cells: [
         {
@@ -227,8 +227,44 @@ describe('notebook utilities', () => {
     });
 
     const result = await readNotebook(filePath);
-    // Should not crash; image data is skipped
     expect(result).toContain('plt.plot([1,2,3])');
+    // We don't inline the base64 image data, but the model should know a
+    // non-text output existed for this cell.
+    expect(result).toContain('[non-text output: image/png]');
+  });
+
+  it('should strip ANSI colour codes from error tracebacks', async () => {
+    // ipykernel emits CSI/SGR sequences like `\x1B[0;31m` in tracebacks by
+    // default. They add noise and take up LLM tokens without conveying
+    // useful information once we're rendering to plain text.
+    const filePath = await writeNotebook('ansi-error.ipynb', {
+      cells: [
+        {
+          cell_type: 'code',
+          source: ['1/0'],
+          execution_count: 1,
+          outputs: [
+            {
+              output_type: 'error',
+              ename: 'ZeroDivisionError',
+              evalue: 'division by zero',
+              traceback: [
+                '\x1B[0;31m---------------------------------------------------------------------------\x1B[0m',
+                '\x1B[0;31mZeroDivisionError\x1B[0m\x1B[0;31m: \x1B[0mdivision by zero',
+              ],
+            },
+          ],
+          metadata: {},
+        },
+      ],
+      metadata: { language_info: { name: 'python' } },
+    });
+
+    const result = await readNotebook(filePath);
+    expect(result).toContain('ZeroDivisionError');
+    expect(result).toContain('division by zero');
+    expect(result).not.toContain('\x1B[');
+    expect(result).not.toContain('[0;31m');
   });
 
   it('should show cell id when available', async () => {
