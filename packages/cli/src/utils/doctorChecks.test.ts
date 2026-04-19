@@ -227,4 +227,35 @@ describe('runDoctorChecks', () => {
     expect(mcpCheck!.status).toBe('pass');
     expect(mcpCheck!.message).toBe('disabled');
   });
+
+  it('should not report MCP connection status in non-interactive mode', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      services: {
+        config: {
+          getAuthType: vi.fn().mockReturnValue('openai'),
+          getGeminiClient: vi.fn().mockReturnValue({
+            isInitialized: vi.fn().mockReturnValue(true),
+          }),
+          getModel: vi.fn().mockReturnValue('gpt-4'),
+          getMcpServers: vi
+            .fn()
+            .mockReturnValue({ 'my-server': { command: 'node' } }),
+          isMcpServerDisabled: vi.fn().mockReturnValue(false),
+          getToolRegistry: vi.fn().mockReturnValue({
+            getAllTools: vi.fn().mockReturnValue([]),
+          }),
+          getUseBuiltinRipgrep: vi.fn().mockReturnValue(false),
+        },
+        settings: { merged: {} },
+        git: {} as never,
+      },
+    } as unknown as CommandContext);
+
+    const results = await runDoctorChecks(mockContext);
+    const mcpCheck = results.find((r) => r.name === 'my-server');
+    expect(mcpCheck).toBeDefined();
+    // In non-interactive mode, servers are never connected — must not report as fail
+    expect(mcpCheck!.status).toBe('pass');
+  });
 });

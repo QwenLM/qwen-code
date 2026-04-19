@@ -61,6 +61,9 @@ export const DoctorReport: React.FC<DoctorReportProps> = ({
   const groups = groupByCategory(checks);
   const categoryEntries = Array.from(groups.entries());
 
+  // Compute the widest check name so the message column aligns consistently.
+  const nameColWidth = Math.max(20, ...checks.map((c) => c.name.length + 2));
+
   return (
     <Box
       borderStyle="round"
@@ -91,7 +94,7 @@ export const DoctorReport: React.FC<DoctorReportProps> = ({
                   {'  '}
                   {STATUS_ICONS[check.status]}{' '}
                 </Text>
-                <Box width={20}>
+                <Box width={nameColWidth}>
                   <Text color={theme.text.primary}>{check.name}</Text>
                 </Box>
                 <Text dimColor>{check.message}</Text>

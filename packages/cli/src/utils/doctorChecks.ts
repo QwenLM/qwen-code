@@ -26,9 +26,9 @@ function checkNodeVersion(): DoctorCheckResult {
     return {
       category: t('System'),
       name: t('Node.js version'),
-      status: 'warn',
+      status: 'fail',
       message: version,
-      detail: t('Node.js v{{min}}+ is recommended. Current: {{version}}', {
+      detail: t('Node.js v{{min}}+ is required. Current: {{version}}', {
         min: String(MIN_NODE_MAJOR),
         version,
       }),
@@ -198,6 +198,20 @@ function checkMcpServers(context: CommandContext): DoctorCheckResult[] {
         message: t('none configured'),
       },
     ];
+  }
+
+  // In non-interactive mode MCP connections are never established, so querying
+  // getMCPServerStatus would always return DISCONNECTED and produce false failures.
+  // Report configured servers as unchecked instead.
+  if (context.executionMode !== 'interactive') {
+    return Object.keys(servers).map((name) => ({
+      category: t('MCP Servers'),
+      name,
+      status: 'pass' as const,
+      message: config?.isMcpServerDisabled(name)
+        ? t('disabled')
+        : t('configured (not checked in non-interactive mode)'),
+    }));
   }
 
   return Object.keys(servers).map((name) => {
