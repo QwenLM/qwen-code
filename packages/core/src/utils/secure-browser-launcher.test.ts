@@ -231,23 +231,26 @@ describe('secure-browser-launcher', () => {
     });
   });
 
-  it('should handle browser launch failures gracefully by logging instead of throwing', async () => {
-    // Simulate a failure (like missing xdg-open)
-    mockExecFile.mockRejectedValueOnce(new Error('Command failed'));
+it('should handle browser launch failures gracefully by logging instead of throwing', async () => {
+  // FIX: Explicitly set platform to 'darwin' to avoid Linux fallback logic issues
+  setPlatform('darwin');
 
-    // Spy on the console to make sure we log the message
-    const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+  // Simulate a failure (like missing xdg-open)
+  mockExecFile.mockRejectedValueOnce(new Error('Command failed'));
 
-    // THE FIX: We expect this to RESOLVE (succeed), not REJECT (crash)
-    await expect(
-      openBrowserSecurely('https://example.com'),
-    ).resolves.toBeUndefined();
+  // Spy on console.error to verify we log the message
+  const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    // Verify we logged the helpful message
-    expect(consoleSpy).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to open browser automatically'),
-    );
+  // ASSERTION: Expect the promise to RESOLVE (not reject/crash)
+  await expect(
+    openBrowserSecurely('https://example.com'),
+  ).resolves.toBeUndefined();
 
-    consoleSpy.mockRestore();
-  });
+  // Verify we logged the helpful message
+  expect(consoleSpy).toHaveBeenCalledWith(
+    expect.stringContaining('Failed to open browser automatically'),
+  );
+
+  consoleSpy.mockRestore();
+});
 });

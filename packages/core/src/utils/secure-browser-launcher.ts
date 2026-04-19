@@ -42,14 +42,14 @@ function validateUrl(url: string): void {
 }
 
 /**
- * Opens a URL in the default browser using platform-specific commands.
- * This implementation avoids shell injection vulnerabilities by:
- * 1. Validating the URL to ensure it's HTTP/HTTPS only
- * 2. Using execFile instead of exec to avoid shell interpretation
- * 3. Passing the URL as an argument rather than constructing a command string
+ * Opens a URL in the user's default browser securely.
  *
- * @param url The URL to open
- * @throws Error if the URL is invalid or if opening the browser fails
+ * On failure (e.g., missing browser binary or command), this function does NOT throw an error.
+ * Instead, it logs the URL to the console error stream so the user can open it manually,
+ * and resolves successfully to prevent application crashes.
+ *
+ * @param url - The URL to open.
+ * @returns A promise that resolves when the attempt is made (whether successful or logged).
  */
 export async function openBrowserSecurely(url: string): Promise<void> {
   // Validate the URL first
