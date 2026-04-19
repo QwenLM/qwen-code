@@ -24,6 +24,9 @@ vi.mock('../telemetry/loggers.js', () => ({
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
+// Mirrored from loopDetectionService.ts. Kept local so the test is
+// self-describing and failures point to the constant that changed.
+const FILE_READ_WINDOW = 15;
 
 describe('LoopDetectionService', () => {
   let service: LoopDetectionService;
@@ -729,12 +732,26 @@ describe('LoopDetectionService', () => {
   });
 
   describe('Read File Loop Detection', () => {
+    // Cold-start exemption: a prompt that has not yet fired any non-read-like
+    // tool is still in its opening-exploration phase, so the detector gives
+    // it an initial pass. Tests that want to exercise the detector must
+    // fire a non-read tool first so subsequent reads are judged normally.
+    const primeNonReadTool = () => {
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'prime.txt',
+          content: '',
+        }),
+      );
+    };
+
     it('should detect excessive file read operations', () => {
       service.reset('');
+      primeNonReadTool();
 
       // FILE_READ_THRESHOLD reads in the window trigger the loop. The first
-      // (THRESHOLD - 1) calls must not fire; the THRESHOLD-th does.
-      for (let i = 0; i < 4; i++) {
+      // (THRESHOLD - 1) reads must not fire; the THRESHOLD-th does.
+      for (let i = 0; i < 7; i++) {
         const event = createToolCallRequestEvent('read_file', {
           path: `file${i}.txt`,
         });
@@ -743,7 +760,7 @@ describe('LoopDetectionService', () => {
       }
 
       const event = createToolCallRequestEvent('read_file', {
-        path: 'file4.txt',
+        path: 'file7.txt',
       });
       const isLoop = service.addAndCheck(event);
       expect(isLoop).toBe(true);
@@ -755,8 +772,65 @@ describe('LoopDetectionService', () => {
       );
     });
 
+    it('should exempt opening exploration from READ_FILE_LOOP (cold start)', () => {
+      service.reset('');
+
+      // Regression for PR #3236 review: a prompt like "summarize this
+      // project" opens with parallel read_file / list_directory calls and
+      // must not trip READ_FILE_LOOP before any write/execute action has
+      // fired. This exercises FILE_READ_WINDOW+ consecutive reads with no
+      // prior non-read tool — nothing should fire.
+      for (let i = 0; i < 20; i++) {
+        const name = i % 2 === 0 ? 'read_file' : 'list_directory';
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent(name, { path: `f${i}` }),
+        );
+        expect(isLoop).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
+    });
+
+    it('should activate READ_FILE_LOOP once a non-read tool lands mid-prompt', () => {
+      service.reset('');
+
+      // No firing before the cold-start gate flips.
+      for (let i = 0; i < 7; i++) {
+        service.addAndCheck(
+          createToolCallRequestEvent('read_file', { path: `pre${i}.txt` }),
+        );
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+
+      // A non-read tool lands — gate opens.
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'out.txt',
+          content: 'x',
+        }),
+      );
+
+      // Now a window of reads should eventually trip READ_FILE_LOOP. As new
+      // reads push the write_file out of the FILE_READ_WINDOW-sized history
+      // and FILE_READ_THRESHOLD read-likes accumulate, detection fires.
+      let detected = false;
+      for (let i = 0; i < FILE_READ_WINDOW + 2 && !detected; i++) {
+        detected = service.addAndCheck(
+          createToolCallRequestEvent('read_file', { path: `post${i}.txt` }),
+        );
+      }
+      expect(detected).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
+    });
+
     it('should detect other read-like operations (exact names + read_/list_ prefixes)', () => {
       service.reset('');
+      primeNonReadTool();
 
       // Mix of read-like tool names that either appear in the exact allowlist
       // (read_file, read_many_files, list_directory) or match the read_/list_
@@ -775,9 +849,18 @@ describe('LoopDetectionService', () => {
       service.addAndCheck(
         createToolCallRequestEvent('read_file', { path: 'file3.txt' }),
       );
+      service.addAndCheck(createToolCallRequestEvent('list_projects', {}));
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file5.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_many_files', {
+          paths: ['file6.txt'],
+        }),
+      );
 
       const isLoop = service.addAndCheck(
-        createToolCallRequestEvent('list_projects', {}),
+        createToolCallRequestEvent('list_directory', { path: 'nested' }),
       );
       expect(isLoop).toBe(true);
       expect(loggers.logLoopDetected).toHaveBeenCalledWith(
@@ -790,6 +873,7 @@ describe('LoopDetectionService', () => {
 
     it('should not treat tools that merely contain read-like substrings as file reads', () => {
       service.reset('');
+      primeNonReadTool();
 
       // Regression: the earlier substring heuristic treated any name
       // containing 'read'/'cat'/'view'/'list' as a file read, so `review`
@@ -816,6 +900,7 @@ describe('LoopDetectionService', () => {
 
     it('should not detect loop with mixed operations', () => {
       service.reset('');
+      primeNonReadTool();
 
       // Mix of read and non-read operations
       service.addAndCheck(
@@ -841,7 +926,10 @@ describe('LoopDetectionService', () => {
         createToolCallRequestEvent('read_file', { path: 'file5.txt' }),
       );
       expect(isLoop).toBe(false);
-      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
     });
   });
 

@@ -28,9 +28,18 @@ const MAX_HISTORY_LENGTH = 1000;
 const THOUGHT_REPEAT_THRESHOLD = 3;
 const MAX_THOUGHT_HISTORY = 50;
 
-// File read tracking
-const FILE_READ_THRESHOLD = 5;
-const FILE_READ_WINDOW = 10;
+// File read tracking.
+//
+// Thresholds were raised from 5/10 because a prompt like "summarize this
+// project" legitimately opens with `list_directory` + several parallel
+// `read_file` calls in a single turn, which previously tripped the detector
+// on its first productive move. 8/15 leaves enough headroom for that shape
+// while still catching pathological read-only churn. Combined with the
+// cold-start exemption below (see `hasSeenNonReadTool`), a turn that has
+// only ever performed read-like actions is treated as exploration, not a
+// loop — once any non-read tool lands, the detector activates.
+const FILE_READ_THRESHOLD = 8;
+const FILE_READ_WINDOW = 15;
 
 // Action stagnation tracking
 const STAGNATION_THRESHOLD = 8;
@@ -70,8 +79,27 @@ export class LoopDetectionService {
   private sameNameStreak = 0;
   private lastSeenToolName: string | null = null;
 
+  // Cold-start gate for READ_FILE_LOOP: the opening exploration of a prompt
+  // is almost always read-heavy (list + parallel reads). Until at least one
+  // non-read-like tool fires, a window full of reads is treated as legitimate
+  // exploration rather than loop evidence. Resets per-prompt in reset().
+  private hasSeenNonReadTool = false;
+
+  // Loop type of the most recent firing. Bubbled up through the
+  // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
+  // the user which detector actually fired.
+  private lastLoopType: LoopType | null = null;
+
   constructor(config: Config) {
     this.config = config;
+  }
+
+  /**
+   * Returns the LoopType of the most recent detection, or null if no loop
+   * has been detected in the current prompt.
+   */
+  getLastLoopType(): LoopType | null {
+    return this.lastLoopType;
   }
 
   /**
@@ -143,6 +171,7 @@ export class LoopDetectionService {
       this.toolCallRepetitionCount = 1;
     }
     if (this.toolCallRepetitionCount >= TOOL_CALL_LOOP_THRESHOLD) {
+      this.lastLoopType = LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
       logLoopDetected(
         this.config,
         new LoopDetectedEvent(
@@ -256,6 +285,7 @@ export class LoopDetectionService {
       const chunkHash = createHash('sha256').update(currentChunk).digest('hex');
 
       if (this.isLoopDetectedForChunk(currentChunk, chunkHash)) {
+        this.lastLoopType = LoopType.CHANTING_IDENTICAL_SENTENCES;
         logLoopDetected(
           this.config,
           new LoopDetectedEvent(
@@ -367,6 +397,7 @@ export class LoopDetectionService {
     const recentThoughts = this.thoughtHistory.slice(-THOUGHT_REPEAT_THRESHOLD);
     const firstThought = recentThoughts[0];
     if (recentThoughts.every((thought) => thought === firstThought)) {
+      this.lastLoopType = LoopType.REPETITIVE_THOUGHTS;
       logLoopDetected(
         this.config,
         new LoopDetectedEvent(LoopType.REPETITIVE_THOUGHTS, this.promptId),
@@ -416,6 +447,13 @@ export class LoopDetectionService {
       this.recentToolCalls.shift();
     }
 
+    // Flip the cold-start gate once any non-read-like tool has been observed.
+    // Opening exploration (list_directory + several read_file calls) should
+    // not count as loop evidence on its own.
+    if (!this.hasSeenNonReadTool && !this.isReadLikeTool(toolCall.name)) {
+      this.hasSeenNonReadTool = true;
+    }
+
     // Track same-name streak for action stagnation. Distinct from
     // checkToolCallLoop which requires identical args; this detector catches
     // "thrashing" where the same tool is called with varying arguments.
@@ -431,6 +469,14 @@ export class LoopDetectionService {
    * Checks for excessive file read operations without meaningful progress.
    */
   private checkReadFileLoop(): boolean {
+    // Cold-start exemption: if no non-read-like tool has ever fired in this
+    // prompt, the model is still in its opening exploration phase. Treat a
+    // run of reads as legitimate discovery rather than a loop. Once any
+    // write/execute/other tool lands, normal detection resumes.
+    if (!this.hasSeenNonReadTool) {
+      return false;
+    }
+
     if (this.recentToolCalls.length < FILE_READ_THRESHOLD) {
       return false;
     }
@@ -441,6 +487,7 @@ export class LoopDetectionService {
     ).length;
 
     if (fileReadCount >= FILE_READ_THRESHOLD) {
+      this.lastLoopType = LoopType.READ_FILE_LOOP;
       logLoopDetected(
         this.config,
         new LoopDetectedEvent(LoopType.READ_FILE_LOOP, this.promptId),
@@ -456,6 +503,7 @@ export class LoopDetectionService {
    */
   private checkActionStagnation(): boolean {
     if (this.sameNameStreak >= STAGNATION_THRESHOLD) {
+      this.lastLoopType = LoopType.ACTION_STAGNATION;
       logLoopDetected(
         this.config,
         new LoopDetectedEvent(LoopType.ACTION_STAGNATION, this.promptId),
@@ -480,6 +528,8 @@ export class LoopDetectionService {
     this.recentToolCalls = [];
     this.sameNameStreak = 0;
     this.lastSeenToolName = null;
+    this.hasSeenNonReadTool = false;
+    this.lastLoopType = null;
   }
 
   private resetToolCallCount(): void {
