@@ -778,19 +778,17 @@ export class GeminiClient {
       }
     }
 
-    // Persist attribution snapshot on every non-retry turn. ToolResult turns
-    // run right after tool execution, so their snapshot captures edits that a
-    // prior UserQuery turn scheduled. Without this, a resumed session only
-    // sees the UserQuery-time snapshot (empty) and loses tool-driven edits.
     if (messageType !== SendMessageType.Retry) {
+      // Snapshot on every non-retry turn. ToolResult turns run right after
+      // tool execution, so their snapshot captures edits that a prior
+      // UserQuery turn scheduled. Without this, a resumed session only sees
+      // the UserQuery-time snapshot (empty) and loses tool-driven edits.
       this.config
         .getChatRecordingService()
         ?.recordAttributionSnapshot(
           CommitAttributionService.getInstance().toSnapshot(),
         );
-    }
 
-    if (messageType !== SendMessageType.Retry) {
       this.sessionTurnCount++;
 
       if (

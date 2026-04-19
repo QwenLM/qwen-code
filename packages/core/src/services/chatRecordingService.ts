@@ -512,7 +512,8 @@ export class ChatRecordingService {
 
   /**
    * Records an attribution state snapshot for session persistence.
-   * Called after each user prompt to persist AI contribution tracking.
+   * Called at the start of every non-retry turn so that a resumed session
+   * sees the most recent state including edits made during the prior turn.
    */
   recordAttributionSnapshot(snapshot: AttributionSnapshot): void {
     try {
