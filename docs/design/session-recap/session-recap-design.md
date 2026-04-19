@@ -140,12 +140,16 @@
 - `user` / `model` 的文本消息
 - `model` 的 `functionCall` parts
 - `user` 的 `functionResponse` parts（含工具返回的**文件全文**等大体积内容）
+- `model` 的 thought parts（`part.thought` / `part.thoughtSignature`，模型隐藏推理）
 
-单次 `functionResponse` 可能含 10K+ token。30 条这样的消息会把 recap LLM 淹没在
-无关细节里，既费 token 又导致 recap 跑偏（容易输出 "调用了 X 工具读取了 Y 文件"
-这种实现细节）。
+`filterToDialog()` 只保留 `user`/`model` 消息中**有非空文本且非 thought**的 part：
 
-`filterToDialog()` 只保留 `user`/`model` 消息中**有非空文本**的 part，丢弃工具调用与响应。
+- 工具调用/响应：单次 `functionResponse` 可能含 10K+ token，30 条这样的消息会把 recap LLM
+  淹没在无关细节里，既费 token 又导致 recap 跑偏（容易输出 "调用了 X 工具读取了 Y 文件"
+  这种实现细节）。
+- thought parts：携带模型的内部推理。混进 recap 上下文会有把隐藏 chain-of-thought 当成
+  对话内容、最终被概括到 recap 文本里 leak 出来的风险。
+
 丢空消息后再做 30 条窗口截取（`takeRecentDialog`），并保证窗口起点不是悬空的 model 回复。
 
 ---

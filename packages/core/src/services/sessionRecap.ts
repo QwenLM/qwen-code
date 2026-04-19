@@ -122,19 +122,29 @@ function extractRecap(raw: string): string {
 }
 
 /**
- * Strip tool calls and tool responses from history; keep only user prompts
- * and the model's text replies. A single tool response can hold a 10K-token
- * file dump that drowns the recap LLM in irrelevant detail.
+ * Strip tool calls, tool responses, and the model's hidden reasoning from
+ * history; keep only user prompts and the model's user-visible text replies.
  *
- * Each remaining message keeps only its text parts, and messages with no
- * text are dropped entirely.
+ * - A single tool response can hold a 10K-token file dump that drowns the
+ *   recap LLM in irrelevant detail.
+ * - "Thought" parts (`part.thought` / `part.thoughtSignature`) carry the
+ *   model's internal reasoning. Including them would leak hidden chain-of-
+ *   thought into the recap context and risk surfacing it as user-facing
+ *   summary text.
+ *
+ * Each remaining message keeps only its visible text parts, and messages
+ * with no remaining parts are dropped entirely.
  */
 function filterToDialog(history: Content[]): Content[] {
   const out: Content[] = [];
   for (const msg of history) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
     const textParts = (msg.parts ?? []).filter(
-      (part) => typeof part?.text === 'string' && part.text.trim() !== '',
+      (part) =>
+        typeof part?.text === 'string' &&
+        part.text.trim() !== '' &&
+        !part.thought &&
+        !part.thoughtSignature,
     );
     if (textParts.length === 0) continue;
     out.push({ role: msg.role, parts: textParts });
