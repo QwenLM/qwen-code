@@ -438,18 +438,31 @@ index 111..222 100644
       );
     });
 
-    it('uses the current content generator for semantic approach summaries', async () => {
-      const generateContent = vi.fn().mockResolvedValue({
+    it('uses each in-process agent generator for semantic approach summaries', async () => {
+      const mainGenerateContent = vi.fn();
+      const model1GenerateContent = vi.fn().mockResolvedValue({
         candidates: [
           {
             content: {
               parts: [
                 {
                   text: JSON.stringify({
-                    summaries: {
-                      'model-1': 'Model 1 used a strategy pattern.',
-                      'model-2': 'Model 2 made inline edits.',
-                    },
+                    summary: 'Model 1 used a strategy pattern.',
+                  }),
+                },
+              ],
+            },
+          },
+        ],
+      });
+      const model2GenerateContent = vi.fn().mockResolvedValue({
+        candidates: [
+          {
+            content: {
+              parts: [
+                {
+                  text: JSON.stringify({
+                    summary: 'Model 2 made inline edits.',
                   }),
                 },
               ],
@@ -460,14 +473,50 @@ index 111..222 100644
       const config = {
         ...mockConfig,
         getContentGenerator: () => ({
-          generateContent,
+          generateContent: mainGenerateContent,
         }),
       };
+      mockBackend.type = 'in-process';
+      mockBackend.setAutoExit(false);
+      const agentInteractives = new Map<
+        string,
+        ReturnType<typeof createMockInteractive>
+      >();
+      mockBackend.getAgent.mockImplementation((agentId: string) =>
+        agentInteractives.get(agentId),
+      );
+      mockBackend.getAgentContentGenerator.mockImplementation(
+        (agentId: string) =>
+          agentId === 'model-1'
+            ? { generateContent: model1GenerateContent }
+            : { generateContent: model2GenerateContent },
+      );
+      mockBackend.spawnAgent.mockImplementation(
+        async (config: { agentId: string }) => {
+          agentInteractives.set(
+            config.agentId,
+            createMockInteractive(config.agentId),
+          );
+        },
+      );
       const manager = new ArenaManager(config as never);
 
       const result = await manager.start(createValidStartOptions());
 
-      expect(generateContent).toHaveBeenCalledTimes(1);
+      expect(mainGenerateContent).not.toHaveBeenCalled();
+      expect(model1GenerateContent).toHaveBeenCalledTimes(1);
+      expect(model2GenerateContent).toHaveBeenCalledTimes(1);
+      expect(model1GenerateContent.mock.calls[0]?.[0].model).toBe('model-1');
+      expect(model2GenerateContent.mock.calls[0]?.[0].model).toBe('model-2');
+
+      const model1Prompt = model1GenerateContent.mock.calls[0]?.[0].contents[0]
+        .parts[0].text as string;
+      const model2Prompt = model2GenerateContent.mock.calls[0]?.[0].contents[0]
+        .parts[0].text as string;
+      expect(model1Prompt).toContain('"agentId": "model-1"');
+      expect(model1Prompt).not.toContain('"agentId": "model-2"');
+      expect(model2Prompt).toContain('"agentId": "model-2"');
+      expect(model2Prompt).not.toContain('"agentId": "model-1"');
       expect(result.agents[0]?.approachSummary).toBe(
         'Model 1 used a strategy pattern.',
       );
@@ -536,7 +585,7 @@ function createMockBackend() {
   let autoExit = true;
 
   const backend = {
-    type: 'tmux' as const,
+    type: 'tmux' as 'tmux' | 'in-process',
     init: vi.fn().mockResolvedValue(undefined),
     spawnAgent: vi.fn(async (config: { agentId: string }) => {
       // By default, simulate immediate agent termination so tests
@@ -563,12 +612,44 @@ function createMockBackend() {
     writeToAgent: vi.fn().mockReturnValue(false),
     resizeAll: vi.fn(),
     getAttachHint: vi.fn().mockReturnValue(null),
+    getAgent: vi.fn().mockReturnValue(undefined),
+    getAgentContentGenerator: vi.fn().mockReturnValue(undefined),
     /** Disable automatic agent exit for tests that need to control timing. */
     setAutoExit(value: boolean) {
       autoExit = value;
     },
   };
   return backend;
+}
+
+function createMockInteractive(agentId: string) {
+  const emitter = {
+    on: vi.fn(),
+    off: vi.fn(),
+  };
+  return {
+    getMessages: vi.fn().mockReturnValue([
+      {
+        role: 'assistant',
+        content: `${agentId} final response`,
+        timestamp: Date.now(),
+      },
+    ]),
+    getStatus: vi.fn().mockReturnValue(AgentStatus.IDLE),
+    getStats: vi.fn().mockReturnValue({
+      rounds: 1,
+      totalTokens: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalToolCalls: 0,
+      successfulToolCalls: 0,
+      failedToolCalls: 0,
+      totalDurationMs: 1,
+    }),
+    getLastRoundError: vi.fn().mockReturnValue(undefined),
+    getError: vi.fn().mockReturnValue(undefined),
+    getEventEmitter: vi.fn().mockReturnValue(emitter),
+  };
 }
 
 function createValidStartOptions() {

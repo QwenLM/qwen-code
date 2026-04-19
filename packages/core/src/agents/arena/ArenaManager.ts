@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { GitWorktreeService } from '../../services/gitWorktreeService.js';
 import { Storage } from '../../config/storage.js';
 import type { Config } from '../../config/config.js';
+import type { ContentGenerator } from '../../core/contentGenerator.js';
 import { getCoreSystemPrompt } from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
@@ -1673,76 +1674,85 @@ export class ArenaManager {
   private async addApproachSummaries(
     summaryInputs: ArenaSummaryInput[],
   ): Promise<void> {
-    const configWithGenerator = this.config as unknown as {
-      getContentGenerator?: Config['getContentGenerator'];
-      getModel?: Config['getModel'];
-    };
+    await Promise.all(
+      summaryInputs.map(async (summaryInput) => {
+        summaryInput.result.approachSummary =
+          await this.generateAgentApproachSummary(summaryInput);
+      }),
+    );
+  }
 
-    if (typeof configWithGenerator.getContentGenerator !== 'function') {
-      for (const { result } of summaryInputs) {
-        result.approachSummary = buildFallbackApproachSummary(result);
-      }
-      return;
+  private getAgentSummaryGenerator(
+    agentId: string,
+  ): ContentGenerator | undefined {
+    if (this.backend?.type !== DISPLAY_MODE.IN_PROCESS) {
+      return undefined;
     }
 
-    try {
-      const abortController = new AbortController();
-      const timeout = setTimeout(
-        () => abortController.abort(),
-        ARENA_SUMMARY_TIMEOUT_MS,
-      );
+    return (this.backend as InProcessBackend).getAgentContentGenerator(agentId);
+  }
 
-      try {
-        const response = await configWithGenerator
-          .getContentGenerator()
-          .generateContent(
+  private async generateAgentApproachSummary(
+    summaryInput: ArenaSummaryInput,
+  ): Promise<string> {
+    const { result } = summaryInput;
+    const generator = this.getAgentSummaryGenerator(result.agentId);
+    if (!generator) {
+      return buildFallbackApproachSummary(result);
+    }
+
+    const abortController = new AbortController();
+    const timeout = setTimeout(
+      () => abortController.abort(),
+      ARENA_SUMMARY_TIMEOUT_MS,
+    );
+
+    try {
+      const response = await generator.generateContent(
+        {
+          model: result.model.modelId,
+          contents: [
             {
-              model: configWithGenerator.getModel?.() ?? this.config.getModel(),
-              contents: [
+              role: 'user',
+              parts: [
                 {
-                  role: 'user',
-                  parts: [
-                    {
-                      text: this.buildApproachSummaryPrompt(summaryInputs),
-                    },
-                  ],
+                  text: this.buildAgentApproachSummaryPrompt(summaryInput),
                 },
               ],
-              config: {
-                abortSignal: abortController.signal,
-                thinkingConfig: { includeThoughts: false },
-              },
             },
-            'arena_approach_summary',
-          );
+          ],
+          config: {
+            abortSignal: abortController.signal,
+            thinkingConfig: { includeThoughts: false },
+          },
+        },
+        'arena_approach_summary',
+      );
 
-        const summaries = parseApproachSummaryResponse(
-          getResponseText(response) ?? '',
-        );
-        for (const { result } of summaryInputs) {
-          const summary = summaries.get(result.agentId);
-          result.approachSummary =
-            summary?.trim() || buildFallbackApproachSummary(result);
-        }
-      } finally {
-        clearTimeout(timeout);
-      }
+      return (
+        parseApproachSummaryResponse(getResponseText(response) ?? '')?.trim() ||
+        buildFallbackApproachSummary(result)
+      );
     } catch (error) {
-      debugLogger.error('Failed to generate Arena approach summaries:', error);
-      for (const { result } of summaryInputs) {
-        result.approachSummary = buildFallbackApproachSummary(result);
-      }
+      debugLogger.error(
+        `Failed to generate Arena approach summary for ${result.agentId}:`,
+        error,
+      );
+      return buildFallbackApproachSummary(result);
+    } finally {
+      clearTimeout(timeout);
     }
   }
 
-  private buildApproachSummaryPrompt(
-    summaryInputs: ArenaSummaryInput[],
-  ): string {
+  private buildAgentApproachSummaryPrompt({
+    result: agent,
+    transcript,
+  }: ArenaSummaryInput): string {
     const payload = {
       task: this.arenaConfig?.task ?? '',
       instruction:
-        'Summarize each Arena agent approach for user comparison. Use git diff as the source of truth for what changed. Use transcript/finalText only to infer intent and architectural decisions. Do not pick a winner. Return only compact JSON: {"summaries":{"<agentId>":"one sentence summary"}}.',
-      agents: summaryInputs.map(({ result: agent, transcript }) => ({
+        'Summarize this Arena agent approach for user comparison. Use git diff as the source of truth for what changed. Use transcript/finalText only to infer intent and architectural decisions. Do not pick a winner. Return only compact JSON: {"summary":"one sentence summary"}.',
+      agent: {
         agentId: agent.agentId,
         model: agent.model.modelId,
         status: agent.status,
@@ -1758,7 +1768,7 @@ export class ArenaManager {
         finalText: truncateForPrompt(agent.finalText ?? '', 2_000),
         transcript: truncateForPrompt(formatTranscript(transcript), 6_000),
         diff: truncateForPrompt(agent.diff ?? '', ARENA_SUMMARY_MAX_DIFF_CHARS),
-      })),
+      },
     };
 
     return JSON.stringify(payload, null, 2);
@@ -1857,33 +1867,25 @@ function formatTranscript(
   );
 }
 
-function parseApproachSummaryResponse(text: string): Map<string, string> {
-  const summaries = new Map<string, string>();
+function parseApproachSummaryResponse(text: string): string | undefined {
   const jsonText = extractJsonObject(text);
   if (!jsonText) {
-    return summaries;
+    return undefined;
   }
 
   try {
     const parsed = JSON.parse(jsonText) as unknown;
     if (!isRecord(parsed)) {
-      return summaries;
+      return undefined;
     }
-    const rawSummaries = parsed['summaries'];
-    if (!isRecord(rawSummaries)) {
-      return summaries;
-    }
-
-    for (const [agentId, summary] of Object.entries(rawSummaries)) {
-      if (typeof summary === 'string') {
-        summaries.set(agentId, summary);
-      }
+    const summary = parsed['summary'];
+    if (typeof summary === 'string') {
+      return summary;
     }
   } catch {
-    return summaries;
+    return undefined;
   }
-
-  return summaries;
+  return undefined;
 }
 
 function extractJsonObject(text: string): string | null {
