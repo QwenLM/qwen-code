@@ -24,6 +24,7 @@ import {
 import type { ToolRegistry } from './tool-registry.js';
 
 const mockExistsSync = vi.hoisted(() => vi.fn(() => true));
+const ORIGINAL_ENV = process.env;
 
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
@@ -37,6 +38,7 @@ vi.mock('../mcp/oauth-token-storage.js');
 describe('mcp-client', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    process.env = ORIGINAL_ENV;
   });
 
   describe('McpClient', () => {
@@ -292,6 +294,40 @@ describe('mcp-client', () => {
         env: { ...process.env, FOO: 'bar' },
         stderr: 'pipe',
       });
+    });
+
+    it('should normalize PATH-like env keys on Windows for stdio transport', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      process.env = {
+        ...ORIGINAL_ENV,
+        PATH: 'C:\\Windows\\System32;C:\\Shared\\Tools',
+        Path: 'C:\\Users\\tester\\bin;C:\\Shared\\Tools',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport(
+        'test-server',
+        {
+          command: 'test-command',
+          env: { FOO: 'bar' },
+        },
+        false,
+      );
+
+      expect(mockedTransport).toHaveBeenCalledWith({
+        command: 'test-command',
+        args: [],
+        cwd: undefined,
+        env: expect.objectContaining({
+          PATH: 'C:\\Windows\\System32;C:\\Shared\\Tools;C:\\Users\\tester\\bin',
+          FOO: 'bar',
+        }),
+        stderr: 'pipe',
+      });
+      const transportOptions = mockedTransport.mock.calls[0]?.[0];
+      expect(transportOptions?.env?.['Path']).toBeUndefined();
     });
 
     it('should connect via command without cwd', async () => {
