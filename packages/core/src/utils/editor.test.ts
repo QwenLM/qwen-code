@@ -462,9 +462,7 @@ describe('editor utils', () => {
           throw new Error(); // CLI not found
         });
         // Accept any path containing Zed.app
-        (existsSync as Mock).mockImplementation((path: string) => {
-          return path.includes('Zed.app');
-        });
+        (existsSync as Mock).mockImplementation((path: string) => path.includes('Zed.app'));
 
         const mockSpawnOn = vi.fn((event, cb) => {
           if (event === 'close') {
@@ -477,7 +475,7 @@ describe('editor utils', () => {
         expect(spawn).toHaveBeenCalled();
         // Verify the command uses the CLI tool (not GUI binary)
         const call = (spawn as Mock).mock.calls[0];
-        expect(call[0]).toMatch(/MacOS[\/\\]cli$/);
+        expect(call[0]).toMatch(/MacOS[/\\]cli$/);
       });
 
       it('should reject if zed is not installed', async () => {
@@ -718,14 +716,12 @@ describe('editor utils', () => {
           throw new Error(); // CLI not found
         });
         // Accept any path containing Zed.app (the CLI check will be for Contents/MacOS/cli)
-        (existsSync as Mock).mockImplementation((path: string) => {
-          return path.includes('Zed.app');
-        });
+        (existsSync as Mock).mockImplementation((path: string) => path.includes('Zed.app'));
 
         const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
         expect(diffCommand).not.toBeNull();
         // Verify the command ends with cli (the CLI tool, not GUI binary zed)
-        expect(diffCommand!.command).toMatch(/MacOS[\/\\]cli$/);
+        expect(diffCommand!.command).toMatch(/MacOS[/\\]cli$/);
         expect(diffCommand!.args).toEqual([
           '--wait',
           '--diff',
@@ -763,13 +759,11 @@ describe('editor utils', () => {
           throw new Error(); // CLI not found
         });
         // Accept any path containing Zed.app
-        (existsSync as Mock).mockImplementation((path: string) => {
-          return path.includes('Zed.app');
-        });
+        (existsSync as Mock).mockImplementation((path: string) => path.includes('Zed.app'));
 
         const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
         expect(diffCommand).not.toBeNull();
-        expect(diffCommand!.command).toMatch(/MacOS[\/\\]cli$/);
+        expect(diffCommand!.command).toMatch(/MacOS[/\\]cli$/);
       });
     });
   });
