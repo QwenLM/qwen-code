@@ -156,10 +156,12 @@ export function getOrCreateSharedDispatcher(proxyUrl?: string): Dispatcher {
         uri: proxyUrl,
         headersTimeout: 0,
         bodyTimeout: 0,
+        keepAliveTimeout: 60_000,
       })
     : new Agent({
         headersTimeout: 0,
         bodyTimeout: 0,
+        keepAliveTimeout: 60_000,
       });
 
   dispatcherCache.set(proxyUrl, dispatcher);

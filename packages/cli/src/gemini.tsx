@@ -462,7 +462,7 @@ export async function main() {
     registerCleanup(() => config.shutdown());
 
     // Startup optimization: preconnect API to warm TCP+TLS connection
-    // Only fire for flows that will make API calls
+    // Fires early; cost is one HEAD request even for local-only commands
     try {
       const modelsConfig = config.getModelsConfig();
       const authType = modelsConfig.getCurrentAuthType();
