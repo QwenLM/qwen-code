@@ -8,7 +8,10 @@
 import type { CommandModule } from 'yargs';
 import { loadSettings, SettingScope } from '../../config/settings.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { MCPServerConfig } from '@qwen-code/qwen-code-core';
+import type {
+  MCPServerConfig,
+  MCPOAuthConfig,
+} from '@qwen-code/qwen-code-core';
 
 async function addMcpServer(
   name: string,
@@ -24,6 +27,12 @@ async function addMcpServer(
     description?: string;
     includeTools?: string[];
     excludeTools?: string[];
+    oauthClientId?: string;
+    oauthClientSecret?: string;
+    oauthRedirectUri?: string;
+    oauthAuthorizationUrl?: string;
+    oauthTokenUrl?: string;
+    oauthScopes?: string[];
   },
 ) {
   const {
@@ -36,6 +45,12 @@ async function addMcpServer(
     description,
     includeTools,
     excludeTools,
+    oauthClientId,
+    oauthClientSecret,
+    oauthRedirectUri,
+    oauthAuthorizationUrl,
+    oauthTokenUrl,
+    oauthScopes,
   } = options;
 
   const settings = loadSettings(process.cwd());
@@ -52,6 +67,26 @@ async function addMcpServer(
     scope === 'user' ? SettingScope.User : SettingScope.Workspace;
 
   let newServer: Partial<MCPServerConfig> = {};
+
+  // Build OAuth config if any OAuth options are provided
+  const oauthConfig: MCPOAuthConfig = {};
+  if (oauthClientId) oauthConfig.clientId = oauthClientId;
+  if (oauthClientSecret) oauthConfig.clientSecret = oauthClientSecret;
+  if (oauthRedirectUri) oauthConfig.redirectUri = oauthRedirectUri;
+  if (oauthAuthorizationUrl)
+    oauthConfig.authorizationUrl = oauthAuthorizationUrl;
+  if (oauthTokenUrl) oauthConfig.tokenUrl = oauthTokenUrl;
+  if (oauthScopes && oauthScopes.length > 0) {
+    // Split comma-separated scopes
+    oauthConfig.scopes = oauthScopes
+      .flatMap((s) => s.split(','))
+      .filter(Boolean);
+  }
+
+  const hasOAuth = Object.keys(oauthConfig).length > 0;
+  if (hasOAuth) {
+    oauthConfig.enabled = true;
+  }
 
   const headers = header?.reduce(
     (acc, curr) => {
@@ -75,6 +110,7 @@ async function addMcpServer(
         description,
         includeTools,
         excludeTools,
+        oauth: hasOAuth ? oauthConfig : undefined,
       };
       break;
     case 'http':
@@ -86,6 +122,7 @@ async function addMcpServer(
         description,
         includeTools,
         excludeTools,
+        oauth: hasOAuth ? oauthConfig : undefined,
       };
       break;
     case 'stdio':
@@ -108,6 +145,7 @@ async function addMcpServer(
         description,
         includeTools,
         excludeTools,
+        oauth: hasOAuth ? oauthConfig : undefined,
       };
       break;
   }
@@ -207,6 +245,32 @@ export const addCommand: CommandModule = {
         type: 'array',
         string: true,
       })
+      .option('oauth-client-id', {
+        describe: 'OAuth client ID for MCP server authentication',
+        type: 'string',
+      })
+      .option('oauth-client-secret', {
+        describe: 'OAuth client secret for MCP server authentication',
+        type: 'string',
+      })
+      .option('oauth-redirect-uri', {
+        describe:
+          'OAuth redirect URI (e.g., https://your-server.com/oauth/callback). Defaults to localhost for local setups.',
+        type: 'string',
+      })
+      .option('oauth-authorization-url', {
+        describe: 'OAuth authorization URL',
+        type: 'string',
+      })
+      .option('oauth-token-url', {
+        describe: 'OAuth token URL',
+        type: 'string',
+      })
+      .option('oauth-scopes', {
+        describe: 'OAuth scopes (comma-separated)',
+        type: 'array',
+        string: true,
+      })
       .middleware((argv) => {
         // Handle -- separator args as server args if present
         if (argv['--']) {
@@ -243,6 +307,14 @@ export const addCommand: CommandModule = {
         description: argv['description'] as string | undefined,
         includeTools: argv['includeTools'] as string[] | undefined,
         excludeTools: argv['excludeTools'] as string[] | undefined,
+        oauthClientId: argv['oauthClientId'] as string | undefined,
+        oauthClientSecret: argv['oauthClientSecret'] as string | undefined,
+        oauthRedirectUri: argv['oauthRedirectUri'] as string | undefined,
+        oauthAuthorizationUrl: argv['oauthAuthorizationUrl'] as
+          | string
+          | undefined,
+        oauthTokenUrl: argv['oauthTokenUrl'] as string | undefined,
+        oauthScopes: argv['oauthScopes'] as string[] | undefined,
       },
     );
   },

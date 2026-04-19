@@ -368,4 +368,74 @@ describe('mcp add command', () => {
       );
     });
   });
+
+  describe('OAuth configuration', () => {
+    it('should add OAuth config when OAuth options are provided', async () => {
+      await parser.parseAsync(
+        'add oauth-server https://example.com/mcp --transport http ' +
+          '--oauth-client-id test-client-id ' +
+          '--oauth-client-secret test-client-secret ' +
+          '--oauth-redirect-uri https://example.com/oauth/callback ' +
+          '--oauth-authorization-url https://provider.example.com/authorize ' +
+          '--oauth-token-url https://provider.example.com/token ' +
+          '--oauth-scopes read,write',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          'oauth-server': expect.objectContaining({
+            httpUrl: 'https://example.com/mcp',
+            oauth: {
+              enabled: true,
+              clientId: 'test-client-id',
+              clientSecret: 'test-client-secret',
+              redirectUri: 'https://example.com/oauth/callback',
+              authorizationUrl: 'https://provider.example.com/authorize',
+              tokenUrl: 'https://provider.example.com/token',
+              scopes: ['read', 'write'],
+            },
+          }),
+        }),
+      );
+    });
+
+    it('should add OAuth config with only redirect URI', async () => {
+      await parser.parseAsync(
+        'add oauth-server https://example.com/mcp --transport sse ' +
+          '--oauth-redirect-uri https://example.com/oauth/callback',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          'oauth-server': expect.objectContaining({
+            url: 'https://example.com/mcp',
+            oauth: {
+              enabled: true,
+              redirectUri: 'https://example.com/oauth/callback',
+            },
+          }),
+        }),
+      );
+    });
+
+    it('should not include oauth field when no OAuth options are provided', async () => {
+      await parser.parseAsync(
+        'add my-server https://example.com/mcp --transport http',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          'my-server': expect.objectContaining({
+            httpUrl: 'https://example.com/mcp',
+          }),
+        }),
+      );
+    });
+  });
 });

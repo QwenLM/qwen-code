@@ -153,6 +153,84 @@ qwen mcp add --transport sse sseServer http://localhost:8080/sse --timeout 30000
 
 - **Server trust** (`trust: true`): bypasses confirmation prompts for that server (use sparingly).
 
+### OAuth authentication
+
+Qwen Code supports OAuth 2.0 authentication for MCP servers. This is useful when accessing remote servers that require authentication.
+
+#### Basic usage
+
+When you add an MCP server with OAuth credentials, Qwen Code will automatically handle the authentication flow:
+
+```bash
+qwen mcp add --transport sse oauth-server https://api.example.com/sse/ \
+  --oauth-client-id your-client-id \
+  --oauth-redirect-uri https://your-server.com/oauth/callback \
+  --oauth-authorization-url https://provider.example.com/authorize \
+  --oauth-token-url https://provider.example.com/token
+```
+
+#### Important: Redirect URI configuration
+
+The OAuth flow requires a redirect URI where the authorization provider sends the authentication code.
+
+- **Local development**: By default, Qwen Code uses `http://localhost:7777/oauth/callback`. This works when running Qwen Code on your local machine with a local browser.
+
+- **Remote/cloud deployments**: When running Qwen Code on remote servers, cloud IDEs, or web terminals, the default `localhost` redirect will NOT work. You MUST configure `--oauth-redirect-uri` to point to a publicly accessible URL that can receive the OAuth callback.
+
+Example for remote servers:
+
+```bash
+qwen mcp add --transport sse remote-server https://api.example.com/sse/ \
+  --oauth-redirect-uri https://your-remote-server.example.com/oauth/callback
+```
+
+#### Manual configuration via settings.json
+
+You can also configure OAuth by editing `settings.json` directly:
+
+```json
+{
+  "mcpServers": {
+    "oauthServer": {
+      "url": "https://api.example.com/sse/",
+      "oauth": {
+        "enabled": true,
+        "clientId": "your-client-id",
+        "clientSecret": "your-client-secret",
+        "authorizationUrl": "https://provider.example.com/authorize",
+        "tokenUrl": "https://provider.example.com/token",
+        "redirectUri": "https://your-server.com/oauth/callback",
+        "scopes": ["read", "write"]
+      }
+    }
+  }
+}
+```
+
+OAuth configuration properties:
+
+| Property           | Description                                                                                                           |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `enabled`          | Enable OAuth for this server (boolean)                                                                                |
+| `clientId`         | OAuth client identifier (string, optional with dynamic registration)                                                  |
+| `clientSecret`     | OAuth client secret (string, optional for public clients)                                                             |
+| `authorizationUrl` | OAuth authorization endpoint (string, auto-discovered if omitted)                                                     |
+| `tokenUrl`         | OAuth token endpoint (string, auto-discovered if omitted)                                                             |
+| `scopes`           | Required OAuth scopes (array of strings)                                                                              |
+| `redirectUri`      | Custom redirect URI (string). **Critical for remote deployments**. Defaults to `http://localhost:7777/oauth/callback` |
+| `tokenParamName`   | Query parameter name for tokens in SSE URLs (string)                                                                  |
+| `audiences`        | Audiences the token is valid for (array of strings)                                                                   |
+
+#### Token management
+
+OAuth tokens are automatically:
+
+- **Stored securely** in `~/.qwen/mcp-oauth-tokens.json`
+- **Refreshed** when expired (if refresh tokens are available)
+- **Validated** before each connection attempt
+
+Use the `/mcp auth` command within Qwen Code to manage OAuth authentication interactively.
+
 ### Tool filtering (allow/deny tools per server)
 
 Use `includeTools` / `excludeTools` to restrict tools exposed by a server (from Qwen Code’s perspective).
@@ -259,20 +337,25 @@ You can always configure MCP servers by manually editing `settings.json`, but th
 qwen mcp add [options] <name> <commandOrUrl> [args...]
 ```
 
-| Argument/Option     | Description                                                         | Default            | Example                                   |
-| ------------------- | ------------------------------------------------------------------- | ------------------ | ----------------------------------------- |
-| `<name>`            | A unique name for the server.                                       | —                  | `example-server`                          |
-| `<commandOrUrl>`    | The command to execute (for `stdio`) or the URL (for `http`/`sse`). | —                  | `/usr/bin/python` or `http://localhost:8` |
-| `[args...]`         | Optional arguments for a `stdio` command.                           | —                  | `--port 5000`                             |
-| `-s`, `--scope`     | Configuration scope (user or project).                              | `project`          | `-s user`                                 |
-| `-t`, `--transport` | Transport type (`stdio`, `sse`, `http`).                            | `stdio`            | `-t sse`                                  |
-| `-e`, `--env`       | Set environment variables.                                          | —                  | `-e KEY=value`                            |
-| `-H`, `--header`    | Set HTTP headers for SSE and HTTP transports.                       | —                  | `-H "X-Api-Key: abc123"`                  |
-| `--timeout`         | Set connection timeout in milliseconds.                             | —                  | `--timeout 30000`                         |
-| `--trust`           | Trust the server (bypass all tool call confirmation prompts).       | — (`false`)        | `--trust`                                 |
-| `--description`     | Set the description for the server.                                 | —                  | `--description "Local tools"`             |
-| `--include-tools`   | A comma-separated list of tools to include.                         | all tools included | `--include-tools mytool,othertool`        |
-| `--exclude-tools`   | A comma-separated list of tools to exclude.                         | none               | `--exclude-tools mytool`                  |
+| Argument/Option             | Description                                                         | Default                                | Example                                                            |
+| --------------------------- | ------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------ |
+| `<name>`                    | A unique name for the server.                                       | —                                      | `example-server`                                                   |
+| `<commandOrUrl>`            | The command to execute (for `stdio`) or the URL (for `http`/`sse`). | —                                      | `/usr/bin/python` or `http://localhost:8`                          |
+| `[args...]`                 | Optional arguments for a `stdio` command.                           | —                                      | `--port 5000`                                                      |
+| `-s`, `--scope`             | Configuration scope (user or project).                              | `project`                              | `-s user`                                                          |
+| `-t`, `--transport`         | Transport type (`stdio`, `sse`, `http`).                            | `stdio`                                | `-t sse`                                                           |
+| `-e`, `--env`               | Set environment variables.                                          | —                                      | `-e KEY=value`                                                     |
+| `-H`, `--header`            | Set HTTP headers for SSE and HTTP transports.                       | —                                      | `-H "X-Api-Key: abc123"`                                           |
+| `--timeout`                 | Set connection timeout in milliseconds.                             | —                                      | `--timeout 30000`                                                  |
+| `--trust`                   | Trust the server (bypass all tool call confirmation prompts).       | — (`false`)                            | `--trust`                                                          |
+| `--description`             | Set the description for the server.                                 | —                                      | `--description "Local tools"`                                      |
+| `--include-tools`           | A comma-separated list of tools to include.                         | all tools included                     | `--include-tools mytool,othertool`                                 |
+| `--exclude-tools`           | A comma-separated list of tools to exclude.                         | none                                   | `--exclude-tools mytool`                                           |
+| `--oauth-client-id`         | OAuth client ID for MCP server authentication.                      | —                                      | `--oauth-client-id your-client-id`                                 |
+| `--oauth-redirect-uri`      | OAuth redirect URI for authentication callback.                     | `http://localhost:7777/oauth/callback` | `--oauth-redirect-uri https://your-server.com/oauth/callback`      |
+| `--oauth-authorization-url` | OAuth authorization URL.                                            | —                                      | `--oauth-authorization-url https://provider.example.com/authorize` |
+| `--oauth-token-url`         | OAuth token URL.                                                    | —                                      | `--oauth-token-url https://provider.example.com/token`             |
+| `--oauth-scopes`            | OAuth scopes (comma-separated).                                     | —                                      | `--oauth-scopes scope1,scope2`                                     |
 
 #### Removing a server (`qwen mcp remove`)
 
