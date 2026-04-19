@@ -123,6 +123,68 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('should return unsupported (not no_command) for a disabled command so it is not forwarded to the model', async () => {
+    const mockInitCommand = {
+      name: 'init',
+      description: 'Initialize project',
+      kind: CommandKind.BUILT_IN,
+      action: vi.fn(),
+    };
+    mockGetCommands.mockReturnValue([mockInitCommand]);
+    vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue(['init']);
+
+    const result = await handleSlashCommand(
+      '/init',
+      abortController,
+      mockConfig,
+      mockSettings,
+      ['init'], // Would normally be allowed; denylist must still block it.
+    );
+
+    expect(result.type).toBe('unsupported');
+    if (result.type === 'unsupported') {
+      expect(result.reason).toContain('/init');
+      expect(result.reason).toContain('disabled');
+    }
+    expect(mockInitCommand.action).not.toHaveBeenCalled();
+  });
+
+  it('should match disabled names case-insensitively', async () => {
+    const mockInitCommand = {
+      name: 'init',
+      description: 'Initialize project',
+      kind: CommandKind.BUILT_IN,
+      action: vi.fn(),
+    };
+    mockGetCommands.mockReturnValue([mockInitCommand]);
+    vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue(['INIT']);
+
+    const result = await handleSlashCommand(
+      '/init',
+      abortController,
+      mockConfig,
+      mockSettings,
+      ['init'],
+    );
+
+    expect(result.type).toBe('unsupported');
+    expect(mockInitCommand.action).not.toHaveBeenCalled();
+  });
+
+  it('should still return no_command for truly unknown slash commands even when a denylist is set', async () => {
+    mockGetCommands.mockReturnValue([]);
+    vi.mocked(mockConfig.getDisabledSlashCommands).mockReturnValue(['help']);
+
+    const result = await handleSlashCommand(
+      '/does-not-exist',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('no_command');
+  });
+
   it('should execute allowed built-in commands', async () => {
     const mockInitCommand = {
       name: 'init',

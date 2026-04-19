@@ -252,13 +252,19 @@ export const handleSlashCommand = async (
       : 'non_interactive';
 
   const allowedBuiltinSet = new Set(allowedBuiltinCommandNames ?? []);
-  const disabledSlashCommands = config.getDisabledSlashCommands();
-  const disabledSlashCommandSet =
-    disabledSlashCommands.length > 0
-      ? new Set(disabledSlashCommands)
-      : undefined;
+  const disabledSlashCommandsRaw = config.getDisabledSlashCommands();
+  const disabledNameSet = new Set<string>();
+  for (const name of disabledSlashCommandsRaw) {
+    const trimmed = name.trim();
+    if (trimmed) disabledNameSet.add(trimmed.toLowerCase());
+  }
+  const isDisabled = (cmd: { name: string }) =>
+    disabledNameSet.has(cmd.name.toLowerCase());
 
-  // Load all commands to check if the command exists but is not allowed
+  // Load the full command set (unfiltered by the denylist) so that the
+  // fallback existence check below can distinguish a disabled command from a
+  // truly unknown one. Without this, a disabled command would fall through to
+  // `no_command` and be forwarded to the model as plain prompt text.
   const allLoaders = [
     new BuiltinCommandLoader(config),
     new BundledSkillLoader(config),
@@ -268,13 +274,12 @@ export const handleSlashCommand = async (
   const commandService = await CommandService.create(
     allLoaders,
     abortController.signal,
-    disabledSlashCommandSet,
   );
   const allCommands = commandService.getCommands();
   const filteredCommands = filterCommandsForNonInteractive(
     allCommands,
     allowedBuiltinSet,
-  );
+  ).filter((cmd) => !isDisabled(cmd));
 
   // First, try to parse with filtered commands
   const { commandToExecute, args } = parseSlashCommand(
@@ -290,6 +295,16 @@ export const handleSlashCommand = async (
     );
 
     if (knownCommand) {
+      if (isDisabled(knownCommand)) {
+        return {
+          type: 'unsupported',
+          reason: t(
+            'The command "/{{command}}" is disabled by the current configuration.',
+            { command: knownCommand.name },
+          ),
+          originalType: 'filtered_command',
+        };
+      }
       // Command exists but is not allowed in non-interactive mode
       return {
         type: 'unsupported',
