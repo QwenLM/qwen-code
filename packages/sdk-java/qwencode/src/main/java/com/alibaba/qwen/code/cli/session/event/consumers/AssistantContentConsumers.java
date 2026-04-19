@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.cli.session.event.consumers;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantUsage;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.TextAssistantContent;
-import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThingkingAssistantContent;
+import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ThinkingAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ToolResultAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.AssistantContent.ToolUseAssistantContent;
 import com.alibaba.qwen.code.cli.protocol.data.behavior.Behavior;
@@ -33,9 +33,9 @@ public interface AssistantContentConsumers {
      * Handles thinking content from the assistant.
      *
      * @param session The session
-     * @param thingkingAssistantContent The thinking content from the assistant
+     * @param thinkingAssistantContent The thinking content from the assistant
      */
-    void onThinking(Session session, ThingkingAssistantContent thingkingAssistantContent);
+    void onThinking(Session session, ThinkingAssistantContent thinkingAssistantContent);
 
     /**
      * Handles tool use content from the assistant.
@@ -125,10 +125,10 @@ public interface AssistantContentConsumers {
      * Gets timeout for thinking handling.
      *
      * @param session The session
-     * @param thingkingAssistantContent The thinking content from the assistant
+     * @param thinkingAssistantContent The thinking content from the assistant
      * @return The timeout for thinking handling
      */
-    Timeout onThinkingTimeout(Session session, ThingkingAssistantContent thingkingAssistantContent);
+    Timeout onThinkingTimeout(Session session, ThinkingAssistantContent thinkingAssistantContent);
 
     /**
      * Gets timeout for tool use handling.

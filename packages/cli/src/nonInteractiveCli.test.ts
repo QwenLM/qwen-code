@@ -146,6 +146,11 @@ describe('runNonInteractive', () => {
       isInteractive: vi.fn().mockReturnValue(false),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getCronScheduler: vi.fn().mockReturnValue(null),
+      getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+        setNotificationCallback: vi.fn(),
+        setRegisterCallback: vi.fn(),
+        getRunning: vi.fn().mockReturnValue([]),
+      }),
     } as unknown as Config;
 
     mockSettings = {
@@ -255,7 +260,7 @@ describe('runNonInteractive', () => {
       'prompt-id-1',
       { type: SendMessageType.UserQuery },
     );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Hello World');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
   });
 
@@ -319,7 +324,7 @@ describe('runNonInteractive', () => {
       'prompt-id-2',
       { type: SendMessageType.ToolResult },
     );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
   it('should handle error during tool execution and should send error back to the model', async () => {
@@ -388,7 +393,7 @@ describe('runNonInteractive', () => {
       'prompt-id-3',
       { type: SendMessageType.ToolResult },
     );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
 
   it('should exit with error if sendMessageStream throws initially', async () => {
@@ -450,7 +455,7 @@ describe('runNonInteractive', () => {
     expect(mockCoreExecuteToolCall).toHaveBeenCalled();
     expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
     expect(processStdoutSpy).toHaveBeenCalledWith(
-      "Sorry, I can't find that tool.",
+      "Sorry, I can't find that tool.\n",
     );
   });
 
@@ -514,7 +519,7 @@ describe('runNonInteractive', () => {
     );
 
     // 6. Assert the final output is correct
-    expect(processStdoutSpy).toHaveBeenCalledWith('Summary complete.');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Summary complete.\n');
   });
 
   it('should process input and write JSON output with stats', async () => {
@@ -887,7 +892,7 @@ describe('runNonInteractive', () => {
       { type: SendMessageType.UserQuery },
     );
 
-    expect(processStdoutSpy).toHaveBeenCalledWith('Response from command');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
   });
 
   it('should handle command that requires confirmation by returning early', async () => {
@@ -912,7 +917,7 @@ describe('runNonInteractive', () => {
 
     // Should write error message through adapter to stdout (TEXT mode goes through JsonOutputAdapter)
     expect(processStderrSpy).toHaveBeenCalledWith(
-      'Shell command confirmation is not supported in non-interactive mode. Use YOLO mode or pre-approve commands.',
+      'Shell command confirmation is not supported in non-interactive mode. Use YOLO mode or pre-approve commands.\n',
     );
   });
 
@@ -947,7 +952,7 @@ describe('runNonInteractive', () => {
       { type: SendMessageType.UserQuery },
     );
 
-    expect(processStdoutSpy).toHaveBeenCalledWith('Response to unknown');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Response to unknown\n');
   });
 
   it('should handle known but unsupported slash commands like /help by returning early', async () => {
@@ -970,7 +975,7 @@ describe('runNonInteractive', () => {
 
     // Should write error message through adapter to stdout (TEXT mode goes through JsonOutputAdapter)
     expect(processStderrSpy).toHaveBeenCalledWith(
-      'The command "/help" is not supported in non-interactive mode.',
+      'The command "/help" is not supported in non-interactive mode.\n',
     );
   });
 
@@ -995,7 +1000,7 @@ describe('runNonInteractive', () => {
 
     // Should write error message to stderr
     expect(processStderrSpy).toHaveBeenCalledWith(
-      'Unknown command result type: unhandled',
+      'Unknown command result type: unhandled\n',
     );
   });
 
@@ -1033,7 +1038,7 @@ describe('runNonInteractive', () => {
 
     expect(mockAction).toHaveBeenCalledWith(expect.any(Object), 'arg1 arg2');
 
-    expect(processStdoutSpy).toHaveBeenCalledWith('Acknowledged');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Acknowledged\n');
   });
 
   it('should emit stream-json envelopes when output format is stream-json', async () => {

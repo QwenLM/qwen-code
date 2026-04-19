@@ -72,6 +72,7 @@ import { type ContextState, templateString } from './agent-headless.js';
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
+  ToolNames.SWARM,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
@@ -300,8 +301,9 @@ export class AgentCore {
    * If no explicit toolConfig or it contains "*" or is empty,
    * inherits all tools (excluding AgentTool to prevent recursion).
    */
-  prepareTools(): FunctionDeclaration[] {
+  async prepareTools(): Promise<FunctionDeclaration[]> {
     const toolRegistry = this.runtimeContext.getToolRegistry();
+    await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
     const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
@@ -941,6 +943,7 @@ export class AgentCore {
   /**
    * Safely retrieves the description of a tool by attempting to build it.
    * Returns an empty string if any error occurs during the process.
+   * Note: Assumes tools are warmed via warmAll() before the reasoning loop.
    */
   getToolDescription(toolName: string, args: Record<string, unknown>): string {
     try {

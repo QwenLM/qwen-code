@@ -51,6 +51,14 @@ const isExpectedPtyRaceError = (error: unknown): boolean => {
     return true;
   }
 
+  // EAGAIN: transient non-blocking read error from PTY fd
+  if (
+    (code === 'EAGAIN' && message.includes('read')) ||
+    message.includes('read EAGAIN')
+  ) {
+    return true;
+  }
+
   // PTY-specific resize/exit race errors - require PTY context in message
   if (
     message.includes('ioctl(2) failed, EBADF') ||

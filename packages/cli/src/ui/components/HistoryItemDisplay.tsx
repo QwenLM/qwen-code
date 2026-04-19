@@ -98,6 +98,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'user' && (
         <UserMessage text={itemForDisplay.text} />
       )}
+      {itemForDisplay.type === 'notification' && (
+        <InfoMessage text={itemForDisplay.text} />
+      )}
       {itemForDisplay.type === 'user_shell' && (
         <UserShellMessage text={itemForDisplay.text} />
       )}

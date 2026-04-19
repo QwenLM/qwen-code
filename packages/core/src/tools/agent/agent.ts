@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from '../tools.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import type {
@@ -60,6 +61,7 @@ export interface AgentParams {
   description: string;
   prompt: string;
   subagent_type?: string;
+  run_in_background?: boolean;
 }
 
 const debugLogger = createDebugLogger('AGENT');
@@ -186,6 +188,11 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'string',
           description: 'The type of specialized agent to use for this task',
         },
+        run_in_background: {
+          type: 'boolean',
+          description:
+            'Set to true to run this agent in the background. You will be notified when it completes.',
+        },
       },
       required: ['description', 'prompt'],
       additionalProperties: false,
@@ -274,6 +281,7 @@ Usage notes:
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
+- You can optionally set \`run_in_background: true\` to run the agent in the background. You will be notified when it completes. Use this when you have genuinely independent work to do in parallel and don't need the agent's results before you can proceed.
 
 Example usage:
 
@@ -385,6 +393,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   readonly eventEmitter: AgentEventEmitter = new AgentEventEmitter();
   private currentDisplay: AgentResultDisplay | null = null;
   private currentToolCalls: AgentResultDisplay['toolCalls'] = [];
+  private callId?: string;
 
   constructor(
     private readonly config: Config,
@@ -392,6 +401,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     params: AgentParams,
   ) {
     super(params);
+  }
+
+  // Background agents carry the tool-use id through to completion notifications.
+  setCallId(callId: string): void {
+    this.callId = callId;
   }
 
   /**
@@ -674,10 +688,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const generationConfig = geminiClient?.getChat().getGenerationConfig();
     if (generationConfig?.systemInstruction) {
       // Inline FunctionDeclaration[] from the parent — passed verbatim
-      // including `agent` itself so the fork's tool-name set matches the
-      // parent's. prepareTools bypasses the exclusion filter for inline
-      // decls; `isInForkExecution()` (ALS-based) is the sole
-      // recursive-fork block at runtime.
+      // (including `agent` and cron tools) so the fork's system prompt,
+      // tools, and history exactly match the parent's and share its
+      // DashScope cache prefix. A fork is a context-sharing extension of
+      // the parent, not an isolated subagent, so the general subagent
+      // exclusion list does not apply. Recursive forks are blocked by the
+      // ALS-based `isInForkExecution()` guard.
       const parentToolDecls: FunctionDeclaration[] =
         (
           generationConfig.tools as Array<{
@@ -714,6 +730,69 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     );
 
     return { subagent, taskPrompt };
+  }
+
+  // Runs the SubagentStop hook after execution. On a blocking decision, feeds the
+  // reason back and re-executes — up to 5 iterations to defend against a
+  // misconfigured hook looping forever.
+  private async runSubagentStopHookLoop(
+    subagent: AgentHeadless,
+    opts: {
+      agentId: string;
+      agentType: string;
+      resolvedMode: PermissionMode;
+      signal?: AbortSignal;
+    },
+  ): Promise<void> {
+    const { agentId, agentType, resolvedMode, signal } = opts;
+    const hookSystem = this.config.getHookSystem();
+    if (!hookSystem) return;
+
+    const transcriptPath = this.config.getTranscriptPath();
+    let stopHookActive = false;
+    const maxIterations = 5;
+
+    for (let i = 0; i < maxIterations; i++) {
+      try {
+        const stopHookOutput = await hookSystem.fireSubagentStopEvent(
+          agentId,
+          agentType,
+          transcriptPath,
+          subagent.getFinalText(),
+          stopHookActive,
+          resolvedMode,
+          signal,
+        );
+
+        const typedStopOutput = stopHookOutput as StopHookOutput | undefined;
+
+        if (
+          !typedStopOutput?.isBlockingDecision() &&
+          !typedStopOutput?.shouldStopExecution()
+        ) {
+          return;
+        }
+
+        stopHookActive = true;
+        const continueContext = new ContextState();
+        continueContext.set(
+          'task_prompt',
+          typedStopOutput.getEffectiveReason(),
+        );
+        await subagent.execute(continueContext, signal);
+
+        if (signal?.aborted) return;
+      } catch (hookError) {
+        debugLogger.warn(
+          `[Agent] SubagentStop hook failed, allowing stop: ${hookError}`,
+        );
+        return;
+      }
+    }
+
+    debugLogger.warn(
+      `[Agent] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop`,
+    );
   }
 
   /**
@@ -759,69 +838,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Execute the subagent (blocking)
       await subagent.execute(contextState, signal);
 
-      // Fire SubagentStop hook after execution and handle block decisions
       if (hookSystem && !signal?.aborted) {
-        const transcriptPath = this.config.getTranscriptPath();
-        let stopHookActive = false;
-
-        // Loop to handle "block" decisions (prevent subagent from stopping)
-        let continueExecution = true;
-        let iterationCount = 0;
-        const maxIterations = 5; // Prevent infinite loops from hook misconfigurations
-
-        while (continueExecution) {
-          iterationCount++;
-
-          // Safety check to prevent infinite loops
-          if (iterationCount >= maxIterations) {
-            debugLogger.warn(
-              `[TaskTool] SubagentStop hook reached maximum iterations (${maxIterations}), forcing stop to prevent infinite loop`,
-            );
-            continueExecution = false;
-            break;
-          }
-
-          try {
-            const stopHookOutput = await hookSystem.fireSubagentStopEvent(
-              agentId,
-              agentType,
-              transcriptPath,
-              subagent.getFinalText(),
-              stopHookActive,
-              resolvedMode,
-              signal,
-            );
-
-            const typedStopOutput = stopHookOutput as
-              | StopHookOutput
-              | undefined;
-
-            if (
-              typedStopOutput?.isBlockingDecision() ||
-              typedStopOutput?.shouldStopExecution()
-            ) {
-              // Feed the reason back to the subagent and continue execution
-              const continueReason = typedStopOutput.getEffectiveReason();
-              stopHookActive = true;
-
-              const continueContext = new ContextState();
-              continueContext.set('task_prompt', continueReason);
-              await subagent.execute(continueContext, signal);
-
-              if (signal?.aborted) {
-                continueExecution = false;
-              }
-              // Loop continues to re-check SubagentStop hook
-            } else {
-              continueExecution = false;
-            }
-          } catch (hookError) {
-            debugLogger.warn(
-              `[TaskTool] SubagentStop hook failed, allowing stop: ${hookError}`,
-            );
-            continueExecution = false;
-          }
-        }
+        await this.runSubagentStopHookLoop(subagent, {
+          agentId,
+          agentType,
+          resolvedMode,
+          signal,
+        });
       }
 
       // Get the results
@@ -962,13 +985,140 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
 
+      // Date.now() alone collides when two parallel background agents of the
+      // same type land in the same ms; the registry is keyed by agentId.
+      const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
       const hookOpts = {
-        agentId: `${subagentConfig.name}-${Date.now()}`,
+        agentId: `${subagentConfig.name}-${agentIdSuffix}`,
         agentType: this.params.subagent_type || subagentConfig.name,
         resolvedMode,
         signal,
         updateOutput,
       };
+
+      // ── Background (async) execution path ──────────────────────
+      // OR the tool parameter with the agent definition's background flag.
+      const shouldRunInBackground =
+        this.params.run_in_background === true ||
+        subagentConfig.background === true;
+
+      if (shouldRunInBackground) {
+        // Fire SubagentStart hook before background launch
+        const hookSystem = this.config.getHookSystem();
+        if (hookSystem) {
+          try {
+            const startHookOutput = await hookSystem.fireSubagentStartEvent(
+              hookOpts.agentId,
+              hookOpts.agentType,
+              resolvedMode,
+              signal,
+            );
+            const additionalContext = startHookOutput?.getAdditionalContext();
+            if (additionalContext) {
+              contextState.set('hook_context', additionalContext);
+            }
+          } catch (hookError) {
+            debugLogger.warn(
+              `[Agent] SubagentStart hook failed, continuing execution: ${hookError}`,
+            );
+          }
+        }
+
+        // Create an independent AbortController — background agents
+        // survive ESC cancellation of the parent's current turn.
+        const bgAbortController = new AbortController();
+
+        // Background agents have no UI, so interactive permission prompts must be
+        // auto-denied rather than auto-approved (YOLO). PermissionRequest hooks
+        // still run and can override. Use Object.create so the resolved approval
+        // mode override (e.g. subagent-level `approvalMode: auto-edit`) is preserved.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const bgConfig = Object.create(agentConfig) as any;
+        bgConfig.getShouldAvoidPermissionPrompts = () => true;
+
+        // Register in the background task registry only AFTER init succeeds — if
+        // construction throws, a pre-registered phantom 'running' entry would hang
+        // the non-interactive hold-back loop forever.
+        let bgSubagent: AgentHeadless;
+        if (isFork) {
+          const fork = await this.createForkSubagent(bgConfig as Config);
+          bgSubagent = fork.subagent;
+        } else {
+          bgSubagent = await this.subagentManager.createAgentHeadless(
+            subagentConfig,
+            bgConfig as Config,
+          );
+        }
+
+        const registry = this.config.getBackgroundTaskRegistry();
+        registry.register({
+          agentId: hookOpts.agentId,
+          description: this.params.description,
+          subagentType: subagentConfig.name,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: bgAbortController,
+          toolUseId: this.callId,
+        });
+
+        const getCompletionStats = () => {
+          const summary = bgSubagent.getExecutionSummary();
+          return {
+            totalTokens: summary.totalTokens,
+            toolUses: summary.totalToolCalls,
+            durationMs: summary.totalDurationMs,
+          };
+        };
+
+        // Fire-and-forget: start the subagent without blocking the parent.
+        // For forks, wrap the body in runInForkContext so the recursive-fork
+        // guard in execute() fires if the fork child's model calls `agent`
+        // again — otherwise background forks bypass the ALS marker and can
+        // spawn nested implicit forks.
+        const bgBody = async () => {
+          try {
+            await bgSubagent.execute(contextState, bgAbortController.signal);
+
+            if (hookSystem && !bgAbortController.signal.aborted) {
+              await this.runSubagentStopHookLoop(bgSubagent, {
+                agentId: hookOpts.agentId,
+                agentType: hookOpts.agentType,
+                resolvedMode,
+                signal: bgAbortController.signal,
+              });
+            }
+
+            // Report terminate mode: only GOAL counts as success. ERROR,
+            // MAX_TURNS, and TIMEOUT are surfaced as failures so the parent
+            // model (and the UI) don't treat incomplete runs as completed.
+            const terminateMode = bgSubagent.getTerminateMode();
+            const finalText = bgSubagent.getFinalText();
+            const completionStats = getCompletionStats();
+            if (terminateMode === AgentTerminateMode.GOAL) {
+              registry.complete(hookOpts.agentId, finalText, completionStats);
+            } else {
+              registry.fail(
+                hookOpts.agentId,
+                finalText || `Agent terminated with mode: ${terminateMode}`,
+                completionStats,
+              );
+            }
+          } catch (error) {
+            const errorMsg =
+              error instanceof Error ? error.message : String(error);
+            debugLogger.error(`[Agent] Background agent failed: ${errorMsg}`);
+
+            registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+          }
+        };
+        void (isFork ? runInForkContext(bgBody) : bgBody());
+
+        this.updateDisplay({ status: 'background' as const }, updateOutput);
+        return {
+          llmContent: `Background agent launched: "${this.params.description}" (ID: ${hookOpts.agentId}). You will be notified when it completes.`,
+          returnDisplay: this.currentDisplay!,
+        };
+      }
 
       if (isFork) {
         // Background fork execution. Run under an AsyncLocalStorage frame so
