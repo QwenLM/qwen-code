@@ -127,8 +127,22 @@ describe('pdf utilities', () => {
       expect(parsePDFPageRange('1-2x')).toBeNull();
       expect(parsePDFPageRange('1x-2')).toBeNull();
       expect(parsePDFPageRange('1.5')).toBeNull();
-      expect(parsePDFPageRange('1 - 5')).toBeNull();
       expect(parsePDFPageRange('+5')).toBeNull();
+    });
+
+    it('should tolerate whitespace around the range hyphen', () => {
+      // Preserves compatibility with the old parseInt-based parser, which
+      // skipped leading whitespace on each side of the hyphen.
+      expect(parsePDFPageRange('1 - 5')).toEqual({ firstPage: 1, lastPage: 5 });
+      expect(parsePDFPageRange('1-  5')).toEqual({ firstPage: 1, lastPage: 5 });
+      expect(parsePDFPageRange('  2 -  7  ')).toEqual({
+        firstPage: 2,
+        lastPage: 7,
+      });
+      expect(parsePDFPageRange('3 -')).toEqual({
+        firstPage: 3,
+        lastPage: Infinity,
+      });
     });
   });
 

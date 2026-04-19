@@ -63,14 +63,16 @@ export function parsePDFPageRange(
 
   // Whole-string match — parseInt() would silently accept tokens like
   // "5abc", "1-2-3", "1.5", or "1x-2" because of its truncation behaviour.
-  const openEnded = /^(\d+)-$/.exec(trimmed);
+  // Optional whitespace around the hyphen is allowed so "1 - 5" still parses
+  // like the old parseInt-based implementation did.
+  const openEnded = /^(\d+)\s*-$/.exec(trimmed);
   if (openEnded) {
     const first = Number(openEnded[1]);
     if (first < 1) return null;
     return { firstPage: first, lastPage: Infinity };
   }
 
-  const range = /^(\d+)-(\d+)$/.exec(trimmed);
+  const range = /^(\d+)\s*-\s*(\d+)$/.exec(trimmed);
   if (range) {
     const first = Number(range[1]);
     const last = Number(range[2]);
