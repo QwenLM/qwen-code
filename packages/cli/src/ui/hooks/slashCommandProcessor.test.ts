@@ -14,6 +14,7 @@ import type {
 } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import type { HistoryItemBtw } from '../types.js';
 import { MessageType } from '../types.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
@@ -1122,6 +1123,55 @@ describe('useSlashCommandProcessor', () => {
         await result.current.handleSlashCommand('/unknown');
       });
       expect(logSlashCommand).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('ui.clear and /btw dialog', () => {
+    it('should dismiss an active btw dialog when ui.clear is called', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.commandContext).toBeDefined());
+
+      const btwItem: HistoryItemBtw = {
+        type: MessageType.BTW,
+        btw: { question: 'why?', answer: '', isPending: true },
+      };
+
+      act(() => {
+        result.current.commandContext.ui.setBtwItem(btwItem);
+      });
+      await waitFor(() => {
+        expect(result.current.commandContext.ui.btwItem).toEqual(btwItem);
+      });
+
+      act(() => {
+        result.current.commandContext.ui.clear();
+      });
+
+      await waitFor(() => {
+        expect(result.current.commandContext.ui.btwItem).toBeNull();
+      });
+    });
+
+    it('should abort the in-flight btw request when ui.clear is called', async () => {
+      const result = setupProcessorHook();
+      await waitFor(() => expect(result.current.commandContext).toBeDefined());
+
+      const abortController = new AbortController();
+      const abortSpy = vi.spyOn(abortController, 'abort');
+
+      act(() => {
+        result.current.commandContext.ui.btwAbortControllerRef.current =
+          abortController;
+      });
+
+      act(() => {
+        result.current.commandContext.ui.clear();
+      });
+
+      expect(abortSpy).toHaveBeenCalledTimes(1);
+      expect(
+        result.current.commandContext.ui.btwAbortControllerRef.current,
+      ).toBeNull();
     });
   });
 });

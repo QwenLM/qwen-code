@@ -1823,6 +1823,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'Использование контекста',
+  '% used': '% использовано',
+  '% context used': '% контекста использовано',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'Контекст превышает лимит! Используйте /compress или /clear для уменьшения.',
+  'Use /compress or /clear': 'Используйте /compress или /clear',
   'No API response yet. Send a message to see actual usage.':
     'Пока нет ответа от API. Отправьте сообщение, чтобы увидеть фактическое использование.',
   'Estimated pre-conversation overhead':

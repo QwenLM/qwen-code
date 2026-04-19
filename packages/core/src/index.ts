@@ -87,32 +87,57 @@ export * from './tools/tool-error.js';
 export * from './tools/tool-registry.js';
 export * from './tools/tools.js';
 
-// Individual tools
-export * from './tools/edit.js';
-export * from './tools/exitPlanMode.js';
-export * from './tools/glob.js';
-export * from './tools/grep.js';
-export * from './tools/ls.js';
-export * from './tools/lsp.js';
+// Individual tools — MCP/SDK infrastructure only (tool classes are lazy-loaded)
 export * from './tools/mcp-client.js';
 export * from './tools/mcp-client-manager.js';
 export * from './tools/mcp-tool.js';
-export * from './memory/const.js';
 export * from './tools/read-file.js';
 export * from './tools/ripGrep.js';
 export * from './tools/sdk-control-client-transport.js';
-export * from './tools/shell.js';
-export * from './tools/skill.js';
-export * from './tools/agent.js';
-export * from './tools/todoWrite.js';
-export * from './tools/tool-error.js';
-export * from './tools/tool-registry.js';
-export * from './tools/web-fetch.js';
-export * from './tools/web-search/index.js';
-export * from './tools/write-file.js';
-export * from './tools/cron-create.js';
-export * from './tools/cron-list.js';
-export * from './tools/cron-delete.js';
+export * from './tools/modifiable-tool.js';
+
+// Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
+export type { WebSearchProviderConfig } from './tools/web-search/types.js';
+export { buildSkillLlmContent } from './tools/skill-utils.js';
+
+// Backward-compatible type re-exports for tool classes removed from eager loading.
+// These preserve TypeScript type compatibility for downstream consumers.
+// Note: runtime value imports (e.g. `new EditTool(...)`) must use the direct
+// module path (e.g. `@qwen-code/qwen-code-core/dist/tools/edit.js`) as these
+// classes are now lazy-loaded and are not exported as values from the package root.
+export type { EditTool, EditToolParams } from './tools/edit.js';
+export type {
+  ExitPlanModeTool,
+  ExitPlanModeParams,
+} from './tools/exitPlanMode.js';
+export type { GlobTool, GlobToolParams, GlobPath } from './tools/glob.js';
+export type { GrepTool, GrepToolParams } from './tools/grep.js';
+export type { LSTool, LSToolParams, FileEntry } from './tools/ls.js';
+export type { LspTool, LspToolParams, LspOperation } from './tools/lsp.js';
+export type {
+  ShellTool,
+  ShellToolParams,
+  ShellToolInvocation,
+} from './tools/shell.js';
+export type { SkillTool, SkillParams } from './tools/skill.js';
+export type { AgentTool, AgentParams } from './tools/agent/agent.js';
+export type { SwarmTool, SwarmParams, SwarmTask } from './tools/swarm.js';
+export type {
+  TodoWriteTool,
+  TodoItem,
+  TodoWriteParams,
+} from './tools/todoWrite.js';
+export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
+export type {
+  WebSearchTool,
+  WebSearchToolParams,
+  WebSearchToolResult,
+  WebSearchConfig,
+} from './tools/web-search/index.js';
+export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
+export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
+export type { CronListTool, CronListParams } from './tools/cron-list.js';
+export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 
 // ============================================================================
 // Services
@@ -171,7 +196,11 @@ export * from './lsp/types.js';
 // MCP (Model Context Protocol)
 // ============================================================================
 
-export { MCPOAuthProvider } from './mcp/oauth-provider.js';
+export {
+  MCPOAuthProvider,
+  OAUTH_AUTH_URL_EVENT,
+  OAUTH_DISPLAY_MESSAGE_EVENT,
+} from './mcp/oauth-provider.js';
 export type {
   MCPOAuthConfig,
   OAuthDisplayMessage,
@@ -212,6 +241,7 @@ export {
   ExtensionUninstallEvent,
   IdeConnectionEvent,
   IdeConnectionType,
+  LoopType,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,
@@ -254,6 +284,8 @@ export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/jsonl-utils.js';
 export * from './utils/memoryDiscovery.js';
+export { ConditionalRulesRegistry } from './utils/rulesDiscovery.js';
+export type { RuleFile } from './utils/rulesDiscovery.js';
 export { OpenAILogger, openaiLogger } from './utils/openaiLogger.js';
 export * from './utils/partUtils.js';
 export * from './utils/pathReader.js';
