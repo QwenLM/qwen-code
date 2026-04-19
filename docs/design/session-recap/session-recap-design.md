@@ -172,6 +172,7 @@
 | ----------------------------------------------------- | -------------------------------------------------------------------------------------- |
 | `!enabled \|\| !config`                               | abort 在飞调用 + 清 `inFlightRef` + 清 `blurredAtRef`                                  |
 | `!isFocused` 且 `blurredAtRef === null`               | 设 `blurredAtRef = Date.now()`                                                         |
+| `isFocused` 且 `blurredAtRef === null`                | 直接返回（没有失焦周期可处理；首次渲染或刚 reset 后会走这里）                          |
 | `isFocused` 且 blur 时长 < 5 min                      | 清 `blurredAtRef`，等下个失焦周期                                                      |
 | `isFocused` 且 blur 时长 ≥ 5 min 且 `recapPendingRef` | 直接返回（去重）                                                                       |
 | `isFocused` 且 blur 时长 ≥ 5 min 且 `!isIdle`         | **保留** `blurredAtRef` 等 turn 结束（`isIdle` 在 deps 中，turn 完成时 effect 会重跑） |
@@ -218,7 +219,9 @@
 - catch 块捕获的异常（`debugLogger.warn`）
 
 所有失败对用户**完全透明**——recap 是辅助功能，不会向用户面前抛错。
-开发者通过 `QWEN_CODE_DEBUG_LOGGING` env var / 设置打开 debug 日志即可看到。
+开发者可在 debug 日志文件中按 `[SESSION_RECAP]` 标签检索：默认写入
+`~/.qwen/debug/<sessionId>.txt`（`latest.txt` 软链指向当前会话），可通过
+`QWEN_DEBUG_LOG_FILE=0` 关闭。
 
 ---
 
