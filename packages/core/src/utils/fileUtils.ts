@@ -593,6 +593,20 @@ export async function processSingleFileContent(
       };
     }
 
+    // Reject FIFOs, sockets, /dev/* devices — stats.size is 0 or
+    // meaningless for these, so the size gate below would wave them
+    // through, and handing `/dev/zero` to pdftotext would make it stream
+    // until the timeout fires. Symlinks to regular files are fine:
+    // fs.stat follows them, so `isFile()` here is true.
+    if (!stats.isFile()) {
+      return {
+        llmContent: `Cannot read file: ${path.basename(filePath)} is not a regular file (e.g. device, socket, or pipe).`,
+        returnDisplay: 'Not a regular file.',
+        error: `Not a regular file: ${filePath}`,
+        errorType: ToolErrorType.READ_CONTENT_FAILURE,
+      };
+    }
+
     const fileType = await detectFileType(filePath);
     const relativePathForDisplay = path
       .relative(rootDirectory, filePath)
@@ -610,9 +624,20 @@ export async function processSingleFileContent(
     // data-URI budget. PDF text extraction streams through pdftotext and
     // truncates to MAX_PDF_TEXT_OUTPUT_CHARS, so oversized PDFs should go
     // through it instead of being rejected up front. Use 9.9MB to leave
-    // margin for base64 encoding overhead (#1880).
+    // margin for base64 encoding overhead (#1880). A separate upper
+    // bound applies to the extraction path so a multi-GB file can't hang
+    // pdftotext until the 30s timeout.
     const willExtractPdfText =
       fileType === 'pdf' && (pages !== undefined || !modalities.pdf);
+    const PDF_EXTRACTION_MAX_MB = 100;
+    if (willExtractPdfText && fileSizeInMB > PDF_EXTRACTION_MAX_MB) {
+      return {
+        llmContent: `PDF file is too large for text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_EXTRACTION_MAX_MB}MB limit. Use the 'pages' parameter to read a narrower range, or split the document.`,
+        returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_EXTRACTION_MAX_MB}MB).`,
+        error: `PDF exceeds extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        errorType: ToolErrorType.FILE_TOO_LARGE,
+      };
+    }
     if (fileSizeInMB > 9.9 && !willExtractPdfText) {
       return {
         llmContent: 'File size exceeds the 10MB limit.',

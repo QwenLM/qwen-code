@@ -954,6 +954,7 @@ describe('fileUtils', () => {
       const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
         size: 15 * 1024 * 1024,
         isDirectory: () => false,
+        isFile: () => true,
       } as fs.Stats);
 
       try {
@@ -993,6 +994,7 @@ describe('fileUtils', () => {
       const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
         size: 15 * 1024 * 1024,
         isDirectory: () => false,
+        isFile: () => true,
       } as fs.Stats);
 
       try {
@@ -1231,6 +1233,7 @@ describe('fileUtils', () => {
       const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
         size: 11 * 1024 * 1024,
         isDirectory: () => false,
+        isFile: () => true,
       } as fs.Stats);
 
       try {
@@ -1244,6 +1247,70 @@ describe('fileUtils', () => {
           'File size exceeds the 10MB limit',
         );
         expect(result.llmContent).toContain('File size exceeds the 10MB limit');
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('should reject PDFs that exceed the text-extraction size cap (100MB)', async () => {
+      const fakePdfData = Buffer.from('fake pdf data');
+      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
+      mockMimeGetType.mockReturnValue('application/pdf');
+
+      // 200MB PDF — text-extraction path skips the 10MB gate but still
+      // needs a sane ceiling so pdftotext can't be asked to stream GBs
+      // until the 30s timeout fires.
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 200 * 1024 * 1024,
+        isDirectory: () => false,
+        isFile: () => true,
+      } as fs.Stats);
+
+      try {
+        const mockConfigNoPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true },
+          }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigNoPdf,
+          undefined,
+          undefined,
+          '1-5',
+        );
+
+        expect(result.error).toMatch(/exceeds extraction size limit/i);
+        expect(result.returnDisplay).toMatch(/PDF file too large/i);
+        expect(result.errorType).toBeDefined();
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('should reject non-regular files (FIFOs, devices, sockets)', async () => {
+      actualNodeFs.writeFileSync(testTextFilePath, 'placeholder');
+
+      // A FIFO / socket / /dev/zero shows up as a non-file, non-directory
+      // stat entry. stats.size is typically 0 or meaningless, so without
+      // this guard a caller could accidentally stream /dev/zero through
+      // pdftotext until the timeout fires.
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 0,
+        isDirectory: () => false,
+        isFile: () => false,
+      } as fs.Stats);
+
+      try {
+        const result = await processSingleFileContent(
+          testTextFilePath,
+          mockConfig,
+        );
+
+        expect(result.error).toMatch(/not a regular file/i);
+        expect(result.returnDisplay).toMatch(/not a regular file/i);
       } finally {
         statSpy.mockRestore();
       }
