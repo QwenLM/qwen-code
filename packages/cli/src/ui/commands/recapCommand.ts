@@ -22,7 +22,7 @@ export const recapCommand: SlashCommand = {
   },
   action: async (
     context: CommandContext,
-  ): Promise<SlashCommandActionReturn> => {
+  ): Promise<void | SlashCommandActionReturn> => {
     const { config } = context.services;
     const abortSignal = context.abortSignal ?? new AbortController().signal;
 
@@ -50,9 +50,7 @@ export const recapCommand: SlashCommand = {
 
     const recap = await generateSessionRecap(config, abortSignal);
 
-    if (abortSignal.aborted) {
-      return { type: 'message', messageType: 'info', content: '' };
-    }
+    if (abortSignal.aborted) return;
 
     if (!recap) {
       return {
@@ -68,7 +66,7 @@ export const recapCommand: SlashCommand = {
         text: recap.text,
       };
       context.ui.addItem(item, Date.now());
-      return { type: 'message', messageType: 'info', content: '' };
+      return;
     }
 
     return { type: 'message', messageType: 'info', content: recap.text };
