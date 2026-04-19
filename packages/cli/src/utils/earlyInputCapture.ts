@@ -223,6 +223,9 @@ function shouldReplayPendingAtStop(pending: Buffer): boolean {
   if (pending.length === 0) {
     return false;
   }
+  if (pending.length === 1 && pending[0] === 0x1b) {
+    return true;
+  }
   return classifyEscapeSequence(pending, 0) === 'user';
 }
 
