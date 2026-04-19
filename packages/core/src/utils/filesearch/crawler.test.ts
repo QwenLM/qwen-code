@@ -785,6 +785,33 @@ describe('crawler', () => {
       );
     });
 
+    it('should not include tracked files deleted from the working tree', async () => {
+      tmpDir = await createTmpDir({
+        'alive.txt': '',
+        'deleted.txt': '',
+      });
+      await initGitRepo(tmpDir);
+      await fs.unlink(path.join(tmpDir, 'deleted.txt'));
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('alive.txt');
+      expect(results).not.toContain('deleted.txt');
+    });
+
     it('should fall back to fdir when not in a git repo and ripgrep unavailable', async () => {
       __setCommandRunnerForTests(async (command) => {
         if (command === 'git' || command === 'rg') {
@@ -919,6 +946,37 @@ describe('crawler', () => {
 
       const results2 = await crawl(options);
       expect(results2).toContain('file1.js');
+    });
+
+    it('should refresh untracked files before reusing throttled git results', async () => {
+      tmpDir = await createTmpDir({
+        'tracked.js': '',
+      });
+      await initGitRepo(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      const first = await crawl(options);
+      expect(first).toContain('tracked.js');
+      expect(first).not.toContain('new-untracked.js');
+
+      await fs.writeFile(path.join(tmpDir, 'new-untracked.js'), '');
+
+      const second = await crawl(options);
+      expect(second).toContain('tracked.js');
+      expect(second).toContain('new-untracked.js');
     });
 
     it('should throttle re-crawl on non-git fallback paths until the window expires', async () => {
@@ -1058,6 +1116,7 @@ describe('crawler', () => {
       expect(first).not.toContain('new-file.txt');
 
       includeExtraFile = true;
+      await fs.writeFile(path.join(worktreeDir, 'new-file.txt'), '');
       const futureTime = new Date(Date.now() + 60_000);
       await fs.utimes(path.join(gitDir, 'index'), futureTime, futureTime);
 

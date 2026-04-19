@@ -55,6 +55,7 @@ function recordRebuild(stateKey: string): void {
 
 interface ChangeState {
   gitRootMtimeMs: number | null;
+  untrackedFingerprint: string | null;
   fileList: string[];
 }
 
@@ -133,9 +134,28 @@ function updateChangeState(
   stateKey: string,
   crawlDirectory: string,
   fileList: string[],
+  untrackedFiles?: string[],
 ): void {
   const mtime = getGitRootMtime(crawlDirectory);
-  changeStateMap.set(stateKey, { gitRootMtimeMs: mtime, fileList });
+  changeStateMap.set(stateKey, {
+    gitRootMtimeMs: mtime,
+    untrackedFingerprint:
+      untrackedFiles === undefined
+        ? null
+        : computeLinesFingerprint(untrackedFiles),
+    fileList,
+  });
+}
+
+function computeLinesFingerprint(lines: string[]): string {
+  let hash = 5381;
+  for (const line of lines) {
+    for (let i = 0; i < line.length; i++) {
+      hash = ((hash << 5) + hash + line.charCodeAt(i)) >>> 0;
+    }
+    hash = ((hash << 5) + hash + 10) >>> 0;
+  }
+  return `${lines.length}:${hash}`;
 }
 
 interface CommandResult {
@@ -369,6 +389,81 @@ async function findGitRoot(dir: string): Promise<string | null> {
   return normalizePath(result.lines[0]);
 }
 
+function shouldIncludeFile(
+  filePath: string,
+  dirFilter: (dirPath: string) => boolean,
+  fileFilter: (filePath: string) => boolean,
+): boolean {
+  if (!isValidIgnorePath(filePath)) {
+    return false;
+  }
+
+  if (isUnderIgnoredDirectory(filePath, dirFilter)) {
+    return false;
+  }
+
+  if (fileFilter(filePath)) {
+    return false;
+  }
+
+  return true;
+}
+
+function hasReachedFileBudget(
+  fileSet: Set<string>,
+  maxFiles?: number,
+): boolean {
+  return maxFiles !== undefined && fileSet.size >= maxFiles;
+}
+
+function existingTrackedPath(gitRoot: string, normalizedFile: string): boolean {
+  return fs.existsSync(path.join(gitRoot, normalizedFile));
+}
+
+async function listUntrackedFiles(
+  gitRoot: string,
+  relativeToGitRoot: string,
+): Promise<string[] | null> {
+  const untrackedArgs = ['ls-files', '--others', '--exclude-standard'];
+  if (relativeToGitRoot && relativeToGitRoot !== '.') {
+    untrackedArgs.push(relativeToGitRoot);
+  }
+
+  const untrackedResult = await commandRunner(
+    'git',
+    untrackedArgs,
+    gitRoot,
+    10_000,
+  );
+  if (!untrackedResult.success) {
+    return null;
+  }
+
+  return untrackedResult.lines.map((file) => normalizePath(file));
+}
+
+async function hasUntrackedFilesChanged(
+  state: ChangeState,
+  crawlDirectory: string,
+): Promise<boolean> {
+  if (state.untrackedFingerprint === null) {
+    return false;
+  }
+
+  const gitRoot = await findGitRoot(crawlDirectory);
+  if (!gitRoot) {
+    return true;
+  }
+
+  const relativeToGitRoot = getPosixRelative(gitRoot, crawlDirectory);
+  const untrackedFiles = await listUntrackedFiles(gitRoot, relativeToGitRoot);
+  if (untrackedFiles === null) {
+    return true;
+  }
+
+  return computeLinesFingerprint(untrackedFiles) !== state.untrackedFingerprint;
+}
+
 async function crawlWithGitLsFiles(
   stateKey: string,
   crawlDirectory: string,
@@ -382,6 +477,8 @@ async function crawlWithGitLsFiles(
 
   const relativeToCrawlDir = getPosixRelative(cwd, crawlDirectory);
   const relativeToGitRoot = getPosixRelative(gitRoot, crawlDirectory);
+  const dirFilter = options.ignore.getDirectoryFilter();
+  const fileFilter = options.ignore.getFileFilter();
 
   const trackedArgs = ['ls-files', '--cached'];
   if (relativeToGitRoot && relativeToGitRoot !== '.') {
@@ -397,23 +494,22 @@ async function crawlWithGitLsFiles(
     return { success: false, files: [], isGitRepo: true };
   }
 
-  const untrackedArgs = ['ls-files', '--others', '--exclude-standard'];
-  if (relativeToGitRoot && relativeToGitRoot !== '.') {
-    untrackedArgs.push(relativeToGitRoot);
-  }
-  const untrackedResult = await commandRunner(
-    'git',
-    untrackedArgs,
-    gitRoot,
-    10_000,
-  );
+  const untrackedFiles = await listUntrackedFiles(gitRoot, relativeToGitRoot);
 
   const fileSet = new Set<string>();
   let count = 0;
 
   for (const file of trackedResult.lines) {
+    if (hasReachedFileBudget(fileSet, options.maxFiles)) {
+      break;
+    }
+
     await maybeYield(count++);
     const normalizedFile = normalizePath(file);
+    if (!existingTrackedPath(gitRoot, normalizedFile)) {
+      continue;
+    }
+
     const fullPath =
       relativeToGitRoot && relativeToGitRoot !== '.'
         ? path.posix.join(
@@ -421,13 +517,21 @@ async function crawlWithGitLsFiles(
             normalizedFile.slice(relativeToGitRoot.length + 1),
           )
         : path.posix.join(relativeToCrawlDir, normalizedFile);
+
+    if (!shouldIncludeFile(fullPath, dirFilter, fileFilter)) {
+      continue;
+    }
+
     fileSet.add(fullPath);
   }
 
-  if (untrackedResult.success) {
-    for (const file of untrackedResult.lines) {
+  if (untrackedFiles !== null) {
+    for (const normalizedFile of untrackedFiles) {
+      if (hasReachedFileBudget(fileSet, options.maxFiles)) {
+        break;
+      }
+
       await maybeYield(count++);
-      const normalizedFile = normalizePath(file);
       const fullPath =
         relativeToGitRoot && relativeToGitRoot !== '.'
           ? path.posix.join(
@@ -435,6 +539,11 @@ async function crawlWithGitLsFiles(
               normalizedFile.slice(relativeToGitRoot.length + 1),
             )
           : path.posix.join(relativeToCrawlDir, normalizedFile);
+
+      if (!shouldIncludeFile(fullPath, dirFilter, fileFilter)) {
+        continue;
+      }
+
       if (!fileSet.has(fullPath)) {
         fileSet.add(fullPath);
       }
@@ -444,7 +553,12 @@ async function crawlWithGitLsFiles(
   const results = buildResultsFromFileSet(fileSet);
   const filteredResults = applyFilters(results, options, relativeToCrawlDir);
 
-  updateChangeState(stateKey, crawlDirectory, filteredResults);
+  updateChangeState(
+    stateKey,
+    crawlDirectory,
+    filteredResults,
+    untrackedFiles ?? undefined,
+  );
   recordRebuild(stateKey);
 
   return { success: true, files: filteredResults, isGitRepo: true };
@@ -481,14 +595,24 @@ async function crawlWithRipgrep(
   }
 
   const relativeToCrawlDir = getPosixRelative(cwd, crawlDirectory);
+  const dirFilter = options.ignore.getDirectoryFilter();
+  const fileFilter = options.ignore.getFileFilter();
 
   const fileSet = new Set<string>();
   let count = 0;
   for (const file of rgResult.lines) {
+    if (hasReachedFileBudget(fileSet, options.maxFiles)) {
+      break;
+    }
+
     await maybeYield(count++);
     const normalizedFile = normalizePath(file);
 
     const fullPath = path.posix.join(relativeToCrawlDir, normalizedFile);
+    if (!shouldIncludeFile(fullPath, dirFilter, fileFilter)) {
+      continue;
+    }
+
     fileSet.add(fullPath);
   }
 
@@ -571,7 +695,13 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     if (!needReCrawl) {
       const state = changeStateMap.get(stateKey);
       if (state) {
-        return applyMaxFilesLimit(state.fileList, options.maxFiles);
+        const untrackedChanged = await hasUntrackedFilesChanged(
+          state,
+          options.crawlDirectory,
+        );
+        if (!untrackedChanged) {
+          return applyMaxFilesLimit(state.fileList, options.maxFiles);
+        }
       }
     }
   }
