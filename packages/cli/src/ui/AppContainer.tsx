@@ -1574,7 +1574,12 @@ export const AppContainer = (props: AppContainerProps) => {
         Date.now(),
       );
 
-      // 7. Close the selector
+      // 7. Record the rewind event for session replay
+      config.getChatRecordingService()?.recordRewind({
+        truncatedCount: historyManager.history.length - truncatedUi.length,
+      });
+
+      // 8. Close the selector
       setIsRewindSelectorOpen(false);
     },
     [config, historyManager, refreshStatic, buffer],

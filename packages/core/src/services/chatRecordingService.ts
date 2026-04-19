@@ -161,9 +161,7 @@ export interface UiTelemetryRecordPayload {
  * Stored payload for conversation rewind events.
  */
 export interface RewindRecordPayload {
-  /** UUID of the record being rewound to. */
-  targetUuid: string;
-  /** Number of records truncated. */
+  /** Number of UI history items truncated. */
   truncatedCount: number;
 }
 
@@ -494,14 +492,10 @@ export class ChatRecordingService {
   }
 
   /**
-   * Records a conversation rewind event. Updates lastRecordUuid to the target
-   * record's UUID, creating a branch in the parentUuid tree structure.
+   * Records a conversation rewind event as a system record.
    */
   recordRewind(payload: RewindRecordPayload): void {
     try {
-      // Branch the tree: set parent to the rewind target before creating the record
-      this.lastRecordUuid = payload.targetUuid;
-
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
         type: 'system',
