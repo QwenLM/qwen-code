@@ -8,6 +8,7 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { platform } from 'node:os';
 import { URL } from 'node:url';
+import { debugLogger } from '../utils/logger.js'; 
 
 const execFileAsync = promisify(execFile);
 
@@ -136,10 +137,7 @@ export async function openBrowserSecurely(url: string): Promise<void> {
     }
 
     // Log the URL so the user can open it manually instead of crashing.
-    console.error(
-      `Failed to open browser automatically. Please open this URL manually:`,
-    );
-    console.error(url);
+  debugLogger.warn(`Failed to open browser automatically. Please open this URL manually: ${url}`);
     return;
   }
 }
