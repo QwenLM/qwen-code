@@ -2078,6 +2078,15 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
+  'Are you sure you want to completely reset the session?':
+    'Are you sure you want to completely reset the session?',
+  'Are you sure you want to clear the conversation history?':
+    'Are you sure you want to clear the conversation history?',
+  'Clear dialogue history (keep system prompt + memory + context)':
+    'Clear dialogue history (keep system prompt + memory + context)',
+  'Complete reset (like a new session)': 'Complete reset (like a new session)',
+  'Clear screen, or use --history/--all to clear conversation and reset session':
+    'Clear screen, or use --history/--all to clear conversation and reset session',
   compact: 'compact',
   'compact mode: on (Ctrl+O off)': 'compact mode: on (Ctrl+O off)',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':

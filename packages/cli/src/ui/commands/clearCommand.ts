@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SlashCommand } from './types.js';
+import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import {
@@ -13,16 +13,60 @@ import {
   SessionStartSource,
   ToolNames,
   type PermissionMode,
+  ideContextStore,
 } from '@qwen-code/qwen-code-core';
 
 export const clearCommand: SlashCommand = {
   name: 'clear',
   altNames: ['reset', 'new'],
   get description() {
-    return t('Clear conversation history and free up context');
+    return t(
+      'Clear screen, or use --history/--all to clear conversation and reset session',
+    );
   },
   kind: CommandKind.BUILT_IN,
-  action: async (context, _args) => {
+  completion: async (_context, partialArg) => {
+    const suggestions = [
+      {
+        value: '--history',
+        description: t(
+          'Clear dialogue history (keep system prompt + memory + context)',
+        ),
+      },
+      {
+        value: '--all',
+        description: t('Complete reset (like a new session)'),
+      },
+    ];
+    const filtered = suggestions.filter((s) => s.value.startsWith(partialArg));
+    return filtered.length > 0 ? filtered : null;
+  },
+  action: async (context, args): Promise<void | SlashCommandActionReturn> => {
+    const tokens = args.trim().split(/\s+/).filter(Boolean);
+    // --all is a superset of --history; if both are provided, treat as --all
+    const isAll = tokens.includes('--all');
+    const isHistory = !isAll && tokens.includes('--history');
+
+    if (!isHistory && !isAll) {
+      // Clear UI only for immediate responsiveness
+      context.ui.clear();
+      return;
+    }
+
+    if (!context.overwriteConfirmed) {
+      return {
+        type: 'confirm_action',
+        prompt: isAll
+          ? t('Are you sure you want to completely reset the session?')
+          : t('Are you sure you want to clear the conversation history?'),
+        originalInvocation: {
+          raw:
+            context.invocation?.raw ||
+            `/clear ${isAll ? '--all' : '--history'}`,
+        },
+      };
+    }
+
     const { config } = context.services;
 
     if (config) {
@@ -46,6 +90,12 @@ export const clearCommand: SlashCommand = {
         .find((tool) => tool.name === ToolNames.SKILL);
       if (skillTool && 'clearLoadedSkills' in skillTool) {
         (skillTool as { clearLoadedSkills(): void }).clearLoadedSkills();
+      }
+
+      if (isAll) {
+        // --history preserves IDE/editor context.
+        // --all also clears the IDE context store.
+        ideContextStore.clear();
       }
 
       if (newSessionId && context.session.startNewSession) {

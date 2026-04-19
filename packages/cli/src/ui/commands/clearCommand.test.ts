@@ -11,6 +11,7 @@ import { createMockCommandContext } from '../../test-utils/mockCommandContext.js
 import {
   SessionEndReason,
   SessionStartSource,
+  ideContextStore,
 } from '@qwen-code/qwen-code-core';
 
 // Mock the telemetry service
@@ -20,6 +21,9 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
     ...actual,
     uiTelemetryService: {
       reset: vi.fn(),
+    },
+    ideContextStore: {
+      clear: vi.fn(),
     },
   };
 });
@@ -68,39 +72,106 @@ describe('clearCommand', () => {
     });
   });
 
-  it('should set debug message, start a new session, reset chat, and clear UI when config is available', async () => {
+  it('should only clear UI when called without flags', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');
     }
 
     await clearCommand.action(mockContext, '');
 
+    expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
+    expect(mockResetChat).not.toHaveBeenCalled();
+    expect(mockStartNewSession).not.toHaveBeenCalled();
+  });
+
+  it('should return confirm_action when called with --history and not confirmed', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    const result = await clearCommand.action(mockContext, '--history');
+
+    expect(result).toEqual({
+      type: 'confirm_action',
+      prompt: 'Are you sure you want to clear the conversation history?',
+      originalInvocation: { raw: '/clear --history' },
+    });
+    expect(mockContext.ui.clear).not.toHaveBeenCalled();
+    expect(mockResetChat).not.toHaveBeenCalled();
+  });
+
+  it('should return confirm_action when called with --all and not confirmed', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    const result = await clearCommand.action(mockContext, '--all');
+
+    expect(result).toEqual({
+      type: 'confirm_action',
+      prompt: 'Are you sure you want to completely reset the session?',
+      originalInvocation: { raw: '/clear --all' },
+    });
+    expect(mockContext.ui.clear).not.toHaveBeenCalled();
+    expect(mockResetChat).not.toHaveBeenCalled();
+  });
+
+  it('should set debug message, start a new session, reset chat, and clear UI when confirmed with --history', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    mockContext.overwriteConfirmed = true;
+    await clearCommand.action(mockContext, '--history');
+
     expect(mockContext.ui.setDebugMessage).toHaveBeenCalledWith(
       'Starting a new session, resetting chat, and clearing terminal.',
     );
-    expect(mockContext.ui.setDebugMessage).toHaveBeenCalledTimes(1);
-
     expect(mockStartNewSession).toHaveBeenCalledTimes(1);
     expect(mockContext.session.startNewSession).toHaveBeenCalledWith(
       'new-session-id',
     );
     expect(mockResetChat).toHaveBeenCalledTimes(1);
     expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
-
-    // Check that all expected operations were called
-    expect(mockContext.ui.setDebugMessage).toHaveBeenCalled();
-    expect(mockStartNewSession).toHaveBeenCalled();
-    expect(mockContext.session.startNewSession).toHaveBeenCalled();
-    expect(mockResetChat).toHaveBeenCalled();
-    expect(mockContext.ui.clear).toHaveBeenCalled();
+    expect(ideContextStore.clear).not.toHaveBeenCalled();
   });
 
-  it('should fire SessionEnd event before clearing and SessionStart event after clearing', async () => {
+  it('should completely reset session when confirmed with --all', async () => {
     if (!clearCommand.action) {
       throw new Error('clearCommand must have an action.');
     }
 
-    await clearCommand.action(mockContext, '');
+    mockContext.overwriteConfirmed = true;
+    await clearCommand.action(mockContext, '--all');
+
+    expect(mockStartNewSession).toHaveBeenCalledTimes(1);
+    expect(mockResetChat).toHaveBeenCalledTimes(1);
+    expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
+    expect(ideContextStore.clear).toHaveBeenCalledTimes(1);
+  });
+
+  it('should treat --all as superset when both --history and --all are provided', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    mockContext.overwriteConfirmed = true;
+    await clearCommand.action(mockContext, '--history --all');
+
+    expect(mockStartNewSession).toHaveBeenCalledTimes(1);
+    expect(mockResetChat).toHaveBeenCalledTimes(1);
+    expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
+    // --all should trigger ideContextStore.clear
+    expect(ideContextStore.clear).toHaveBeenCalledTimes(1);
+  });
+
+  it('should fire SessionEnd event before clearing and SessionStart event after clearing when confirmed', async () => {
+    if (!clearCommand.action) {
+      throw new Error('clearCommand must have an action.');
+    }
+
+    mockContext.overwriteConfirmed = true;
+    await clearCommand.action(mockContext, '--history');
 
     expect(mockGetHookSystem).toHaveBeenCalled();
     expect(mockFireSessionEndEvent).toHaveBeenCalledWith(
@@ -132,7 +203,8 @@ describe('clearCommand', () => {
       new Error('SessionStart hook failed'),
     );
 
-    await clearCommand.action(mockContext, '');
+    mockContext.overwriteConfirmed = true;
+    await clearCommand.action(mockContext, '--history');
 
     // Should still complete the clear operation despite hook errors
     expect(mockStartNewSession).toHaveBeenCalledTimes(1);
@@ -155,7 +227,8 @@ describe('clearCommand', () => {
       callOrder.push('resetChat');
     });
 
-    await clearCommand.action(mockContext, '');
+    mockContext.overwriteConfirmed = true;
+    await clearCommand.action(mockContext, '--history');
 
     // ui.clear should be called before resetChat for immediate UI feedback
     const clearIndex = callOrder.indexOf('ui.clear');
@@ -192,7 +265,8 @@ describe('clearCommand', () => {
         }),
     );
 
-    await clearCommand.action(mockContext, '');
+    mockContext.overwriteConfirmed = true;
+    await clearCommand.action(mockContext, '--history');
 
     // The action should complete immediately without waiting for hooks
     expect(mockContext.ui.clear).toHaveBeenCalledTimes(1);
@@ -217,9 +291,10 @@ describe('clearCommand', () => {
       session: {
         startNewSession: vi.fn(),
       },
+      overwriteConfirmed: true,
     });
 
-    await clearCommand.action(nullConfigContext, '');
+    await clearCommand.action(nullConfigContext, '--history');
 
     expect(nullConfigContext.ui.setDebugMessage).toHaveBeenCalledWith(
       'Starting a new session and clearing.',

@@ -1883,6 +1883,15 @@ export default {
     '原始模式不可用。请在交互式终端中运行。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(使用 ↑ ↓ 箭头导航，Enter 选择，Ctrl+C 退出)\n',
+  'Are you sure you want to completely reset the session?':
+    '您确定要完全重置会话吗？',
+  'Are you sure you want to clear the conversation history?':
+    '您确定要清除对话历史吗？',
+  'Clear dialogue history (keep system prompt + memory + context)':
+    '清除对话历史（保留系统提示+记忆+上下文）',
+  'Complete reset (like a new session)': '完全重置（如同新会话）',
+  'Clear screen, or use --history/--all to clear conversation and reset session':
+    '清屏，或使用 --history/--all 清除对话并重置会话',
   compact: '紧凑',
   'compact mode: on (Ctrl+O off)': '紧凑模式：开（Ctrl+O 关闭）',
   'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
