@@ -166,6 +166,20 @@ describe('pdf utilities', () => {
         lastPage: Infinity,
       });
     });
+
+    it('should reject page numbers past the safe precision limit', () => {
+      // Number('999999999999999998') === Number('999999999999999999') due
+      // to IEEE-754 precision loss. Without a hard ceiling, that made
+      // "999999999999999998-999999999999999999" look like a 1-page range
+      // and sneak past the 20-page validator in read-file.ts.
+      expect(parsePDFPageRange('999999999999999999')).toBeNull();
+      expect(
+        parsePDFPageRange('999999999999999998-999999999999999999'),
+      ).toBeNull();
+      // Just past the documented cap (1_000_000) also rejected.
+      expect(parsePDFPageRange('1000001')).toBeNull();
+      expect(parsePDFPageRange('1-1000001')).toBeNull();
+    });
   });
 
   describe('isPdftotextAvailable', () => {
@@ -175,6 +189,14 @@ describe('pdf utilities', () => {
         stderr: 'pdftotext version 24.02.0',
         code: 0,
       });
+      expect(await isPdftotextAvailable()).toBe(true);
+    });
+
+    it('should return true when exit code is 0 even without stderr (sandboxed)', async () => {
+      // Exit code is the reliable signal. Earlier implementation relied on
+      // stderr having bytes, which flaked to false when stderr was
+      // suppressed by a container / CI wrapper.
+      mockExecResult({ stdout: '', stderr: '', code: 0 });
       expect(await isPdftotextAvailable()).toBe(true);
     });
 
@@ -191,6 +213,34 @@ describe('pdf utilities', () => {
       });
       await isPdftotextAvailable();
       await isPdftotextAvailable();
+      expect(mockExecFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('should dedupe concurrent callers to a single subprocess spawn', async () => {
+      // Returning a delayed result lets us start multiple callers before
+      // the first resolves — without in-flight promise caching each one
+      // would have spawned its own pdftotext -v probe.
+      mockExecFile.mockImplementationOnce(
+        (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+          const callback = cb as (
+            err: Error | null,
+            stdout: string,
+            stderr: string,
+          ) => void;
+          setTimeout(() => callback(null, '', 'pdftotext version 24.02.0'), 10);
+          return {} as ReturnType<typeof execFile>;
+        },
+      );
+
+      const [a, b, c] = await Promise.all([
+        isPdftotextAvailable(),
+        isPdftotextAvailable(),
+        isPdftotextAvailable(),
+      ]);
+
+      expect(a).toBe(true);
+      expect(b).toBe(true);
+      expect(c).toBe(true);
       expect(mockExecFile).toHaveBeenCalledTimes(1);
     });
   });
@@ -263,6 +313,25 @@ describe('pdf utilities', () => {
       expect(args).toContain('2');
       expect(args).toContain('-l');
       expect(args).toContain('5');
+    });
+
+    it('should quote the filename with -- so hyphen-prefixed paths are not parsed as options', async () => {
+      // Without `--`, a filename like `-opw=X.pdf` is treated by poppler
+      // as the `-opw` (owner password) option, since execFile passes each
+      // element as a separate argv entry but poppler itself parses argv.
+      mockExecResult({
+        stdout: '',
+        stderr: 'pdftotext version 24.02.0',
+        code: 0,
+      });
+      mockExecResult({ stdout: 'dummy content', stderr: '', code: 0 });
+
+      await extractPDFText('/tmp/-opw=X.pdf');
+      const extractionArgs = mockExecFile.mock.calls[1]![1] as string[];
+      const dashDashIndex = extractionArgs.indexOf('--');
+      const fileIndex = extractionArgs.indexOf('/tmp/-opw=X.pdf');
+      expect(dashDashIndex).toBeGreaterThanOrEqual(0);
+      expect(fileIndex).toBeGreaterThan(dashDashIndex);
     });
 
     it('should not pass lastPage for Infinity', async () => {
@@ -375,6 +444,72 @@ describe('pdf utilities', () => {
         expect(result.text.length).toBeLessThan(110000);
         expect(result.text).toContain('text truncated');
         expect(result.text).toContain("'pages' parameter");
+      }
+    });
+
+    it('should NOT treat maxBuffer overrun as success when stdout is tiny', async () => {
+      // If pdftotext spilled into maxBuffer-exceeded with very little
+      // stdout, the overrun was probably caused by stderr warnings —
+      // pretending we got a valid extraction would feed garbage to the
+      // model. Re-run the password/corrupt detectors on the stderr we
+      // did capture, then fall back to a generic failure.
+      mockExecResult({
+        stdout: '',
+        stderr: 'pdftotext version 24.02.0',
+        code: 0,
+      });
+      mockExecFile.mockImplementationOnce(
+        (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+          const callback = cb as (
+            err: Error | null,
+            stdout: string,
+            stderr: string,
+          ) => void;
+          const err = new Error('maxBuffer') as Error & { code: string };
+          err.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+          // Tiny stdout, password-related stderr spam.
+          callback(err, 'x', 'Incorrect password '.repeat(20000));
+          return {} as ReturnType<typeof execFile>;
+        },
+      );
+
+      const result = await extractPDFText('/test.pdf');
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toContain('password-protected');
+      }
+    });
+
+    it('should surface a dedicated error on timeout', async () => {
+      mockExecResult({
+        stdout: '',
+        stderr: 'pdftotext version 24.02.0',
+        code: 0,
+      });
+      mockExecFile.mockImplementationOnce(
+        (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+          const callback = cb as (
+            err: Error | null,
+            stdout: string,
+            stderr: string,
+          ) => void;
+          // Node's execFile timeout: SIGTERM + killed=true, no numeric code.
+          const err = new Error('Command failed: pdftotext') as Error & {
+            code?: string;
+            killed?: boolean;
+            signal?: string;
+          };
+          err.killed = true;
+          err.signal = 'SIGTERM';
+          callback(err, '', '');
+          return {} as ReturnType<typeof execFile>;
+        },
+      );
+
+      const result = await extractPDFText('/test.pdf');
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toMatch(/timed out/i);
       }
     });
 

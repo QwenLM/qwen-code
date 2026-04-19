@@ -7,11 +7,17 @@
 import { execFile, type ExecFileOptions } from 'node:child_process';
 
 const MAX_PDF_TEXT_OUTPUT_CHARS = 100000;
+// Upper bound on a page number we're willing to forward to pdftotext.
+// Sits well below Number.MAX_SAFE_INTEGER so arithmetic in validation
+// (e.g. lastPage - firstPage + 1) stays exact, and well above any real
+// PDF (the current world record is roughly 86,000 pages).
+const MAX_PDF_PAGE_NUMBER = 1_000_000;
 
 /**
- * Lightweight wrapper around execFile that returns { stdout, stderr, code }.
- * Avoids importing shell-utils.ts (which pulls in tool-utils → barrel index →
- * circular dependency in vitest mock environments).
+ * Lightweight wrapper around execFile that returns { stdout, stderr, code,
+ * maxBufferExceeded, timedOut }. Avoids importing shell-utils.ts (which
+ * pulls in tool-utils → barrel index → circular dependency in vitest mock
+ * environments).
  */
 function execCommand(
   command: string,
@@ -22,6 +28,7 @@ function execCommand(
   stderr: string;
   code: number;
   maxBufferExceeded: boolean;
+  timedOut: boolean;
 }> {
   return new Promise((resolve) => {
     execFile(
@@ -34,14 +41,25 @@ function execCommand(
           // when stdout or stderr exceeds the configured maxBuffer — the child
           // is killed and the partial output is delivered. ENOENT (command
           // not found) is also a string code. Numeric codes are real exit codes.
+          const errAny = error as {
+            code?: unknown;
+            killed?: boolean;
+            signal?: string;
+          };
           const maxBufferExceeded =
-            (error as { code?: unknown }).code ===
-            'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+            errAny.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+          // `timeout` option triggers SIGTERM and sets error.killed with no
+          // numeric exit code. Some Node versions also surface 'ETIMEDOUT'.
+          const timedOut =
+            !maxBufferExceeded &&
+            (errAny.code === 'ETIMEDOUT' ||
+              (errAny.killed === true && errAny.signal === 'SIGTERM'));
           resolve({
             stdout: String(stdout ?? ''),
             stderr: String(stderr ?? ''),
             code: typeof error.code === 'number' ? error.code : 1,
             maxBufferExceeded,
+            timedOut,
           });
           return;
         }
@@ -50,6 +68,7 @@ function execCommand(
           stderr: String(stderr ?? ''),
           code: 0,
           maxBufferExceeded: false,
+          timedOut: false,
         });
       },
     );
@@ -77,11 +96,17 @@ export function parsePDFPageRange(
   // Whole-string match — parseInt() would silently accept tokens like
   // "5abc", "1-2-3", "1.5", or "1x-2" because of its truncation behaviour.
   // Optional whitespace around the hyphen is allowed so "1 - 5" still parses
-  // like the old parseInt-based implementation did.
+  // like the old parseInt-based implementation did. A hard ceiling on the
+  // parsed integer prevents precision loss past Number.MAX_SAFE_INTEGER from
+  // collapsing e.g. "999999999999999998-999999999999999999" into a range of
+  // length 1 that would sneak past the 20-page validator in read-file.ts.
+  const inRange = (n: number): boolean =>
+    Number.isFinite(n) && n >= 1 && n <= MAX_PDF_PAGE_NUMBER;
+
   const openEnded = /^(\d+)\s*-$/.exec(trimmed);
   if (openEnded) {
     const first = Number(openEnded[1]);
-    if (first < 1) return null;
+    if (!inRange(first)) return null;
     return { firstPage: first, lastPage: Infinity };
   }
 
@@ -89,14 +114,14 @@ export function parsePDFPageRange(
   if (range) {
     const first = Number(range[1]);
     const last = Number(range[2]);
-    if (first < 1 || last < 1 || last < first) return null;
+    if (!inRange(first) || !inRange(last) || last < first) return null;
     return { firstPage: first, lastPage: last };
   }
 
   const single = /^(\d+)$/.exec(trimmed);
   if (single) {
     const page = Number(single[1]);
-    if (page < 1) return null;
+    if (!inRange(page)) return null;
     return { firstPage: page, lastPage: page };
   }
 
@@ -104,23 +129,36 @@ export function parsePDFPageRange(
 }
 
 let pdftotextAvailable: boolean | undefined;
+let pdftotextAvailablePromise: Promise<boolean> | undefined;
 
 /**
  * Check whether `pdftotext` (from poppler-utils) is available.
- * The result is cached for the lifetime of the process.
+ * The result is cached for the lifetime of the process. The in-flight
+ * promise is also cached so N concurrent callers (e.g. @-reading a
+ * directory of PDFs) don't each spawn their own probe subprocess.
  */
 export async function isPdftotextAvailable(): Promise<boolean> {
   if (pdftotextAvailable !== undefined) return pdftotextAvailable;
-  try {
-    const { stderr } = await execCommand('pdftotext', ['-v'], {
-      timeout: 5000,
-    });
-    // pdftotext prints version info to stderr
-    pdftotextAvailable = stderr.length > 0;
-  } catch {
-    pdftotextAvailable = false;
-  }
-  return pdftotextAvailable;
+  if (pdftotextAvailablePromise) return pdftotextAvailablePromise;
+
+  pdftotextAvailablePromise = (async () => {
+    try {
+      const { code } = await execCommand('pdftotext', ['-v'], {
+        timeout: 5000,
+      });
+      // Exit code is the reliable signal. Sandboxes that suppress stderr
+      // would have made the old stderr-length check flake to false.
+      return code === 0;
+    } catch {
+      return false;
+    }
+  })().then((result) => {
+    pdftotextAvailable = result;
+    pdftotextAvailablePromise = undefined;
+    return result;
+  });
+
+  return pdftotextAvailablePromise;
 }
 
 /**
@@ -128,6 +166,7 @@ export async function isPdftotextAvailable(): Promise<boolean> {
  */
 export function resetPdftotextCache(): void {
   pdftotextAvailable = undefined;
+  pdftotextAvailablePromise = undefined;
 }
 
 /**
@@ -138,7 +177,10 @@ export async function getPDFPageCount(
   filePath: string,
 ): Promise<number | null> {
   try {
-    const { stdout, code } = await execCommand('pdfinfo', [filePath], {
+    // `--` separates options from positional args so a filename starting
+    // with `-` (e.g. `-opw=foo.pdf`) can't be mistaken for an option by
+    // poppler's option parser.
+    const { stdout, code } = await execCommand('pdfinfo', ['--', filePath], {
       timeout: 10000,
     });
     if (code !== 0) {
@@ -186,26 +228,37 @@ export async function extractPDFText(
   if (options?.lastPage && options.lastPage !== Infinity) {
     args.push('-l', String(options.lastPage));
   }
-  args.push(filePath, '-'); // `-` means output to stdout
+  // `--` separates options from positional args so a filename starting
+  // with `-` isn't misread as an option by poppler's parser. `-` means
+  // "write extracted text to stdout".
+  args.push('--', filePath, '-');
 
   try {
-    const { stdout, stderr, code, maxBufferExceeded } = await execCommand(
-      'pdftotext',
-      args,
-      {
+    const { stdout, stderr, code, maxBufferExceeded, timedOut } =
+      await execCommand('pdftotext', args, {
         timeout: 30000,
         // Keep the buffer just above MAX_PDF_TEXT_OUTPUT_CHARS — anything
         // past that is going to be truncated anyway, and capping the child
         // prevents unbounded memory use on pathological text-dense PDFs.
         maxBuffer: MAX_PDF_TEXT_OUTPUT_CHARS * 2,
-      },
-    );
+      });
+
+    if (timedOut) {
+      return {
+        success: false,
+        error: `pdftotext timed out after 30s. The PDF may be unusually large or complex; try the 'pages' parameter to narrow the range.`,
+      };
+    }
 
     // pdftotext produced more than maxBuffer — Node killed the child and
     // delivered the partial stdout. Treat this the same as a post-hoc
     // truncation so large PDFs degrade to a usable prefix instead of a
-    // generic execution failure.
-    if (maxBufferExceeded && stdout.length > 0) {
+    // generic execution failure. Require enough stdout to be confident
+    // the extraction actually made progress (guards against cases where
+    // the buffer overrun was driven by pathological stderr rather than
+    // real text output) and still give the password/corrupt detectors a
+    // chance to kick in on the partial stderr.
+    if (maxBufferExceeded && stdout.length >= MAX_PDF_TEXT_OUTPUT_CHARS) {
       return {
         success: true,
         text:
@@ -214,7 +267,7 @@ export async function extractPDFText(
       };
     }
 
-    if (code !== 0) {
+    if (code !== 0 || maxBufferExceeded) {
       if (/password/i.test(stderr)) {
         return {
           success: false,
@@ -230,7 +283,7 @@ export async function extractPDFText(
       }
       return {
         success: false,
-        error: `pdftotext failed: ${stderr}`,
+        error: `pdftotext failed: ${stderr || '(no stderr)'}`,
       };
     }
 
