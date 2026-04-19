@@ -252,6 +252,11 @@ export const handleSlashCommand = async (
       : 'non_interactive';
 
   const allowedBuiltinSet = new Set(allowedBuiltinCommandNames ?? []);
+  const disabledSlashCommands = config.getDisabledSlashCommands();
+  const disabledSlashCommandSet =
+    disabledSlashCommands.length > 0
+      ? new Set(disabledSlashCommands)
+      : undefined;
 
   // Load all commands to check if the command exists but is not allowed
   const allLoaders = [
@@ -263,6 +268,7 @@ export const handleSlashCommand = async (
   const commandService = await CommandService.create(
     allLoaders,
     abortController.signal,
+    disabledSlashCommandSet,
   );
   const allCommands = commandService.getCommands();
   const filteredCommands = filterCommandsForNonInteractive(
@@ -378,7 +384,14 @@ export const getAvailableCommands = async (
           ]
         : [new BundledSkillLoader(config), new FileCommandLoader(config)];
 
-    const commandService = await CommandService.create(loaders, abortSignal);
+    const disabledSlashCommands = config.getDisabledSlashCommands();
+    const commandService = await CommandService.create(
+      loaders,
+      abortSignal,
+      disabledSlashCommands.length > 0
+        ? new Set(disabledSlashCommands)
+        : undefined,
+    );
     const commands = commandService.getCommands();
     const filteredCommands = filterCommandsForNonInteractive(
       commands,

@@ -151,6 +151,7 @@ describe('runNonInteractive', () => {
         setRegisterCallback: vi.fn(),
         getRunning: vi.fn().mockReturnValue([]),
       }),
+      getDisabledSlashCommands: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
     mockSettings = {

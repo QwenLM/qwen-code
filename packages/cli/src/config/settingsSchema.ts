@@ -1134,6 +1134,36 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  slashCommands: {
+    type: 'object',
+    label: 'Slash Commands',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Configuration for slash commands exposed by the CLI. Useful for ' +
+      'locking down the command surface in multi-tenant or enterprise ' +
+      'deployments.',
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: 'array',
+        label: 'Disabled Slash Commands',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Slash command names to hide and refuse to execute. Matched ' +
+          'case-insensitively against the final command name (for extension ' +
+          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
+          'Merged as a union across settings scopes, so workspace settings ' +
+          'can add to but not remove entries defined in system/user settings.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
   tools: {
     type: 'object',
     label: 'Tools',
