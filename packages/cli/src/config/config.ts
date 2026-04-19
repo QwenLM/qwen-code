@@ -956,7 +956,12 @@ export async function loadCliConfig(
   // the caller has explicitly allowed them. Stream-JSON input is excluded from
   // this logic because approval can be sent programmatically via JSON messages.
   const isAcpMode = argv.acp || argv.experimentalAcp;
-  if (!interactive && !isAcpMode && inputFormat !== InputFormat.STREAM_JSON) {
+  if (
+    !bareMode &&
+    !interactive &&
+    !isAcpMode &&
+    inputFormat !== InputFormat.STREAM_JSON
+  ) {
     const denyUnlessAllowed = (toolName: ToolName): void => {
       if (!isExplicitlyAllowed(toolName)) {
         const name = toolName as string;

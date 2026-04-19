@@ -1248,6 +1248,17 @@ describe('Approval mode tool exclusion logic', () => {
     }
   });
 
+  it('should keep the bare toolset available in non-interactive bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare', '-p', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.EDIT);
+    expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
+  });
+
   it('should merge approval mode exclusions with settings exclusions in auto-edit mode', async () => {
     process.argv = [
       'node',
