@@ -38,6 +38,8 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
 
   useEffect(() => {
     if (!enabled || !config) {
+      inFlightRef.current?.abort();
+      inFlightRef.current = null;
       blurredAtRef.current = null;
       return;
     }
