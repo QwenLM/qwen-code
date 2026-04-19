@@ -942,6 +942,78 @@ describe('fileUtils', () => {
       expect(result.returnDisplay).toContain('Failed to read pdf');
     });
 
+    it('should skip the 10MB size gate when extracting PDF text by pages', async () => {
+      // Tiny file on disk — the fs.stat spy below reports a size >10MB so
+      // the upstream size gate would reject if it still ran. With the
+      // text-extraction path we want pdftotext to handle oversized PDFs,
+      // since it streams the file and the output is capped downstream.
+      const fakePdfData = Buffer.from('fake pdf data');
+      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
+      mockMimeGetType.mockReturnValue('application/pdf');
+
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 15 * 1024 * 1024,
+        isDirectory: () => false,
+      } as fs.Stats);
+
+      try {
+        const mockConfigNoPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true },
+          }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigNoPdf,
+          undefined,
+          undefined,
+          '1-5',
+        );
+
+        // Must not be rejected by the generic 10MB gate.
+        expect(result.error ?? '').not.toContain('10MB limit');
+        expect(result.llmContent).not.toMatch(/exceeds the 10MB limit/i);
+        // Routed into the pdftotext path — either success or the
+        // install-guidance error, never "File size exceeds the 10MB limit".
+        expect(result.returnDisplay ?? '').toMatch(/pdf/i);
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
+    it('should still reject oversized PDFs when routing to the native base64 path', async () => {
+      // When the model supports PDF modality and no pages arg is provided,
+      // the base64 path applies and the 10MB inline-data cap still matters.
+      const fakePdfData = Buffer.from('fake pdf data');
+      actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);
+      mockMimeGetType.mockReturnValue('application/pdf');
+
+      const statSpy = vi.spyOn(fs.promises, 'stat').mockResolvedValueOnce({
+        size: 15 * 1024 * 1024,
+        isDirectory: () => false,
+      } as fs.Stats);
+
+      try {
+        const mockConfigWithPdf = {
+          ...mockConfig,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, pdf: true },
+          }),
+        } as unknown as Config;
+
+        const result = await processSingleFileContent(
+          testPdfFilePath,
+          mockConfigWithPdf,
+        );
+
+        expect(result.error).toContain('10MB limit');
+      } finally {
+        statSpy.mockRestore();
+      }
+    });
+
     it('should accept PDF files when model supports PDF', async () => {
       const fakePdfData = Buffer.from('fake pdf data');
       actualNodeFs.writeFileSync(testPdfFilePath, fakePdfData);

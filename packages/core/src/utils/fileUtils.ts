@@ -593,17 +593,6 @@ export async function processSingleFileContent(
       };
     }
 
-    const fileSizeInMB = stats.size / (1024 * 1024);
-    // Use 9.9MB instead of 10MB to leave margin for encoding overhead (#1880)
-    if (fileSizeInMB > 9.9) {
-      return {
-        llmContent: 'File size exceeds the 10MB limit.',
-        returnDisplay: 'File size exceeds the 10MB limit.',
-        error: `File size exceeds the 10MB limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
-        errorType: ToolErrorType.FILE_TOO_LARGE,
-      };
-    }
-
     const fileType = await detectFileType(filePath);
     const relativePathForDisplay = path
       .relative(rootDirectory, filePath)
@@ -614,6 +603,24 @@ export async function processSingleFileContent(
     // getContentGeneratorConfig still work for non-media file types.
     const modalities: InputModalities =
       config.getContentGeneratorConfig?.()?.modalities ?? {};
+
+    const fileSizeInMB = stats.size / (1024 * 1024);
+    // The 10MB cap exists for inline-data paths (base64 images / audio /
+    // video / PDFs), where the encoded payload must fit in the model's
+    // data-URI budget. PDF text extraction streams through pdftotext and
+    // truncates to MAX_PDF_TEXT_OUTPUT_CHARS, so oversized PDFs should go
+    // through it instead of being rejected up front. Use 9.9MB to leave
+    // margin for base64 encoding overhead (#1880).
+    const willExtractPdfText =
+      fileType === 'pdf' && (pages !== undefined || !modalities.pdf);
+    if (fileSizeInMB > 9.9 && !willExtractPdfText) {
+      return {
+        llmContent: 'File size exceeds the 10MB limit.',
+        returnDisplay: 'File size exceeds the 10MB limit.',
+        error: `File size exceeds the 10MB limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        errorType: ToolErrorType.FILE_TOO_LARGE,
+      };
+    }
 
     // Check modality support for media files using the resolved config
     // (same source of truth the converter uses at API-call time).
