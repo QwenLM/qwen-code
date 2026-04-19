@@ -86,10 +86,15 @@ parentPort.on('message', (msg: WorkerRequest) => {
       return;
     }
     case 'dispose': {
+      // Abort any in-flight searches so their message handlers can finish
+      // posting their `searchError` reply before we tear down the channel.
       inflightAborts.forEach((c) => c.abort());
       inflightAborts.clear();
-      // Allow pending messages to flush, then exit.
-      setImmediate(() => process.exit(0));
+      // Closing the message port lets Node drain any pending
+      // `postMessage` calls (searchError/searchResult replies queued in the
+      // current tick) before the worker actually exits. Using
+      // `process.exit(0)` would race those sends and occasionally drop them.
+      parentPort!.close();
       return;
     }
     default: {

@@ -79,12 +79,12 @@ export class FileIndexCore {
     // If onProgress never fired (e.g. tiny tree or cache hit), the crawl
     // result comes through the fulfilled promise only. In that case we need
     // to reconcile: the above push loop may have populated allFiles from
-    // streaming chunks, or it may still be empty. crawl() itself returns the
-    // full list on cache hits — handle that by falling back to it if the
-    // stream produced nothing.
+    // streaming chunks, or it may still be empty. crawl() itself returns
+    // the full list on cache hits — fall back to it if the stream produced
+    // nothing. Push into the existing array rather than replacing the
+    // reference so any `search()` already iterating `this.allFiles` keeps
+    // observing a stable list.
     if (this.allFiles.length === 0 && chunks.length === 0) {
-      // Cache hit path: re-run the crawl without streaming to collect the
-      // cached results. Since cache read is in-memory this is cheap.
       const cached = await crawl({
         crawlDirectory: this.options.projectRoot,
         cwd: this.options.projectRoot,
@@ -94,7 +94,7 @@ export class FileIndexCore {
         maxDepth: this.options.maxDepth,
         maxFiles: MAX_CRAWL_FILES,
       });
-      this.allFiles = cached;
+      for (const p of cached) this.allFiles.push(p);
     }
     this.crawlDone = true;
   }

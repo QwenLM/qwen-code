@@ -98,4 +98,23 @@ describe('FileIndexService', () => {
       svc.search('a', { signal: controller.signal }),
     ).rejects.toMatchObject({ name: 'AbortError' });
   });
+
+  it('rejects whenReady() waiters on dispose', async () => {
+    tmpDir = await createTmpDir({ 'a.txt': '' });
+    const svc = FileIndexService.for(baseOptions(tmpDir));
+    const readyPromise = svc.whenReady();
+    // Dispose before whenReady could resolve.
+    await svc.dispose();
+    await expect(readyPromise).rejects.toMatchObject({ name: 'AbortError' });
+  });
+
+  it('yields a fresh instance after a previous one was disposed', async () => {
+    tmpDir = await createTmpDir({ 'a.txt': '' });
+    const a = FileIndexService.for(baseOptions(tmpDir));
+    await a.dispose();
+    const b = FileIndexService.for(baseOptions(tmpDir));
+    expect(b).not.toBe(a);
+    await b.whenReady();
+    expect(b.state).toBe('ready');
+  });
 });

@@ -48,17 +48,48 @@ function createWorkerTransport(options: FileSearchOptions): IndexTransport {
   const worker = new Worker(new URL('./fileIndexWorker.js', import.meta.url), {
     workerData: { options },
   });
+  let dead = false;
+  const exitListeners = new Set<(code: number) => void>();
+
+  // An uncaught error inside the worker fires 'error' and typically 'exit'
+  // right after. Without an 'error' handler Node re-throws on the main
+  // process and crashes the CLI; convert it into a synthetic non-zero exit
+  // so handleExit cleanup runs uniformly. We also listen for 'exit' itself.
+  const forwardExit = (code: number) => {
+    if (dead) return;
+    dead = true;
+    exitListeners.forEach((cb) => cb(code));
+  };
+  worker.on('error', (err) => {
+    // Surface the crash to stderr once so it's diagnosable, then drive the
+    // normal exit-cleanup path. Without this handler Node re-emits the
+    // error on the main process and tears down the CLI.
+    // eslint-disable-next-line no-console
+    console.error('[fileIndexWorker] uncaught error:', err);
+    forwardExit(1);
+  });
+  worker.on('exit', (code) => forwardExit(code));
+
   return {
-    post: (msg) => worker.postMessage(msg),
+    post: (msg) => {
+      // postMessage on a terminated worker throws synchronously; swallow it
+      // so service callers fail via the pending-promise rejection path
+      // instead of bubbling a ThreadStoppedError up the call stack.
+      if (dead) return;
+      try {
+        worker.postMessage(msg);
+      } catch {
+        // ignore; exit cleanup will surface this to pending callers
+      }
+    },
     onMessage: (cb) => {
       const listener = (m: WorkerResponse) => cb(m);
       worker.on('message', listener);
       return () => worker.off('message', listener);
     },
     onExit: (cb) => {
-      const listener = (code: number) => cb(code);
-      worker.on('exit', listener);
-      return () => worker.off('exit', listener);
+      exitListeners.add(cb);
+      return () => exitListeners.delete(cb);
     },
     terminate: async () => {
       await worker.terminate();
@@ -349,14 +380,25 @@ export class FileIndexService {
     if (this.disposed) return;
     this.disposed = true;
     INSTANCES.delete(this.key);
-    this.transport.post({ type: 'dispose' });
+    // Unsubscribe BEFORE posting the dispose message: the in-process
+    // transport runs its exit cleanup synchronously inside `post('dispose')`,
+    // which would otherwise invoke `handleExit` and reject waiters with a
+    // plain "worker exited" Error, beating the AbortError rejection below.
     this.unsubscribeMessage();
     this.unsubscribeExit();
-    await this.transport.terminate();
-    const err = new Error('FileIndexService disposed');
-    err.name = 'AbortError';
+    this.transport.post({ type: 'dispose' });
+    // Race terminate against a short timeout so a faulted worker can't hang
+    // dispose() indefinitely. `terminate()` normally resolves in well under
+    // 100ms; 2s is generous enough that healthy workers always win.
+    await Promise.race([
+      this.transport.terminate(),
+      new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+    ]);
+    const err = new AbortError('FileIndexService disposed');
     this.pending.forEach(({ reject }) => reject(err));
     this.pending.clear();
+    const waiters = this.readyWaiters.splice(0);
+    waiters.forEach((w) => w.reject(err));
   }
 
   private handleMessage = (msg: WorkerResponse) => {
@@ -380,6 +422,16 @@ export class FileIndexService {
         const err = new Error(msg.error);
         const rejectees = this.readyWaiters.splice(0);
         rejectees.forEach((w) => w.reject(err));
+        // Also fail any in-flight searches — without a successful crawl the
+        // worker has only a partial snapshot and callers usually want to
+        // surface the failure rather than silently see fewer results.
+        this.pending.forEach(({ reject }) => reject(err));
+        this.pending.clear();
+        // Tear the service down so a subsequent FileIndexService.for() call
+        // starts a fresh worker. Otherwise this instance lingers in
+        // INSTANCES with a live worker that will reject every whenReady()
+        // forever, leaking a thread per crawl failure.
+        void this.dispose();
         return;
       }
       case 'searchResult': {
@@ -411,7 +463,10 @@ export class FileIndexService {
   };
 
   private handleExit = (_code: number) => {
-    // Worker died; fail outstanding requests so callers don't hang.
+    // If we already ran dispose(), its own cleanup has either rejected or
+    // will reject the pending maps with AbortError; don't double-reject with
+    // a worker-exited Error.
+    if (this.disposed) return;
     const err = new Error('File index worker exited');
     err.name = 'Error';
     this.pending.forEach(({ reject }) => reject(err));

@@ -34,6 +34,10 @@ interface AtCompletionState {
   suggestions: Suggestion[];
   isLoading: boolean;
   pattern: string | null;
+  // Monotonic counter bumped on every REFRESH so effects depending on state
+  // can re-run even when `status` and `pattern` stay the same (e.g. REFRESH
+  // hits while we are already in SEARCHING).
+  refreshToken: number;
 }
 
 type AtCompletionAction =
@@ -51,6 +55,7 @@ const initialState: AtCompletionState = {
   suggestions: [],
   isLoading: false,
   pattern: null,
+  refreshToken: 0,
 };
 
 function atCompletionReducer(
@@ -76,8 +81,10 @@ function atCompletionReducer(
     case 'REFRESH':
       // Re-run the current pattern against a newly-grown snapshot. Only
       // meaningful when a pattern is active and we've finished the initial
-      // load. Preserves pattern and isLoading; the Worker effect picks up the
-      // SEARCHING transition to fetch fresh results.
+      // load. Preserves pattern and isLoading. Bumps `refreshToken` so the
+      // Worker effect observes a dep change even when status was already
+      // SEARCHING (common: partial arrives while the first search is still
+      // in flight, and without this bump the effect would not re-run).
       if (
         state.pattern === null ||
         (state.status !== AtCompletionStatus.READY &&
@@ -85,7 +92,11 @@ function atCompletionReducer(
       ) {
         return state;
       }
-      return { ...state, status: AtCompletionStatus.SEARCHING };
+      return {
+        ...state,
+        status: AtCompletionStatus.SEARCHING,
+        refreshToken: state.refreshToken + 1,
+      };
     case 'SEARCH_SUCCESS':
       return {
         ...state,
@@ -292,6 +303,8 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
     // `fileSearchOptions` is recomputed each render but hashes to the same
     // FileIndexService singleton when inputs are equal; adding it to deps
     // would cause spurious effect re-runs on every render.
+    // `state.refreshToken` is included so REFRESH re-triggers a search
+    // even when `state.status` was already SEARCHING from a previous call.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.status, state.pattern, config, cwd]);
+  }, [state.status, state.pattern, state.refreshToken, config, cwd]);
 }
