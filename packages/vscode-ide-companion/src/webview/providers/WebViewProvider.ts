@@ -31,6 +31,12 @@ import {
   readQwenSettingsForVSCode,
 } from '../../services/settingsWriter.js';
 
+const AUTH_RELATED_QWEN_SETTINGS = [
+  'qwen-code.provider',
+  'qwen-code.apiKey',
+  'qwen-code.codingPlanRegion',
+] as const;
+
 export class WebViewProvider {
   private panelManager: PanelManager;
   private messageHandler: MessageHandler;
@@ -111,13 +117,17 @@ export class WebViewProvider {
       },
     );
 
-    // Watch for VSCode settings changes — auto-sync and reconnect when qwen-code.* changes.
+    // Watch for auth-related VSCode settings changes — auto-sync and reconnect.
     // The isSyncingToVSCode guard prevents a loop when we programmatically populate VSCode settings.
     const configChangeDisposable = vscode.workspace.onDidChangeConfiguration(
       async (e) => {
-        if (e.affectsConfiguration('qwen-code') && !this.isSyncingToVSCode) {
+        const authSettingsChanged = AUTH_RELATED_QWEN_SETTINGS.some((setting) =>
+          e.affectsConfiguration(setting),
+        );
+
+        if (authSettingsChanged && !this.isSyncingToVSCode) {
           console.log(
-            '[WebViewProvider] qwen-code settings changed by user, syncing...',
+            '[WebViewProvider] Auth-related qwen-code settings changed by user, syncing...',
           );
           const synced = await this.syncVSCodeSettingsToQwenConfig();
           if (synced && this.agentInitialized) {
@@ -897,21 +907,42 @@ export class WebViewProvider {
       );
 
       // Set guard to prevent onDidChangeConfiguration from triggering a write-back
-      this.isSyncingToVSCode = true;
-
       const config = vscode.workspace.getConfiguration('qwen-code');
       const target = vscode.ConfigurationTarget.Global;
+      const updates: Array<Promise<void>> = [];
 
-      try {
-        await Promise.all([
-          config.update('provider', qwenSettings.provider, target),
-          config.update('apiKey', qwenSettings.apiKey, target),
+      if (
+        config.get<string>('provider', 'coding-plan') !== qwenSettings.provider
+      ) {
+        updates.push(config.update('provider', qwenSettings.provider, target));
+      }
+      if (config.get<string>('apiKey', '') !== qwenSettings.apiKey) {
+        updates.push(config.update('apiKey', qwenSettings.apiKey, target));
+      }
+      if (
+        config.get<'china' | 'global'>('codingPlanRegion', 'china') !==
+        qwenSettings.codingPlanRegion
+      ) {
+        updates.push(
           config.update(
             'codingPlanRegion',
             qwenSettings.codingPlanRegion,
             target,
           ),
-        ]);
+        );
+      }
+
+      if (updates.length === 0) {
+        console.log(
+          '[WebViewProvider] VSCode settings already match ~/.qwen/settings.json',
+        );
+        return;
+      }
+
+      this.isSyncingToVSCode = true;
+
+      try {
+        await Promise.all(updates);
       } finally {
         this.isSyncingToVSCode = false;
       }
