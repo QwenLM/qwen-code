@@ -63,6 +63,37 @@ describe('<MarkdownDisplay />', () => {
     expect(lastFrame()).toContain('$E = mc^2$');
   });
 
+  it('handles manual math verification text with an unclosed code fence', () => {
+    const text = [
+      '> Please output the following markdown exactly:',
+      '',
+      'Inline: $E = mc^2$, $\\alpha + \\beta \\leq \\gamma$',
+      '',
+      '$$',
+      '\\frac{\\partial_t u}{\\Delta u + \\xi}',
+      '$$',
+      '',
+      '$$',
+      '\\begin{cases}',
+      'x^2 & x \\geq 0 \\\\',
+      '-x & x < 0',
+      '\\end{cases}',
+      '$$',
+      '',
+      '```latex',
+      '$E = mc^2$',
+      '',
+      'Also keep this non-math text unchanged: price is $20 and shell variable is $PATH.',
+    ].join('\n');
+    const { lastFrame } = renderWithProviders(
+      <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Inline: E = mc², α + β ≤ γ');
+    expect(output).toContain('$E = mc^2$');
+    expect(output).toContain('price is $20');
+  });
+
   const lineEndings = [
     { name: 'Windows', eol: '\r\n' },
     { name: 'Unix', eol: '\n' },
