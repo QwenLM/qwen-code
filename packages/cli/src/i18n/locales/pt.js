@@ -1892,6 +1892,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'Uso do Contexto',
+  '% used': '% usado',
+  '% context used': '% contexto usado',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'Contexto excede o limite! Use /compress ou /clear para reduzir.',
+  'Use /compress or /clear': 'Use /compress ou /clear',
   'No API response yet. Send a message to see actual usage.':
     'Ainda não há resposta da API. Envie uma mensagem para ver o uso real.',
   'Estimated pre-conversation overhead': 'Sobrecarga estimada pré-conversa',
