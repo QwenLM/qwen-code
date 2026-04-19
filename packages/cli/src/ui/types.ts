@@ -388,6 +388,16 @@ export type HistoryItemBtw = HistoryItemBase & {
 };
 
 /**
+ * Away-summary recap shown when the user returns to the session after a
+ * period of inactivity (or via /recap). Rendered in dim color so it is
+ * visually distinct from real assistant replies.
+ */
+export type HistoryItemAwayRecap = HistoryItemBase & {
+  type: 'away_recap';
+  text: string;
+};
+
+/**
  * UserPromptSubmit hook blocked event.
  * Displayed when a UserPromptSubmit hook blocks the user's prompt.
  */
@@ -454,6 +464,7 @@ export type HistoryItemWithoutId =
   | HistoryItemInsightProgress
   | HistoryItemBtw
   | HistoryItemMemorySaved
+  | HistoryItemAwayRecap
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
   | HistoryItemStopHookSystemMessage;
