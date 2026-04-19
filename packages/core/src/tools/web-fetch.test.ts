@@ -101,6 +101,10 @@ describe('WebFetchTool', () => {
       expect(fetchSpy).toHaveBeenCalledWith(
         'https://example.com',
         expect.any(Number),
+        { Accept: 'text/markdown, text/html, text/plain' },
+      );
+        'https://example.com',
+        expect.any(Number),
         { Accept: 'text/markdown, text/html' },
       );
     });
