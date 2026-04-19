@@ -83,17 +83,6 @@ export const editorCommands: Record<
 };
 
 /**
- * Check if Zed is installed via the app bundle on macOS.
- * This is needed because Zed's CLI is not automatically added to PATH.
- */
-function zedAppExists(): boolean {
-  if (process.platform !== 'darwin') {
-    return false;
-  }
-  return zedMacOsPaths.some((p) => existsSync(p));
-}
-
-/**
  * Get the Zed command to use for opening files/diffs.
  * On macOS, if the CLI is not in PATH, fall back to using the app bundle's CLI.
  */
@@ -151,22 +140,9 @@ export function getEditorExecutable(editorType: EditorType): string | null {
 }
 
 export function checkHasEditorType(editor: EditorType): boolean {
-  const commandConfig = editorCommands[editor];
-  const commands =
-    process.platform === 'win32' ? commandConfig.win32 : commandConfig.default;
-
-  // Check if any of the CLI commands exist
-  if (commands.some((cmd) => commandExists(cmd))) {
-    return true;
-  }
-
-  // On macOS, also check for Zed.app if the CLI is not found
-  // Zed's CLI is not automatically added to PATH when installed via Homebrew or direct download
-  if (editor === 'zed' && zedAppExists()) {
-    return true;
-  }
-
-  return false;
+  // Use the same resolution logic as getEditorExecutable to keep
+  // availability detection and execution in sync.
+  return getEditorExecutable(editor) !== null;
 }
 
 export function allowEditorTypeInSandbox(editor: EditorType): boolean {
