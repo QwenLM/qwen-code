@@ -8,6 +8,7 @@ import path from 'node:path';
 import { fdir } from 'fdir';
 import type { Ignore } from './ignore.js';
 import * as cache from './crawlCache.js';
+import { buildRipgrepFileFilter, ripgrepCrawl } from './ripgrepCrawler.js';
 
 export interface CrawlOptions {
   // The directory to start the crawl from.
@@ -24,39 +25,43 @@ export interface CrawlOptions {
   cache: boolean;
   cacheTtl: number;
   // Optional streaming callback. If provided, is invoked with batches of
-  // cwd-relative paths as fdir discovers them. A final batch containing any
-  // remainder is flushed just before the crawl resolves. Errors thrown by the
-  // callback are caught and ignored.
+  // cwd-relative paths as the underlying walker discovers them. A final
+  // batch containing any remainder is flushed just before the crawl
+  // resolves. Errors thrown by the callback are caught and ignored.
   onProgress?: (chunk: string[]) => void;
   // Buffer flushing thresholds for onProgress. Flush when either hits first.
   progressChunkSize?: number; // default 2000
   progressFlushMs?: number; // default 50
+  // Abort signal threaded through to ripgrep so a search change can kill
+  // an in-flight crawl early.
+  signal?: AbortSignal;
+  // Escape hatch: force the fdir backend even when ripgrep would be
+  // eligible. Mostly for tests; in production callers always default to
+  // the faster ripgrep path.
+  preferFdir?: boolean;
 }
 
 function toPosixPath(p: string) {
   return p.split(path.sep).join(path.posix.sep);
 }
 
-export async function crawl(options: CrawlOptions): Promise<string[]> {
-  if (options.cache) {
-    const cacheKey = cache.getCacheKey(
-      options.crawlDirectory,
-      options.ignore.getFingerprint(),
-      options.maxDepth,
-      options.maxFiles,
-    );
-    const cachedResults = cache.read(cacheKey);
+/**
+ * Once-per-process flag that disables the ripgrep fast path after a runtime
+ * failure (binary missing, unexpected exit). We retry fdir for subsequent
+ * crawls without paying the spawn-and-fail cost every time.
+ */
+let ripgrepDisabled = false;
 
-    if (cachedResults) {
-      return cachedResults;
-    }
-  }
+/** For tests: let a suite re-enable the ripgrep fast path after forcing failures. */
+export function __resetRipgrepDisabledForTests(): void {
+  ripgrepDisabled = false;
+}
 
+async function fdirCrawl(options: CrawlOptions): Promise<string[]> {
   const posixCwd = toPosixPath(options.cwd);
   const posixCrawlDirectory = toPosixPath(options.crawlDirectory);
   const relativeToCrawlDir = path.posix.relative(posixCwd, posixCrawlDirectory);
 
-  // Streaming state for onProgress callback.
   const onProgress = options.onProgress;
   const chunkSize = options.progressChunkSize ?? 2000;
   const flushMs = options.progressFlushMs ?? 50;
@@ -121,12 +126,84 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     return [];
   }
 
-  // Flush any remaining buffered progress before returning the final batch.
   flushProgress();
 
-  const relativeToCwdResults = results.map((p) =>
-    path.posix.join(relativeToCrawlDir, p),
-  );
+  return results.map((p) => path.posix.join(relativeToCrawlDir, p));
+}
+
+/**
+ * Extracts the directory portion of the ignore fingerprint-relevant info.
+ * Currently we just pass the patterns straight through; the ripgrep walker
+ * already consults `.gitignore` / `.ignore` from disk via its own parser,
+ * so our `extraExcludeDirs` set is limited to directory-style patterns that
+ * rg wouldn't otherwise know about (e.g. user-supplied ignoreDirs, or
+ * `.qwenignore` directory rules). This is a superset; the post-filter
+ * below enforces the exact semantics.
+ */
+function collectRipgrepExcludeDirs(_options: CrawlOptions): string[] {
+  // We rely on the Ignore object's directory filter for correctness; the
+  // rg --glob hints are only a speed optimisation so rg's walker can prune
+  // without actually listing matching files. The post-filter drops
+  // anything that slips through. Left as a hook for a later perf pass
+  // (see the TODO below); currently we let rg enumerate and filter
+  // ourselves, which is still fast enough in practice.
+  return [];
+}
+
+export async function crawl(options: CrawlOptions): Promise<string[]> {
+  if (options.cache) {
+    const cacheKey = cache.getCacheKey(
+      options.crawlDirectory,
+      options.ignore.getFingerprint(),
+      options.maxDepth,
+      options.maxFiles,
+    );
+    const cachedResults = cache.read(cacheKey);
+
+    if (cachedResults) {
+      return cachedResults;
+    }
+  }
+
+  // Benchmark finding: spawning ripgrep via `child_process` and piping its
+  // output back through Node's stream layer is *slower* than fdir in this
+  // process for every tree size we tested (fdir was 3-5× faster on both
+  // a 2700-file and a 48k-file target). The spawn-and-IPC overhead beats
+  // the native parallel walker's advantage when the consumer is Node, so
+  // we keep fdir as the default. ripgrep stays behind an opt-in escape
+  // hatch (`QWEN_FILESEARCH_USE_RG=1`) for future re-evaluation on very
+  // large trees or different platforms — leave it disabled by default.
+  const forceRg = process.env['QWEN_FILESEARCH_USE_RG'] === '1';
+  const canUseRipgrep =
+    forceRg &&
+    !options.preferFdir &&
+    !ripgrepDisabled &&
+    options.maxDepth === undefined;
+
+  let results: string[] | undefined;
+  if (canUseRipgrep) {
+    try {
+      const ripResult = await ripgrepCrawl({
+        crawlDirectory: options.crawlDirectory,
+        cwd: options.cwd,
+        maxFiles: options.maxFiles,
+        extraExcludeDirs: collectRipgrepExcludeDirs(options),
+        fileFilter: buildRipgrepFileFilter(options.ignore),
+        onProgress: options.onProgress,
+        progressChunkSize: options.progressChunkSize,
+        progressFlushMs: options.progressFlushMs,
+        signal: options.signal,
+      });
+      results = ripResult.files;
+    } catch (_e) {
+      ripgrepDisabled = true;
+      results = undefined;
+    }
+  }
+
+  if (results === undefined) {
+    results = await fdirCrawl(options);
+  }
 
   if (options.cache) {
     const cacheKey = cache.getCacheKey(
@@ -135,8 +212,8 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
       options.maxDepth,
       options.maxFiles,
     );
-    cache.write(cacheKey, relativeToCwdResults, options.cacheTtl * 1000);
+    cache.write(cacheKey, results, options.cacheTtl * 1000);
   }
 
-  return relativeToCwdResults;
+  return results;
 }

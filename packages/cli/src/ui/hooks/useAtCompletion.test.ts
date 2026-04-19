@@ -116,12 +116,20 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
 
-      expect(result.current.suggestions.map((s) => s.value)).toEqual([
-        'src/',
-        'src/components/',
-        'src/index.js',
-        'src/components/Button.tsx',
-      ]);
+      // fzf ranks matches by score and breaks ties using list position,
+      // which depends on the crawler's emission order. That order is a
+      // ripgrep-vs-fdir implementation detail; asserting on the exact
+      // ranking was coupling this test to fdir's legacy breadth-first
+      // output. Content is what matters — all `src/` entries should be
+      // returned, nothing else.
+      expect(result.current.suggestions.map((s) => s.value).sort()).toEqual(
+        [
+          'src/',
+          'src/components/',
+          'src/components/Button.tsx',
+          'src/index.js',
+        ].sort(),
+      );
     });
 
     it('should append a trailing slash to directory paths in suggestions', async () => {
@@ -139,10 +147,9 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
 
-      expect(result.current.suggestions.map((s) => s.value)).toEqual([
-        'dir/',
-        'file.txt',
-      ]);
+      expect(result.current.suggestions.map((s) => s.value).sort()).toEqual(
+        ['dir/', 'file.txt'].sort(),
+      );
     });
   });
 
@@ -396,10 +403,9 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
 
-      expect(result.current.suggestions.map((s) => s.value)).toEqual([
-        'src/',
-        '.gitignore',
-      ]);
+      expect(result.current.suggestions.map((s) => s.value).sort()).toEqual(
+        ['src/', '.gitignore'].sort(),
+      );
     });
 
     it('should work correctly when config is undefined', async () => {
@@ -417,10 +423,9 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
 
-      expect(result.current.suggestions.map((s) => s.value)).toEqual([
-        'node_modules/',
-        'src/',
-      ]);
+      expect(result.current.suggestions.map((s) => s.value).sort()).toEqual(
+        ['node_modules/', 'src/'].sort(),
+      );
     });
 
     it('should reset and re-initialize when the cwd changes', async () => {
