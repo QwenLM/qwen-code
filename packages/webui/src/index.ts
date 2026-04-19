@@ -80,7 +80,6 @@ export type {
 } from './components/messages/Assistant/AssistantMessage';
 export { InsightProgressCard } from './components/messages/InsightProgressCard.js';
 export type { InsightProgressCardProps } from './components/messages/InsightProgressCard.js';
-export type { InsightProgressCardProps } from './components/messages/InsightProgressCard';
 export {
   CollapsibleFileContent,
   parseContentWithFileReferences,
