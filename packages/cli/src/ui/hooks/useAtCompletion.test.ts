@@ -147,16 +147,16 @@ describe('useAtCompletion', () => {
   });
 
   describe('UI State and Loading Behavior', () => {
-    it('should be in a loading state during initial file system crawl', async () => {
+    it('settles into non-loading state after initial file system crawl', async () => {
       testRootDir = await createTmpDir({});
       const { result } = renderHook(() =>
         useTestHarnessForAtCompletion(true, '', mockConfig, testRootDir),
       );
 
-      // It's initially true because the effect runs synchronously.
-      expect(result.current.isLoadingSuggestions).toBe(true);
-
-      // Wait for the loading to complete.
+      // The transient INITIALIZING → READY window no longer flashes the
+      // loading indicator synchronously; `isLoading` only flips to true if
+      // initialization stays slow past the 200 ms threshold. Either way, the
+      // steady state after a fast crawl is `false`.
       await waitFor(() => {
         expect(result.current.isLoadingSuggestions).toBe(false);
       });
@@ -452,13 +452,9 @@ describe('useAtCompletion', () => {
         rerender({ cwd: rootDir2, pattern: 'file' });
       });
 
-      // After CWD changes, suggestions should be cleared and it should load again.
-      await waitFor(() => {
-        expect(result.current.isLoadingSuggestions).toBe(true);
-        expect(result.current.suggestions).toEqual([]);
-      });
-
-      // Wait for the new suggestions from the second directory
+      // After CWD changes, the RESET clears suggestions; the loading flash
+      // is no longer synchronous (suppressed for <200 ms inits), so we only
+      // assert the end state.
       await waitFor(() => {
         expect(result.current.suggestions.map((s) => s.value)).toEqual([
           'file2.txt',

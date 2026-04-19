@@ -64,13 +64,14 @@ function atCompletionReducer(
 ): AtCompletionState {
   switch (action.type) {
     case 'INITIALIZE':
-      return {
-        ...state,
-        status: AtCompletionStatus.INITIALIZING,
-        isLoading: true,
-      };
+      // Don't flip isLoading here. The Worker effect arms a 200ms timer via
+      // SET_LOADING so the "Loading suggestions..." placeholder only appears
+      // when initialization is actually slow. For the common case — worker
+      // already pre-warmed, first search resolves in <200ms — the picker
+      // opens silently and fills in results without any loading flash.
+      return { ...state, status: AtCompletionStatus.INITIALIZING };
     case 'INITIALIZE_SUCCESS':
-      return { ...state, status: AtCompletionStatus.READY, isLoading: false };
+      return { ...state, status: AtCompletionStatus.READY };
     case 'SEARCH':
       // Keep old suggestions, don't set loading immediately
       return {
@@ -105,8 +106,15 @@ function atCompletionReducer(
         isLoading: false,
       };
     case 'SET_LOADING':
-      // Only show loading if we are still in a searching state
-      if (state.status === AtCompletionStatus.SEARCHING) {
+      // Only show loading if we are still working (initial crawl or an
+      // in-flight search). Covering INITIALIZING lets the 200ms threshold
+      // protect the initialization path too, so a genuinely slow cold start
+      // still surfaces a spinner after the threshold rather than appearing
+      // frozen.
+      if (
+        state.status === AtCompletionStatus.SEARCHING ||
+        state.status === AtCompletionStatus.INITIALIZING
+      ) {
         return { ...state, isLoading: action.payload, suggestions: [] };
       }
       return state;
@@ -233,15 +241,32 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
   // The "Worker" that performs async operations based on status.
   useEffect(() => {
     const initialize = async () => {
+      // Arm the slow-load indicator for initialization too. In the normal
+      // pre-warmed path this timer never fires (crawl completes instantly)
+      // and the picker opens silently. On a cold start with a large tree
+      // the user sees the spinner after 200ms instead of wondering if @
+      // is broken.
+      if (slowSearchTimer.current) {
+        clearTimeout(slowSearchTimer.current);
+      }
+      slowSearchTimer.current = setTimeout(() => {
+        dispatch({ type: 'SET_LOADING', payload: true });
+      }, 200);
       try {
         const searcher = FileSearchFactory.create(fileSearchOptions);
         await searcher.initialize();
+        if (slowSearchTimer.current) {
+          clearTimeout(slowSearchTimer.current);
+        }
         fileSearch.current = searcher;
         dispatch({ type: 'INITIALIZE_SUCCESS' });
         if (state.pattern !== null) {
           dispatch({ type: 'SEARCH', payload: state.pattern });
         }
       } catch (_) {
+        if (slowSearchTimer.current) {
+          clearTimeout(slowSearchTimer.current);
+        }
         dispatch({ type: 'ERROR' });
       }
     };

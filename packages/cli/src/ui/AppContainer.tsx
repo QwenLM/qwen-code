@@ -56,6 +56,7 @@ import {
   type PermissionMode,
   ToolConfirmationOutcome,
   type WaitingToolCall,
+  FileIndexService,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -311,6 +312,31 @@ export const AppContainer = (props: AppContainerProps) => {
       // handled by the global catch.
       await config.initialize();
       setConfigInitialized(true);
+
+      // Pre-warm the file index so the first `@` keypress usually finds a
+      // ready-or-nearly-ready snapshot instead of kicking off a cold crawl.
+      // These options must match the ones useAtCompletion uses so both hit
+      // the same FileIndexService singleton (keyed by an options hash).
+      // Fire-and-forget: errors surface via the normal search path the next
+      // time the hook is used.
+      try {
+        FileIndexService.for({
+          projectRoot: config.getTargetDir(),
+          ignoreDirs: [],
+          useGitignore:
+            config.getFileFilteringOptions()?.respectGitIgnore ?? true,
+          useQwenignore:
+            config.getFileFilteringOptions()?.respectQwenIgnore ?? true,
+          cache: true,
+          cacheTtl: 30,
+          enableRecursiveFileSearch:
+            config.getEnableRecursiveFileSearch() ?? true,
+          enableFuzzySearch:
+            config.getFileFilteringEnableFuzzySearch() !== false,
+        });
+      } catch {
+        // ignore — the hook will spawn on demand if pre-warm throws.
+      }
 
       const resumedSessionData = config.getResumedSessionData();
       if (resumedSessionData) {
