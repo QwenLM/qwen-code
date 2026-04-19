@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import type { ServerGeminiStreamEvent } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
+import type { ThoughtSummary } from '../utils/thoughtUtils.js';
 import {
   logLoopDetected,
   logLoopDetectionDisabled,
@@ -105,25 +106,26 @@ export class LoopDetectionService {
         // content chanting only happens in one single stream, reset if there
         // is a tool call in between
         this.resetContentTracking();
+        // Thought repetition is only meaningful within a single contiguous
+        // reasoning stream. Once a tool call lands, the model has made
+        // observable progress — any prior thoughts should not carry over.
+        this.thoughtHistory = [];
 
         const toolCallLoop = this.checkToolCallLoop(event.value);
         this.trackToolCall(event.value);
-        const repetitiveThoughts = this.checkRepetitiveThoughts();
         const readFileLoop = this.checkReadFileLoop();
         const actionStagnation = this.checkActionStagnation();
 
-        this.loopDetected =
-          toolCallLoop ||
-          repetitiveThoughts ||
-          readFileLoop ||
-          actionStagnation;
+        this.loopDetected = toolCallLoop || readFileLoop || actionStagnation;
         break;
       }
       case GeminiEventType.Content: {
-        this.trackThoughtPatterns(event.value);
-        const repetitiveThoughts = this.checkRepetitiveThoughts();
-        this.loopDetected =
-          repetitiveThoughts || this.checkContentLoop(event.value);
+        this.loopDetected = this.checkContentLoop(event.value);
+        break;
+      }
+      case GeminiEventType.Thought: {
+        this.trackThought(event.value);
+        this.loopDetected = this.checkRepetitiveThoughts();
         break;
       }
       default:
@@ -332,21 +334,20 @@ export class LoopDetectionService {
   }
 
   /**
-   * Tracks thought patterns in content for repetitive thoughts detection.
+   * Records a structured thought summary for repetition detection. Uses both
+   * subject and description so two thoughts with the same subject but
+   * diverging descriptions are correctly treated as distinct progress.
    */
-  private trackThoughtPatterns(content: string): void {
-    // Look for thought-like patterns in the content (e.g., internal reasoning)
-    const thoughtPattern =
-      /\b(thinking|considering|let me|need to|should|could|might|perhaps|maybe|likely|probably|possibly)\b/i;
-    if (thoughtPattern.test(content)) {
-      // Record every thought-like content fragment so repetition is visible.
-      // Earlier versions deduped consecutive identical entries, which made
-      // checkRepetitiveThoughts() impossible to trigger.
-      const simplifiedThought = content.toLowerCase().substring(0, 100).trim();
-      this.thoughtHistory.push(simplifiedThought);
-      if (this.thoughtHistory.length > MAX_THOUGHT_HISTORY) {
-        this.thoughtHistory.shift();
-      }
+  private trackThought(summary: ThoughtSummary): void {
+    const subject = summary.subject.trim().toLowerCase();
+    const description = summary.description
+      .trim()
+      .toLowerCase()
+      .substring(0, 200);
+    const signature = `${subject}|${description}`;
+    this.thoughtHistory.push(signature);
+    if (this.thoughtHistory.length > MAX_THOUGHT_HISTORY) {
+      this.thoughtHistory.shift();
     }
   }
 

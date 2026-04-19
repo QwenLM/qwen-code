@@ -9,6 +9,7 @@ import type { Config } from '../config/config.js';
 import type {
   ServerGeminiContentEvent,
   ServerGeminiStreamEvent,
+  ServerGeminiThoughtEvent,
   ServerGeminiToolCallRequestEvent,
 } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
@@ -53,6 +54,14 @@ describe('LoopDetectionService', () => {
   const createContentEvent = (content: string): ServerGeminiContentEvent => ({
     type: GeminiEventType.Content,
     value: content,
+  });
+
+  const createThoughtEvent = (
+    subject: string,
+    description = '',
+  ): ServerGeminiThoughtEvent => ({
+    type: GeminiEventType.Thought,
+    value: { subject, description },
   });
 
   const createRepetitiveContent = (id: number, length: number): string => {
@@ -114,7 +123,7 @@ describe('LoopDetectionService', () => {
         param: 'value',
       });
       const otherEvent = {
-        type: 'thought',
+        type: GeminiEventType.UserCancelled,
       } as unknown as ServerGeminiStreamEvent;
 
       // Send events just below the threshold
@@ -624,17 +633,12 @@ describe('LoopDetectionService', () => {
     it('should detect repetitive thoughts pattern', () => {
       service.reset('');
 
-      // Simulate repetitive thinking patterns
       for (let i = 0; i < 3; i++) {
         service.addAndCheck(
-          createContentEvent('Thinking about the problem...'),
+          createThoughtEvent('Plan', 'Inspect the migration script.'),
         );
       }
 
-      const isLoop = service.addAndCheck(
-        createContentEvent('Still thinking about the same problem...'),
-      );
-      expect(isLoop).toBe(true);
       expect(loggers.logLoopDetected).toHaveBeenCalledWith(
         mockConfig,
         expect.objectContaining({
@@ -646,12 +650,16 @@ describe('LoopDetectionService', () => {
     it('should not detect loop with varied thoughts', () => {
       service.reset('');
 
-      service.addAndCheck(createContentEvent('Thinking about the problem...'));
-      service.addAndCheck(createContentEvent('Considering the solution...'));
-      service.addAndCheck(createContentEvent('Analyzing the requirements...'));
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createThoughtEvent('Analysis', 'Check migration risks.'),
+      );
+      service.addAndCheck(
+        createThoughtEvent('Plan', 'Evaluate rollout alternatives.'),
+      );
 
       const isLoop = service.addAndCheck(
-        createContentEvent('Now evaluating alternatives...'),
+        createThoughtEvent('Next', 'Draft the fix.'),
       );
       expect(isLoop).toBe(false);
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
@@ -665,16 +673,58 @@ describe('LoopDetectionService', () => {
       // history. A healthy long-running session where the model revisits
       // the same phrase after making progress on unrelated steps should
       // *not* trip this detector — only a sustained consecutive run does.
-      service.addAndCheck(createContentEvent('Thinking about the schema.'));
-      service.addAndCheck(createContentEvent('Considering the migration.'));
-      service.addAndCheck(createContentEvent('Analyzing the indexes.'));
-      service.addAndCheck(createContentEvent('Thinking about the schema.'));
-      service.addAndCheck(createContentEvent('Considering rollout risks.'));
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createThoughtEvent('Analysis', 'Consider migration.'),
+      );
+      service.addAndCheck(createThoughtEvent('Analysis', 'Review indexes.'));
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createThoughtEvent('Analysis', 'Consider rollout risks.'),
+      );
       const isLoop = service.addAndCheck(
-        createContentEvent('Thinking about the schema.'),
+        createThoughtEvent('Plan', 'Inspect the schema.'),
       );
       expect(isLoop).toBe(false);
       expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('clears thought history across tool-call roundtrips within a turn', () => {
+      service.reset('');
+
+      // Regression: thoughtHistory previously persisted across ToolCallRequest
+      // events within a single prompt. Three identical thoughts separated by
+      // real tool-call progress would incorrectly fire REPETITIVE_THOUGHTS.
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'a.sql' }),
+      );
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'b.sql' }),
+      );
+      const isLoop = service.addAndCheck(
+        createThoughtEvent('Plan', 'Inspect the schema.'),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('ignores hedge phrases in Content events (thought detection is Thought-only)', () => {
+      service.reset('');
+
+      // Content events used to feed a substring-matched hedge-phrase list
+      // into thoughtHistory, which conflated prose with the model's actual
+      // reasoning channel. Thought detection now runs only on Thought events.
+      for (let i = 0; i < 5; i++) {
+        service.addAndCheck(
+          createContentEvent('I should check the config, maybe it helps.'),
+        );
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'repetitive_thoughts' }),
+      );
     });
   });
 
