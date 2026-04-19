@@ -4166,4 +4166,150 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(msg).toBeDefined();
     expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
   });
+
+  it('should isolate retry counters per-tool across batches', async () => {
+    // Regression: the batch-level continues-loop check used to keep *all*
+    // retry state whenever any current request matched a previously failing
+    // tool. That let stale counts for an unrelated tool survive long enough
+    // to fire RETRY LOOP DETECTED prematurely the next time that tool was
+    // called. The correct behaviour prunes counters per-tool: keep only
+    // counters whose tool name actually appears in the current batch.
+    class StrictToolAlt extends BaseDeclarativeTool<
+      { other: string },
+      ToolResult
+    > {
+      static readonly Name = 'strictStringToolAlt';
+      constructor() {
+        super(
+          StrictToolAlt.Name,
+          'StrictStringToolAlt',
+          'Alt tool requiring string other param.',
+          Kind.Other,
+          {
+            type: 'object',
+            properties: { other: { type: 'string' } },
+            required: ['other'],
+          },
+        );
+      }
+      protected createInvocation(params: {
+        other: string;
+      }): ToolInvocation<{ other: string }, ToolResult> {
+        return new (class extends BaseToolInvocation<
+          { other: string },
+          ToolResult
+        > {
+          constructor(p: { other: string }) {
+            super(p);
+          }
+          getDescription() {
+            return 'strictStringToolAlt invocation';
+          }
+          async execute(): Promise<ToolResult> {
+            return { llmContent: 'ok', returnDisplay: 'ok' };
+          }
+        })(params);
+      }
+    }
+
+    const toolA = new StrictStringTool();
+    const toolB = new StrictToolAlt();
+    const mockToolRegistry = {
+      ensureTool: async (name: string) =>
+        name === StrictStringTool.Name
+          ? toolA
+          : name === StrictToolAlt.Name
+            ? toolB
+            : undefined,
+      getTool: (name: string) =>
+        name === StrictStringTool.Name
+          ? toolA
+          : name === StrictToolAlt.Name
+            ? toolB
+            : undefined,
+      getFunctionDeclarations: () => [],
+      tools: new Map(),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: (name: string) =>
+        name === StrictStringTool.Name
+          ? toolA
+          : name === StrictToolAlt.Name
+            ? toolB
+            : undefined,
+      getToolByDisplayName: () => undefined,
+      getTools: () => [],
+      discoverTools: async () => {},
+      getAllTools: () => [],
+      getAllToolNames: () => [StrictStringTool.Name, StrictToolAlt.Name],
+      getToolsByServer: () => [],
+    } as unknown as ToolRegistry;
+
+    const mockConfig = {
+      getSessionId: () => 'test-session-id',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => ApprovalMode.YOLO,
+      getPermissionsAllow: () => [],
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: { getProjectTempDir: () => '/tmp' },
+      getTruncateToolOutputThreshold: () => 100,
+      getTruncateToolOutputLines: () => 10,
+      getToolRegistry: () => mockToolRegistry,
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      isInteractive: () => true,
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getChatRecordingService: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config: mockConfig,
+      onAllToolCallsComplete: vi.fn(),
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+
+    // Tool A fails twice, accumulating a retry count of 2.
+    await scheduler.schedule(
+      [makeRequest('a1', StrictStringTool.Name, { value: 123 })],
+      new AbortController().signal,
+    );
+    await scheduler.schedule(
+      [makeRequest('a2', StrictStringTool.Name, { value: 123 })],
+      new AbortController().signal,
+    );
+
+    // Now a batch for tool B only — tool A's counter must be pruned because
+    // A is not present in this batch.
+    await scheduler.schedule(
+      [makeRequest('b1', StrictToolAlt.Name, { other: 456 })],
+      new AbortController().signal,
+    );
+
+    // Tool A fails once more. Under the old wholesale-keep behaviour this
+    // would be the third consecutive A failure and would trip the directive.
+    // Under per-tool pruning the counter starts fresh at 1 and no directive
+    // should be emitted.
+    await scheduler.schedule(
+      [makeRequest('a3', StrictStringTool.Name, { value: 123 })],
+      new AbortController().signal,
+    );
+    const msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toBeDefined();
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
 });
