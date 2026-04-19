@@ -92,15 +92,18 @@
 
 ### System Prompt
 
-通过 `generationConfig.systemInstruction` 覆盖主 Agent 的 system prompt，使模型在这次调用中
-**只**做 recap，不再表现为编程助手。
+通过 `generationConfig.systemInstruction` 替换主 Agent 的 system prompt，使模型在这次调用中
+**只**做 recap，不再表现为编程助手。注意 `GeminiClient.generateContent()` 内部会用
+`getCustomSystemPrompt()` 在我们提供的 prompt 之后追加用户的 memory（QWEN.md / 自动 memory），
+因此最终 system prompt = recap prompt + 用户 memory，这对 recap 反而是有益的项目背景。
 
-要点：
+要点（与 `RECAP_SYSTEM_PROMPT` 一一对应）：
 
 - 限制 1-3 句、纯文本（无 markdown / 列表 / 标题）。
 - 第一句必须是高层任务，紧接下一步。
-- 明确禁止：罗列已做事项、复述工具调用、状态汇报、推测用户意图、用 "you" 称呼用户。
+- 明确禁止：罗列已做事项、复述工具调用、状态汇报。
 - 要求**用对话主导语言回答**（中文 / 英文）。
+- 输出必须包在 `<recap>...</recap>` 标签中，标签外不允许任何内容。
 
 ### 结构化输出 + 提取
 
