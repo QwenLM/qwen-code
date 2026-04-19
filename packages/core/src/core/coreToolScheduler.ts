@@ -355,8 +355,6 @@ interface ToolBatch {
 function isConcurrencySafe(call: ScheduledToolCall): boolean {
   // Agent tools spawn independent sub-agents with no shared state.
   if (call.request.name === ToolNames.AGENT) return true;
-  // Swarm tools spawn independent ephemeral workers and aggregate results.
-  if (call.request.name === ToolNames.SWARM) return true;
   // Shell commands: check if the command is read-only (e.g., git log, cat).
   // Uses the synchronous regex+shell-quote checker (not the async AST-based
   // one) because partitioning runs synchronously. The sync checker covers

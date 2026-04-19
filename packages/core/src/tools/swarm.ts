@@ -25,6 +25,9 @@ const debugLogger = createDebugLogger('SWARM');
 
 const DEFAULT_MAX_TURNS = 8;
 const DEFAULT_WORKER_NAME = 'swarm-worker';
+const DEFAULT_WORKER_DISALLOWED_TOOLS: readonly string[] = [
+  ToolNames.ASK_USER_QUESTION,
+];
 
 const DEFAULT_WORKER_SYSTEM_PROMPT = `You are a lightweight swarm worker.
 Execute exactly one assigned task independently and return only the requested result.
@@ -516,15 +519,19 @@ class SwarmToolInvocation extends BaseToolInvocation<SwarmParams, ToolResult> {
   }
 
   private createToolConfig(): ToolConfig {
+    const disallowedTools = Array.from(
+      new Set([
+        ...DEFAULT_WORKER_DISALLOWED_TOOLS,
+        ...(this.params.disallowed_tools ?? []),
+      ]),
+    );
+
     return {
       tools:
         this.params.allowed_tools && this.params.allowed_tools.length > 0
           ? this.params.allowed_tools
           : ['*'],
-      ...(this.params.disallowed_tools &&
-      this.params.disallowed_tools.length > 0
-        ? { disallowedTools: this.params.disallowed_tools }
-        : {}),
+      disallowedTools,
     };
   }
 }
@@ -625,5 +632,5 @@ function summarizeWorkerResult(result: SwarmWorkerResult): string {
 }
 
 function escapeMarkdownTableCell(value: string): string {
-  return value.replace(/\|/g, '\\|').replace(/\n/g, '<br>');
+  return value.replace(/\|/g, '&#124;').replace(/\r?\n/g, '<br>');
 }

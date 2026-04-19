@@ -9,6 +9,7 @@ import { SwarmTool, type SwarmParams } from './swarm.js';
 import type { Config } from '../config/config.js';
 import type { ToolResult, ToolResultDisplay } from './tools.js';
 import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
+import { ToolNames } from './tool-names.js';
 
 const hoisted = vi.hoisted(() => ({
   createAgent: vi.fn(),
@@ -171,6 +172,40 @@ describe('SwarmTool', () => {
       taskId: 'b.ts',
       status: 'failed',
     });
+  });
+
+  it('disallows interactive tools in workers by default', async () => {
+    hoisted.createAgent.mockResolvedValueOnce(createWorker('done'));
+
+    await getInvocation({
+      description: 'Non-interactive worker',
+      disallowed_tools: [ToolNames.SHELL],
+      tasks: [{ description: 'Task', prompt: 'Do task' }],
+    }).execute(new AbortController().signal);
+
+    const toolConfig = hoisted.createAgent.mock.calls[0]![5] as {
+      disallowedTools?: string[];
+    };
+    expect(toolConfig.disallowedTools).toEqual([
+      ToolNames.ASK_USER_QUESTION,
+      ToolNames.SHELL,
+    ]);
+  });
+
+  it('formats table output without incomplete backslash escaping', async () => {
+    hoisted.createAgent.mockResolvedValueOnce(
+      createWorker('C:\\tmp\\a|b\nline2'),
+    );
+
+    const result = await getInvocation({
+      description: 'Format result',
+      tasks: [{ description: 'Task', prompt: 'Return path' }],
+    }).execute(new AbortController().signal);
+
+    expect(String(result.returnDisplay)).toContain(
+      '| task-1 | success | C:\\tmp\\a&#124;b<br>line2 |',
+    );
+    expect(String(result.returnDisplay)).not.toContain('\\|');
   });
 
   it('honors max_concurrency while draining queued tasks', async () => {
