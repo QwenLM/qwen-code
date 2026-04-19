@@ -35,6 +35,34 @@ describe('<MarkdownDisplay />', () => {
     expect(lastFrame()).toMatchSnapshot();
   });
 
+  it('renders inline math without rewriting non-math dollar text', () => {
+    const text = 'Energy $E = mc^2$ costs $20 and $30.';
+    const { lastFrame } = renderWithProviders(
+      <MarkdownDisplay {...baseProps} text={text} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('Energy E = mc² costs $20 and $30.');
+  });
+
+  it('renders block math with terminal layout', () => {
+    const text = '$$\n\\frac{a+b}{c+d}\n$$';
+    const { lastFrame } = renderWithProviders(
+      <MarkdownDisplay {...baseProps} text={text} />,
+    );
+    const output = lastFrame();
+    expect(output).toContain('a+b');
+    expect(output).toContain('───');
+    expect(output).toContain('c+d');
+  });
+
+  it('does not render math inside fenced code blocks', () => {
+    const text = '```latex\n$E = mc^2$\n```';
+    const { lastFrame } = renderWithProviders(
+      <MarkdownDisplay {...baseProps} text={text} />,
+    );
+    expect(lastFrame()).toContain('$E = mc^2$');
+  });
+
   const lineEndings = [
     { name: 'Windows', eol: '\r\n' },
     { name: 'Unix', eol: '\n' },
