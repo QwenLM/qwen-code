@@ -165,17 +165,25 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     }
   }
 
-  // Benchmark finding: spawning ripgrep via `child_process` and piping its
-  // output back through Node's stream layer is *slower* than fdir in this
-  // process for every tree size we tested (fdir was 3-5× faster on both
-  // a 2700-file and a 48k-file target). The spawn-and-IPC overhead beats
-  // the native parallel walker's advantage when the consumer is Node, so
-  // we keep fdir as the default. ripgrep stays behind an opt-in escape
-  // hatch (`QWEN_FILESEARCH_USE_RG=1`) for future re-evaluation on very
-  // large trees or different platforms — leave it disabled by default.
-  const forceRg = process.env['QWEN_FILESEARCH_USE_RG'] === '1';
+  // Benchmark findings (measured against fdir on the same tree):
+  //
+  //   qwen-code repo (~2700 files)     fdir ~25ms   rg ~140ms   fdir wins
+  //   project/node_modules (~48k)      fdir ~640ms  rg ~1800ms  fdir wins
+  //   ~/ home dir (100k-file cap)      fdir ~9s     rg ~2.5s    rg 3-4× wins
+  //
+  // On small repos Node's `spawn`+stdout IPC overhead (~50-100ms baseline)
+  // beats rg's native parallel walker. Past roughly 50k files the picture
+  // flips: fdir's single-threaded JS walk plus per-entry `.gitignore`
+  // callbacks into the `ignore` package balloon, while rg's Rust walker
+  // stays saturated across cores and keeps output flowing. Since the slow
+  // case is the painful one (a user typing @ at $HOME shouldn't wait 9s)
+  // and the fast case is already well under the 200 ms loading threshold
+  // regardless of backend, we default to rg and let callers force fdir
+  // via `QWEN_FILESEARCH_USE_RG=0` if needed.
+  const rgEnvVar = process.env['QWEN_FILESEARCH_USE_RG'];
+  const ripgrepEnabled = rgEnvVar === undefined ? true : rgEnvVar !== '0';
   const canUseRipgrep =
-    forceRg &&
+    ripgrepEnabled &&
     !options.preferFdir &&
     !ripgrepDisabled &&
     options.maxDepth === undefined;
