@@ -378,11 +378,14 @@ export class FileIndexService {
     pattern: string,
     options: SearchOptions = {},
   ): Promise<string[]> {
-    // Surfacing disposal as AbortError matches how in-flight searches are
-    // rejected inside dispose(), so callers can handle both cases with a
-    // single `err.name === 'AbortError'` check.
-    if (this.disposed)
-      throw new AbortError('FileIndexService has been disposed');
+    // Deliberately NOT an AbortError here. In-flight searches rejected from
+    // inside dispose() are AbortErrors because the caller's request was
+    // cancelled. This path, by contrast, is a caller misuse (calling search
+    // after dispose) — and useAtCompletion's catch block silently swallows
+    // AbortError as "user typed ESC", which would hide the disposed-service
+    // signal and leave the UI stuck in SEARCHING. A plain Error correctly
+    // drives the ERROR dispatch branch.
+    if (this.disposed) throw new Error('FileIndexService has been disposed');
 
     const reqId = `r${this.nextReqId++}`;
     return new Promise<string[]>((resolve, reject) => {

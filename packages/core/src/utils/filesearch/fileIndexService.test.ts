@@ -141,6 +141,9 @@ describe('FileIndexService', () => {
     expect(b).not.toBe(a);
     // And — regression test — the stale instance must have been disposed, so
     // its worker doesn't linger in INSTANCES keyed under the old fingerprint.
-    await expect(a.search('a')).rejects.toMatchObject({ name: 'AbortError' });
+    // Post-dispose search throws a plain Error (not AbortError) so that
+    // callers like useAtCompletion, which silently swallow AbortError, don't
+    // accidentally hide this caller-misuse signal.
+    await expect(a.search('a')).rejects.toThrow(/disposed/i);
   });
 });
