@@ -417,6 +417,24 @@ export type HistoryItemStopHookSystemMessage = HistoryItemBase & {
   message: string;
 };
 
+// --- Doctor diagnostics types ---
+
+export type DoctorCheckStatus = 'pass' | 'warn' | 'fail';
+
+export interface DoctorCheckResult {
+  category: string;
+  name: string;
+  status: DoctorCheckStatus;
+  message: string;
+  detail?: string;
+}
+
+export type HistoryItemDoctor = HistoryItemBase & {
+  type: 'doctor';
+  checks: DoctorCheckResult[];
+  summary: { pass: number; warn: number; fail: number };
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
@@ -456,7 +474,8 @@ export type HistoryItemWithoutId =
   | HistoryItemMemorySaved
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
-  | HistoryItemStopHookSystemMessage;
+  | HistoryItemStopHookSystemMessage
+  | HistoryItemDoctor;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
