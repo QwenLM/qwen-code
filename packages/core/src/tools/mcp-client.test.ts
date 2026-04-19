@@ -272,6 +272,12 @@ describe('mcp-client', () => {
     });
 
     it('should connect via command', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      process.env = {
+        ...ORIGINAL_ENV,
+        PATH: 'C:\\Windows\\System32;C:\\Shared\\Tools',
+        Path: 'C:\\Users\\tester\\bin;C:\\Shared\\Tools',
+      };
       const mockedTransport = vi
         .spyOn(SdkClientStdioLib, 'StdioClientTransport')
         .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
@@ -291,9 +297,14 @@ describe('mcp-client', () => {
         command: 'test-command',
         args: ['--foo', 'bar'],
         cwd: 'test/cwd',
-        env: { ...process.env, FOO: 'bar' },
+        env: expect.objectContaining({
+          FOO: 'bar',
+          PATH: 'C:\\Windows\\System32;C:\\Shared\\Tools;C:\\Users\\tester\\bin',
+        }),
         stderr: 'pipe',
       });
+      const transportOptions = mockedTransport.mock.calls[0]?.[0];
+      expect(transportOptions?.env?.['Path']).toBeUndefined();
     });
 
     it('should normalize PATH-like env keys on Windows for stdio transport', async () => {
