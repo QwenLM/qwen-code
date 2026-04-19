@@ -259,6 +259,7 @@ export const useSlashCommandProcessor = (
       ui: {
         addItem,
         clear: () => {
+          cancelBtw();
           clearItems();
           clearScreen();
           refreshStatic();
