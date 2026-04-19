@@ -1,49 +1,37 @@
-# Session Recap 会话回顾
+# Session Recap Design
 
-> 本文介绍 `/recap` 命令与离开-返回自动摘要（"where did I leave off"）功能的设计与实现。
+> A 1-3 sentence "where did I leave off" summary surfaced when the user
+> returns to an idle session, either on demand (`/recap`) or after the
+> terminal has been blurred for 5+ minutes.
 
----
+## Overview
 
-## 目录
+When a user `/resume`s an old session days later, scrolling back through
+pages of history to remember **what they were doing and what came next**
+is a real friction point. Just reloading messages does not solve this
+UX problem.
 
-1. [问题与目标](#问题与目标)
-2. [触发方式](#触发方式)
-3. [架构](#架构)
-4. [Prompt 设计](#prompt-设计)
-5. [History 过滤](#history-过滤)
-6. [并发与边界情况](#并发与边界情况)
-7. [配置与模型选择](#配置与模型选择)
-8. [可观测性](#可观测性)
-9. [刻意未做的范围](#刻意未做的范围)
+The goal is to proactively surface a 1-3 sentence recap when the user
+returns:
 
----
+- **High-level task** (what they are doing) → **next step** (what to do next).
+- Visually distinct from real assistant replies, so it is never mistaken
+  for new model output.
+- **Best-effort**: failures must be silent and never break the main flow.
 
-## 问题与目标
+## Triggers
 
-用户离开几天再 `/resume` 一个旧会话时，往往要翻几页才能回忆起**"上次在做什么、下一步是什么"**。
-仅靠重新加载消息无法解决这个体验问题。
+| Trigger    | Conditions                                                                                   | Implementation                                                    |
+| ---------- | -------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| **Manual** | User runs `/recap`                                                                           | `recapCommand.ts` calls the same underlying service               |
+| **Auto**   | Terminal blurred (DECSET 1004 focus protocol) for ≥ 5 min + focus returns + stream is `Idle` | `useAwaySummary.ts` — 5min blur timer + `useFocus` event listener |
 
-目标：在用户回到终端时，**主动**提供一段 1-3 句话的会话摘要：
+Both paths funnel into a single function — `generateSessionRecap()` — to
+guarantee identical behavior. The auto-trigger is gated by
+`general.showSessionRecap` (default: on); the manual command ignores
+that setting.
 
-- **高层任务**（在做什么）→ **下一步**（下一步做什么）。
-- 视觉上明确区别于 Agent 的正常回复，避免被误读为新输出。
-- **尽力而为**：失败必须静默，绝不打断主流程。
-
----
-
-## 触发方式
-
-| 触发     | 条件                                                                | 实现                                                         |
-| -------- | ------------------------------------------------------------------- | ------------------------------------------------------------ |
-| **手动** | 用户输入 `/recap`                                                   | `recapCommand.ts` 调用同一个底层服务                         |
-| **自动** | 终端失焦（DECSET 1004 焦点协议）≥ 5 分钟 + 焦点回归 + 流处于 `Idle` | `useAwaySummary.ts` 5min blur 计时 + `useFocus` 监听焦点事件 |
-
-两条路径最终都调用 `generateSessionRecap()` 这一个底层函数，保证行为一致。
-自动触发受 `general.showSessionRecap` 控制（默认开启），手动 `/recap` 不受其影响。
-
----
-
-## 架构
+## Architecture
 
 ```
 ┌────────────────────────────────────────────────────────────────────────┐
@@ -53,7 +41,7 @@
 │       │                                                                │
 │       ├─→ useAwaySummary({enabled, config, isFocused, isIdle, addItem})│
 │       │       │                                                        │
-│       │       └─→ 5 min blur 计时 + idle/dedupe 闸门                   │
+│       │       └─→ 5 min blur timer + idle/dedupe gates                 │
 │       │              │                                                 │
 │       │              ↓                                                 │
 │       └─→ recapCommand (slash) ─→ generateSessionRecap(config, signal) │
@@ -66,174 +54,186 @@
 │                                          │                             │
 │                                          ↓                             │
 │                              GeminiClient.generateContent              │
-│                              （fastModel + tools:[]）                  │
+│                              (fastModel + tools:[])                    │
 │                                                                        │
 │   addItem({type: 'away_recap', text}) ─→ HistoryItemDisplay            │
 │                                            └─ AwayRecapMessage         │
-│                                               （dim color + ❯ 前缀）    │
+│                                               (dim color + ❯ prefix)   │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 关键文件
+### Files
 
-| 文件                                                         | 作用                                      |
-| ------------------------------------------------------------ | ----------------------------------------- |
-| `packages/core/src/services/sessionRecap.ts`                 | 一次性 LLM 调用 + history 过滤 + tag 提取 |
-| `packages/cli/src/ui/hooks/useAwaySummary.ts`                | 自动触发的 React hook                     |
-| `packages/cli/src/ui/commands/recapCommand.ts`               | `/recap` 手动入口                         |
-| `packages/cli/src/ui/components/messages/StatusMessages.tsx` | `AwayRecapMessage` dim 渲染               |
-| `packages/cli/src/ui/types.ts`                               | `HistoryItemAwayRecap` 类型               |
-| `packages/cli/src/ui/components/HistoryItemDisplay.tsx`      | 渲染分发                                  |
-| `packages/cli/src/config/settingsSchema.ts`                  | `general.showSessionRecap` 配置           |
+| File                                                         | Responsibility                                      |
+| ------------------------------------------------------------ | --------------------------------------------------- |
+| `packages/core/src/services/sessionRecap.ts`                 | One-shot LLM call + history filter + tag extraction |
+| `packages/cli/src/ui/hooks/useAwaySummary.ts`                | Auto-trigger React hook                             |
+| `packages/cli/src/ui/commands/recapCommand.ts`               | `/recap` manual entry point                         |
+| `packages/cli/src/ui/components/messages/StatusMessages.tsx` | `AwayRecapMessage` dim renderer                     |
+| `packages/cli/src/ui/types.ts`                               | `HistoryItemAwayRecap` type                         |
+| `packages/cli/src/ui/components/HistoryItemDisplay.tsx`      | Renderer dispatch                                   |
+| `packages/cli/src/config/settingsSchema.ts`                  | `general.showSessionRecap` setting                  |
 
----
-
-## Prompt 设计
+## Prompt Design
 
 ### System Prompt
 
-通过 `generationConfig.systemInstruction` 替换主 Agent 的 system prompt，使模型在这次调用中
-**只**做 recap，不再表现为编程助手。注意 `GeminiClient.generateContent()` 内部会用
-`getCustomSystemPrompt()` 在我们提供的 prompt 之后追加用户的 memory（QWEN.md / 自动 memory），
-因此最终 system prompt = recap prompt + 用户 memory，这对 recap 反而是有益的项目背景。
+`generationConfig.systemInstruction` replaces the main agent's system
+prompt for this single call, so the model behaves only as a recap
+generator and not as a coding assistant.
 
-要点（与 `RECAP_SYSTEM_PROMPT` 一一对应）：
+Note that `GeminiClient.generateContent()` internally runs the prompt
+through `getCustomSystemPrompt()`, which appends the user's memory
+(QWEN.md / managed auto-memory) as a suffix. The final system prompt is
+therefore `recap prompt + user memory` — useful project context for the
+recap, not a leak.
 
-- 限制 1-3 句、纯文本（无 markdown / 列表 / 标题）。
-- 第一句必须是高层任务，紧接下一步。
-- 明确禁止：罗列已做事项、复述工具调用、状态汇报。
-- 要求**用对话主导语言回答**（中文 / 英文）。
-- 输出必须包在 `<recap>...</recap>` 标签中，标签外不允许任何内容。
+Bullets below correspond 1:1 with `RECAP_SYSTEM_PROMPT`:
 
-### 结构化输出 + 提取
+- 1 to 3 short sentences, plain prose (no markdown / lists / headings).
+- First sentence: the high-level task. Then: the concrete next step.
+- Explicitly forbid: listing what was done, reciting tool calls, status reports.
+- Match the dominant language of the conversation (English or Chinese).
+- Wrap output in `<recap>...</recap>`; nothing outside the tags.
 
-模型被要求把 recap 包在 `<recap>...</recap>` 标签内：
+### Structured Output + Extraction
+
+The model is instructed to wrap its answer in `<recap>...</recap>`:
 
 ```
-<recap>正在重构 loopDetectionService.ts，解决长会话 OOM。下一步是实现选项 B。</recap>
+<recap>Refactoring loopDetectionService.ts to address long-session OOM. Next step is to implement option B.</recap>
 ```
 
-理由：部分模型（GLM 系列、reasoning 模型等）在给出最终答案前会写"思考过程"。
-直接取响应文本会把推理 leak 进 UI。
+Why: some models (GLM family, reasoning models) write a "thinking"
+paragraph before the final answer. Returning the raw text would leak
+that reasoning into the UI.
 
-`extractRecap()` 三级回退：
+`extractRecap()` has three fallback tiers:
 
-1. 标签完整：取 `<recap>...</recap>` 之间的文本（首选）。
-2. 仅有开标签（`maxOutputTokens` 截断 close 标签）：取开标签后的全部文本。
-3. 标签缺失：返回空 → 服务整体返回 `null` → UI 不渲染。
+1. Both tags present: take what is between `<recap>...</recap>` (preferred).
+2. Only the open tag (e.g. `maxOutputTokens` truncated the close tag):
+   take everything after the open tag.
+3. Tag missing entirely: return empty string → service returns `null`
+   → UI renders nothing.
 
-第 3 级的策略是"宁可不显示也不显示错的"——展示模型 reasoning 的 preamble 会比"没有 recap"更糟。
+The third tier is "skip rather than show the wrong thing" — surfacing
+the model's reasoning preamble is worse than showing no recap at all.
 
-### 调用参数
+### Call Parameters
 
-| 参数                | 值                             | 理由                              |
-| ------------------- | ------------------------------ | --------------------------------- |
-| `model`             | `getFastModel() ?? getModel()` | 摘要任务无需 frontier 模型        |
-| `tools`             | `[]`                           | 一次性查询，禁止工具调用          |
-| `maxOutputTokens`   | `300`                          | 1-3 句 + 标签足够，太大会鼓励冗长 |
-| `temperature`       | `0.3`                          | 偏确定性，但保留少量自然变化      |
-| `systemInstruction` | 上述 recap-only prompt         | 覆盖主 Agent 的角色定义           |
+| Parameter           | Value                          | Reason                                                           |
+| ------------------- | ------------------------------ | ---------------------------------------------------------------- |
+| `model`             | `getFastModel() ?? getModel()` | Recap doesn't need a frontier model                              |
+| `tools`             | `[]`                           | One-shot query, no tool use                                      |
+| `maxOutputTokens`   | `300`                          | Enough for 1-3 sentences + tags; larger would encourage rambling |
+| `temperature`       | `0.3`                          | Mostly deterministic, with a bit of natural variation            |
+| `systemInstruction` | The recap-only prompt above    | Replaces the main agent's role definition                        |
 
----
+## History Filtering
 
-## History 过滤
+`geminiClient.getChat().getHistory()` returns a `Content[]` that
+includes:
 
-`geminiClient.getChat().getHistory()` 返回的 `Content[]` 包含：
+- `user` / `model` text messages
+- `model` `functionCall` parts
+- `user` `functionResponse` parts (which can hold full file contents)
+- `model` thought parts (`part.thought` / `part.thoughtSignature`,
+  the model's hidden reasoning)
 
-- `user` / `model` 的文本消息
-- `model` 的 `functionCall` parts
-- `user` 的 `functionResponse` parts（含工具返回的**文件全文**等大体积内容）
-- `model` 的 thought parts（`part.thought` / `part.thoughtSignature`，模型隐藏推理）
+`filterToDialog()` keeps only `user` / `model` parts that have **non-empty
+text and are not thoughts**. Two reasons:
 
-`filterToDialog()` 只保留 `user`/`model` 消息中**有非空文本且非 thought**的 part：
+- **Tool calls / responses**: a single `functionResponse` can be 10K+
+  tokens. 30 such messages would drown the recap LLM in irrelevant
+  detail, both wasting tokens and biasing the recap toward
+  implementation noise like "called X tool to read Y file".
+- **Thought parts**: carry the model's internal reasoning. Including
+  them risks treating hidden chain-of-thought as dialogue and
+  surfacing it in the recap text.
 
-- 工具调用/响应：单次 `functionResponse` 可能含 10K+ token，30 条这样的消息会把 recap LLM
-  淹没在无关细节里，既费 token 又导致 recap 跑偏（容易输出 "调用了 X 工具读取了 Y 文件"
-  这种实现细节）。
-- thought parts：携带模型的内部推理。混进 recap 上下文会有把隐藏 chain-of-thought 当成
-  对话内容、最终被概括到 recap 文本里 leak 出来的风险。
+After dropping empty messages, `takeRecentDialog` slices to the last 30
+messages and refuses to start the slice on a dangling model/tool
+response.
 
-丢空消息后再做 30 条窗口截取（`takeRecentDialog`），并保证窗口起点不是悬空的 model 回复。
+## Concurrency and Edge Cases
 
----
+### Auto-trigger hook state machine
 
-## 并发与边界情况
+`useAwaySummary` keeps three refs:
 
-### 自动触发 hook 的状态机
+| Ref               | Meaning                                           |
+| ----------------- | ------------------------------------------------- |
+| `blurredAtRef`    | Blur start time (not cleared until focus returns) |
+| `recapPendingRef` | Whether an LLM call is in flight                  |
+| `inFlightRef`     | The current in-flight `AbortController`           |
 
-`useAwaySummary` 维护三个 ref：
+`useEffect` deps: `[enabled, config, isFocused, isIdle, addItem]`.
 
-| Ref               | 含义                                |
-| ----------------- | ----------------------------------- |
-| `blurredAtRef`    | 失焦起始时间（焦点回归前不清）      |
-| `recapPendingRef` | 是否有 LLM 调用在飞                 |
-| `inFlightRef`     | 当前 in-flight 的 `AbortController` |
+| Event                                              | Action                                                                                                                                 |
+| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `!enabled \|\| !config`                            | Abort in-flight call + clear `inFlightRef` + clear `blurredAtRef`                                                                      |
+| `!isFocused` and `blurredAtRef === null`           | Set `blurredAtRef = Date.now()`                                                                                                        |
+| `isFocused` and `blurredAtRef === null`            | Return early (no blur cycle to handle — first render or right after a brief-blur reset)                                                |
+| `isFocused` and blur duration < 5 min              | Clear `blurredAtRef`, wait for next blur cycle                                                                                         |
+| `isFocused` and blur ≥ 5 min and `recapPendingRef` | Return (dedupe)                                                                                                                        |
+| `isFocused` and blur ≥ 5 min and `!isIdle`         | **Preserve** `blurredAtRef` and wait for the turn to finish (`isIdle` is in the deps, so the effect re-fires when streaming completes) |
+| `isFocused` and all conditions met                 | Clear `blurredAtRef`, set `recapPendingRef = true`, create `AbortController`, send the LLM request                                     |
 
-`useEffect` deps：`[enabled, config, isFocused, isIdle, addItem]`。
+The `.then` callback **re-checks** `isIdleRef.current`: if the user has
+started a new turn while the LLM was running, the late-arriving recap
+is dropped to avoid inserting it mid-turn.
 
-| 事件                                                  | 处理                                                                                   |
-| ----------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| `!enabled \|\| !config`                               | abort 在飞调用 + 清 `inFlightRef` + 清 `blurredAtRef`                                  |
-| `!isFocused` 且 `blurredAtRef === null`               | 设 `blurredAtRef = Date.now()`                                                         |
-| `isFocused` 且 `blurredAtRef === null`                | 直接返回（没有失焦周期可处理；首次渲染或刚 reset 后会走这里）                          |
-| `isFocused` 且 blur 时长 < 5 min                      | 清 `blurredAtRef`，等下个失焦周期                                                      |
-| `isFocused` 且 blur 时长 ≥ 5 min 且 `recapPendingRef` | 直接返回（去重）                                                                       |
-| `isFocused` 且 blur 时长 ≥ 5 min 且 `!isIdle`         | **保留** `blurredAtRef` 等 turn 结束（`isIdle` 在 deps 中，turn 完成时 effect 会重跑） |
-| `isFocused` 且全部条件满足                            | 清 `blurredAtRef`、置 `recapPendingRef` 为 true、新建 `AbortController`、发 LLM 请求   |
+The `.finally` clears `recapPendingRef`, and clears `inFlightRef` only
+if `inFlightRef.current === controller` (so it doesn't overwrite a
+newer controller).
 
-`.then` 回调里**再次**检查 `isIdleRef.current`：如果在等 LLM 期间用户已经开始新 turn，
-丢弃这次 recap，避免 recap 插入到 turn 中间。
+A second `useEffect` aborts the in-flight controller on unmount.
 
-`.finally` 清 `recapPendingRef`，并仅在 `inFlightRef.current === controller` 时清 `inFlightRef`
-（避免覆盖其它 controller）。
+### `/recap` gating
 
-组件卸载时第二个 `useEffect` 会 abort 在飞调用。
+`CommandContext.ui.isIdleRef` exposes the current stream state
+(mirroring the existing `btwAbortControllerRef` pattern). In
+interactive mode, `recapCommand` refuses when `!isIdleRef.current`
+**or** `pendingItem !== null`. `pendingItem` alone is insufficient
+because a normal model reply runs with `streamingState === Responding`
+and a null `pendingItem`.
 
-### `/recap` 的拦截
+## Configuration and Model Selection
 
-`CommandContext.ui.isIdleRef` 暴露当前流状态（mirror 已有的 `btwAbortControllerRef` 模式）。
-`recapCommand` 在交互模式下，当 `!isIdleRef.current` **或** `pendingItem !== null` 时拒绝执行：
-仅靠 `pendingItem` 不够，因为正常 model 回复期间 `streamingState === Responding` 但 `pendingItem` 为 null。
+### User-facing knobs
 
----
+| Setting                    | Default | Notes                                                             |
+| -------------------------- | ------- | ----------------------------------------------------------------- |
+| `general.showSessionRecap` | `true`  | Auto-trigger only. Manual `/recap` ignores this.                  |
+| `fastModel`                | unset   | Recommended (e.g. `qwen3-coder-flash`) for fast and cheap recaps. |
 
-## 配置与模型选择
+### Model fallback
 
-### 用户可控
+`config.getFastModel() ?? config.getModel()`:
 
-| 设置                       | 默认   | 说明                                                    |
-| -------------------------- | ------ | ------------------------------------------------------- |
-| `general.showSessionRecap` | `true` | 自动触发开关。手动 `/recap` 不受其影响                  |
-| `fastModel`                | 未设   | 推荐设置（如 `qwen3-coder-flash`），让 recap 快速且便宜 |
+- User has a `fastModel` set and it is valid for the current auth type
+  → use `fastModel`.
+- Otherwise → fall back to the main session model (works, just costlier
+  and slower).
 
-### 模型回退
+## Observability
 
-`config.getFastModel() ?? config.getModel()`：
+`createDebugLogger('SESSION_RECAP')` emits:
 
-- 用户设了 `fastModel` 且当前 auth type 可用 → 用 `fastModel`
-- 否则 → 退回主 session 模型（功能可用，但成本和延迟略高）
+- caught exceptions from the recap path (`debugLogger.warn`).
 
----
+All failures are **fully transparent** to the user — recap is an
+auxiliary feature and never throws into the UI. Developers can grep for
+the `[SESSION_RECAP]` tag in the debug log file: written by default to
+`~/.qwen/debug/<sessionId>.txt` (`latest.txt` symlinks to the current
+session); disable via `QWEN_DEBUG_LOG_FILE=0`.
 
-## 可观测性
+## Out of Scope
 
-通过 `createDebugLogger('SESSION_RECAP')` 输出：
-
-- catch 块捕获的异常（`debugLogger.warn`）
-
-所有失败对用户**完全透明**——recap 是辅助功能，不会向用户面前抛错。
-开发者可在 debug 日志文件中按 `[SESSION_RECAP]` 标签检索：默认写入
-`~/.qwen/debug/<sessionId>.txt`（`latest.txt` 软链指向当前会话），可通过
-`QWEN_DEBUG_LOG_FILE=0` 关闭。
-
----
-
-## 刻意未做的范围
-
-| 项                                            | 不做的原因                                                                        |
-| --------------------------------------------- | --------------------------------------------------------------------------------- |
-| `/recap` 进度指示 UI（spinner / pendingItem） | 3-5 秒等待可接受，加 UI 增加复杂度                                                |
-| 自动化测试                                    | 服务实现较小（~150 行），先做端到端验证；后续单测可单独 PR 加                     |
-| Prompt 国际化                                 | system prompt 是给模型看的，英文最稳定；模型按对话语言决定输出语言                |
-| `QWEN_CODE_ENABLE_AWAY_SUMMARY` env var       | Claude Code 用它处理"telemetry 关闭时仍启用"；Qwen Code 当前 telemetry 模型不需要 |
-| `/resume` 完成后自动 recap                    | 自然的下一步增强，但需要在 `useResumeCommand` 加 hook 点；当前 PR 范围之外        |
+| Item                                             | Why not                                                                                                                                  |
+| ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| Progress UI for `/recap` (spinner / pendingItem) | 3-5 second wait is tolerable; adds complexity.                                                                                           |
+| Automated tests                                  | Service is small (~150 lines), end-to-end tested manually first; unit tests can land in a separate PR.                                   |
+| Localized prompts                                | The system prompt is for the model; English is the most reliable substrate. The model selects the output language from the conversation. |
+| `QWEN_CODE_ENABLE_AWAY_SUMMARY` env var          | Claude Code uses it to keep the feature on when telemetry is disabled; Qwen Code's current telemetry model doesn't need this.            |
+| Auto-recap on `/resume` completion               | A natural follow-up but needs a hook point in `useResumeCommand`; out of scope for this PR.                                              |
