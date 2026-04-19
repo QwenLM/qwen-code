@@ -119,6 +119,17 @@ describe('pdf utilities', () => {
       expect(parsePDFPageRange('abc')).toBeNull();
       expect(parsePDFPageRange('1-abc')).toBeNull();
     });
+
+    it('should reject malformed tokens that parseInt would silently truncate', () => {
+      // Whole-string validation — parseInt() would accept each of these.
+      expect(parsePDFPageRange('5abc')).toBeNull();
+      expect(parsePDFPageRange('1-2-3')).toBeNull();
+      expect(parsePDFPageRange('1-2x')).toBeNull();
+      expect(parsePDFPageRange('1x-2')).toBeNull();
+      expect(parsePDFPageRange('1.5')).toBeNull();
+      expect(parsePDFPageRange('1 - 5')).toBeNull();
+      expect(parsePDFPageRange('+5')).toBeNull();
+    });
   });
 
   describe('isPdftotextAvailable', () => {

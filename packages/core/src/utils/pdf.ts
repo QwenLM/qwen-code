@@ -61,32 +61,31 @@ export function parsePDFPageRange(
     return null;
   }
 
-  // "N-" open-ended range
-  if (trimmed.endsWith('-')) {
-    const first = parseInt(trimmed.slice(0, -1), 10);
-    if (isNaN(first) || first < 1) {
-      return null;
-    }
+  // Whole-string match — parseInt() would silently accept tokens like
+  // "5abc", "1-2-3", "1.5", or "1x-2" because of its truncation behaviour.
+  const openEnded = /^(\d+)-$/.exec(trimmed);
+  if (openEnded) {
+    const first = Number(openEnded[1]);
+    if (first < 1) return null;
     return { firstPage: first, lastPage: Infinity };
   }
 
-  const dashIndex = trimmed.indexOf('-');
-  if (dashIndex === -1) {
-    // Single page: "5"
-    const page = parseInt(trimmed, 10);
-    if (isNaN(page) || page < 1) {
-      return null;
-    }
+  const range = /^(\d+)-(\d+)$/.exec(trimmed);
+  if (range) {
+    const first = Number(range[1]);
+    const last = Number(range[2]);
+    if (first < 1 || last < 1 || last < first) return null;
+    return { firstPage: first, lastPage: last };
+  }
+
+  const single = /^(\d+)$/.exec(trimmed);
+  if (single) {
+    const page = Number(single[1]);
+    if (page < 1) return null;
     return { firstPage: page, lastPage: page };
   }
 
-  // Range: "1-10"
-  const first = parseInt(trimmed.slice(0, dashIndex), 10);
-  const last = parseInt(trimmed.slice(dashIndex + 1), 10);
-  if (isNaN(first) || isNaN(last) || first < 1 || last < 1 || last < first) {
-    return null;
-  }
-  return { firstPage: first, lastPage: last };
+  return null;
 }
 
 let pdftotextAvailable: boolean | undefined;
