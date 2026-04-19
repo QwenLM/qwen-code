@@ -175,17 +175,21 @@ back through pages of history.
   responses are filtered out) is sent to the model with a tight system prompt.
 - The recap is rendered in dim color with a `❯` prefix so it stands apart
   from real assistant replies.
-- Shows an inline error and refuses to run while a model turn is in flight or
-  another command is processing. Generation/network failures are silent —
-  the recap simply does not appear.
+- Refuses with an inline error if a model turn is in flight or another command
+  is processing. If there is no usable conversation, or the underlying
+  generation fails, `/recap` shows a short info message instead of a recap —
+  the manual command always responds with something.
 
 **Auto-trigger when returning from being away:**
 
 If the terminal is blurred for **5+ minutes** and gets focused again, a recap
 is generated and shown automatically (only when no model response is in
 progress; otherwise it waits for the current turn to finish and then fires).
-Controlled by the `general.showSessionRecap` setting (default: `true`); the
-manual `/recap` command always works regardless of this setting.
+Unlike the manual command, the auto-trigger is fully silent on failure: if
+generation errors or there is nothing to summarize, no message is added to
+the history. Controlled by the `general.showSessionRecap` setting
+(default: `true`); the manual `/recap` command always works regardless of
+this setting.
 
 **Example:**
 
