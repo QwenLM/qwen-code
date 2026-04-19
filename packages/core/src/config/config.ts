@@ -2463,6 +2463,10 @@ export class Config {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
     });
+    await registerLazy(ToolNames.SWARM, async () => {
+      const { SwarmTool } = await import('../tools/swarm.js');
+      return new SwarmTool(this);
+    });
     await registerLazy(ToolNames.SKILL, async () => {
       const { SkillTool } = await import('../tools/skill.js');
       return new SkillTool(this);
