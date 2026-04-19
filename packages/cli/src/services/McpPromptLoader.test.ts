@@ -7,9 +7,10 @@
 import { McpPromptLoader } from './McpPromptLoader.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { PromptArgument } from '@modelcontextprotocol/sdk/types.js';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import * as cliCore from '@qwen-code/qwen-code-core';
+import { setLanguageAsync } from '../i18n/index.js';
 
 // Define the mock prompt data at a higher scope
 const mockPrompt = {
@@ -36,9 +37,14 @@ describe('McpPromptLoader', () => {
   const mockConfig = {} as Config;
 
   // Use a beforeEach to set up and clean a spy for each test
-  beforeEach(() => {
+  beforeEach(async () => {
     vi.clearAllMocks();
+    await setLanguageAsync('en');
     vi.spyOn(cliCore, 'getMCPServerPrompts').mockReturnValue([mockPrompt]);
+  });
+
+  afterAll(async () => {
+    await setLanguageAsync('en');
   });
 
   // --- `parseArgs` tests remain the same ---
@@ -173,6 +179,37 @@ describe('McpPromptLoader', () => {
       expect(commands[0].kind).toBe(CommandKind.MCP_PROMPT);
     });
 
+    it('should preserve server-provided descriptions before provider resolution', async () => {
+      const loader = new McpPromptLoader(mockConfigWithPrompts);
+      const commands = await loader.loadCommands(new AbortController().signal);
+
+      expect(commands[0].description).toBe('A test prompt.');
+    });
+
+    it('should localize fallback description and help text in zh', async () => {
+      await setLanguageAsync('zh');
+      vi.spyOn(cliCore, 'getMCPServerPrompts').mockReturnValue([
+        {
+          ...mockPrompt,
+          description: undefined,
+          arguments: [],
+        },
+      ]);
+
+      const loader = new McpPromptLoader(mockConfigWithPrompts);
+      const commands = await loader.loadCommands(new AbortController().signal);
+      const helpCommand = commands[0].subCommands?.[0];
+      const result = await helpCommand?.action?.({} as CommandContext, '');
+
+      expect(commands[0].description).toBe('调用提示 test-prompt');
+      expect(helpCommand?.description).toBe('显示此提示的帮助');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: '提示 "test-prompt" 没有参数。',
+      });
+    });
+
     it('should handle prompt invocation successfully', async () => {
       const loader = new McpPromptLoader(mockConfigWithPrompts);
       const commands = await loader.loadCommands(new AbortController().signal);
@@ -216,6 +253,24 @@ describe('McpPromptLoader', () => {
         type: 'message',
         messageType: 'error',
         content: 'Error: Invocation failed!',
+      });
+    });
+
+    it('should localize invalid response errors in zh', async () => {
+      await setLanguageAsync('zh');
+      vi.spyOn(mockPrompt, 'invoke').mockResolvedValue({
+        messages: [{ content: { type: 'image' } }],
+      });
+
+      const loader = new McpPromptLoader(mockConfigWithPrompts);
+      const commands = await loader.loadCommands(new AbortController().signal);
+      const action = commands[0].action!;
+      const result = await action({} as CommandContext, 'test-name 123 tiger');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: '从服务器收到空响应或无效的提示响应。',
       });
     });
 

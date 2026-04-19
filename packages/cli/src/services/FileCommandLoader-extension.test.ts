@@ -278,6 +278,57 @@ describe('FileCommandLoader - Extension Commands Support', () => {
     expect(commands[0].description).toMatch(/^\[prefix-ext\]/);
   });
 
+  it('should preserve the extension prefix when translating extension descriptions', async () => {
+    const extensionDir = path.join(
+      projectRoot,
+      '.qwen',
+      'extensions',
+      'translated-ext',
+    );
+
+    const extensionConfig = {
+      name: 'translated-ext',
+      version: '1.0.0',
+    };
+
+    mock({
+      [userCommandsDir]: {},
+      [projectCommandsDir]: {},
+      [extensionDir]: {
+        'qwen-extension.json': JSON.stringify(extensionConfig),
+        commands: {
+          'deploy.md':
+            '---\ndescription: Deploy staged changes to production\n---\nDeploy now',
+        },
+      },
+    });
+
+    const mockConfig = {
+      getFolderTrustFeature: vi.fn(() => false),
+      getFolderTrust: vi.fn(() => true),
+      getProjectRoot: vi.fn(() => projectRoot),
+      storage: new Storage(projectRoot),
+      getExtensions: vi.fn(() => [
+        {
+          id: 'translated-ext',
+          config: extensionConfig,
+          contextFiles: [],
+          name: 'translated-ext',
+          version: '1.0.0',
+          isActive: true,
+          path: extensionDir,
+        },
+      ]),
+    } as unknown as Config;
+    const loader = new FileCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+
+    expect(commands).toHaveLength(1);
+    expect(commands[0].description).toBe(
+      '[translated-ext] Deploy staged changes to production',
+    );
+  });
+
   it('should load commands from multiple extensions in alphabetical order', async () => {
     const ext1Dir = path.join(projectRoot, '.qwen', 'extensions', 'ext-b');
     const ext2Dir = path.join(projectRoot, '.qwen', 'extensions', 'ext-a');

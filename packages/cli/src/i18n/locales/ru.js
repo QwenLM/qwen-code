@@ -7,7 +7,10 @@
 // Русский перевод для Qwen Code CLI
 // Ключ служит одновременно ключом перевода и текстом по умолчанию
 
+import en from './en.js';
+
 export default {
+  ...en,
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
@@ -930,8 +933,11 @@ export default {
   'Managed auto-memory dream found nothing to improve.':
     'Консолидация автопамяти не нашла чего улучшать.',
   'Deduplicated entries: {{count}}': 'Удалено дубликатов: {{count}}',
+  'Open the memory manager.': 'Открыть менеджер памяти.',
   'Save a durable memory using the save_memory tool.':
     'Сохранить долгосрочную память с помощью инструмента save_memory.',
+  'Save a durable memory to the memory system.':
+    'Сохранить долгосрочную память в системе памяти.',
   'Usage: /remember [--global|--project] <text to remember>':
     'Использование: /remember [--global|--project] <текст для запоминания>',
 
@@ -2043,16 +2049,94 @@ export default {
   'Press Ctrl+O to show full tool output':
     'Нажмите Ctrl+O для показа полного вывода инструментов',
 
+  // ============================================================================
+  // i18n completeness overrides
+  // ============================================================================
+  'Open MCP management dialog': 'Открыть диалог управления MCP',
+  'Manage MCP servers': 'Управление MCP-серверами',
+  Tools: 'Инструменты',
+  prompts: 'промпты',
+  tools: 'инструменты',
   'Switch to plan mode or exit plan mode':
-    'Switch to plan mode or exit plan mode',
+    'Перейти в режим планирования или выйти из него',
   'Exited plan mode. Previous approval mode restored.':
-    'Exited plan mode. Previous approval mode restored.',
+    'Выход из режима планирования. Предыдущий режим подтверждения восстановлен.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
-    'Enabled plan mode. The agent will analyze and plan without executing tools.',
+    'Режим планирования включён. Агент будет анализировать и планировать без выполнения инструментов.',
   'Already in plan mode. Use "/plan exit" to exit plan mode.':
-    'Already in plan mode. Use "/plan exit" to exit plan mode.',
+    'Режим планирования уже включён. Используйте "/plan exit" для выхода из режима планирования.',
   'Not in plan mode. Use "/plan" to enter plan mode first.':
-    'Not in plan mode. Use "/plan" to enter plan mode first.',
-
-  "Set up Qwen Code's status line UI": "Set up Qwen Code's status line UI",
+    'Сейчас не в режиме планирования. Сначала используйте "/plan" для входа в режим планирования.',
+  'Manage extension settings': 'Управление настройками расширения',
+  'Manage Extensions': 'Управление расширениями',
+  'Extension Details': 'Сведения о расширении',
+  'View Extension': 'Просмотреть расширение',
+  'Update Extension': 'Обновить расширение',
+  'Disable Extension': 'Отключить расширение',
+  'Enable Extension': 'Включить расширение',
+  'Uninstall Extension': 'Удалить расширение',
+  'Select Scope': 'Выбрать область',
+  'User Scope': 'Область пользователя',
+  'Workspace Scope': 'Область рабочего пространства',
+  'No extensions found.': 'Расширения не найдены.',
+  'Are you sure you want to uninstall extension "{{name}}"?':
+    'Вы уверены, что хотите удалить расширение "{{name}}"?',
+  'This action cannot be undone.': 'Это действие нельзя отменить.',
+  'Extension "{{name}}" disabled successfully.':
+    'Расширение "{{name}}" успешно отключено.',
+  'Extension "{{name}}" enabled successfully.':
+    'Расширение "{{name}}" успешно включено.',
+  'Extension "{{name}}" updated successfully.':
+    'Расширение "{{name}}" успешно обновлено.',
+  'Failed to update extension "{{name}}": {{error}}':
+    'Не удалось обновить расширение "{{name}}": {{error}}',
+  'Select the scope for this action:': 'Выберите область для этого действия:',
+  'User - Applies to all projects':
+    'Пользователь - применяется ко всем проектам',
+  'Workspace - Applies to current project only':
+    'Рабочее пространство - применяется только к текущему проекту',
+  'Name:': 'Имя:',
+  'MCP Servers:': 'MCP-серверы:',
+  'Settings:': 'Настройки:',
+  'View Details': 'Просмотреть сведения',
+  'Update failed:': 'Ошибка обновления:',
+  'Updating {{name}}...': 'Обновление {{name}}...',
+  'Update complete!': 'Обновление завершено!',
+  'User (global)': 'Пользователь (глобально)',
+  'Workspace (project-specific)': 'Рабочее пространство (для проекта)',
+  'Disable "{{name}}" - Select Scope': 'Отключить "{{name}}" - выбрать область',
+  'Enable "{{name}}" - Select Scope': 'Включить "{{name}}" - выбрать область',
+  'No extension selected': 'Расширение не выбрано',
+  'Press Y/Enter to confirm, N/Esc to cancel':
+    'Нажмите Y/Enter для подтверждения, N/Esc для отмены',
+  'Y/Enter to confirm, N/Esc to cancel':
+    'Y/Enter для подтверждения, N/Esc для отмены',
+  '{{count}} extensions installed': 'Установлено расширений: {{count}}',
+  "Use '/extensions install' to install your first extension.":
+    "Используйте '/extensions install', чтобы установить первое расширение.",
+  'up to date': 'актуально',
+  'update available': 'доступно обновление',
+  'checking...': 'проверка...',
+  'not updatable': 'обновление недоступно',
+  "Set up Qwen Code's status line UI":
+    'Настроить интерфейс строки состояния Qwen Code',
+  'Ask a quick side question without affecting the main conversation':
+    'Задать быстрый побочный вопрос, не затрагивая основной разговор',
+  'Manage Arena sessions': 'Управлять сессиями Arena',
+  'Start an Arena session with multiple models competing on the same task':
+    'Запустить сессию Arena, где несколько моделей соревнуются на одной и той же задаче',
+  'Stop the current Arena session': 'Остановить текущую сессию Arena',
+  'Show the current Arena session status':
+    'Показать статус текущей сессии Arena',
+  'Select a model result and merge its diff into the current workspace':
+    'Выбрать результат модели и объединить его diff с текущим рабочим пространством',
+  'Manage dynamic translation cache': 'Управлять кэшем динамического перевода',
+  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
+    'Повторно перевести уже загруженные динамические описания slash-команд для текущего языка интерфейса',
+  'Clear cached translations for the current UI language':
+    'Очистить кэшированные переводы для текущего языка интерфейса',
+  'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
+    'Показать разбивку использования окна контекста. Используйте "/context detail" для детализации по элементам.',
+  'Show per-item context usage breakdown.':
+    'Показать разбивку использования контекста по элементам.',
 };

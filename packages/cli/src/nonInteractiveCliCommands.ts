@@ -16,6 +16,7 @@ import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { UnifiedCommandDescriptionProvider } from './services/CommandDescriptionProvider.js';
 import {
   CommandKind,
   type CommandContext,
@@ -254,6 +255,9 @@ export const handleSlashCommand = async (
       : 'non_interactive';
 
   const allowedBuiltinSet = new Set(allowedBuiltinCommandNames ?? []);
+  const commandDescriptionProvider = new UnifiedCommandDescriptionProvider(
+    config,
+  );
 
   // Load all commands to check if the command exists but is not allowed
   const allLoaders = [
@@ -265,6 +269,7 @@ export const handleSlashCommand = async (
   const commandService = await CommandService.create(
     allLoaders,
     abortController.signal,
+    commandDescriptionProvider,
   );
   const allCommands = commandService.getCommands();
   const filteredCommands = filterCommandsForNonInteractive(
@@ -322,6 +327,7 @@ export const handleSlashCommand = async (
       settings,
       git: undefined,
       logger,
+      commandDescriptionProvider,
     },
     ui: createNonInteractiveUI(),
     session: {
@@ -369,6 +375,9 @@ export const getAvailableCommands = async (
 ): Promise<SlashCommand[]> => {
   try {
     const allowedBuiltinSet = new Set(allowedBuiltinCommandNames ?? []);
+    const commandDescriptionProvider = new UnifiedCommandDescriptionProvider(
+      config,
+    );
 
     // Only load BuiltinCommandLoader if there are allowed built-in commands
     const loaders =
@@ -380,7 +389,11 @@ export const getAvailableCommands = async (
           ]
         : [new BundledSkillLoader(config), new FileCommandLoader(config)];
 
-    const commandService = await CommandService.create(loaders, abortSignal);
+    const commandService = await CommandService.create(
+      loaders,
+      abortSignal,
+      commandDescriptionProvider,
+    );
     const commands = commandService.getCommands();
     const filteredCommands = filterCommandsForNonInteractive(
       commands,

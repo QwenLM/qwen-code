@@ -17,6 +17,66 @@ import type {
 import { CommandKind } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import type { PromptArgument } from '@modelcontextprotocol/sdk/types.js';
+import { t } from '../i18n/index.js';
+import { markDynamicDescriptionSource } from './commandDescriptionMetadata.js';
+
+function getPromptDescription(
+  promptName: string,
+  promptDescription?: string,
+): string {
+  if (promptDescription) {
+    return promptDescription;
+  }
+
+  return t('Invoke prompt {{name}}', { name: promptName });
+}
+
+function buildPromptHelpMessage(
+  promptName: string,
+  promptArgs: PromptArgument[] | undefined,
+): string {
+  if (!promptArgs || promptArgs.length === 0) {
+    return t('Prompt "{{name}}" has no arguments.', { name: promptName });
+  }
+
+  const positionalExample = `${promptName} ${promptArgs
+    .map(() => '"foo"')
+    .join(' ')}`;
+  const namedExample = `${promptName} ${promptArgs
+    .map((arg) => `--${arg.name}="foo"`)
+    .join(' ')}`;
+  const lines = [
+    t('Arguments for "{{name}}":', { name: promptName }),
+    '',
+    t(
+      'You can provide arguments by name (e.g., {{namedExample}}) or by position.',
+      {
+        namedExample: '--argName="value"',
+      },
+    ),
+    '',
+    t('For example, {{positionalExample}} is equivalent to {{namedExample}}', {
+      positionalExample,
+      namedExample,
+    }),
+    '',
+  ];
+
+  for (const arg of promptArgs) {
+    lines.push(`  --${arg.name}`);
+    if (arg.description) {
+      lines.push(`    ${arg.description}`);
+    }
+    lines.push(
+      `    ${t('(required: {{required}})', {
+        required: arg.required ? t('yes') : t('no'),
+      })}`,
+    );
+    lines.push('');
+  }
+
+  return lines.join('\n');
+}
 
 /**
  * Discovers and loads executable slash commands from prompts exposed by
@@ -44,42 +104,20 @@ export class McpPromptLoader implements ICommandLoader {
         const commandName = `${prompt.name}`;
         const newPromptCommand: SlashCommand = {
           name: commandName,
-          description: prompt.description || `Invoke prompt ${prompt.name}`,
+          get description() {
+            return getPromptDescription(prompt.name, prompt.description);
+          },
           kind: CommandKind.MCP_PROMPT,
           subCommands: [
             {
               name: 'help',
-              description: 'Show help for this prompt',
+              description: t('Show help for this prompt'),
               kind: CommandKind.MCP_PROMPT,
-              action: async (): Promise<SlashCommandActionReturn> => {
-                if (!prompt.arguments || prompt.arguments.length === 0) {
-                  return {
-                    type: 'message',
-                    messageType: 'info',
-                    content: `Prompt "${prompt.name}" has no arguments.`,
-                  };
-                }
-
-                let helpMessage = `Arguments for "${prompt.name}":\n\n`;
-                if (prompt.arguments && prompt.arguments.length > 0) {
-                  helpMessage += `You can provide arguments by name (e.g., --argName="value") or by position.\n\n`;
-                  helpMessage += `e.g., ${prompt.name} ${prompt.arguments?.map((_) => `"foo"`)} is equivalent to ${prompt.name} ${prompt.arguments?.map((arg) => `--${arg.name}="foo"`)}\n\n`;
-                }
-                for (const arg of prompt.arguments) {
-                  helpMessage += `  --${arg.name}\n`;
-                  if (arg.description) {
-                    helpMessage += `    ${arg.description}\n`;
-                  }
-                  helpMessage += `    (required: ${
-                    arg.required ? 'yes' : 'no'
-                  })\n\n`;
-                }
-                return {
-                  type: 'message',
-                  messageType: 'info',
-                  content: helpMessage,
-                };
-              },
+              action: async (): Promise<SlashCommandActionReturn> => ({
+                type: 'message',
+                messageType: 'info',
+                content: buildPromptHelpMessage(prompt.name, prompt.arguments),
+              }),
             },
           ],
           action: async (
@@ -90,7 +128,7 @@ export class McpPromptLoader implements ICommandLoader {
               return {
                 type: 'message',
                 messageType: 'error',
-                content: 'Config not loaded.',
+                content: t('Config not loaded.'),
               };
             }
 
@@ -110,7 +148,12 @@ export class McpPromptLoader implements ICommandLoader {
                 return {
                   type: 'message',
                   messageType: 'error',
-                  content: `MCP server config not found for '${serverName}'.`,
+                  content: t(
+                    'MCP server config not found for "{{serverName}}".',
+                    {
+                      serverName,
+                    },
+                  ),
                 };
               }
               const result = await prompt.invoke(promptInputs);
@@ -119,7 +162,9 @@ export class McpPromptLoader implements ICommandLoader {
                 return {
                   type: 'message',
                   messageType: 'error',
-                  content: `Error invoking prompt: ${result['error']}`,
+                  content: t('Error invoking prompt: {{error}}', {
+                    error: String(result['error']),
+                  }),
                 };
               }
 
@@ -130,8 +175,9 @@ export class McpPromptLoader implements ICommandLoader {
                 return {
                   type: 'message',
                   messageType: 'error',
-                  content:
+                  content: t(
                     'Received an empty or invalid prompt response from the server.',
+                  ),
                 };
               }
 
@@ -143,7 +189,9 @@ export class McpPromptLoader implements ICommandLoader {
               return {
                 type: 'message',
                 messageType: 'error',
-                content: `Error: ${getErrorMessage(error)}`,
+                content: t('Error: {{error}}', {
+                  error: getErrorMessage(error),
+                }),
               };
             }
           },
@@ -212,6 +260,14 @@ export class McpPromptLoader implements ICommandLoader {
             return matchingArguments;
           },
         };
+
+        if (prompt.description) {
+          markDynamicDescriptionSource(
+            newPromptCommand,
+            CommandKind.MCP_PROMPT,
+            prompt.description,
+          );
+        }
         promptCommands.push(newPromptCommand);
       }
     }
@@ -296,7 +352,11 @@ export class McpPromptLoader implements ICommandLoader {
         const missingArgNames = missingArgs
           .map((name) => `--${name}`)
           .join(', ');
-        return new Error(`Missing required argument(s): ${missingArgNames}`);
+        return new Error(
+          t('Missing required argument(s): {{args}}', {
+            args: missingArgNames,
+          }),
+        );
       }
     }
 

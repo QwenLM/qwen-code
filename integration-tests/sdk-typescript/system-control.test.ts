@@ -408,6 +408,72 @@ describe('System Control (E2E)', () => {
       }
     });
 
+    it('should include custom workspace slash commands', async () => {
+      await helper.createFile(
+        '.qwen/commands/review-staged.md',
+        `---
+description: Review staged changes in the current workspace
+---
+
+Review the currently staged changes and summarize the risk.`,
+      );
+
+      const sessionId = crypto.randomUUID();
+      const resultWaiter = createResultWaiter(1);
+      const generator = (async function* () {
+        yield {
+          type: 'user',
+          session_id: sessionId,
+          message: { role: 'user', content: 'Hello' },
+          parent_tool_use_id: null,
+        } as SDKUserMessage;
+
+        await resultWaiter.waitForResult(0);
+      })();
+
+      const q = query({
+        prompt: generator,
+        options: {
+          ...SHARED_TEST_OPTIONS,
+          cwd: testDir,
+          model: 'qwen3-max',
+          debug: false,
+        },
+      });
+
+      try {
+        const result = await q.supportedCommands();
+        const messageConsumer = (async () => {
+          try {
+            for await (const message of q) {
+              if (isSDKResultMessage(message)) {
+                resultWaiter.notifyResult();
+              }
+            }
+          } catch (error) {
+            if (error instanceof Error && error.message !== 'Query is closed') {
+              throw error;
+            }
+          }
+        })();
+
+        expect(result).toBeDefined();
+        expect(result).toHaveProperty('commands');
+
+        const commands = result?.['commands'] as string[];
+        expect(commands).toContain('review-staged');
+
+        const sortedCommands = [...commands].sort();
+        expect(commands).toEqual(sortedCommands);
+
+        await q.close();
+        await messageConsumer;
+      } catch (error) {
+        await q.close();
+        throw error;
+      }
+    });
+
     it('should throw error when supportedCommands is called on closed query', async () => {
       const q = query({
         prompt: 'Hello',

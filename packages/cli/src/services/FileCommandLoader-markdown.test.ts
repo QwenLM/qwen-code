@@ -4,11 +4,20 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  beforeAll,
+  afterAll,
+  beforeEach,
+  afterEach,
+} from 'vitest';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { FileCommandLoader } from './FileCommandLoader.js';
+import { setLanguageAsync } from '../i18n/index.js';
 
 describe('FileCommandLoader - Markdown support', () => {
   let tempDir: string;
@@ -18,9 +27,17 @@ describe('FileCommandLoader - Markdown support', () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-md-test-'));
   });
 
+  beforeEach(async () => {
+    await setLanguageAsync('en');
+  });
+
   afterAll(async () => {
     // Clean up
     await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    await setLanguageAsync('en');
   });
 
   it('should load markdown commands with frontmatter', async () => {
@@ -134,6 +151,32 @@ Markdown prompt`;
 
       expect(mdCommand).toBeDefined();
       expect(mdCommand?.description).toBe('Markdown command');
+    } finally {
+      loader['getCommandDirectories'] = originalMethod;
+    }
+  });
+
+  it('should preserve markdown command source descriptions before provider resolution', async () => {
+    const mdContent = `---
+description: Create a pull request based on staged code changes
+---
+
+This is a test prompt from markdown.`;
+
+    const commandPath = path.join(tempDir, 'create-pr.md');
+    await fs.writeFile(commandPath, mdContent, 'utf-8');
+
+    const loader = new FileCommandLoader(null);
+    const originalMethod = loader['getCommandDirectories'];
+    loader['getCommandDirectories'] = () => [{ path: tempDir }];
+
+    try {
+      const commands = await loader.loadCommands(new AbortController().signal);
+      const command = commands.find((cmd) => cmd.name === 'create-pr');
+
+      expect(command?.description).toBe(
+        'Create a pull request based on staged code changes',
+      );
     } finally {
       loader['getCommandDirectories'] = originalMethod;
     }

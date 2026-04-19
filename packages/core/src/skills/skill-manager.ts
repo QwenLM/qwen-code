@@ -533,6 +533,7 @@ export class SkillManager {
     matcher: Record<string, unknown>,
   ): HookDefinition | null {
     const matcherPattern = matcher['matcher'] as string | undefined;
+    const sequential = matcher['sequential'] as boolean | undefined;
     const hooksRaw = matcher['hooks'] as unknown[] | undefined;
 
     if (!hooksRaw || !Array.isArray(hooksRaw)) {
@@ -554,7 +555,11 @@ export class SkillManager {
         const commandHook: CommandHookConfig = {
           type: HookType.Command,
           command: hook['command'] as string,
+          name: hook['name'] as string | undefined,
+          description: hook['description'] as string | undefined,
           timeout: hook['timeout'] as number | undefined,
+          env: hook['env'] as Record<string, string> | undefined,
+          async: hook['async'] as boolean | undefined,
           statusMessage: hook['statusMessage'] as string | undefined,
           shell: hook['shell'] as 'bash' | 'powershell' | undefined,
         };
@@ -563,10 +568,14 @@ export class SkillManager {
         const httpHook: HttpHookConfig = {
           type: HookType.Http,
           url: hook['url'] as string,
+          if: hook['if'] as string | undefined,
+          name: hook['name'] as string | undefined,
+          description: hook['description'] as string | undefined,
           headers: hook['headers'] as Record<string, string> | undefined,
           allowedEnvVars: hook['allowedEnvVars'] as string[] | undefined,
           timeout: hook['timeout'] as number | undefined,
           statusMessage: hook['statusMessage'] as string | undefined,
+          once: hook['once'] as boolean | undefined,
         };
         hooks.push(httpHook);
       } else {
@@ -580,6 +589,7 @@ export class SkillManager {
 
     return {
       matcher: matcherPattern,
+      sequential,
       hooks,
     };
   }

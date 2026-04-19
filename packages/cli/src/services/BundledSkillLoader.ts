@@ -15,6 +15,7 @@ import type {
   SlashCommandActionReturn,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
+import { markDynamicDescriptionSource } from './commandDescriptionMetadata.js';
 
 const debugLogger = createDebugLogger('BUNDLED_SKILL_LOADER');
 
@@ -54,34 +55,46 @@ export class BundledSkillLoader implements ICommandLoader {
         `Loaded ${skills.length} bundled skill(s) as slash commands`,
       );
 
-      return skills.map((skill) => ({
-        name: skill.name,
-        description: skill.description,
-        kind: CommandKind.SKILL,
-        action: async (context, _args): Promise<SlashCommandActionReturn> => {
-          // Resolve template variables in skill body
-          let body = skill.body;
-          const modelId = this.config?.getModel()?.trim() || '';
-          if (body.includes('{{model}}') || body.includes('YOUR_MODEL_ID')) {
-            body = body.replaceAll('{{model}}', modelId);
-            body = body.replaceAll('YOUR_MODEL_ID', modelId);
-            // Prepend model identity as a top-level declaration so the LLM
-            // cannot miss it even if it doesn't copy the template exactly.
-            if (modelId) {
-              body = `YOUR_MODEL_ID="${modelId}"\n\n${body}`;
+      return skills.map((skill) => {
+        const command: SlashCommand = {
+          name: skill.name,
+          get description() {
+            return skill.description;
+          },
+          kind: CommandKind.SKILL,
+          action: async (context, _args): Promise<SlashCommandActionReturn> => {
+            // Resolve template variables in skill body
+            let body = skill.body;
+            const modelId = this.config?.getModel()?.trim() || '';
+            if (body.includes('{{model}}') || body.includes('YOUR_MODEL_ID')) {
+              body = body.replaceAll('{{model}}', modelId);
+              body = body.replaceAll('YOUR_MODEL_ID', modelId);
+              // Prepend model identity as a top-level declaration so the LLM
+              // cannot miss it even if it doesn't copy the template exactly.
+              if (modelId) {
+                body = `YOUR_MODEL_ID="${modelId}"\n\n${body}`;
+              }
             }
-          }
 
-          const content = context.invocation?.args
-            ? appendToLastTextPart([{ text: body }], context.invocation.raw)
-            : [{ text: body }];
+            const content = context.invocation?.args
+              ? appendToLastTextPart([{ text: body }], context.invocation.raw)
+              : [{ text: body }];
 
-          return {
-            type: 'submit_prompt',
-            content,
-          };
-        },
-      }));
+            return {
+              type: 'submit_prompt',
+              content,
+            };
+          },
+        };
+
+        markDynamicDescriptionSource(
+          command,
+          CommandKind.SKILL,
+          skill.description,
+        );
+
+        return command;
+      });
     } catch (error) {
       debugLogger.error('Failed to load bundled skills:', error);
       return [];

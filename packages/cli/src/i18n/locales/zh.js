@@ -6,7 +6,10 @@
 
 // Chinese translations for Qwen Code CLI
 
+import en from './en.js';
+
 export default {
+  ...en,
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -68,6 +71,7 @@ export default {
   'Open input in external editor': '在外部编辑器中打开输入',
   'Send message': '发送消息',
   'Initializing...': '正在初始化...',
+  'Loading suggestions...': '正在加载建议...',
   'Connecting to MCP servers... ({{connected}}/{{total}})':
     '正在连接到 MCP 服务器... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': '输入您的消息或 @ 文件路径',
@@ -145,10 +149,72 @@ export default {
   'open full Qwen Code documentation in your browser':
     '在浏览器中打开完整的 Qwen Code 文档',
   'Configuration not available.': '配置不可用',
+  'Settings service not available.': '设置服务不可用。',
   'change the auth method': '更改认证方法',
   'Configure authentication information for login': '配置登录认证信息',
   'Copy the last result or code snippet to clipboard':
     '将最后的结果或代码片段复制到剪贴板',
+  'Ask a quick side question without affecting the main conversation':
+    '在不影响主对话的情况下快速问一个旁支问题',
+  'Please provide a question. Usage: /btw <your question>':
+    '请输入问题。用法：/btw <your question>',
+  'No model configured.': '未配置模型。',
+  'No response received.': '未收到响应。',
+  'Thinking...': '思考中...',
+  'Failed to answer btw question: {{error}}': '回答 btw 问题失败：{{error}}',
+
+  // ============================================================================
+  // Commands - Arena
+  // ============================================================================
+  'Manage Arena sessions': '管理 Arena 会话',
+  'Start an Arena session with multiple models competing on the same task':
+    '启动一个 Arena 会话，让多个模型在同一任务上竞争',
+  'Stop the current Arena session': '停止当前 Arena 会话',
+  'Show the current Arena session status': '显示当前 Arena 会话状态',
+  'Select a model result and merge its diff into the current workspace':
+    '选择一个模型结果并将其差异合并到当前工作区',
+  'Usage: /arena start --models model1,model2 <task>':
+    '用法：/arena start --models model1,model2 <task>',
+  'Options:': '选项：',
+  'Models to compete (required, at least 2)':
+    '参与竞争的模型（必填，至少 2 个）',
+  'Format: authType:modelId or just modelId':
+    '格式：authType:modelId 或仅 modelId',
+  'Examples:': '示例：',
+  'Arena requires at least 2 models. Use --models model1,model2 to specify.':
+    'Arena 至少需要 2 个模型。请使用 --models model1,model2 指定。',
+  'Format: [authType:]modelId (e.g., openai:gpt-4o or just gpt-4o)':
+    '格式：[authType:]modelId（例如 openai:gpt-4o 或仅 gpt-4o）',
+  'Arena started with {{count}} agents on task: "{{task}}"\nModels:\n{{modelList}}':
+    'Arena 已启动，共 {{count}} 个智能体，任务为：“{{task}}”\n模型：\n{{modelList}}',
+  'Arena panes are running in tmux. Attach with: `{{command}}`':
+    'Arena 面板正在 tmux 中运行。使用 `{{command}}` 连接。',
+  '[{{label}}] failed: {{error}}': '[{{label}}] 失败：{{error}}',
+  'Arena is not supported in non-interactive mode. Use interactive mode to start an Arena session.':
+    '非交互模式不支持 Arena。请使用交互模式启动 Arena 会话。',
+  'Arena is not supported in non-interactive mode. Use interactive mode to stop an Arena session.':
+    '非交互模式不支持 Arena。请使用交互模式停止 Arena 会话。',
+  'Arena is not supported in non-interactive mode.': '非交互模式不支持 Arena。',
+  'An Arena session exists. Use /arena stop or /arena select to end it before starting a new one.':
+    '已有 Arena 会话存在。请先使用 /arena stop 或 /arena select 结束当前会话，再启动新的会话。',
+  'No running Arena session found.': '未找到正在运行的 Arena 会话。',
+  'No Arena session found. Start one with /arena start.':
+    '未找到 Arena 会话。请使用 /arena start 启动一个。',
+  'Arena session is still running. Wait for it to complete or use /arena stop first.':
+    'Arena 会话仍在运行中。请等待其完成，或先使用 /arena stop。',
+  'Discard all Arena results and clean up worktrees?':
+    '要丢弃所有 Arena 结果并清理工作树吗？',
+  'Arena results discarded. All worktrees cleaned up.':
+    '已丢弃 Arena 结果，并清理所有工作树。',
+  'No successful agent results to select from. All agents failed or were cancelled.':
+    '没有可供选择的成功智能体结果。所有智能体都失败了或已被取消。',
+  'Use /arena stop to end the session.': '使用 /arena stop 结束该会话。',
+  'No idle agent found matching "{{name}}".':
+    '未找到与 "{{name}}" 匹配的空闲智能体。',
+  'Failed to apply changes from {{label}}: {{error}}':
+    '从 {{label}} 应用更改失败：{{error}}',
+  'Applied changes from {{label}} to workspace. Arena session complete.':
+    '已将 {{label}} 的更改应用到工作区。Arena 会话已完成。',
 
   // ============================================================================
   // Commands - Agents
@@ -776,6 +842,11 @@ export default {
   // ============================================================================
   'generate personalized programming insights from your chat history':
     '根据你的聊天记录生成个性化编程洞察',
+  'Generating insights...': '正在生成洞察...',
+  'This may take a couple minutes. Sit tight!': '这可能需要几分钟，请稍候！',
+  'Starting insight generation...': '正在开始生成洞察...',
+  'Insight report generated successfully!': '洞察报告生成成功！',
+  'Insights ready.': '洞察已准备就绪。',
 
   // ============================================================================
   // Commands - Session History
@@ -802,6 +873,22 @@ export default {
   'Set LLM output language': '设置 LLM 输出语言',
   'Usage: /language ui [{{options}}]': '用法：/language ui [{{options}}]',
   'Usage: /language output <language>': '用法：/language output <语言>',
+  'Manage dynamic translation cache': '管理动态翻译缓存',
+  'Usage: /language cache <refresh|clear>':
+    '用法：/language cache <refresh|clear>',
+  'Re-translate currently loaded dynamic slash descriptions for the current UI language':
+    '按当前 UI 语言重新翻译当前已加载的动态 slash 描述',
+  'Clear cached translations for the current UI language':
+    '清除当前 UI 语言的缓存翻译',
+  'Invalid cache command. Available: refresh, clear':
+    '无效的缓存命令。可用选项：refresh、clear',
+  'Cache subcommands do not accept additional arguments.':
+    '缓存子命令不接受额外参数',
+  'Dynamic translation service is not available.': '动态翻译服务不可用。',
+  'Queued translation refresh for {{count}} dynamic description(s).':
+    '已为 {{count}} 个动态描述排队刷新翻译。',
+  'Cleared dynamic translation cache for the current UI language.':
+    '已清除当前 UI 语言的动态翻译缓存。',
   'Example: /language output 中文': '示例：/language output 中文',
   'Example: /language output English': '示例：/language output English',
   'Example: /language output 日本語': '示例：/language output 日本語',
@@ -930,8 +1017,11 @@ export default {
   'Managed auto-memory dream found nothing to improve.':
     '托管自动记忆 dream 未发现可改进内容。',
   'Deduplicated entries: {{count}}': '去重条目数：{{count}}',
+  'Open the memory manager.': '打开记忆管理器。',
   'Save a durable memory using the save_memory tool.':
     '使用 save_memory 工具保存一条持久记忆',
+  'Save a durable memory to the memory system.':
+    '将一条持久记忆保存到记忆系统。',
   'Usage: /remember [--global|--project] <text to remember>':
     '用法：/remember [--global|--project] <要记住的文本>',
 
@@ -1139,6 +1229,8 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型）',
   'Set a lighter model for prompt suggestions and speculative execution':
     '设置用于输入建议和推测执行的轻量模型',
+  'Could not retrieve skill manager.': '无法获取技能管理器。',
+  'No skills are currently available.': '当前没有可用技能。',
   'Content generator configuration not available.': '内容生成器配置不可用',
   'Authentication type not available.': '认证类型不可用',
   'No models available for the current authentication type ({{authType}}).':
@@ -1781,6 +1873,7 @@ export default {
   'No API response yet. Send a message to see actual usage.':
     '暂无 API 响应。发送消息以查看实际使用情况。',
   'Show context window usage breakdown.': '显示上下文窗口使用情况分解。',
+  'Show per-item context usage breakdown.': '显示按项目划分的上下文使用详情。',
   'Run /context detail for per-item breakdown.':
     '运行 /context detail 查看详细分解。',
   'Show context window usage breakdown. Use "/context detail" for per-item breakdown.':
@@ -1904,5 +1997,49 @@ export default {
   'Not in plan mode. Use "/plan" to enter plan mode first.':
     '未处于计划模式。请先使用 "/plan" 进入计划模式。',
 
+  'Custom command from {{file}}': '来自 {{file}} 的自定义命令',
+  'Create a recurring loop that runs a prompt on a schedule. Usage - /loop 5m check the build, /loop check the PR every 30m, /loop run tests (defaults to 10m). /loop list to show jobs, /loop clear to cancel all.':
+    '创建按计划重复运行提示词的循环任务。用法：`/loop 5m check the build`、`/loop check the PR every 30m`、`/loop run tests`（默认 10 分钟）。使用 `/loop list` 查看任务，使用 `/loop clear` 取消全部任务。',
+  'Answer any question about Qwen Code usage, features, configuration, and troubleshooting by referencing the official user documentation. Also helps users view or modify their settings.json. Invoke with `/qc-helper` followed by a question, e.g. `/qc-helper how do I configure MCP servers?` or `/qc-helper change approval mode to yolo`.':
+    '参考官方用户文档回答关于 Qwen Code 用法、功能、配置和故障排查的任何问题，也可协助查看或修改 `settings.json`。使用方式：`/qc-helper` 后接问题，例如 `/qc-helper 如何配置 MCP servers？` 或 `/qc-helper change approval mode to yolo`。',
+  'Review changed code for correctness, security, code quality, and performance. Use when the user asks to review code changes, a PR, or specific files. Invoke with `/review`, `/review <pr-number>`, `/review <file-path>`, or `/review <pr-number> --comment` to post inline comments on the PR.':
+    '审查已变更代码的正确性、安全性、代码质量和性能。适用于用户要求评审代码变更、PR 或特定文件时。可使用 `/review`、`/review <pr-number>`、`/review <file-path>`，或用 `/review <pr-number> --comment` 在 PR 上发布行内评论。',
+  'Fix a bug from a GitHub issue, following the reproduce-first workflow':
+    '按照“先复现后修复”的流程，根据 GitHub issue 修复缺陷',
+  'Code review a pull request': '审查一个拉取请求',
+  'Commit staged changes with an AI-generated commit message and push':
+    '用 AI 生成提交信息来提交已暂存的变更并推送',
+  'Draft and submit a GitHub issue based on a user-provided idea':
+    '根据用户提供的想法起草并提交 GitHub issue',
+  'Create a pull request based on staged code changes':
+    '基于已暂存的代码变更创建拉取请求',
+
   "Set up Qwen Code's status line UI": '配置 Qwen Code 的状态栏',
+
+  // ============================================================================
+  // MCP Prompt Commands
+  // ============================================================================
+  'Invoke prompt {{name}}': '调用提示 {{name}}',
+  'Show help for this prompt': '显示此提示的帮助',
+  'Prompt "{{name}}" has no arguments.': '提示 "{{name}}" 没有参数。',
+  'Arguments for "{{name}}":': '"{{name}}" 的参数：',
+  'You can provide arguments by name (e.g., {{namedExample}}) or by position.':
+    '您可以按名称（例如：{{namedExample}}）或按位置提供参数。',
+  'For example, {{positionalExample}} is equivalent to {{namedExample}}':
+    '例如，{{positionalExample}} 等价于 {{namedExample}}',
+  '(required: {{required}})': '（必填：{{required}}）',
+  yes: '是',
+  no: '否',
+  'MCP server config not found for "{{serverName}}".':
+    '未找到 "{{serverName}}" 的 MCP 服务器配置。',
+  'Error invoking prompt: {{error}}': '调用提示失败：{{error}}',
+  'Received an empty or invalid prompt response from the server.':
+    '从服务器收到空响应或无效的提示响应。',
+  'Missing required argument(s): {{args}}': '缺少必填参数：{{args}}',
+  'Value:': '值：',
+  'No server selected': '未选择服务器',
+  prompts: '提示',
+  required: '必填',
+  Enum: '枚举',
+  'Manage extension settings': '管理扩展设置',
 };

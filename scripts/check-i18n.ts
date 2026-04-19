@@ -8,13 +8,26 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { dirname } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { glob } from 'glob';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+import {
+  MUST_TRANSLATE_KEYS,
+  SUPPORTED_LANGUAGES,
+} from '../packages/cli/src/i18n/index.js';
 
-// Get __dirname for ESM modules
-// @ts-expect-error - import.meta is supported in NodeNext module system at runtime
-const __dirname = dirname(fileURLToPath(import.meta.url));
+type TranslationValue = string | string[];
+type TranslationDict = Record<string, TranslationValue>;
+
+interface LocaleStats {
+  code: string;
+  id: string;
+  totalKeys: number;
+  translatedKeys: number;
+  missingKeys: string[];
+  extraKeys: string[];
+  untranslatedMustKeys: string[];
+}
 
 interface CheckResult {
   success: boolean;
@@ -22,45 +35,34 @@ interface CheckResult {
   warnings: string[];
   stats: {
     totalKeys: number;
-    translatedKeys: number;
     unusedKeys: string[];
-    unusedKeysOnlyInLocales?: string[]; // 新增：只在 locales 中存在的未使用键
+    unusedKeysOnlyInLocales?: string[];
+    locales: LocaleStats[];
   };
 }
 
-/**
- * Load translations from JS file
- */
+const __dirname = dirname(fileURLToPath(import.meta.url));
+
 async function loadTranslationsFile(
   filePath: string,
-): Promise<Record<string, string | string[]>> {
-  try {
-    // Dynamic import for ES modules
-    const module = await import(filePath);
-    return module.default || module;
-  } catch (error) {
-    // Fallback: try reading as JSON if JS import fails
-    try {
-      const content = fs.readFileSync(
-        filePath.replace('.js', '.json'),
-        'utf-8',
-      );
-      return JSON.parse(content);
-    } catch {
-      throw error;
-    }
+): Promise<TranslationDict> {
+  const fileUrl = pathToFileURL(filePath).href;
+  const module = await import(fileUrl);
+  const result = module.default || module;
+
+  if (!result || typeof result !== 'object') {
+    throw new Error(`Invalid locale module: ${filePath}`);
   }
+
+  return result as TranslationDict;
 }
 
-/**
- * Extract string literal from code, handling escaped quotes
- */
 function extractStringLiteral(
   content: string,
   startPos: number,
   quote: string,
 ): { value: string; endPos: number } | null {
-  let pos = startPos + 1; // Skip opening quote
+  let pos = startPos + 1;
   let value = '';
   let escaped = false;
 
@@ -93,16 +95,12 @@ function extractStringLiteral(
     pos++;
   }
 
-  return null; // String not closed
+  return null;
 }
 
-/**
- * Extract all t() calls from source files
- */
 async function extractUsedKeys(sourceDir: string): Promise<Set<string>> {
   const usedKeys = new Set<string>();
 
-  // Find all TypeScript/TSX files
   const files = await glob('**/*.{ts,tsx}', {
     cwd: sourceDir,
     ignore: [
@@ -115,22 +113,22 @@ async function extractUsedKeys(sourceDir: string): Promise<Set<string>> {
 
   for (const file of files) {
     const filePath = path.join(sourceDir, file);
+
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
-
-      // Find all t( or ta( calls
       const tCallRegex = /\bta?\s*\(/g;
-      let match;
-      while ((match = tCallRegex.exec(content)) !== null) {
-        const startPos = match.index + match[0].length;
-        let pos = startPos;
+      let match: RegExpExecArray | null;
 
-        // Skip whitespace
+      while ((match = tCallRegex.exec(content)) !== null) {
+        let pos = match.index + match[0].length;
+
         while (pos < content.length && /\s/.test(content[pos])) {
           pos++;
         }
 
-        if (pos >= content.length) continue;
+        if (pos >= content.length) {
+          continue;
+        }
 
         const char = content[pos];
         if (char === "'" || char === '"') {
@@ -141,7 +139,6 @@ async function extractUsedKeys(sourceDir: string): Promise<Set<string>> {
         }
       }
     } catch {
-      // Skip files that can't be read
       continue;
     }
   }
@@ -149,70 +146,53 @@ async function extractUsedKeys(sourceDir: string): Promise<Set<string>> {
   return usedKeys;
 }
 
-/**
- * Check key-value consistency in en.js
- */
-function checkKeyValueConsistency(
-  enTranslations: Record<string, string | string[]>,
-): string[] {
+function checkKeyValueConsistency(enTranslations: TranslationDict): string[] {
   const errors: string[] = [];
 
   for (const [key, value] of Object.entries(enTranslations)) {
-    // Skip array values as they don't follow the key=value rule (e.g., WITTY_LOADING_PHRASES)
     if (Array.isArray(value)) {
       continue;
     }
 
     if (key !== value) {
-      errors.push(`Key-value mismatch: "${key}" !== "${value}"`);
+      errors.push(`Key-value mismatch in en.js: "${key}" !== "${value}"`);
     }
   }
 
   return errors;
 }
 
-/**
- * Check if en.js and zh.js have matching keys
- */
-function checkKeyMatching(
-  enTranslations: Record<string, string | string[]>,
-  zhTranslations: Record<string, string | string[]>,
-): string[] {
-  const errors: string[] = [];
-  const enKeys = new Set(Object.keys(enTranslations));
-  const zhKeys = new Set(Object.keys(zhTranslations));
-
-  // Check for keys in en but not in zh
-  for (const key of enKeys) {
-    if (!zhKeys.has(key)) {
-      errors.push(`Missing translation in zh.js: "${key}"`);
-    }
-  }
-
-  // Check for keys in zh but not in en
-  for (const key of zhKeys) {
-    if (!enKeys.has(key)) {
-      errors.push(`Extra key in zh.js (not in en.js): "${key}"`);
-    }
-  }
-
-  return errors;
+function translationValuesMatch(
+  left: TranslationValue | undefined,
+  right: TranslationValue | undefined,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
-/**
- * Find unused translation keys
- */
+function countTranslatedKeys(
+  enTranslations: TranslationDict,
+  localeTranslations: TranslationDict,
+): number {
+  let translatedKeys = 0;
+
+  for (const [key, enValue] of Object.entries(enTranslations)) {
+    if (
+      key in localeTranslations &&
+      !translationValuesMatch(localeTranslations[key], enValue)
+    ) {
+      translatedKeys++;
+    }
+  }
+
+  return translatedKeys;
+}
+
 function findUnusedKeys(allKeys: Set<string>, usedKeys: Set<string>): string[] {
   return Array.from(allKeys)
     .filter((key) => !usedKeys.has(key))
     .sort();
 }
 
-/**
- * Save keys that exist only in locale files to a JSON file
- * @param keysOnlyInLocales Array of keys that exist only in locale files
- * @param outputPath Path to save the JSON file
- */
 function saveKeysOnlyInLocalesToJson(
   keysOnlyInLocales: string[],
   outputPath: string,
@@ -230,14 +210,6 @@ function saveKeysOnlyInLocalesToJson(
   }
 }
 
-/**
- * Check if unused keys exist only in locale files and nowhere else in the codebase
- * Optimized to search all keys in a single pass instead of multiple grep calls
- * @param unusedKeys The list of unused keys to check
- * @param sourceDir The source directory to search in
- * @param localesDir The locales directory to exclude from search
- * @returns Array of keys that exist only in locale files
- */
 async function findKeysOnlyInLocales(
   unusedKeys: string[],
   sourceDir: string,
@@ -250,7 +222,6 @@ async function findKeysOnlyInLocales(
   const keysOnlyInLocales: string[] = [];
   const localesDirName = path.basename(localesDir);
 
-  // Find all TypeScript/TSX files (excluding locales, node_modules, dist, and test files)
   const files = await glob('**/*.{ts,tsx}', {
     cwd: sourceDir,
     ignore: [
@@ -262,27 +233,23 @@ async function findKeysOnlyInLocales(
     ],
   });
 
-  // Read all files and check for key usage
   const foundKeys = new Set<string>();
 
   for (const file of files) {
     const filePath = path.join(sourceDir, file);
+
     try {
       const content = fs.readFileSync(filePath, 'utf-8');
-
-      // Check each unused key in the file content
       for (const key of unusedKeys) {
         if (!foundKeys.has(key) && content.includes(key)) {
           foundKeys.add(key);
         }
       }
     } catch {
-      // Skip files that can't be read
       continue;
     }
   }
 
-  // Keys that were not found in any source files exist only in locales
   for (const key of unusedKeys) {
     if (!foundKeys.has(key)) {
       keysOnlyInLocales.push(key);
@@ -292,9 +259,6 @@ async function findKeysOnlyInLocales(
   return keysOnlyInLocales;
 }
 
-/**
- * Main check function
- */
 async function checkI18n(): Promise<CheckResult> {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -302,57 +266,95 @@ async function checkI18n(): Promise<CheckResult> {
   const localesDir = path.join(__dirname, '../packages/cli/src/i18n/locales');
   const sourceDir = path.join(__dirname, '../packages/cli/src');
 
-  const enPath = path.join(localesDir, 'en.js');
-  const zhPath = path.join(localesDir, 'zh.js');
+  const localeDefinitions = SUPPORTED_LANGUAGES.map((language) => ({
+    code: language.code,
+    id: language.id,
+    path: path.join(localesDir, `${language.code}.js`),
+  }));
 
-  // Load translation files
-  let enTranslations: Record<string, string | string[]>;
-  let zhTranslations: Record<string, string | string[]>;
+  const localeTranslations = new Map<string, TranslationDict>();
 
-  try {
-    enTranslations = await loadTranslationsFile(enPath);
-  } catch (error) {
-    errors.push(
-      `Failed to load en.js: ${error instanceof Error ? error.message : String(error)}`,
-    );
+  for (const locale of localeDefinitions) {
+    try {
+      localeTranslations.set(
+        locale.code,
+        await loadTranslationsFile(locale.path),
+      );
+    } catch (error) {
+      errors.push(
+        `Failed to load ${locale.code}.js: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  const enTranslations = localeTranslations.get('en');
+  if (!enTranslations) {
     return {
       success: false,
       errors,
       warnings,
-      stats: { totalKeys: 0, translatedKeys: 0, unusedKeys: [] },
+      stats: {
+        totalKeys: 0,
+        unusedKeys: [],
+        locales: [],
+      },
     };
   }
 
-  try {
-    zhTranslations = await loadTranslationsFile(zhPath);
-  } catch (error) {
-    errors.push(
-      `Failed to load zh.js: ${error instanceof Error ? error.message : String(error)}`,
-    );
-    return {
-      success: false,
-      errors,
-      warnings,
-      stats: { totalKeys: 0, translatedKeys: 0, unusedKeys: [] },
-    };
-  }
+  errors.push(...checkKeyValueConsistency(enTranslations));
 
-  // Check key-value consistency in en.js
-  const consistencyErrors = checkKeyValueConsistency(enTranslations);
-  errors.push(...consistencyErrors);
-
-  // Check key matching between en and zh
-  const matchingErrors = checkKeyMatching(enTranslations, zhTranslations);
-  errors.push(...matchingErrors);
-
-  // Extract used keys from source code
-  const usedKeys = await extractUsedKeys(sourceDir);
-
-  // Find unused keys
   const enKeys = new Set(Object.keys(enTranslations));
-  const unusedKeys = findUnusedKeys(enKeys, usedKeys);
+  const localeStats: LocaleStats[] = [];
 
-  // Find keys that exist only in locales (and nowhere else in the codebase)
+  for (const locale of localeDefinitions) {
+    if (locale.code === 'en') {
+      continue;
+    }
+
+    const translations = localeTranslations.get(locale.code);
+    if (!translations) {
+      continue;
+    }
+
+    const localeKeys = new Set(Object.keys(translations));
+    const missingKeys = Array.from(enKeys)
+      .filter((key) => !localeKeys.has(key))
+      .sort();
+    const extraKeys = Array.from(localeKeys)
+      .filter((key) => !enKeys.has(key))
+      .sort();
+    const untranslatedMustKeys = MUST_TRANSLATE_KEYS.filter((key) => {
+      const value = translations[key];
+      return (
+        value === undefined ||
+        translationValuesMatch(value, enTranslations[key])
+      );
+    });
+    const translatedKeys = countTranslatedKeys(enTranslations, translations);
+
+    localeStats.push({
+      code: locale.code,
+      id: locale.id,
+      totalKeys: enKeys.size,
+      translatedKeys,
+      missingKeys,
+      extraKeys,
+      untranslatedMustKeys,
+    });
+
+    for (const key of missingKeys) {
+      errors.push(`Missing translation in ${locale.code}.js: "${key}"`);
+    }
+
+    for (const key of untranslatedMustKeys) {
+      errors.push(
+        `Required translation still falls back to English in ${locale.code}.js: "${key}"`,
+      );
+    }
+  }
+
+  const usedKeys = await extractUsedKeys(sourceDir);
+  const unusedKeys = findUnusedKeys(enKeys, usedKeys);
   const unusedKeysOnlyInLocales =
     unusedKeys.length > 0
       ? await findKeysOnlyInLocales(unusedKeys, sourceDir, localesDir)
@@ -362,43 +364,43 @@ async function checkI18n(): Promise<CheckResult> {
     warnings.push(`Found ${unusedKeys.length} unused translation keys`);
   }
 
-  const totalKeys = Object.keys(enTranslations).length;
-  const translatedKeys = Object.keys(zhTranslations).length;
-
   return {
     success: errors.length === 0,
     errors,
     warnings,
     stats: {
-      totalKeys,
-      translatedKeys,
+      totalKeys: enKeys.size,
       unusedKeys,
       unusedKeysOnlyInLocales,
+      locales: localeStats,
     },
   };
 }
 
-// Run checks
 async function main() {
   const result = await checkI18n();
 
   console.log('\n=== i18n Check Results ===\n');
+  console.log(`Total keys: ${result.stats.totalKeys}\n`);
+  console.log('Locale coverage:');
 
-  console.log(`Total keys: ${result.stats.totalKeys}`);
-  console.log(`Translated keys: ${result.stats.translatedKeys}`);
-  const coverage =
-    result.stats.totalKeys > 0
-      ? ((result.stats.translatedKeys / result.stats.totalKeys) * 100).toFixed(
-          1,
-        )
-      : '0.0';
-  console.log(`Translation coverage: ${coverage}%\n`);
+  for (const locale of result.stats.locales) {
+    const coverage =
+      locale.totalKeys > 0
+        ? ((locale.translatedKeys / locale.totalKeys) * 100).toFixed(1)
+        : '0.0';
+
+    console.log(
+      `  - ${locale.id} (${locale.code}): ${locale.translatedKeys}/${locale.totalKeys} translated (${coverage}%)`,
+    );
+  }
+
+  console.log();
 
   if (result.warnings.length > 0) {
     console.log('⚠️  Warnings:');
     result.warnings.forEach((warning) => console.log(`  - ${warning}`));
 
-    // Show unused keys
     if (
       result.stats.unusedKeys.length > 0 &&
       result.stats.unusedKeys.length <= 10
@@ -414,7 +416,6 @@ async function main() {
         .forEach((key) => console.log(`  - "${key}"`));
     }
 
-    // Show keys that exist only in locales files
     if (
       result.stats.unusedKeysOnlyInLocales &&
       result.stats.unusedKeysOnlyInLocales.length > 0
@@ -429,7 +430,6 @@ async function main() {
         console.log(`  - "${key}"`),
       );
 
-      // Save these keys to a JSON file
       const outputPath = path.join(
         __dirname,
         'unused-keys-only-in-locales.json',
@@ -450,10 +450,7 @@ async function main() {
     process.exit(1);
   }
 
-  if (result.success) {
-    console.log('✅ All checks passed!\n');
-    process.exit(0);
-  }
+  console.log('✅ All checks passed!\n');
 }
 
 main().catch((error) => {

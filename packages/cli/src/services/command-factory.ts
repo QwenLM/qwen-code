@@ -11,12 +11,14 @@
 
 import path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { t } from '../i18n/index.js';
 import type {
   CommandContext,
   SlashCommand,
   SlashCommandActionReturn,
 } from '../ui/commands/types.js';
 import { CommandKind } from '../ui/commands/types.js';
+import { markDynamicDescriptionSource } from './commandDescriptionMetadata.js';
 import { DefaultArgumentProcessor } from './prompt-processors/argumentProcessor.js';
 import type {
   IPromptProcessor,
@@ -39,6 +41,22 @@ export interface CommandDefinition {
 }
 
 const debugLogger = createDebugLogger('COMMAND_FACTORY');
+
+function getLocalizedDescription(
+  filePath: string,
+  description: string | undefined,
+  extensionName: string | undefined,
+): string {
+  const baseDescription =
+    description ||
+    t('Custom command from {{file}}', {
+      file: path.basename(filePath),
+    });
+
+  return extensionName
+    ? `[${extensionName}] ${baseDescription}`
+    : baseDescription;
+}
 
 /**
  * Creates a SlashCommand from a parsed command definition.
@@ -72,12 +90,6 @@ export function createSlashCommandFromDefinition(
     .join(':');
 
   // Add extension name tag for extension commands
-  const defaultDescription = `Custom command from ${path.basename(filePath)}`;
-  let description = definition.description || defaultDescription;
-  if (extensionName) {
-    description = `[${extensionName}] ${description}`;
-  }
-
   const processors: IPromptProcessor[] = [];
   const usesArgs = definition.prompt.includes(SHORTHAND_ARGS_PLACEHOLDER);
   const usesShellInjection = definition.prompt.includes(
@@ -106,9 +118,15 @@ export function createSlashCommandFromDefinition(
     processors.push(new DefaultArgumentProcessor());
   }
 
-  return {
+  const command: SlashCommand = {
     name: baseCommandName,
-    description,
+    get description() {
+      return getLocalizedDescription(
+        filePath,
+        definition.description,
+        extensionName,
+      );
+    },
     kind: CommandKind.FILE,
     extensionName,
     action: async (
@@ -154,4 +172,19 @@ export function createSlashCommandFromDefinition(
       }
     },
   };
+
+  if (definition.description) {
+    markDynamicDescriptionSource(
+      command,
+      CommandKind.FILE,
+      definition.description,
+      {
+        formatResolvedText: extensionName
+          ? (resolvedText) => `[${extensionName}] ${resolvedText}`
+          : undefined,
+      },
+    );
+  }
+
+  return command;
 }

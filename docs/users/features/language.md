@@ -26,6 +26,8 @@ Use the `/language ui` command:
 /language ui ru-RU    # Russian
 /language ui de-DE    # German
 /language ui ja-JP    # Japanese
+/language ui pt-BR    # Portuguese (Brazil)
+/language ui fr-FR    # French
 ```
 
 Aliases are also supported:
@@ -36,6 +38,8 @@ Aliases are also supported:
 /language ui ru       # Russian
 /language ui de       # German
 /language ui ja       # Japanese
+/language ui pt       # Portuguese
+/language ui fr       # French
 ```
 
 ### Auto-detection
@@ -66,6 +70,8 @@ On first startup, if no `output-language.md` file exists, Qwen Code automaticall
 - System locale `ru` creates a rule for Russian responses
 - System locale `de` creates a rule for German responses
 - System locale `ja` creates a rule for Japanese responses
+- System locale `pt` creates a rule for Portuguese responses
+- System locale `fr` creates a rule for French responses
 
 ### Manual Setting
 

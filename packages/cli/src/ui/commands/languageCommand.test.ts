@@ -23,6 +23,7 @@ vi.mock('../../i18n/index.js', () => ({
       de: 'German',
       ja: 'Japanese',
       pt: 'Portuguese',
+      fr: 'French',
     };
     return map[locale] || 'English';
   }),
@@ -88,6 +89,10 @@ describe('languageCommand', () => {
         config: {
           getModel: vi.fn().mockReturnValue('test-model'),
         },
+        commandDescriptionProvider: {
+          refreshTrackedDescriptions: vi.fn(() => 2),
+          clearCurrentLanguageCache: vi.fn(),
+        },
         settings: {
           merged: {},
           setValue: vi.fn(),
@@ -97,7 +102,12 @@ describe('languageCommand', () => {
 
     // Reset i18n mocks
     vi.mocked(i18n.getCurrentLanguage).mockReturnValue('en');
-    vi.mocked(i18n.t).mockImplementation((key: string) => key);
+    vi.mocked(i18n.t).mockImplementation(
+      (key: string, params?: Record<string, string>) =>
+        params
+          ? key.replace(/\{\{(\w+)\}\}/g, (_match, name) => params[name] || '')
+          : key,
+    );
 
     // Reset fs mocks
     vi.mocked(fs.existsSync).mockReturnValue(false);
@@ -123,13 +133,14 @@ describe('languageCommand', () => {
 
     it('should have subcommands', () => {
       expect(languageCommand.subCommands).toBeDefined();
-      expect(languageCommand.subCommands?.length).toBe(2);
+      expect(languageCommand.subCommands?.length).toBe(3);
     });
 
-    it('should have ui and output subcommands', () => {
+    it('should have ui, output, and cache subcommands', () => {
       const subCommandNames = languageCommand.subCommands?.map((c) => c.name);
       expect(subCommandNames).toContain('ui');
       expect(subCommandNames).toContain('output');
+      expect(subCommandNames).toContain('cache');
     });
   });
 
@@ -164,6 +175,11 @@ describe('languageCommand', () => {
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('/language output'),
+      });
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('/language cache'),
       });
     });
 
@@ -285,11 +301,58 @@ describe('languageCommand', () => {
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('en');
       expect(mockContext.services.settings.setValue).toHaveBeenCalled();
       expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
+      expect(mockContext.ui.refreshStatic).toHaveBeenCalled();
+      expect(
+        mockContext.services.commandDescriptionProvider
+          ?.refreshTrackedDescriptions,
+      ).toHaveBeenCalledTimes(1);
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
         content: expect.stringContaining('UI language changed'),
       });
+    });
+
+    it('should refresh static UI after switching UI language', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      await languageCommand.action(mockContext, 'ui zh-CN');
+
+      expect(mockContext.ui.reloadCommands).toHaveBeenCalledTimes(1);
+      expect(mockContext.ui.refreshStatic).toHaveBeenCalledTimes(1);
+      expect(
+        mockContext.services.commandDescriptionProvider
+          ?.refreshTrackedDescriptions,
+      ).toHaveBeenCalledTimes(1);
+    });
+
+    it('should queue dynamic translations after refreshing the UI', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      await languageCommand.action(mockContext, 'ui zh-CN');
+
+      const reloadCommandsMock = mockContext.ui.reloadCommands as ReturnType<
+        typeof vi.fn
+      >;
+      const refreshStaticMock = mockContext.ui.refreshStatic as ReturnType<
+        typeof vi.fn
+      >;
+      const refreshTrackedDescriptionsMock = mockContext.services
+        .commandDescriptionProvider?.refreshTrackedDescriptions as ReturnType<
+        typeof vi.fn
+      >;
+
+      const reloadOrder = reloadCommandsMock.mock.invocationCallOrder[0];
+      const refreshStaticOrder = refreshStaticMock.mock.invocationCallOrder[0];
+      const refreshTranslationsOrder =
+        refreshTrackedDescriptionsMock.mock.invocationCallOrder[0];
+
+      expect(reloadOrder).toBeLessThan(refreshTranslationsOrder);
+      expect(refreshStaticOrder).toBeLessThan(refreshTranslationsOrder);
     });
 
     it('should set English with "en-US"', async () => {
@@ -508,6 +571,79 @@ describe('languageCommand', () => {
     });
   });
 
+  describe('/language cache subcommand', () => {
+    it('should show help when no cache action is provided', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      const result = await languageCommand.action(mockContext, 'cache');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('current UI language'),
+      });
+    });
+
+    it('should refresh tracked dynamic descriptions', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      const result = await languageCommand.action(mockContext, 'cache refresh');
+
+      expect(
+        mockContext.services.commandDescriptionProvider
+          ?.refreshTrackedDescriptions,
+      ).toHaveBeenCalledTimes(1);
+      expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
+      expect(mockContext.ui.refreshStatic).toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining(
+          'Queued translation refresh for 2 dynamic description(s).',
+        ),
+      });
+    });
+
+    it('should clear the current language cache', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      const result = await languageCommand.action(mockContext, 'cache clear');
+
+      expect(
+        mockContext.services.commandDescriptionProvider
+          ?.clearCurrentLanguageCache,
+      ).toHaveBeenCalledTimes(1);
+      expect(mockContext.ui.reloadCommands).toHaveBeenCalled();
+      expect(mockContext.ui.refreshStatic).toHaveBeenCalled();
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'Cleared dynamic translation cache for the current UI language.',
+      });
+    });
+
+    it('should reject invalid cache actions', async () => {
+      if (!languageCommand.action) {
+        throw new Error('The language command must have an action.');
+      }
+
+      const result = await languageCommand.action(mockContext, 'cache invalid');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'error',
+        content: 'Invalid cache command. Available: refresh, clear',
+      });
+    });
+  });
+
   describe('backward compatibility - direct language arguments', () => {
     it('should set Chinese with direct "zh" argument', async () => {
       if (!languageCommand.action) {
@@ -634,6 +770,12 @@ describe('languageCommand', () => {
     const deDESubcommand = uiSubcommand?.subCommands?.find(
       (c) => c.name === 'de-DE',
     );
+    const ptBRSubcommand = uiSubcommand?.subCommands?.find(
+      (c) => c.name === 'pt-BR',
+    );
+    const frFRSubcommand = uiSubcommand?.subCommands?.find(
+      (c) => c.name === 'fr-FR',
+    );
 
     it('zh-CN action should set Chinese', async () => {
       if (!zhCNSubcommand?.action) {
@@ -691,6 +833,36 @@ describe('languageCommand', () => {
       const result = await jaJPSubcommand.action(mockContext, '');
 
       expect(i18n.setLanguageAsync).toHaveBeenCalledWith('ja');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('UI language changed'),
+      });
+    });
+
+    it('pt-BR action should set Portuguese', async () => {
+      if (!ptBRSubcommand?.action) {
+        throw new Error('pt-BR subcommand must have an action.');
+      }
+
+      const result = await ptBRSubcommand.action(mockContext, '');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('pt');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('UI language changed'),
+      });
+    });
+
+    it('fr-FR action should set French', async () => {
+      if (!frFRSubcommand?.action) {
+        throw new Error('fr-FR subcommand must have an action.');
+      }
+
+      const result = await frFRSubcommand.action(mockContext, '');
+
+      expect(i18n.setLanguageAsync).toHaveBeenCalledWith('fr');
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
@@ -838,6 +1010,19 @@ describe('languageCommand', () => {
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('output-language.md'),
         expect.stringContaining('Portuguese'),
+        'utf-8',
+      );
+    });
+
+    it('should detect French locale and create French rule file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('fr');
+
+      initializeLlmOutputLanguage();
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('French'),
         'utf-8',
       );
     });

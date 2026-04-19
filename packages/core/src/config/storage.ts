@@ -21,6 +21,8 @@ const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
+const I18N_CACHE_DIR_NAME = 'i18n-cache';
+const COMMAND_TRANSLATIONS_DIR_NAME = 'commands';
 
 export class Storage {
   private readonly targetDir: string;
@@ -180,6 +182,21 @@ export class Storage {
 
   static getGlobalArenaDir(): string {
     return path.join(Storage.getGlobalQwenDir(), ARENA_DIR_NAME);
+  }
+
+  static getI18nCacheDir(): string {
+    return path.join(Storage.getGlobalQwenDir(), I18N_CACHE_DIR_NAME);
+  }
+
+  static getCommandTranslationsCacheDir(): string {
+    return path.join(Storage.getI18nCacheDir(), COMMAND_TRANSLATIONS_DIR_NAME);
+  }
+
+  static getCommandTranslationsCachePath(language: string): string {
+    return path.join(
+      Storage.getCommandTranslationsCacheDir(),
+      `${language}.json`,
+    );
   }
 
   getQwenDir(): string {
