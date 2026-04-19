@@ -735,11 +735,6 @@ export class GeminiClient {
         this.config.getChatRecordingService()?.recordUserMessage(request);
       }
 
-      // Persist attribution state snapshot for session resume
-      this.config
-        .getChatRecordingService()
-        ?.recordAttributionSnapshot(attributionService.toSnapshot());
-
       // Idle cleanup: clear stale thinking blocks after idle period.
       // Latch: once triggered, never revert — prevents oscillation.
       const idleConfig = this.config.getClearContextOnIdle();
@@ -782,6 +777,19 @@ export class GeminiClient {
         );
       }
     }
+
+    // Persist attribution snapshot on every non-retry turn. ToolResult turns
+    // run right after tool execution, so their snapshot captures edits that a
+    // prior UserQuery turn scheduled. Without this, a resumed session only
+    // sees the UserQuery-time snapshot (empty) and loses tool-driven edits.
+    if (messageType !== SendMessageType.Retry) {
+      this.config
+        .getChatRecordingService()
+        ?.recordAttributionSnapshot(
+          CommitAttributionService.getInstance().toSnapshot(),
+        );
+    }
+
     if (messageType !== SendMessageType.Retry) {
       this.sessionTurnCount++;
 

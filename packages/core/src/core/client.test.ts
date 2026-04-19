@@ -2821,6 +2821,64 @@ Other open files:
         expect(mockMessageBus.request).toHaveBeenCalled();
       });
     });
+
+    describe('attribution snapshot persistence', () => {
+      let recordAttributionSnapshot: ReturnType<typeof vi.fn>;
+
+      beforeEach(() => {
+        recordAttributionSnapshot = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordAttributionSnapshot,
+          recordUserMessage: vi.fn(),
+          recordCronPrompt: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield { type: 'content', value: 'ok' };
+          })(),
+        );
+      });
+
+      it('records a snapshot on ToolResult turns so post-tool state is captured', async () => {
+        const stream = client.sendMessageStream(
+          [{ text: 'tool-result' }],
+          new AbortController().signal,
+          'prompt-tr',
+          { type: SendMessageType.ToolResult },
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+        expect(recordAttributionSnapshot).toHaveBeenCalled();
+      });
+
+      it('records a snapshot on UserQuery turns', async () => {
+        const stream = client.sendMessageStream(
+          [{ text: 'user' }],
+          new AbortController().signal,
+          'prompt-uq',
+          { type: SendMessageType.UserQuery },
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+        expect(recordAttributionSnapshot).toHaveBeenCalled();
+      });
+
+      it('does not record a snapshot on Retry turns', async () => {
+        const stream = client.sendMessageStream(
+          [{ text: 'retry' }],
+          new AbortController().signal,
+          'prompt-retry-snap',
+          { type: SendMessageType.Retry },
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+        expect(recordAttributionSnapshot).not.toHaveBeenCalled();
+      });
+    });
   });
 
   describe('generateContent', () => {
