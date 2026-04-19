@@ -266,10 +266,7 @@ export * from './utils/errorParsing.js';
 export * from './utils/errors.js';
 export * from './utils/fileUtils.js';
 export * from './utils/filesearch/fileSearch.js';
-export {
-  FileIndexService,
-  __setIndexTransportFactory,
-} from './utils/filesearch/fileIndexService.js';
+export { FileIndexService } from './utils/filesearch/fileIndexService.js';
 export * from './utils/formatters.js';
 export * from './utils/generateContentResponseUtilities.js';
 export * from './utils/getFolderStructure.js';

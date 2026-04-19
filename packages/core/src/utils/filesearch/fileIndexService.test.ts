@@ -139,5 +139,8 @@ describe('FileIndexService', () => {
       useGitignore: true,
     });
     expect(b).not.toBe(a);
+    // And — regression test — the stale instance must have been disposed, so
+    // its worker doesn't linger in INSTANCES keyed under the old fingerprint.
+    await expect(a.search('a')).rejects.toMatchObject({ name: 'AbortError' });
   });
 });

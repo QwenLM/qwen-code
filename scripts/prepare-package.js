@@ -159,6 +159,11 @@ const distPackageJson = {
   },
   files: [
     'cli.js',
+    // Worker thread entry loaded by fileIndexService at runtime via
+    // `new URL('./fileIndexWorker.js', import.meta.url)`. Must ship in the
+    // tarball or the @-picker crashes on the first search in an npm-installed
+    // CLI.
+    'fileIndexWorker.js',
     'vendor',
     '*.sb',
     'README.md',

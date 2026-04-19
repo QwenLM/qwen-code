@@ -264,6 +264,19 @@ export class FileIndexService {
     const key = optionsKey(options);
     const existing = INSTANCES.get(key);
     if (existing && !existing.disposed) return existing;
+    // Before minting a fresh singleton, evict any previous instance keyed
+    // under a *different* hash for the same `projectRoot`. This happens
+    // when .gitignore/.qwenignore is edited: the content changes the
+    // fingerprint, so the old key no longer matches — without eviction
+    // the stale worker stays alive forever with outdated ignore rules.
+    for (const [staleKey, staleInst] of INSTANCES) {
+      if (staleKey === key) continue;
+      if (staleInst.projectRoot !== options.projectRoot) continue;
+      // Fire-and-forget; dispose() is idempotent and removes the entry from
+      // INSTANCES synchronously at its start so the current iteration and
+      // future lookups won't see it.
+      void staleInst.dispose();
+    }
     const instance = new FileIndexService(options, key);
     // If the transport errored synchronously inside the constructor (e.g.
     // Worker spawn throws because of a sandbox restriction), handleExit
@@ -302,10 +315,13 @@ export class FileIndexService {
   private unsubscribeMessage: () => void;
   private unsubscribeExit: () => void;
 
+  readonly projectRoot: string;
+
   private constructor(
     options: FileSearchOptions,
     private readonly key: string,
   ) {
+    this.projectRoot = options.projectRoot;
     this.transport = transportFactory(options);
     this.unsubscribeMessage = this.transport.onMessage(this.handleMessage);
     this.unsubscribeExit = this.transport.onExit(this.handleExit);
@@ -362,7 +378,11 @@ export class FileIndexService {
     pattern: string,
     options: SearchOptions = {},
   ): Promise<string[]> {
-    if (this.disposed) throw new Error('FileIndexService has been disposed');
+    // Surfacing disposal as AbortError matches how in-flight searches are
+    // rejected inside dispose(), so callers can handle both cases with a
+    // single `err.name === 'AbortError'` check.
+    if (this.disposed)
+      throw new AbortError('FileIndexService has been disposed');
 
     const reqId = `r${this.nextReqId++}`;
     return new Promise<string[]>((resolve, reject) => {
