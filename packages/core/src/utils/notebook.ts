@@ -16,7 +16,9 @@ const MAX_NOTEBOOK_OUTPUT_CHARS = 100000;
  *   CSI: ESC [ … final            — colour / cursor / SGR
  *   OSC: ESC ] … BEL or ST        — hyperlinks (`OSC 8`), titles
  *   DCS / APC / PM / SOS: ESC P/_/^/X … ST  — long-form sequences
- *   Lone two-byte escapes (e.g. RIS, ESC 7/8 — save/restore cursor).
+ *   Lone two-byte escapes in the C1 Fe set (0x40-0x5A, 0x5C-0x5F):
+ *     e.g. IND `ESC D`, NEL `ESC E`, HTS `ESC H`, RI `ESC M`.
+ *     (CSI's `[` 0x5B is excluded here since it's handled above.)
  * Matching ESC (\x1B) is intentional, so disable no-control-regex here.
  */
 // prettier-ignore

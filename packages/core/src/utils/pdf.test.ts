@@ -244,11 +244,11 @@ describe('pdf utilities', () => {
       expect(mockExecFile).toHaveBeenCalledTimes(1);
     });
 
-    it('should clear the in-flight promise after a probe to allow retries', async () => {
-      // First probe rejects. We expect the promise slot to be cleared so a
-      // subsequent call (e.g. after `resetPdftotextCache()` in tests, or a
-      // brand-new probe in a long-lived session) can re-enter the function
-      // rather than re-await the failed promise forever.
+    it('resetPdftotextCache should allow re-probing after a failed first attempt', async () => {
+      // The in-flight slot is cleared in a `.finally` so a transient probe
+      // failure can't leave the cache stuck on a rejected promise. After
+      // `resetPdftotextCache()`, the second call must reach the subprocess
+      // again and observe the new (now-installed) state.
       mockExecError();
       const first = await isPdftotextAvailable();
       expect(first).toBe(false);
