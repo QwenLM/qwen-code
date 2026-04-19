@@ -136,7 +136,9 @@ export async function openBrowserSecurely(url: string): Promise<void> {
     }
 
     // Log the URL so the user can open it manually instead of crashing.
+    /* eslint-disable no-console */
     console.warn(`Failed to open browser automatically. Please open this URL manually: ${url}`);
+    /* eslint-enable no-console */
     return;
   }
 }
