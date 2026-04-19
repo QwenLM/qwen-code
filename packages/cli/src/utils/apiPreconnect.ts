@@ -162,24 +162,19 @@ export function preconnectApi(
 
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
 
-  // Build fetch options with shared dispatcher for connection pool reuse.
-  // On Node.js, use the same undici dispatcher that SDK clients will use,
+  // Use the same shared undici dispatcher that SDK clients will use,
   // so the warmed TCP+TLS connection is reused by subsequent API calls.
-  const dispatcherOptions: Record<string, unknown> =
-    detectRuntime() === 'node'
-      ? { dispatcher: getOrCreateSharedDispatcher(options.proxy) }
-      : {};
+  const dispatcher = getOrCreateSharedDispatcher(options.proxy);
 
   // Fire HEAD request to warm connection (fire-and-forget)
   fetch(targetUrl, {
     method: 'HEAD',
     signal: AbortSignal.timeout(5_000),
-    // Don't send any authentication info
     headers: {
       'User-Agent': 'QwenCode-Preconnect/1.0',
     },
-    ...dispatcherOptions,
-  })
+    dispatcher,
+  } as RequestInit)
     .then(() => {
       debugLogger.debug('Preconnect completed');
     })
