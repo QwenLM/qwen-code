@@ -25,7 +25,11 @@ import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
 import { loadCliConfig, parseArguments } from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
-import { getSettingsWarnings, loadSettings } from './config/settings.js';
+import {
+  createMinimalSettings,
+  getSettingsWarnings,
+  loadSettings,
+} from './config/settings.js';
 import {
   initializeApp,
   type InitializationResult,
@@ -292,9 +296,10 @@ export async function startInteractiveUI(
 export async function main() {
   profileCheckpoint('main_entry');
   setupUnhandledRejectionHandler();
-  const settings = loadSettings();
-  await cleanupCheckpoints();
-  profileCheckpoint('after_load_settings');
+
+  if (process.argv.includes('--bare')) {
+    process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
+  }
 
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
@@ -302,6 +307,12 @@ export async function main() {
   if (isBareMode(argv.bare)) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
+
+  const settings = isBareMode(argv.bare)
+    ? createMinimalSettings()
+    : loadSettings();
+  await cleanupCheckpoints();
+  profileCheckpoint('after_load_settings');
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {

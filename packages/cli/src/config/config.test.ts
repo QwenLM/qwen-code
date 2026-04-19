@@ -1681,6 +1681,63 @@ describe('loadCliConfig with includeDirectories', () => {
       cliPath,
     ]);
   });
+
+  it('should force minimal startup behavior in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [ToolNames.WEB_FETCH],
+        allowed: [ToolNames.WEB_FETCH],
+        exclude: [ToolNames.ASK_USER_QUESTION],
+      },
+      hooks: {
+        PreToolUse: [],
+      } as Record<string, unknown>,
+      memory: {
+        enableManagedAutoMemory: true,
+      },
+      security: {
+        allowedHttpHookUrls: ['https://hooks.example.com/*'],
+      },
+      mcp: {
+        allowed: ['test-server'],
+      },
+      mcpServers: {
+        'test-server': {
+          command: 'node',
+          args: ['server.js'],
+        },
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.EDIT,
+      ToolNames.SHELL,
+    ]);
+    expect(config.getDisableAllHooks()).toBe(true);
+    expect(config.getManagedAutoMemoryEnabled()).toBe(false);
+    expect(config.getToolDiscoveryCommand()).toBeUndefined();
+    expect(config.getToolCallCommand()).toBeUndefined();
+    expect(config.getMcpServers()).toEqual({});
+    expect(config.getWebSearchConfig()).toBeUndefined();
+    expect(config.isLspEnabled()).toBe(false);
+  });
+
+  it('should ignore coreTools overrides in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare', '--core-tools', 'web_fetch'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getCoreTools()).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.EDIT,
+      ToolNames.SHELL,
+    ]);
+  });
 });
 
 describe('loadCliConfig chatCompression', () => {

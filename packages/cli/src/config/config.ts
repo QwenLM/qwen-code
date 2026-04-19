@@ -797,7 +797,7 @@ export async function loadCliConfig(
     .concat((argv.includeDirectories || []).map(resolvePath));
 
   // LSP configuration: enabled only via --experimental-lsp flag
-  const lspEnabled = argv.experimentalLsp === true;
+  const lspEnabled = !bareMode && argv.experimentalLsp === true;
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -823,7 +823,7 @@ export async function loadCliConfig(
     approvalMode = parseApprovalModeValue(argv.approvalMode);
   } else if (argv.yolo) {
     approvalMode = ApprovalMode.YOLO;
-  } else if (settings.tools?.approvalMode) {
+  } else if (!bareMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
   } else {
     approvalMode = ApprovalMode.DEFAULT;
@@ -901,17 +901,19 @@ export async function loadCliConfig(
   // not auto-approve semantics. They are passed via the `coreTools` Config param
   // and handled by PermissionManager.coreToolsAllowList.
   const resolvedCoreTools: string[] = [
-    ...(argv.coreTools ?? []),
-    ...(settings.tools?.core ?? []),
+    ...(bareMode ? [] : (argv.coreTools ?? [])),
+    ...(bareMode ? [] : (settings.tools?.core ?? [])),
   ];
   const mergedAllow: string[] = [
-    ...(settings.permissions?.allow ?? []),
-    ...(settings.tools?.allowed ?? []),
+    ...(bareMode ? [] : (settings.permissions?.allow ?? [])),
+    ...(bareMode ? [] : (settings.tools?.allowed ?? [])),
   ];
-  const mergedAsk: string[] = [...(settings.permissions?.ask ?? [])];
+  const mergedAsk: string[] = [
+    ...(bareMode ? [] : (settings.permissions?.ask ?? [])),
+  ];
   const mergedDeny: string[] = [
-    ...(settings.permissions?.deny ?? []),
-    ...(settings.tools?.exclude ?? []),
+    ...(bareMode ? [] : (settings.permissions?.deny ?? [])),
+    ...(bareMode ? [] : (settings.tools?.exclude ?? [])),
   ];
 
   // argv.allowedTools adds allow rules (auto-approve).
@@ -987,7 +989,7 @@ export async function loadCliConfig(
   if (argv.allowedMcpServerNames) {
     allowedMcpServers = new Set(argv.allowedMcpServerNames.filter(Boolean));
     excludedMcpServers = undefined;
-  } else {
+  } else if (!bareMode) {
     allowedMcpServers = settings.mcp?.allowed
       ? new Set(settings.mcp.allowed.filter(Boolean))
       : undefined;
@@ -998,7 +1000,7 @@ export async function loadCliConfig(
 
   const selectedAuthType =
     (argv.authType as AuthType | undefined) ||
-    settings.security?.auth?.selectedType ||
+    (bareMode ? undefined : settings.security?.auth?.selectedType) ||
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
 
@@ -1018,7 +1020,10 @@ export async function loadCliConfig(
 
   const { model: resolvedModel } = resolvedCliConfig;
 
-  const sandboxConfig = await loadSandboxConfig(settings, argv);
+  const sandboxConfig = await loadSandboxConfig(
+    bareMode ? ({} as Settings) : settings,
+    argv,
+  );
   const screenReader =
     argv.screenReader !== undefined
       ? argv.screenReader
@@ -1067,16 +1072,21 @@ export async function loadCliConfig(
     sandbox: sandboxConfig,
     targetDir: cwd,
     includeDirectories,
-    loadMemoryFromIncludeDirectories:
-      settings.context?.loadFromIncludeDirectories || false,
+    loadMemoryFromIncludeDirectories: bareMode
+      ? includeDirectories.length > 0
+      : (settings.context?.loadFromIncludeDirectories ?? false),
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,
     systemPrompt: argv.systemPrompt,
     appendSystemPrompt: argv.appendSystemPrompt,
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
-    coreTools: argv.coreTools || settings.tools?.core || undefined,
-    allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
+    coreTools: bareMode
+      ? undefined
+      : argv.coreTools || settings.tools?.core || undefined,
+    allowedTools: bareMode
+      ? argv.allowedTools || undefined
+      : argv.allowedTools || settings.tools?.allowed || undefined,
     excludeTools: mergedDeny,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
@@ -1098,10 +1108,12 @@ export async function loadCliConfig(
         currentSettings.setValue(settingScope, key, [...currentRules, rule]);
       }
     },
-    toolDiscoveryCommand: settings.tools?.discoveryCommand,
-    toolCallCommand: settings.tools?.callCommand,
-    mcpServerCommand: settings.mcp?.serverCommand,
-    mcpServers: settings.mcpServers || {},
+    toolDiscoveryCommand: bareMode
+      ? undefined
+      : settings.tools?.discoveryCommand,
+    toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
+    mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
+    mcpServers: bareMode ? {} : settings.mcpServers || {},
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
@@ -1147,9 +1159,13 @@ export async function loadCliConfig(
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
     bareMode,
-    allowedHttpHookUrls: settings.security?.allowedHttpHookUrls ?? [],
+    allowedHttpHookUrls: bareMode
+      ? []
+      : (settings.security?.allowedHttpHookUrls ?? []),
     cliVersion: await getCliVersion(),
-    webSearch: buildWebSearchConfig(argv, settings, selectedAuthType),
+    webSearch: bareMode
+      ? undefined
+      : buildWebSearchConfig(argv, settings, selectedAuthType),
     ideMode,
     chatCompression: settings.model?.chatCompression,
     folderTrust,
@@ -1168,14 +1184,18 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
-    enableManagedAutoMemory: settings.memory?.enableManagedAutoMemory ?? true,
+    enableManagedAutoMemory: bareMode
+      ? false
+      : (settings.memory?.enableManagedAutoMemory ?? true),
     enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
     fastModel: settings.fastModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
-    userHooks: hooksConfig?.userHooks ?? settings.hooks,
-    projectHooks: hooksConfig?.projectHooks,
-    hooks: settings.hooks, // Keep for backward compatibility
-    disableAllHooks: settings.disableAllHooks ?? false,
+    userHooks: bareMode
+      ? undefined
+      : (hooksConfig?.userHooks ?? settings.hooks),
+    projectHooks: bareMode ? undefined : hooksConfig?.projectHooks,
+    hooks: bareMode ? undefined : settings.hooks, // Keep for backward compatibility
+    disableAllHooks: bareMode ? true : (settings.disableAllHooks ?? false),
     channel: argv.channel,
     // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
     // equivalent — fd passing is a spawn-time concern). `--json-file` and

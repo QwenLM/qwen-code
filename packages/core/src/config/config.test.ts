@@ -41,6 +41,7 @@ import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { HookSystem } from '../hooks/index.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -98,6 +99,17 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 vi.mock('../memory/store.js', () => ({
   readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
 }));
+
+vi.mock('../hooks/index.js', () => {
+  const HookSystemMock = vi.fn();
+  HookSystemMock.prototype.initialize = vi.fn().mockResolvedValue(undefined);
+  HookSystemMock.prototype.hasHooksForEvent = vi.fn().mockReturnValue(false);
+  HookSystemMock.prototype.getAllHooks = vi.fn().mockReturnValue([]);
+  return {
+    HookSystem: HookSystemMock,
+    createHookOutput: vi.fn(),
+  };
+});
 
 // Mock individual tools if their constructors are complex or have side effects
 vi.mock('../tools/ls', () => ({
@@ -353,9 +365,15 @@ describe('Server Config (config.ts)', () => {
       await expect(config.initialize()).resolves.toBeUndefined();
 
       expect(extensionRefreshSpy).not.toHaveBeenCalled();
+      expect(HookSystem).not.toHaveBeenCalled();
       expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
       expect(SkillManager.prototype.refreshCache).toHaveBeenCalledTimes(1);
       expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
+      expect(
+        (ToolRegistry.prototype.registerFactory as Mock).mock.calls.map(
+          (call) => call[0],
+        ),
+      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
     });
   });
 
@@ -690,9 +708,45 @@ describe('Server Config (config.ts)', () => {
       bareMode: true,
     });
 
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
     await config.refreshHierarchicalMemory();
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
+    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
+    expect(lastCall?.[1]).toEqual([]);
+    expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(config.getUserMemory()).toContain('Project rules');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+  });
+
+  it('refreshHierarchicalMemory should exclude implicit cwd from bare include-directories', async () => {
+    const explicitDir = '/tmp/explicit';
+    const config = new Config({
+      ...baseParams,
+      bareMode: true,
+      includeDirectories: [explicitDir],
+      loadMemoryFromIncludeDirectories: true,
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
+    expect(lastCall?.[1]).toEqual([explicitDir]);
     expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
   });
 
@@ -997,6 +1051,30 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('should ignore coreTools overrides in bare mode', async () => {
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        coreTools: [ToolNames.WEB_FETCH],
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      expect(config.getCoreTools()).toEqual([
+        ToolNames.READ_FILE,
+        ToolNames.EDIT,
+        ToolNames.SHELL,
+      ]);
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toEqual([ToolNames.READ_FILE, ToolNames.EDIT, ToolNames.SHELL]);
+    });
+
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
         ...baseParams,
