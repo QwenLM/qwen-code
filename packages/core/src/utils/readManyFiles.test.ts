@@ -316,6 +316,9 @@ describe('readManyFiles', () => {
       );
       expect(result.files).toHaveLength(1);
       expect(result.files[0]!.filePath).toBe(absolutePath);
+      // Downstream callers (e.g. atCommandProcessor) inspect this field to
+      // render the read as failed rather than successful.
+      expect(result.files[0]!.error).toMatch(/exceeds the 10MB limit/i);
     });
   });
 });

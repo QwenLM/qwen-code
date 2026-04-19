@@ -38,6 +38,14 @@ export interface FileReadInfo {
   content: PartListUnion;
   /** Whether this is a directory listing rather than file content */
   isDirectory: boolean;
+  /**
+   * Error message when the read failed (e.g. missing pdftotext,
+   * password-protected PDF, file too large). When present, `content`
+   * holds the user-facing guidance string that was surfaced to the LLM,
+   * and callers should render this entry as a failed read rather than a
+   * successful one.
+   */
+  error?: string;
 }
 
 /**
@@ -186,6 +194,7 @@ async function readFileContent(
           filePath,
           content: errorText,
           isDirectory: false,
+          error: fileReadResult.error,
         },
       };
     }
