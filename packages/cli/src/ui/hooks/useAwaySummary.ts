@@ -52,13 +52,20 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
     }
 
     const blurredAt = blurredAtRef.current;
-    blurredAtRef.current = null;
-
     if (blurredAt === null) return;
-    if (Date.now() - blurredAt < AWAY_THRESHOLD_MS) return;
+
+    if (Date.now() - blurredAt < AWAY_THRESHOLD_MS) {
+      // Brief blur; reset and wait for the next away cycle.
+      blurredAtRef.current = null;
+      return;
+    }
+
     if (recapPendingRef.current) return;
+    // Wait for idle; do NOT clear blurredAtRef so this effect re-fires
+    // (with isIdle in the deps) when the streaming turn finishes.
     if (!isIdleRef.current) return;
 
+    blurredAtRef.current = null;
     recapPendingRef.current = true;
     const controller = new AbortController();
     inFlightRef.current = controller;
@@ -79,7 +86,7 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
         }
         recapPendingRef.current = false;
       });
-  }, [enabled, config, isFocused, addItem]);
+  }, [enabled, config, isFocused, isIdle, addItem]);
 
   useEffect(
     () => () => {

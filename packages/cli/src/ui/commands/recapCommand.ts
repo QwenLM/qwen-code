@@ -34,15 +34,18 @@ export const recapCommand: SlashCommand = {
       };
     }
 
-    if (
-      context.executionMode === 'interactive' &&
-      context.ui.pendingItem !== null
-    ) {
-      return {
-        type: 'message',
-        messageType: 'error',
-        content: t('Cannot run /recap while another operation is in progress.'),
-      };
+    if (context.executionMode === 'interactive') {
+      const turnInFlight =
+        !context.ui.isIdleRef.current || context.ui.pendingItem !== null;
+      if (turnInFlight) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'Cannot run /recap while another operation is in progress.',
+          ),
+        };
+      }
     }
 
     const recap = await generateSessionRecap(config, abortSignal);
