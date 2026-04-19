@@ -117,4 +117,27 @@ describe('FileIndexService', () => {
     await b.whenReady();
     expect(b.state).toBe('ready');
   });
+
+  it('invalidates the singleton when ignore rules change', async () => {
+    const fs = await import('node:fs/promises');
+    const path = await import('node:path');
+    tmpDir = await createTmpDir({ 'a.txt': '' });
+
+    const a = FileIndexService.for({
+      ...baseOptions(tmpDir),
+      useGitignore: true,
+    });
+    await a.whenReady();
+
+    // Write a .gitignore after the service was created; a subsequent `.for()`
+    // call must see a different options key and spawn a fresh worker rather
+    // than returning the memoised instance with stale ignore rules.
+    await fs.writeFile(path.join(tmpDir, '.gitignore'), 'ignored/\n', 'utf8');
+
+    const b = FileIndexService.for({
+      ...baseOptions(tmpDir),
+      useGitignore: true,
+    });
+    expect(b).not.toBe(a);
+  });
 });

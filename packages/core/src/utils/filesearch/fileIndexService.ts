@@ -9,6 +9,7 @@ import { Worker } from 'node:worker_threads';
 import { FileIndexCore } from './fileIndexCore.js';
 import type { FileSearchOptions, SearchOptions } from './fileSearch.js';
 import { AbortError } from './fileSearch.js';
+import { loadIgnoreRules } from './ignore.js';
 
 type WorkerRequest =
   | { type: 'start' }
@@ -217,6 +218,20 @@ export interface FileIndexServiceState {
 const INSTANCES = new Map<string, FileIndexService>();
 
 function optionsKey(options: FileSearchOptions): string {
+  // Include the ignore-rule content (via loadIgnoreRules().getFingerprint(),
+  // which hashes .gitignore + .qwenignore + ignoreDirs) so that editing
+  // those files produces a different key and spawns a fresh worker. Without
+  // this, a stale singleton would keep serving results that still match
+  // the old patterns. `loadIgnoreRules` is sync-fs; the cost is tiny (two
+  // existsSync + at-most-two readFileSync) and only runs on `.for()` miss
+  // paths (it's called again from FileIndexCore inside the worker).
+  let ignoreFingerprint = '';
+  try {
+    ignoreFingerprint = loadIgnoreRules(options).getFingerprint();
+  } catch {
+    // If the project root is unreadable, fall back to the path only. The
+    // worker will fail its own crawl in that case and surface the error.
+  }
   const serializable = {
     projectRoot: options.projectRoot,
     ignoreDirs: [...options.ignoreDirs].sort(),
@@ -225,6 +240,7 @@ function optionsKey(options: FileSearchOptions): string {
     enableFuzzySearch: options.enableFuzzySearch,
     enableRecursiveFileSearch: options.enableRecursiveFileSearch,
     maxDepth: options.maxDepth ?? null,
+    ignoreFingerprint,
   };
   return crypto
     .createHash('sha256')
@@ -245,7 +261,14 @@ export class FileIndexService {
     const existing = INSTANCES.get(key);
     if (existing && !existing.disposed) return existing;
     const instance = new FileIndexService(options, key);
-    INSTANCES.set(key, instance);
+    // If the transport errored synchronously inside the constructor (e.g.
+    // Worker spawn throws because of a sandbox restriction), handleExit
+    // already ran and called `INSTANCES.delete(this.key)` against an entry
+    // that wasn't there yet. Guard the set so a permanently-disposed
+    // instance isn't memoised for every future `.for()` caller.
+    if (!instance.disposed) {
+      INSTANCES.set(key, instance);
+    }
     return instance;
   }
 

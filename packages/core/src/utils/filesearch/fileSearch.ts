@@ -86,6 +86,16 @@ export interface SearchOptions {
 export interface FileSearch {
   initialize(): Promise<void>;
   search(pattern: string, options?: SearchOptions): Promise<string[]>;
+  /**
+   * Release any resources held by this instance. For the recursive (worker-
+   * backed) implementation this tears down the shared FileIndexService so the
+   * next `FileSearchFactory.create(...)` call gets a fresh worker — callers
+   * should invoke this when filesystem events (e.g. a watcher reporting file
+   * create/delete) would otherwise leave the indexed snapshot stale.
+   * Optional to implement for backward compatibility; callers that didn't
+   * previously call dispose() don't need to start.
+   */
+  dispose?(): Promise<void>;
 }
 
 /**
@@ -122,6 +132,12 @@ class RecursiveFileSearch implements FileSearch {
       throw new Error('Engine not initialized. Call initialize() first.');
     }
     return this.service.search(pattern, options);
+  }
+
+  async dispose(): Promise<void> {
+    const svc = this.service;
+    this.service = undefined;
+    await svc?.dispose();
   }
 }
 

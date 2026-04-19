@@ -104,9 +104,18 @@ export class FileMessageHandler extends BaseMessageHandler {
   }
 
   private clearFileSearchCache(rootPath: string): void {
+    const existing = this.fileSearchInstances.get(rootPath);
     this.fileSearchInstances.delete(rootPath);
     this.fileSearchInitializing.delete(rootPath);
+    // Drop the in-process crawl cache and, crucially, dispose the
+    // worker-backed FileIndexService singleton so its in-memory snapshot
+    // and fzf index are rebuilt from disk on the next search. Without
+    // dispose(), the worker keeps serving stale results until the process
+    // exits (FileIndexService.for() memoises by optionsKey).
     crawlCache.clear();
+    void existing?.dispose?.().catch((err) => {
+      console.warn('[FileMessageHandler] FileSearch dispose failed:', err);
+    });
     console.log(
       '[FileMessageHandler] Cleared file search cache, trigger:',
       rootPath,
