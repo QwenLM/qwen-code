@@ -6,9 +6,15 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { SkillManager } from './skill-manager.js';
+import * as yaml from 'yaml';
+import {
+  SkillManager,
+  watcherIgnored,
+  WATCHER_MAX_DEPTH,
+} from './skill-manager.js';
 import { type SkillConfig, SkillError } from './types.js';
 import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
@@ -17,9 +23,29 @@ import { makeFakeConfig } from '../test-utils/config.js';
 vi.mock('fs/promises');
 vi.mock('os');
 
+const { mockWatch, mockWatcher } = vi.hoisted(() => {
+  const mockWatcher = {
+    on: vi.fn().mockReturnThis(),
+    close: vi.fn().mockResolvedValue(undefined),
+  };
+  const mockWatch = vi.fn().mockReturnValue(mockWatcher);
+  return { mockWatch, mockWatcher };
+});
+
+vi.mock('chokidar', () => ({
+  watch: mockWatch,
+}));
+
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+});
+
 // Mock yaml parser - use vi.hoisted for proper hoisting
 const mockParseYaml = vi.hoisted(() => vi.fn());
 
+// Only mock yaml-parser for non-hooks tests
+// For hooks tests, we'll use the real parser by unmocking selectively
 vi.mock('../utils/yaml-parser.js', () => ({
   parse: mockParseYaml,
   stringify: vi.fn(),
@@ -45,6 +71,10 @@ describe('SkillManager', () => {
     // Setup yaml parser mocks with sophisticated behavior
     mockParseYaml.mockImplementation((yamlString: string) => {
       // Handle different test cases based on YAML content
+      if (yamlString.includes('hooks:')) {
+        // For hooks tests, use real YAML parser
+        return yaml.parse(yamlString);
+      }
       if (yamlString.includes('allowedTools:')) {
         return {
           name: 'test-skill',
@@ -892,6 +922,200 @@ Symlinked skill content`);
         'regular-skill',
         'symlink-skill',
       ]);
+    });
+  });
+
+  describe('file watchers', () => {
+    it('should pass ignored function and shallow depth to chokidar', async () => {
+      const projectSkillsDir = path.join('/test/project', '.qwen', 'skills');
+      vi.mocked(fsSync.existsSync).mockImplementation(
+        (p) => String(p) === projectSkillsDir,
+      );
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      mockWatch.mockClear();
+      mockWatcher.on.mockClear();
+
+      await manager.startWatching();
+
+      expect(mockWatch).toHaveBeenCalledWith(projectSkillsDir, {
+        ignoreInitial: true,
+        ignored: watcherIgnored,
+        depth: WATCHER_MAX_DEPTH,
+      });
+      expect(WATCHER_MAX_DEPTH).toBe(2);
+    });
+
+    it('watcherIgnored should reject .git directories', () => {
+      expect(watcherIgnored(path.join('/skills', '.git', 'config'))).toBe(true);
+      expect(watcherIgnored(path.join('/skills', '.git'))).toBe(true);
+      expect(watcherIgnored(path.join('/skills', 'my-skill', 'SKILL.md'))).toBe(
+        false,
+      );
+    });
+
+    it('watcherIgnored should reject special file types', () => {
+      const socketStats = {
+        isFile: () => false,
+        isDirectory: () => false,
+      } as fsSync.Stats;
+      const fileStats = {
+        isFile: () => true,
+        isDirectory: () => false,
+      } as fsSync.Stats;
+      const dirStats = {
+        isFile: () => false,
+        isDirectory: () => true,
+      } as fsSync.Stats;
+
+      expect(watcherIgnored('/skills/some.sock', socketStats)).toBe(true);
+      expect(watcherIgnored('/skills/SKILL.md', fileStats)).toBe(false);
+      expect(watcherIgnored('/skills/my-skill', dirStats)).toBe(false);
+    });
+  });
+
+  describe('hooks parsing', () => {
+    it('should parse hooks configuration from frontmatter', () => {
+      const markdown = `---
+name: hook-skill
+description: Skill with hooks
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: 'echo "checking"'
+          timeout: 5
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      expect(config.hooks).toBeDefined();
+      expect(config.hooks?.PreToolUse).toBeDefined();
+      expect(config.hooks?.PreToolUse).toHaveLength(1);
+      expect(config.hooks?.PreToolUse?.[0]?.matcher).toBe('Bash');
+      expect(config.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(1);
+    });
+
+    it('should parse multiple hooks for same event', () => {
+      const markdown = `---
+name: multi-hook-skill
+description: Skill with multiple hooks
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: 'echo "first"'
+        - type: command
+          command: 'echo "second"'
+    - matcher: "Write"
+      hooks:
+        - type: http
+          url: 'https://example.com/hook'
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      expect(config.hooks?.PreToolUse).toHaveLength(2);
+      expect(config.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(2);
+      expect(config.hooks?.PreToolUse?.[1]?.matcher).toBe('Write');
+    });
+
+    it('should parse HTTP hooks with headers', () => {
+      const markdown = `---
+name: http-hook-skill
+description: Skill with HTTP hooks
+hooks:
+  PostToolUse:
+    - matcher: "*"
+      hooks:
+        - type: http
+          url: 'https://audit.example.com/log'
+          headers:
+            Authorization: 'Bearer token'
+          allowedEnvVars:
+            - API_KEY
+          timeout: 10
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      expect(config.hooks?.PostToolUse).toHaveLength(1);
+      const hook = config.hooks?.PostToolUse?.[0]?.hooks?.[0];
+      expect(hook?.type).toBe('http');
+      if (hook?.type === 'http') {
+        expect(hook.url).toBe('https://audit.example.com/log');
+        expect(hook.headers).toEqual({ Authorization: 'Bearer token' });
+        expect(hook.allowedEnvVars).toEqual(['API_KEY']);
+        expect(hook.timeout).toBe(10);
+      }
+    });
+
+    it('should ignore unknown hook events', () => {
+      const markdown = `---
+name: unknown-event-skill
+description: Skill with unknown event
+hooks:
+  UnknownEvent:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: 'echo "test"'
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      // Unknown events are ignored, only valid HookEventNames are kept
+      expect(config.hooks).toBeDefined();
+      // UnknownEvent should not be in the parsed hooks
+      expect(Object.keys(config.hooks || {})).not.toContain('UnknownEvent');
+    });
+
+    it('should set skillRoot from filePath', () => {
+      const markdown = `---
+name: skillroot-skill
+description: Skill with skillRoot
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: 'echo $QWEN_SKILL_ROOT'
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      // skillRoot should be set to the directory containing SKILL.md
+      expect(config.skillRoot).toBe('/test/skill');
     });
   });
 });

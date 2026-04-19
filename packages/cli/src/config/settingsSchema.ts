@@ -131,18 +131,36 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
       items: {
         type: 'object',
         description:
-          'A hook configuration entry that defines a command to execute.',
+          'A hook configuration entry that defines a hook to execute.',
         properties: {
           type: {
             type: 'string',
-            description: 'The type of hook.',
-            enum: ['command'],
+            description:
+              'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
+            enum: ['command', 'http'],
             required: true,
           },
           command: {
             type: 'string',
-            description: 'The command to execute when the hook is triggered.',
-            required: true,
+            description:
+              'The command to execute when the hook is triggered. Required for "command" type.',
+          },
+          url: {
+            type: 'string',
+            description:
+              'The URL to send the POST request to. Required for "http" type.',
+          },
+          headers: {
+            type: 'object',
+            description:
+              'HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).',
+            additionalProperties: { type: 'string' },
+          },
+          allowedEnvVars: {
+            type: 'array',
+            description:
+              'List of environment variables allowed for interpolation in headers and URL.',
+            items: { type: 'string' },
           },
           name: {
             type: 'string',
@@ -154,13 +172,32 @@ const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
           },
           timeout: {
             type: 'number',
-            description: 'Timeout in milliseconds for the hook execution.',
+            description: 'Timeout in seconds for the hook execution.',
           },
           env: {
             type: 'object',
             description:
               'Environment variables to set when executing the hook command.',
             additionalProperties: { type: 'string' },
+          },
+          async: {
+            type: 'boolean',
+            description:
+              'Whether to execute the hook asynchronously (non-blocking, for "command" type only).',
+          },
+          once: {
+            type: 'boolean',
+            description:
+              'Whether to execute the hook only once per session (for "http" type).',
+          },
+          statusMessage: {
+            type: 'string',
+            description: 'A message to display while the hook is executing.',
+          },
+          shell: {
+            type: 'string',
+            description: 'The shell to use for command execution.',
+            enum: ['bash', 'powershell'],
           },
         },
       },
@@ -411,6 +448,44 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  dualOutput: {
+    type: 'object',
+    label: 'Dual Output',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Dual-output sidecar mode: emit structured JSON events to a ' +
+      'second channel while the TUI renders normally on stdout. See ' +
+      'docs/users/features/dual-output.md. CLI flags take precedence ' +
+      'over these settings.',
+    showInDialog: false,
+    properties: {
+      jsonFile: {
+        type: 'string',
+        label: 'JSON Event File',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'File path for structured JSON event output. Equivalent to ' +
+          '--json-file. Ignored if --json-fd or --json-file is also set.',
+        showInDialog: false,
+      },
+      inputFile: {
+        type: 'string',
+        label: 'Remote Input File',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'File path for remote input commands (JSONL). Equivalent to ' +
+          '--input-file. Ignored if --input-file is also set.',
+        showInDialog: false,
+      },
+    },
+  },
+
   ui: {
     type: 'object',
     label: 'UI',
@@ -509,7 +584,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Show welcome back dialog when returning to a project with conversation history.',
+          'Show welcome back dialog when returning to a project with conversation history. Choosing "Start new chat session" suppresses the dialog for that project until the project summary changes.',
         showInDialog: true,
       },
       enableUserFeedback: {
@@ -978,6 +1053,38 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  memory: {
+    type: 'object',
+    label: 'Memory',
+    category: 'Memory',
+    requiresRestart: false,
+    default: {},
+    description: 'Settings for managed auto-memory.',
+    showInDialog: false,
+    properties: {
+      enableManagedAutoMemory: {
+        type: 'boolean',
+        label: 'Enable Managed Auto-Memory',
+        category: 'Memory',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Enable background extraction of memories from conversations.',
+        showInDialog: false,
+      },
+      enableManagedAutoDream: {
+        type: 'boolean',
+        label: 'Enable Managed Auto-Dream',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable automatic consolidation (dream) of collected memories.',
+        showInDialog: false,
+      },
+    },
+  },
+
   permissions: {
     type: 'object',
     label: 'Permissions',
@@ -1336,6 +1443,20 @@ const SETTINGS_SCHEMA = {
             description: 'Base URL for OpenAI compatible API.',
             showInDialog: false,
           },
+        },
+      },
+      allowedHttpHookUrls: {
+        type: 'array',
+        label: 'Allowed HTTP Hook URLs',
+        category: 'Security',
+        requiresRestart: false,
+        default: [] as string[],
+        description:
+          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).',
+        showInDialog: false,
+        items: {
+          type: 'string',
+          description: 'URL pattern (supports * wildcard)',
         },
       },
     },

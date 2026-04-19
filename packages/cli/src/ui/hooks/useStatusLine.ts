@@ -72,6 +72,9 @@ interface StatusLineConfig {
 }
 
 const debugLog = createDebugLogger('STATUS_LINE');
+// Footer's bottom row (hint/mode indicator) occupies 1 line, so the status
+// line gets at most 2 to keep the total footer height at 3 rows max.
+export const MAX_STATUS_LINES = 2;
 
 function getStatusLineConfig(
   settings: ReturnType<typeof useSettings>,
@@ -133,7 +136,7 @@ function buildMetricsPayload(
  * new messages, vim mode toggle) rather than blind polling.
  */
 export function useStatusLine(): {
-  text: string | null;
+  lines: string[];
 } {
   const settings = useSettings();
   const uiState = useUIState();
@@ -143,7 +146,7 @@ export function useStatusLine(): {
   const statusLineConfig = getStatusLineConfig(settings);
   const statusLineCommand = statusLineConfig?.command;
 
-  const [output, setOutput] = useState<string | null>(null);
+  const [output, setOutput] = useState<string[]>([]);
 
   // Keep latest values in refs so the stable doUpdate callback can read them
   // without being recreated on every render.
@@ -201,7 +204,7 @@ export function useStatusLine(): {
   const doUpdate = useCallback(() => {
     const cmd = statusLineCommandRef.current;
     if (!cmd) {
-      setOutput(null);
+      setOutput([]);
       return;
     }
 
@@ -269,21 +272,35 @@ export function useStatusLine(): {
     // Bump generation so earlier in-flight callbacks are ignored.
     const gen = ++generationRef.current;
 
-    const child = exec(
-      cmd,
-      { cwd: cfg.getTargetDir(), timeout: 5000, maxBuffer: 1024 * 10 },
-      (error, stdout) => {
-        if (gen !== generationRef.current) return; // stale
-        activeChildRef.current = undefined;
-        if (!error && stdout) {
-          // Strip only the trailing newline to preserve intentional whitespace.
-          const line = stdout.replace(/\r?\n$/, '').split(/\r?\n/, 1)[0];
-          setOutput(line || null);
-        } else {
-          setOutput(null);
-        }
-      },
-    );
+    // exec() can throw synchronously: libuv reports a handful of spawn
+    // errors (EACCES, ENOENT, …) via the async 'error' event, but anything
+    // else — including EBADF, reported on macOS Node 22 in issue #3264 — is
+    // thrown from ChildProcess.spawn. Without this guard the throw escapes
+    // the setTimeout callback and crashes the CLI as uncaughtException.
+    let child: ChildProcess;
+    try {
+      child = exec(
+        cmd,
+        { cwd: cfg.getTargetDir(), timeout: 5000, maxBuffer: 1024 * 10 },
+        (error, stdout) => {
+          if (gen !== generationRef.current) return; // stale
+          activeChildRef.current = undefined;
+          if (!error && stdout) {
+            const lines = stdout
+              .replace(/\r?\n$/, '')
+              .split(/\r?\n/)
+              .filter(Boolean);
+            setOutput(lines.slice(0, MAX_STATUS_LINES));
+          } else {
+            setOutput([]);
+          }
+        },
+      );
+    } catch (err) {
+      debugLog.error('statusline exec error:', (err as Error).message);
+      setOutput([]);
+      return;
+    }
 
     activeChildRef.current = child;
 
@@ -321,7 +338,7 @@ export function useStatusLine(): {
         clearTimeout(debounceTimerRef.current);
         debounceTimerRef.current = undefined;
       }
-      setOutput(null);
+      setOutput([]);
       return;
     }
 
@@ -392,5 +409,5 @@ export function useStatusLine(): {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return { text: output };
+  return { lines: output };
 }
