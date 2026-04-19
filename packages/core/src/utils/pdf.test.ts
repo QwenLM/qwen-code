@@ -66,6 +66,28 @@ function mockExecError() {
   );
 }
 
+/**
+ * Helper: simulate Node's maxBuffer overrun — child is killed, partial
+ * stdout is delivered, error.code is 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'.
+ */
+function mockMaxBufferExceeded(partialStdout: string) {
+  mockExecFile.mockImplementationOnce(
+    (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+      const callback = cb as (
+        err: Error | null,
+        stdout: string,
+        stderr: string,
+      ) => void;
+      const err = new Error('stdout maxBuffer length exceeded') as Error & {
+        code: string;
+      };
+      err.code = 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
+      callback(err, partialStdout, '');
+      return {} as ReturnType<typeof execFile>;
+    },
+  );
+}
+
 describe('pdf utilities', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -322,6 +344,30 @@ describe('pdf utilities', () => {
         stderr: '',
         code: 0,
       });
+
+      const result = await extractPDFText('/test.pdf');
+      expect(result.success).toBe(true);
+      if (result.success) {
+        expect(result.text.length).toBeLessThan(110000);
+        expect(result.text).toContain('text truncated');
+        expect(result.text).toContain("'pages' parameter");
+      }
+    });
+
+    it('should treat maxBuffer overrun as truncation, not a generic failure', async () => {
+      // Availability check
+      mockExecResult({
+        stdout: '',
+        stderr: 'pdftotext version 24.02.0',
+        code: 0,
+      });
+      // Simulate a text-dense PDF whose output exceeded the execFile
+      // maxBuffer. Node kills the child and delivers partial stdout plus
+      // err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'. We should recover
+      // the partial output and return success with the truncation note,
+      // not fail with "pdftotext failed:" or "pdftotext execution failed:".
+      const partial = 'y'.repeat(200000);
+      mockMaxBufferExceeded(partial);
 
       const result = await extractPDFText('/test.pdf');
       expect(result.success).toBe(true);

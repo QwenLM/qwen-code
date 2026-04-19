@@ -17,7 +17,12 @@ function execCommand(
   command: string,
   args: string[],
   options: ExecFileOptions = {},
-): Promise<{ stdout: string; stderr: string; code: number }> {
+): Promise<{
+  stdout: string;
+  stderr: string;
+  code: number;
+  maxBufferExceeded: boolean;
+}> {
   return new Promise((resolve) => {
     execFile(
       command,
@@ -25,11 +30,18 @@ function execCommand(
       { encoding: 'utf8', ...options },
       (error, stdout, stderr) => {
         if (error) {
-          // ENOENT (command not found) — code is a string, not a number
+          // Node sets error.code to the string 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER'
+          // when stdout or stderr exceeds the configured maxBuffer — the child
+          // is killed and the partial output is delivered. ENOENT (command
+          // not found) is also a string code. Numeric codes are real exit codes.
+          const maxBufferExceeded =
+            (error as { code?: unknown }).code ===
+            'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
           resolve({
             stdout: String(stdout ?? ''),
             stderr: String(stderr ?? ''),
             code: typeof error.code === 'number' ? error.code : 1,
+            maxBufferExceeded,
           });
           return;
         }
@@ -37,6 +49,7 @@ function execCommand(
           stdout: String(stdout ?? ''),
           stderr: String(stderr ?? ''),
           code: 0,
+          maxBufferExceeded: false,
         });
       },
     );
@@ -176,10 +189,30 @@ export async function extractPDFText(
   args.push(filePath, '-'); // `-` means output to stdout
 
   try {
-    const { stdout, stderr, code } = await execCommand('pdftotext', args, {
-      timeout: 30000,
-      maxBuffer: 5 * 1024 * 1024, // 5MB — default 1MB is too small for dense PDFs
-    });
+    const { stdout, stderr, code, maxBufferExceeded } = await execCommand(
+      'pdftotext',
+      args,
+      {
+        timeout: 30000,
+        // Keep the buffer just above MAX_PDF_TEXT_OUTPUT_CHARS — anything
+        // past that is going to be truncated anyway, and capping the child
+        // prevents unbounded memory use on pathological text-dense PDFs.
+        maxBuffer: MAX_PDF_TEXT_OUTPUT_CHARS * 2,
+      },
+    );
+
+    // pdftotext produced more than maxBuffer — Node killed the child and
+    // delivered the partial stdout. Treat this the same as a post-hoc
+    // truncation so large PDFs degrade to a usable prefix instead of a
+    // generic execution failure.
+    if (maxBufferExceeded && stdout.length > 0) {
+      return {
+        success: true,
+        text:
+          stdout.substring(0, MAX_PDF_TEXT_OUTPUT_CHARS) +
+          `\n\n... [text truncated at ${MAX_PDF_TEXT_OUTPUT_CHARS} characters. Use the 'pages' parameter to read specific page ranges.]`,
+      };
+    }
 
     if (code !== 0) {
       if (/password/i.test(stderr)) {
