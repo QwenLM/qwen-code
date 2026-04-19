@@ -28,6 +28,15 @@ const debugLogger = createDebugLogger('FILE_UTILS');
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
 
+// Upper bound on the on-disk size of a PDF we will hand to the
+// pdftotext text-extraction path. The 10MB inline-data cap is bypassed
+// for this branch (pdftotext streams the file rather than base64-
+// encoding it), so a separate ceiling prevents handing pdftotext an
+// arbitrarily large file it would spend the full 30s timeout chewing
+// on. 100MB is large enough for typical scanned documents and reports
+// while keeping wall-clock and RSS bounded.
+const PDF_EXTRACTION_MAX_MB = 100;
+
 // --- Unicode BOM detection & decoding helpers --------------------------------
 
 type UnicodeEncoding = 'utf8' | 'utf16le' | 'utf16be' | 'utf32le' | 'utf32be';
@@ -629,7 +638,6 @@ export async function processSingleFileContent(
     // pdftotext until the 30s timeout.
     const willExtractPdfText =
       fileType === 'pdf' && (pages !== undefined || !modalities.pdf);
-    const PDF_EXTRACTION_MAX_MB = 100;
     if (willExtractPdfText && fileSizeInMB > PDF_EXTRACTION_MAX_MB) {
       return {
         llmContent: `PDF file is too large for text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_EXTRACTION_MAX_MB}MB limit. Use the 'pages' parameter to read a narrower range, or split the document.`,

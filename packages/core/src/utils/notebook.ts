@@ -10,17 +10,31 @@ const LARGE_OUTPUT_THRESHOLD = 10000;
 const MAX_NOTEBOOK_OUTPUT_CHARS = 100000;
 
 /**
- * Strip ANSI CSI / SGR escape sequences so terminal colour codes emitted
- * by ipykernel (e.g. in error tracebacks) don't leak into the LLM prompt.
- * Uses a conservative pattern that matches the common CSI sequences
- * without trying to be a full ANSI parser. Matching ESC (\x1B) is
- * intentional, so the no-control-regex lint rule is disabled for this
- * expression only.
+ * Strip ANSI escape sequences so terminal control codes emitted by
+ * ipykernel (and any tool that writes to the cell's stdout/stderr) don't
+ * leak into the LLM prompt. Covers the four common families:
+ *   CSI: ESC [ … final            — colour / cursor / SGR
+ *   OSC: ESC ] … BEL or ST        — hyperlinks (`OSC 8`), titles
+ *   DCS / APC / PM / SOS: ESC P/_/^/X … ST  — long-form sequences
+ *   Lone two-byte escapes (e.g. RIS, ESC 7/8 — save/restore cursor).
+ * Matching ESC (\x1B) is intentional, so disable no-control-regex here.
  */
+// prettier-ignore
 // eslint-disable-next-line no-control-regex
-const ANSI_ESCAPE_RE = /\x1B\[[0-?]*[ -/]*[@-~]/g;
+const ANSI_ESCAPE_RE = /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|[P_^X][^\x1B]*\x1B\\|[@-Z\\-_])/g;
 function stripAnsi(input: string): string {
   return input.replace(ANSI_ESCAPE_RE, '');
+}
+
+// IANA MIME-type grammar: type "/" subtree.subtype with optional
+// suffix and parameters. We accept a permissive but ASCII-printable
+// shape and reject anything else (newlines, control chars, "[", "]"
+// — which would let an attacker-authored notebook break out of the
+// `[non-text output: ...]` placeholder and inject prompt-shaped text).
+const MIME_TYPE_RE =
+  /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+(?:\+[A-Za-z0-9!#$&^_.+-]+)?$/;
+function sanitizeMimeTypes(keys: string[]): string[] {
+  return keys.filter((k) => MIME_TYPE_RE.test(k));
 }
 
 /**
@@ -82,8 +96,11 @@ function processOutput(output: NotebookCellOutput): string {
       // Non-textual output (image/png, text/html, application/json, widget
       // views, ...): we don't render the payload but don't silently drop
       // it either — surface a placeholder so the LLM knows something
-      // was in the cell.
-      const mimeTypes = output.data ? Object.keys(output.data) : [];
+      // was in the cell. Filter to well-formed MIME types so a malicious
+      // notebook can't inject prompt-shaped text via crafted data keys.
+      const mimeTypes = output.data
+        ? sanitizeMimeTypes(Object.keys(output.data))
+        : [];
       if (mimeTypes.length > 0) {
         return `[non-text output: ${mimeTypes.join(', ')}]`;
       }

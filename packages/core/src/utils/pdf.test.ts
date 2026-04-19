@@ -220,7 +220,7 @@ describe('pdf utilities', () => {
       // Returning a delayed result lets us start multiple callers before
       // the first resolves — without in-flight promise caching each one
       // would have spawned its own pdftotext -v probe.
-      mockExecFile.mockImplementationOnce(
+      mockExecFile.mockImplementation(
         (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
           const callback = cb as (
             err: Error | null,
@@ -242,6 +242,26 @@ describe('pdf utilities', () => {
       expect(b).toBe(true);
       expect(c).toBe(true);
       expect(mockExecFile).toHaveBeenCalledTimes(1);
+    });
+
+    it('should clear the in-flight promise after a probe to allow retries', async () => {
+      // First probe rejects. We expect the promise slot to be cleared so a
+      // subsequent call (e.g. after `resetPdftotextCache()` in tests, or a
+      // brand-new probe in a long-lived session) can re-enter the function
+      // rather than re-await the failed promise forever.
+      mockExecError();
+      const first = await isPdftotextAvailable();
+      expect(first).toBe(false);
+
+      resetPdftotextCache();
+      mockExecResult({
+        stdout: '',
+        stderr: 'pdftotext version 24.02.0',
+        code: 0,
+      });
+      const second = await isPdftotextAvailable();
+      expect(second).toBe(true);
+      expect(mockExecFile).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -501,6 +521,41 @@ describe('pdf utilities', () => {
           };
           err.killed = true;
           err.signal = 'SIGTERM';
+          callback(err, '', '');
+          return {} as ReturnType<typeof execFile>;
+        },
+      );
+
+      const result = await extractPDFText('/test.pdf');
+      expect(result.success).toBe(false);
+      if (!result.success) {
+        expect(result.error).toMatch(/timed out/i);
+      }
+    });
+
+    it('should surface a dedicated error on Windows-style timeout (signal=null)', async () => {
+      // On Windows Node terminates via TerminateProcess and `signal` is
+      // typically null rather than 'SIGTERM'. Should still be classified
+      // as a timeout, not as a generic execution failure.
+      mockExecResult({
+        stdout: '',
+        stderr: 'pdftotext version 24.02.0',
+        code: 0,
+      });
+      mockExecFile.mockImplementationOnce(
+        (_cmd: unknown, _args: unknown, _opts: unknown, cb: unknown) => {
+          const callback = cb as (
+            err: Error | null,
+            stdout: string,
+            stderr: string,
+          ) => void;
+          const err = new Error('Command failed: pdftotext') as Error & {
+            code?: string;
+            killed?: boolean;
+            signal?: string | null;
+          };
+          err.killed = true;
+          err.signal = null;
           callback(err, '', '');
           return {} as ReturnType<typeof execFile>;
         },

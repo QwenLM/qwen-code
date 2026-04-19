@@ -48,12 +48,18 @@ function execCommand(
           };
           const maxBufferExceeded =
             errAny.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER';
-          // `timeout` option triggers SIGTERM and sets error.killed with no
-          // numeric exit code. Some Node versions also surface 'ETIMEDOUT'.
+          // `timeout` option triggers process termination with `killed=true`
+          // and no numeric exit code. On POSIX the signal is SIGTERM; on
+          // Windows Node uses TerminateProcess and `signal` is typically
+          // null. Some Node versions also surface `code='ETIMEDOUT'`. Cover
+          // all three so timeouts always get a dedicated message.
           const timedOut =
             !maxBufferExceeded &&
             (errAny.code === 'ETIMEDOUT' ||
-              (errAny.killed === true && errAny.signal === 'SIGTERM'));
+              (errAny.killed === true &&
+                (errAny.signal === 'SIGTERM' ||
+                  errAny.signal === undefined ||
+                  errAny.signal === null)));
           resolve({
             stdout: String(stdout ?? ''),
             stderr: String(stderr ?? ''),
@@ -152,11 +158,17 @@ export async function isPdftotextAvailable(): Promise<boolean> {
     } catch {
       return false;
     }
-  })().then((result) => {
-    pdftotextAvailable = result;
-    pdftotextAvailablePromise = undefined;
-    return result;
-  });
+  })()
+    .then((result) => {
+      pdftotextAvailable = result;
+      return result;
+    })
+    .finally(() => {
+      // Always clear the in-flight slot so a transient probe failure
+      // (e.g. an unexpected throw) doesn't leave the cache permanently
+      // pointing at a rejected promise.
+      pdftotextAvailablePromise = undefined;
+    });
 
   return pdftotextAvailablePromise;
 }
