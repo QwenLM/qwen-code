@@ -956,9 +956,10 @@ export class WebViewProvider {
 
   /**
    * Attempt to restore authentication state and initialize connection.
-   * First syncs ~/.qwen/settings.json → VSCode settings (for visibility),
-   * then syncs VSCode settings → ~/.qwen/settings.json (for CLI to read),
-   * then connects.
+   * On startup, sync ~/.qwen/settings.json → VSCode settings so the Settings UI
+   * reflects existing CLI config, then attempt a connection.
+   * Writing back to ~/.qwen/settings.json happens through the auth flow and
+   * auth-related VSCode setting changes.
    */
   private async attemptAuthStateRestoration(): Promise<void> {
     // Prevent concurrent initialization attempts (e.g. visibility toggle + webviewReady race)
@@ -968,10 +969,10 @@ export class WebViewProvider {
 
     this.initializationPromise = (async () => {
       try {
-        // On startup, only sync ~/.qwen/settings.json → VSCode settings (read-only).
-        // This populates the Settings UI with existing config without overwriting anything.
-        // Writing to ~/.qwen/settings.json only happens when user explicitly
-        // changes VSCode settings (onDidChangeConfiguration) or clicks "Connect".
+        // On startup, sync ~/.qwen/settings.json → VSCode settings so the
+        // Settings UI reflects existing CLI config, then attempt a connection.
+        // Writing back to ~/.qwen/settings.json happens through the auth flow
+        // and auth-related VSCode setting changes.
         await this.syncQwenConfigToVSCodeSettings();
 
         console.log('[WebViewProvider] Attempting connection...');
