@@ -6,20 +6,19 @@
 
 /** @vitest-environment jsdom */
 
-import React, { act } from 'react';
+import type React from 'react';
+import { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import type { CompletionItem } from '../types/completionItemTypes.js';
 
-const {
-  mockPostMessage,
-  mockOpenCompletion,
-  mockCloseCompletion,
-} = vi.hoisted(() => ({
-  mockPostMessage: vi.fn(),
-  mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
-  mockCloseCompletion: vi.fn(),
-}));
+const { mockPostMessage, mockOpenCompletion, mockCloseCompletion } = vi.hoisted(
+  () => ({
+    mockPostMessage: vi.fn(),
+    mockOpenCompletion: vi.fn().mockResolvedValue(undefined),
+    mockCloseCompletion: vi.fn(),
+  }),
+);
 
 const slashSkillsItem: CompletionItem = {
   id: 'skills',
@@ -106,13 +105,19 @@ vi.mock('./hooks/useWebViewMessages.js', async () => {
       ) => void;
       setAvailableSkills: (value: string[]) => void;
     }) => {
+      const initializedRef = React.useRef(false);
+
       React.useEffect(() => {
+        if (initializedRef.current) {
+          return;
+        }
+        initializedRef.current = true;
         setIsAuthenticated(true);
         setAvailableCommands([
           { name: 'skills', description: 'List available skills' },
         ]);
         setAvailableSkills(['code-review']);
-      }, []);
+      }, [setAvailableCommands, setAvailableSkills, setIsAuthenticated]);
     },
   };
 });
