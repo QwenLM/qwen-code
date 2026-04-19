@@ -54,6 +54,9 @@ describe('runDoctorChecks', () => {
     } as unknown as CommandContext);
 
     vi.mocked(systemInfoUtils.getNpmVersion).mockResolvedValue('10.0.0');
+    vi.mocked(systemInfoUtils.getGitVersion).mockResolvedValue(
+      'git version 2.39.0',
+    );
     vi.mocked(authModule.validateAuthMethod).mockReturnValue(null);
   });
 
@@ -138,7 +141,7 @@ describe('runDoctorChecks', () => {
     expect(gitCheck!.status).toBe('pass');
   });
 
-  it('should warn git check when git service is missing', async () => {
+  it('should warn git check when git service is missing and git binary is unavailable', async () => {
     mockContext = createMockCommandContext({
       services: {
         config: {
@@ -158,9 +161,41 @@ describe('runDoctorChecks', () => {
       },
     } as unknown as CommandContext);
 
+    vi.mocked(systemInfoUtils.getGitVersion).mockResolvedValue('unknown');
+
     const results = await runDoctorChecks(mockContext);
     const gitCheck = results.find((r) => r.name === 'Git');
     expect(gitCheck!.status).toBe('warn');
+  });
+
+  it('should pass git check when git service is missing but git binary is available', async () => {
+    mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getAuthType: vi.fn().mockReturnValue('openai'),
+          getGeminiClient: vi.fn().mockReturnValue({
+            isInitialized: vi.fn().mockReturnValue(true),
+          }),
+          getModel: vi.fn().mockReturnValue('gpt-4'),
+          getMcpServers: vi.fn().mockReturnValue({}),
+          getToolRegistry: vi.fn().mockReturnValue({
+            getAllTools: vi.fn().mockReturnValue([]),
+          }),
+          getUseBuiltinRipgrep: vi.fn().mockReturnValue(false),
+        },
+        settings: { merged: {} },
+        git: undefined,
+      },
+    } as unknown as CommandContext);
+
+    vi.mocked(systemInfoUtils.getGitVersion).mockResolvedValue(
+      'git version 2.39.0',
+    );
+
+    const results = await runDoctorChecks(mockContext);
+    const gitCheck = results.find((r) => r.name === 'Git');
+    expect(gitCheck!.status).toBe('pass');
+    expect(gitCheck!.message).toBe('git version 2.39.0');
   });
 
   it('should report disabled MCP servers as pass instead of fail', async () => {

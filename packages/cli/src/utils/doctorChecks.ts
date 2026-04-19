@@ -6,7 +6,7 @@
 
 import process from 'node:process';
 import os from 'node:os';
-import { getNpmVersion } from './systemInfo.js';
+import { getNpmVersion, getGitVersion } from './systemInfo.js';
 import { validateAuthMethod } from '../config/auth.js';
 import type { CommandContext } from '../ui/commands/types.js';
 import type { DoctorCheckResult } from '../ui/types.js';
@@ -295,8 +295,18 @@ async function checkRipgrep(
   }
 }
 
-function checkGit(context: CommandContext): DoctorCheckResult {
-  if (!context.services.git) {
+async function checkGit(context: CommandContext): Promise<DoctorCheckResult> {
+  if (context.services.git) {
+    return {
+      category: t('Git'),
+      name: t('Git'),
+      status: 'pass',
+      message: t('available'),
+    };
+  }
+  // services.git is undefined in non-interactive mode — probe the binary directly
+  const version = await getGitVersion();
+  if (version === 'unknown') {
     return {
       category: t('Git'),
       name: t('Git'),
@@ -309,7 +319,7 @@ function checkGit(context: CommandContext): DoctorCheckResult {
     category: t('Git'),
     name: t('Git'),
     status: 'pass',
-    message: t('available'),
+    message: version,
   };
 }
 
@@ -320,11 +330,13 @@ export async function runDoctorChecks(
   context: CommandContext,
 ): Promise<DoctorCheckResult[]> {
   // Run async checks in parallel
-  const [npmResult, ripgrepResult, apiClientResult] = await Promise.all([
-    checkNpmVersion(),
-    checkRipgrep(context),
-    checkApiClient(context),
-  ]);
+  const [npmResult, ripgrepResult, apiClientResult, gitResult] =
+    await Promise.all([
+      checkNpmVersion(),
+      checkRipgrep(context),
+      checkApiClient(context),
+      checkGit(context),
+    ]);
 
   return [
     // System
@@ -343,6 +355,6 @@ export async function runDoctorChecks(
     checkToolRegistry(context),
     ripgrepResult,
     // Git
-    checkGit(context),
+    gitResult,
   ];
 }
