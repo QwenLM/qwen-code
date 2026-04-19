@@ -136,6 +136,7 @@ export * from './services/fileDiscoveryService.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
+export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
 

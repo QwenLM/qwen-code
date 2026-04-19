@@ -152,6 +152,7 @@ describe('useSlashCommandProcessor', () => {
         vi.fn(), // toggleVimEnabled
         false, // isProcessing
         setIsProcessing,
+        { current: true }, // isIdleRef
         vi.fn(), // setGeminiMdFileCount
         {
           openAuthDialog: mockOpenAuthDialog,
@@ -965,6 +966,7 @@ describe('useSlashCommandProcessor', () => {
           vi.fn(), // toggleVimEnabled
           false, // isProcessing
           vi.fn(), // setIsProcessing
+          { current: true }, // isIdleRef
           vi.fn(), // setGeminiMdFileCount
           {
             openAuthDialog: mockOpenAuthDialog,
