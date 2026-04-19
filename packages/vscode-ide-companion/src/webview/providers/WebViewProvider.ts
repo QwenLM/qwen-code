@@ -909,7 +909,7 @@ export class WebViewProvider {
       // Set guard to prevent onDidChangeConfiguration from triggering a write-back
       const config = vscode.workspace.getConfiguration('qwen-code');
       const target = vscode.ConfigurationTarget.Global;
-      const updates: Array<Promise<void>> = [];
+      const updates: Array<Thenable<void>> = [];
 
       if (
         config.get<string>('provider', 'coding-plan') !== qwenSettings.provider

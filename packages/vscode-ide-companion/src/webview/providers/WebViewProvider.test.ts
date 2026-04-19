@@ -50,7 +50,13 @@ const {
   ),
   mockOnDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
   mockOnDidChangeTextEditorSelection: vi.fn(() => ({ dispose: vi.fn() })),
-  mockReadQwenSettingsForVSCode: vi.fn(() => null),
+  mockReadQwenSettingsForVSCode: vi.fn<
+    () => {
+      provider: 'coding-plan' | 'api-key';
+      apiKey: string;
+      codingPlanRegion: 'china' | 'global';
+    } | null
+  >(() => null),
   mockWriteCodingPlanConfig: vi.fn(() => ({})),
   mockWriteModelProvidersConfig: vi.fn(),
   mockQwenAgentManagerInstances: [] as Array<{
