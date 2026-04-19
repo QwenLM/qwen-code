@@ -47,30 +47,6 @@ describe('apiPreconnect', () => {
   });
 
   describe('shouldSkipPreconnect', () => {
-    it('should skip when HTTPS_PROXY is set', () => {
-      process.env['HTTPS_PROXY'] = 'http://proxy.example.com:8080';
-      preconnectApi('qwen-oauth');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('should skip when https_proxy is set', () => {
-      process.env['https_proxy'] = 'http://proxy.example.com:8080';
-      preconnectApi('qwen-oauth');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('should skip when HTTP_PROXY is set', () => {
-      process.env['HTTP_PROXY'] = 'http://proxy.example.com:8080';
-      preconnectApi('qwen-oauth');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
-    it('should skip when http_proxy is set', () => {
-      process.env['http_proxy'] = 'http://proxy.example.com:8080';
-      preconnectApi('qwen-oauth');
-      expect(mockFetch).not.toHaveBeenCalled();
-    });
-
     it('should skip when NODE_EXTRA_CA_CERTS is set', () => {
       process.env['NODE_EXTRA_CA_CERTS'] = '/path/to/ca.pem';
       preconnectApi('qwen-oauth');

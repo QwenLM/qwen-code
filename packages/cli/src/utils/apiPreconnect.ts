@@ -40,20 +40,7 @@ const DEFAULT_BASE_URLS: Record<string, string> = {
  * Check if preconnect should be skipped due to environment conditions
  */
 function shouldSkipPreconnect(): boolean {
-  // 1. Check proxy environment variables
-  // Note: If NO_PROXY is set and target URL is in it, we don't need to skip
-  // But for simplicity: skip if any proxy config is present
-  if (
-    process.env['HTTPS_PROXY'] ||
-    process.env['https_proxy'] ||
-    process.env['HTTP_PROXY'] ||
-    process.env['http_proxy']
-  ) {
-    debugLogger.debug('Skipping preconnect: proxy environment variable set');
-    return true;
-  }
-
-  // 2. Check custom CA certificate (may use enterprise TLS inspection)
+  // Skip for custom CA certificate (enterprise TLS inspection may interfere)
   if (process.env['NODE_EXTRA_CA_CERTS']) {
     debugLogger.debug('Skipping preconnect: custom CA certificate configured');
     return true;
@@ -154,8 +141,15 @@ export function preconnectApi(
     return;
   }
 
-  // Check environment skip conditions (proxy, custom CA)
+  // Check environment skip conditions (custom CA)
   if (shouldSkipPreconnect()) {
+    return;
+  }
+
+  // Skip on non-Node runtimes (e.g. Bun) — they use independent connection
+  // pools, so warming undici's pool provides no benefit.
+  if (detectRuntime() !== 'node') {
+    debugLogger.debug('Skipping preconnect: unsupported runtime');
     return;
   }
 
