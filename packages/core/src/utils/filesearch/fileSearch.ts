@@ -8,20 +8,8 @@ import path from 'node:path';
 import picomatch from 'picomatch';
 import type { Ignore } from './ignore.js';
 import { loadIgnoreRules } from './ignore.js';
-import { ResultCache } from './result-cache.js';
 import { crawl } from './crawler.js';
-import type { FzfResultItem } from 'fzf';
-import { AsyncFzf } from 'fzf';
-import { unescapePath } from '../paths.js';
-
-/**
- * Safety cap on the number of file entries the recursive crawler will
- * materialise in memory. Without this, workspaces with millions of files
- * (e.g. missing .gitignore, huge node_modules trees) can push Node.js past
- * its heap limit and crash with an OOM.  100 000 entries is generous enough
- * for virtually all real projects while keeping peak memory well under 100 MB.
- */
-const MAX_CRAWL_FILES = 100_000;
+import { FileIndexService } from './fileIndexService.js';
 
 export interface FileSearchOptions {
   projectRoot: string;
@@ -100,106 +88,40 @@ export interface FileSearch {
   search(pattern: string, options?: SearchOptions): Promise<string[]>;
 }
 
+/**
+ * Thin proxy over a shared {@link FileIndexService}. Prior to P1 this class
+ * owned the crawl, the fzf index, and the result cache on the main thread,
+ * which could block the Ink render loop for hundreds of milliseconds on
+ * large monorepos. Those responsibilities now live in a worker thread
+ * managed by FileIndexService; the proxy is kept so existing callers and
+ * the public `FileSearch` interface are unchanged.
+ */
 class RecursiveFileSearch implements FileSearch {
-  private ignore: Ignore | undefined;
-  private resultCache: ResultCache | undefined;
-  private allFiles: string[] = [];
-  private fzf: AsyncFzf<string[]> | undefined;
+  private service: FileIndexService | undefined;
 
   constructor(private readonly options: FileSearchOptions) {}
 
   async initialize(): Promise<void> {
-    this.ignore = loadIgnoreRules(this.options);
-    this.allFiles = await crawl({
-      crawlDirectory: this.options.projectRoot,
-      cwd: this.options.projectRoot,
-      ignore: this.ignore,
-      cache: this.options.cache,
-      cacheTtl: this.options.cacheTtl,
-      maxDepth: this.options.maxDepth,
-      maxFiles: MAX_CRAWL_FILES,
-    });
-    this.buildResultCache();
+    // Grab-or-create the shared service. The crawl starts eagerly inside
+    // the worker. We wait for `whenReady()` here so the public contract
+    // ("after initialize, search results are complete") is preserved for
+    // existing callers like vscode-ide-companion. This no longer blocks
+    // the main thread because the heavy work happens inside the worker;
+    // Ink can render "loading" state while the promise is pending.
+    // Streaming-aware callers (e.g. useAtCompletion) go straight to
+    // `FileIndexService.for(...)` to bypass this wait.
+    this.service = FileIndexService.for(this.options);
+    await this.service.whenReady();
   }
 
   async search(
     pattern: string,
     options: SearchOptions = {},
   ): Promise<string[]> {
-    // Check if engine is properly initialized.
-    // If fuzzy search is enabled (or undefined, default true), fzf must be initialized.
-    if (
-      !this.resultCache ||
-      (!this.fzf && this.options.enableFuzzySearch !== false) ||
-      !this.ignore
-    ) {
+    if (!this.service) {
       throw new Error('Engine not initialized. Call initialize() first.');
     }
-
-    pattern = unescapePath(pattern) || '*';
-
-    let filteredCandidates;
-    const { files: candidates, isExactMatch } =
-      await this.resultCache!.get(pattern);
-
-    if (isExactMatch) {
-      // Use the cached result.
-      filteredCandidates = candidates;
-    } else {
-      let shouldCache = true;
-      if (pattern.includes('*') || !this.fzf) {
-        filteredCandidates = await filter(candidates, pattern, options.signal);
-      } else {
-        filteredCandidates = await this.fzf
-          .find(pattern)
-          .then((results: Array<FzfResultItem<string>>) =>
-            results.map((entry: FzfResultItem<string>) => entry.item),
-          )
-          .catch(() => {
-            shouldCache = false;
-            return [];
-          });
-      }
-
-      if (shouldCache) {
-        this.resultCache!.set(pattern, filteredCandidates);
-      }
-    }
-
-    const fileFilter = this.ignore.getFileFilter();
-    const results: string[] = [];
-    for (const [i, candidate] of filteredCandidates.entries()) {
-      if (i % 1000 === 0) {
-        await new Promise((resolve) => setImmediate(resolve));
-        if (options.signal?.aborted) {
-          throw new AbortError();
-        }
-      }
-
-      if (results.length >= (options.maxResults ?? Infinity)) {
-        break;
-      }
-      if (candidate === '.') {
-        continue;
-      }
-      if (!fileFilter(candidate)) {
-        results.push(candidate);
-      }
-    }
-    return results;
-  }
-
-  private buildResultCache(): void {
-    this.resultCache = new ResultCache(this.allFiles);
-    // Initialize fuzzy search if enabled (or undefined, default true).
-    if (this.options.enableFuzzySearch !== false) {
-      // The v1 algorithm is much faster since it only looks at the first
-      // occurence of the pattern. We use it for search spaces that have >20k
-      // files, because the v2 algorithm is just too slow in those cases.
-      this.fzf = new AsyncFzf(this.allFiles, {
-        fuzzy: this.allFiles.length > 20000 ? 'v1' : 'v2',
-      });
-    }
+    return this.service.search(pattern, options);
   }
 }
 

@@ -6,9 +6,20 @@
 
 import { useEffect, useReducer, useRef } from 'react';
 import type { Config, FileSearch } from '@qwen-code/qwen-code-core';
-import { FileSearchFactory, escapePath } from '@qwen-code/qwen-code-core';
+import {
+  FileIndexService,
+  FileSearchFactory,
+  escapePath,
+} from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
+
+/**
+ * Delay before replaying the current query against an updated partial
+ * snapshot. Keeps us from burning work when fdir bursts hundreds of chunks
+ * per second, but short enough that results feel live.
+ */
+const PARTIAL_REFRESH_THROTTLE_MS = 80;
 
 export enum AtCompletionStatus {
   IDLE = 'idle',
@@ -29,6 +40,7 @@ type AtCompletionAction =
   | { type: 'INITIALIZE' }
   | { type: 'INITIALIZE_SUCCESS' }
   | { type: 'SEARCH'; payload: string }
+  | { type: 'REFRESH' }
   | { type: 'SEARCH_SUCCESS'; payload: Suggestion[] }
   | { type: 'SET_LOADING'; payload: boolean }
   | { type: 'ERROR' }
@@ -61,6 +73,19 @@ function atCompletionReducer(
         status: AtCompletionStatus.SEARCHING,
         pattern: action.payload,
       };
+    case 'REFRESH':
+      // Re-run the current pattern against a newly-grown snapshot. Only
+      // meaningful when a pattern is active and we've finished the initial
+      // load. Preserves pattern and isLoading; the Worker effect picks up the
+      // SEARCHING transition to fetch fresh results.
+      if (
+        state.pattern === null ||
+        (state.status !== AtCompletionStatus.READY &&
+          state.status !== AtCompletionStatus.SEARCHING)
+      ) {
+        return state;
+      }
+      return { ...state, status: AtCompletionStatus.SEARCHING };
     case 'SEARCH_SUCCESS':
       return {
         ...state,
@@ -151,25 +176,54 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
     }
   }, [enabled, pattern, state.status, state.pattern]);
 
+  // Stable snapshot of the FileSearch options derived from config. The worker
+  // effect and the partial-subscription effect below both use this; keeping
+  // the derivation in one place avoids accidental key drift when looking up
+  // the singleton FileIndexService.
+  const fileSearchOptions = {
+    projectRoot: cwd,
+    ignoreDirs: [] as string[],
+    useGitignore: config?.getFileFilteringOptions()?.respectGitIgnore ?? true,
+    useQwenignore: config?.getFileFilteringOptions()?.respectQwenIgnore ?? true,
+    cache: true,
+    cacheTtl: 30, // 30 seconds
+    enableRecursiveFileSearch: config?.getEnableRecursiveFileSearch() ?? true,
+    // Use enableFuzzySearch with !== false to default to true when undefined.
+    enableFuzzySearch: config?.getFileFilteringEnableFuzzySearch() !== false,
+  };
+
+  // While the FileIndexService is still crawling, every new chunk expands the
+  // searchable snapshot. Subscribing here lets us replay the active pattern
+  // against the growing list so the user sees results progressively — similar
+  // to Claude Code's behaviour — rather than waiting for the full crawl. The
+  // subscription is bound to the project identity (cwd+config) rather than
+  // the reducer status so that chunks arriving mid-search still drive a
+  // REFRESH once the initial SEARCHING state completes.
+  useEffect(() => {
+    if (!fileSearchOptions.enableRecursiveFileSearch) return;
+
+    const service = FileIndexService.for(fileSearchOptions);
+    if (service.state === 'ready') return; // Nothing will stream anymore.
+
+    let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = service.onPartial(() => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        dispatch({ type: 'REFRESH' });
+      }, PARTIAL_REFRESH_THROTTLE_MS);
+    });
+    return () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cwd, config]);
+
   // The "Worker" that performs async operations based on status.
   useEffect(() => {
     const initialize = async () => {
       try {
-        const searcher = FileSearchFactory.create({
-          projectRoot: cwd,
-          ignoreDirs: [],
-          useGitignore:
-            config?.getFileFilteringOptions()?.respectGitIgnore ?? true,
-          useQwenignore:
-            config?.getFileFilteringOptions()?.respectQwenIgnore ?? true,
-          cache: true,
-          cacheTtl: 30, // 30 seconds
-          enableRecursiveFileSearch:
-            config?.getEnableRecursiveFileSearch() ?? true,
-          // Use enableFuzzySearch with !== false to default to true when undefined.
-          enableFuzzySearch:
-            config?.getFileFilteringEnableFuzzySearch() !== false,
-        });
+        const searcher = FileSearchFactory.create(fileSearchOptions);
         await searcher.initialize();
         fileSearch.current = searcher;
         dispatch({ type: 'INITIALIZE_SUCCESS' });
@@ -235,5 +289,9 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         clearTimeout(slowSearchTimer.current);
       }
     };
+    // `fileSearchOptions` is recomputed each render but hashes to the same
+    // FileIndexService singleton when inputs are equal; adding it to deps
+    // would cause spurious effect re-runs on every render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state.status, state.pattern, config, cwd]);
 }
