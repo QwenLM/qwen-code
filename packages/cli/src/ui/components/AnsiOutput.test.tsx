@@ -117,4 +117,33 @@ describe('<AnsiOutputText />', () => {
     // The line should be truncated to fit within maxWidth
     expect(output.length).toBeLessThanOrEqual(20);
   });
+
+  it('truncates multi-token wide lines (styled-column output) to maxWidth', () => {
+    // Mirrors the real-world shape produced by commands like `gh run list`:
+    // a single logical row composed of many styled-column tokens whose
+    // combined width far exceeds the available box width. This exercises
+    // the MaxSizedBox row.segments.length === 0 path, where truncation
+    // depends on per-token wrap="truncate" + ink's flex layout rather
+    // than MaxSizedBox performing the crop itself.
+    const data: AnsiOutput = [
+      [
+        createAnsiToken({ text: 'STATUS  ', bold: true }),
+        createAnsiToken({ text: 'TITLE  ', bold: true }),
+        createAnsiToken({ text: 'WORKFLOW  ', bold: true }),
+        createAnsiToken({ text: 'BRANCH  ', bold: true }),
+        createAnsiToken({ text: 'EVENT  ', bold: true }),
+        createAnsiToken({ text: 'ID  ', bold: true }),
+        createAnsiToken({ text: 'ELAPSED  ', bold: true }),
+        createAnsiToken({ text: 'AGE', bold: true }),
+      ],
+    ];
+    const maxWidth = 30;
+    const { lastFrame } = render(
+      <AnsiOutputText data={data} maxWidth={maxWidth} />,
+    );
+    const output = lastFrame()!;
+    for (const line of output.split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(maxWidth);
+    }
+  });
 });
