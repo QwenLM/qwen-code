@@ -319,9 +319,12 @@ export class InProcessBackend implements Backend {
   }
 
   /**
-   * Get the dedicated ContentGenerator created for this agent.
-   * Undefined means the agent did not get an isolated generator, so callers
-   * should avoid sending agent data through the parent session generator.
+   * Get the ContentGenerator this agent can use for summary generation.
+   * If auth overrides created an isolated generator, this returns that
+   * generator. If no override was requested, this returns the inherited
+   * generator the agent already runs with. If override creation failed, this is
+   * undefined so callers can avoid sending agent data through a fallback
+   * provider.
    */
   getAgentContentGenerator(agentId: string): ContentGenerator | undefined {
     return this.agentContentGenerators.get(agentId);
@@ -354,6 +357,7 @@ export class InProcessBackend implements Backend {
  *   the agent Config
  * - `getContentGenerator()` / `getContentGeneratorConfig()` / `getAuthType()`
  *   → per-agent ContentGenerator when `authOverrides` is provided
+ * - returned `contentGenerator` → the generator safe to use for summaries
  */
 async function createPerAgentConfig(
   base: Config,
@@ -414,6 +418,8 @@ async function createPerAgentConfig(
 
   return {
     config: override as Config,
-    contentGenerator: dedicatedContentGenerator,
+    contentGenerator:
+      dedicatedContentGenerator ??
+      (authOverrides?.authType ? undefined : base.getContentGenerator()),
   };
 }
