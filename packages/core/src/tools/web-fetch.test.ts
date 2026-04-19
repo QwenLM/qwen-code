@@ -103,10 +103,6 @@ describe('WebFetchTool', () => {
         expect.any(Number),
         { Accept: 'text/markdown, text/html, text/plain' },
       );
-        'https://example.com',
-        expect.any(Number),
-        { Accept: 'text/markdown, text/html' },
-      );
     });
 
     it('should request only markdown when format is markdown', async () => {
