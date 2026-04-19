@@ -81,6 +81,15 @@ const reactDedupPlugin = {
   },
 };
 
+const publicCliExportPlugin = {
+  name: 'public-cli-export',
+  setup(build) {
+    build.onResolve({ filter: /^@qwen-code\/qwen-code\/export$/ }, () => ({
+      path: resolve(repoRoot, 'packages/cli/src/export/index.ts'),
+    }));
+  },
+};
+
 /**
  * Resolve `*.wasm?binary` imports to embedded Uint8Array content.
  * This keeps the companion bundle compatible with core's inline-WASM loader.
@@ -187,6 +196,7 @@ async function main() {
       'import.meta.url': 'import_meta.url',
     },
     plugins: [
+      publicCliExportPlugin,
       wasmBinaryPlugin,
       wasmLoader({ mode: 'embedded' }),
       /* add to the end of plugins array */

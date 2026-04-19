@@ -26,7 +26,7 @@ function formatExportSuccessMessage(
   filename: string,
   filePath: string,
 ): string {
-  const markdownLinkPath = filePath.replace(/\\/g, '/');
+  const markdownLinkPath = vscode.Uri.file(filePath).toString();
   return `Session exported to ${formatLabel}: [${filename}](${markdownLinkPath})`;
 }
 

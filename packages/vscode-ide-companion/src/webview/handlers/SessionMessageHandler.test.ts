@@ -30,6 +30,13 @@ vi.mock('vscode', () => ({
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/workspace' } }],
   },
+  Uri: {
+    file: (fsPath: string) => ({
+      fsPath,
+      toString: () =>
+        `file://${encodeURI(fsPath.replace(/\\/g, '/')).replace(/#/g, '%23')}`,
+    }),
+  },
 }));
 
 vi.mock('../utils/imageHandler.js', async (importOriginal) => {
@@ -286,7 +293,7 @@ describe('SessionMessageHandler', () => {
       data: expect.objectContaining({
         role: 'assistant',
         content:
-          'Session exported to HTML: [export.html](/workspace/export.html)',
+          'Session exported to HTML: [export.html](file:///workspace/export.html)',
       }),
     });
   });
@@ -402,5 +409,50 @@ describe('SessionMessageHandler', () => {
       data: { message: 'Failed to export session: disk full' },
     });
     expect(agentManager.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('encodes exported file links before rendering markdown', async () => {
+    mockExportSessionToFile.mockResolvedValue({
+      filename: 'export (#1).html',
+      uri: { fsPath: '/workspace/export (#1).html' },
+    });
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      getSessionList: vi
+        .fn()
+        .mockResolvedValue([{ sessionId: 'session-1', cwd: '/workspace' }]),
+      sendMessage: vi.fn(),
+    };
+    const conversationStore = {
+      createConversation: vi.fn(),
+      getConversation: vi.fn(),
+      addMessage: vi.fn(),
+    };
+    const sendToWebView = vi.fn();
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'session-1',
+      sendToWebView,
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: '/export html',
+      },
+    });
+
+    expect(sendToWebView).toHaveBeenCalledWith({
+      type: 'message',
+      data: expect.objectContaining({
+        role: 'assistant',
+        content:
+          'Session exported to HTML: [export (#1).html](file:///workspace/export%20(%231).html)',
+      }),
+    });
   });
 });

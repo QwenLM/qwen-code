@@ -43,7 +43,7 @@ vi.mock('@qwen-code/qwen-code-core', () => {
   };
 });
 
-vi.mock('../../../cli/src/ui/utils/export/index.js', () => ({
+vi.mock('@qwen-code/qwen-code/export', () => ({
   collectSessionData: mockCollectSessionData,
   normalizeSessionData: mockNormalizeSessionData,
   toHtml: mockToHtml,

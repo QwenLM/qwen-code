@@ -16,7 +16,7 @@ import {
   toJson,
   toJsonl,
   toMarkdown,
-} from '../../../cli/src/ui/utils/export/index.js';
+} from '@qwen-code/qwen-code/export';
 import {
   EXPORT_SESSION_FORMATS,
   getExportSubcommandRequiredMessage,
