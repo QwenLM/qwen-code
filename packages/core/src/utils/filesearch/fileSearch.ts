@@ -114,6 +114,7 @@ class RecursiveFileSearch implements FileSearch {
       crawlDirectory: this.options.projectRoot,
       cwd: this.options.projectRoot,
       ignore: this.ignore,
+      useGitignore: this.options.useGitignore,
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
       maxDepth: this.options.maxDepth,
@@ -227,6 +228,7 @@ class DirectoryFileSearch implements FileSearch {
       cwd: this.options.projectRoot,
       maxDepth: 0,
       ignore: this.ignore,
+      useGitignore: this.options.useGitignore,
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
     });
