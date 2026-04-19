@@ -109,6 +109,7 @@ export type {
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
+export type { SwarmTool, SwarmParams, SwarmTask } from './tools/swarm.js';
 export type {
   TodoWriteTool,
   TodoItem,
@@ -136,6 +137,7 @@ export * from './services/fileDiscoveryService.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
+export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
 
@@ -183,7 +185,11 @@ export * from './lsp/types.js';
 // MCP (Model Context Protocol)
 // ============================================================================
 
-export { MCPOAuthProvider } from './mcp/oauth-provider.js';
+export {
+  MCPOAuthProvider,
+  OAUTH_AUTH_URL_EVENT,
+  OAUTH_DISPLAY_MESSAGE_EVENT,
+} from './mcp/oauth-provider.js';
 export type {
   MCPOAuthConfig,
   OAuthDisplayMessage,
@@ -224,6 +230,7 @@ export {
   ExtensionUninstallEvent,
   IdeConnectionEvent,
   IdeConnectionType,
+  LoopType,
   ModelSlashCommandEvent,
   PromptSuggestionEvent,
   SpeculationEvent,

@@ -154,6 +154,9 @@ export {
   // Business ToolCall components
   ThinkToolCall,
   GenericToolCall,
+  AgentToolCall,
+  isAgentExecutionRawOutput,
+  isAgentExecutionToolCall,
   EditToolCall,
   WriteToolCall,
   SearchToolCall,
@@ -165,6 +168,11 @@ export {
 } from './components/toolcalls';
 export type {
   ToolCallContainerProps,
+  AgentExecutionRawOutput,
+  AgentExecutionStatus,
+  AgentExecutionSummary,
+  AgentExecutionToolCall,
+  AgentToolCallStatus,
   ToolCallContent,
   ToolCallData,
   BaseToolCallProps,

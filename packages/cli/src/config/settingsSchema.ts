@@ -324,6 +324,16 @@ const SETTINGS_SCHEMA = {
           'Enable automatic update checks and installations on startup.',
         showInDialog: true,
       },
+      showSessionRecap: {
+        type: 'boolean',
+        label: 'Show Session Recap',
+        category: 'General',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. Use /recap to trigger manually.',
+        showInDialog: true,
+      },
       gitCoAuthor: {
         type: 'boolean',
         label: 'Attribution: commit',
@@ -509,8 +519,15 @@ const SETTINGS_SCHEMA = {
         label: 'Status Line',
         category: 'UI',
         requiresRestart: false,
-        default: undefined as { type: 'command'; command: string } | undefined,
-        description: 'Custom status line display configuration.',
+        default: undefined as
+          | {
+              type: 'command';
+              command: string;
+              refreshInterval?: number;
+            }
+          | undefined,
+        description:
+          'Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
         showInDialog: false,
       },
       customThemes: {

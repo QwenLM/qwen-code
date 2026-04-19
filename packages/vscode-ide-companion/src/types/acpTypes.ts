@@ -47,10 +47,10 @@ export {
 export const NEXT_APPROVAL_MODE: {
   [k in ApprovalModeValue]: ApprovalModeValue;
 } = {
+  plan: 'default',
   default: 'auto-edit',
   'auto-edit': 'yolo',
-  plan: 'yolo',
-  yolo: 'default',
+  yolo: 'plan',
 };
 
 // Ask User Question types
