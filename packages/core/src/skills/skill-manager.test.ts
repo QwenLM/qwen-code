@@ -740,6 +740,23 @@ Review content`);
       expect(reviewSkills[0].level).toBe('user');
     });
 
+    it('should skip project and user skills in bare mode', async () => {
+      vi.spyOn(mockConfig, 'getBareMode').mockReturnValue(true);
+      mockReaddirForLevels(new Set(['project', 'user', 'bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await manager.listSkills({ force: true });
+
+      const reviewSkills = skills.filter((s) => s.name === 'review');
+      expect(reviewSkills).toHaveLength(1);
+      expect(reviewSkills[0].level).toBe('bundled');
+      expect(
+        skills.some(
+          (skill) => skill.level === 'project' || skill.level === 'user',
+        ),
+      ).toBe(false);
+    });
+
     it('should fall back to bundled level in loadSkill', async () => {
       // Project, user, extension all empty; bundled has the skill
       mockReaddirForLevels(new Set(['bundled']));

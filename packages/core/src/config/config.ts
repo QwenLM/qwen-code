@@ -422,6 +422,7 @@ export interface ConfigParameters {
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
   skipStartupContext?: boolean;
+  bareMode?: boolean;
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
@@ -646,6 +647,7 @@ export class Config {
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
+  private readonly bareMode: boolean;
   private readonly warnings: string[];
   private readonly allowedHttpHookUrls: string[];
   private readonly onPersistPermissionRuleCallback?: (
@@ -783,6 +785,7 @@ export class Config {
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
+    this.bareMode = params.bareMode ?? false;
     this.warnings = params.warnings ?? [];
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
@@ -883,7 +886,14 @@ export class Config {
     }
     this.promptRegistry = new PromptRegistry();
     this.extensionManager.setConfig(this);
-    await this.extensionManager.refreshCache();
+    const explicitExtensionNames = this.getExplicitExtensionNames();
+    if (!this.getBareMode()) {
+      await this.extensionManager.refreshCache();
+    } else if (explicitExtensionNames.length > 0) {
+      await this.extensionManager.refreshCache({
+        names: explicitExtensionNames,
+      });
+    }
     this.debugLogger.debug('Extension manager initialized');
 
     // Initialize hook system if enabled
@@ -1055,7 +1065,11 @@ export class Config {
 
     this.subagentManager = new SubagentManager(this);
     this.skillManager = new SkillManager(this);
-    await this.skillManager.startWatching();
+    if (this.getBareMode()) {
+      await this.skillManager.refreshCache();
+    } else {
+      await this.skillManager.startWatching();
+    }
     this.debugLogger.debug('Skill manager initialized');
 
     this.permissionManager = new PermissionManager(this);
@@ -1067,13 +1081,16 @@ export class Config {
       this.subagentManager.loadSessionSubagents(this.sessionSubagents);
     }
 
-    await this.extensionManager.refreshCache();
+    if (!this.getBareMode()) {
+      await this.extensionManager.refreshCache();
+    }
 
     await this.refreshHierarchicalMemory();
     this.debugLogger.debug('Hierarchical memory loaded');
 
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
+      this.getBareMode() ? { skipDiscovery: true } : undefined,
     );
     this.debugLogger.info(
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
@@ -1105,6 +1122,7 @@ export class Config {
         this.isTrustedFolder(),
         this.getImportFormat(),
         this.contextRuleExcludes,
+        { explicitOnly: this.getBareMode() },
       );
     if (this.getManagedAutoMemoryEnabled()) {
       const managedAutoMemoryIndex = await readAutoMemoryIndex(
@@ -2101,12 +2119,21 @@ export class Config {
   getExtensions(): Extension[] {
     const extensions = this.extensionManager.getLoadedExtensions();
     if (this.overrideExtensions) {
+      const overrideExtensionNames = new Set(
+        this.overrideExtensions.map((name) => name.toLowerCase()),
+      );
       return extensions.filter((e) =>
-        this.overrideExtensions?.includes(e.name),
+        overrideExtensionNames.has(e.name.toLowerCase()),
       );
     } else {
       return extensions;
     }
+  }
+
+  private getExplicitExtensionNames(): string[] {
+    return (this.overrideExtensions ?? []).filter(
+      (name) => name.trim() !== '' && name.toLowerCase() !== 'none',
+    );
   }
 
   getActiveExtensions(): Extension[] {
@@ -2311,6 +2338,10 @@ export class Config {
 
   getSkipStartupContext(): boolean {
     return this.skipStartupContext;
+  }
+
+  getBareMode(): boolean {
+    return this.bareMode;
   }
 
   getTruncateToolOutputThreshold(): number {

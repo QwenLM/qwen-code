@@ -8,7 +8,9 @@ import {
   AuthType,
   InputFormat,
   isDebugLoggingDegraded,
+  isBareMode,
   logUserPrompt,
+  QWEN_CODE_SIMPLE_ENV_VAR,
   Storage,
   type Config,
   createDebugLogger,
@@ -297,6 +299,10 @@ export async function main() {
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
 
+  if (isBareMode(argv.bare)) {
+    process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
+  }
+
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
     writeStderrLine(
@@ -439,7 +445,9 @@ export async function main() {
   profileCheckpoint('after_sandbox_check');
 
   // Initialize output language file before config loads to ensure it's included in context
-  initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  if (!isBareMode(argv.bare)) {
+    initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  }
 
   {
     const config = await loadCliConfig(

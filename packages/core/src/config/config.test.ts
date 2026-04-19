@@ -39,6 +39,8 @@ import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import { readAutoMemoryIndex } from '../memory/store.js';
+import { ExtensionManager } from '../extension/extensionManager.js';
+import { SkillManager } from '../skills/skill-manager.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -190,6 +192,9 @@ vi.mock('../skills/skill-manager.js', () => {
   SkillManagerMock.prototype.startWatching = vi
     .fn()
     .mockResolvedValue(undefined);
+  SkillManagerMock.prototype.refreshCache = vi
+    .fn()
+    .mockResolvedValue(undefined);
   SkillManagerMock.prototype.stopWatching = vi.fn();
   SkillManagerMock.prototype.listSkills = vi.fn().mockResolvedValue([]);
   SkillManagerMock.prototype.addChangeListener = vi.fn();
@@ -332,6 +337,25 @@ describe('Server Config (config.ts)', () => {
       await expect(config.initialize()).rejects.toThrow(
         'Config was already initialized',
       );
+    });
+
+    it('should skip implicit startup discovery in bare mode', async () => {
+      const extensionRefreshSpy = vi
+        .spyOn(ExtensionManager.prototype, 'refreshCache')
+        .mockResolvedValue(undefined);
+
+      const config = new Config({
+        ...baseParams,
+        checkpointing: false,
+        bareMode: true,
+      });
+
+      await expect(config.initialize()).resolves.toBeUndefined();
+
+      expect(extensionRefreshSpy).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.startWatching).not.toHaveBeenCalled();
+      expect(SkillManager.prototype.refreshCache).toHaveBeenCalledTimes(1);
+      expect(ToolRegistry.prototype.discoverAllTools).not.toHaveBeenCalled();
     });
   });
 
@@ -658,6 +682,18 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).toContain('# auto memory');
     expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
+  });
+
+  it('refreshHierarchicalMemory should only use explicit inputs in bare mode', async () => {
+    const config = new Config({
+      ...baseParams,
+      bareMode: true,
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
+    expect(lastCall?.at(-1)).toEqual({ explicitOnly: true });
   });
 
   it('Config constructor should call setGeminiMdFilename with contextFileName if provided', () => {

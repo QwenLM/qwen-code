@@ -28,6 +28,7 @@ import {
   NativeLspClient,
   createDebugLogger,
   NativeLspService,
+  isBareMode,
   isToolEnabled,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
@@ -115,6 +116,7 @@ export interface CliArgs {
   systemPrompt: string | undefined;
   appendSystemPrompt: string | undefined;
   yolo: boolean | undefined;
+  bare: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
   checkpointing: boolean | undefined;
@@ -258,6 +260,12 @@ export async function parseArguments(): Promise<CliArgs> {
       alias: 'd',
       type: 'boolean',
       description: 'Run in debug mode?',
+      default: false,
+    })
+    .option('bare', {
+      type: 'boolean',
+      description:
+        'Minimal mode: skip implicit startup auto-discovery and only honor explicitly provided CLI inputs.',
       default: false,
     })
     .option('proxy', {
@@ -737,6 +745,7 @@ export async function loadCliConfig(
   },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
+  const bareMode = isBareMode(argv.bare);
 
   // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
   // is auto-detected inside getRuntimeBaseDir() at each call site).
@@ -771,15 +780,19 @@ export async function loadCliConfig(
   );
 
   let outputLanguageFilePath: string | undefined;
-  if (fs.existsSync(projectOutputLanguagePath)) {
-    outputLanguageFilePath = projectOutputLanguagePath;
-  } else if (fs.existsSync(globalOutputLanguagePath)) {
-    outputLanguageFilePath = globalOutputLanguagePath;
+  if (!bareMode) {
+    if (fs.existsSync(projectOutputLanguagePath)) {
+      outputLanguageFilePath = projectOutputLanguagePath;
+    } else if (fs.existsSync(globalOutputLanguagePath)) {
+      outputLanguageFilePath = globalOutputLanguagePath;
+    }
   }
 
   const fileService = new FileDiscoveryService(cwd);
 
-  const includeDirectories = (settings.context?.includeDirectories || [])
+  const includeDirectories = (
+    bareMode ? [] : (settings.context?.includeDirectories ?? [])
+  )
     .map(resolvePath)
     .concat((argv.includeDirectories || []).map(resolvePath));
 
@@ -1133,6 +1146,7 @@ export async function loadCliConfig(
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
+    bareMode,
     allowedHttpHookUrls: settings.security?.allowedHttpHookUrls ?? [],
     cliVersion: await getCliVersion(),
     webSearch: buildWebSearchConfig(argv, settings, selectedAuthType),

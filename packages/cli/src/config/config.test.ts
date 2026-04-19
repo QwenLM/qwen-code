@@ -579,6 +579,12 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.extensions).toEqual(['ext1', 'ext2']);
   });
+
+  it('should parse --bare', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    expect(argv.bare).toBe(true);
+  });
 });
 
 describe('loadCliConfig', () => {
@@ -1647,6 +1653,33 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getWorkspaceContext().getDirectories()).toHaveLength(
       expected.length,
     );
+  });
+
+  it('should ignore implicit startup context inputs in bare mode', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    const cliPath = path.resolve(path.sep, 'cli', 'path1');
+    const settingsPath = path.resolve(path.sep, 'settings', 'path1');
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--bare',
+      '--include-directories',
+      cliPath,
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      context: {
+        includeDirectories: [settingsPath],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getWorkspaceContext().getDirectories()).toEqual([
+      mockCwd,
+      cliPath,
+    ]);
   });
 });
 
