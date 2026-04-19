@@ -108,6 +108,7 @@ export type {
 } from './tools/shell.js';
 export type { SkillTool, SkillParams } from './tools/skill.js';
 export type { AgentTool, AgentParams } from './tools/agent/agent.js';
+export type { SwarmTool, SwarmParams, SwarmTask } from './tools/swarm.js';
 export type {
   TodoWriteTool,
   TodoItem,
