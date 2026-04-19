@@ -626,10 +626,7 @@ export class SkillManager {
    * @returns Array of skill configurations
    */
   private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
-    if (
-      this.config.getBareMode() &&
-      (level === 'project' || level === 'user')
-    ) {
+    if (this.config.getBareMode()) {
       debugLogger.debug(`Skipping ${level} level skills in bare mode`);
       return [];
     }
