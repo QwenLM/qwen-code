@@ -67,6 +67,14 @@ export class StreamJsonOutputAdapter
   }
 
   /**
+   * Control-plane messages (control_request / control_response) share the
+   * same transport as data messages in stream mode.
+   */
+  protected override emitControlMessageImpl(message: ControlMessage): void {
+    this.outputStream.write(`${JSON.stringify(message)}\n`);
+  }
+
+  /**
    * Stream mode emits stream events when includePartialMessages is enabled.
    */
   protected shouldEmitStreamEvents(): boolean {

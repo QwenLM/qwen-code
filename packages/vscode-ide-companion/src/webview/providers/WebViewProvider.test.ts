@@ -22,18 +22,6 @@ const {
   mockOnDidChangeTextEditorSelection: vi.fn(() => ({ dispose: vi.fn() })),
 }));
 
-// PanelManager imports Storage via deep path
-// (`@qwen-code/qwen-code-core/src/config/storage.js`) instead of the
-// package barrel `@qwen-code/qwen-code-core` — see commit 9266b3633
-// which switched to the deep path for better tree-shaking. The vitest
-// mock has to match the exact import path used by the production code,
-// so we mock the deep path. The barrel mock is kept for any other code
-// in the test that might import from the barrel.
-vi.mock('@qwen-code/qwen-code-core/src/config/storage.js', () => ({
-  Storage: {
-    getGlobalTempDir: mockGetGlobalTempDir,
-  },
-}));
 vi.mock('@qwen-code/qwen-code-core', () => ({
   Storage: {
     getGlobalTempDir: mockGetGlobalTempDir,
