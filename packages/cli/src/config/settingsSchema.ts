@@ -329,9 +329,12 @@ const SETTINGS_SCHEMA = {
         label: 'Show Session Recap',
         category: 'General',
         requiresRestart: false,
-        default: true,
+        // Unset by default: auto-trigger turns on only when `fastModel` is
+        // configured (recap-on-main-model is too costly for an ambient
+        // background call). Setting an explicit true/false overrides.
+        default: undefined,
         description:
-          'Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. Use /recap to trigger manually.',
+          'Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. When unset, auto-trigger is on if `fastModel` is configured. Use /recap to trigger manually regardless.',
         showInDialog: true,
       },
       gitCoAuthor: {

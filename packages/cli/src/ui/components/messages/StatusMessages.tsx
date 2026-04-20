@@ -128,7 +128,7 @@ export const RetryCountdownMessage: React.FC<StatusTextProps> = ({ text }) => (
 export const AwayRecapMessage: React.FC<StatusTextProps> = ({ text }) => (
   <StatusMessage
     text={text}
-    prefix="❯"
+    prefix="※ recap:"
     prefixColor={theme.text.secondary}
     textColor={theme.text.secondary}
   />

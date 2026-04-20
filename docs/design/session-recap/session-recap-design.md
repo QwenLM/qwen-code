@@ -39,8 +39,8 @@ that setting.
 │   isFocused = useFocus()                                               │
 │   isIdle = streamingState === Idle                                     │
 │       │                                                                │
-│       ├─→ useAwaySummary({enabled, config, isFocused, isIdle, addItem})│
-│       │       │                                                        │
+│       ├─→ useAwaySummary({enabled, config, isFocused, isIdle,          │
+│       │       │             setAwayRecapItem})                         │
 │       │       └─→ 5 min blur timer + idle/dedupe gates                 │
 │       │              │                                                 │
 │       │              ↓                                                 │
@@ -56,9 +56,10 @@ that setting.
 │                              GeminiClient.generateContent              │
 │                              (fastModel + tools:[])                    │
 │                                                                        │
-│   addItem({type: 'away_recap', text}) ─→ HistoryItemDisplay            │
-│                                            └─ AwayRecapMessage         │
-│                                               (dim color + ❯ prefix)   │
+│   setAwayRecapItem({type: 'away_recap', text})                         │
+│       └─→ DefaultAppLayout renders AwayRecapMessage                    │
+│           as a sticky banner above the Composer                        │
+│           (dim color + "※ recap:" prefix)                              │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,9 +70,10 @@ that setting.
 | `packages/core/src/services/sessionRecap.ts`                 | One-shot LLM call + history filter + tag extraction |
 | `packages/cli/src/ui/hooks/useAwaySummary.ts`                | Auto-trigger React hook                             |
 | `packages/cli/src/ui/commands/recapCommand.ts`               | `/recap` manual entry point                         |
-| `packages/cli/src/ui/components/messages/StatusMessages.tsx` | `AwayRecapMessage` dim renderer                     |
+| `packages/cli/src/ui/components/messages/StatusMessages.tsx` | `AwayRecapMessage` dim renderer (`※ recap:` prefix) |
 | `packages/cli/src/ui/types.ts`                               | `HistoryItemAwayRecap` type                         |
-| `packages/cli/src/ui/components/HistoryItemDisplay.tsx`      | Renderer dispatch                                   |
+| `packages/cli/src/ui/layouts/DefaultAppLayout.tsx`           | Sticky-banner placement above the Composer          |
+| `packages/cli/src/ui/layouts/ScreenReaderAppLayout.tsx`      | Same placement under screen-reader mode             |
 | `packages/cli/src/config/settingsSchema.ts`                  | `general.showSessionRecap` setting                  |
 
 ## Prompt Design
@@ -167,7 +169,7 @@ response.
 | `recapPendingRef` | Whether an LLM call is in flight                  |
 | `inFlightRef`     | The current in-flight `AbortController`           |
 
-`useEffect` deps: `[enabled, config, isFocused, isIdle, addItem]`.
+`useEffect` deps: `[enabled, config, isFocused, isIdle, setAwayRecapItem]`.
 
 | Event                                              | Action                                                                                                                                 |
 | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
