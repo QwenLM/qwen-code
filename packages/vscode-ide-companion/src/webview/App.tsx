@@ -965,7 +965,7 @@ export const App: React.FC = () => {
     if (tc.content) {
       for (const c of tc.content) {
         if (c.type === 'content' && c.content?.text) {
-          parts.push(c.content.text);
+          parts.push(`\`\`\`\n${c.content.text}\n\`\`\``);
         } else if (c.type === 'diff') {
           const filePath = c.path || '';
           if (c.oldText) {
