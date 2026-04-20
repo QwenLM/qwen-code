@@ -139,6 +139,7 @@ export * from './services/gitWorktreeService.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
+export * from './utils/bareMode.js';
 
 // ============================================================================
 // Managed Auto-Memory
