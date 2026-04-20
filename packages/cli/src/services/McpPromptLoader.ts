@@ -46,6 +46,10 @@ export class McpPromptLoader implements ICommandLoader {
           name: commandName,
           description: prompt.description || `Invoke prompt ${prompt.name}`,
           kind: CommandKind.MCP_PROMPT,
+          source: 'mcp-prompt' as const,
+          sourceLabel: `MCP: ${serverName}`,
+          commandType: 'prompt' as const,
+          modelInvocable: true,
           subCommands: [
             {
               name: 'help',

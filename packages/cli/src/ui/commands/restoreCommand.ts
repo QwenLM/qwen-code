@@ -151,6 +151,7 @@ export const restoreCommand = (config: Config | null): SlashCommand | null => {
       );
     },
     kind: CommandKind.BUILT_IN,
+    commandType: 'local-jsx',
     action: restoreAction,
     completion,
   };

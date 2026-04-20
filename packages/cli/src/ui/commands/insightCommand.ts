@@ -29,6 +29,7 @@ export const insightCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local',
   action: async (context: CommandContext) => {
     try {
       context.ui.setDebugMessage(t('Generating insights...'));

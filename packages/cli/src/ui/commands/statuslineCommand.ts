@@ -14,6 +14,7 @@ export const statuslineCommand: SlashCommand = {
     return t("Set up Qwen Code's status line UI");
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: (_context, args): SubmitPromptActionReturn => {
     const prompt =
       args.trim() || 'Configure my statusLine from my shell PS1 configuration';

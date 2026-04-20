@@ -15,6 +15,7 @@ export const authCommand: SlashCommand = {
     return t('Configure authentication information for login');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: (_context, _args): OpenDialogActionReturn => ({
     type: 'dialog',
     dialog: 'auth',

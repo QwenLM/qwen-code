@@ -4,9 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { SlashCommand } from '../ui/commands/types.js';
+import type { SlashCommand, ExecutionMode } from '../ui/commands/types.js';
 import type { ICommandLoader } from './types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { filterCommandsForMode } from './commandUtils.js';
 
 const debugLogger = createDebugLogger('CLI_COMMANDS');
 
@@ -123,5 +124,28 @@ export class CommandService {
    */
   getCommands(): readonly SlashCommand[] {
     return this.commands;
+  }
+
+  /**
+   * Returns commands available in the specified execution mode.
+   * Hidden commands are excluded.
+   */
+  getCommandsForMode(mode: ExecutionMode): readonly SlashCommand[] {
+    return Object.freeze(
+      filterCommandsForMode(
+        this.commands.filter((cmd) => !cmd.hidden),
+        mode,
+      ),
+    );
+  }
+
+  /**
+   * Returns commands that the model is allowed to invoke (modelInvocable === true).
+   * Hidden commands are excluded.
+   */
+  getModelInvocableCommands(): readonly SlashCommand[] {
+    return this.commands.filter(
+      (cmd) => !cmd.hidden && cmd.modelInvocable === true,
+    );
   }
 }

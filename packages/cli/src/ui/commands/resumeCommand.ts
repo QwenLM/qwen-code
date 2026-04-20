@@ -11,6 +11,7 @@ import { t } from '../../i18n/index.js';
 export const resumeCommand: SlashCommand = {
   name: 'resume',
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   get description() {
     return t('Resume a previous session');
   },

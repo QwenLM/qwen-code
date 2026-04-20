@@ -384,12 +384,14 @@ export const arenaCommand: SlashCommand = {
   name: 'arena',
   description: 'Manage Arena sessions',
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   subCommands: [
     {
       name: 'start',
       description:
         'Start an Arena session with multiple models competing on the same task',
       kind: CommandKind.BUILT_IN,
+      commandType: 'local-jsx',
       action: async (
         context: CommandContext,
         args: string,
@@ -446,6 +448,7 @@ export const arenaCommand: SlashCommand = {
       name: 'stop',
       description: 'Stop the current Arena session',
       kind: CommandKind.BUILT_IN,
+      commandType: 'local-jsx',
       action: async (
         context: CommandContext,
       ): Promise<void | SlashCommandActionReturn> => {
@@ -487,6 +490,7 @@ export const arenaCommand: SlashCommand = {
       name: 'status',
       description: 'Show the current Arena session status',
       kind: CommandKind.BUILT_IN,
+      commandType: 'local-jsx',
       action: async (
         context: CommandContext,
       ): Promise<void | SlashCommandActionReturn> => {
@@ -529,6 +533,7 @@ export const arenaCommand: SlashCommand = {
       description:
         'Select a model result and merge its diff into the current workspace',
       kind: CommandKind.BUILT_IN,
+      commandType: 'local-jsx',
       action: async (
         context: CommandContext,
         args: string,

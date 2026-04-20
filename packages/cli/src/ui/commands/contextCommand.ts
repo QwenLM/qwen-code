@@ -316,6 +316,8 @@ export const contextCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext, args?: string) => {
     const showDetails =
       args?.trim().toLowerCase() === 'detail' ||
@@ -360,6 +362,8 @@ export const contextCommand: SlashCommand = {
         return t('Show per-item context usage breakdown.');
       },
       kind: CommandKind.BUILT_IN,
+      commandType: 'local',
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: async (context: CommandContext) => {
         // Delegate to main action with 'detail' arg to show detailed view
         await contextCommand.action!(context, 'detail');

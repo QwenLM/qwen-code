@@ -143,6 +143,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
         return t('manage IDE integration');
       },
       kind: CommandKind.BUILT_IN,
+      commandType: 'local-jsx',
       action: (): SlashCommandActionReturn =>
         ({
           type: 'message',
@@ -160,6 +161,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
       return t('manage IDE integration');
     },
     kind: CommandKind.BUILT_IN,
+    commandType: 'local-jsx',
     subCommands: [],
   };
 
@@ -169,6 +171,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
       return t('check status of IDE integration');
     },
     kind: CommandKind.BUILT_IN,
+    commandType: 'local-jsx',
     action: async (): Promise<SlashCommandActionReturn> => {
       const { messageType, content } =
         await getIdeStatusMessageWithFiles(ideClient);
@@ -189,6 +192,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
       });
     },
     kind: CommandKind.BUILT_IN,
+    commandType: 'local-jsx',
     action: async (context) => {
       const installer = getIdeInstaller(currentIDE);
       const isSandBox = !!process.env['SANDBOX'];
@@ -276,6 +280,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
       return t('enable IDE integration');
     },
     kind: CommandKind.BUILT_IN,
+    commandType: 'local-jsx',
     action: async (context: CommandContext) => {
       context.services.settings.setValue(
         SettingScope.User,
@@ -300,6 +305,7 @@ export const ideCommand = async (): Promise<SlashCommand> => {
       return t('disable IDE integration');
     },
     kind: CommandKind.BUILT_IN,
+    commandType: 'local-jsx',
     action: async (context: CommandContext) => {
       context.services.settings.setValue(
         SettingScope.User,

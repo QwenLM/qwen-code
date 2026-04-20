@@ -361,7 +361,7 @@ export const useSlashCommandProcessor = (
         );
         // Avoid overwriting newer results from a subsequent effect run
         if (!controller.signal.aborted) {
-          setCommands(commandService.getCommands());
+          setCommands(commandService.getCommandsForMode('interactive'));
         }
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);

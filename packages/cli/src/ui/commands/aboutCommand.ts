@@ -17,6 +17,7 @@ export const aboutCommand: SlashCommand = {
     return t('show version info');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: async (context) => {
     const systemInfo = await getExtendedSystemInfo(context);
 
