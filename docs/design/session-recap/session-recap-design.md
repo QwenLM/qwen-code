@@ -1,6 +1,6 @@
 # Session Recap Design
 
-> A 1-3 sentence "where did I leave off" summary surfaced when the user
+> A one-line "where did I leave off" summary surfaced when the user
 > returns to an idle session, either on demand (`/recap`) or after the
 > terminal has been blurred for 5+ minutes.
 
@@ -11,7 +11,7 @@ pages of history to remember **what they were doing and what came next**
 is a real friction point. Just reloading messages does not solve this
 UX problem.
 
-The goal is to proactively surface a 1-3 sentence recap when the user
+The goal is to proactively surface a one-line recap when the user
 returns:
 
 - **High-level task** (what they are doing) → **next step** (what to do next).
@@ -92,7 +92,7 @@ recap, not a leak.
 
 Bullets below correspond 1:1 with `RECAP_SYSTEM_PROMPT`:
 
-- 1 to 3 short sentences, plain prose (no markdown / lists / headings).
+- Exactly one short sentence (≤ 80 chars), plain prose (no markdown / lists / headings).
 - First sentence: the high-level task. Then: the concrete next step.
 - Explicitly forbid: listing what was done, reciting tool calls, status reports.
 - Match the dominant language of the conversation (English or Chinese).
@@ -123,13 +123,13 @@ the model's reasoning preamble is worse than showing no recap at all.
 
 ### Call Parameters
 
-| Parameter           | Value                          | Reason                                                           |
-| ------------------- | ------------------------------ | ---------------------------------------------------------------- |
-| `model`             | `getFastModel() ?? getModel()` | Recap doesn't need a frontier model                              |
-| `tools`             | `[]`                           | One-shot query, no tool use                                      |
-| `maxOutputTokens`   | `300`                          | Enough for 1-3 sentences + tags; larger would encourage rambling |
-| `temperature`       | `0.3`                          | Mostly deterministic, with a bit of natural variation            |
-| `systemInstruction` | The recap-only prompt above    | Replaces the main agent's role definition                        |
+| Parameter           | Value                          | Reason                                                |
+| ------------------- | ------------------------------ | ----------------------------------------------------- |
+| `model`             | `getFastModel() ?? getModel()` | Recap doesn't need a frontier model                   |
+| `tools`             | `[]`                           | One-shot query, no tool use                           |
+| `maxOutputTokens`   | `300`                          | Headroom for one short sentence + tags                |
+| `temperature`       | `0.3`                          | Mostly deterministic, with a bit of natural variation |
+| `systemInstruction` | The recap-only prompt above    | Replaces the main agent's role definition             |
 
 ## History Filtering
 

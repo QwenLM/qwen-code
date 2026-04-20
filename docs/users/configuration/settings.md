@@ -77,15 +77,15 @@ Settings are organized into categories. All settings should be placed within the
 
 #### general
 
-| Setting                         | Type    | Description                                                                                                                                                                     | Default     |
-| ------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `general.preferredEditor`       | string  | The preferred editor to open files in.                                                                                                                                          | `undefined` |
-| `general.vimMode`               | boolean | Enable Vim keybindings.                                                                                                                                                         | `false`     |
-| `general.enableAutoUpdate`      | boolean | Enable automatic update checks and installations on startup.                                                                                                                    | `true`      |
-| `general.showSessionRecap`      | boolean | Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. Use `/recap` to trigger manually.                             | `true`      |
-| `general.gitCoAuthor`           | boolean | Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.                                                                      | `true`      |
-| `general.checkpointing.enabled` | boolean | Enable session checkpointing for recovery.                                                                                                                                      | `false`     |
-| `general.defaultFileEncoding`   | string  | Default encoding for new files. Use `"utf-8"` (default) for UTF-8 without BOM, or `"utf-8-bom"` for UTF-8 with BOM. Only change this if your project specifically requires BOM. | `"utf-8"`   |
+| Setting                         | Type    | Description                                                                                                                                                                                                          | Default     |
+| ------------------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `general.preferredEditor`       | string  | The preferred editor to open files in.                                                                                                                                                                               | `undefined` |
+| `general.vimMode`               | boolean | Enable Vim keybindings.                                                                                                                                                                                              | `false`     |
+| `general.enableAutoUpdate`      | boolean | Enable automatic update checks and installations on startup.                                                                                                                                                         | `true`      |
+| `general.showSessionRecap`      | boolean | Show a one-line "where you left off" recap when returning to the terminal after being away for 5+ minutes. When unset, auto-trigger is on if `fastModel` is configured. Use `/recap` to trigger manually regardless. | unset       |
+| `general.gitCoAuthor`           | boolean | Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.                                                                                                           | `true`      |
+| `general.checkpointing.enabled` | boolean | Enable session checkpointing for recovery.                                                                                                                                                                           | `false`     |
+| `general.defaultFileEncoding`   | string  | Default encoding for new files. Use `"utf-8"` (default) for UTF-8 without BOM, or `"utf-8-bom"` for UTF-8 with BOM. Only change this if your project specifically requires BOM.                                      | `"utf-8"`   |
 
 #### output
 
