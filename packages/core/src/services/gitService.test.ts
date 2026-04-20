@@ -201,32 +201,20 @@ describe('GitService', () => {
       expect(hoistedMockInit).toHaveBeenCalled();
     });
 
-    it('should fall back to plain init when git does not support --initial-branch', async () => {
-      hoistedMockCheckIsRepo.mockResolvedValue(false);
-      hoistedMockInit
-        .mockRejectedValueOnce(
-          new Error("error: unknown option `initial-branch=main'"),
-        )
-        .mockResolvedValueOnce(undefined);
-      hoistedMockRaw.mockResolvedValueOnce('');
-
-      const service = new GitService(projectRoot, storage);
-      await service.setupShadowGitRepository();
-
-      expect(hoistedMockInit).toHaveBeenNthCalledWith(1, false, {
-        '--initial-branch': 'main',
-      });
-      expect(hoistedMockInit).toHaveBeenNthCalledWith(2, false);
-      expect(hoistedMockCommit).toHaveBeenCalledWith('Initial snapshot');
-    });
-
     it('should not initialize git repo if already initialized', async () => {
       hoistedMockCheckIsRepo.mockResolvedValue(true);
       hoistedMockRaw.mockResolvedValueOnce('tracked.txt\n');
       const service = new GitService(projectRoot, storage);
       await service.setupShadowGitRepository();
       expect(hoistedMockInit).not.toHaveBeenCalled();
-      expect(hoistedMockRaw).not.toHaveBeenCalled();
+      expect(hoistedMockRaw).toHaveBeenCalledWith(
+        'ls-tree',
+        '-r',
+        '--name-only',
+        'HEAD',
+      );
+      expect(hoistedMockAdd).not.toHaveBeenCalled();
+      expect(hoistedMockCommit).not.toHaveBeenCalled();
     });
 
     it('should copy .gitignore from projectRoot if it exists', async () => {
@@ -287,13 +275,6 @@ describe('GitService', () => {
     it('should make an initial commit if no commits exist in history repo', async () => {
       hoistedMockCheckIsRepo.mockResolvedValue(false);
       hoistedMockRaw.mockResolvedValueOnce('');
-      hoistedMockCommit
-        .mockRejectedValueOnce(
-          new Error('nothing to commit, working tree clean'),
-        )
-        .mockResolvedValueOnce({
-          commit: 'initial',
-        });
       const service = new GitService(projectRoot, storage);
       await service.setupShadowGitRepository();
       expect(hoistedMockCommit).toHaveBeenCalledWith('Initial commit', {
