@@ -6,7 +6,7 @@
 
 import { useEffect, useRef } from 'react';
 import { generateSessionRecap, type Config } from '@qwen-code/qwen-code-core';
-import type { HistoryItemAwayRecap } from '../types.js';
+import type { HistoryItemAwayRecap, HistoryItemWithoutId } from '../types.js';
 
 const DEFAULT_AWAY_THRESHOLD_MINUTES = 5;
 
@@ -15,7 +15,7 @@ export interface UseAwaySummaryOptions {
   config: Config | null;
   isFocused: boolean;
   isIdle: boolean;
-  setAwayRecapItem: (item: HistoryItemAwayRecap | null) => void;
+  addItem: (item: HistoryItemWithoutId, baseTimestamp: number) => number;
   /**
    * Minutes the terminal must be blurred before an auto-recap fires on
    * the next focus-in. Falsy / non-positive values fall back to the
@@ -33,14 +33,8 @@ export interface UseAwaySummaryOptions {
  * a single back-and-forth produces at most one recap.
  */
 export function useAwaySummary(options: UseAwaySummaryOptions): void {
-  const {
-    enabled,
-    config,
-    isFocused,
-    isIdle,
-    setAwayRecapItem,
-    awayThresholdMinutes,
-  } = options;
+  const { enabled, config, isFocused, isIdle, addItem, awayThresholdMinutes } =
+    options;
 
   const blurredAtRef = useRef<number | null>(null);
   const recapPendingRef = useRef(false);
@@ -98,7 +92,7 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
           type: 'away_recap',
           text: recap.text,
         };
-        setAwayRecapItem(item);
+        addItem(item, Date.now());
       })
       .finally(() => {
         if (inFlightRef.current === controller) {
@@ -106,7 +100,7 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
         }
         recapPendingRef.current = false;
       });
-  }, [enabled, config, isFocused, isIdle, setAwayRecapItem, thresholdMs]);
+  }, [enabled, config, isFocused, isIdle, addItem, thresholdMs]);
 
   useEffect(
     () => () => {

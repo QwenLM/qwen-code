@@ -41,7 +41,7 @@ command ignores that setting.
 │   isIdle = streamingState === Idle                                     │
 │       │                                                                │
 │       ├─→ useAwaySummary({enabled, config, isFocused, isIdle,          │
-│       │       │             setAwayRecapItem})                         │
+│       │       │             addItem})                                  │
 │       │       └─→ 5 min blur timer + idle/dedupe gates                 │
 │       │              │                                                 │
 │       │              ↓                                                 │
@@ -57,25 +57,25 @@ command ignores that setting.
 │                              GeminiClient.generateContent              │
 │                              (fastModel + tools:[])                    │
 │                                                                        │
-│   setAwayRecapItem({type: 'away_recap', text})                         │
-│       └─→ DefaultAppLayout renders AwayRecapMessage                    │
-│           as a sticky banner above the Composer                        │
-│           (dim color + "※ recap:" prefix)                              │
+│   addItem({type: 'away_recap', text}) ─→ HistoryItemDisplay            │
+│       └─ AwayRecapMessage rendered inline like any other history       │
+│         item (※ + bold "recap: " + italic content, all dim);           │
+│         scrolls naturally with the conversation. Mirrors Claude        │
+│         Code's away_summary system message.                            │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Files
 
-| File                                                         | Responsibility                                      |
-| ------------------------------------------------------------ | --------------------------------------------------- |
-| `packages/core/src/services/sessionRecap.ts`                 | One-shot LLM call + history filter + tag extraction |
-| `packages/cli/src/ui/hooks/useAwaySummary.ts`                | Auto-trigger React hook                             |
-| `packages/cli/src/ui/commands/recapCommand.ts`               | `/recap` manual entry point                         |
-| `packages/cli/src/ui/components/messages/StatusMessages.tsx` | `AwayRecapMessage` dim renderer (`※ recap:` prefix) |
-| `packages/cli/src/ui/types.ts`                               | `HistoryItemAwayRecap` type                         |
-| `packages/cli/src/ui/layouts/DefaultAppLayout.tsx`           | Sticky-banner placement above the Composer          |
-| `packages/cli/src/ui/layouts/ScreenReaderAppLayout.tsx`      | Same placement under screen-reader mode             |
-| `packages/cli/src/config/settingsSchema.ts`                  | `general.showSessionRecap` setting                  |
+| File                                                         | Responsibility                                                                   |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `packages/core/src/services/sessionRecap.ts`                 | One-shot LLM call + history filter + tag extraction                              |
+| `packages/cli/src/ui/hooks/useAwaySummary.ts`                | Auto-trigger React hook                                                          |
+| `packages/cli/src/ui/commands/recapCommand.ts`               | `/recap` manual entry point                                                      |
+| `packages/cli/src/ui/components/messages/StatusMessages.tsx` | `AwayRecapMessage` renderer (`※` + bold `recap:` + italic content, all dim)      |
+| `packages/cli/src/ui/types.ts`                               | `HistoryItemAwayRecap` type                                                      |
+| `packages/cli/src/ui/components/HistoryItemDisplay.tsx`      | Dispatches `away_recap` history items to the renderer                            |
+| `packages/cli/src/config/settingsSchema.ts`                  | `general.showSessionRecap` + `general.sessionRecapAwayThresholdMinutes` settings |
 
 ## Prompt Design
 
@@ -170,7 +170,7 @@ response.
 | `recapPendingRef` | Whether an LLM call is in flight                  |
 | `inFlightRef`     | The current in-flight `AbortController`           |
 
-`useEffect` deps: `[enabled, config, isFocused, isIdle, setAwayRecapItem]`.
+`useEffect` deps: `[enabled, config, isFocused, isIdle, addItem, thresholdMs]`.
 
 | Event                                              | Action                                                                                                                                 |
 | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |

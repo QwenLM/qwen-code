@@ -390,9 +390,9 @@ export type HistoryItemBtw = HistoryItemBase & {
 
 /**
  * Away-summary recap shown when the user returns to the session after a
- * period of inactivity (or via /recap). Rendered as a sticky banner above
- * the input box (NOT part of the scrolling history), so it is intentionally
- * excluded from the HistoryItemWithoutId union.
+ * period of inactivity (or via /recap). Rendered inline as a regular
+ * history item (matching Claude Code's away_summary message); scrolls
+ * with the conversation, no sticky pinning.
  */
 export type HistoryItemAwayRecap = HistoryItemBase & {
   type: 'away_recap';
@@ -484,6 +484,7 @@ export type HistoryItemWithoutId =
   | HistoryItemInsightProgress
   | HistoryItemBtw
   | HistoryItemMemorySaved
+  | HistoryItemAwayRecap
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
   | HistoryItemStopHookSystemMessage
