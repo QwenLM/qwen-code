@@ -82,6 +82,10 @@ export class WebViewProvider {
   /** Guards against concurrent auth-restore / connection init */
   private initializationPromise: Promise<void> | null = null;
   private isReconnecting = false;
+  /** Timer for the deferred auto-auth launch inside doInitializeAgentConnection */
+  private autoAuthTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Whether an explicit interactive auth flow is currently active */
+  private authFlowActive = false;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -921,8 +925,27 @@ export class WebViewProvider {
     await this.attemptAuthStateRestoration();
   }
 
+  /**
+   * Launch the interactive auth flow (QuickPick → InputBox → write settings → reconnect).
+   * Guards against concurrent launches: if auto-auth was scheduled by
+   * doInitializeAgentConnection's deferred timeout, it is cancelled first.
+   */
   async startInteractiveAuth(): Promise<void> {
-    await this.messageHandler.route({ type: 'auth' });
+    // Cancel any pending auto-auth from doInitializeAgentConnection so we
+    // don't end up with two overlapping auth flows.
+    if (this.autoAuthTimer) {
+      clearTimeout(this.autoAuthTimer);
+      this.autoAuthTimer = null;
+    }
+    if (this.authFlowActive) {
+      return;
+    }
+    this.authFlowActive = true;
+    try {
+      await this.messageHandler.route({ type: 'auth' });
+    } finally {
+      this.authFlowActive = false;
+    }
   }
 
   setInitialModelId(modelId: string | null | undefined): void {
@@ -1138,8 +1161,13 @@ export class WebViewProvider {
           // so the user is immediately guided to configure their provider,
           // mirroring CLI's behavior of showing AuthDialog on first run.
           // Deferred to avoid conflicting with the current connection init.
-          setTimeout(() => {
-            void this.messageHandler.route({ type: 'auth' });
+          // The timer is stored so startInteractiveAuth() can cancel it
+          // to prevent two overlapping auth flows.
+          this.autoAuthTimer = setTimeout(() => {
+            this.autoAuthTimer = null;
+            if (!this.authFlowActive) {
+              void this.messageHandler.route({ type: 'auth' });
+            }
           }, 100);
           return;
         }

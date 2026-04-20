@@ -180,7 +180,9 @@ export function writeModelProvidersConfig(params: {
   env['OPENAI_API_KEY'] = params.apiKey;
   delete env[CODING_PLAN_ENV_KEY];
 
-  // Convert key-value map to CLI's array format
+  // Convert key-value map to CLI's array format and merge with existing
+  // non-target entries so reconfiguring one provider doesn't silently
+  // delete others (e.g. Coding Plan entries with a different envKey).
   const providers = ensureNestedObject(settings, 'modelProviders');
   const modelArray = Object.entries(params.modelProviders).map(
     ([id, baseUrl]) => ({
@@ -190,7 +192,11 @@ export function writeModelProvidersConfig(params: {
       envKey: 'OPENAI_API_KEY',
     }),
   );
-  providers[AuthType.USE_OPENAI] = modelArray;
+  const existing = findOpenaiModels(
+    settings.modelProviders as Record<string, unknown>,
+  );
+  const nonTarget = existing.filter((e) => e.envKey !== 'OPENAI_API_KEY');
+  providers[AuthType.USE_OPENAI] = [...modelArray, ...nonTarget];
 
   // Active model
   if (params.activeModel) {

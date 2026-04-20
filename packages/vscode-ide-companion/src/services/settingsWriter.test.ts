@@ -71,14 +71,18 @@ describe('settingsWriter', () => {
     expect(env[CODING_PLAN_ENV_KEY]).toBeUndefined();
     expect(settings.codingPlan).toBeUndefined();
     expect(settings.model).toEqual({ name: 'gpt-4o' });
-    expect(openaiModels).toEqual([
-      {
-        id: 'gpt-4o',
-        name: 'gpt-4o',
-        baseUrl: 'https://api.openai.com/v1',
-        envKey: 'OPENAI_API_KEY',
-      },
-    ]);
+    // The new entry must be present
+    expect(openaiModels[0]).toEqual({
+      id: 'gpt-4o',
+      name: 'gpt-4o',
+      baseUrl: 'https://api.openai.com/v1',
+      envKey: 'OPENAI_API_KEY',
+    });
+    // Non-target entries (Coding Plan) are preserved, not silently deleted
+    const preserved = openaiModels.filter(
+      (m) => m.envKey === CODING_PLAN_ENV_KEY,
+    );
+    expect(preserved.length).toBeGreaterThan(0);
   });
 
   it('reads an api-key configuration after switching away from coding plan', () => {
