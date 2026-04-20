@@ -142,7 +142,7 @@ Prompt hooks use an LLM to evaluate hook input and return a decision. This is us
 **How it works:**
 
 1. The hook input JSON is injected into your prompt using the `$ARGUMENTS` placeholder
-2. The prompt is sent to an LLM (default: fastModel from your config)
+2. The prompt is sent to an LLM (default: your current model)
 3. The LLM returns a JSON response with the decision
 4. Qwen Code processes the decision and continues or blocks execution accordingly
 
@@ -152,7 +152,7 @@ Prompt hooks use an LLM to evaluate hook input and return a decision. This is us
 | :-------------- | :--------- | :------- | :-------------------------------------------------- |
 | `type`          | `"prompt"` | Yes      | Hook type                                           |
 | `prompt`        | `string`   | Yes      | Prompt sent to LLM. Use `$ARGUMENTS` for hook input |
-| `model`         | `string`   | No       | Model to use (defaults to fastModel)                |
+| `model`         | `string`   | No       | Model to use (defaults to your current model)       |
 | `timeout`       | `number`   | No       | Timeout in seconds, default 30                      |
 | `name`          | `string`   | No       | Hook name (for logging)                             |
 | `description`   | `string`   | No       | Hook description                                    |

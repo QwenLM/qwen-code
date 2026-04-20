@@ -158,7 +158,7 @@ export interface PromptHookConfig {
   type: HookType.Prompt;
   /** Prompt template with $ARGUMENTS placeholder for hook input JSON */
   prompt: string;
-  /** Optional model override (defaults to fastModel from config) */
+  /** Optional model override (defaults to the user's current model) */
   model?: string;
   /** Timeout in seconds (default 30) */
   timeout?: number;

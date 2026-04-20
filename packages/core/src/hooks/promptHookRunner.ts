@@ -211,38 +211,39 @@ export class PromptHookRunner {
       },
     ];
 
-    // Create timeout promise
+    // Create internal AbortController to abort the request on timeout
+    const internalAbortController = new AbortController();
+    const internalSignal = internalAbortController.signal;
+
+    // Chain external signal to internal abort controller
+    if (signal) {
+      if (signal.aborted) {
+        internalAbortController.abort();
+      } else {
+        signal.addEventListener('abort', () => {
+          internalAbortController.abort();
+        });
+      }
+    }
+
+    // Create timeout promise that also aborts the request
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
+        internalAbortController.abort();
         reject(new Error(`Prompt hook timed out after ${timeoutMs}ms`));
       }, timeoutMs);
     });
 
-    // Create abort promise if signal provided
-    let abortPromise: Promise<never> | undefined;
-    if (signal) {
-      abortPromise = new Promise<never>((_, reject) => {
-        if (signal.aborted) {
-          reject(new Error('Prompt hook execution aborted'));
-        }
-        signal.addEventListener('abort', () => {
-          reject(new Error('Prompt hook execution aborted'));
-        });
-      });
-    }
-
     try {
-      // Race between LLM call, timeout, and abort
-      const promises: Array<Promise<unknown>> = [
+      // Race between LLM call and timeout
+      const response = await Promise.race([
         generator.generateContent(
           {
             model,
             contents,
             config: {
-              abortSignal: signal,
-              // Enable thinking for better hook evaluation (more thorough security analysis)
-              thinkingConfig: { includeThoughts: true },
+              abortSignal: internalSignal,
               systemInstruction: {
                 parts: [{ text: LLM_HOOK_SYSTEM_PROMPT }],
               },
@@ -251,13 +252,7 @@ export class PromptHookRunner {
           'prompt_hook',
         ),
         timeoutPromise,
-      ];
-
-      if (abortPromise) {
-        promises.push(abortPromise);
-      }
-
-      const response = await Promise.race(promises);
+      ]);
 
       // Extract text from response
       const text = (
