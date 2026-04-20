@@ -172,15 +172,16 @@ response.
 
 `useEffect` deps: `[enabled, config, isFocused, isIdle, addItem, thresholdMs]`.
 
-| Event                                              | Action                                                                                                                                 |
-| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `!enabled \|\| !config`                            | Abort in-flight call + clear `inFlightRef` + clear `blurredAtRef`                                                                      |
-| `!isFocused` and `blurredAtRef === null`           | Set `blurredAtRef = Date.now()`                                                                                                        |
-| `isFocused` and `blurredAtRef === null`            | Return early (no blur cycle to handle — first render or right after a brief-blur reset)                                                |
-| `isFocused` and blur duration < 5 min              | Clear `blurredAtRef`, wait for next blur cycle                                                                                         |
-| `isFocused` and blur ≥ 5 min and `recapPendingRef` | Return (dedupe)                                                                                                                        |
-| `isFocused` and blur ≥ 5 min and `!isIdle`         | **Preserve** `blurredAtRef` and wait for the turn to finish (`isIdle` is in the deps, so the effect re-fires when streaming completes) |
-| `isFocused` and all conditions met                 | Clear `blurredAtRef`, set `recapPendingRef = true`, create `AbortController`, send the LLM request                                     |
+| Event                                                            | Action                                                                                                                                 |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `!enabled \|\| !config`                                          | Abort in-flight call + clear `inFlightRef` + clear `blurredAtRef`                                                                      |
+| `!isFocused` and `blurredAtRef === null`                         | Set `blurredAtRef = Date.now()`                                                                                                        |
+| `isFocused` and `blurredAtRef === null`                          | Return early (no blur cycle to handle — first render or right after a brief-blur reset)                                                |
+| `isFocused` and blur duration < 5 min                            | Clear `blurredAtRef`, wait for next blur cycle                                                                                         |
+| `isFocused` and blur ≥ 5 min and `recapPendingRef`               | Return (dedupe)                                                                                                                        |
+| `isFocused` and blur ≥ 5 min and `!isIdle`                       | **Preserve** `blurredAtRef` and wait for the turn to finish (`isIdle` is in the deps, so the effect re-fires when streaming completes) |
+| `isFocused` and blur ≥ 5 min and `shouldFireRecap` returns false | Clear `blurredAtRef` and return — conversation hasn't moved enough since the last recap (≥ 2 user turns required, mirrors Claude Code) |
+| `isFocused` and all conditions met                               | Clear `blurredAtRef`, set `recapPendingRef = true`, create `AbortController`, send the LLM request                                     |
 
 The `.then` callback **re-checks** `isIdleRef.current`: if the user has
 started a new turn while the LLM was running, the late-arriving recap

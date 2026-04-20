@@ -1264,6 +1264,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isFocused,
     isIdle: streamingState === StreamingState.Idle,
     addItem: historyManager.addItem,
+    history: historyManager.history,
     awayThresholdMinutes:
       settings.merged.general?.sessionRecapAwayThresholdMinutes,
   });

@@ -6,9 +6,22 @@
 
 import { useEffect, useRef } from 'react';
 import { generateSessionRecap, type Config } from '@qwen-code/qwen-code-core';
-import type { HistoryItemAwayRecap, HistoryItemWithoutId } from '../types.js';
+import type {
+  HistoryItem,
+  HistoryItemAwayRecap,
+  HistoryItemWithoutId,
+} from '../types.js';
 
 const DEFAULT_AWAY_THRESHOLD_MINUTES = 5;
+
+// Dedup thresholds, matching Claude Code's `Sc1`/`Rc1`:
+// - need at least MIN_USER_MESSAGES_TO_FIRE user turns total
+// - if a recap is already in history, need at least
+//   MIN_USER_MESSAGES_SINCE_LAST_RECAP new user turns since then before
+//   another can fire. Prevents back-to-back recaps when the user briefly
+//   alt-tabs twice without doing any new work in between.
+const MIN_USER_MESSAGES_TO_FIRE = 3;
+const MIN_USER_MESSAGES_SINCE_LAST_RECAP = 2;
 
 export interface UseAwaySummaryOptions {
   enabled: boolean;
@@ -17,11 +30,38 @@ export interface UseAwaySummaryOptions {
   isIdle: boolean;
   addItem: (item: HistoryItemWithoutId, baseTimestamp: number) => number;
   /**
+   * The current chat history. Read at fire time only (via a ref) to apply
+   * the dedup gate; not added to the effect's deps so it doesn't re-fire
+   * on every history change.
+   */
+  history: HistoryItem[];
+  /**
    * Minutes the terminal must be blurred before an auto-recap fires on
    * the next focus-in. Falsy / non-positive values fall back to the
    * 5-minute default (matching Claude Code).
    */
   awayThresholdMinutes?: number;
+}
+
+/**
+ * Whether enough new user activity has happened since the last recap to
+ * justify another one. Mirrors Claude Code's `Ic1` gate.
+ */
+function shouldFireRecap(history: HistoryItem[]): boolean {
+  let userMessageCount = 0;
+  let lastRecapIndex = -1;
+  for (let i = 0; i < history.length; i++) {
+    const item = history[i];
+    if (item.type === 'user') userMessageCount++;
+    if (item.type === 'away_recap') lastRecapIndex = i;
+  }
+  if (userMessageCount < MIN_USER_MESSAGES_TO_FIRE) return false;
+  if (lastRecapIndex === -1) return true;
+  let userSinceLast = 0;
+  for (let i = lastRecapIndex + 1; i < history.length; i++) {
+    if (history[i].type === 'user') userSinceLast++;
+  }
+  return userSinceLast >= MIN_USER_MESSAGES_SINCE_LAST_RECAP;
 }
 
 /**
@@ -33,8 +73,15 @@ export interface UseAwaySummaryOptions {
  * a single back-and-forth produces at most one recap.
  */
 export function useAwaySummary(options: UseAwaySummaryOptions): void {
-  const { enabled, config, isFocused, isIdle, addItem, awayThresholdMinutes } =
-    options;
+  const {
+    enabled,
+    config,
+    isFocused,
+    isIdle,
+    addItem,
+    history,
+    awayThresholdMinutes,
+  } = options;
 
   const blurredAtRef = useRef<number | null>(null);
   const recapPendingRef = useRef(false);
@@ -42,6 +89,11 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
 
   const isIdleRef = useRef(isIdle);
   isIdleRef.current = isIdle;
+
+  // Latest history snapshot, read at fire time only — keeps history out
+  // of the effect's deps so we don't re-evaluate on every message.
+  const historyRef = useRef(history);
+  historyRef.current = history;
 
   const thresholdMs =
     (awayThresholdMinutes && awayThresholdMinutes > 0
@@ -78,6 +130,14 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
     // Wait for idle; do NOT clear blurredAtRef so this effect re-fires
     // (with isIdle in the deps) when the streaming turn finishes.
     if (!isIdleRef.current) return;
+
+    // Skip if the conversation hasn't moved enough since the last recap —
+    // a brief alt-tab cycle right after a recap shouldn't produce a near-
+    // duplicate one.
+    if (!shouldFireRecap(historyRef.current)) {
+      blurredAtRef.current = null;
+      return;
+    }
 
     blurredAtRef.current = null;
     recapPendingRef.current = true;
