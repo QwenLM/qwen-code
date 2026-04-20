@@ -519,6 +519,9 @@ export interface AgentResultDisplay {
 
 export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
+  totalLines?: number;
+  totalBytes?: number;
+  timeoutMs?: number;
 }
 
 /**
