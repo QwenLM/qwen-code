@@ -157,6 +157,27 @@ describe('ThemeManager', () => {
       await themeManager.resolveAutoThemeAsync();
       expect(themeManager.getActiveTheme().name).toBe('Qwen Dark');
     });
+
+    it('should reuse the async-detected value when auto is re-selected', async () => {
+      // Startup: async probe (e.g. OSC 11) reports light.
+      vi.mocked(detectModule.detectTerminalThemeAsync).mockResolvedValue(
+        'light',
+      );
+      await themeManager.resolveAutoThemeAsync();
+      expect(themeManager.getActiveTheme().name).toBe('Qwen Light');
+
+      // User switches to another theme via /theme.
+      themeManager.setActiveTheme('Ayu');
+      expect(themeManager.getActiveTheme().name).toBe('Ayu');
+
+      // Switching back to Auto must not regress: even if the sync detector
+      // disagrees (OSC 11 is unavailable in-session), the cached async
+      // result wins so the preview stays consistent with startup.
+      vi.mocked(detectModule.detectTerminalTheme).mockReturnValue('dark');
+      themeManager.setActiveTheme(AUTO_THEME_NAME);
+      expect(themeManager.getActiveTheme().name).toBe('Qwen Light');
+      expect(detectModule.detectTerminalTheme).not.toHaveBeenCalled();
+    });
   });
 
   describe('when loading a theme from a file', () => {
