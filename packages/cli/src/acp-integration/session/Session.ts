@@ -33,10 +33,7 @@ import {
   logToolCall,
   logUserPrompt,
   getErrorStatus,
-  AgentTool,
   UserPromptEvent,
-  TodoWriteTool,
-  ExitPlanModeTool,
   readManyFiles,
   Storage,
   ToolNames,
@@ -76,6 +73,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
 import {
+  ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
   handleSlashCommand,
   getAvailableCommands,
   type NonInteractiveSlashCommandResult,
@@ -83,6 +81,11 @@ import {
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
+
+const ACP_ALLOWED_COMMANDS = [
+  ...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
+  'insight',
+];
 
 // Import modular session components
 import type {
@@ -327,12 +330,13 @@ export class Session implements SessionContext {
         let parts: Part[] | null;
 
         if (isSlashCommand(inputText)) {
-          // Handle slash command - uses default allowed commands (init, summary, compress)
+          // ACP supports the standard non-interactive built-ins plus /insight.
           const slashCommandResult = await handleSlashCommand(
             inputText,
             pendingSend,
             this.config,
             this.settings,
+            ACP_ALLOWED_COMMANDS,
           );
 
           parts = await this.#processSlashCommandResult(
@@ -968,6 +972,7 @@ export class Session implements SessionContext {
       const slashCommands = await getAvailableCommands(
         this.config,
         abortController.signal,
+        ACP_ALLOWED_COMMANDS,
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
@@ -1128,7 +1133,7 @@ export class Session implements SessionContext {
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
     ) => {
-      if (toolName !== TodoWriteTool.Name) {
+      if (toolName !== ToolNames.TODO_WRITE) {
         await this.toolCallEmitter.emitError(callId, toolName, error);
       }
 
@@ -1168,9 +1173,9 @@ export class Session implements SessionContext {
     }
 
     // Detect TodoWriteTool early - route to plan updates instead of tool_call events
-    const isTodoWriteTool = tool.name === TodoWriteTool.Name;
-    const isAgentTool = tool.name === AgentTool.Name;
-    const isExitPlanModeTool = tool.name === ExitPlanModeTool.Name;
+    const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
+    const isAgentTool = tool.name === ToolNames.AGENT;
+    const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
 
     // Track cleanup functions for sub-agent event listeners
     let subAgentCleanupFunctions: Array<() => void> = [];

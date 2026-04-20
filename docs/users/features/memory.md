@@ -2,7 +2,7 @@
 
 Every Qwen Code session starts with a fresh context window. Two mechanisms carry knowledge across sessions so you don't have to re-explain yourself every time:
 
-- **QWEN.md** — instructions *you* write once and Qwen reads every session
+- **QWEN.md** — instructions _you_ write once and Qwen reads every session
 - **Auto-memory** — notes Qwen writes itself based on what it learns from you
 
 ---
@@ -24,9 +24,9 @@ Don't include things Qwen can figure out by reading your code. QWEN.md works bes
 
 ### Where to create QWEN.md
 
-| File | Who it applies to |
-|---|---|
-| `~/.qwen/QWEN.md` | You, across all your projects |
+| File                          | Who it applies to                             |
+| ----------------------------- | --------------------------------------------- |
+| `~/.qwen/QWEN.md`             | You, across all your projects                 |
 | `QWEN.md` in the project root | Your whole team (commit it to source control) |
 
 You can have both. Qwen loads all QWEN.md files it finds when you start a session — your personal one plus any in the project.
@@ -45,6 +45,7 @@ You can point QWEN.md at other files so Qwen reads them too:
 See @README.md for project overview.
 
 # Conventions
+
 - Git workflow: @docs/git-workflow.md
 ```
 
@@ -62,12 +63,12 @@ This is different from QWEN.md: you don't write it, Qwen does.
 
 Qwen looks for four kinds of things worth remembering:
 
-| What | Examples |
-|---|---|
-| **About you** | Your role, background, how you like to work |
-| **Your feedback** | Corrections you made, approaches you confirmed |
-| **Project context** | Ongoing work, decisions, goals not obvious from the code |
-| **External references** | Dashboards, ticket trackers, docs links you mentioned |
+| What                    | Examples                                                 |
+| ----------------------- | -------------------------------------------------------- |
+| **About you**           | Your role, background, how you like to work              |
+| **Your feedback**       | Corrections you made, approaches you confirmed           |
+| **Project context**     | Ongoing work, decisions, goals not obvious from the code |
+| **External references** | Dashboards, ticket trackers, docs links you mentioned    |
 
 Qwen doesn't save everything — only things that would actually be useful next time.
 
@@ -150,6 +151,7 @@ Runs the memory cleanup now instead of waiting for the automatic schedule:
 Open `/memory` to see which files are loaded. If your file isn't listed, Qwen can't see it — make sure it's in the project root or `~/.qwen/`.
 
 Instructions work better when they're specific:
+
 - ✓ `Use 2-space indentation for TypeScript files`
 - ✗ `Format code nicely`
 

@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useMemo,
+  useEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from 'react';
 import { type PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { ArenaDialogType } from './useArenaCommand.js';
@@ -108,6 +115,7 @@ export const useSlashCommandProcessor = (
   toggleVimEnabled: () => Promise<boolean>,
   isProcessing: boolean,
   setIsProcessing: (isProcessing: boolean) => void,
+  isIdleRef: MutableRefObject<boolean>,
   setGeminiMdFileCount: (count: number) => void,
   actions: SlashCommandProcessorActions,
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
@@ -264,6 +272,7 @@ export const useSlashCommandProcessor = (
       ui: {
         addItem,
         clear: () => {
+          cancelBtw();
           clearItems();
           clearScreen();
           refreshStatic();
@@ -277,6 +286,7 @@ export const useSlashCommandProcessor = (
         setBtwItem,
         cancelBtw,
         btwAbortControllerRef,
+        isIdleRef,
         toggleVimEnabled,
         setGeminiMdFileCount,
         reloadCommands,
@@ -315,6 +325,7 @@ export const useSlashCommandProcessor = (
       reloadCommands,
       setSessionName,
       extensionsUpdateState,
+      isIdleRef,
     ],
   );
 

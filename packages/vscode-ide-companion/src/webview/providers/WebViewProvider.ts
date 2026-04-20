@@ -9,6 +9,7 @@ import { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import { ConversationStore } from '../../services/conversationStore.js';
 import type {
   RequestPermissionRequest,
+  AvailableCommand,
   ModelInfo,
 } from '@agentclientprotocol/sdk';
 import type { AskUserQuestionRequest } from '../../types/acpTypes.js';
@@ -25,6 +26,12 @@ import { createImagePathResolver } from '../utils/imageHandler.js';
 import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import { parseInsightMessage } from '@qwen-code/qwen-code-core';
+
+function isInsightCommand(command: string): boolean {
+  const [firstToken = ''] = command.trim().split(/\s+/, 1);
+  return firstToken.replace(/^\/+/, '') === 'insight';
+}
 
 export class WebViewProvider {
   private panelManager: PanelManager;
@@ -46,6 +53,8 @@ export class WebViewProvider {
   // Track current ACP mode id to influence permission/diff behavior
   private currentModeId: ApprovalModeValue | null = null;
   private authState: boolean | null = null;
+  /** Cached available commands for re-sending on webview ready */
+  private cachedAvailableCommands: AvailableCommand[] | null = null;
   /** Cached available models for re-sending on webview ready */
   private cachedAvailableModels: ModelInfo[] | null = null;
   /** Model to apply once a new editor-tab session is initialized */
@@ -134,6 +143,50 @@ export class WebViewProvider {
       });
     });
 
+    this.agentManager.onSlashCommandNotification((event) => {
+      if (isInsightCommand(event.command) && event.messageType === 'error') {
+        this.sendMessageToWebView({
+          type: 'insightProgressCleared',
+          data: {},
+        });
+      }
+
+      // Try to parse as structured insight message
+      if (isInsightCommand(event.command) && event.messageType === 'info') {
+        const parsed = parseInsightMessage(event.message);
+        if (parsed?.type === 'insight_progress') {
+          this.sendMessageToWebView({
+            type: 'insightProgress',
+            data: {
+              stage: parsed.stage,
+              progress: parsed.progress,
+              detail: parsed.detail,
+            },
+          });
+          return;
+        }
+
+        if (parsed?.type === 'insight_ready') {
+          this.sendMessageToWebView({
+            type: 'insightReportReady',
+            data: {
+              path: parsed.path,
+            },
+          });
+          return;
+        }
+      }
+
+      const chunk = event.message.endsWith('\n')
+        ? event.message
+        : `${event.message}\n`;
+      this.messageHandler.appendStreamContent(chunk);
+      this.sendMessageToWebView({
+        type: 'streamChunk',
+        data: { chunk },
+      });
+    });
+
     // Surface available modes and current mode (from ACP initialize)
     this.agentManager.onModeInfo((info) => {
       try {
@@ -190,6 +243,7 @@ export class WebViewProvider {
 
     // Surface available commands (from ACP available_commands_update)
     this.agentManager.onAvailableCommands((commands) => {
+      this.cachedAvailableCommands = commands;
       this.sendMessageToWebView({
         type: 'availableCommands',
         data: { commands },
@@ -308,25 +362,35 @@ export class WebViewProvider {
               optionId === 'cancel' ||
               optionId.toLowerCase().includes('reject');
 
+            // For switch_mode (exit_plan_mode), cancel means "reject
+            // the plan and stay in plan mode" — the agent keeps running.
+            const isSwitchMode =
+              (request.toolCall as { kind?: string } | undefined)?.kind ===
+              'switch_mode';
+
             // Always close open qwen-diff editors after any permission decision
             void vscode.commands.executeCommand('qwen.diff.closeAll');
 
             if (isCancel) {
-              // Fire and forget — cancel generation and update UI
+              // Fire and forget — for normal tool calls, cancel generation and
+              // end the stream; for switch_mode, keep the session alive but
+              // still mark the permission tool call as failed in the UI.
               void (async () => {
-                try {
-                  await this.agentManager.cancelCurrentPrompt();
-                } catch (err) {
-                  console.warn(
-                    '[WebViewProvider] cancelCurrentPrompt error:',
-                    err,
-                  );
-                }
+                if (!isSwitchMode) {
+                  try {
+                    await this.agentManager.cancelCurrentPrompt();
+                  } catch (err) {
+                    console.warn(
+                      '[WebViewProvider] cancelCurrentPrompt error:',
+                      err,
+                    );
+                  }
 
-                this.sendMessageToWebView({
-                  type: 'streamEnd',
-                  data: { timestamp: Date.now(), reason: 'user_cancelled' },
-                });
+                  this.sendMessageToWebView({
+                    type: 'streamEnd',
+                    data: { timestamp: Date.now(), reason: 'user_cancelled' },
+                  });
+                }
 
                 // Synthesize a failed tool_call_update to match CLI UX
                 try {
@@ -453,6 +517,25 @@ export class WebViewProvider {
     });
   }
 
+  private async openInsightReport(path: string): Promise<void> {
+    await vscode.env.openExternal(vscode.Uri.file(path));
+  }
+
+  private async handleOpenInsightReportMessage(message: {
+    type: string;
+    data?: unknown;
+  }): Promise<boolean> {
+    if (message.type !== 'openInsightReport') {
+      return false;
+    }
+
+    const path = (message.data as { path?: unknown } | undefined)?.path;
+    if (typeof path === 'string' && path.length > 0) {
+      await this.openInsightReport(path);
+    }
+    return true;
+  }
+
   /**
    * Attach the provider to a WebviewView (sidebar / panel / secondary sidebar).
    * Called from ChatWebviewViewProvider.resolveWebviewView when VS Code opens
@@ -500,6 +583,9 @@ export class WebViewProvider {
         }
         if (message.type === 'resolveImagePaths') {
           this.handleResolveImagePaths(message.data, webview);
+          return;
+        }
+        if (await this.handleOpenInsightReportMessage(message)) {
           return;
         }
         if (this.handleNewChatByContext(message)) {
@@ -659,6 +745,9 @@ export class WebViewProvider {
         }
         if (message.type === 'resolveImagePaths') {
           this.handleResolveImagePaths(message.data, newPanel.webview);
+          return;
+        }
+        if (await this.handleOpenInsightReportMessage(message)) {
           return;
         }
         // Allow webview to request updating the VS Code tab title
@@ -1258,6 +1347,13 @@ export class WebViewProvider {
       });
     }
 
+    if (this.cachedAvailableCommands) {
+      this.sendMessageToWebView({
+        type: 'availableCommands',
+        data: { commands: this.cachedAvailableCommands },
+      });
+    }
+
     // Send cached available models to webview
     if (this.cachedAvailableModels && this.cachedAvailableModels.length > 0) {
       console.log(
@@ -1496,6 +1592,9 @@ export class WebViewProvider {
         }
         if (message.type === 'resolveImagePaths') {
           this.handleResolveImagePaths(message.data, panel.webview);
+          return;
+        }
+        if (await this.handleOpenInsightReportMessage(message)) {
           return;
         }
         if (message.type === 'updatePanelTitle') {

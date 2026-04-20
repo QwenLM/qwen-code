@@ -20,6 +20,7 @@ import { compressCommand } from '../ui/commands/compressCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
+import { doctorCommand } from '../ui/commands/doctorCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
@@ -40,6 +41,7 @@ import { planCommand } from '../ui/commands/planCommand.js';
 import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
+import { recapCommand } from '../ui/commands/recapCommand.js';
 import { renameCommand } from '../ui/commands/renameCommand.js';
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
 import { resumeCommand } from '../ui/commands/resumeCommand.js';
@@ -99,6 +101,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       copyCommand,
       deleteCommand,
       docsCommand,
+      doctorCommand,
       directoryCommand,
       editorCommand,
       exportCommand,
@@ -119,6 +122,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       permissionsCommand,
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,
+      recapCommand,
       renameCommand,
       restoreCommand(this.config),
       resumeCommand,

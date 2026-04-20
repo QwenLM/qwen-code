@@ -19,6 +19,7 @@ import {
   validateDnsResolutionOrder,
   startInteractiveUI,
 } from './gemini.js';
+import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
 import type { Config } from '@qwen-code/qwen-code-core';
@@ -40,6 +41,7 @@ vi.mock('./config/settings.js', async (importOriginal) => {
   return {
     ...actual,
     loadSettings: vi.fn(),
+    createMinimalSettings: vi.fn(),
   };
 });
 
@@ -109,6 +111,7 @@ vi.mock('./core/initializer.js', () => ({
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
+  let originalEnvQwenCodeSimple: string | undefined;
   let initialUnhandledRejectionListeners: NodeJS.UnhandledRejectionListener[] =
     [];
 
@@ -116,8 +119,10 @@ describe('gemini.tsx main function', () => {
     // Store and clear sandbox-related env variables to ensure a consistent test environment
     originalEnvGeminiSandbox = process.env['QWEN_SANDBOX'];
     originalEnvSandbox = process.env['SANDBOX'];
+    originalEnvQwenCodeSimple = process.env['QWEN_CODE_SIMPLE'];
     delete process.env['QWEN_SANDBOX'];
     delete process.env['SANDBOX'];
+    delete process.env['QWEN_CODE_SIMPLE'];
 
     initialUnhandledRejectionListeners =
       process.listeners('unhandledRejection');
@@ -134,6 +139,11 @@ describe('gemini.tsx main function', () => {
       process.env['SANDBOX'] = originalEnvSandbox;
     } else {
       delete process.env['SANDBOX'];
+    }
+    if (originalEnvQwenCodeSimple !== undefined) {
+      process.env['QWEN_CODE_SIMPLE'] = originalEnvQwenCodeSimple;
+    } else {
+      delete process.env['QWEN_CODE_SIMPLE'];
     }
 
     const currentListeners = process.listeners('unhandledRejection');
@@ -213,6 +223,87 @@ describe('gemini.tsx main function', () => {
     // we can authorize outside the sandbox.
     expect(callOrder).toEqual(['relaunch', 'loadCliConfig']);
     processExitSpy.mockRestore();
+  });
+
+  it('should skip full settings discovery in bare mode', async () => {
+    const originalArgv = process.argv;
+    process.argv = ['node', 'script.js', '--bare'];
+
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings, createMinimalSettings } = await import(
+      './config/settings.js'
+    );
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+    const nonInteractiveModule = await import('./nonInteractiveCli.js');
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+
+    const minimalSettings = {
+      errors: [],
+      merged: {},
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    };
+    const configStub = {
+      isInteractive: () => false,
+      getQuestion: () => 'bare prompt',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      initialize: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getGeminiMdFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => [],
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getSessionId: () => 'test-session-id',
+    } as unknown as Config;
+
+    vi.mocked(parseArguments).mockResolvedValue({
+      bare: true,
+    } as unknown as CliArgs);
+    vi.mocked(createMinimalSettings).mockReturnValue(minimalSettings as never);
+    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    vi.mocked(relaunchAppInChildProcess).mockResolvedValue(undefined);
+    vi.mocked(loadCliConfig).mockResolvedValue(configStub);
+    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue();
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) {
+        throw error;
+      }
+    } finally {
+      process.argv = originalArgv;
+      processExitSpy.mockRestore();
+    }
+
+    expect(createMinimalSettings).toHaveBeenCalledOnce();
+    expect(loadSettings).not.toHaveBeenCalled();
+    expect(loadCliConfig).toHaveBeenCalledWith(
+      {},
+      expect.objectContaining({ bare: true }),
+      process.cwd(),
+      undefined,
+      {
+        userHooks: undefined,
+        projectHooks: undefined,
+      },
+    );
   });
 
   it('should log unhandled promise rejections and open debug console on first error', async () => {
@@ -483,6 +574,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       appendSystemPrompt: undefined,
       query: undefined,
       yolo: undefined,
+      bare: undefined,
       approvalMode: undefined,
       telemetry: undefined,
       checkpointing: undefined,

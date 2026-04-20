@@ -311,6 +311,26 @@ describe('extension tests', () => {
         true,
       );
     });
+
+    it('should only load explicitly named extensions when refreshCache is filtered', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext1',
+        version: '1.0.0',
+      });
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'ext2',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      await manager.refreshCache({ names: ['ext2'] });
+      const extensions = manager.getLoadedExtensions();
+
+      expect(extensions).toHaveLength(1);
+      expect(extensions[0].name).toBe('ext2');
+    });
   });
 
   describe('enableExtension / disableExtension', () => {

@@ -80,6 +80,8 @@ export interface CommandContext {
     cancelBtw: () => void;
     /** Ref to the btw AbortController, set by btwCommand so cancelBtw can abort it. */
     btwAbortControllerRef: MutableRefObject<AbortController | null>;
+    /** Ref to whether the agent stream is currently idle (no model turn in flight). */
+    isIdleRef: MutableRefObject<boolean>;
     /**
      * Loads a new set of history items, replacing the current history.
      *

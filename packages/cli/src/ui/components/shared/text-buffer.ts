@@ -657,40 +657,30 @@ export const findPrevWordAcrossLines = (
 };
 
 // Helper functions for vim line operations
+const offsetToRowCol = (
+  offset: number,
+  lines: string[],
+): { row: number; col: number } => {
+  let running = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const lineLength = lines[i].length + 1; // include implicit newline
+    if (running + lineLength > offset) {
+      return { row: i, col: offset - running };
+    }
+    running += lineLength;
+  }
+  // Offset is at or past end of text — clamp to end of last line
+  const last = Math.max(0, lines.length - 1);
+  return { row: last, col: lines[last]?.length ?? 0 };
+};
+
 export const getPositionFromOffsets = (
   startOffset: number,
   endOffset: number,
   lines: string[],
 ) => {
-  let offset = 0;
-  let startRow = 0;
-  let startCol = 0;
-  let endRow = 0;
-  let endCol = 0;
-
-  // Find start position
-  for (let i = 0; i < lines.length; i++) {
-    const lineLength = lines[i].length + 1; // +1 for newline
-    if (offset + lineLength > startOffset) {
-      startRow = i;
-      startCol = startOffset - offset;
-      break;
-    }
-    offset += lineLength;
-  }
-
-  // Find end position
-  offset = 0;
-  for (let i = 0; i < lines.length; i++) {
-    const lineLength = lines[i].length + (i < lines.length - 1 ? 1 : 0); // +1 for newline except last line
-    if (offset + lineLength >= endOffset) {
-      endRow = i;
-      endCol = endOffset - offset;
-      break;
-    }
-    offset += lineLength;
-  }
-
+  const { row: startRow, col: startCol } = offsetToRowCol(startOffset, lines);
+  const { row: endRow, col: endCol } = offsetToRowCol(endOffset, lines);
   return { startRow, startCol, endRow, endCol };
 };
 
@@ -2298,6 +2288,7 @@ export function useTextBuffer({
       else if (key.meta && key.name === 'b') move('wordLeft');
       else if ((key.ctrl || key.meta) && key.name === 'right')
         move('wordRight');
+      else if (key.meta && key.name === 'd') deleteWordRight();
       else if (key.meta && key.name === 'f') move('wordRight');
       else if (key.name === 'home') move('home');
       else if (key.ctrl && key.name === 'a') move('home');

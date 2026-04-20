@@ -51,6 +51,11 @@
           "type": "boolean",
           "default": true
         },
+        "showSessionRecap": {
+          "description": "Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. Use /recap to trigger manually.",
+          "type": "boolean",
+          "default": true
+        },
         "gitCoAuthor": {
           "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",
           "type": "boolean",
@@ -125,6 +130,20 @@
         }
       }
     },
+    "dualOutput": {
+      "description": "Dual-output sidecar mode: emit structured JSON events to a second channel while the TUI renders normally on stdout. See docs/users/features/dual-output.md. CLI flags take precedence over these settings.",
+      "type": "object",
+      "properties": {
+        "jsonFile": {
+          "description": "File path for structured JSON event output. Equivalent to --json-file. Ignored if --json-fd or --json-file is also set.",
+          "type": "string"
+        },
+        "inputFile": {
+          "description": "File path for remote input commands (JSONL). Equivalent to --input-file. Ignored if --input-file is also set.",
+          "type": "string"
+        }
+      }
+    },
     "ui": {
       "description": "User interface settings.",
       "type": "object",
@@ -135,7 +154,7 @@
           "default": "Qwen Dark"
         },
         "statusLine": {
-          "description": "Custom status line display configuration.",
+          "description": "Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.",
           "type": "object",
           "additionalProperties": true
         },
