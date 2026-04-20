@@ -313,6 +313,8 @@ export function mapToDisplay(
               (trackedCall as TrackedExecutingToolCall).liveOutput ?? undefined,
             confirmationDetails: undefined,
             ptyId: (trackedCall as TrackedExecutingToolCall).pid,
+            executionStartTime: (trackedCall as TrackedExecutingToolCall)
+              .executionStartTime,
           };
         case 'validating': // Fallthrough
         case 'scheduled':

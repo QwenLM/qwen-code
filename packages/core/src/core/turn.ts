@@ -33,6 +33,7 @@ import {
   parseThought,
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
+import type { LoopType } from '../telemetry/types.js';
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -194,6 +195,12 @@ export type ServerGeminiFinishedEvent = {
 
 export type ServerGeminiLoopDetectedEvent = {
   type: GeminiEventType.LoopDetected;
+  // The loop type is optional so historical call sites that don't produce one
+  // (tests, fixtures) stay valid. Real emissions in client.ts always populate
+  // it so downstream consumers can surface a concrete reason to the user.
+  value?: {
+    loopType: LoopType;
+  };
 };
 
 export type ServerGeminiCitationEvent = {

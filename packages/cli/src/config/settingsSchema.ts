@@ -324,6 +324,16 @@ const SETTINGS_SCHEMA = {
           'Enable automatic update checks and installations on startup.',
         showInDialog: true,
       },
+      showSessionRecap: {
+        type: 'boolean',
+        label: 'Show Session Recap',
+        category: 'General',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. Use /recap to trigger manually.',
+        showInDialog: true,
+      },
       gitCoAuthor: {
         type: 'boolean',
         label: 'Attribution: commit',
@@ -448,6 +458,44 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  dualOutput: {
+    type: 'object',
+    label: 'Dual Output',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Dual-output sidecar mode: emit structured JSON events to a ' +
+      'second channel while the TUI renders normally on stdout. See ' +
+      'docs/users/features/dual-output.md. CLI flags take precedence ' +
+      'over these settings.',
+    showInDialog: false,
+    properties: {
+      jsonFile: {
+        type: 'string',
+        label: 'JSON Event File',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'File path for structured JSON event output. Equivalent to ' +
+          '--json-file. Ignored if --json-fd or --json-file is also set.',
+        showInDialog: false,
+      },
+      inputFile: {
+        type: 'string',
+        label: 'Remote Input File',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'File path for remote input commands (JSONL). Equivalent to ' +
+          '--input-file. Ignored if --input-file is also set.',
+        showInDialog: false,
+      },
+    },
+  },
+
   ui: {
     type: 'object',
     label: 'UI',
@@ -471,8 +519,15 @@ const SETTINGS_SCHEMA = {
         label: 'Status Line',
         category: 'UI',
         requiresRestart: false,
-        default: undefined as { type: 'command'; command: string } | undefined,
-        description: 'Custom status line display configuration.',
+        default: undefined as
+          | {
+              type: 'command';
+              command: string;
+              refreshInterval?: number;
+            }
+          | undefined,
+        description:
+          'Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
         showInDialog: false,
       },
       customThemes: {
@@ -1090,6 +1145,36 @@ const SETTINGS_SCHEMA = {
         description:
           'Tools or commands that are always blocked. Highest priority rule. ' +
           'Examples: "ShellTool", "Bash(rm -rf *)".',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
+  slashCommands: {
+    type: 'object',
+    label: 'Slash Commands',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Configuration for slash commands exposed by the CLI. Useful for ' +
+      'locking down the command surface in multi-tenant or enterprise ' +
+      'deployments.',
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: 'array',
+        label: 'Disabled Slash Commands',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Slash command names to hide and refuse to execute. Matched ' +
+          'case-insensitively against the final command name (for extension ' +
+          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
+          'Merged as a union across settings scopes, so workspace settings ' +
+          'can add to but not remove entries defined in system/user settings.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

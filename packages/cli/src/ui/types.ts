@@ -69,6 +69,7 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
+  executionStartTime?: number;
   /** If this tool call operated on a managed-auto-memory file, indicates whether it was a read or write. */
   isMemoryOp?: 'read' | 'write';
 }
@@ -206,6 +207,11 @@ export type HistoryItemToolGroup = HistoryItemBase & {
   /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+};
+
+export type HistoryItemNotification = HistoryItemBase & {
+  type: 'notification';
+  text: string;
 };
 
 export type HistoryItemUserShell = HistoryItemBase & {
@@ -383,6 +389,16 @@ export type HistoryItemBtw = HistoryItemBase & {
 };
 
 /**
+ * Away-summary recap shown when the user returns to the session after a
+ * period of inactivity (or via /recap). Rendered in dim color so it is
+ * visually distinct from real assistant replies.
+ */
+export type HistoryItemAwayRecap = HistoryItemBase & {
+  type: 'away_recap';
+  text: string;
+};
+
+/**
  * UserPromptSubmit hook blocked event.
  * Displayed when a UserPromptSubmit hook blocks the user's prompt.
  */
@@ -412,12 +428,31 @@ export type HistoryItemStopHookSystemMessage = HistoryItemBase & {
   message: string;
 };
 
+// --- Doctor diagnostics types ---
+
+export type DoctorCheckStatus = 'pass' | 'warn' | 'fail';
+
+export interface DoctorCheckResult {
+  category: string;
+  name: string;
+  status: DoctorCheckStatus;
+  message: string;
+  detail?: string;
+}
+
+export type HistoryItemDoctor = HistoryItemBase & {
+  type: 'doctor';
+  checks: DoctorCheckResult[];
+  summary: { pass: number; warn: number; fail: number };
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
 // Individually exported types extending HistoryItemBase
 export type HistoryItemWithoutId =
   | HistoryItemUser
+  | HistoryItemNotification
   | HistoryItemUserShell
   | HistoryItemGemini
   | HistoryItemGeminiContent
@@ -448,9 +483,11 @@ export type HistoryItemWithoutId =
   | HistoryItemInsightProgress
   | HistoryItemBtw
   | HistoryItemMemorySaved
+  | HistoryItemAwayRecap
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
-  | HistoryItemStopHookSystemMessage;
+  | HistoryItemStopHookSystemMessage
+  | HistoryItemDoctor;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 

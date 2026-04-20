@@ -39,6 +39,21 @@ const QWEN_CONFIG_DIR = '.qwen';
 const SKILLS_CONFIG_DIR = 'skills';
 const SKILL_MANIFEST_FILE = 'SKILL.md';
 
+// Skills have a fixed layout (<skill-name>/SKILL.md), so depth 2 is enough to
+// detect any change. This keeps chokidar out of heavy subtrees like node_modules
+// that would otherwise exhaust file descriptors (see #3289).
+export const WATCHER_MAX_DEPTH = 2;
+
+// Reject special file types (sockets, FIFOs, devices) that cannot be watched
+// and would error with EOPNOTSUPP, plus .git directories.
+export function watcherIgnored(
+  filePath: string,
+  stats?: fsSync.Stats,
+): boolean {
+  if (stats && !stats.isFile() && !stats.isDirectory()) return true;
+  return filePath.split(path.sep).includes('.git');
+}
+
 /**
  * Manages skill configurations stored as directories containing SKILL.md files.
  * Provides discovery, parsing, validation, and caching for skills.
@@ -275,6 +290,14 @@ export class SkillManager {
   async startWatching(): Promise<void> {
     if (this.watchStarted) {
       debugLogger.debug('Skill watching already started, skipping');
+      return;
+    }
+
+    if (this.config.getBareMode()) {
+      debugLogger.info(
+        'Bare mode enabled; refreshing skill cache without starting watchers',
+      );
+      await this.refreshCache();
       return;
     }
 
@@ -603,6 +626,11 @@ export class SkillManager {
    * @returns Array of skill configurations
    */
   private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
+    if (this.config.getBareMode()) {
+      debugLogger.debug(`Skipping ${level} level skills in bare mode`);
+      return [];
+    }
+
     const projectRoot = this.config.getProjectRoot();
     const homeDir = os.homedir();
     const isHomeDirectory = path.resolve(projectRoot) === path.resolve(homeDir);
@@ -784,6 +812,10 @@ export class SkillManager {
   // Bundled skills are immutable (shipped with the package) and extension
   // skills are managed by the extension system, so neither needs watching.
   private updateWatchersFromCache(): void {
+    if (this.config.getBareMode()) {
+      return;
+    }
+
     const watchTargets = new Set<string>(
       (['project', 'user'] as const)
         .map((level) => this.getSkillsBaseDirs(level))
@@ -814,6 +846,8 @@ export class SkillManager {
       try {
         const watcher = watchFs(watchPath, {
           ignoreInitial: true,
+          ignored: watcherIgnored,
+          depth: WATCHER_MAX_DEPTH,
         })
           .on('all', () => {
             this.scheduleRefresh();

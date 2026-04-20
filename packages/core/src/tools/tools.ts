@@ -495,7 +495,7 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
@@ -519,6 +519,9 @@ export interface AgentResultDisplay {
 
 export interface AnsiOutputDisplay {
   ansiOutput: AnsiOutput;
+  totalLines?: number;
+  totalBytes?: number;
+  timeoutMs?: number;
 }
 
 /**

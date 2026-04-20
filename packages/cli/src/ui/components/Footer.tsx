@@ -51,8 +51,8 @@ export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const { vimEnabled, vimMode } = useVimMode();
+  const { lines: statusLineLines } = useStatusLine();
   const dreamRunning = useDreamRunning(config.getProjectRoot());
-  const { text: statusLineText } = useStatusLine();
 
   const { promptTokenCount, showAutoAcceptIndicator } = {
     promptTokenCount: uiState.sessionStats.lastPromptTokenCount,
@@ -79,8 +79,8 @@ export const Footer: React.FC = () => {
     config.getContentGeneratorConfig()?.contextWindowSize;
 
   // Hide "? for shortcuts" when a custom status line is active (it already
-  // occupies the top row, so the hint is redundant). Matches upstream behavior.
-  const suppressHint = !!statusLineText;
+  // occupies the footer, so the hint is redundant). Matches upstream behavior.
+  const suppressHint = statusLineLines.length > 0;
 
   // Left bottom row: high-priority messages > approval mode > hint.
   const leftBottomContent = uiState.ctrlCPressedOnce ? (
@@ -146,18 +146,20 @@ export const Footer: React.FC = () => {
     >
       {/* Left column — status line on top, hints/mode on bottom */}
       <Box flexDirection="column" flexShrink={isNarrow ? 0 : 1}>
-        {statusLineText &&
+        {statusLineLines.length > 0 &&
           !uiState.ctrlCPressedOnce &&
-          !uiState.ctrlDPressedOnce && (
-            <Text dimColor wrap="truncate">
-              {statusLineText}
+          !uiState.ctrlDPressedOnce &&
+          statusLineLines.map((line, i) => (
+            <Text key={`status-line-${i}`} dimColor wrap="truncate">
+              {line}
             </Text>
-          )}
+          ))}
         <Text wrap="truncate">{leftBottomContent}</Text>
       </Box>
 
-      {/* Right Section — never compressed */}
-      <Box flexShrink={0} gap={1}>
+      {/* Right Section — never compressed, aligns to top so multi-line
+          status lines on the left don't push the indicators to the center. */}
+      <Box flexShrink={0} gap={1} alignItems="flex-start">
         {rightItems.map(({ key, node }, index) => (
           <Box key={key} alignItems="center">
             {index > 0 && <Text color={theme.text.secondary}> | </Text>}

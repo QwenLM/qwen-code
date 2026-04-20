@@ -19,94 +19,10 @@ import {
   serializeTerminalToObject,
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 const { Terminal } = pkg;
 
 const SIGKILL_TIMEOUT_MS = 200;
-const WINDOWS_PATH_DELIMITER = ';';
-let cachedWindowsPathFingerprint: string | undefined;
-let cachedMergedWindowsPath: string | undefined;
-
-function mergeWindowsPathValues(
-  env: NodeJS.ProcessEnv,
-  pathKeys: string[],
-): string | undefined {
-  const mergedEntries: string[] = [];
-  const seenEntries = new Set<string>();
-
-  for (const key of pathKeys) {
-    const value = env[key];
-    if (value === undefined) {
-      continue;
-    }
-
-    for (const entry of value.split(WINDOWS_PATH_DELIMITER)) {
-      if (seenEntries.has(entry)) {
-        continue;
-      }
-      seenEntries.add(entry);
-      mergedEntries.push(entry);
-    }
-  }
-
-  return mergedEntries.length > 0
-    ? mergedEntries.join(WINDOWS_PATH_DELIMITER)
-    : undefined;
-}
-
-function getWindowsPathFingerprint(
-  env: NodeJS.ProcessEnv,
-  pathKeys: string[],
-): string {
-  return pathKeys.map((key) => `${key}=${env[key] ?? ''}`).join('\0');
-}
-
-function normalizePathEnvForWindows(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (os.platform() !== 'win32') {
-    return env;
-  }
-
-  const normalized: NodeJS.ProcessEnv = { ...env };
-  const pathKeys = Object.keys(normalized).filter(
-    (key) => key.toLowerCase() === 'path',
-  );
-
-  if (pathKeys.length === 0) {
-    return normalized;
-  }
-
-  const orderedPathKeys = [...pathKeys].sort((left, right) => {
-    if (left === 'PATH') {
-      return -1;
-    }
-    if (right === 'PATH') {
-      return 1;
-    }
-    return left.localeCompare(right);
-  });
-
-  const fingerprint = getWindowsPathFingerprint(normalized, orderedPathKeys);
-  const canonicalValue =
-    fingerprint === cachedWindowsPathFingerprint
-      ? cachedMergedWindowsPath
-      : mergeWindowsPathValues(normalized, orderedPathKeys);
-
-  if (fingerprint !== cachedWindowsPathFingerprint) {
-    cachedWindowsPathFingerprint = fingerprint;
-    cachedMergedWindowsPath = canonicalValue;
-  }
-
-  for (const key of pathKeys) {
-    if (key !== 'PATH') {
-      delete normalized[key];
-    }
-  }
-
-  if (canonicalValue !== undefined) {
-    normalized['PATH'] = canonicalValue;
-  }
-
-  return normalized;
-}
 
 /**
  * On Windows with PowerShell, prefix the command with a statement that forces
@@ -198,12 +114,12 @@ const getErrorMessage = (error: unknown): string =>
 
 const isExpectedPtyReadExitError = (error: unknown): boolean => {
   const code = getErrnoCode(error);
-  if (code === 'EIO') {
+  if (code === 'EIO' || code === 'EAGAIN') {
     return true;
   }
 
   const message = getErrorMessage(error);
-  return message.includes('read EIO');
+  return message.includes('read EIO') || message.includes('EAGAIN');
 };
 
 const isExpectedPtyExitRaceError = (error: unknown): boolean => {

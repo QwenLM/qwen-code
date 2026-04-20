@@ -20,6 +20,12 @@ import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 
 vi.mock('../../nonInteractiveCliCommands.js', () => ({
+  ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE: [
+    'init',
+    'summary',
+    'compress',
+    'bug',
+  ],
   getAvailableCommands: vi.fn(),
   handleSlashCommand: vi.fn(),
 }));
@@ -51,7 +57,6 @@ describe('Session', () => {
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
   let mockToolRegistry: { getTool: ReturnType<typeof vi.fn> };
-
   beforeEach(() => {
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;

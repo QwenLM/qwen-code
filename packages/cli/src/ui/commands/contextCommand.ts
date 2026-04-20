@@ -23,7 +23,6 @@ import {
   getCoreSystemPrompt,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
-  SkillTool,
   buildSkillLlmContent,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
@@ -138,8 +137,10 @@ export async function collectContextData(
     : 0;
 
   const loadedSkillNames: ReadonlySet<string> =
-    skillTool instanceof SkillTool
-      ? skillTool.getLoadedSkillNames()
+    skillTool && 'getLoadedSkillNames' in skillTool
+      ? (
+          skillTool as { getLoadedSkillNames(): ReadonlySet<string> }
+        ).getLoadedSkillNames()
       : new Set();
 
   const skillManager = config.getSkillManager();

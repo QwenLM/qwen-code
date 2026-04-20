@@ -7,6 +7,7 @@ export default {
   skills: 'Skills',
   memory: 'Memory',
   headless: 'Headless Mode',
+  'dual-output': 'Dual Output',
   checkpointing: {
     display: 'hidden',
   },

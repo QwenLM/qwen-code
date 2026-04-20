@@ -60,6 +60,7 @@ export const createMockCommandContext = (
       setBtwItem: vi.fn(),
       cancelBtw: vi.fn(),
       btwAbortControllerRef: { current: null },
+      isIdleRef: { current: true },
       loadHistory: vi.fn(),
       toggleVimEnabled: vi.fn(),
       extensionsUpdateState: new Map(),

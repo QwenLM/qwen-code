@@ -47,8 +47,8 @@ import {
 import { LoopDetectionService } from '../services/loopDetectionService.js';
 
 // Tools
-import { AgentTool } from '../tools/agent.js';
 import type { RelevantAutoMemoryPromptResult } from '../memory/manager.js';
+import { ToolNames } from '../tools/tool-names.js';
 
 // Telemetry
 import {
@@ -102,6 +102,8 @@ export enum SendMessageType {
   Hook = 'hook',
   /** Cron-fired prompt. Behaves like UserQuery but skips UserPromptSubmit hook. */
   Cron = 'cron',
+  /** Background agent notification. Display item is added by the drain loop. */
+  Notification = 'notification',
 }
 
 export interface SendMessageOptions {
@@ -111,6 +113,8 @@ export interface SendMessageOptions {
     iterationCount: number;
     reasons: string[];
   };
+  /** Display text for notification messages (persisted for session resume). */
+  notificationDisplayText?: string;
   /** Model override from skill execution. When present, overrides the session model for this turn. */
   modelOverride?: string;
 }
@@ -224,12 +228,13 @@ export class GeminiClient {
     this.forceFullIdeContext = true;
   }
 
-  setTools(): void {
+  async setTools(): Promise<void> {
     if (!this.isInitialized()) {
       return;
     }
 
     const toolRegistry = this.config.getToolRegistry();
+    await toolRegistry.warmAll();
     const toolDeclarations = toolRegistry.getFunctionDeclarations();
     const tools: Tool[] = [{ functionDeclarations: toolDeclarations }];
     this.getChat().setTools(tools);
@@ -299,7 +304,7 @@ export class GeminiClient {
         uiTelemetryService,
       );
 
-      this.setTools();
+      await this.setTools();
 
       return this.chat;
     } catch (error) {
@@ -598,6 +603,7 @@ export class GeminiClient {
     if (
       messageType !== SendMessageType.Retry &&
       messageType !== SendMessageType.Cron &&
+      messageType !== SendMessageType.Notification &&
       hooksEnabled &&
       messageBus &&
       this.config.hasHooksForEvent('UserPromptSubmit')
@@ -642,13 +648,28 @@ export class GeminiClient {
       }
     }
 
+    if (messageType === SendMessageType.Notification) {
+      this.config
+        .getChatRecordingService()
+        ?.recordNotification(request, options?.notificationDisplayText);
+    }
+
+    // Notifications start a fresh Turn with a new prompt_id, so the loop
+    // detector must reset — otherwise a prior turn's count can trip
+    // LoopDetected early on the notification turn.
+    if (
+      messageType === SendMessageType.UserQuery ||
+      messageType === SendMessageType.Cron ||
+      messageType === SendMessageType.Notification
+    ) {
+      this.loopDetector.reset(prompt_id);
+      this.lastPromptId = prompt_id;
+    }
+
     if (
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron
     ) {
-      this.loopDetector.reset(prompt_id);
-      this.lastPromptId = prompt_id;
-
       if (this.config.getManagedAutoMemoryEnabled()) {
         relevantAutoMemoryPromise = this.config
           .getMemoryManager()
@@ -665,8 +686,14 @@ export class GeminiClient {
           });
       }
 
-      // record user message for session management
-      this.config.getChatRecordingService()?.recordUserMessage(request);
+      // record user/cron message for session management
+      if (messageType === SendMessageType.Cron) {
+        this.config
+          .getChatRecordingService()
+          ?.recordCronPrompt(request, options?.notificationDisplayText);
+      } else {
+        this.config.getChatRecordingService()?.recordUserMessage(request);
+      }
 
       // Idle cleanup: clear stale thinking blocks after idle period.
       // Latch: once triggered, never revert — prevents oscillation.
@@ -819,9 +846,9 @@ export class GeminiClient {
       }
 
       // add subagent system reminder if there are subagents
-      const hasAgentTool = this.config
+      const hasAgentTool = await this.config
         .getToolRegistry()
-        .getTool(AgentTool.Name);
+        .ensureTool(ToolNames.AGENT);
       const subagents = (await this.config.getSubagentManager().listSubagents())
         .filter((subagent) => subagent.level !== 'builtin')
         .map((subagent) => subagent.name);
@@ -856,7 +883,11 @@ export class GeminiClient {
     for await (const event of resultStream) {
       if (!this.config.getSkipLoopDetection()) {
         if (this.loopDetector.addAndCheck(event)) {
-          yield { type: GeminiEventType.LoopDetected };
+          const loopType = this.loopDetector.getLastLoopType();
+          yield {
+            type: GeminiEventType.LoopDetected,
+            ...(loopType && { value: { loopType } }),
+          };
           if (arenaAgentClient) {
             await arenaAgentClient.reportError('Loop detected');
           }
