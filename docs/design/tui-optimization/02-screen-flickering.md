@@ -60,8 +60,9 @@ Ink 6.2.3 的渲染模型决定了闪烁问题的根源：
 | ---------------- | -------------------------------------- | -------- | ---------------------------- |
 | 流式输出         | 每个内容 chunk 触发 React re-render    | 高       | `useGeminiStream` hook       |
 | 长输出超屏       | 动态内容高度 > 终端行数                | 严重     | Ink 内部 `eraseLines` 路径   |
-| 终端 resize      | `refreshStatic()` 调用 `clearTerminal` | 中       | `AppContainer.tsx:1508-1517` |
-| Compact 模式切换 | 历史合并触发 `refreshStatic()`         | 中       | `MainContent.tsx:80`         |
+| 终端宽度 resize  | `refreshStatic()` 调用 `clearTerminal`；当前 effect 主要依赖宽度变化 | 中       | `AppContainer.tsx` resize effect |
+| Compact 模式切换 | 历史合并、settings dialog、快捷键切换触发 `refreshStatic()` | 中       | `MainContent` / `SettingsDialog` / `AppContainer` |
+| 手动清屏/视图切换 | `/clear`、active view 切换触发全屏刷新 | 中 | `slashCommandProcessor` / `DefaultAppLayout` |
 | 窄屏布局抖动     | 布局重算导致内容高度反复变化           | 中       | Ink 布局引擎                 |
 | tmux/SSH         | 终端复用器放大闪烁效果                 | 严重     | 终端环境因素                 |
 
@@ -95,13 +96,13 @@ CSI ? 2026 l    ← End Synchronized Update（刷新显示）
 | Windows Terminal | 1.18+ |
 | Contour | 0.3.0+ |
 | tmux | 3.4+ (透传) |
-| 不支持的终端 | 静默忽略序列，零副作用 |
+| 不支持的终端 | 通常会忽略未知私有 CSI 序列；仍需按终端和 tmux/SSH 组合验证 |
 
-**实现方案**：
+**落地步骤**：先在现有的 `terminalRedrawOptimizer.ts` 中加入输出指标，再根据指标决定采用“单 write 包裹”还是“帧缓冲合并”。
 
-在现有的 `terminalRedrawOptimizer.ts` 中扩展 `optimizedWrite`。
+**前置 instrumentation**：在默认启用前，必须先统计 Ink 每帧对应的 `stdout.write()` 次数、每次 write 的字节数、chunk 类型（string / Buffer）和 callback 语义。当前优化器的 `optimizeMultilineEraseLines()` 只能处理**单次 string write 内**的 ANSI 序列折叠，不能据此假设每帧一定只有一次 write。
 
-**需要确认的前提**：Ink 是否每帧只调用一次 `stdout.write()`？当前优化器的 `optimizeMultilineEraseLines()` 处理的是**单次 write 内**的 ANSI 序列折叠，这暗示 Ink 大概率将完整帧内容在单次 write 中输出。如果确认如此，BSU/ESU 可直接包裹单次 write：
+**实现方案**：先在现有 `terminalRedrawOptimizer.ts` 中扩展 `optimizedWrite`，但需保证 BSU/ESU 成对、可禁用、且不改变 Buffer/callback 行为。
 
 ```typescript
 const BSU = '\x1b[?2026h';  // Begin Synchronized Update
@@ -125,16 +126,23 @@ const optimizedWrite = function (
 };
 ```
 
-**如果 Ink 每帧多次 write**：需要改用帧缓冲策略 — 在 idle tick 中收集所有 write 调用，合并后统一输出。实现更复杂但同样可行。
+**如果 Ink 每帧多次 write**：不要简单给每个 write 都包 BSU/ESU。应改用帧缓冲策略：在 microtask/idle tick 中收集同一帧的 write 调用，合并后统一输出，并记录合并前后的 writes/sec 和 bytes/sec。
 
-**验证步骤**：在优化器中添加临时计数器，统计单次 React render 触发多少次 `stdout.write()`。
+**验证步骤**：
+
+1. 在优化器中添加 counters，统计单次 React render 触发多少次 `stdout.write()`
+2. 覆盖 string、Buffer、带 encoding、带 callback 的 `stdout.write()` 调用形态
+3. 覆盖 screen reader 开启时不安装优化器的路径
+4. 覆盖 `ansiEscapes.clearTerminal`、`eraseLines`、普通文本输出三类路径
+5. 检查 `bsu_frame_count === esu_frame_count`，异常时自动关闭同步输出
 
 **影响范围**：仅 `packages/cli/src/ui/utils/terminalRedrawOptimizer.ts`
 
-**风险评估**：**极低**
+**风险评估**：**中低**
 
-- 不支持的终端静默忽略 BSU/ESU 序列
-- 可通过 `QWEN_CODE_LEGACY_ERASE_LINES=1` 完全禁用
+- 不支持的终端通常忽略 BSU/ESU，但不能宣称零风险，需覆盖 tmux/SSH/Windows Terminal/Terminal.app
+- 可通过 `QWEN_CODE_LEGACY_ERASE_LINES=1` 或 `QWEN_CODE_LEGACY_RENDERING=1` 禁用
+- stdout monkeypatch 是全局副作用，必须保证原始 `write()` 语义不变
 - Claude Code 在 `src/ink/terminal.ts` 中已使用相同方案
 
 **预期收益**：
@@ -147,7 +155,7 @@ const optimizedWrite = function (
 
 **现状**：LLM 流式输出的每个内容 chunk 都触发 React 状态更新。虽然不是逐 token 更新（而是按 API 返回的 chunk 粒度），但在高速流式输出时仍可能产生每秒 50+ 次 re-render。人眼对文本更新的感知频率约 15-20fps，大量渲染被浪费。
 
-**方案**：在流式 hook 中实现 chunk 缓冲 + 定时刷新。
+**方案**：在流式 hook 中实现 chunk 缓冲 + 定时刷新。需要覆盖 content stream 和 thought stream；shell 命令输出已有 1s 级节流，应作为现状保留并单独验证。
 
 ```typescript
 // packages/cli/src/ui/hooks/useGeminiStream.ts（概念实现）
@@ -174,7 +182,7 @@ const onContentChunk = useCallback(
   [flushBuffer],
 );
 
-// 流结束时立即刷新
+// 流结束、取消、工具调用开始、需要展示确认框时立即刷新
 const onStreamEnd = useCallback(() => {
   if (flushTimerRef.current) clearTimeout(flushTimerRef.current);
   flushBuffer();
@@ -183,29 +191,33 @@ const onStreamEnd = useCallback(() => {
 
 **影响范围**：`packages/cli/src/ui/hooks/useGeminiStream.ts`
 
-**具体切入点**：`handleContentEvent()` 回调（第 664 行），该函数在每个内容 chunk 到达时调用 `setPendingHistoryItem()`（第 690 行）触发 React 状态更新。节流层应在 `setPendingHistoryItem` 调用之前缓冲内容。
+**具体切入点**：
+
+- `handleContentEvent()`：在 `setPendingHistoryItem()` 前缓冲 content chunk
+- thought stream 更新路径：使用同一套缓冲/flush 机制，避免思考内容绕过节流
+- shell command output：保留现有 `OUTPUT_UPDATE_INTERVAL_MS = 1000`，只补指标和回归测试
 
 **风险评估**：低
 
 - 60ms 延迟对用户不可感知
-- 流结束时立即刷新确保最终内容完整
+- 流结束、取消、工具调用、确认框展示前立即刷新，确保 UI 状态不滞后
 - 如有问题可调整 `FLUSH_INTERVAL_MS` 或通过环境变量禁用
 
 **预期收益**：`stdout.write` 调用从 50+/秒降至 < 20/秒，直接减少 60%+ 的渲染开销。
 
 ### 2.3 [P1] 动态内容高度管理 + 渐进提升
 
-**现状**：当流式内容超过终端高度时，Ink 触发全屏重绘。`constrainHeight` 状态标志虽然存在（`AppContainer.tsx:1482`），但计算不够精确。
+**现状校准**：当流式内容超过终端高度时，Ink 可能触发全屏重绘。源码中已经存在渐进提升的雏形：`useGeminiStream` 在 content 和 thought 流中调用 `findLastSafeSplitPoint()`，把安全分割点之前的内容加入 history/static，只保留尾部 pending 内容在动态区域。当前缺口不是“从零实现提升”，而是提升阈值、覆盖范围和刷新频率不够可控。
 
-**方案**：实现"渐进提升"（Progressive Promotion）模式 — 随着流式内容增长，将已完成的块从动态区域提升到 `<Static>` 区域。
+**方案**：增强现有"渐进提升"（Progressive Promotion）模式 — 随着流式内容增长，将已完成的块从动态区域提升到 `<Static>` 区域，并把触发条件从纯文本边界升级为“渲染高度 + 时间间隔 + 安全 Markdown 边界”。
 
 **核心逻辑**：
 
 ```
 流式输出开始
   ├─ 新 token 追加到 pendingContent
-  ├─ 检查 pendingContent 高度 vs 可用动态区域高度
-  │   ├─ 高度安全 → 继续累积
+  ├─ 估算 pendingContent 渲染高度 vs 可用动态区域高度
+  │   ├─ 高度安全且未超过最小间隔 → 继续累积
   │   └─ 接近阈值 →
   │       ├─ 使用 findLastSafeSplitPoint() 找到安全分割点
   │       ├─ 分割点之前的内容 → 提升到 history (Static)
@@ -219,18 +231,25 @@ const onStreamEnd = useCallback(() => {
 - 优先在段落边界 `\n\n` 分割
 - 回退到行边界 `\n`
 
+**增强点**：
+
+- 使用 `availableTerminalHeight`、`contentWidth` 和渲染行数估算 pending 高度
+- 对 content stream、thought stream、tool 输出摘要分别设置阈值
+- 加入最小提升间隔（如 300-500ms），避免频繁写入 `<Static>`
+- 只在安全 Markdown 边界分割；代码块、列表、表格中保守不切
+
 **影响范围**：
 
-- `packages/cli/src/ui/components/MainContent.tsx` — 实现提升逻辑
+- `packages/cli/src/ui/components/MainContent.tsx` — 提供可用动态高度和 pending 高度约束
 - `packages/cli/src/ui/AppContainer.tsx` — 改进高度计算
-- `packages/cli/src/ui/hooks/useGeminiStream.ts` — 在流式处理中调用分割
+- `packages/cli/src/ui/hooks/useGeminiStream.ts` — 增强现有分割/提升逻辑
 
 **风险评估**：中
 
 - 分割可能导致部分 Markdown 上下文丢失（如跨段落的列表）→ 通过保守的分割策略缓解
 - 频繁提升可能导致 `<Static>` 闪烁 → 设置最小提升间隔（如 500ms）
 
-**预期收益**：动态内容始终控制在终端高度内，永远不触发 Ink 的全屏重绘路径。
+**预期收益**：动态内容尽量控制在终端高度内，显著降低 Ink 全屏重绘路径触发概率。
 
 ### 2.4 [P1] 智能 refreshStatic()
 
@@ -246,10 +265,12 @@ const refreshStatic = useCallback(() => {
 
 触发场景：
 
-- 终端 resize（300ms debounce）：`AppContainer.tsx:1508-1517`
-- Compact 模式合并：`MainContent.tsx:80`
-- 手动清屏：`AppContainer.tsx:1200`
-- Auth 变更：`AppContainer.tsx:498`
+- 终端宽度 resize（当前主要依赖 `terminalWidth`，高度变化不应触发静态区重排）
+- Compact 模式合并：`MainContent`
+- Compact 设置变更：`SettingsDialog`
+- Compact 快捷键切换：`AppContainer`
+- 手动清屏：`/clear` / `clearScreen()`
+- Active view 切换：`DefaultAppLayout`
 
 **方案**：
 
@@ -260,7 +281,7 @@ const refreshStatic = useCallback(() => {
      debounce(() => {
        // 不再 clearTerminal，仅更新布局尺寸
        updateTerminalDimensions();
-       // 只在宽度变化时才需要重新渲染（高度变化不影响已渲染内容）
+       // 只在宽度变化时才需要重新渲染（高度变化不影响已渲染内容换行）
        if (widthChanged) {
          refreshStatic(); // 宽度变化时仍需全量重绘（行包装会变）
        }
@@ -354,9 +375,10 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 
 | 优先级 | 方案                 | 周次  | 风险 | 预期收益                  |
 | ------ | -------------------- | ----- | ---- | ------------------------- |
-| P0     | 同步输出 DECSET 2026 | 1     | 极低 | 消除帧撕裂，tmux 效果显著 |
-| P0     | 流式更新节流 60ms    | 1     | 低   | stdout.write -60%+        |
-| P1     | 渐进提升到 Static    | 6-7   | 中   | 消除长输出全屏闪烁        |
+| P0     | 输出层 instrumentation | 1     | 低   | 指标口径可信              |
+| P0     | 同步输出 DECSET 2026 | 2     | 中低 | 消除帧撕裂，tmux 效果显著 |
+| P0     | 流式更新节流 60ms    | 2     | 低   | stdout.write -60%+        |
+| P1     | 现有渐进提升增强      | 7     | 中   | 降低长输出全屏闪烁        |
 | P1     | 智能 refreshStatic() | 8-9   | 中   | resize 不再全屏闪烁       |
 | P2     | 双缓冲 + diff patch  | 11-13 | 高   | stdout 字节/帧 -80%       |
 | P2     | DECSTBM 滚动区域     | 13+   | 高   | 滚动性能接近原生          |
@@ -369,6 +391,8 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 | ---------------------------- | ----------- | -------------------- | ------------ |
 | stdout.write 调用/秒（流式） | 50+         | < 20                 | < 16         |
 | stdout 字节/帧（增量更新）   | 全帧大小    | 全帧大小（同步包裹） | 仅变更 cell  |
+| clearTerminal 次数（正常流式） | 未知        | 0                    | 0            |
+| BSU/ESU 平衡                 | 无          | 100% 成对            | 100% 成对    |
 | tmux 滚动事件/秒             | 4,000-6,700 | < 100                | < 20         |
 | 可见闪烁（主观）             | 严重        | 轻微/无              | 无           |
 
@@ -382,11 +406,13 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 | 窄屏 (< 40 列) | 将终端缩至 30 列        | 布局优雅降级，无抖动 |
 | tmux 内运行    | tmux 分屏环境           | 滚动事件 < 100/秒    |
 | SSH 远程       | 高延迟网络              | 闪烁不加剧           |
-| kitty/WezTerm  | 支持 DECSET 2026 的终端 | 零帧撕裂             |
+| kitty/WezTerm  | 支持 DECSET 2026 的终端 | 无明显帧撕裂         |
 | Terminal.app   | 不支持 DECSET 2026      | 行为不变（不退化）   |
+| screen reader  | `config.getScreenReader()` 开启 | 不安装 stdout 优化器 |
+| Buffer write/callback | 直接写 stdout 的外部路径 | `write()` 返回值和 callback 行为不变 |
 
 ### 5.3 向后兼容
 
 - `QWEN_CODE_LEGACY_ERASE_LINES=1`：禁用所有 stdout 拦截优化（已有）
 - `QWEN_CODE_LEGACY_RENDERING=1`：新增，禁用同步输出 + 节流
-- 不支持 DECSET 2026 的终端：序列被静默忽略，零风险
+- 不支持 DECSET 2026 的终端：通常忽略未知序列，但仍需保留开关和终端矩阵验证
