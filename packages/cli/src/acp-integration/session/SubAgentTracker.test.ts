@@ -21,7 +21,7 @@ import type {
 import {
   AgentEventType,
   ToolConfirmationOutcome,
-  TodoWriteTool,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
 import type { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { EventEmitter } from 'node:events';
@@ -253,7 +253,7 @@ describe('SubAgentTracker', () => {
       tracker.setup(eventEmitter, abortController.signal);
 
       const event = createToolCallEvent({
-        name: TodoWriteTool.Name,
+        name: ToolNames.TODO_WRITE,
         callId: 'call-todo',
         args: { todos: [] },
       });
@@ -358,7 +358,7 @@ describe('SubAgentTracker', () => {
       eventEmitter.emit(
         AgentEventType.TOOL_CALL,
         createToolCallEvent({
-          name: TodoWriteTool.Name,
+          name: ToolNames.TODO_WRITE,
           callId: 'call-todo',
           args: {
             todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
@@ -368,7 +368,7 @@ describe('SubAgentTracker', () => {
 
       // Emit result with todo_list display
       const resultEvent = createToolResultEvent({
-        name: TodoWriteTool.Name,
+        name: ToolNames.TODO_WRITE,
         callId: 'call-todo',
         success: true,
         resultDisplay: JSON.stringify({

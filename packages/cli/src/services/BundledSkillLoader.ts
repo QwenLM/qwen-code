@@ -26,6 +26,11 @@ export class BundledSkillLoader implements ICommandLoader {
   constructor(private readonly config: Config | null) {}
 
   async loadCommands(_signal: AbortSignal): Promise<SlashCommand[]> {
+    if (this.config?.getBareMode?.()) {
+      debugLogger.debug('Bare mode enabled, skipping bundled skills');
+      return [];
+    }
+
     const skillManager = this.config?.getSkillManager();
     if (!skillManager) {
       debugLogger.debug('SkillManager not available, skipping bundled skills');
@@ -58,6 +63,10 @@ export class BundledSkillLoader implements ICommandLoader {
         name: skill.name,
         description: skill.description,
         kind: CommandKind.SKILL,
+        source: 'bundled-skill' as const,
+        sourceLabel: 'Skill',
+        commandType: 'prompt' as const,
+        modelInvocable: true,
         action: async (context, _args): Promise<SlashCommandActionReturn> => {
           // Resolve template variables in skill body
           let body = skill.body;

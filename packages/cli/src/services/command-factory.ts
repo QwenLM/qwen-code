@@ -13,6 +13,7 @@ import path from 'node:path';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type {
   CommandContext,
+  CommandSource,
   SlashCommand,
   SlashCommandActionReturn,
 } from '../ui/commands/types.js';
@@ -111,6 +112,12 @@ export function createSlashCommandFromDefinition(
     description,
     kind: CommandKind.FILE,
     extensionName,
+    source: (extensionName
+      ? 'plugin-command'
+      : 'skill-dir-command') as CommandSource,
+    sourceLabel: extensionName ? `Plugin: ${extensionName}` : 'Custom',
+    commandType: 'prompt' as const,
+    modelInvocable: !extensionName,
     action: async (
       context: CommandContext,
       _args: string,

@@ -34,6 +34,7 @@ export const approvalModeCommand: SlashCommand = {
     return t('View or change the approval mode for tool usage');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: async (
     context: CommandContext,
     args: string,

@@ -55,6 +55,20 @@ describe('BundledSkillLoader', () => {
     expect(commands).toEqual([]);
   });
 
+  it('should return empty array in bare mode', async () => {
+    const skill = makeSkill();
+    mockSkillManager.listSkills.mockResolvedValue([skill]);
+    (
+      mockConfig as Config & { getBareMode: ReturnType<typeof vi.fn> }
+    ).getBareMode = vi.fn().mockReturnValue(true);
+
+    const loader = new BundledSkillLoader(mockConfig);
+    const commands = await loader.loadCommands(signal);
+
+    expect(commands).toEqual([]);
+    expect(mockSkillManager.listSkills).not.toHaveBeenCalled();
+  });
+
   it('should load bundled skills as slash commands', async () => {
     const skill = makeSkill();
     mockSkillManager.listSkills.mockResolvedValue([skill]);

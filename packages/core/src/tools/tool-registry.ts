@@ -27,6 +27,9 @@ import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 
 type ToolParams = Record<string, unknown>;
 
+/** Factory function for lazy tool instantiation via dynamic import. */
+export type ToolFactory = () => Promise<AnyDeclarativeTool>;
+
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
 
 class DiscoveredToolInvocation extends BaseToolInvocation<
@@ -174,6 +177,11 @@ Signal: Signal number or \`(none)\` if no signal was received.
 export class ToolRegistry {
   // The tools keyed by tool name as seen by the LLM.
   private tools: Map<string, AnyDeclarativeTool> = new Map();
+  // Lazy tool factories keyed by tool name — resolved on first use.
+  private factories: Map<string, ToolFactory> = new Map();
+  // In-flight factory promises — ensures concurrent ensureTool() calls for the
+  // same name share one promise instead of running the factory multiple times.
+  private inflight: Map<string, Promise<AnyDeclarativeTool>> = new Map();
   private config: Config;
   private mcpClientManager: McpClientManager;
 
@@ -210,12 +218,81 @@ export class ToolRegistry {
   }
 
   /**
+   * Registers a lazy tool factory. The tool module is not imported and the tool
+   * is not instantiated until {@link ensureTool} or {@link warmAll} is called.
+   */
+  registerFactory(name: string, factory: ToolFactory): void {
+    this.factories.set(name, factory);
+  }
+
+  /**
+   * Ensures a specific tool is loaded. Returns the cached instance if already
+   * loaded, otherwise invokes the factory, caches the result, and returns it.
+   * Concurrent calls for the same name share a single in-flight promise so the
+   * factory is never executed more than once.
+   */
+  async ensureTool(name: string): Promise<AnyDeclarativeTool | undefined> {
+    const cached = this.tools.get(name);
+    if (cached) {
+      // Clean up any stale factory for this name so warmAll() and bulk
+      // accessors don't treat it as still pending.
+      this.factories.delete(name);
+      return cached;
+    }
+
+    const existing = this.inflight.get(name);
+    if (existing) return existing;
+
+    const factory = this.factories.get(name);
+    if (!factory) return undefined;
+
+    const load = factory()
+      .then((tool) => {
+        this.tools.set(name, tool);
+        this.factories.delete(name);
+        this.inflight.delete(name);
+        return tool;
+      })
+      .catch((err: unknown) => {
+        this.inflight.delete(name);
+        throw err;
+      });
+
+    this.inflight.set(name, load);
+    return load;
+  }
+
+  /**
+   * Loads all pending tool factories in parallel. Safe to call multiple times
+   * (no-op when all factories have been resolved). Call this before any bulk
+   * access such as {@link getAllTools} or {@link getFunctionDeclarations}.
+   *
+   * @param options.strict - When `true`, re-throws the first factory failure
+   *   instead of swallowing it. Use this during startup (e.g. in
+   *   `Config.initialize`) so a broken built-in tool surfaces immediately
+   *   rather than leaving the session partially initialised.
+   */
+  async warmAll(options?: { strict?: boolean }): Promise<void> {
+    const pending = Array.from(this.factories.keys());
+    if (pending.length === 0) return;
+    const results = await Promise.allSettled(
+      pending.map((name) => this.ensureTool(name)),
+    );
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        if (options?.strict) throw result.reason as Error;
+        debugLogger.warn('Failed to warm tool factory:', result.reason);
+      }
+    }
+  }
+
+  /**
    * Copies discovered (non-core) tools from another registry into this one.
    * Used to share MCP/command-discovered tools with per-agent registries
    * that were built with skipDiscovery.
    */
   copyDiscoveredToolsFrom(source: ToolRegistry): void {
-    for (const tool of source.getAllTools()) {
+    for (const tool of source.tools.values()) {
       if (
         (tool instanceof DiscoveredTool || tool instanceof DiscoveredMCPTool) &&
         !this.tools.has(tool.name)
@@ -482,8 +559,17 @@ export class ToolRegistry {
    * Retrieves a filtered list of tool schemas based on a list of tool names.
    * @param toolNames - An array of tool names to include.
    * @returns An array of FunctionDeclarations for the specified tools.
+   * @remarks Requires all tool factories to be resolved first. Call
+   * {@link warmAll} before invoking this method, otherwise factory-registered
+   * tools that have not yet been loaded will be silently omitted.
    */
   getFunctionDeclarationsFiltered(toolNames: string[]): FunctionDeclaration[] {
+    if (this.factories.size > 0) {
+      debugLogger.warn(
+        `getFunctionDeclarationsFiltered() called with ${this.factories.size} unloaded ` +
+          `tool factories. Call warmAll() first to avoid incomplete results.`,
+      );
+    }
     const declarations: FunctionDeclaration[] = [];
     for (const name of toolNames) {
       const tool = this.tools.get(name);
@@ -495,16 +581,27 @@ export class ToolRegistry {
   }
 
   /**
-   * Returns an array of all registered and discovered tool names.
+   * Returns an array of all registered and discovered tool names,
+   * including tools that are registered via factory but not yet loaded.
    */
   getAllToolNames(): string[] {
-    return Array.from(this.tools.keys());
+    const names = new Set([...this.tools.keys(), ...this.factories.keys()]);
+    return Array.from(names);
   }
 
   /**
    * Returns an array of all registered and discovered tool instances.
+   * @remarks Requires all tool factories to be resolved first. Call
+   * {@link warmAll} before invoking this method, otherwise factory-registered
+   * tools that have not yet been loaded will be absent from the result.
    */
   getAllTools(): AnyDeclarativeTool[] {
+    if (this.factories.size > 0) {
+      debugLogger.warn(
+        `getAllTools() called with ${this.factories.size} unloaded tool factories. ` +
+          `Call warmAll() first to avoid incomplete results.`,
+      );
+    }
     return Array.from(this.tools.values()).sort((a, b) =>
       a.displayName.localeCompare(b.displayName),
     );
@@ -547,6 +644,13 @@ export class ToolRegistry {
    * This method is idempotent and safe to call multiple times.
    */
   async stop(): Promise<void> {
+    // Wait for any in-flight factory promises to settle before disposing, so
+    // that tools which finish loading after stop() is called are still cleaned
+    // up rather than leaking their listeners and resources.
+    if (this.inflight.size > 0) {
+      await Promise.allSettled(this.inflight.values());
+    }
+
     for (const tool of this.tools.values()) {
       if ('dispose' in tool && typeof tool.dispose === 'function') {
         try {

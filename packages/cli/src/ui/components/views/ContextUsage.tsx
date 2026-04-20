@@ -91,6 +91,18 @@ const ProgressBar: React.FC<{
 };
 
 /**
+ * Format percentage for display, showing ">100%" when exceeding limit.
+ */
+function formatPercentage(tokens: number, contextWindowSize: number): string {
+  if (contextWindowSize <= 0) return '0.0';
+  const percentage = (tokens / contextWindowSize) * 100;
+  if (percentage > 100) {
+    return '>100';
+  }
+  return percentage.toFixed(1);
+}
+
+/**
  * A row showing a category with its token count and percentage.
  */
 const CategoryRow: React.FC<{
@@ -99,9 +111,17 @@ const CategoryRow: React.FC<{
   tokens: number;
   contextWindowSize: number;
   symbolColor?: string;
-}> = ({ symbol, label, tokens, contextWindowSize, symbolColor }) => {
-  const percentage = ((tokens / contextWindowSize) * 100).toFixed(1);
-  const tokenStr = `${formatTokens(tokens)} ${t('tokens')} (${percentage}%)`;
+  isOverLimit?: boolean;
+}> = ({
+  symbol,
+  label,
+  tokens,
+  contextWindowSize,
+  symbolColor,
+  isOverLimit,
+}) => {
+  const percentageStr = formatPercentage(tokens, contextWindowSize);
+  const tokenStr = `${formatTokens(tokens)} ${t('tokens')} (${percentageStr}%)`;
 
   return (
     <Box width={CONTENT_WIDTH}>
@@ -112,7 +132,9 @@ const CategoryRow: React.FC<{
         <Text color={theme.text.primary}>{label}</Text>
       </Box>
       <Box flexGrow={1} justifyContent="flex-end">
-        <Text color={theme.text.secondary}>{tokenStr}</Text>
+        <Text color={isOverLimit ? theme.status.error : theme.text.secondary}>
+          {tokenStr}
+        </Text>
       </Box>
     </Box>
   );
@@ -158,6 +180,7 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
 }) => {
   const percentage =
     contextWindowSize > 0 ? (totalTokens / contextWindowSize) * 100 : 0;
+  const isOverLimit = percentage > 100;
 
   // Sort detail items by token count (descending) for better readability
   const sortedBuiltinTools = [...builtinTools].sort(
@@ -236,6 +259,14 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
               width={CONTENT_WIDTH}
             />
           </Box>
+          {/* Warning when context exceeds limit */}
+          {isOverLimit && (
+            <Box marginBottom={1}>
+              <Text color={theme.status.error}>
+                {t('Context exceeds limit! Use /compress or /clear to reduce.')}
+              </Text>
+            </Box>
+          )}
           <Box height={1} />
           {/* Legend — same layout as CategoryRow for alignment */}
           <CategoryRow
@@ -243,7 +274,8 @@ export const ContextUsage: React.FC<ContextUsageProps> = ({
             label={t('Used')}
             tokens={totalTokens}
             contextWindowSize={contextWindowSize}
-            symbolColor={theme.text.accent}
+            symbolColor={isOverLimit ? theme.status.error : theme.text.accent}
+            isOverLimit={isOverLimit}
           />
           <CategoryRow
             symbol={EMPTY}

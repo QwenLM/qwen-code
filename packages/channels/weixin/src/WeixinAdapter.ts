@@ -205,7 +205,12 @@ export class WeixinChannel extends ChannelBase {
 
 /** Detect image MIME type from magic bytes. */
 function detectImageMime(data: Buffer): string {
-  if (data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e) {
+  if (
+    data[0] === 0x89 &&
+    data[1] === 0x50 &&
+    data[2] === 0x4e &&
+    data[3] === 0x47
+  ) {
     return 'image/png';
   }
   if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) {

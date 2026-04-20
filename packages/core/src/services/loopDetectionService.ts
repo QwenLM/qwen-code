@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import type { ServerGeminiStreamEvent } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
+import type { ThoughtSummary } from '../utils/thoughtUtils.js';
 import {
   logLoopDetected,
   logLoopDetectionDisabled,
@@ -22,6 +23,26 @@ const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
 const MAX_HISTORY_LENGTH = 1000;
+
+// Thought tracking
+const THOUGHT_REPEAT_THRESHOLD = 3;
+const MAX_THOUGHT_HISTORY = 50;
+
+// File read tracking.
+//
+// Thresholds were raised from 5/10 because a prompt like "summarize this
+// project" legitimately opens with `list_directory` + several parallel
+// `read_file` calls in a single turn, which previously tripped the detector
+// on its first productive move. 8/15 leaves enough headroom for that shape
+// while still catching pathological read-only churn. Combined with the
+// cold-start exemption below (see `hasSeenNonReadTool`), a turn that has
+// only ever performed read-like actions is treated as exploration, not a
+// loop — once any non-read tool lands, the detector activates.
+const FILE_READ_THRESHOLD = 8;
+const FILE_READ_WINDOW = 15;
+
+// Action stagnation tracking
+const STAGNATION_THRESHOLD = 8;
 
 /**
  * Service for detecting and preventing infinite loops in AI responses.
@@ -45,8 +66,40 @@ export class LoopDetectionService {
   // Session-level disable flag
   private disabledForSession = false;
 
+  // Thought tracking
+  private thoughtHistory: string[] = [];
+
+  // Tool call tracking (for read-file loop + stagnation detection)
+  private recentToolCalls: Array<{ name: string; args: object }> = [];
+
+  // Action stagnation tracking: consecutive calls to the same tool *name*
+  // (regardless of args). Distinct from checkToolCallLoop, which requires
+  // identical name AND args. This catches parameter-thrashing loops where
+  // the model keeps calling one tool with varying arguments.
+  private sameNameStreak = 0;
+  private lastSeenToolName: string | null = null;
+
+  // Cold-start gate for READ_FILE_LOOP: the opening exploration of a prompt
+  // is almost always read-heavy (list + parallel reads). Until at least one
+  // non-read-like tool fires, a window full of reads is treated as legitimate
+  // exploration rather than loop evidence. Resets per-prompt in reset().
+  private hasSeenNonReadTool = false;
+
+  // Loop type of the most recent firing. Bubbled up through the
+  // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
+  // the user which detector actually fired.
+  private lastLoopType: LoopType | null = null;
+
   constructor(config: Config) {
     this.config = config;
+  }
+
+  /**
+   * Returns the LoopType of the most recent detection, or null if no loop
+   * has been detected in the current prompt.
+   */
+  getLastLoopType(): LoopType | null {
+    return this.lastLoopType;
   }
 
   /**
@@ -77,15 +130,32 @@ export class LoopDetectionService {
     }
 
     switch (event.type) {
-      case GeminiEventType.ToolCallRequest:
+      case GeminiEventType.ToolCallRequest: {
         // content chanting only happens in one single stream, reset if there
         // is a tool call in between
         this.resetContentTracking();
-        this.loopDetected = this.checkToolCallLoop(event.value);
+        // Thought repetition is only meaningful within a single contiguous
+        // reasoning stream. Once a tool call lands, the model has made
+        // observable progress — any prior thoughts should not carry over.
+        this.thoughtHistory = [];
+
+        const toolCallLoop = this.checkToolCallLoop(event.value);
+        this.trackToolCall(event.value);
+        const readFileLoop = this.checkReadFileLoop();
+        const actionStagnation = this.checkActionStagnation();
+
+        this.loopDetected = toolCallLoop || readFileLoop || actionStagnation;
         break;
-      case GeminiEventType.Content:
+      }
+      case GeminiEventType.Content: {
         this.loopDetected = this.checkContentLoop(event.value);
         break;
+      }
+      case GeminiEventType.Thought: {
+        this.trackThought(event.value);
+        this.loopDetected = this.checkRepetitiveThoughts();
+        break;
+      }
       default:
         break;
     }
@@ -101,6 +171,7 @@ export class LoopDetectionService {
       this.toolCallRepetitionCount = 1;
     }
     if (this.toolCallRepetitionCount >= TOOL_CALL_LOOP_THRESHOLD) {
+      this.lastLoopType = LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS;
       logLoopDetected(
         this.config,
         new LoopDetectedEvent(
@@ -214,6 +285,7 @@ export class LoopDetectionService {
       const chunkHash = createHash('sha256').update(currentChunk).digest('hex');
 
       if (this.isLoopDetectedForChunk(currentChunk, chunkHash)) {
+        this.lastLoopType = LoopType.CHANTING_IDENTICAL_SENTENCES;
         logLoopDetected(
           this.config,
           new LoopDetectedEvent(
@@ -292,6 +364,157 @@ export class LoopDetectionService {
   }
 
   /**
+   * Records a structured thought summary for repetition detection. Uses both
+   * subject and description so two thoughts with the same subject but
+   * diverging descriptions are correctly treated as distinct progress.
+   */
+  private trackThought(summary: ThoughtSummary): void {
+    const subject = summary.subject.trim().toLowerCase();
+    const description = summary.description
+      .trim()
+      .toLowerCase()
+      .substring(0, 200);
+    const signature = `${subject}|${description}`;
+    this.thoughtHistory.push(signature);
+    if (this.thoughtHistory.length > MAX_THOUGHT_HISTORY) {
+      this.thoughtHistory.shift();
+    }
+  }
+
+  /**
+   * Checks for repetitive thoughts pattern.
+   *
+   * Only fires when the last `THOUGHT_REPEAT_THRESHOLD` thoughts are the same
+   * string. Earlier implementations counted repeats across the full retained
+   * history, which caused false positives whenever the model revisited an
+   * earlier phrase after making progress on an unrelated step.
+   */
+  private checkRepetitiveThoughts(): boolean {
+    if (this.thoughtHistory.length < THOUGHT_REPEAT_THRESHOLD) {
+      return false;
+    }
+
+    const recentThoughts = this.thoughtHistory.slice(-THOUGHT_REPEAT_THRESHOLD);
+    const firstThought = recentThoughts[0];
+    if (recentThoughts.every((thought) => thought === firstThought)) {
+      this.lastLoopType = LoopType.REPETITIVE_THOUGHTS;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.REPETITIVE_THOUGHTS, this.promptId),
+      );
+      return true;
+    }
+    return false;
+  }
+
+  // Exact tool names that read content from the filesystem. A plain substring
+  // match on tokens like "view" or "list" is unsafe because unrelated tools
+  // (e.g. "review", "checklist_update") can incidentally contain those
+  // tokens and get miscounted as file reads.
+  private static readonly READ_LIKE_TOOL_NAMES: ReadonlySet<string> = new Set([
+    'read_file',
+    'read_many_files',
+    'list_directory',
+  ]);
+
+  // Prefix fallback for MCP-provided tools that follow the same naming
+  // convention (e.g. `read_resource`, `list_projects`). The trailing
+  // underscore anchors the match to a name segment so "review" and
+  // "listener" are not treated as read-like.
+  private static readonly READ_LIKE_NAME_PREFIXES: readonly string[] = [
+    'read_',
+    'list_',
+  ];
+
+  private isReadLikeTool(toolName: string): boolean {
+    if (LoopDetectionService.READ_LIKE_TOOL_NAMES.has(toolName)) {
+      return true;
+    }
+    return LoopDetectionService.READ_LIKE_NAME_PREFIXES.some((prefix) =>
+      toolName.startsWith(prefix),
+    );
+  }
+
+  /**
+   * Tracks tool calls for subsequent loop detection.
+   */
+  private trackToolCall(toolCall: { name: string; args: object }): void {
+    // Add to recent tool calls history
+    this.recentToolCalls.push(toolCall);
+
+    // Keep bounded history
+    if (this.recentToolCalls.length > FILE_READ_WINDOW) {
+      this.recentToolCalls.shift();
+    }
+
+    // Flip the cold-start gate once any non-read-like tool has been observed.
+    // Opening exploration (list_directory + several read_file calls) should
+    // not count as loop evidence on its own.
+    if (!this.hasSeenNonReadTool && !this.isReadLikeTool(toolCall.name)) {
+      this.hasSeenNonReadTool = true;
+    }
+
+    // Track same-name streak for action stagnation. Distinct from
+    // checkToolCallLoop which requires identical args; this detector catches
+    // "thrashing" where the same tool is called with varying arguments.
+    if (this.lastSeenToolName === toolCall.name) {
+      this.sameNameStreak++;
+    } else {
+      this.lastSeenToolName = toolCall.name;
+      this.sameNameStreak = 1;
+    }
+  }
+
+  /**
+   * Checks for excessive file read operations without meaningful progress.
+   */
+  private checkReadFileLoop(): boolean {
+    // Cold-start exemption: if no non-read-like tool has ever fired in this
+    // prompt, the model is still in its opening exploration phase. Treat a
+    // run of reads as legitimate discovery rather than a loop. Once any
+    // write/execute/other tool lands, normal detection resumes.
+    if (!this.hasSeenNonReadTool) {
+      return false;
+    }
+
+    if (this.recentToolCalls.length < FILE_READ_THRESHOLD) {
+      return false;
+    }
+
+    // Count how many of the recent tool calls were file reads
+    const fileReadCount = this.recentToolCalls.filter((call) =>
+      this.isReadLikeTool(call.name),
+    ).length;
+
+    if (fileReadCount >= FILE_READ_THRESHOLD) {
+      this.lastLoopType = LoopType.READ_FILE_LOOP;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.READ_FILE_LOOP, this.promptId),
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Checks for action stagnation where the model performs different but equally unproductive actions.
+   */
+  private checkActionStagnation(): boolean {
+    if (this.sameNameStreak >= STAGNATION_THRESHOLD) {
+      this.lastLoopType = LoopType.ACTION_STAGNATION;
+      logLoopDetected(
+        this.config,
+        new LoopDetectedEvent(LoopType.ACTION_STAGNATION, this.promptId),
+      );
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
    * Resets all loop detection state.
    */
   reset(promptId: string): void {
@@ -299,6 +522,14 @@ export class LoopDetectionService {
     this.resetToolCallCount();
     this.resetContentTracking();
     this.loopDetected = false;
+
+    // Reset new tracking variables
+    this.thoughtHistory = [];
+    this.recentToolCalls = [];
+    this.sameNameStreak = 0;
+    this.lastSeenToolName = null;
+    this.hasSeenNonReadTool = false;
+    this.lastLoopType = null;
   }
 
   private resetToolCallCount(): void {

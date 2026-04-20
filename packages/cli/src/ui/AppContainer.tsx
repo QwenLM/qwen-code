@@ -52,6 +52,7 @@ import {
   type SpeculationState,
   IDLE_SPECULATION,
   ApprovalMode,
+  ConditionalRulesRegistry,
   type PermissionMode,
   ToolConfirmationOutcome,
   type WaitingToolCall,
@@ -59,7 +60,6 @@ import {
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
 import { loadHierarchicalGeminiMemory } from '../config/config.js';
-import { randomUUID } from 'node:crypto';
 import process from 'node:process';
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
@@ -91,6 +91,7 @@ import { isBtwCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
+import { useAwaySummary } from './hooks/useAwaySummary.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
@@ -128,14 +129,14 @@ import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
 import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
-import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
+import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
+import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
-import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
@@ -669,6 +670,7 @@ export const AppContainer = (props: AppContainerProps) => {
     toggleVimEnabled,
     isProcessing,
     setIsProcessing,
+    isIdleRef,
     setGeminiMdFileCount,
     slashCommandActions,
     extensionsUpdateStateInternal,
@@ -693,19 +695,24 @@ export const AppContainer = (props: AppContainerProps) => {
       Date.now(),
     );
     try {
-      const { memoryContent, fileCount } = await loadHierarchicalGeminiMemory(
-        process.cwd(),
-        settings.merged.context?.loadFromIncludeDirectories
-          ? config.getWorkspaceContext().getDirectories()
-          : [],
-        config.getFileService(),
-        config.getExtensionContextFilePaths(),
-        config.isTrustedFolder(),
-        settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
-      );
+      const { memoryContent, fileCount, conditionalRules, projectRoot } =
+        await loadHierarchicalGeminiMemory(
+          process.cwd(),
+          settings.merged.context?.loadFromIncludeDirectories
+            ? config.getWorkspaceContext().getDirectories()
+            : [],
+          config.getFileService(),
+          config.getExtensionContextFilePaths(),
+          config.isTrustedFolder(),
+          settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
+          config.getContextRuleExcludes(),
+        );
 
       config.setUserMemory(memoryContent);
       config.setGeminiMdFileCount(fileCount);
+      config.setConditionalRulesRegistry(
+        new ConditionalRulesRegistry(conditionalRules, projectRoot),
+      );
       setGeminiMdFileCount(fileCount);
 
       historyManager.addItem(
@@ -746,7 +753,7 @@ export const AppContainer = (props: AppContainerProps) => {
     submitQuery,
     initError,
     pendingHistoryItems: pendingGeminiHistoryItems,
-    pendingToolCalls = [],
+    pendingToolCalls,
     thought,
     cancelOngoingRequest,
     retryLastPrompt,
@@ -841,12 +848,22 @@ export const AppContainer = (props: AppContainerProps) => {
       submitQuery,
     });
 
+  // Bridge message queue to mid-turn drain via ref.
+  // drainQueue reads the synchronous queueRef inside the hook, so it
+  // stays consistent with popAllMessages even before React re-renders.
+  midTurnDrainRef.current = drainQueue;
+
+  // Connect remote input watcher to submitQuery for bidirectional sync.
+  // When an external process writes a command to the input-file,
+  // the watcher calls submitQuery as if the user typed it in the TUI.
   const remoteInput = useRemoteInput();
   useEffect(() => {
     if (!remoteInput) return;
     remoteInput.setSubmitFn((text: string) => submitQuery(text));
   }, [remoteInput, submitQuery]);
 
+  // Notify remote input watcher when TUI becomes idle so it can
+  // retry queued commands that were deferred while TUI was busy.
   useEffect(() => {
     if (!remoteInput) return;
     if (streamingState === StreamingState.Idle) {
@@ -854,20 +871,27 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [remoteInput, streamingState]);
 
+  // Dual-output tool-confirmation bridge.
+  //
+  // When a tool call enters awaiting_approval we emit a `control_request`
+  // (subtype: can_use_tool) on the dual-output channel so an external
+  // consumer can decide. Whichever side resolves first (TUI native UI or
+  // `confirmation_response` written to --input-file) wins; we always emit
+  // a `control_response` mirroring the final decision so observers stay in
+  // sync.
   const dualOutput = useDualOutput();
-  const confirmRequestMap = useRef(new Map<string, string>());
-  const confirmCallIdMap = useRef(new Map<string, string>());
+  const confirmRequestMap = useRef(new Map<string, string>()); // requestId → callId
+  const confirmCallIdMap = useRef(new Map<string, string>()); // callId → requestId
   const confirmEmitted = useRef(new Set<string>());
 
   useEffect(() => {
     if (!dualOutput || !dualOutput.isConnected) return;
-
     for (const tc of pendingToolCalls) {
       if (
         tc.status === 'awaiting_approval' &&
         !confirmEmitted.current.has(tc.request.callId)
       ) {
-        const requestId = randomUUID();
+        const requestId = crypto.randomUUID();
         confirmRequestMap.current.set(requestId, tc.request.callId);
         confirmCallIdMap.current.set(tc.request.callId, requestId);
         confirmEmitted.current.add(tc.request.callId);
@@ -876,15 +900,13 @@ export const AppContainer = (props: AppContainerProps) => {
           tc.request.name,
           tc.request.callId,
           tc.request.args,
-          null,
         );
       }
     }
-
+    // Detect tools that left awaiting_approval (TUI-native resolution) so we
+    // can emit a matching control_response back to external consumers.
     for (const [callId, requestId] of confirmCallIdMap.current) {
-      const tc = pendingToolCalls.find(
-        (toolCall) => toolCall.request.callId === callId,
-      );
+      const tc = pendingToolCalls.find((t) => t.request.callId === callId);
       if (
         tc &&
         tc.status !== 'awaiting_approval' &&
@@ -899,44 +921,63 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [dualOutput, pendingToolCalls]);
 
+  // Keep latest state in refs so the confirmation handler (registered once)
+  // always reads current values without needing re-registration.
+  const pendingToolCallsRef = useRef(pendingToolCalls);
+  pendingToolCallsRef.current = pendingToolCalls;
+  const dualOutputRef = useRef(dualOutput);
+  dualOutputRef.current = dualOutput;
+
+  // Route confirmation_response commands written to --input-file back into
+  // the tool's onConfirm handler. Registered once (deps: [remoteInput]) to
+  // avoid teardown/re-registration churn on every pendingToolCalls change.
   useEffect(() => {
     if (!remoteInput) return;
-
     remoteInput.setConfirmationHandler(
       (requestId: string, allowed: boolean) => {
         const callId = confirmRequestMap.current.get(requestId);
-        if (!callId) return;
-
-        const tc = pendingToolCalls.find(
-          (toolCall) =>
-            toolCall.request.callId === callId &&
-            toolCall.status === 'awaiting_approval',
+        if (!callId) {
+          dualOutputRef.current?.emitControlError(
+            requestId,
+            'unknown request_id (already resolved, cancelled, or never issued)',
+          );
+          return;
+        }
+        const tc = pendingToolCallsRef.current.find(
+          (t) =>
+            t.request.callId === callId && t.status === 'awaiting_approval',
         );
-        if (!tc) return;
-
+        if (!tc) {
+          dualOutputRef.current?.emitControlError(
+            requestId,
+            'tool call is no longer awaiting approval',
+          );
+          return;
+        }
         const waitingTc = tc as WaitingToolCall;
-        if (!waitingTc.confirmationDetails?.onConfirm) return;
-
+        if (!waitingTc.confirmationDetails?.onConfirm) {
+          dualOutputRef.current?.emitControlError(
+            requestId,
+            'tool call has no onConfirm handler',
+          );
+          return;
+        }
         void waitingTc.confirmationDetails.onConfirm(
           allowed
             ? ToolConfirmationOutcome.ProceedOnce
             : ToolConfirmationOutcome.Cancel,
         );
-        confirmRequestMap.current.delete(requestId);
-        confirmCallIdMap.current.delete(callId);
-        confirmEmitted.current.delete(callId);
+        // Do NOT clean up maps here — let the mirror useEffect (line ~870)
+        // detect the state transition and emit control_response + clean up,
+        // keeping the emission path symmetric for both TUI-native and
+        // external-initiated resolutions.
       },
     );
 
     return () => {
       remoteInput.setConfirmationHandler(() => {});
     };
-  }, [remoteInput, pendingToolCalls]);
-
-  // Bridge message queue to mid-turn drain via ref.
-  // drainQueue reads the synchronous queueRef inside the hook, so it
-  // stays consistent with popAllMessages even before React re-renders.
-  midTurnDrainRef.current = drainQueue;
+  }, [remoteInput]);
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
@@ -1212,6 +1253,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const isFocused = useFocus();
   useBracketedPaste();
+
+  useAwaySummary({
+    enabled: settings.merged.general?.showSessionRecap ?? true,
+    config,
+    isFocused,
+    isIdle: streamingState === StreamingState.Idle,
+    addItem: historyManager.addItem,
+  });
 
   // Context file names computation
   const contextFileNames = useMemo(() => {

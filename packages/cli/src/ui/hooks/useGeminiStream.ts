@@ -562,6 +562,7 @@ export const useGeminiStream = (
       userMessageTimestamp: number,
       abortSignal: AbortSignal,
       prompt_id: string,
+      submitType: SendMessageType,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -577,6 +578,19 @@ export const useGeminiStream = (
 
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
+
+        // Notification messages (e.g. background agent completions) are
+        // pre-processed by the notification drain loop which already
+        // added the display item to history. Just pass the model text
+        // through to the API. Cron prompts still go through the normal
+        // slash/@-command/shell preprocessing path below.
+        if (submitType === SendMessageType.Notification) {
+          onDebugMessage(
+            `Received notification (${trimmedQuery.length} chars)`,
+          );
+          return { queryToSend: trimmedQuery, shouldProceed: true };
+        }
+
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
 
@@ -627,10 +641,15 @@ export const useGeminiStream = (
 
         localQueryToSendToGemini = trimmedQuery;
 
-        addItem(
-          { type: MessageType.USER, text: trimmedQuery },
-          userMessageTimestamp,
-        );
+        // Cron prompts are already rendered as a `● Cron: …` notification by
+        // the queue drain, so skip the user-message history item to avoid
+        // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
+        if (submitType !== SendMessageType.Cron) {
+          addItem(
+            { type: MessageType.USER, text: trimmedQuery },
+            userMessageTimestamp,
+          );
+        }
 
         // Handle @-commands (which might involve tool calls)
         if (isAtCommand(trimmedQuery)) {
@@ -1271,6 +1290,7 @@ export const useGeminiStream = (
       } finally {
         dualOutput?.finalizeAssistantMessage();
       }
+      dualOutput?.finalizeAssistantMessage();
       if (toolCallRequests.length > 0) {
         scheduleToolCalls(toolCallRequests, signal);
         return StreamProcessingStatus.CompletedWithToolCalls;
@@ -1306,6 +1326,7 @@ export const useGeminiStream = (
       query: PartListUnion,
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
+      metadata?: { notificationDisplayText?: string },
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
@@ -1383,6 +1404,7 @@ export const useGeminiStream = (
                 userMessageTimestamp,
                 abortSignal,
                 prompt_id!,
+                submitType,
               );
 
         if (!shouldProceed || queryToSend === null) {
@@ -1443,6 +1465,9 @@ export const useGeminiStream = (
         setInitError(null);
 
         try {
+          // Emit user message to dual output sidecar (if enabled).
+          // Skip for tool-result submissions — those are emitted separately
+          // when the tool completes.
           if (dualOutput && submitType !== SendMessageType.ToolResult) {
             const rawParts =
               typeof finalQueryToSend === 'string'
@@ -1450,8 +1475,8 @@ export const useGeminiStream = (
                 : Array.isArray(finalQueryToSend)
                   ? finalQueryToSend
                   : [finalQueryToSend];
-            const userParts: Part[] = rawParts.map((part) =>
-              typeof part === 'string' ? { text: part } : part,
+            const userParts: Part[] = rawParts.map((p) =>
+              typeof p === 'string' ? { text: p } : p,
             );
             dualOutput.emitUserMessage(userParts);
           }
@@ -1460,7 +1485,11 @@ export const useGeminiStream = (
             finalQueryToSend,
             abortSignal,
             prompt_id!,
-            { type: submitType, modelOverride: modelOverrideRef.current },
+            {
+              type: submitType,
+              notificationDisplayText: metadata?.notificationDisplayText,
+              modelOverride: modelOverrideRef.current,
+            },
           );
 
           const processingStatus = await processGeminiStreamEvents(
@@ -1777,6 +1806,13 @@ export const useGeminiStream = (
         }
       }
 
+      // Emit tool results to dual output sidecar (if enabled)
+      if (dualOutput) {
+        for (const toolCall of geminiTools) {
+          dualOutput.emitToolResult(toolCall.request, toolCall.response);
+        }
+      }
+
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
       // Don't continue if model was switched due to quota error
@@ -1952,17 +1988,29 @@ export const useGeminiStream = (
     storage,
   ]);
 
-  // ─── Cron scheduler integration ─────────────────────────
-  const cronQueueRef = useRef<string[]>([]);
-  const [cronTrigger, setCronTrigger] = useState(0);
+  // ─── Unified notification queue (cron + background agents) ──────
+  const notificationQueueRef = useRef<
+    Array<{
+      displayText: string;
+      modelText: string;
+      sendMessageType: SendMessageType;
+    }>
+  >([]);
+  const [notificationTrigger, setNotificationTrigger] = useState(0);
 
-  // Start the scheduler on mount, stop on unmount
+  // Start the cron scheduler on mount, stop on unmount.
+  // Cron fires enqueue onto the shared notification queue.
   useEffect(() => {
     if (!config.isCronEnabled()) return;
     const scheduler = config.getCronScheduler();
     scheduler.start((job: { prompt: string }) => {
-      cronQueueRef.current.push(job.prompt);
-      setCronTrigger((n) => n + 1);
+      const label = job.prompt.slice(0, 40);
+      notificationQueueRef.current.push({
+        displayText: `Cron: ${label}`,
+        modelText: job.prompt,
+        sendMessageType: SendMessageType.Cron,
+      });
+      setNotificationTrigger((n) => n + 1);
     });
     return () => {
       const summary = scheduler.getExitSummary();
@@ -1973,16 +2021,38 @@ export const useGeminiStream = (
     };
   }, [config]);
 
-  // When idle, drain the cron queue one prompt at a time
+  // Register background agent notification callback onto the shared queue.
+  useEffect(() => {
+    const registry = config.getBackgroundTaskRegistry();
+    registry.setNotificationCallback((displayText, modelText) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
+    return () => {
+      registry.setNotificationCallback(undefined);
+    };
+  }, [config]);
+
+  // When idle, drain the unified queue one item at a time.
   useEffect(() => {
     if (
       streamingState === StreamingState.Idle &&
-      cronQueueRef.current.length > 0
+      notificationQueueRef.current.length > 0
     ) {
-      const prompt = cronQueueRef.current.shift()!;
-      submitQuery(prompt, SendMessageType.Cron);
+      const item = notificationQueueRef.current.shift()!;
+      addItem(
+        { type: 'notification' as const, text: item.displayText },
+        Date.now(),
+      );
+      submitQuery(item.modelText, item.sendMessageType, undefined, {
+        notificationDisplayText: item.displayText,
+      });
     }
-  }, [streamingState, submitQuery, cronTrigger]);
+  }, [streamingState, submitQuery, notificationTrigger, addItem]);
 
   return {
     streamingState,

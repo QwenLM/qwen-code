@@ -19,11 +19,7 @@ import type {
   ToolKind,
 } from '@agentclientprotocol/sdk';
 import type { Part } from '@google/genai';
-import {
-  TodoWriteTool,
-  Kind,
-  ExitPlanModeTool,
-} from '@qwen-code/qwen-code-core';
+import { ToolNames, Kind } from '@qwen-code/qwen-code-core';
 
 /**
  * Unified tool call event emitter.
@@ -185,14 +181,14 @@ export class ToolCallEmitter extends BaseEmitter {
    * Exposed for external use in components that need to check this.
    */
   isTodoWriteTool(toolName: string): boolean {
-    return toolName === TodoWriteTool.Name;
+    return toolName === ToolNames.TODO_WRITE;
   }
 
   /**
    * Checks if a tool name is the ExitPlanModeTool.
    */
   isExitPlanModeTool(toolName: string): boolean {
-    return toolName === ExitPlanModeTool.Name;
+    return toolName === ToolNames.EXIT_PLAN_MODE;
   }
 
   /**

@@ -9,6 +9,7 @@ import type { Config } from '../config/config.js';
 import type {
   ServerGeminiContentEvent,
   ServerGeminiStreamEvent,
+  ServerGeminiThoughtEvent,
   ServerGeminiToolCallRequestEvent,
 } from '../core/turn.js';
 import { GeminiEventType } from '../core/turn.js';
@@ -23,6 +24,9 @@ vi.mock('../telemetry/loggers.js', () => ({
 const TOOL_CALL_LOOP_THRESHOLD = 5;
 const CONTENT_LOOP_THRESHOLD = 10;
 const CONTENT_CHUNK_SIZE = 50;
+// Mirrored from loopDetectionService.ts. Kept local so the test is
+// self-describing and failures point to the constant that changed.
+const FILE_READ_WINDOW = 15;
 
 describe('LoopDetectionService', () => {
   let service: LoopDetectionService;
@@ -53,6 +57,14 @@ describe('LoopDetectionService', () => {
   const createContentEvent = (content: string): ServerGeminiContentEvent => ({
     type: GeminiEventType.Content,
     value: content,
+  });
+
+  const createThoughtEvent = (
+    subject: string,
+    description = '',
+  ): ServerGeminiThoughtEvent => ({
+    type: GeminiEventType.Thought,
+    value: { subject, description },
   });
 
   const createRepetitiveContent = (id: number, length: number): string => {
@@ -114,7 +126,7 @@ describe('LoopDetectionService', () => {
         param: 'value',
       });
       const otherEvent = {
-        type: 'thought',
+        type: GeminiEventType.UserCancelled,
       } as unknown as ServerGeminiStreamEvent;
 
       // Send events just below the threshold
@@ -617,6 +629,363 @@ describe('LoopDetectionService', () => {
       } as unknown as ServerGeminiStreamEvent;
       expect(service.addAndCheck(otherEvent)).toBe(false);
       expect(service.addAndCheck(otherEvent)).toBe(false);
+    });
+  });
+
+  describe('Repetitive Thoughts Detection', () => {
+    it('should detect repetitive thoughts pattern', () => {
+      service.reset('');
+
+      for (let i = 0; i < 3; i++) {
+        service.addAndCheck(
+          createThoughtEvent('Plan', 'Inspect the migration script.'),
+        );
+      }
+
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'repetitive_thoughts',
+        }),
+      );
+    });
+
+    it('should not detect loop with varied thoughts', () => {
+      service.reset('');
+
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createThoughtEvent('Analysis', 'Check migration risks.'),
+      );
+      service.addAndCheck(
+        createThoughtEvent('Plan', 'Evaluate rollout alternatives.'),
+      );
+
+      const isLoop = service.addAndCheck(
+        createThoughtEvent('Next', 'Draft the fix.'),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('should not detect a loop when an earlier thought reappears after progress', () => {
+      service.reset('');
+
+      // Regression: earlier counting-based implementation fired as soon as
+      // any thought appeared >= THRESHOLD times anywhere in the retained
+      // history. A healthy long-running session where the model revisits
+      // the same phrase after making progress on unrelated steps should
+      // *not* trip this detector — only a sustained consecutive run does.
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createThoughtEvent('Analysis', 'Consider migration.'),
+      );
+      service.addAndCheck(createThoughtEvent('Analysis', 'Review indexes.'));
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createThoughtEvent('Analysis', 'Consider rollout risks.'),
+      );
+      const isLoop = service.addAndCheck(
+        createThoughtEvent('Plan', 'Inspect the schema.'),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('clears thought history across tool-call roundtrips within a turn', () => {
+      service.reset('');
+
+      // Regression: thoughtHistory previously persisted across ToolCallRequest
+      // events within a single prompt. Three identical thoughts separated by
+      // real tool-call progress would incorrectly fire REPETITIVE_THOUGHTS.
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'a.sql' }),
+      );
+      service.addAndCheck(createThoughtEvent('Plan', 'Inspect the schema.'));
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'b.sql' }),
+      );
+      const isLoop = service.addAndCheck(
+        createThoughtEvent('Plan', 'Inspect the schema.'),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('ignores hedge phrases in Content events (thought detection is Thought-only)', () => {
+      service.reset('');
+
+      // Content events used to feed a substring-matched hedge-phrase list
+      // into thoughtHistory, which conflated prose with the model's actual
+      // reasoning channel. Thought detection now runs only on Thought events.
+      for (let i = 0; i < 5; i++) {
+        service.addAndCheck(
+          createContentEvent('I should check the config, maybe it helps.'),
+        );
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'repetitive_thoughts' }),
+      );
+    });
+  });
+
+  describe('Read File Loop Detection', () => {
+    // Cold-start exemption: a prompt that has not yet fired any non-read-like
+    // tool is still in its opening-exploration phase, so the detector gives
+    // it an initial pass. Tests that want to exercise the detector must
+    // fire a non-read tool first so subsequent reads are judged normally.
+    const primeNonReadTool = () => {
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'prime.txt',
+          content: '',
+        }),
+      );
+    };
+
+    it('should detect excessive file read operations', () => {
+      service.reset('');
+      primeNonReadTool();
+
+      // FILE_READ_THRESHOLD reads in the window trigger the loop. The first
+      // (THRESHOLD - 1) reads must not fire; the THRESHOLD-th does.
+      for (let i = 0; i < 7; i++) {
+        const event = createToolCallRequestEvent('read_file', {
+          path: `file${i}.txt`,
+        });
+        const isLoop = service.addAndCheck(event);
+        expect(isLoop).toBe(false);
+      }
+
+      const event = createToolCallRequestEvent('read_file', {
+        path: 'file7.txt',
+      });
+      const isLoop = service.addAndCheck(event);
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'read_file_loop',
+        }),
+      );
+    });
+
+    it('should exempt opening exploration from READ_FILE_LOOP (cold start)', () => {
+      service.reset('');
+
+      // Regression for PR #3236 review: a prompt like "summarize this
+      // project" opens with parallel read_file / list_directory calls and
+      // must not trip READ_FILE_LOOP before any write/execute action has
+      // fired. This exercises FILE_READ_WINDOW+ consecutive reads with no
+      // prior non-read tool — nothing should fire.
+      for (let i = 0; i < 20; i++) {
+        const name = i % 2 === 0 ? 'read_file' : 'list_directory';
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent(name, { path: `f${i}` }),
+        );
+        expect(isLoop).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
+    });
+
+    it('should activate READ_FILE_LOOP once a non-read tool lands mid-prompt', () => {
+      service.reset('');
+
+      // No firing before the cold-start gate flips.
+      for (let i = 0; i < 7; i++) {
+        service.addAndCheck(
+          createToolCallRequestEvent('read_file', { path: `pre${i}.txt` }),
+        );
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+
+      // A non-read tool lands — gate opens.
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'out.txt',
+          content: 'x',
+        }),
+      );
+
+      // Now a window of reads should eventually trip READ_FILE_LOOP. As new
+      // reads push the write_file out of the FILE_READ_WINDOW-sized history
+      // and FILE_READ_THRESHOLD read-likes accumulate, detection fires.
+      let detected = false;
+      for (let i = 0; i < FILE_READ_WINDOW + 2 && !detected; i++) {
+        detected = service.addAndCheck(
+          createToolCallRequestEvent('read_file', { path: `post${i}.txt` }),
+        );
+      }
+      expect(detected).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
+    });
+
+    it('should detect other read-like operations (exact names + read_/list_ prefixes)', () => {
+      service.reset('');
+      primeNonReadTool();
+
+      // Mix of read-like tool names that either appear in the exact allowlist
+      // (read_file, read_many_files, list_directory) or match the read_/list_
+      // prefix fallback used for MCP-provided tools.
+      service.addAndCheck(
+        createToolCallRequestEvent('read_many_files', {
+          paths: ['file1.txt'],
+        }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('list_directory', { path: '.' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_resource', { uri: 'a' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file3.txt' }),
+      );
+      service.addAndCheck(createToolCallRequestEvent('list_projects', {}));
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file5.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_many_files', {
+          paths: ['file6.txt'],
+        }),
+      );
+
+      const isLoop = service.addAndCheck(
+        createToolCallRequestEvent('list_directory', { path: 'nested' }),
+      );
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          loop_type: 'read_file_loop',
+        }),
+      );
+    });
+
+    it('should not treat tools that merely contain read-like substrings as file reads', () => {
+      service.reset('');
+      primeNonReadTool();
+
+      // Regression: the earlier substring heuristic treated any name
+      // containing 'read'/'cat'/'view'/'list' as a file read, so `review`
+      // (contains 'view') and `concat_chunks` (contains 'cat') contributed
+      // to READ_FILE_LOOP even though no file-read loop was happening.
+      const nonReadLikeNames = [
+        'review',
+        'concat_chunks',
+        'viewport_set',
+        'listener_bind',
+      ];
+      for (let i = 0; i < 6; i++) {
+        const name = nonReadLikeNames[i % nonReadLikeNames.length];
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent(name, { i }),
+        );
+        expect(isLoop).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
+    });
+
+    it('should not detect loop with mixed operations', () => {
+      service.reset('');
+      primeNonReadTool();
+
+      // Mix of read and non-read operations
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file1.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'file2.txt',
+          content: 'test',
+        }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file3.txt' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('execute', { command: 'ls' }),
+      );
+      service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file4.txt' }),
+      );
+
+      const isLoop = service.addAndCheck(
+        createToolCallRequestEvent('read_file', { path: 'file5.txt' }),
+      );
+      expect(isLoop).toBe(false);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'read_file_loop' }),
+      );
+    });
+  });
+
+  describe('Action Stagnation Detection', () => {
+    // Stagnation fires when the same tool *name* is called STAGNATION_THRESHOLD
+    // times consecutively regardless of arguments. This is distinct from
+    // CONSECUTIVE_IDENTICAL_TOOL_CALLS (same name AND args) and from
+    // READ_FILE_LOOP (high proportion of read-like tools in the window),
+    // so we exercise it with a non-read-like tool and varying args.
+    it('should detect action stagnation when the same tool is repeated with varying args', () => {
+      service.reset('');
+
+      // STAGNATION_THRESHOLD - 1 calls must not fire
+      for (let i = 0; i < 7; i++) {
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent('search_code', { query: `term${i}` }),
+        );
+        expect(isLoop).toBe(false);
+      }
+
+      // THRESHOLD-th consecutive same-name call triggers stagnation
+      const isLoop = service.addAndCheck(
+        createToolCallRequestEvent('search_code', { query: 'term7' }),
+      );
+      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({ loop_type: 'action_stagnation' }),
+      );
+    });
+
+    it('should reset stagnation streak when a different tool is called', () => {
+      service.reset('');
+
+      // Accumulate 5 consecutive same-name calls (below threshold)
+      for (let i = 0; i < 5; i++) {
+        service.addAndCheck(
+          createToolCallRequestEvent('search_code', { query: `a${i}` }),
+        );
+      }
+
+      // A different tool resets the streak
+      service.addAndCheck(
+        createToolCallRequestEvent('write_file', {
+          path: 'out.txt',
+          content: 'x',
+        }),
+      );
+
+      // 5 more calls of the original tool: streak only reaches 5, below threshold
+      for (let i = 0; i < 5; i++) {
+        const isLoop = service.addAndCheck(
+          createToolCallRequestEvent('search_code', { query: `b${i}` }),
+        );
+        expect(isLoop).toBe(false);
+      }
     });
   });
 });

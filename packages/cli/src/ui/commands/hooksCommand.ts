@@ -43,6 +43,7 @@ const listCommand: SlashCommand = {
     return t('List all configured hooks');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: async (
     context: CommandContext,
     _args: string,
@@ -185,6 +186,7 @@ export const hooksCommand: SlashCommand = {
     return t('Manage Qwen Code hooks');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: async (
     context: CommandContext,
     args: string,

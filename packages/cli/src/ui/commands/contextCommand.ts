@@ -23,7 +23,6 @@ import {
   getCoreSystemPrompt,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
-  SkillTool,
   buildSkillLlmContent,
 } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
@@ -138,8 +137,10 @@ export async function collectContextData(
     : 0;
 
   const loadedSkillNames: ReadonlySet<string> =
-    skillTool instanceof SkillTool
-      ? skillTool.getLoadedSkillNames()
+    skillTool && 'getLoadedSkillNames' in skillTool
+      ? (
+          skillTool as { getLoadedSkillNames(): ReadonlySet<string> }
+        ).getLoadedSkillNames()
       : new Set();
 
   const skillManager = config.getSkillManager();
@@ -315,6 +316,8 @@ export const contextCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext, args?: string) => {
     const showDetails =
       args?.trim().toLowerCase() === 'detail' ||
@@ -359,6 +362,8 @@ export const contextCommand: SlashCommand = {
         return t('Show per-item context usage breakdown.');
       },
       kind: CommandKind.BUILT_IN,
+      commandType: 'local',
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: async (context: CommandContext) => {
         // Delegate to main action with 'detail' arg to show detailed view
         await contextCommand.action!(context, 'detail');
