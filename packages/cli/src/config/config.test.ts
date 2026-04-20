@@ -1495,16 +1495,8 @@ describe('loadCliConfig with --mcp-config', () => {
       },
     });
     process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
-    const argv = await parseArguments({} as Settings);
-    const config = await loadCliConfig(
-      baseSettings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      argv,
-    );
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
 
     const mcpServers = config.getMcpServers();
     expect(mcpServers['cli-server']).toEqual({
@@ -1522,16 +1514,8 @@ describe('loadCliConfig with --mcp-config', () => {
       'direct-server': { url: 'http://localhost:8080' },
     });
     process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
-    const argv = await parseArguments({} as Settings);
-    const config = await loadCliConfig(
-      baseSettings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      argv,
-    );
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
 
     expect(config.getMcpServers()['direct-server']).toEqual({
       url: 'http://localhost:8080',
@@ -1543,16 +1527,8 @@ describe('loadCliConfig with --mcp-config', () => {
       'settings-server': { url: 'http://localhost:8888' }, // Override
     });
     process.argv = ['node', 'script.js', '--mcp-config', mcpConfig];
-    const argv = await parseArguments({} as Settings);
-    const config = await loadCliConfig(
-      baseSettings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      argv,
-    );
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
 
     // CLI config should override settings
     expect(config.getMcpServers()['settings-server']).toEqual({
@@ -1562,8 +1538,8 @@ describe('loadCliConfig with --mcp-config', () => {
 
   it('should work with --allowed-mcp-server-names filter', async () => {
     const mcpConfig = JSON.stringify({
-      'server1': { url: 'http://localhost:8081' },
-      'server2': { url: 'http://localhost:8082' },
+      server1: { url: 'http://localhost:8081' },
+      server2: { url: 'http://localhost:8082' },
     });
     process.argv = [
       'node',
@@ -1573,90 +1549,24 @@ describe('loadCliConfig with --mcp-config', () => {
       '--allowed-mcp-server-names',
       'server1',
     ];
-    const argv = await parseArguments({} as Settings);
-    const config = await loadCliConfig(
-      {},
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      argv,
-    );
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv);
 
     // Only server1 should be allowed
     expect(config.getMcpServers()).toEqual({
-      'server1': { url: 'http://localhost:8081' },
+      server1: { url: 'http://localhost:8081' },
     });
   });
 
   it('should handle empty mcp-config gracefully', async () => {
     process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const config = await loadCliConfig(
-      baseSettings,
-      [],
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      argv,
-    );
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv);
 
     // Should only have settings server
     expect(config.getMcpServers()).toEqual({
       'settings-server': { url: 'http://localhost:9000' },
     });
-  });
-});
-
-describe('loadCliConfig extensions', () => {
-  const mockExtensions: Extension[] = [
-    {
-      path: '/path/to/ext1',
-      config: { name: 'ext1', version: '1.0.0' },
-      contextFiles: ['/path/to/ext1.md'],
-    },
-    {
-      path: '/path/to/ext2',
-      config: { name: 'ext2', version: '1.0.0' },
-      contextFiles: ['/path/to/ext2.md'],
-    },
-  ];
-
-  it('should not filter extensions if --extensions flag is not used', async () => {
-    process.argv = ['node', 'script.js'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {};
-    const config = await loadCliConfig(
-      settings,
-      mockExtensions,
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      argv,
-    );
-    expect(config.getExtensionContextFilePaths()).toEqual([
-      '/path/to/ext1.md',
-      '/path/to/ext2.md',
-    ]);
-  });
-
-  it('should filter extensions if --extensions flag is used', async () => {
-    process.argv = ['node', 'script.js', '--extensions', 'ext1'];
-    const argv = await parseArguments({} as Settings);
-    const settings: Settings = {};
-    const config = await loadCliConfig(
-      settings,
-      mockExtensions,
-      new ExtensionEnablementManager(
-        ExtensionStorage.getUserExtensionsDir(),
-        argv.extensions,
-      ),
-      argv,
-    );
-    expect(config.getExtensionContextFilePaths()).toEqual(['/path/to/ext1.md']);
   });
 });
 
