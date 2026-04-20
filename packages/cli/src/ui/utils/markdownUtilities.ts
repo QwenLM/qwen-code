@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import stringWidth from 'string-width';
+
 /*
 **Background & Purpose:**
 
@@ -90,7 +92,78 @@ const findEnclosingCodeBlockStart = (
   return -1;
 };
 
-export const findLastSafeSplitPoint = (content: string) => {
+export interface SafeSplitOptions {
+  /**
+   * Current terminal width. Used together with `terminalHeight` to decide
+   * whether the pending region is at risk of outgrowing what Ink can erase
+   * with its cursor-up-and-redraw mechanism.
+   */
+  terminalWidth?: number;
+  /** Current terminal height (rows). */
+  terminalHeight?: number;
+}
+
+/**
+ * Rough upper bound for how many rendered rows `content` would occupy at
+ * `terminalWidth`. Uses `string-width` so CJK/emoji wide chars are counted
+ * correctly. Mirrors how Ink's `wrap="wrap"` Text + the terminal's soft-wrap
+ * would render the content.
+ */
+export const estimateRenderedLines = (
+  content: string,
+  terminalWidth: number,
+): number => {
+  if (terminalWidth <= 0) return 0;
+  let total = 0;
+  for (const line of content.split('\n')) {
+    total += Math.max(1, Math.ceil(stringWidth(line) / terminalWidth));
+  }
+  return total;
+};
+
+/**
+ * Walks backward from the end of `content` for the last `\n` that is not
+ * inside a fenced code block. Returns the index just after that `\n` (so the
+ * caller can safely slice `content.substring(0, n)` / `content.substring(n)`).
+ * Returns 0 when no safe single newline exists.
+ */
+const findLastSafeNewline = (content: string): number => {
+  let searchStartIndex = content.length;
+  while (searchStartIndex > 0) {
+    const nlIndex = content.lastIndexOf('\n', searchStartIndex - 1);
+    if (nlIndex === -1) break;
+    const potentialSplitPoint = nlIndex + 1;
+    if (!isIndexInsideCodeBlock(content, potentialSplitPoint)) {
+      return potentialSplitPoint;
+    }
+    searchStartIndex = nlIndex;
+  }
+  return 0;
+};
+
+/**
+ * Narrow-width threshold below which we proactively commit completed lines to
+ * `<Static>` on every incoming streaming chunk. Ink's dynamic region erase
+ * only works within the current viewport — anything that has scrolled past
+ * the top cannot be cleared, which is what produces the duplicated output
+ * users see on small tmux panes (see issues #2912 / #3279).
+ *
+ * 80 columns mirrors the cap used by `mainAreaWidth` (`AppContainer.tsx`).
+ */
+const NARROW_WIDTH_COL_THRESHOLD = 80;
+
+/**
+ * Proportion of the viewport that may be occupied by the pending region
+ * before we aggressively split at a single `\n` even in wider terminals.
+ * Keeping the pending region well under the viewport guarantees Ink can
+ * always erase-and-redraw without leaving orphan rows.
+ */
+const PENDING_VIEWPORT_FRACTION = 0.5;
+
+export const findLastSafeSplitPoint = (
+  content: string,
+  options?: SafeSplitOptions,
+): number => {
   const enclosingBlockStart = findEnclosingCodeBlockStart(
     content,
     content.length,
@@ -119,7 +192,41 @@ export const findLastSafeSplitPoint = (content: string) => {
     searchStartIndex = dnlIndex - 1;
   }
 
-  // If no safe double newline is found, return content.length
-  // to keep the entire content as one piece.
+  // Preventive single-`\n` split. When no `\n\n` paragraph break is available
+  // and the terminal is either narrow (which soft-wraps each logical line to
+  // many rows) or the pending buffer is already approaching the viewport
+  // height, proactively commit all completed lines to the static region and
+  // keep only the in-flight partial in the pending region.
+  //
+  // Rationale: Ink's dynamic region is redrawn by cursor-up + erase-lines.
+  // Anything that has scrolled past the top of the viewport cannot be
+  // erased, so as soon as the pending region risks exceeding the viewport
+  // we must offload earlier lines before that boundary is crossed —
+  // otherwise scrollback accumulates every intermediate streaming frame.
+  if (
+    options &&
+    options.terminalWidth !== undefined &&
+    options.terminalHeight !== undefined &&
+    options.terminalWidth > 0 &&
+    options.terminalHeight > 0
+  ) {
+    const isNarrow = options.terminalWidth < NARROW_WIDTH_COL_THRESHOLD;
+    const viewportBudget = Math.max(
+      1,
+      Math.floor(options.terminalHeight * PENDING_VIEWPORT_FRACTION),
+    );
+    const pendingApproachingViewport =
+      estimateRenderedLines(content, options.terminalWidth) >= viewportBudget;
+
+    if (isNarrow || pendingApproachingViewport) {
+      const lastNewline = findLastSafeNewline(content);
+      if (lastNewline > 0) {
+        return lastNewline;
+      }
+    }
+  }
+
+  // If no safe split point is found, return content.length to keep the
+  // entire content as one piece.
   return content.length;
 };

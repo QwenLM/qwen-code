@@ -658,7 +658,13 @@ export const useGeminiStream = (
       }
       // Split large messages for better rendering performance. Ideally,
       // we should maximize the amount of output sent to <Static />.
-      const splitPoint = findLastSafeSplitPoint(newGeminiMessageBuffer);
+      // Passing terminal width/height lets findLastSafeSplitPoint aggressively
+      // commit earlier lines when the pending tail would exceed the viewport,
+      // which is what causes duplicated output at narrow widths.
+      const splitPoint = findLastSafeSplitPoint(newGeminiMessageBuffer, {
+        terminalWidth,
+        terminalHeight,
+      });
       if (splitPoint === newGeminiMessageBuffer.length) {
         // Update the existing message with accumulated content
         setPendingHistoryItem((item) => ({
@@ -690,7 +696,13 @@ export const useGeminiStream = (
       }
       return newGeminiMessageBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [
+      addItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      terminalWidth,
+      terminalHeight,
+    ],
   );
 
   const mergeThought = useCallback(
@@ -742,7 +754,10 @@ export const useGeminiStream = (
       // Split large thought messages for better rendering performance (same rationale
       // as regular content streaming). This helps avoid terminal flicker caused by
       // constantly re-rendering an ever-growing "pending" block.
-      const splitPoint = findLastSafeSplitPoint(newThoughtBuffer);
+      const splitPoint = findLastSafeSplitPoint(newThoughtBuffer, {
+        terminalWidth,
+        terminalHeight,
+      });
       const nextPendingType: 'gemini_thought' | 'gemini_thought_content' =
         isPendingThought && pendingType === 'gemini_thought_content'
           ? 'gemini_thought_content'
@@ -776,7 +791,14 @@ export const useGeminiStream = (
 
       return newThoughtBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, mergeThought],
+    [
+      addItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      mergeThought,
+      terminalWidth,
+      terminalHeight,
+    ],
   );
 
   const handleUserCancelledEvent = useCallback(
