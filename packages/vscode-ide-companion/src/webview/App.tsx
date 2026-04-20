@@ -39,6 +39,7 @@ import {
   FileIcon,
   PermissionDrawer,
   AskUserQuestionDialog,
+  InsightProgressCard,
   ImageMessageRenderer,
   ImagePreview,
   // Layout components imported directly from webui
@@ -199,6 +200,14 @@ export const App: React.FC = () => {
     AvailableCommand[]
   >([]);
   const [availableModels, setAvailableModels] = useState<ModelInfo[]>([]);
+  const [insightProgress, setInsightProgress] = useState<{
+    stage: string;
+    progress: number;
+    detail?: string;
+  } | null>(null);
+  const [insightReportPath, setInsightReportPath] = useState<string | null>(
+    null,
+  );
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -440,6 +449,8 @@ export const App: React.FC = () => {
     setAccountInfo: (info) => {
       setAccountInfo(info);
     },
+    setInsightReportPath,
+    setInsightProgress,
   });
 
   // Auto-scroll handling: keep the view pinned to bottom when new content arrives,
@@ -838,12 +849,21 @@ export const App: React.FC = () => {
     });
   }, [vscode]);
 
+  const handleOpenInsightReport = useCallback(() => {
+    if (!insightReportPath) {
+      return;
+    }
+    vscode.postMessage({
+      type: 'openInsightReport',
+      data: { path: insightReportPath },
+    });
+  }, [insightReportPath, vscode]);
+
   // Handle toggle edit mode (Default -> Auto-edit -> YOLO -> Default)
   const handleToggleEditMode = useCallback(() => {
     setEditMode((prev) => {
       const next: ApprovalModeValue = NEXT_APPROVAL_MODE[prev];
 
-      // Notify extension to set approval mode via ACP
       try {
         vscode.postMessage({
           type: 'setApprovalMode',
@@ -855,6 +875,22 @@ export const App: React.FC = () => {
       return next;
     });
   }, [vscode]);
+
+  // Handle Tab key to cycle approval modes when input is focused
+  const handleInputKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (
+        e.key === 'Tab' &&
+        !e.shiftKey &&
+        !isComposing &&
+        !completion.isOpen
+      ) {
+        e.preventDefault();
+        handleToggleEditMode();
+      }
+    },
+    [completion.isOpen, handleToggleEditMode, isComposing],
+  );
 
   const handleToggleThinking = useCallback(() => {
     setThinkingEnabled((prev) => !prev);
@@ -996,6 +1032,32 @@ export const App: React.FC = () => {
               onFileClick={handleFileClick}
             />
 
+            {insightProgress && (
+              <InsightProgressCard
+                stage={insightProgress.stage}
+                progress={insightProgress.progress}
+                detail={insightProgress.detail}
+              />
+            )}
+
+            {insightReportPath && (
+              <div className="px-[30px] py-2">
+                <div className="text-sm text-[var(--vscode-descriptionForeground)]">
+                  Insight report generated at:
+                </div>
+                <a
+                  href="#"
+                  className="mt-1 inline-block break-all text-sm text-[var(--vscode-textLink-foreground)] underline decoration-[color-mix(in_srgb,var(--vscode-textLink-foreground)_55%,transparent)] underline-offset-2 hover:text-[var(--vscode-textLink-activeForeground)]"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    handleOpenInsightReport();
+                  }}
+                >
+                  {insightReportPath}
+                </a>
+              </div>
+            )}
+
             {/* Waiting message positioned fixed above the input form to avoid layout shifts */}
             {messageHandling.isWaitingForResponse &&
               messageHandling.loadingMessage && (
@@ -1026,7 +1088,7 @@ export const App: React.FC = () => {
           onInputChange={setInputText}
           onCompositionStart={() => setIsComposing(true)}
           onCompositionEnd={() => setIsComposing(false)}
-          onKeyDown={() => {}}
+          onKeyDown={handleInputKeyDown}
           onSubmit={handleSubmitWithScroll}
           onCancel={handleCancel}
           onToggleEditMode={handleToggleEditMode}

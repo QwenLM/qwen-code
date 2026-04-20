@@ -26,6 +26,11 @@ export class BundledSkillLoader implements ICommandLoader {
   constructor(private readonly config: Config | null) {}
 
   async loadCommands(_signal: AbortSignal): Promise<SlashCommand[]> {
+    if (this.config?.getBareMode?.()) {
+      debugLogger.debug('Bare mode enabled, skipping bundled skills');
+      return [];
+    }
+
     const skillManager = this.config?.getSkillManager();
     if (!skillManager) {
       debugLogger.debug('SkillManager not available, skipping bundled skills');

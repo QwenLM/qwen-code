@@ -20,6 +20,7 @@ import {
   promptIdContext,
   OutputFormat,
   InputFormat,
+  LoopType,
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
@@ -50,6 +51,38 @@ import {
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
 } from './utils/nonInteractiveHelpers.js';
+
+// Human-readable labels for the detectors that can fire mid-stream.
+// Surfaced to stderr in TEXT mode so a headless run that halts on a loop
+// doesn't exit with empty stdout and no explanation — see PR #3236 review.
+const LOOP_TYPE_LABELS: Record<LoopType, string> = {
+  [LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS]:
+    'the model repeated the same tool call with identical arguments',
+  [LoopType.CHANTING_IDENTICAL_SENTENCES]:
+    'the model repeated the same sentence in its output',
+  [LoopType.REPETITIVE_THOUGHTS]:
+    'the model repeated the same reasoning thought',
+  [LoopType.READ_FILE_LOOP]:
+    'the model spent too many consecutive calls reading files without making progress',
+  [LoopType.ACTION_STAGNATION]:
+    'the model kept calling the same tool without making progress',
+};
+
+function emitLoopDetectedMessage(
+  config: Config,
+  loopType: LoopType | undefined,
+): void {
+  // In TEXT mode the adapter swallows LoopDetected, so we print here. In
+  // JSON modes the adapter emits a structured result, which is enough.
+  if (config.getOutputFormat() !== OutputFormat.TEXT) {
+    return;
+  }
+  const reason = loopType ? LOOP_TYPE_LABELS[loopType] : undefined;
+  const detail = reason ? ` (${loopType}: ${reason})` : '';
+  process.stderr.write(
+    `Loop detection halted the run${detail}. Set the \`model.skipLoopDetection\` setting to true to disable.\n`,
+  );
+}
 
 /**
  * Emits a final message for slash command results.
@@ -340,6 +373,9 @@ export async function runNonInteractive(
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
+          if (event.type === GeminiEventType.LoopDetected) {
+            emitLoopDetectedMessage(config, event.value?.loopType);
+          }
           if (
             outputFormat === OutputFormat.TEXT &&
             event.type === GeminiEventType.Error
@@ -505,6 +541,9 @@ export async function runNonInteractive(
                 adapter.processEvent(event);
                 if (event.type === GeminiEventType.ToolCallRequest) {
                   itemToolCallRequests.push(event.value);
+                }
+                if (event.type === GeminiEventType.LoopDetected) {
+                  emitLoopDetectedMessage(config, event.value?.loopType);
                 }
                 if (
                   outputFormat === OutputFormat.TEXT &&

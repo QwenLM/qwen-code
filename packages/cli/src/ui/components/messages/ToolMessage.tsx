@@ -421,6 +421,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
                 <AnsiOutputText
                   data={effectiveDisplayRenderer.data}
                   availableTerminalHeight={availableHeight}
+                  maxWidth={innerWidth}
                 />
                 {effectiveDisplayRenderer.stats && (
                   <ShellStatsBar
