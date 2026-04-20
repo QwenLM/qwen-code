@@ -1,6 +1,6 @@
 # Session Recap Design
 
-> A one-line "where did I leave off" summary surfaced when the user
+> A brief (1-2 sentence) "where did I leave off" summary surfaced when the user
 > returns to an idle session, either on demand (`/recap`) or after the
 > terminal has been blurred for 5+ minutes.
 
@@ -11,7 +11,7 @@ pages of history to remember **what they were doing and what came next**
 is a real friction point. Just reloading messages does not solve this
 UX problem.
 
-The goal is to proactively surface a one-line recap when the user
+The goal is to proactively surface a brief 1-2 sentence recap when the user
 returns:
 
 - **High-level task** (what they are doing) → **next step** (what to do next).
@@ -93,7 +93,7 @@ recap, not a leak.
 
 Bullets below correspond 1:1 with `RECAP_SYSTEM_PROMPT`:
 
-- Exactly one short sentence (≤ 80 chars), plain prose (no markdown / lists / headings).
+- Under 40 words, 1-2 plain sentences (no markdown / lists / headings). For Chinese, treat the budget as roughly 80 characters total.
 - First sentence: the high-level task. Then: the concrete next step.
 - Explicitly forbid: listing what was done, reciting tool calls, status reports.
 - Match the dominant language of the conversation (English or Chinese).
@@ -128,7 +128,7 @@ the model's reasoning preamble is worse than showing no recap at all.
 | ------------------- | ------------------------------ | ----------------------------------------------------- |
 | `model`             | `getFastModel() ?? getModel()` | Recap doesn't need a frontier model                   |
 | `tools`             | `[]`                           | One-shot query, no tool use                           |
-| `maxOutputTokens`   | `300`                          | Headroom for one short sentence + tags                |
+| `maxOutputTokens`   | `300`                          | Headroom for 1-2 short sentences + tags               |
 | `temperature`       | `0.3`                          | Mostly deterministic, with a bit of natural variation |
 | `systemInstruction` | The recap-only prompt above    | Replaces the main agent's role definition             |
 
