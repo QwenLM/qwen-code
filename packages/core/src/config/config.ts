@@ -2212,9 +2212,9 @@ export class Config {
   }
 
   /**
-   * Get the file path for receiving remote input commands.
-   * When set, the TUI mode watches this file for JSONL commands and
-   * processes them as if the user typed them (bidirectional sync).
+   * Get the file path for remote input commands (bidirectional sync).
+   * When set, the TUI mode will watch this file for JSONL commands written
+   * by an external process and submit them as user messages.
    */
   getInputFile(): string | undefined {
     return this.inputFile;
