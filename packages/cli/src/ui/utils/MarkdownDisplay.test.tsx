@@ -286,6 +286,82 @@ plain
       expect(output).not.toContain('┌');
     });
 
+    it('recognizes a table nested under a list-item bullet', () => {
+      // Models sometimes emit tables prefixed by a bullet marker:
+      //   `+ | ID | Name |`
+      // ulItemRegex would otherwise swallow the line; this verifies the
+      // bullet prefix does not prevent table detection.
+      const text = `
++ | ID | Name |
+|----|------|
+| 001 | foo |
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+      // Should render as a table (has border chars), not as a list item + raw text.
+      expect(output).toContain('┌');
+      expect(output).toContain('ID');
+      expect(output).toContain('001');
+      // No stray raw pipe lines, and no bullet + pipe content.
+      expect(output).not.toContain('+ |');
+    });
+
+    it('buffers a partial in-progress row while streaming (no raw flicker)', () => {
+      // Mid-stream: last line is a row being typed — starts with `|` but has
+      // no closing `|` yet. Without the guard this would close the table and
+      // render the partial row as raw text, flipping each chunk.
+      const text = `
+| A | B |
+|---|---|
+| 1 | 2 |
+| 3 | x`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} isPending={true} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+      // The committed row is rendered.
+      expect(output).toContain('1');
+      expect(output).toContain('2');
+      // The partial row must NOT be rendered as raw pipe text.
+      expect(output).not.toMatch(/\|\s*3\s*\|\s*x\s*$/m);
+    });
+
+    it('flushes the partial row as text when streaming is complete', () => {
+      // Same content but stream has ended — fall through to legacy behavior
+      // so truly malformed tables don't silently drop data.
+      const text = `
+| A | B |
+|---|---|
+| 1 | 2 |
+| 3 | x`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} isPending={false} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('3');
+      expect(output).toContain('x');
+    });
+
+    it('renders a header-only skeleton while streaming with no data rows yet', () => {
+      // Reproduces the mid-stream state where header + separator have arrived
+      // but no data rows have been parsed yet. Before this fix the renderer
+      // emitted nothing for that state, causing a height collapse between
+      // "raw text" and "first row arrives" frames.
+      const text = `
+| ID | Name |
+|----|------|
+`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} isPending={true} text={text} />,
+      );
+      const output = lastFrame() ?? '';
+      // Skeleton contains the header labels followed by a colon.
+      expect(output).toContain('ID:');
+      expect(output).toContain('Name:');
+    });
+
     it('does not crash on uneven escaped pipes near row edges', () => {
       const text = `
 | A | B |

@@ -483,4 +483,98 @@ describe('<TableRenderer />', () => {
       }
     }
   });
+
+  // Helpers for cross-render decision tests.
+  // A cell with N embedded newlines forces maxRowLines = N (wrapText preserves
+  // internal \n), giving precise control over the vertical/horizontal decision.
+  const cellOfHeight = (n: number) =>
+    Array.from({ length: n }, (_, i) => `l${i}`).join('\n');
+
+  it('streaming keeps the vertical layout locked in once entered', () => {
+    const headers = ['Col1', 'Col2'];
+
+    // Start short (1 line) — horizontal.
+    const { lastFrame, rerender } = renderWithProviders(
+      <TableRenderer
+        headers={headers}
+        rows={[['a', 'b']]}
+        contentWidth={80}
+        isPending={true}
+      />,
+    );
+    expect(lastFrame() ?? '').toContain('┌');
+
+    // Grow to 6 lines in a cell — crosses ENTER (>5) → vertical.
+    rerender(
+      <TableRenderer
+        headers={headers}
+        rows={[[cellOfHeight(6), 'b']]}
+        contentWidth={80}
+        isPending={true}
+      />,
+    );
+    expect(lastFrame() ?? '').toContain('Col1:');
+    expect(lastFrame() ?? '').not.toContain('┌');
+
+    // Shrink back to 1 line — during pending, must stay vertical.
+    rerender(
+      <TableRenderer
+        headers={headers}
+        rows={[['a', 'b']]}
+        contentWidth={80}
+        isPending={true}
+      />,
+    );
+    expect(lastFrame() ?? '').toContain('Col1:');
+    expect(lastFrame() ?? '').not.toContain('┌');
+  });
+
+  it('applies hysteresis (enter on >5, exit on ≤3) after streaming ends', () => {
+    const headers = ['Col1', 'Col2'];
+
+    // maxRowLines = 5 ⇒ not > ENTER (5), so horizontal.
+    const { lastFrame, rerender } = renderWithProviders(
+      <TableRenderer
+        headers={headers}
+        rows={[[cellOfHeight(5), 'b']]}
+        contentWidth={80}
+        isPending={false}
+      />,
+    );
+    expect(lastFrame() ?? '').toContain('┌');
+
+    // maxRowLines = 6 ⇒ enter vertical.
+    rerender(
+      <TableRenderer
+        headers={headers}
+        rows={[[cellOfHeight(6), 'b']]}
+        contentWidth={80}
+        isPending={false}
+      />,
+    );
+    expect(lastFrame() ?? '').toContain('Col1:');
+
+    // maxRowLines = 4 ⇒ > EXIT (3), stays vertical (hysteresis).
+    rerender(
+      <TableRenderer
+        headers={headers}
+        rows={[[cellOfHeight(4), 'b']]}
+        contentWidth={80}
+        isPending={false}
+      />,
+    );
+    expect(lastFrame() ?? '').toContain('Col1:');
+    expect(lastFrame() ?? '').not.toContain('┌');
+
+    // maxRowLines = 3 ⇒ ≤ EXIT, switch back to horizontal.
+    rerender(
+      <TableRenderer
+        headers={headers}
+        rows={[[cellOfHeight(3), 'b']]}
+        contentWidth={80}
+        isPending={false}
+      />,
+    );
+    expect(lastFrame() ?? '').toContain('┌');
+  });
 });

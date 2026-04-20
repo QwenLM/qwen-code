@@ -60,6 +60,7 @@ import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import { handleAtCommand } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
 import { useStateAndRef } from './useStateAndRef.js';
+import { useRenderThrottledStateAndRef } from './useRenderThrottledStateAndRef.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { useLogger } from './useLogger.js';
 import {
@@ -221,8 +222,21 @@ export const useGeminiStream = (
   const lastPromptErroredRef = useRef(false);
   const [isResponding, setIsResponding] = useState<boolean>(false);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
-  const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
-    useStateAndRef<HistoryItemWithoutId | null>(null);
+  // Streaming pending text updates one chunk per microtask. Each React render
+  // drives a full Ink frame write; on a 100+ line pending body the resulting
+  // terminal IO produces visible flicker. Cap render frequency to ~60fps so
+  // multiple chunks within a frame coalesce into a single Ink paint. The ref
+  // stays synchronous so finalize paths still see the latest text.
+  const PENDING_RENDER_THROTTLE_MS = 16;
+  const [
+    pendingHistoryItem,
+    pendingHistoryItemRef,
+    setPendingHistoryItem,
+    flushPendingHistoryItem,
+  ] = useRenderThrottledStateAndRef<HistoryItemWithoutId | null>(
+    null,
+    PENDING_RENDER_THROTTLE_MS,
+  );
   const [
     pendingRetryErrorItem,
     pendingRetryErrorItemRef,
@@ -654,6 +668,12 @@ export const useGeminiStream = (
           addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
         setPendingHistoryItem({ type: 'gemini', text: '' });
+        // addItem() commits the prior pending to Static synchronously. If the
+        // pending setState above is still within the throttle window, React
+        // would render the batch with history=new + pending=stale-old briefly,
+        // showing the content duplicated. Flushing forces the '' to land in
+        // the same React batch as the history update.
+        flushPendingHistoryItem();
         newGeminiMessageBuffer = eventValue;
       }
       // Split large messages for better rendering performance. Ideally,
@@ -686,11 +706,20 @@ export const useGeminiStream = (
           userMessageTimestamp,
         );
         setPendingHistoryItem({ type: 'gemini_content', text: afterText });
+        // Force the split into the same React batch as addItem — without this,
+        // the throttled setState would leave the Ink render showing beforeText
+        // in Static AND still-full-text in pending for up to 16ms, duplicated.
+        flushPendingHistoryItem();
         newGeminiMessageBuffer = afterText;
       }
       return newGeminiMessageBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [
+      addItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      flushPendingHistoryItem,
+    ],
   );
 
   const mergeThought = useCallback(
@@ -737,6 +766,10 @@ export const useGeminiStream = (
           addItem(pendingHistoryItemRef.current, userMessageTimestamp);
         }
         setPendingHistoryItem({ type: 'gemini_thought', text: '' });
+        // Same rationale as handleContentEvent: addItem fires state
+        // synchronously while the throttled pending setState may trail — flush
+        // so both land in one React batch and avoid a duplicated render.
+        flushPendingHistoryItem();
       }
 
       // Split large thought messages for better rendering performance (same rationale
@@ -768,6 +801,7 @@ export const useGeminiStream = (
           type: 'gemini_thought_content',
           text: afterText,
         });
+        flushPendingHistoryItem();
         newThoughtBuffer = afterText;
       }
 
@@ -776,7 +810,13 @@ export const useGeminiStream = (
 
       return newThoughtBuffer;
     },
-    [addItem, pendingHistoryItemRef, setPendingHistoryItem, mergeThought],
+    [
+      addItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      flushPendingHistoryItem,
+      mergeThought,
+    ],
   );
 
   const handleUserCancelledEvent = useCallback(

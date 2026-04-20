@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { useRef } from 'react';
 import { Text, Box } from 'ink';
 import wrapAnsi from 'wrap-ansi';
 import stripAnsi from 'strip-ansi';
@@ -14,8 +15,13 @@ import { theme } from '../semantic-colors.js';
 /** Minimum column width to prevent degenerate layouts */
 const MIN_COLUMN_WIDTH = 3;
 
-/** Maximum number of lines per row before switching to vertical format */
-const MAX_ROW_LINES = 4;
+/**
+ * Thresholds for vertical format decision with hysteresis to prevent
+ * layout flipping during streaming when maxRowLines oscillates around
+ * the boundary. Enter vertical on >5, exit only on ≤3.
+ */
+const VERTICAL_ENTER_THRESHOLD = 5;
+const VERTICAL_EXIT_THRESHOLD = 3;
 
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
@@ -28,6 +34,15 @@ interface TableRendererProps {
   contentWidth: number;
   /** Per-column alignment parsed from markdown separator line */
   aligns?: ColumnAlign[];
+  /** True while the containing message is still streaming. When true,
+   *  the vertical/horizontal decision is monotonic (once vertical, stays
+   *  vertical) to prevent layout flipping across chunks. */
+  isPending?: boolean;
+  /** Visible terminal height in rows. Used during streaming to cap the number
+   *  of table rows rendered — exceeding the viewport forces Ink's log-update
+   *  to clear the entire visible area on every chunk, producing a black-frame
+   *  flicker. The final (committed) render ignores this and shows all rows. */
+  availableTerminalHeight?: number;
 }
 
 /** Map Ink-compatible named colors to ANSI foreground codes */
@@ -246,12 +261,46 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   rows,
   contentWidth,
   aligns,
+  isPending,
+  availableTerminalHeight,
 }) => {
+  // Cross-render decision lock: keyed by the React instance (stable as long as
+  // the parent supplies a stable key — MarkdownDisplay uses a headers-based key
+  // so the same table keeps the same instance across streaming chunks).
+  const decisionRef = useRef<{ vertical: boolean }>({ vertical: false });
+
   const colCount = headers.length;
 
   // Empty table — nothing to render
   if (colCount === 0) {
     return <Box />;
+  }
+
+  // Streaming skeleton: when a table has been detected (headers present) but
+  // no data rows have arrived yet, render a vertical header-only skeleton.
+  // This preserves layout height (colCount lines) so that when the first row
+  // arrives, the rendered vertical table stays at the same height — avoiding
+  // the "empty → tall table" flicker during streaming.
+  if (rows.length === 0) {
+    if (!isPending) {
+      return <Box />;
+    }
+    const linkCode = getColorCode(theme.text.link);
+    const skeletonLines = headers.map((h) => {
+      const label = renderMarkdownToAnsi(h);
+      const recoloredLabel = linkCode
+        ? recolorAfterResets(`${label}:`, linkCode)
+        : `${label}:`;
+      return applyColor(ansiFmt.bold(recoloredLabel), theme.text.link);
+    });
+    // Lock the vertical decision so subsequent renders (once rows arrive)
+    // also pick vertical, keeping the layout stable.
+    decisionRef.current.vertical = true;
+    return (
+      <Box marginY={1}>
+        <Text>{skeletonLines.join('\n')}</Text>
+      </Box>
+    );
   }
 
   // ── Precompute per-cell metrics to avoid repeated renderMarkdownToAnsi calls ──
@@ -366,7 +415,56 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   }
 
   const maxRowLines = calculateMaxRowLines();
-  const useVerticalFormat = maxRowLines > MAX_ROW_LINES;
+  // During streaming: monotonic — once vertical, stay vertical until stream ends.
+  // After streaming: hysteresis — enter on >ENTER, exit only on ≤EXIT.
+  let useVerticalFormat: boolean;
+  if (isPending) {
+    useVerticalFormat =
+      decisionRef.current.vertical || maxRowLines > VERTICAL_ENTER_THRESHOLD;
+  } else {
+    useVerticalFormat = decisionRef.current.vertical
+      ? maxRowLines > VERTICAL_EXIT_THRESHOLD
+      : maxRowLines > VERTICAL_ENTER_THRESHOLD;
+  }
+  decisionRef.current.vertical = useVerticalFormat;
+
+  // Streaming row cap: if pending output would exceed the visible viewport,
+  // Ink's log-update clears the entire visible area on every chunk — the
+  // terminal briefly renders blank between clear and rewrite. Cap the rendered
+  // row count to fit within availableTerminalHeight and prepend a hint for the
+  // hidden rows. The final (committed) render goes through Static with no cap.
+  //
+  // Per-row cost:
+  //   vertical:   colCount lines (key:value pairs) + 1 inter-row separator
+  //   horizontal: maxRowLines lines (wrapped content) + 1 inter-row separator
+  // Fixed overhead (non-row chrome):
+  //   vertical:   marginY=2
+  //   horizontal: top/middle/bottom border(3) + header(maxRowLines) + marginY(2)
+  // Plus 1 line reserved for the "... N earlier rows hidden ..." hint.
+  const HIDDEN_HINT_RESERVED_LINES = 1;
+  const perRowLines = useVerticalFormat ? colCount + 1 : maxRowLines + 1;
+  const tableFixedOverhead = useVerticalFormat
+    ? 2 + HIDDEN_HINT_RESERVED_LINES
+    : maxRowLines + 5 + HIDDEN_HINT_RESERVED_LINES;
+  const heightBudget =
+    isPending && availableTerminalHeight !== undefined
+      ? Math.max(perRowLines, availableTerminalHeight - tableFixedOverhead)
+      : Number.POSITIVE_INFINITY;
+  const maxVisibleRows = Math.max(1, Math.floor(heightBudget / perRowLines));
+  const hiddenRowCount =
+    isPending && rows.length > maxVisibleRows
+      ? rows.length - maxVisibleRows
+      : 0;
+  const displayRowMetrics =
+    hiddenRowCount > 0 ? rowMetrics.slice(hiddenRowCount) : rowMetrics;
+  const displayRowCount = displayRowMetrics.length;
+  const hiddenRowsHint =
+    hiddenRowCount > 0
+      ? applyColor(
+          `... ${hiddenRowCount} earlier row${hiddenRowCount === 1 ? '' : 's'} hidden during streaming ...`,
+          theme.text.secondary,
+        )
+      : null;
 
   // ── Helper: Get alignment for a column ──
   const getAlign = (colIndex: number): ColumnAlign =>
@@ -456,10 +554,13 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   // ── Vertical format (key-value pairs) for narrow terminals ──
   function renderVerticalFormat(): string {
     const lines: string[] = [];
+    if (hiddenRowsHint) {
+      lines.push(hiddenRowsHint);
+    }
     const separatorWidth = Math.max(Math.min(contentWidth - 1, 40), 0);
     const separator = separatorWidth > 0 ? '─'.repeat(separatorWidth) : '';
 
-    rowMetrics.forEach((row, rowIndex) => {
+    displayRowMetrics.forEach((row, rowIndex) => {
       if (rowIndex > 0) {
         lines.push(separator);
       }
@@ -502,17 +603,20 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   // ── Build the complete horizontal table as strings ──
   const headerRendered = headerMetrics.map((m) => m.rendered);
   const tableLines: string[] = [];
+  if (hiddenRowsHint) {
+    tableLines.push(hiddenRowsHint);
+  }
   tableLines.push(renderBorderLine('top'));
   tableLines.push(...renderRowLines(headerRendered, true));
   tableLines.push(renderBorderLine('middle'));
-  rowMetrics.forEach((row, rowIndex) => {
+  displayRowMetrics.forEach((row, rowIndex) => {
     tableLines.push(
       ...renderRowLines(
         row.map((m) => m.rendered),
         false,
       ),
     );
-    if (rowIndex < rows.length - 1) {
+    if (rowIndex < displayRowCount - 1) {
       tableLines.push(renderBorderLine('middle'));
     }
   });
@@ -523,7 +627,10 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     ...tableLines.map((line) => getCachedStringWidth(stripAnsi(line))),
   );
   if (maxLineWidth > contentWidth - SAFETY_MARGIN) {
-    // Fallback to vertical format to prevent terminal resize flicker
+    // Fallback to vertical format to prevent terminal resize flicker.
+    // Record the decision so the next render doesn't immediately flip back
+    // if column widths micro-adjust.
+    decisionRef.current.vertical = true;
     return (
       <Box marginY={1}>
         <Text>{renderVerticalFormat()}</Text>

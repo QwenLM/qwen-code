@@ -49,6 +49,7 @@ import {
 import { AppEvent, appEvents } from './utils/events.js';
 import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
+import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
 import {
   profileCheckpoint,
   finalizeStartupProfile,
@@ -183,6 +184,11 @@ export async function startInteractiveUI(
       </SettingsContext.Provider>
     );
   };
+
+  // Wrap each frame's stdout burst in DEC 2026 BSU/ESU so supporting terminals
+  // commit the clear→redraw atomically. Must be installed BEFORE Ink's render
+  // so Ink's own writes flow through the wrapper.
+  installSynchronizedOutput();
 
   const instance = render(
     process.env['DEBUG'] ? (

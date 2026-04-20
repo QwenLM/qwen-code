@@ -115,14 +115,38 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     const hrMatch = line.match(hrRegex);
     const tableRowMatch = line.match(tableRowRegex);
     const tableSeparatorMatch = line.match(tableSeparatorRegex);
+    // Models frequently emit tables nested in list items, like
+    //   `+ | ID | Name | ... |`
+    // ulItemRegex would otherwise consume the whole line as a bullet's text,
+    // hiding the table. Promote it to a table-start candidate when the bullet's
+    // content itself matches a table row and the next line is a separator.
+    const bulletTableMatch =
+      !inTable && ulMatch ? ulMatch[3].match(tableRowRegex) : null;
+    const tableStartMatch = tableRowMatch ?? bulletTableMatch;
+
+    // Streaming guard: while inside a table, if the last line is a partial
+    // row being typed (starts with `|` but has no closing `|` yet), skip it
+    // and stay in `inTable`. Otherwise every chunk that crosses a `|`
+    // boundary would flip between "add row" and "end table + raw text",
+    // causing per-chunk flicker on the in-progress row.
+    if (
+      isPending &&
+      index === lines.length - 1 &&
+      inTable &&
+      /^\s*\|/.test(line) &&
+      !tableRowMatch &&
+      !tableSeparatorMatch
+    ) {
+      return;
+    }
 
     if (codeFenceMatch) {
       inCodeBlock = true;
       codeBlockFence = codeFenceMatch[1];
       codeBlockLang = codeFenceMatch[2] || null;
-    } else if (tableRowMatch && !inTable) {
+    } else if (tableStartMatch && !inTable) {
       // Potential table start - check if next line is separator with matching column count
-      const potentialHeaders = tableRowMatch[1]
+      const potentialHeaders = tableStartMatch[1]
         .split(/(?<!\\)\|/)
         .map((cell) => cell.trim().replaceAll('\\|', '|'));
       const nextLine = index + 1 < lines.length ? lines[index + 1]! : '';
@@ -138,6 +162,19 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         inTable = true;
         tableHeaders = potentialHeaders;
         tableRows = [];
+      } else if (bulletTableMatch && ulMatch) {
+        // Bullet-wrapped pipe line that isn't actually a table — preserve
+        // its list-item rendering (falling back to raw text would drop the bullet).
+        addContentBlock(
+          <RenderListItem
+            key={key}
+            itemText={ulMatch[3]}
+            type="ul"
+            marker={ulMatch[2]}
+            leadingWhitespace={ulMatch[1]}
+            textColor={textColor}
+          />,
+        );
       } else {
         // Not a table, treat as regular text
         addContentBlock(
@@ -165,15 +202,22 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       }
       tableRows.push(cells);
     } else if (inTable && !tableRowMatch) {
-      // End of table
-      if (tableHeaders.length > 0 && tableRows.length > 0) {
+      // End of table. Emit even when no data rows arrived yet — during
+      // streaming the TableRenderer renders a stable header-only skeleton
+      // so the layout doesn't collapse to zero height between "header+sep
+      // arrived" and "first row arrived".
+      if (tableHeaders.length > 0) {
         addContentBlock(
           <RenderTable
-            key={`table-${contentBlocks.length}`}
+            // Headers-based key keeps the same React instance across
+            // streaming chunks so TableRenderer's decision ref persists.
+            key={`table-${tableHeaders.join('\x00')}`}
             headers={tableHeaders}
             rows={tableRows}
             contentWidth={contentWidth}
             aligns={tableAligns}
+            isPending={isPending}
+            availableTerminalHeight={availableTerminalHeight}
           />,
         );
       }
@@ -301,15 +345,18 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     );
   }
 
-  // Handle table at end of content
-  if (inTable && tableHeaders.length > 0 && tableRows.length > 0) {
+  // Handle table at end of content — emit even with 0 rows so streaming
+  // shows a stable skeleton instead of collapsing to zero height.
+  if (inTable && tableHeaders.length > 0) {
     addContentBlock(
       <RenderTable
-        key={`table-${contentBlocks.length}`}
+        key={`table-${tableHeaders.join('\x00')}`}
         headers={tableHeaders}
         rows={tableRows}
         contentWidth={contentWidth}
         aligns={tableAligns}
+        isPending={isPending}
+        availableTerminalHeight={availableTerminalHeight}
       />,
     );
   }
@@ -440,6 +487,8 @@ interface RenderTableProps {
   rows: string[][];
   contentWidth: number;
   aligns?: ColumnAlign[];
+  isPending?: boolean;
+  availableTerminalHeight?: number;
 }
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
@@ -447,12 +496,16 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   rows,
   contentWidth,
   aligns,
+  isPending,
+  availableTerminalHeight,
 }) => (
   <TableRenderer
     headers={headers}
     rows={rows}
     contentWidth={contentWidth}
     aligns={aligns}
+    isPending={isPending}
+    availableTerminalHeight={availableTerminalHeight}
   />
 );
 

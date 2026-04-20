@@ -187,6 +187,12 @@ export const AppContainer = (props: AppContainerProps) => {
   const [modelSwitchedFromQuotaError, setModelSwitchedFromQuotaError] =
     useState<boolean>(false);
   const [historyRemountKey, setHistoryRemountKey] = useState(0);
+  // TEMP: prove our diagnostic code path is actually loaded in this run.
+  useEffect(() => {
+    process.stderr.write(
+      `[AppContainer mounted] ts=${Date.now()} pid=${process.pid} build=flicker-diag-v2\n`,
+    );
+  }, []);
   const [updateInfo, setUpdateInfo] = useState<UpdateObject | null>(null);
   const [isTrustedFolder, setIsTrustedFolder] = useState<boolean | undefined>(
     config.isTrustedFolder(),
@@ -439,6 +445,11 @@ export const AppContainer = (props: AppContainerProps) => {
   }, [historyManager.history, logger]);
 
   const refreshStatic = useCallback(() => {
+    // TEMP: unconditional flicker diagnostic (no env flag, so we can't miss it).
+    const stack = new Error().stack ?? '(no stack)';
+    process.stderr.write(
+      `[refreshStatic] ts=${Date.now()}\n${stack.split('\n').slice(1, 8).join('\n')}\n---\n`,
+    );
     stdout.write(ansiEscapes.clearTerminal);
     setHistoryRemountKey((prev) => prev + 1);
   }, [setHistoryRemountKey, stdout]);
@@ -1352,13 +1363,29 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, [ideNeedsRestart]);
 
+  const lastRefreshWidthRef = useRef(terminalWidth);
   useEffect(() => {
     if (isInitialMount.current) {
       isInitialMount.current = false;
+      lastRefreshWidthRef.current = terminalWidth;
       return;
     }
 
     const handler = setTimeout(() => {
+      // Guard against scrollbar-induced micro-oscillations: terminals like
+      // macOS Terminal show/hide a 1–2 column scrollbar as content grows past
+      // the viewport, triggering SIGWINCH with tiny width changes (e.g.
+      // 97↔95). A full clear+remount per toggle produces a visible blank
+      // frame every time — that's the "black page" flicker during streaming.
+      // Only trigger the expensive refresh when the user really resized the
+      // window (≥4 columns); Ink's normal reflow handles sub-threshold
+      // changes transparently.
+      const diff = Math.abs(lastRefreshWidthRef.current - terminalWidth);
+      const MIN_WIDTH_DELTA_FOR_REFRESH = 4;
+      if (diff < MIN_WIDTH_DELTA_FOR_REFRESH) {
+        return;
+      }
+      lastRefreshWidthRef.current = terminalWidth;
       refreshStatic();
     }, 300);
 
