@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import path from 'node:path';
+import os from 'node:os';
 import type { PartUnion } from '@google/genai';
 import mime from 'mime/lite';
 import {
@@ -20,7 +21,7 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
-import { normalizePathForComparison } from './paths.js';
+import { isSubpath } from './paths.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
@@ -378,23 +379,15 @@ export function isWithinRoot(
   pathToCheck: string,
   rootDirectory: string,
 ): boolean {
-  const normalizedPathToCheck = path.resolve(pathToCheck);
-  const normalizedRootDirectory = path.resolve(rootDirectory);
+  const isWindows = os.platform() === 'win32';
+  const pathModule = isWindows ? path.win32 : path.posix;
 
-  const rootWithSeparator =
-    normalizedRootDirectory === path.sep ||
-    normalizedRootDirectory.endsWith(path.sep)
-      ? normalizedRootDirectory
-      : normalizedRootDirectory + path.sep;
+  // Use platform-specific resolve to ensure that tests mocking Windows path logic
+  // work correctly even when they are executed on a non-Windows host (e.g. Linux).
+  const normalizedPathToCheck = pathModule.resolve(pathToCheck);
+  const normalizedRootDirectory = pathModule.resolve(rootDirectory);
 
-  const pathToCompare = normalizePathForComparison(normalizedPathToCheck);
-  const rootWithSepToCompare = normalizePathForComparison(rootWithSeparator);
-  const rootDirToCompare = normalizePathForComparison(normalizedRootDirectory);
-
-  return (
-    pathToCompare === rootDirToCompare ||
-    pathToCompare.startsWith(rootWithSepToCompare)
-  );
+  return isSubpath(normalizedRootDirectory, normalizedPathToCheck);
 }
 
 /**

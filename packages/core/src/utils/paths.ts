@@ -229,10 +229,20 @@ export function sanitizeCwd(cwd: string): string {
  */
 export function isSubpath(parentPath: string, childPath: string): boolean {
   const isWindows = os.platform() === 'win32';
-  const pathModule = isWindows ? path.win32 : path;
+  const isDarwin = os.platform() === 'darwin';
+  const pathModule = isWindows ? path.win32 : path.posix;
 
-  // On Windows, path.relative is case-insensitive. On POSIX, it's case-sensitive.
-  const relative = pathModule.relative(parentPath, childPath);
+  let p = parentPath;
+  let c = childPath;
+
+  if (isWindows || isDarwin) {
+    p = p.toLowerCase();
+    c = c.toLowerCase();
+  }
+
+  // On Windows/macOS, path comparison is generally case-insensitive.
+  // By lowercasing both paths here, we ensure consistent behavior regardless of the host OS.
+  const relative = pathModule.relative(p, c);
 
   return (
     !relative.startsWith(`..${pathModule.sep}`) &&
