@@ -26,7 +26,10 @@ Add to `settings.json`:
     "target": "all",
     "promptFile": ".qwen/rewrite-prompt.txt",
     "model": "qwen3-plus",
-    "contextTurns": 1
+    "contextTurns": 1,
+    "timeoutMs": 60000
   }
 }
+
+`timeoutMs` 控制每次 rewrite LLM 调用的超时（毫秒），默认 30000。
 ```
