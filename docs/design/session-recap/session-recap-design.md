@@ -28,8 +28,9 @@ returns:
 
 Both paths funnel into a single function — `generateSessionRecap()` — to
 guarantee identical behavior. The auto-trigger is gated by
-`general.showSessionRecap` (default: on); the manual command ignores
-that setting.
+`general.showSessionRecap` (default: off — explicit opt-in, so ambient
+LLM calls are never silently added to a user's bill); the manual
+command ignores that setting.
 
 ## Architecture
 
@@ -206,7 +207,7 @@ and a null `pendingItem`.
 
 | Setting                    | Default | Notes                                                             |
 | -------------------------- | ------- | ----------------------------------------------------------------- |
-| `general.showSessionRecap` | `true`  | Auto-trigger only. Manual `/recap` ignores this.                  |
+| `general.showSessionRecap` | `false` | Auto-trigger only. Manual `/recap` ignores this.                  |
 | `fastModel`                | unset   | Recommended (e.g. `qwen3-coder-flash`) for fast and cheap recaps. |
 
 ### Model fallback

@@ -52,8 +52,9 @@
           "default": true
         },
         "showSessionRecap": {
-          "description": "Show a one-line \"where you left off\" recap when returning to the terminal after being away for 5+ minutes. When unset, auto-trigger is on if `fastModel` is configured. Use /recap to trigger manually regardless.",
-          "type": "boolean"
+          "description": "Auto-show a one-line \"where you left off\" recap when returning to the terminal after being away for 5+ minutes. Off by default. Use /recap to trigger manually regardless of this setting.",
+          "type": "boolean",
+          "default": false
         },
         "gitCoAuthor": {
           "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",

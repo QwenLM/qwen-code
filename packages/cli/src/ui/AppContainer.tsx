@@ -1277,9 +1277,7 @@ export const AppContainer = (props: AppContainerProps) => {
   useBracketedPaste();
 
   useAwaySummary({
-    enabled:
-      settings.merged.general?.showSessionRecap ??
-      Boolean(config?.getFastModel()),
+    enabled: settings.merged.general?.showSessionRecap ?? false,
     config,
     isFocused,
     isIdle: streamingState === StreamingState.Idle,
