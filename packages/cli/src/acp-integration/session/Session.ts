@@ -1105,12 +1105,41 @@ export class Session implements SessionContext {
       }
     }
 
+    // Bounded-concurrency runner: matches core's `runConcurrently`
+    // behaviour (`coreToolScheduler.ts:1506`), capped by
+    // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
+    // in input order regardless of resolution order.
+    const runBounded = async (calls: FunctionCall[]): Promise<Part[][]> => {
+      const parsed = parseInt(
+        process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'] || '',
+        10,
+      );
+      const maxConcurrency =
+        Number.isFinite(parsed) && parsed >= 1 ? parsed : 10;
+      const results: Part[][] = new Array(calls.length);
+      const executing = new Set<Promise<void>>();
+      for (let i = 0; i < calls.length; i++) {
+        const idx = i;
+        const p = this.runTool(abortSignal, promptId, calls[idx])
+          .then((r) => {
+            results[idx] = r;
+          })
+          .finally(() => {
+            executing.delete(p);
+          });
+        executing.add(p);
+        if (executing.size >= maxConcurrency) {
+          await Promise.race(executing);
+        }
+      }
+      await Promise.all(executing);
+      return results;
+    };
+
     const parts: Part[] = [];
     for (const batch of batches) {
       if (batch.concurrent && batch.calls.length > 1) {
-        const results = await Promise.all(
-          batch.calls.map((fc) => this.runTool(abortSignal, promptId, fc)),
-        );
+        const results = await runBounded(batch.calls);
         for (const r of results) parts.push(...r);
       } else {
         for (const fc of batch.calls) {
