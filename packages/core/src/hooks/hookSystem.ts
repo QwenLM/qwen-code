@@ -12,7 +12,7 @@ import { HookPlanner } from './hookPlanner.js';
 import { HookEventHandler } from './hookEventHandler.js';
 import type { HookRegistryEntry } from './hookRegistry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import type { DefaultHookOutput } from './types.js';
+import type { DefaultHookOutput , HookPhase } from './types.js';
 import { createHookOutput } from './types.js';
 import type {
   SessionStartSource,
@@ -418,6 +418,7 @@ export class HookSystem {
     todoContent: string,
     todoStatus: TodoStatus,
     allTodos: TodoItem[],
+    phase: HookPhase,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     return this.hookEventHandler.fireTodoCreatedEvent(
@@ -425,6 +426,7 @@ export class HookSystem {
       todoContent,
       todoStatus,
       allTodos,
+      phase,
       signal,
     );
   }
@@ -438,6 +440,7 @@ export class HookSystem {
     todoContent: string,
     previousStatus: 'pending' | 'in_progress',
     allTodos: TodoItem[],
+    phase: HookPhase,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     return this.hookEventHandler.fireTodoCompletedEvent(
@@ -445,6 +448,7 @@ export class HookSystem {
       todoContent,
       previousStatus,
       allTodos,
+      phase,
       signal,
     );
   }

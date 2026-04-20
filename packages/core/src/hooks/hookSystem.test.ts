@@ -24,6 +24,7 @@ import {
   PreCompactTrigger,
   NotificationType,
   type PermissionSuggestion,
+  HookPhase,
 } from './types.js';
 import type { Config } from '../config/config.js';
 import type { AggregatedHookResult } from './hookAggregator.js';
@@ -1711,6 +1712,7 @@ describe('HookSystem', () => {
         'Test Task',
         'pending',
         allTodos,
+        HookPhase.Validation,
       );
 
       expect(result).toEqual(mockResult);
@@ -1719,6 +1721,7 @@ describe('HookSystem', () => {
         'Test Task',
         'pending',
         allTodos,
+        HookPhase.Validation,
         undefined,
       );
     });
@@ -1739,6 +1742,7 @@ describe('HookSystem', () => {
         'Task',
         'pending',
         allTodos,
+        HookPhase.Validation,
         abortController.signal,
       );
 
@@ -1747,6 +1751,7 @@ describe('HookSystem', () => {
         'Task',
         'pending',
         allTodos,
+        HookPhase.Validation,
         abortController.signal,
       );
     });
@@ -1776,6 +1781,7 @@ describe('HookSystem', () => {
         'test',
         'pending',
         allTodos,
+        HookPhase.Validation,
       );
 
       expect(result.finalOutput?.decision).toBe('block');
@@ -1806,6 +1812,7 @@ describe('HookSystem', () => {
         'Test Task',
         'pending',
         allTodos,
+        HookPhase.Validation,
       );
 
       expect(result).toEqual(mockResult);
@@ -1814,6 +1821,7 @@ describe('HookSystem', () => {
         'Test Task',
         'pending',
         allTodos,
+        HookPhase.Validation,
         undefined,
       );
     });
@@ -1834,6 +1842,7 @@ describe('HookSystem', () => {
         'Task',
         'in_progress',
         allTodos,
+        HookPhase.Validation,
         abortController.signal,
       );
 
@@ -1842,6 +1851,7 @@ describe('HookSystem', () => {
         'Task',
         'in_progress',
         allTodos,
+        HookPhase.Validation,
         abortController.signal,
       );
     });
@@ -1871,6 +1881,7 @@ describe('HookSystem', () => {
         'Task',
         'in_progress',
         allTodos,
+        HookPhase.Validation,
       );
 
       expect(result.finalOutput?.decision).toBe('block');

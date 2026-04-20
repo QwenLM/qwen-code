@@ -55,6 +55,17 @@ export enum HookEventName {
 }
 
 /**
+ * Hook execution phase for todo events
+ * Used to split validation from side effects for atomic updates
+ */
+export enum HookPhase {
+  /** Validation phase - hooks should only check and return block/approve decisions, no side effects */
+  Validation = 'validation',
+  /** PostWrite phase - hooks can perform side effects (logging, HTTP sync, etc.) after data is persisted */
+  PostWrite = 'postWrite',
+}
+
+/**
  * Fields in the hooks configuration that are not hook event names
  */
 export const HOOKS_CONFIG_FIELDS = ['enabled', 'disabled', 'notifications'];
@@ -901,6 +912,8 @@ export interface TodoCreatedInput extends HookInput {
   todo_content: string;
   todo_status: TodoStatus;
   all_todos: TodoItem[];
+  /** Execution phase: validation (no side effects) or postWrite (side effects allowed) */
+  phase: HookPhase;
 }
 
 /**
@@ -923,6 +936,8 @@ export interface TodoCompletedInput extends HookInput {
   todo_content: string;
   previous_status: 'pending' | 'in_progress';
   all_todos: TodoItem[];
+  /** Execution phase: validation (no side effects) or postWrite (side effects allowed) */
+  phase: HookPhase;
 }
 
 /**

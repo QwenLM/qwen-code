@@ -42,7 +42,7 @@ import type {
   TodoCompletedInput,
   TodoItem,
   TodoStatus,
-} from './types.js';
+ HookPhase } from './types.js';
 import { PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
@@ -486,6 +486,7 @@ export class HookEventHandler {
     todoContent: string,
     todoStatus: TodoStatus,
     allTodos: TodoItem[],
+    phase: HookPhase,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: TodoCreatedInput = {
@@ -495,6 +496,7 @@ export class HookEventHandler {
       todo_content: todoContent,
       todo_status: todoStatus,
       all_todos: allTodos,
+      phase,
     };
 
     return this.executeHooks(
@@ -514,6 +516,7 @@ export class HookEventHandler {
     todoContent: string,
     previousStatus: 'pending' | 'in_progress',
     allTodos: TodoItem[],
+    phase: HookPhase,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: TodoCompletedInput = {
@@ -523,6 +526,7 @@ export class HookEventHandler {
       todo_content: todoContent,
       previous_status: previousStatus,
       all_todos: allTodos,
+      phase,
     };
 
     return this.executeHooks(
