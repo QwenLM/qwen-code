@@ -102,11 +102,14 @@ export function registerNewCommands(
 
   disposables.push(
     vscode.commands.registerCommand(authCommand, async () => {
-      // Open VSCode Settings filtered to qwen-code configuration
-      await vscode.commands.executeCommand(
-        'workbench.action.openSettings',
-        '@ext:qwenlm.qwen-code-vscode-ide-companion',
-      );
+      const providers = getWebViewProviders();
+      const provider =
+        providers.length > 0
+          ? providers[providers.length - 1]
+          : createWebViewProvider();
+
+      await provider.show();
+      await provider.startInteractiveAuth();
     }),
   );
 

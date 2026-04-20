@@ -6,6 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  authCommand,
   focusChatCommand,
   openNewChatTabCommand,
   registerNewCommands,
@@ -70,6 +71,7 @@ describe('registerNewCommands', () => {
     const provider = {
       show: vi.fn().mockResolvedValue(undefined),
       createNewSession: vi.fn().mockResolvedValue(undefined),
+      startInteractiveAuth: vi.fn().mockResolvedValue(undefined),
       setInitialModelId: vi.fn(),
     };
 
@@ -88,6 +90,27 @@ describe('registerNewCommands', () => {
     expect(provider.show).toHaveBeenCalledTimes(1);
     expect(provider.createNewSession).not.toHaveBeenCalled();
     expect(provider.setInitialModelId).toHaveBeenCalledWith('glm-5');
+  });
+
+  it('auth opens the interactive provider setup flow instead of VS Code settings', async () => {
+    const provider = {
+      show: vi.fn().mockResolvedValue(undefined),
+      startInteractiveAuth: vi.fn().mockResolvedValue(undefined),
+    };
+
+    registerNewCommands(
+      context as never,
+      log,
+      diffManager as never,
+      () => [provider as never],
+      vi.fn(() => provider as never),
+    );
+
+    await getRegisteredHandler(authCommand)();
+
+    expect(provider.show).toHaveBeenCalledTimes(1);
+    expect(provider.startInteractiveAuth).toHaveBeenCalledTimes(1);
+    expect(executeCommand).not.toHaveBeenCalled();
   });
 
   it('focusChat focuses the secondary sidebar when it is supported', async () => {

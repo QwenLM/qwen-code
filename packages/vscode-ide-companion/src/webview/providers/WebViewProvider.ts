@@ -921,6 +921,10 @@ export class WebViewProvider {
     await this.attemptAuthStateRestoration();
   }
 
+  async startInteractiveAuth(): Promise<void> {
+    await this.messageHandler.route({ type: 'auth' });
+  }
+
   setInitialModelId(modelId: string | null | undefined): void {
     this.initialModelId =
       typeof modelId === 'string' && modelId.trim().length > 0
@@ -971,8 +975,8 @@ export class WebViewProvider {
 
   /**
    * Sync ~/.qwen/settings.json values back to VSCode Settings UI.
-   * This makes existing CLI-configured settings visible in the VSCode Settings page.
-   * Only populates VSCode settings that are currently empty/default.
+   * This makes existing CLI-configured non-secret metadata visible in the
+   * VSCode Settings page without mirroring credentials into settings.json.
    */
   private async syncQwenConfigToVSCodeSettings(): Promise<void> {
     try {
@@ -994,9 +998,6 @@ export class WebViewProvider {
         config.get<string>('provider', 'coding-plan') !== qwenSettings.provider
       ) {
         updates.push(config.update('provider', qwenSettings.provider, target));
-      }
-      if (config.get<string>('apiKey', '') !== qwenSettings.apiKey) {
-        updates.push(config.update('apiKey', qwenSettings.apiKey, target));
       }
       if (
         config.get<'china' | 'global'>('codingPlanRegion', 'china') !==
@@ -1036,7 +1037,7 @@ export class WebViewProvider {
   /**
    * Attempt to restore authentication state and initialize connection.
    * On startup, sync ~/.qwen/settings.json → VSCode settings so the Settings UI
-   * reflects existing CLI config, then attempt a connection.
+   * reflects existing non-secret CLI config, then attempt a connection.
    * Writing back to ~/.qwen/settings.json happens through the auth flow and
    * auth-related VSCode setting changes.
    */
@@ -1049,7 +1050,8 @@ export class WebViewProvider {
     this.initializationPromise = (async () => {
       try {
         // On startup, sync ~/.qwen/settings.json → VSCode settings so the
-        // Settings UI reflects existing CLI config, then attempt a connection.
+        // Settings UI reflects existing non-secret CLI config, then attempt a
+        // connection.
         // Writing back to ~/.qwen/settings.json happens through the auth flow
         // and auth-related VSCode setting changes.
         await this.syncQwenConfigToVSCodeSettings();

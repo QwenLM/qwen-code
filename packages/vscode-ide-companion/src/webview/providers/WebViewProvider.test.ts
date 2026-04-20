@@ -758,15 +758,15 @@ describe('WebViewProvider settings sync', () => {
     expect(mockWriteModelProvidersConfig).not.toHaveBeenCalled();
   });
 
-  it('only writes VS Code settings whose values differ from ~/.qwen/settings.json', async () => {
+  it('only syncs non-secret VS Code settings from ~/.qwen/settings.json', async () => {
     mockReadQwenSettingsForVSCode.mockReturnValue({
       provider: 'coding-plan',
       apiKey: 'sk-updated',
-      codingPlanRegion: 'china',
+      codingPlanRegion: 'global',
     });
     mockConfigGet.mockImplementation((key: string, defaultValue: unknown) => {
       if (key === 'provider') {
-        return 'coding-plan';
+        return 'api-key';
       }
       if (key === 'apiKey') {
         return 'sk-current';
@@ -788,8 +788,18 @@ describe('WebViewProvider settings sync', () => {
       }
     ).syncQwenConfigToVSCodeSettings();
 
-    expect(mockConfigUpdate).toHaveBeenCalledTimes(1);
+    expect(mockConfigUpdate).toHaveBeenCalledTimes(2);
     expect(mockConfigUpdate).toHaveBeenCalledWith(
+      'provider',
+      'coding-plan',
+      expect.anything(),
+    );
+    expect(mockConfigUpdate).toHaveBeenCalledWith(
+      'codingPlanRegion',
+      'global',
+      expect.anything(),
+    );
+    expect(mockConfigUpdate).not.toHaveBeenCalledWith(
       'apiKey',
       'sk-updated',
       expect.anything(),
