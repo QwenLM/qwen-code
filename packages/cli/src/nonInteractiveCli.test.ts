@@ -982,7 +982,7 @@ describe('runNonInteractive', () => {
 
     // Should write error message through adapter to stdout (TEXT mode goes through JsonOutputAdapter)
     expect(processStderrSpy).toHaveBeenCalledWith(
-      'The command "/help" is not supported in non-interactive mode.\n',
+      'The command "/help" is not supported in this mode.\n',
     );
   });
 

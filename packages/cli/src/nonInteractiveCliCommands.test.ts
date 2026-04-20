@@ -125,7 +125,7 @@ describe('handleSlashCommand', () => {
     expect(result.type).toBe('unsupported');
     if (result.type === 'unsupported') {
       expect(result.reason).toBe(
-        'The command "/help" is not supported in non-interactive mode.',
+        'The command "/help" is not supported in this mode.',
       );
     }
   });
