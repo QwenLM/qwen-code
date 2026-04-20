@@ -16,14 +16,18 @@ interface Shortcut {
 }
 
 // Platform-specific key mappings
-const getNewlineKey = () =>
-  process.platform === 'win32' ? 'ctrl+enter' : 'ctrl+j';
+const getNewlineKey = () => {
+  if (process.platform === 'win32') return 'ctrl+enter';
+  // Show shift+enter as the primary newline key since it's the most intuitive.
+  // It works natively in CSI-u terminals (VSCode, iTerm2, Ghostty, Kitty, WezTerm, etc.)
+  // ctrl+j and ctrl+enter also work as alternatives.
+  return 'shift+enter';
+};
 const getPasteKey = () => {
   if (process.platform === 'win32') return 'alt+v';
   return process.platform === 'darwin' ? 'cmd+v' : 'ctrl+v';
 };
-const getExternalEditorKey = () =>
-  process.platform === 'darwin' ? 'ctrl+x' : 'ctrl+x';
+const getExternalEditorKey = () => 'ctrl+x';
 
 // Generate shortcuts with translations (called at render time)
 const getShortcuts = (): Shortcut[] => [

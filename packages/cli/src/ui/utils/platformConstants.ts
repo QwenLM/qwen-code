@@ -56,11 +56,6 @@ export const MODIFIER_CTRL_BIT = 4;
 export const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 
 /**
- * VS Code terminal integration constants
- */
-export const VSCODE_SHIFT_ENTER_SEQUENCE = '\\\r\n';
-
-/**
  * Backslash + Enter detection window in milliseconds.
  * Used to detect Shift+Enter pattern where backslash
  * is followed by Enter within this timeframe.
