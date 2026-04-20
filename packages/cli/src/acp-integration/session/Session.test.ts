@@ -1066,5 +1066,107 @@ describe('Session', () => {
         });
       });
     });
+
+    describe('system reminders', () => {
+      // Captures the `message` parts fed into chat.sendMessageStream on the
+      // first turn so individual tests can assert what the model saw.
+      const captureFirstTurnMessage = () => {
+        const capture: { parts: Array<{ text?: string }> } = { parts: [] };
+        (mockChat.sendMessageStream as ReturnType<typeof vi.fn>) = vi
+          .fn()
+          .mockImplementation(async (_model, req) => {
+            capture.parts = req.message ?? [];
+            return createEmptyStream();
+          });
+        return capture;
+      };
+
+      const stubEmptySubagents = () => {
+        (mockConfig as unknown as Record<string, unknown>)[
+          'getSubagentManager'
+        ] = vi.fn().mockReturnValue({
+          listSubagents: vi.fn().mockResolvedValue([]),
+        });
+        // ensureTool is called on the result of getToolRegistry(); add it.
+        (
+          mockToolRegistry as unknown as { ensureTool: () => Promise<boolean> }
+        ).ensureTool = vi.fn().mockResolvedValue(true);
+      };
+
+      it('prepends plan-mode reminder when approval mode is PLAN (#1151)', async () => {
+        stubEmptySubagents();
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+        const capture = captureFirstTurnMessage();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'research this' }],
+        });
+
+        const reminderPart = capture.parts.find(
+          (p) => p.text && p.text.includes('Plan mode is active'),
+        );
+        expect(reminderPart).toBeTruthy();
+        expect(reminderPart!.text).toContain('exit_plan_mode');
+        // Reminder comes before the user text, matching client.ts ordering.
+        const reminderIdx = capture.parts.indexOf(reminderPart!);
+        const userIdx = capture.parts.findIndex(
+          (p) => p.text === 'research this',
+        );
+        expect(reminderIdx).toBeLessThan(userIdx);
+      });
+
+      it('does not prepend plan-mode reminder in default approval mode', async () => {
+        stubEmptySubagents();
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        const capture = captureFirstTurnMessage();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hi' }],
+        });
+
+        const hasPlanReminder = capture.parts.some(
+          (p) => p.text && p.text.includes('Plan mode is active'),
+        );
+        expect(hasPlanReminder).toBe(false);
+      });
+
+      it('prepends subagent reminder when user-level subagents exist', async () => {
+        (mockConfig as unknown as Record<string, unknown>)[
+          'getSubagentManager'
+        ] = vi.fn().mockReturnValue({
+          listSubagents: vi.fn().mockResolvedValue([
+            { name: 'researcher', level: 'user' },
+            { name: 'planner', level: 'project' },
+            // builtin entries are filtered out, matching client.ts:853.
+            { name: 'builtin-helper', level: 'builtin' },
+          ]),
+        });
+        (
+          mockToolRegistry as unknown as { ensureTool: () => Promise<boolean> }
+        ).ensureTool = vi.fn().mockResolvedValue(true);
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        const capture = captureFirstTurnMessage();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hi' }],
+        });
+
+        const reminder = capture.parts.find(
+          (p) =>
+            p.text &&
+            p.text.includes('researcher') &&
+            p.text.includes('planner'),
+        );
+        expect(reminder).toBeTruthy();
+        expect(reminder!.text).not.toContain('builtin-helper');
+      });
+    });
   });
 });
