@@ -32,6 +32,10 @@ export class FileMessageHandler extends BaseMessageHandler {
   >();
   private readonly fileSearchInstances = new Map<string, FileSearch>();
   private readonly fileSearchInitializing = new Map<string, Promise<void>>();
+  // Per-rootPath generation token. Incremented whenever clearFileSearchCache
+  // fires, so an in-flight initialize() can detect it raced against a cache
+  // invalidation and skip re-caching the stale index.
+  private readonly fileSearchInitTokens = new Map<string, symbol>();
   private readonly fileWatchers = new Map<string, vscode.FileSystemWatcher>();
   private readonly globSpecialChars = new Set([
     '\\',
@@ -73,6 +77,13 @@ export class FileMessageHandler extends BaseMessageHandler {
       return this.fileSearchInstances.get(rootPath) ?? null;
     }
 
+    // Mint a generation token before kicking off initialize(). Race guard
+    // below compares against this token after the async build completes —
+    // `clearFileSearchCache` deletes the map entry, so a mid-flight
+    // invalidation flips the identity and we dispose rather than cache.
+    const token = Symbol('fileSearchInit');
+    this.fileSearchInitTokens.set(rootPath, token);
+
     const initPromise = (async () => {
       const search = FileSearchFactory.create({
         projectRoot: rootPath,
@@ -85,6 +96,14 @@ export class FileMessageHandler extends BaseMessageHandler {
         enableFuzzySearch: true,
       });
       await search.initialize();
+      if (this.fileSearchInitTokens.get(rootPath) !== token) {
+        // clearFileSearchCache fired while we were crawling; the index we
+        // just built reflects a stale view of the filesystem. Dispose it
+        // rather than re-caching under the same rootPath, which would
+        // masquerade as fresh. Next getOrCreateFileSearch call starts new.
+        void search.dispose?.();
+        return;
+      }
       this.fileSearchInstances.set(rootPath, search);
     })();
 
@@ -107,6 +126,9 @@ export class FileMessageHandler extends BaseMessageHandler {
     const existing = this.fileSearchInstances.get(rootPath);
     this.fileSearchInstances.delete(rootPath);
     this.fileSearchInitializing.delete(rootPath);
+    // Invalidate any in-flight initialize() so it disposes instead of
+    // writing its (now stale) index into fileSearchInstances when it lands.
+    this.fileSearchInitTokens.delete(rootPath);
     // Drop the in-process crawl cache and, crucially, dispose the
     // worker-backed FileIndexService singleton so its in-memory snapshot
     // and fzf index are rebuilt from disk on the next search. Without

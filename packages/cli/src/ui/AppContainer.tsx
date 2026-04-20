@@ -317,25 +317,29 @@ export const AppContainer = (props: AppContainerProps) => {
       // ready-or-nearly-ready snapshot instead of kicking off a cold crawl.
       // These options must match the ones useAtCompletion uses so both hit
       // the same FileIndexService singleton (keyed by an options hash).
+      // Skip the prewarm entirely when recursive file search is disabled —
+      // otherwise users who opted out still pay for a full crawl on startup,
+      // and the worker they never use sticks around.
       // Fire-and-forget: errors surface via the normal search path the next
       // time the hook is used.
-      try {
-        FileIndexService.for({
-          projectRoot: config.getTargetDir(),
-          ignoreDirs: [],
-          useGitignore:
-            config.getFileFilteringOptions()?.respectGitIgnore ?? true,
-          useQwenignore:
-            config.getFileFilteringOptions()?.respectQwenIgnore ?? true,
-          cache: true,
-          cacheTtl: 30,
-          enableRecursiveFileSearch:
-            config.getEnableRecursiveFileSearch() ?? true,
-          enableFuzzySearch:
-            config.getFileFilteringEnableFuzzySearch() !== false,
-        });
-      } catch {
-        // ignore — the hook will spawn on demand if pre-warm throws.
+      if (config.getEnableRecursiveFileSearch() !== false) {
+        try {
+          FileIndexService.for({
+            projectRoot: config.getTargetDir(),
+            ignoreDirs: [],
+            useGitignore:
+              config.getFileFilteringOptions()?.respectGitIgnore ?? true,
+            useQwenignore:
+              config.getFileFilteringOptions()?.respectQwenIgnore ?? true,
+            cache: true,
+            cacheTtl: 30,
+            enableRecursiveFileSearch: true,
+            enableFuzzySearch:
+              config.getFileFilteringEnableFuzzySearch() !== false,
+          });
+        } catch {
+          // ignore — the hook will spawn on demand if pre-warm throws.
+        }
       }
 
       const resumedSessionData = config.getResumedSessionData();

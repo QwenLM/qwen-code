@@ -5,7 +5,10 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
-import { FileIndexService } from './fileIndexService.js';
+import {
+  FileIndexService,
+  __setIndexTransportFactory,
+} from './fileIndexService.js';
 import {
   cleanupTmpDir,
   createTmpDir,
@@ -116,6 +119,40 @@ describe('FileIndexService', () => {
     expect(b).not.toBe(a);
     await b.whenReady();
     expect(b.state).toBe('ready');
+  });
+
+  it('rejects whenReady() called after the transport has exited', async () => {
+    // Regression: an 'exit' event before any `whenReady()` call used to leave
+    // `_state` stuck at 'crawling', so a later `whenReady()` parked in
+    // `readyWaiters` and never settled. With the fix, handleExit transitions
+    // the service to 'error' and future `whenReady()` calls reject
+    // synchronously.
+    tmpDir = await createTmpDir({ 'a.txt': '' });
+
+    // Fake transport that captures the exit callback so the test can fire an
+    // early exit deterministically — before any `whenReady()` call subscribes.
+    const exitListeners: Array<(code: number) => void> = [];
+    const restore = __setIndexTransportFactory(() => ({
+      post: () => {},
+      onMessage: () => () => {},
+      onExit: (cb) => {
+        exitListeners.push(cb);
+        return () => {
+          const i = exitListeners.indexOf(cb);
+          if (i >= 0) exitListeners.splice(i, 1);
+        };
+      },
+      terminate: async () => {},
+    }));
+    try {
+      const svc = FileIndexService.for(baseOptions(tmpDir));
+      // Fire the exit before any `whenReady()` caller subscribes.
+      for (const cb of exitListeners) cb(1);
+      await expect(svc.whenReady()).rejects.toThrow(/File index worker/i);
+      expect(svc.state).toBe('error');
+    } finally {
+      restore();
+    }
   });
 
   it('invalidates the singleton when ignore rules change', async () => {

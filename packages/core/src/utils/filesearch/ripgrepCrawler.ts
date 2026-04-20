@@ -204,10 +204,13 @@ export async function ripgrepCrawl(
         stdoutBuf = stdoutBuf.slice(idx + 1);
         if (raw.length > 0) {
           // rg emits paths relative to the invocation dir with a leading
-          // `./`. Strip it and translate through `relativeToCrawlDir` so
-          // the final path is cwd-relative (matching the fdir contract).
-          let p = raw.startsWith('./') ? raw.slice(2) : raw;
-          p = toPosixPath(p);
+          // `./` on POSIX or `.\` on Windows. Normalize to posix separators
+          // FIRST so the prefix check catches both; otherwise Windows paths
+          // keep the `./` prefix after toPosixPath, and downstream
+          // buildRipgrepFileFilter then asks `ignore` to test `"./"`, which
+          // throws RangeError and poisons the stdout stream.
+          let p = toPosixPath(raw);
+          if (p.startsWith('./')) p = p.slice(2);
           if (relativeToCrawlDir) {
             p = path.posix.join(relativeToCrawlDir, p);
           }
@@ -360,7 +363,11 @@ export function buildRipgrepFileFilter(
   const fileIgnore = ignore.getFileFilter();
   const dirIgnore = ignore.getDirectoryFilter();
   return (p: string) => {
-    if (p === '') return true;
+    if (p === '' || p === '.' || p === './') return true;
+    // Defensive: a leading "./" would make the ancestor-dir walk below call
+    // `dirIgnore("./")`, which the ignore lib rejects with a RangeError.
+    // Callers strip this already; the guard is cheap insurance.
+    if (p.startsWith('./')) p = p.slice(2);
     // Directory entry (trailing slash) — consult the dir filter directly.
     if (p.endsWith('/')) {
       return dirIgnore(p);

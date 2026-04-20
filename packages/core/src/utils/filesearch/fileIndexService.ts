@@ -517,6 +517,12 @@ export class FileIndexService {
     // will reject the pending maps with AbortError; don't double-reject with
     // a worker-exited Error.
     if (this.disposed) return;
+    // Mark the service errored so `whenReady()` calls arriving after this
+    // point reject synchronously instead of parking in readyWaiters forever.
+    // Without this, a caller that holds a `FileIndexService.for(...)`
+    // reference and invokes `whenReady()` just after an early worker exit
+    // would see `_state === 'crawling'` and never settle.
+    this._state = 'error';
     const err = new Error('File index worker exited');
     err.name = 'Error';
     this.pending.forEach(({ reject }) => reject(err));
