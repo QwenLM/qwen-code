@@ -95,13 +95,11 @@ describe('secure-browser-launcher', () => {
     it('should prevent PowerShell command injection on Windows', async () => {
       setPlatform('win32');
 
-      // The POC from the vulnerability report
       const maliciousUrl =
         "http://127.0.0.1:8080/?param=example#$(Invoke-Expression([System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('Y2FsYy5leGU='))))";
 
       await openBrowserSecurely(maliciousUrl);
 
-      // Verify that execFile was called (not exec) and the URL is passed safely
       expect(mockExecFile).toHaveBeenCalledWith(
         'powershell.exe',
         [
@@ -130,7 +128,6 @@ describe('secure-browser-launcher', () => {
 
       for (const url of urlsWithSpecialChars) {
         await openBrowserSecurely(url);
-        // Verify the URL is passed as an argument, not interpreted by shell
         expect(mockExecFile).toHaveBeenCalledWith(
           'open',
           [url],
@@ -146,7 +143,6 @@ describe('secure-browser-launcher', () => {
         "http://example.com/path?name=O'Brien&test='value'";
       await openBrowserSecurely(urlWithSingleQuotes);
 
-      // Verify that single quotes are escaped by doubling them
       expect(mockExecFile).toHaveBeenCalledWith(
         'powershell.exe',
         [
@@ -205,12 +201,29 @@ describe('secure-browser-launcher', () => {
   });
 
   describe('Error handling', () => {
+    it('should handle browser launch failures gracefully by logging instead of throwing', async () => {
+      setPlatform('darwin');
+      mockExecFile.mockRejectedValueOnce(new Error('Command not found'));
+
+      const consoleSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+      await expect(
+        openBrowserSecurely('https://example.com')
+      ).resolves.toBeUndefined();
+
+      expect(consoleSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to open browser automatically'),
+      );
+
+      consoleSpy.mockRestore();
+    });
+  });
+
+  describe('Linux Fallback', () => {
     it('should try fallback browsers on Linux', async () => {
       setPlatform('linux');
 
-      // First call to xdg-open fails
       mockExecFile.mockRejectedValueOnce(new Error('Command not found'));
-      // Second call to gnome-open succeeds
       mockExecFile.mockResolvedValueOnce({ stdout: '', stderr: '' });
 
       await openBrowserSecurely('https://example.com');
@@ -230,27 +243,4 @@ describe('secure-browser-launcher', () => {
       );
     });
   });
-
-it('should handle browser launch failures gracefully by logging instead of throwing', async () => {
-  // FIX: Explicitly set platform to 'darwin' to avoid Linux fallback logic issues
-  setPlatform('darwin');
-
-  // Simulate a failure (like missing xdg-open)
-  mockExecFile.mockRejectedValueOnce(new Error('Command failed'));
-
-  // Spy on console.error to verify we log the message
-  const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-
-  // ASSERTION: Expect the promise to RESOLVE (not reject/crash)
-  await expect(
-    openBrowserSecurely('https://example.com'),
-  ).resolves.toBeUndefined();
-
-  // Verify we logged the helpful message
-  expect(consoleSpy).toHaveBeenCalledWith(
-    expect.stringContaining('Failed to open browser automatically'),
-  );
-
-  consoleSpy.mockRestore();
-});
 });
