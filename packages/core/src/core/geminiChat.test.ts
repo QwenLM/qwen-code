@@ -2544,5 +2544,49 @@ describe('GeminiChat', async () => {
         lastEntry.parts?.some((p) => 'functionCall' in p && p.functionCall),
       ).toBe(true);
     });
+
+    it('should coalesce successful recovery iterations into the preceding model turn', async () => {
+      // Two recovery iterations then a clean STOP. Without coalescing, the
+      // internal OUTPUT_RECOVERY_MESSAGE would persist as a real user turn
+      // and bias every later model call.
+      const streams = [
+        makeStream([makeChunk([{ text: 'A' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'B' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'C' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'D' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'essay' },
+        'prompt-recovery-coalesce',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      const history = chat.getHistory();
+      // Exactly one user turn + one model turn — the recovery pairs should
+      // be folded back into the preceding model entry.
+      expect(history.length).toBe(2);
+      expect(history[0]!.role).toBe('user');
+      expect(history[1]!.role).toBe('model');
+
+      // The control prompt must NOT appear anywhere in durable history.
+      const flattened = JSON.stringify(history);
+      expect(flattened).not.toContain('Resume directly');
+      expect(flattened).not.toContain('Output token limit hit');
+
+      // All escalation + recovery content must be preserved in the merged
+      // model turn, in order (B escalation → C recovery-1 → D recovery-2).
+      const mergedText = (history[1]!.parts ?? [])
+        .map((p) => ('text' in p ? ((p as { text?: string }).text ?? '') : ''))
+        .join('');
+      expect(mergedText).toBe('BCD');
+    });
   });
 });

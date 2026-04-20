@@ -577,6 +577,7 @@ export class GeminiChat {
           // partial response in history and inject a recovery message so the
           // model can continue from where it left off.
           let recoveryCount = 0;
+          let successfulRecoveries = 0;
           while (
             escalatedFinishReason === FinishReason.MAX_TOKENS &&
             recoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
@@ -628,6 +629,10 @@ export class GeminiChat {
                 if (fr) escalatedFinishReason = fr;
                 yield { type: StreamEventType.CHUNK, value: chunk };
               }
+              // Iteration fully succeeded: both the user recovery turn and
+              // the model continuation turn are now in history and can be
+              // coalesced back into the preceding model entry after the loop.
+              successfulRecoveries++;
             } catch (recoveryError) {
               // If a recovery attempt fails (e.g., empty response, network
               // error), stop recovering and let the partial output stand.
@@ -659,6 +664,15 @@ export class GeminiChat {
               };
               break;
             }
+          }
+
+          // Coalesce completed recovery pairs back into the preceding model
+          // turn so the OUTPUT_RECOVERY_MESSAGE control prompt does not
+          // persist as a synthetic user turn in durable history. The user
+          // never sent that message, and leaving it in history would bias
+          // later turns and pollute compression / replay / export.
+          if (successfulRecoveries > 0) {
+            self.coalesceRecoveryPairs(successfulRecoveries);
           }
         }
 
@@ -1084,6 +1098,44 @@ export class GeminiChat {
         ...consolidatedHistoryParts,
       ],
     });
+  }
+
+  /**
+   * Merge `pairCount` trailing (user_recovery, model_continuation) pairs back
+   * into the model turn that precedes them. Used after the output-token
+   * recovery loop so the internal OUTPUT_RECOVERY_MESSAGE control prompt
+   * does not persist in durable history as if the user sent it.
+   *
+   * Expected tail shape per iteration (walking from the back):
+   *   [..., precedingModel, userRecovery, modelContinuation]
+   *
+   * If any pair doesn't match that shape the method bails defensively
+   * rather than corrupting history.
+   */
+  private coalesceRecoveryPairs(pairCount: number): void {
+    for (let i = 0; i < pairCount; i++) {
+      const len = this.history.length;
+      if (len < 3) return;
+
+      const modelContinuation = this.history[len - 1]!;
+      const userRecovery = this.history[len - 2]!;
+      const precedingModel = this.history[len - 3]!;
+
+      if (
+        modelContinuation.role !== 'model' ||
+        userRecovery.role !== 'user' ||
+        precedingModel.role !== 'model'
+      ) {
+        return;
+      }
+
+      precedingModel.parts = [
+        ...(precedingModel.parts ?? []),
+        ...(modelContinuation.parts ?? []),
+      ];
+      // Drop the (userRecovery, modelContinuation) pair.
+      this.history.splice(len - 2, 2);
+    }
   }
 }
 
