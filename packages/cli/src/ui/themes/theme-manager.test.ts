@@ -146,8 +146,7 @@ describe('ThemeManager', () => {
       vi.mocked(detectModule.detectTerminalThemeAsync).mockResolvedValue(
         'light',
       );
-      const result = await themeManager.resolveAutoThemeAsync();
-      expect(result).toBe(true);
+      await themeManager.resolveAutoThemeAsync();
       expect(themeManager.getActiveTheme().name).toBe('Qwen Light');
     });
 
@@ -155,8 +154,7 @@ describe('ThemeManager', () => {
       vi.mocked(detectModule.detectTerminalThemeAsync).mockResolvedValue(
         'dark',
       );
-      const result = await themeManager.resolveAutoThemeAsync();
-      expect(result).toBe(true);
+      await themeManager.resolveAutoThemeAsync();
       expect(themeManager.getActiveTheme().name).toBe('Qwen Dark');
     });
   });

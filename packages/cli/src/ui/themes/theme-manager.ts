@@ -150,13 +150,11 @@ class ThemeManager {
   /**
    * Asynchronous auto-detection that includes an OSC 11 probe.
    * Intended for startup where a short async delay (~200 ms) is acceptable.
-   * Sets the active theme and returns true.
    */
-  async resolveAutoThemeAsync(): Promise<boolean> {
+  async resolveAutoThemeAsync(): Promise<void> {
     const detected = await detectTerminalThemeAsync();
     this.activeTheme = detected === 'light' ? QwenLight : QwenDark;
     debugLogger.info(`Auto-detected theme (async): ${this.activeTheme.name}`);
-    return true;
   }
 
   /**

@@ -331,11 +331,11 @@ export async function main() {
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
-  if (settings.merged.ui?.theme) {
-    if (settings.merged.ui.theme === AUTO_THEME_NAME) {
-      // Use async detection (includes OSC 11 probe) at startup.
-      await themeManager.resolveAutoThemeAsync();
-    } else if (!themeManager.setActiveTheme(settings.merged.ui.theme)) {
+  if (
+    settings.merged.ui?.theme &&
+    settings.merged.ui.theme !== AUTO_THEME_NAME
+  ) {
+    if (!themeManager.setActiveTheme(settings.merged.ui.theme)) {
       // If the theme is not found during initial load, log a warning and continue.
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       writeStderrLine(
@@ -457,6 +457,12 @@ export async function main() {
   // to run Qwen Code. It is now safe to perform expensive initialization that
   // may have side effects.
   profileCheckpoint('after_sandbox_check');
+
+  // Auto-detect theme here (not before sandbox entry) so the ~200ms OSC 11
+  // probe does not block a process that's about to exec into the sandbox.
+  if (settings.merged.ui?.theme === AUTO_THEME_NAME) {
+    await themeManager.resolveAutoThemeAsync();
+  }
 
   // Initialize output language file before config loads to ensure it's included in context
   if (!isBareMode(argv.bare)) {
