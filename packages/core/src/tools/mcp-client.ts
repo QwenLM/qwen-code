@@ -43,6 +43,7 @@ import { OAuthUtils } from '../mcp/oauth-utils.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type {
   Unsubscribe,
   WorkspaceContext,
@@ -60,73 +61,6 @@ export type SendSdkMcpMessage = (
 export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
 const debugLogger = createDebugLogger('MCP');
-const WINDOWS_PATH_DELIMITER = ';';
-
-function mergeWindowsPathValues(
-  env: NodeJS.ProcessEnv,
-  pathKeys: string[],
-): string | undefined {
-  const mergedEntries: string[] = [];
-  const seenEntries = new Set<string>();
-
-  for (const key of pathKeys) {
-    const value = env[key];
-    if (value === undefined) {
-      continue;
-    }
-
-    for (const entry of value.split(WINDOWS_PATH_DELIMITER)) {
-      if (seenEntries.has(entry)) {
-        continue;
-      }
-      seenEntries.add(entry);
-      mergedEntries.push(entry);
-    }
-  }
-
-  return mergedEntries.length > 0
-    ? mergedEntries.join(WINDOWS_PATH_DELIMITER)
-    : undefined;
-}
-
-function normalizePathEnvForWindows(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  if (process.platform !== 'win32') {
-    return env;
-  }
-
-  const normalized: NodeJS.ProcessEnv = { ...env };
-  const pathKeys = Object.keys(normalized).filter(
-    (key) => key.toLowerCase() === 'path',
-  );
-
-  if (pathKeys.length === 0) {
-    return normalized;
-  }
-
-  const orderedPathKeys = [...pathKeys].sort((left, right) => {
-    if (left === 'PATH') {
-      return -1;
-    }
-    if (right === 'PATH') {
-      return 1;
-    }
-    return left.localeCompare(right);
-  });
-
-  const canonicalValue = mergeWindowsPathValues(normalized, orderedPathKeys);
-
-  for (const key of pathKeys) {
-    if (key !== 'PATH') {
-      delete normalized[key];
-    }
-  }
-
-  if (canonicalValue !== undefined) {
-    normalized['PATH'] = canonicalValue;
-  }
-
-  return normalized;
-}
 
 export type DiscoveredMCPPrompt = Prompt & {
   serverName: string;
@@ -1476,10 +1410,14 @@ export async function createTransport(
       );
     }
 
-    const env = normalizePathEnvForWindows({
-      ...process.env,
+    // Normalize process.env PATH first (merge PATH+Path → single PATH on
+    // Windows), then apply server-specific overrides on top so that a server
+    // config providing its own PATH fully replaces the parent value instead of
+    // being merged with a stale case-variant.
+    const env = {
+      ...normalizePathEnvForWindows({ ...process.env }),
       ...(mcpServerConfig.env || {}),
-    });
+    };
 
     const transport = new StdioClientTransport({
       command: mcpServerConfig.command,
