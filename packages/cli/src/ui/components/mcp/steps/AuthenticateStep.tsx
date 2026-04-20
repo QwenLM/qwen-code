@@ -45,9 +45,15 @@ function wrapForMultiplexer(osc: string): string {
  * (iTerm2, WezTerm, Kitty, Windows Terminal, VS Code, GNOME Terminal, …)
  * render it as a clickable link; terminals without OSC 8 support ignore
  * the escapes and still show the raw text.
+ *
+ * We terminate with BEL (\x07) rather than ST (ESC \\). Both are valid
+ * per the OSC 8 spec, but Ink's renderer uses @alcalzone/ansi-tokenize,
+ * which only recognizes OSC 8 sequences that end with BEL — ST-
+ * terminated escapes get mangled into per-character tokens and the
+ * hyperlink is lost on every line past the first.
  */
 function osc8Hyperlink(url: string, label = url): string {
-  return `\x1b]8;;${url}\x1b\\${label}\x1b]8;;\x1b\\`;
+  return `\x1b]8;;${url}\x07${label}\x1b]8;;\x07`;
 }
 
 /**
