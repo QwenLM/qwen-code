@@ -280,10 +280,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
               case 'data':
                 if (isBinaryStream) break;
                 cumulativeOutput = event.chunk;
-                if (typeof event.chunk === 'string') {
-                  totalLines = event.chunk.split('\n').length;
-                  totalBytes = Buffer.byteLength(event.chunk, 'utf-8');
-                } else if (Array.isArray(event.chunk)) {
+                // Stats are only consumed by the ANSI-output branch below,
+                // so skip the per-chunk accounting for plain string chunks.
+                if (Array.isArray(event.chunk)) {
                   totalLines = event.chunk.length;
                   totalBytes = event.chunk.reduce(
                     (sum, line) =>
