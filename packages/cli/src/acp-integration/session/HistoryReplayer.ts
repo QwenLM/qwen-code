@@ -8,6 +8,7 @@ import type {
   ChatRecord,
   AgentResultDisplay,
   SlashCommandRecordPayload,
+  NotificationRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import type {
   Content,

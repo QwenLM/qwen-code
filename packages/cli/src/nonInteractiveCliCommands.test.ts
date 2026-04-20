@@ -44,6 +44,7 @@ describe('handleSlashCommand', () => {
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       setModelInvocableCommandsProvider: vi.fn(),
+      setModelInvocableCommandsExecutor: vi.fn(),
       storage: {},
     } as unknown as Config;
 

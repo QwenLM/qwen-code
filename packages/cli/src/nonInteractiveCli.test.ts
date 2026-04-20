@@ -153,6 +153,7 @@ describe('runNonInteractive', () => {
       isCronEnabled: vi.fn().mockReturnValue(false),
       getCronScheduler: vi.fn().mockReturnValue(null),
       setModelInvocableCommandsProvider: vi.fn(),
+      setModelInvocableCommandsExecutor: vi.fn(),
       getBackgroundTaskRegistry: vi.fn().mockReturnValue({
         setNotificationCallback: vi.fn(),
         setRegisterCallback: vi.fn(),
