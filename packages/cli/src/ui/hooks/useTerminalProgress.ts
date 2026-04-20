@@ -80,21 +80,20 @@ export function useTerminalProgress(
     };
   }, [streamingState, hasToolExecuting, writeProgress]);
 
-  // Ensure the progress bar is cleared if the process exits abruptly (Ctrl+C,
-  // SIGTERM) — otherwise a terminal tab can remain stuck showing progress
-  // after qwen exits.
+  // Clear the progress bar on process exit so the terminal tab does not
+  // stay stuck showing progress after qwen terminates. We deliberately
+  // hook only 'exit' (not SIGINT/SIGTERM) to avoid swallowing those
+  // signals — other parts of the CLI already own the signal-to-shutdown
+  // path and will ultimately call process.exit(), at which point 'exit'
+  // fires and this cleanup runs.
   useEffect(() => {
     if (!isProgressBarSupported()) return;
     const clearOnExit = () => {
       stdout?.write(PROGRESS_CLEAR);
     };
     process.on('exit', clearOnExit);
-    process.on('SIGINT', clearOnExit);
-    process.on('SIGTERM', clearOnExit);
     return () => {
       process.removeListener('exit', clearOnExit);
-      process.removeListener('SIGINT', clearOnExit);
-      process.removeListener('SIGTERM', clearOnExit);
     };
   }, [stdout]);
 }
