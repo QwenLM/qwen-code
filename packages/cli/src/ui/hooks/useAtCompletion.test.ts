@@ -15,6 +15,7 @@ import type {
   FileSystemStructure,
 } from '@qwen-code/qwen-code-core';
 import {
+  FileIndexService,
   FileSearchFactory,
   createTmpDir,
   cleanupTmpDir,
@@ -61,6 +62,12 @@ describe('useAtCompletion', () => {
   });
 
   afterEach(async () => {
+    // Dispose any live FileIndexService singletons before removing the
+    // temp dir. On Windows, an in-flight ripgrep child launched with
+    // `cwd: testRootDir` keeps a handle on the directory until it exits;
+    // rmdir'ing while that handle is open returns EBUSY. Resetting the
+    // service tears down the transport (and its rg subprocess) first.
+    await FileIndexService.__resetForTests();
     if (testRootDir) {
       await cleanupTmpDir(testRootDir);
     }

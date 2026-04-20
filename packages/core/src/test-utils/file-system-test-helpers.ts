@@ -91,8 +91,21 @@ export async function createTmpDir(
 
 /**
  * Cleans up (deletes) a temporary directory and its contents.
+ *
+ * On Windows, a freshly-terminated child process (e.g. ripgrep invoked with
+ * `cwd: dir`) can hold a handle on the directory for a few milliseconds
+ * after exit, and `fs.rm` then fails with `EBUSY`. Node's built-in
+ * `maxRetries`/`retryDelay` options absorb that race: 5 retries at 100ms
+ * gives the OS half a second to release the handle, which is far longer
+ * than the typical tens-of-ms window we've observed in CI.
+ *
  * @param dir The absolute path to the temporary directory to clean up.
  */
 export async function cleanupTmpDir(dir: string) {
-  await fs.rm(dir, { recursive: true, force: true });
+  await fs.rm(dir, {
+    recursive: true,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
 }

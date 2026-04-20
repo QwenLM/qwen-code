@@ -17,8 +17,12 @@ import {
 describe('FileIndexService', () => {
   let tmpDir: string;
   afterEach(async () => {
-    if (tmpDir) await cleanupTmpDir(tmpDir);
+    // Reset FIRST — cleanupTmpDir on Windows fails with EBUSY if the
+    // in-process transport's ripgrep child still holds a handle on the
+    // directory it was invoked with. Tearing down the service (and with
+    // it, the rg subprocess) before rmdir lets the OS release handles.
     await FileIndexService.__resetForTests();
+    if (tmpDir) await cleanupTmpDir(tmpDir);
   });
 
   const baseOptions = (projectRoot: string) => ({
