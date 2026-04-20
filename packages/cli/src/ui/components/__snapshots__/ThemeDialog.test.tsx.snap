@@ -18,9 +18,9 @@ exports[`ThemeDialog Snapshots > should render correctly in theme selection mode
 │                                                                                                  │
 │ > Select Theme                               Preview                                             │
 │ ▲                                            ┌─────────────────────────────────────────────────┐ │
-│    1. Auto Auto                              │                                                 │ │
+│ ›  1. Auto Auto                              │                                                 │ │
 │    2. Qwen Light Light                       │ 1 # function                                    │ │
-│ ›  3. Qwen Dark Dark                         │ 2 def fibonacci(n):                             │ │
+│    3. Qwen Dark Dark                         │ 2 def fibonacci(n):                             │ │
 │    4. ANSI Dark                              │ 3     a, b = 0, 1                               │ │
 │    5. Atom One Dark                          │ 4     for _ in range(n):                        │ │
 │    6. Ayu Dark                               │ 5         a, b = b, a + b                       │ │

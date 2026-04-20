@@ -331,16 +331,12 @@ export async function main() {
   // Load custom themes from settings
   themeManager.loadCustomThemes(settings.merged.ui?.customThemes);
 
-  if (
-    settings.merged.ui?.theme &&
-    settings.merged.ui.theme !== AUTO_THEME_NAME
-  ) {
-    if (!themeManager.setActiveTheme(settings.merged.ui.theme)) {
+  const configuredTheme = settings.merged.ui?.theme;
+  if (configuredTheme && configuredTheme !== AUTO_THEME_NAME) {
+    if (!themeManager.setActiveTheme(configuredTheme)) {
       // If the theme is not found during initial load, log a warning and continue.
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
-      writeStderrLine(
-        `Warning: Theme "${settings.merged.ui.theme}" not found.`,
-      );
+      writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
   }
 
@@ -460,7 +456,8 @@ export async function main() {
 
   // Auto-detect theme here (not before sandbox entry) so the ~200ms OSC 11
   // probe does not block a process that's about to exec into the sandbox.
-  if (settings.merged.ui?.theme === AUTO_THEME_NAME) {
+  // An unset theme is treated as 'auto' so fresh installs match the terminal.
+  if (!configuredTheme || configuredTheme === AUTO_THEME_NAME) {
     await themeManager.resolveAutoThemeAsync();
   }
 

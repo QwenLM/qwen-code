@@ -46,10 +46,11 @@ export function ThemeDialog({
     SettingScope.User,
   );
 
-  // Track the currently highlighted theme name
+  // Track the currently highlighted theme name. An unset theme means
+  // auto-detection is in effect, so reflect that by highlighting Auto.
   const [highlightedThemeName, setHighlightedThemeName] = useState<
     string | undefined
-  >(settings.merged.ui?.theme || DEFAULT_THEME.name);
+  >(settings.merged.ui?.theme || AUTO_THEME_NAME);
 
   // Generate theme items filtered by selected scope
   const customThemes =
