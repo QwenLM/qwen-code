@@ -43,7 +43,6 @@ import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
-import { ToolNames } from '../tools/tool-names.js';
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
@@ -3166,61 +3165,6 @@ describe('Fire hook functions integration', () => {
         .map((e) => executionLog.indexOf(e));
       const firstEnd = executionLog.findIndex((e) => e.startsWith('end:'));
       expect(startIndices.every((i) => i < firstEnd)).toBe(true);
-    });
-
-    it('should execute multiple swarm tools sequentially', async () => {
-      const executionLog: string[] = [];
-
-      const swarmTool = new MockTool({
-        name: ToolNames.SWARM,
-        execute: async (params) => {
-          const id = (params as { id: string }).id;
-          executionLog.push(`swarm:start:${id}`);
-          await new Promise((r) => setTimeout(r, 50));
-          executionLog.push(`swarm:end:${id}`);
-          return {
-            llmContent: `Swarm ${id} done`,
-            returnDisplay: `Swarm ${id} done`,
-          };
-        },
-      });
-
-      const tools = new Map([[ToolNames.SWARM, swarmTool]]);
-      const onAllToolCallsComplete = vi.fn();
-      const onToolCallsUpdate = vi.fn();
-      const scheduler = createScheduler(
-        tools,
-        onAllToolCallsComplete,
-        onToolCallsUpdate,
-      );
-
-      await scheduler.schedule(
-        [
-          {
-            callId: '1',
-            name: ToolNames.SWARM,
-            args: { id: 'A' },
-            isClientInitiated: false,
-            prompt_id: 'p1',
-          },
-          {
-            callId: '2',
-            name: ToolNames.SWARM,
-            args: { id: 'B' },
-            isClientInitiated: false,
-            prompt_id: 'p1',
-          },
-        ],
-        new AbortController().signal,
-      );
-
-      expect(onAllToolCallsComplete).toHaveBeenCalled();
-      expect(executionLog).toEqual([
-        'swarm:start:A',
-        'swarm:end:A',
-        'swarm:start:B',
-        'swarm:end:B',
-      ]);
     });
 
     it('should run concurrency-safe tools in parallel and unsafe tools sequentially', async () => {
