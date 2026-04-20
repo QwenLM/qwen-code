@@ -291,7 +291,9 @@ describe('mcp-client', () => {
         command: 'test-command',
         args: ['--foo', 'bar'],
         cwd: 'test/cwd',
-        env: { ...process.env, FOO: 'bar' },
+        // Use objectContaining because normalizePathEnvForWindows deduplicates
+        // PATH entries on Windows, so the env won't be an exact spread match.
+        env: expect.objectContaining({ FOO: 'bar' }),
         stderr: 'pipe',
       });
     });
