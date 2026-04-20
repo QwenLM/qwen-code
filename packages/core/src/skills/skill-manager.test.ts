@@ -740,6 +740,16 @@ Review content`);
       expect(reviewSkills[0].level).toBe('user');
     });
 
+    it('should skip all skills in bare mode', async () => {
+      vi.spyOn(mockConfig, 'getBareMode').mockReturnValue(true);
+      mockReaddirForLevels(new Set(['project', 'user', 'bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toEqual([]);
+    });
+
     it('should fall back to bundled level in loadSkill', async () => {
       // Project, user, extension all empty; bundled has the skill
       mockReaddirForLevels(new Set(['bundled']));

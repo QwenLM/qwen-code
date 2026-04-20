@@ -293,6 +293,14 @@ export class SkillManager {
       return;
     }
 
+    if (this.config.getBareMode()) {
+      debugLogger.info(
+        'Bare mode enabled; refreshing skill cache without starting watchers',
+      );
+      await this.refreshCache();
+      return;
+    }
+
     debugLogger.info('Starting skill directory watchers...');
     this.watchStarted = true;
     await this.ensureUserSkillsDir();
@@ -618,6 +626,11 @@ export class SkillManager {
    * @returns Array of skill configurations
    */
   private async listSkillsAtLevel(level: SkillLevel): Promise<SkillConfig[]> {
+    if (this.config.getBareMode()) {
+      debugLogger.debug(`Skipping ${level} level skills in bare mode`);
+      return [];
+    }
+
     const projectRoot = this.config.getProjectRoot();
     const homeDir = os.homedir();
     const isHomeDirectory = path.resolve(projectRoot) === path.resolve(homeDir);
@@ -799,6 +812,10 @@ export class SkillManager {
   // Bundled skills are immutable (shipped with the package) and extension
   // skills are managed by the extension system, so neither needs watching.
   private updateWatchersFromCache(): void {
+    if (this.config.getBareMode()) {
+      return;
+    }
+
     const watchTargets = new Set<string>(
       (['project', 'user'] as const)
         .map((level) => this.getSkillsBaseDirs(level))

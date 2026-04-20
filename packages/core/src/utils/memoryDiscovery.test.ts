@@ -136,6 +136,83 @@ describe('loadServerHierarchicalMemory', () => {
     });
   });
 
+  it('should skip implicit global, project, and rule discovery in explicit-only mode', async () => {
+    await createTestFile(
+      path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),
+      'global context',
+    );
+    await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context',
+    );
+    await createTestFile(
+      path.join(cwd, DEFAULT_CONTEXT_FILENAME),
+      'cwd context',
+    );
+    await createTestFile(
+      path.join(projectRoot, QWEN_DIR, 'rules', 'baseline.md'),
+      'project rule',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      { explicitOnly: true },
+    );
+
+    expect(result).toEqual({
+      memoryContent: '',
+      fileCount: 0,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: expect.any(String),
+    });
+  });
+
+  it('should still load context from explicit include directories in explicit-only mode', async () => {
+    const extraDir = await createEmptyDir(path.join(testRootDir, 'explicit'));
+    const explicitContextFile = await createTestFile(
+      path.join(extraDir, DEFAULT_CONTEXT_FILENAME),
+      'explicit context',
+    );
+    await createTestFile(
+      path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),
+      'global context',
+    );
+    await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project context',
+    );
+    await createTestFile(
+      path.join(projectRoot, QWEN_DIR, 'rules', 'baseline.md'),
+      'project rule',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [extraDir],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      { explicitOnly: true },
+    );
+
+    expect(result).toEqual({
+      memoryContent: `--- Context from: ${path.relative(cwd, explicitContextFile)} ---\nexplicit context\n--- End of Context from: ${path.relative(cwd, explicitContextFile)} ---`,
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: expect.any(String),
+    });
+  });
+
   it('should load only the global context file if present and others are not (default filename)', async () => {
     const defaultContextFile = await createTestFile(
       path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),

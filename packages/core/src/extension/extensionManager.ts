@@ -536,9 +536,17 @@ export class ExtensionManager {
   /**
    * Refreshes the extension cache from disk.
    */
-  async refreshCache(): Promise<void> {
+  async refreshCache(options?: { names?: string[] }): Promise<void> {
     this.extensionCache = new Map<string, Extension>();
-    const extensions = await this.loadExtensionsFromDir(os.homedir());
+    const requestedNames = options?.names?.filter(Boolean) ?? [];
+    const extensions =
+      requestedNames.length > 0
+        ? (
+            await Promise.all(
+              requestedNames.map((name) => this.loadExtensionByName(name)),
+            )
+          ).filter((extension): extension is Extension => extension !== null)
+        : await this.loadExtensionsFromDir(os.homedir());
     extensions.forEach((extension) => {
       this.extensionCache!.set(extension.name, extension);
     });
