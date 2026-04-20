@@ -338,6 +338,14 @@ export async function main() {
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
+  } else if (!configuredTheme) {
+    // Unset theme: auto-detect synchronously (COLORFGBG + macOS) so fresh
+    // installs match the terminal without running the OSC 11 probe — the
+    // probe manipulates stdin raw mode and can interleave with kitty
+    // protocol detection, leaking characters into the input box. Users on
+    // terminals that need OSC 11 (e.g., GNOME Terminal) should set
+    // ui.theme to 'auto' explicitly to opt into the async path.
+    themeManager.setActiveTheme(AUTO_THEME_NAME);
   }
 
   // hop into sandbox if we are outside and sandboxing is enabled
@@ -454,10 +462,11 @@ export async function main() {
   // may have side effects.
   profileCheckpoint('after_sandbox_check');
 
-  // Auto-detect theme here (not before sandbox entry) so the ~200ms OSC 11
-  // probe does not block a process that's about to exec into the sandbox.
-  // An unset theme is treated as 'auto' so fresh installs match the terminal.
-  if (!configuredTheme || configuredTheme === AUTO_THEME_NAME) {
+  // Async auto-detect (OSC 11 probe) runs only when the user explicitly
+  // opts in via ui.theme = 'auto'. Placed after the sandbox-check gate so
+  // the ~200ms probe does not block a process that is about to exec into
+  // the sandbox child.
+  if (configuredTheme === AUTO_THEME_NAME) {
     await themeManager.resolveAutoThemeAsync();
   }
 
