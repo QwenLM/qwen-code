@@ -960,36 +960,48 @@ export const App: React.FC = () => {
   );
 
   // Format a tool call's content for clipboard copy
-  const formatToolCallForCopy = useCallback((tc: ToolCallData): string => {
-    const parts: string[] = [];
-    if (tc.content) {
-      for (const c of tc.content) {
-        if (c.type === 'content' && c.content?.text) {
-          parts.push(`\`\`\`\n${c.content.text}\n\`\`\``);
-        } else if (c.type === 'diff') {
-          const filePath = c.path || '';
-          if (c.oldText) {
-            // Edit: unified diff format
-            const oldLines = c.oldText
-              .split('\n')
-              .map((l) => `-${l}`)
-              .join('\n');
-            const newLines = (c.newText || '')
-              .split('\n')
-              .map((l) => `+${l}`)
-              .join('\n');
+  // wrapCodeBlock: true for Copy All (markdown), false for single Copy Message (plain text)
+  const formatToolCallForCopy = useCallback(
+    (tc: ToolCallData, wrapCodeBlock = false): string => {
+      const parts: string[] = [];
+      if (tc.content) {
+        for (const c of tc.content) {
+          if (c.type === 'content' && c.content?.text) {
             parts.push(
-              `\`\`\`diff\n--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}\n\`\`\``,
+              wrapCodeBlock
+                ? `\`\`\`\n${c.content.text}\n\`\`\``
+                : c.content.text,
             );
-          } else {
-            // Write: show new content in code block
-            parts.push(`${filePath}:\n\`\`\`\n${c.newText || ''}\n\`\`\``);
+          } else if (c.type === 'diff') {
+            const filePath = c.path || '';
+            if (c.oldText) {
+              const oldLines = c.oldText
+                .split('\n')
+                .map((l) => `-${l}`)
+                .join('\n');
+              const newLines = (c.newText || '')
+                .split('\n')
+                .map((l) => `+${l}`)
+                .join('\n');
+              parts.push(
+                wrapCodeBlock
+                  ? `\`\`\`diff\n--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}\n\`\`\``
+                  : `--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}`,
+              );
+            } else {
+              parts.push(
+                wrapCodeBlock
+                  ? `${filePath}:\n\`\`\`\n${c.newText || ''}\n\`\`\``
+                  : `${filePath}:\n${c.newText || ''}`,
+              );
+            }
           }
         }
       }
-    }
-    return parts.join('\n\n');
-  }, []);
+      return parts.join('\n\n');
+    },
+    [],
+  );
 
   // Track the right-click target so we can identify which message was clicked
   const contextMenuTargetRef = useRef<HTMLElement | null>(null);
@@ -1070,7 +1082,7 @@ export const App: React.FC = () => {
             item.type === 'completed-tool-call' ||
             item.type === 'in-progress-tool-call'
           ) {
-            const text = formatToolCallForCopy(item.data as ToolCallData);
+            const text = formatToolCallForCopy(item.data as ToolCallData, true);
             if (text) {
               parts.push(
                 `**[Tool: ${(item.data as ToolCallData).kind}]**\n\n${text}`,
