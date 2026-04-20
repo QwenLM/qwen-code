@@ -129,7 +129,14 @@ export type ExecutingToolCall = {
   tool: AnyDeclarativeTool;
   invocation: AnyToolInvocation;
   liveOutput?: ToolResultDisplay;
+  /** Timestamp when the tool was first scheduled (validating). */
   startTime?: number;
+  /**
+   * Timestamp when the tool actually began executing (after any
+   * approval/scheduling wait). Use this for "how long has this been
+   * running" displays; prefer it over startTime to exclude approval time.
+   */
+  executionStartTime?: number;
   outcome?: ToolConfirmationOutcome;
   pid?: number;
 };
@@ -597,6 +604,7 @@ export class CoreToolScheduler {
             tool: toolInstance,
             status: 'executing',
             startTime: existingStartTime,
+            executionStartTime: Date.now(),
             outcome,
             invocation,
           } as ExecutingToolCall;
