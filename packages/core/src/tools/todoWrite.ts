@@ -18,6 +18,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import type { TodoItem } from '../hooks/types.js';
 import { detectTodoChanges, HookPhase } from '../hooks/types.js';
 import type { AggregatedHookResult } from '../hooks/hookAggregator.js';
+export type { TodoItem } from '../hooks/types.js';
 
 const debugLogger = createDebugLogger('TODO_WRITE');
 
