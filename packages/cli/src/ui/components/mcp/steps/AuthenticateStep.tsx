@@ -40,6 +40,17 @@ function wrapForMultiplexer(osc: string): string {
 }
 
 /**
+ * Wrap a URL in an OSC 8 hyperlink escape sequence. Supported terminals
+ * (iTerm2, WezTerm, Kitty, Windows Terminal, VS Code, GNOME Terminal, …)
+ * render it as a single clickable link even when the visible text wraps
+ * across multiple lines; terminals without OSC 8 support ignore the
+ * escapes and still show the raw text.
+ */
+function osc8Hyperlink(url: string, label = url): string {
+  return `\x1b]8;;${url}\x1b\\${label}\x1b]8;;\x1b\\`;
+}
+
+/**
  * Copy a string to the user's clipboard using the OSC 52 terminal escape
  * sequence. Works through SSH and most web terminals (iTerm2, Windows
  * Terminal, xterm.js-based emulators) without spawning a subprocess.
@@ -268,24 +279,33 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
           </Text>
         )}
         {authState === 'authenticating' && authUrl && (
-          <Text
-            bold={copyState.status === 'idle'}
-            color={
-              copyState.status === 'copied'
-                ? theme.status.success
+          <>
+            <Box marginTop={1}>
+              <Text color={theme.text.accent} wrap="wrap">
+                {osc8Hyperlink(authUrl)}
+              </Text>
+            </Box>
+            <Text
+              bold={copyState.status === 'idle'}
+              color={
+                copyState.status === 'copied'
+                  ? theme.status.success
+                  : copyState.status === 'unsupported'
+                    ? theme.status.warning
+                    : theme.text.accent
+              }
+            >
+              {copyState.status === 'copied'
+                ? t(
+                    'Copy request sent to your terminal. If paste is empty, copy the URL above manually.',
+                  )
                 : copyState.status === 'unsupported'
-                  ? theme.status.warning
-                  : theme.text.accent
-            }
-          >
-            {copyState.status === 'copied'
-              ? t(
-                  'Copy request sent to your terminal. If paste is empty, copy the URL above manually.',
-                )
-              : copyState.status === 'unsupported'
-                ? t('Cannot write to terminal — copy the URL above manually.')
-                : t('Press c to copy the authorization URL to your clipboard.')}
-          </Text>
+                  ? t('Cannot write to terminal — copy the URL above manually.')
+                  : t(
+                      'Press c to copy the authorization URL to your clipboard.',
+                    )}
+            </Text>
+          </>
         )}
         {authState === 'success' && (
           <Text color={theme.status.success}>
