@@ -12,6 +12,7 @@ import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
 import { BtwMessage } from '../components/messages/BtwMessage.js';
+import { AwayRecapMessage } from '../components/messages/StatusMessages.js';
 import { AgentTabBar } from '../components/agent-view/AgentTabBar.js';
 import { AgentChatView } from '../components/agent-view/AgentChatView.js';
 import { AgentComposer } from '../components/agent-view/AgentComposer.js';
@@ -69,6 +70,11 @@ export const DefaultAppLayout: React.FC = () => {
               </Box>
             ) : (
               <>
+                {uiState.awayRecapItem && (
+                  <Box marginX={2} width={uiState.mainAreaWidth}>
+                    <AwayRecapMessage text={uiState.awayRecapItem.text} />
+                  </Box>
+                )}
                 {uiState.btwItem && (
                   <Box marginX={2} width={uiState.mainAreaWidth}>
                     <BtwMessage

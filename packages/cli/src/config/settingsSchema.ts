@@ -329,9 +329,13 @@ const SETTINGS_SCHEMA = {
         label: 'Show Session Recap',
         category: 'General',
         requiresRestart: false,
-        default: true,
+        // Off by default — an ambient background LLM call isn't something
+        // users should be opted into silently, especially when `fastModel`
+        // is unset and the call would land on the main coding model.
+        // Manual `/recap` works regardless.
+        default: false,
         description:
-          'Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. Use /recap to trigger manually.',
+          'Auto-show a one-line "where you left off" recap when returning to the terminal after being away for 5+ minutes. Off by default. Use /recap to trigger manually regardless of this setting.',
         showInDialog: true,
       },
       gitCoAuthor: {

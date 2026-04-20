@@ -11,6 +11,7 @@ import type {
   HistoryItemWithoutId,
   HistoryItem,
   HistoryItemBtw,
+  HistoryItemAwayRecap,
   ConfirmationRequest,
 } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -75,6 +76,10 @@ export interface CommandContext {
     cancelBtw: () => void;
     /** Ref to the btw AbortController, set by btwCommand so cancelBtw can abort it. */
     btwAbortControllerRef: MutableRefObject<AbortController | null>;
+    /** The current away-recap item rendered as a sticky banner above the input box. */
+    awayRecapItem: HistoryItemAwayRecap | null;
+    /** Sets the away-recap item independently of the main history. */
+    setAwayRecapItem: (item: HistoryItemAwayRecap | null) => void;
     /** Ref to whether the agent stream is currently idle (no model turn in flight). */
     isIdleRef: MutableRefObject<boolean>;
     /**
