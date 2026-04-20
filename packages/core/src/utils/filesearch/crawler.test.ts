@@ -1055,6 +1055,50 @@ describe('crawler', () => {
         vi.useRealTimers();
       }
     });
+
+    it('should not reuse throttled snapshot across different maxFiles values', async () => {
+      __setCommandRunnerForTests(async (command) => {
+        if (command === 'git' || command === 'rg') {
+          return { success: false, lines: [] };
+        }
+        return { success: false, lines: [] };
+      });
+
+      tmpDir = await createTmpDir({
+        'a.js': '',
+        'b.js': '',
+        'c.js': '',
+      });
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const first = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        maxFiles: 2,
+      });
+
+      const second = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+        maxFiles: 100,
+      });
+
+      expect(second.length).toBeGreaterThan(first.length);
+      expect(second).toEqual(
+        expect.arrayContaining(['.', 'a.js', 'b.js', 'c.js']),
+      );
+    });
   });
 
   describe('mtime-based change detection', () => {
@@ -1085,6 +1129,44 @@ describe('crawler', () => {
 
       const results2 = await crawl(options);
       expect(results2.length).toBeGreaterThanOrEqual(results1.length);
+    });
+
+    it('should detect git index changes when crawling a subdirectory', async () => {
+      tmpDir = await createTmpDir({
+        nested: {
+          'tracked.txt': '',
+        },
+      });
+      await initGitRepo(tmpDir);
+
+      const nestedDir = path.join(tmpDir, 'nested');
+      const ignore = loadIgnoreRules({
+        projectRoot: nestedDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+      const options = {
+        crawlDirectory: nestedDir,
+        cwd: nestedDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      };
+
+      const first = await crawl(options);
+      expect(first).toContain('tracked.txt');
+      expect(first).not.toContain('new-tracked.txt');
+
+      await fs.writeFile(path.join(nestedDir, 'new-tracked.txt'), '');
+      await runExecFile('git', ['add', 'nested/new-tracked.txt'], tmpDir);
+      const indexPath = path.join(tmpDir, '.git', 'index');
+      const futureTime = new Date(Date.now() + 60_000);
+      await fs.utimes(indexPath, futureTime, futureTime);
+
+      const second = await crawl(options);
+      expect(second).toContain('tracked.txt');
+      expect(second).toContain('new-tracked.txt');
     });
 
     it('should re-crawl git worktrees when the gitdir index changes', async () => {

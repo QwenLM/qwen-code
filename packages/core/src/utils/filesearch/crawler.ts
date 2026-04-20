@@ -40,6 +40,7 @@ function getStateKey(options: CrawlOptions): string {
     normalizePath(options.cwd),
     options.ignore.getFingerprint(),
     options.maxDepth === undefined ? 'undefined' : String(options.maxDepth),
+    options.maxFiles === undefined ? 'undefined' : String(options.maxFiles),
   ].join('|');
 }
 
@@ -62,10 +63,11 @@ interface ChangeState {
 const changeStateMap = new Map<string, ChangeState>();
 
 function resolveGitDir(crawlDirectory: string): string | null {
-  try {
-    let current = crawlDirectory;
-    while (current) {
-      const gitPath = path.join(current, '.git');
+  let current = crawlDirectory;
+  while (current) {
+    const gitPath = path.join(current, '.git');
+
+    try {
       const stat = fs.statSync(gitPath);
 
       if (stat.isDirectory()) {
@@ -84,13 +86,17 @@ function resolveGitDir(crawlDirectory: string): string | null {
           ? resolvedGitDir
           : path.resolve(current, resolvedGitDir);
       }
-
-      const parent = path.dirname(current);
-      if (parent === current) break;
-      current = parent;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT' && code !== 'ENOTDIR') {
+        return null;
+      }
+      // Keep walking ancestors when .git is simply missing here.
     }
-  } catch {
-    // Ignore errors when .git metadata is missing or unreadable.
+
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
   }
 
   return null;
