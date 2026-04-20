@@ -23,7 +23,7 @@ import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
-import { isSubpaths, isSubpath } from '../utils/paths.js';
+import { isSubpaths } from '../utils/paths.js';
 import { Storage } from '../config/storage.js';
 import { isAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
@@ -89,23 +89,24 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const filePath = path.resolve(this.params.file_path);
     const workspaceContext = this.config.getWorkspaceContext();
-    const globalTempDir = Storage.getGlobalTempDir();
-    const projectTempDir = this.config.storage.getProjectTempDir();
-    const userSkillsDirs = this.config.storage.getUserSkillsDirs();
-    const userExtensionsDir = Storage.getUserExtensionsDir();
-    const osTempDir = os.tmpdir();
 
-    // Auto-allow reads of files within the managed auto-memory root for this
-    // project only — using the narrower isAutoMemPath check instead of the
-    // broad getMemoryBaseDir() to avoid exposing sensitive ~/.qwen files such
-    // as settings.json or OAuth credentials.
+    const allowedRoots = [
+      this.config.storage.getProjectTempDir(),
+      // Background subagent transcripts live under <projectDir>/subagents/ and
+      // are advertised to the model as polling targets via read_file.
+      path.join(this.config.storage.getProjectDir(), 'subagents'),
+      Storage.getGlobalTempDir(),
+      os.tmpdir(),
+      ...this.config.storage.getUserSkillsDirs(),
+      Storage.getUserExtensionsDir(),
+    ];
+
     if (
       workspaceContext.isPathWithinWorkspace(filePath) ||
-      isSubpath(projectTempDir, filePath) ||
-      isSubpath(globalTempDir, filePath) ||
-      isSubpath(osTempDir, filePath) ||
-      isSubpaths(userSkillsDirs, filePath) ||
-      isSubpath(userExtensionsDir, filePath) ||
+      isSubpaths(allowedRoots, filePath) ||
+      // isAutoMemPath uses the narrower managed auto-memory root for this
+      // project — not the broad getMemoryBaseDir() — to avoid exposing
+      // sensitive ~/.qwen files such as settings.json or OAuth credentials.
       isAutoMemPath(filePath, this.config.getTargetDir())
     ) {
       return 'allow';

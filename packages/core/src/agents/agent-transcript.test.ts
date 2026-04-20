@@ -9,341 +9,396 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import {
-  getAgentTranscriptDir,
-  getAgentTranscriptPath,
-  attachTranscriptWriter,
+  getSubagentSessionDir,
+  getAgentJsonlPath,
+  getAgentMetaPath,
+  attachJsonlTranscriptWriter,
+  writeAgentMeta,
+  type AgentMeta,
 } from './agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
+import type { ChatRecord } from '../services/chatRecordingService.js';
 
 describe('agent-transcript', () => {
-  describe('getAgentTranscriptDir', () => {
-    it('returns agents subdirectory under projectTempDir', () => {
-      expect(getAgentTranscriptDir('/tmp/project')).toBe('/tmp/project/agents');
-    });
-  });
-
-  describe('getAgentTranscriptPath', () => {
-    it('returns .txt file under agents directory', () => {
-      expect(getAgentTranscriptPath('/tmp/project', 'my-agent')).toBe(
-        '/tmp/project/agents/my-agent.txt',
+  describe('path helpers', () => {
+    it('places the session dir under projectDir/subagents/<sessionId>', () => {
+      expect(getSubagentSessionDir('/proj', 'sess-1')).toBe(
+        '/proj/subagents/sess-1',
       );
     });
 
-    it('sanitizes agent ID to prevent path traversal', () => {
-      const result = getAgentTranscriptPath(
-        '/tmp/project',
+    it('returns .jsonl path for the canonical transcript', () => {
+      expect(getAgentJsonlPath('/proj', 'sess-1', 'agent-1')).toBe(
+        '/proj/subagents/sess-1/agent-agent-1.jsonl',
+      );
+    });
+
+    it('returns .meta.json path for the sidecar', () => {
+      expect(getAgentMetaPath('/proj', 'sess-1', 'agent-1')).toBe(
+        '/proj/subagents/sess-1/agent-agent-1.meta.json',
+      );
+    });
+
+    it('sanitizes agentId to prevent path traversal', () => {
+      const result = getAgentJsonlPath(
+        '/proj',
+        'sess-1',
         '../../../etc/passwd',
       );
       expect(result).not.toContain('..');
-      expect(result).toContain('/tmp/project/agents/');
-      expect(result.endsWith('.txt')).toBe(true);
+      expect(result).toContain('/proj/subagents/sess-1/');
+      expect(result.endsWith('.jsonl')).toBe(true);
     });
 
-    it('preserves alphanumeric, underscores, and hyphens', () => {
-      expect(getAgentTranscriptPath('/tmp/project', 'agent_1-abc')).toBe(
-        '/tmp/project/agents/agent_1-abc.txt',
+    it('sanitizes sessionId to prevent path traversal', () => {
+      const result = getAgentJsonlPath('/proj', '../escape', 'agent-1');
+      expect(result).not.toContain('..');
+      expect(result.startsWith('/proj/subagents/')).toBe(true);
+    });
+
+    it('preserves alphanumerics, underscores, and hyphens in agentId', () => {
+      expect(getAgentJsonlPath('/proj', 'sess', 'agent_1-abc')).toBe(
+        '/proj/subagents/sess/agent-agent_1-abc.jsonl',
       );
     });
   });
 
-  describe('attachTranscriptWriter', () => {
+  describe('writeAgentMeta', () => {
     let tempDir: string;
 
     beforeEach(() => {
-      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'transcript-test-'));
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'meta-test-'));
     });
 
     afterEach(() => {
       fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
-    it('writes START event to transcript file', () => {
-      const emitter = new AgentEventEmitter();
-      const transcriptPath = path.join(tempDir, 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, transcriptPath);
-
-      emitter.emit(AgentEventType.START, {
-        subagentId: 'test-1',
-        name: 'Test Agent',
-        model: 'gemini-2.0',
-        tools: ['read_file', 'edit_file'],
-        timestamp: Date.now(),
-      });
-
-      cleanup();
-
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      expect(content).toContain('Agent started: Test Agent');
-      expect(content).toContain('Tools: read_file, edit_file');
-    });
-
-    it('writes TOOL_CALL event to transcript file', () => {
-      const emitter = new AgentEventEmitter();
-      const transcriptPath = path.join(tempDir, 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, transcriptPath);
-
-      emitter.emit(AgentEventType.TOOL_CALL, {
-        subagentId: 'test-1',
-        round: 1,
-        callId: 'call-1',
-        name: 'read_file',
-        args: { file_path: '/src/main.ts' },
-        description: 'Read main.ts',
-        timestamp: Date.now(),
-      });
-
-      cleanup();
-
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      expect(content).toContain('Tool call: read_file(');
-      expect(content).toContain('file_path="/src/main.ts"');
-    });
-
-    it('collapses multi-line string args into a single transcript line', () => {
-      // Tool args like write_file/edit/shell heredoc carry multi-line
-      // payloads. The transcript is read via read_file as a progress
-      // window, so a raw newline would split one tool call across many
-      // lines and dump file contents into the progress file.
-      const emitter = new AgentEventEmitter();
-      const transcriptPath = path.join(tempDir, 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, transcriptPath);
-
-      emitter.emit(AgentEventType.TOOL_CALL, {
-        subagentId: 'test-1',
-        round: 1,
-        callId: 'call-1',
-        name: 'write_file',
-        args: {
-          file_path: '/src/main.ts',
-          content: 'line one\nline two\nline three',
-        },
-        description: 'Write main.ts',
-        timestamp: Date.now(),
-      });
-
-      cleanup();
-
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      const toolCallLines = content
-        .split('\n')
-        .filter((l) => l.includes('Tool call:'));
-      expect(toolCallLines).toHaveLength(1);
-      expect(toolCallLines[0]).toContain(
-        'content="line one line two line three"',
+    it('writes a JSON sidecar with the expected fields', () => {
+      const metaPath = path.join(
+        tempDir,
+        'subagents',
+        's1',
+        'agent-a.meta.json',
       );
-      expect(toolCallLines[0]).not.toContain('\n');
+      const meta: AgentMeta = {
+        agentId: 'a',
+        agentType: 'explore',
+        description: 'Explore: list ts files',
+        parentSessionId: 's1',
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+      };
+      writeAgentMeta(metaPath, meta);
+      const parsed = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
+      expect(parsed).toEqual(meta);
     });
 
-    it('writes TOOL_RESULT event to transcript file', () => {
-      const emitter = new AgentEventEmitter();
-      const transcriptPath = path.join(tempDir, 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, transcriptPath);
-
-      emitter.emit(AgentEventType.TOOL_RESULT, {
-        subagentId: 'test-1',
-        round: 1,
-        callId: 'call-1',
-        name: 'read_file',
-        success: true,
-        durationMs: 42,
-        timestamp: Date.now(),
+    it('creates parent directories that do not yet exist', () => {
+      const metaPath = path.join(
+        tempDir,
+        'a',
+        'deeply',
+        'nested',
+        'agent.meta.json',
+      );
+      writeAgentMeta(metaPath, {
+        agentId: 'a',
+        agentType: 'x',
+        description: 'd',
+        parentSessionId: 's',
+        parentAgentId: null,
+        createdAt: 'now',
       });
+      expect(fs.existsSync(metaPath)).toBe(true);
+    });
+  });
 
-      cleanup();
+  describe('attachJsonlTranscriptWriter (canonical)', () => {
+    let tempDir: string;
 
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      expect(content).toContain('Tool result: read_file');
-      expect(content).toContain('OK');
-      expect(content).toContain('42ms');
+    beforeEach(() => {
+      tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jsonl-test-'));
     });
 
-    it('writes error info in TOOL_RESULT event', () => {
-      const emitter = new AgentEventEmitter();
-      const transcriptPath = path.join(tempDir, 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, transcriptPath);
+    afterEach(() => {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    });
 
-      emitter.emit(AgentEventType.TOOL_RESULT, {
-        subagentId: 'test-1',
-        round: 1,
-        callId: 'call-1',
-        name: 'read_file',
-        success: false,
-        error: 'File not found',
-        durationMs: 10,
-        timestamp: Date.now(),
+    function readJsonl(p: string): ChatRecord[] {
+      return fs
+        .readFileSync(p, 'utf-8')
+        .split('\n')
+        .filter((l) => l.trim().length > 0)
+        .map((l) => JSON.parse(l) as ChatRecord);
+    }
+
+    function makeWriter(
+      jsonlPath: string,
+      extra: { initialUserPrompt?: string } = {},
+    ) {
+      const emitter = new AgentEventEmitter();
+      const { cleanup } = attachJsonlTranscriptWriter(emitter, jsonlPath, {
+        agentId: 'agent-x',
+        agentName: 'explore',
+        agentColor: 'blue',
+        sessionId: 'session-1',
+        cwd: '/proj',
+        version: '1.2.3',
+        gitBranch: 'main',
+        ...extra,
       });
+      return { emitter, cleanup };
+    }
 
-      cleanup();
-
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      expect(content).toContain('ERROR');
-      expect(content).toContain('File not found');
-    });
-
-    it('writes ROUND_TEXT event to transcript file', () => {
-      const emitter = new AgentEventEmitter();
-      const transcriptPath = path.join(tempDir, 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, transcriptPath);
+    it('stamps base fields on every subagent record', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
 
       emitter.emit(AgentEventType.ROUND_TEXT, {
-        subagentId: 'test-1',
+        subagentId: 'agent-x',
         round: 1,
-        text: 'I will now search the codebase.',
+        text: 'Hello',
         thoughtText: '',
         timestamp: Date.now(),
       });
-
       cleanup();
 
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      expect(content).toContain(
-        'Agent response: I will now search the codebase.',
-      );
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(1);
+      const r = records[0];
+      expect(r.agentId).toBe('agent-x');
+      expect(r.agentName).toBe('explore');
+      expect(r.agentColor).toBe('blue');
+      expect(r.isSidechain).toBe(true);
+      expect(r.sessionId).toBe('session-1');
+      expect(r.cwd).toBe('/proj');
+      expect(r.version).toBe('1.2.3');
+      expect(r.gitBranch).toBe('main');
+      expect(r.parentUuid).toBeNull();
     });
 
-    it('writes FINISH event to transcript file', () => {
-      const emitter = new AgentEventEmitter();
-      const transcriptPath = path.join(tempDir, 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, transcriptPath);
+    it('writes a ROUND_TEXT event as an assistant record with text part', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
 
-      emitter.emit(AgentEventType.FINISH, {
-        subagentId: 'test-1',
-        terminateReason: 'end_turn',
-        rounds: 3,
-        totalTokens: 1500,
-        totalToolCalls: 5,
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'Hello',
+        thoughtText: '',
         timestamp: Date.now(),
       });
-
       cleanup();
 
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      expect(content).toContain('Agent finished: end_turn');
-      expect(content).toContain('3 rounds');
-      expect(content).toContain('1500 tokens');
-      expect(content).toContain('5 tool calls');
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(1);
+      expect(records[0].type).toBe('assistant');
+      expect(records[0].message?.parts?.[0]).toMatchObject({ text: 'Hello' });
     });
 
-    it('writes a throttled TOOL_OUTPUT_UPDATE progress line', () => {
-      const emitter = new AgentEventEmitter();
-      const transcriptPath = path.join(tempDir, 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, transcriptPath);
+    it('drops empty ROUND_TEXT to keep the canonical view free of noise', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
 
-      // First update for this callId → should be written.
-      emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
-        subagentId: 'test-1',
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
         round: 1,
-        callId: 'call-1',
-        outputChunk: 'line one\nline two\nline three',
-        pid: 42,
-        timestamp: 1_000,
+        text: '',
+        thoughtText: '',
+        timestamp: Date.now(),
       });
-
-      // Same callId within throttle window → must be suppressed.
-      emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
-        subagentId: 'test-1',
-        round: 1,
-        callId: 'call-1',
-        outputChunk: 'line one\nline two\nline three\nline four',
-        timestamp: 1_500,
-      });
-
-      // After throttle window → allowed again.
-      emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
-        subagentId: 'test-1',
-        round: 1,
-        callId: 'call-1',
-        outputChunk: 'tailing output burst',
-        timestamp: 10_000,
-      });
-
       cleanup();
 
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      const progressLines = content
-        .split('\n')
-        .filter((l) => l.includes('Tool progress:'));
-      expect(progressLines).toHaveLength(2);
-      expect(progressLines[0]).toContain('callId=call-1');
-      expect(progressLines[0]).toContain('pid=42');
-      expect(progressLines[0]).toContain('line three');
-      expect(progressLines[1]).toContain('tailing output burst');
+      expect(fs.existsSync(jsonlPath)).toBe(false);
     });
 
-    it('resets throttle tracking when a tool finishes', () => {
-      const emitter = new AgentEventEmitter();
-      const transcriptPath = path.join(tempDir, 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, transcriptPath);
+    it('writes TOOL_CALL events as assistant records with functionCall parts', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
 
-      emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
-        subagentId: 'test-1',
+      emitter.emit(AgentEventType.TOOL_CALL, {
+        subagentId: 'agent-x',
         round: 1,
-        callId: 'call-1',
-        outputChunk: 'first',
-        timestamp: 1_000,
+        callId: 'c1',
+        name: 'read_file',
+        args: { file_path: '/x.txt' },
+        description: 'read x',
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(1);
+      const part = records[0].message?.parts?.[0] as {
+        functionCall?: { id: string; name: string; args: unknown };
+      };
+      expect(part.functionCall).toMatchObject({
+        id: 'c1',
+        name: 'read_file',
+        args: { file_path: '/x.txt' },
+      });
+    });
+
+    it('writes TOOL_RESULT events as tool_result records with toolCallResult metadata', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.TOOL_RESULT, {
+        subagentId: 'agent-x',
+        round: 1,
+        callId: 'c1',
+        name: 'read_file',
+        success: true,
+        durationMs: 7,
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(1);
+      expect(records[0].type).toBe('tool_result');
+      expect(records[0].toolCallResult).toMatchObject({
+        callId: 'c1',
+        durationMs: 7,
+      });
+    });
+
+    it('preserves real responseParts from TOOL_RESULT when present', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      const responseParts = [
+        {
+          functionResponse: {
+            id: 'c1',
+            name: 'read_file',
+            response: { output: 'line1\nline2\n' },
+          },
+        },
+      ];
+      emitter.emit(AgentEventType.TOOL_RESULT, {
+        subagentId: 'agent-x',
+        round: 1,
+        callId: 'c1',
+        name: 'read_file',
+        success: true,
+        responseParts,
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records[0].message?.parts).toEqual(responseParts);
+    });
+
+    it('chains parentUuid across multiple records', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'hi',
+        thoughtText: '',
+        timestamp: 1,
+      });
+      emitter.emit(AgentEventType.TOOL_CALL, {
+        subagentId: 'agent-x',
+        round: 1,
+        callId: 'c1',
+        name: 'read_file',
+        args: {},
+        description: '',
+        timestamp: 2,
       });
       emitter.emit(AgentEventType.TOOL_RESULT, {
-        subagentId: 'test-1',
+        subagentId: 'agent-x',
         round: 1,
-        callId: 'call-1',
-        name: 'run_shell_command',
+        callId: 'c1',
+        name: 'read_file',
         success: true,
-        durationMs: 5,
-        timestamp: 1_100,
+        timestamp: 3,
       });
-      // New run of the same callId (extremely unlikely in practice, but
-      // guards against state leakage between tools) should emit immediately.
-      emitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
-        subagentId: 'test-1',
-        round: 2,
-        callId: 'call-1',
-        outputChunk: 'second',
-        timestamp: 1_200,
-      });
-
       cleanup();
 
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      expect(content.match(/Tool progress:/g)!.length).toBe(2);
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(3);
+      expect(records[0].parentUuid).toBeNull();
+      expect(records[1].parentUuid).toBe(records[0].uuid);
+      expect(records[2].parentUuid).toBe(records[1].uuid);
     });
 
-    it('removes listeners on cleanup', () => {
-      const emitter = new AgentEventEmitter();
-      const transcriptPath = path.join(tempDir, 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, transcriptPath);
+    it('seeds the JSONL with the launching prompt as a user-role record', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { cleanup } = makeWriter(jsonlPath, {
+        initialUserPrompt: 'Find all TODO comments',
+      });
 
       cleanup();
 
-      // Emitting after cleanup should not write anything new
-      emitter.emit(AgentEventType.START, {
-        subagentId: 'test-1',
-        name: 'Late Agent',
-        model: 'gemini-2.0',
-        tools: [],
-        timestamp: Date.now(),
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(1);
+      expect(records[0].type).toBe('user');
+      expect(records[0].message).toEqual({
+        role: 'user',
+        parts: [{ text: 'Find all TODO comments' }],
       });
-
-      const content = fs.readFileSync(transcriptPath, 'utf-8');
-      expect(content).not.toContain('Late Agent');
+      expect(records[0].isSidechain).toBe(true);
+      expect(records[0].parentUuid).toBeNull();
     });
 
-    it('creates transcript directory if it does not exist', () => {
-      const emitter = new AgentEventEmitter();
-      const deepPath = path.join(tempDir, 'nested', 'agents', 'test.txt');
-      const cleanup = attachTranscriptWriter(emitter, deepPath);
-
-      emitter.emit(AgentEventType.START, {
-        subagentId: 'test-1',
-        name: 'Nested Agent',
-        tools: [],
-        timestamp: Date.now(),
-      });
+    it('skips an empty initialUserPrompt so the chain stays clean', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { cleanup } = makeWriter(jsonlPath, { initialUserPrompt: '' });
 
       cleanup();
 
-      expect(fs.existsSync(deepPath)).toBe(true);
-      const content = fs.readFileSync(deepPath, 'utf-8');
-      expect(content).toContain('Agent started: Nested Agent');
+      expect(fs.existsSync(jsonlPath)).toBe(false);
+    });
+
+    it('writes EXTERNAL_MESSAGE events as user records chained after the seed', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath, {
+        initialUserPrompt: 'initial prompt',
+      });
+
+      emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: 'agent-x',
+        text: 'follow-up from parent',
+        timestamp: 100,
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(2);
+      expect(records[1].type).toBe('user');
+      expect(records[1].message).toEqual({
+        role: 'user',
+        parts: [{ text: 'follow-up from parent' }],
+      });
+      expect(records[1].parentUuid).toBe(records[0].uuid);
+    });
+
+    it('stops writing after cleanup', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      cleanup();
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'late',
+        thoughtText: '',
+        timestamp: 1,
+      });
+      emitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+        subagentId: 'agent-x',
+        text: 'late injection',
+        timestamp: 2,
+      });
+
+      expect(fs.existsSync(jsonlPath)).toBe(false);
     });
   });
 });

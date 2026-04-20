@@ -5,218 +5,269 @@
  */
 
 /**
- * @fileoverview Per-agent transcript writer for background agents.
+ * @fileoverview Per-agent transcript for background subagents.
  *
- * Subscribes to AgentEventEmitter events and appends human-readable
- * lines to a plain-text file. The model reads this file via read_file
- * to check on a background agent's progress.
+ * Each background subagent produces two sibling files under
+ * `<projectDir>/subagents/<sessionId>/`:
+ *
+ *   agent-<id>.jsonl       — canonical, ChatRecord-shaped event log;
+ *                            the model reads this via read_file to check
+ *                            in-flight progress and <output-file> in the
+ *                            notification XML points here
+ *   agent-<id>.meta.json   — sidecar with agentType, description, parent
+ *                            session/agent IDs, createdAt
  */
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import {
   AgentEventType,
   type AgentEventEmitter,
   type AgentToolCallEvent,
   type AgentToolResultEvent,
-  type AgentToolOutputUpdateEvent,
   type AgentRoundTextEvent,
-  type AgentFinishEvent,
-  type AgentStartEvent,
-} from '../agents/runtime/agent-events.js';
+  type AgentExternalMessageEvent,
+} from './runtime/agent-events.js';
+import { type ChatRecord } from '../services/chatRecordingService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 
-const MAX_ARG_PREVIEW = 80;
-const MAX_PROGRESS_PREVIEW = 200;
-// Throttle in-flight tool output updates so streaming tools (e.g.
-// run_shell_command) don't spam the transcript with every chunk. One
-// progress line per callId every ~2s keeps the file useful as a
-// live-progress window without bloating it.
-const PROGRESS_THROTTLE_MS = 2000;
-
-/**
- * Returns the directory where background agent transcript files are stored.
- */
-export function getAgentTranscriptDir(projectTempDir: string): string {
-  return path.join(projectTempDir, 'agents');
+function sanitizeFilenameComponent(value: string): string {
+  return value.replace(/[^a-zA-Z0-9_-]/g, '_');
 }
 
 /**
- * Returns the full path for a specific agent's transcript file.
+ * Returns the directory holding all subagent transcripts for a given session.
+ * Layout: `<projectDir>/subagents/<sessionId>/`.
  */
-export function getAgentTranscriptPath(
-  projectTempDir: string,
+export function getSubagentSessionDir(
+  projectDir: string,
+  sessionId: string,
+): string {
+  // Sanitize sessionId defensively (UUIDs are safe; resumed/external IDs
+  // could carry path-traversal bytes).
+  return path.join(
+    projectDir,
+    'subagents',
+    sanitizeFilenameComponent(sessionId),
+  );
+}
+
+/** Returns the canonical JSONL transcript path. */
+export function getAgentJsonlPath(
+  projectDir: string,
+  sessionId: string,
   agentId: string,
 ): string {
-  // Sanitize agentId to prevent path traversal
-  const safeId = agentId.replace(/[^a-zA-Z0-9_-]/g, '_');
-  return path.join(getAgentTranscriptDir(projectTempDir), `${safeId}.txt`);
+  return path.join(
+    getSubagentSessionDir(projectDir, sessionId),
+    `agent-${sanitizeFilenameComponent(agentId)}.jsonl`,
+  );
+}
+
+/** Returns the sidecar metadata file path. */
+export function getAgentMetaPath(
+  projectDir: string,
+  sessionId: string,
+  agentId: string,
+): string {
+  return path.join(
+    getSubagentSessionDir(projectDir, sessionId),
+    `agent-${sanitizeFilenameComponent(agentId)}.meta.json`,
+  );
+}
+
+export interface AgentMeta {
+  agentId: string;
+  agentType: string;
+  description: string;
+  /** SessionId of the user session that launched this agent. */
+  parentSessionId: string;
+  /** AgentId of the launching subagent for nested forks; null for top-level. */
+  parentAgentId: string | null;
+  /** ISO 8601 creation time. */
+  createdAt: string;
 }
 
 /**
- * Truncate a string to maxLen, appending '...' if truncated.
+ * Best-effort — a failed sidecar write must not break the agent launch path.
  */
-function truncate(s: string, maxLen: number): string {
-  if (s.length <= maxLen) return s;
-  return s.slice(0, maxLen) + '...';
-}
-
-/**
- * Extract a short, single-line tail preview from a streaming tool's
- * accumulated output. Returns an empty string if the payload isn't a
- * string (structured displays aren't useful as a progress preview).
- */
-function formatProgressPreview(outputChunk: unknown): string {
-  if (typeof outputChunk !== 'string' || outputChunk.length === 0) return '';
-  const tail = outputChunk.slice(-MAX_PROGRESS_PREVIEW);
-  return tail.replace(/\s+/g, ' ').trim();
-}
-
-/**
- * Format tool call arguments into a compact single-line preview.
- */
-function formatArgs(args: Record<string, unknown>): string {
-  const parts: string[] = [];
-  for (const [key, value] of Object.entries(args)) {
-    if (typeof value === 'string') {
-      // Collapse whitespace (including newlines) before truncating. Tool
-      // args like write_file/edit/shell can carry multi-line payloads;
-      // without this, a raw newline would split the transcript entry
-      // across lines and dump file contents into the progress file.
-      const single = value.replace(/\s+/g, ' ').trim();
-      parts.push(`${key}="${truncate(single, MAX_ARG_PREVIEW)}"`);
-    } else if (value !== undefined && value !== null) {
-      parts.push(`${key}=${JSON.stringify(value)}`);
-    }
+export function writeAgentMeta(metaPath: string, meta: AgentMeta): void {
+  try {
+    fs.mkdirSync(path.dirname(metaPath), { recursive: true });
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
+  } catch (error) {
+    debugLogger.warn(`Failed to write agent meta sidecar ${metaPath}:`, error);
   }
-  return parts.join(', ');
+}
+
+export interface AttachJsonlOptions {
+  /** Subagent identifier — populated on every record. */
+  agentId: string;
+  /** Display name (subagent type), e.g. "explore". */
+  agentName?: string;
+  /** UI hint. */
+  agentColor?: string;
+  /** Parent user-session UUID — recorded as `sessionId` on every record. */
+  sessionId: string;
+  /** cwd at launch time, for resume context. */
+  cwd: string;
+  /** CLI version for compatibility tracking. */
+  version: string;
+  /** Optional git branch at launch time. */
+  gitBranch?: string;
+  /**
+   * Launching prompt — recorded as the first `user`-role record so the
+   * transcript is self-describing. Empty/omitted seeds nothing.
+   */
+  initialUserPrompt?: string;
+}
+
+export interface AttachJsonlTranscriptResult {
+  /** Removes the event listeners and closes the file handle. Idempotent. */
+  cleanup: () => void;
 }
 
 /**
- * Subscribes to an AgentEventEmitter and writes a plain-text transcript
- * to the given file path. Returns a cleanup function that removes the
- * listeners.
+ * Subscribes to an AgentEventEmitter and appends ChatRecord-shaped JSONL
+ * lines to `jsonlPath`. Maintains a parentUuid chain so consumers can walk
+ * the transcript tree the same way they walk the main session log.
+ *
+ * Holds a single append-mode fd for the lifetime of the writer so streaming
+ * tools (which can fire many TOOL_CALL/TOOL_RESULT events per round) avoid
+ * an open+write+close syscall storm. The fd is opened lazily on the first
+ * write so callers that attach but never produce a record don't materialize
+ * an empty file.
  */
-export function attachTranscriptWriter(
+export function attachJsonlTranscriptWriter(
   emitter: AgentEventEmitter,
-  transcriptPath: string,
-): () => void {
-  // Ensure the directory exists
-  const dir = path.dirname(transcriptPath);
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-  } catch (error) {
-    debugLogger.warn(`Failed to create transcript directory ${dir}:`, error);
-  }
-
-  // Open append-only file descriptor
+  jsonlPath: string,
+  options: AttachJsonlOptions,
+): AttachJsonlTranscriptResult {
+  let lastUuid: string | null = null;
   let fd: number | null = null;
-  try {
-    fd = fs.openSync(transcriptPath, 'a');
-  } catch (error) {
-    debugLogger.warn(
-      `Failed to open transcript file ${transcriptPath}:`,
-      error,
-    );
-    return () => {};
-  }
+  let openFailed = false;
 
-  const write = (line: string) => {
-    if (fd === null) return;
+  const ensureOpen = (): boolean => {
+    if (fd !== null) return true;
+    if (openFailed) return false;
     try {
-      fs.writeSync(fd, line + '\n');
+      fs.mkdirSync(path.dirname(jsonlPath), { recursive: true });
+      fd = fs.openSync(jsonlPath, 'a');
+      return true;
     } catch (error) {
-      debugLogger.warn('Failed to write to transcript:', error);
+      debugLogger.warn(`Failed to open JSONL transcript ${jsonlPath}:`, error);
+      openFailed = true;
+      return false;
     }
   };
 
-  const onStart = (event: AgentStartEvent) => {
-    write(
-      `[${new Date(event.timestamp).toISOString()}] Agent started: ${event.name}`,
-    );
-    if (event.tools.length > 0) {
-      write(`  Tools: ${event.tools.join(', ')}`);
+  const baseFields = (type: ChatRecord['type']) => ({
+    uuid: randomUUID(),
+    parentUuid: lastUuid,
+    sessionId: options.sessionId,
+    timestamp: new Date().toISOString(),
+    type,
+    cwd: options.cwd,
+    version: options.version,
+    gitBranch: options.gitBranch,
+    agentId: options.agentId,
+    agentName: options.agentName,
+    agentColor: options.agentColor,
+    isSidechain: true,
+  });
+
+  const append = (record: ChatRecord) => {
+    if (!ensureOpen()) return;
+    try {
+      fs.writeSync(fd!, JSON.stringify(record) + '\n');
+      lastUuid = record.uuid;
+    } catch (error) {
+      debugLogger.warn(`Failed to append JSONL record to ${jsonlPath}:`, error);
     }
-  };
-
-  const onToolCall = (event: AgentToolCallEvent) => {
-    const argPreview = formatArgs(event.args);
-    write(
-      `[${new Date(event.timestamp).toISOString()}] Tool call: ${event.name}(${truncate(argPreview, 200)})`,
-    );
-    if (event.description) {
-      write(`  ${event.description}`);
-    }
-  };
-
-  // Tracks the last progress-line timestamp per in-flight tool callId so we
-  // can throttle streaming updates. Cleared when the tool finishes.
-  const lastProgressAt = new Map<string, number>();
-
-  const onToolOutputUpdate = (event: AgentToolOutputUpdateEvent) => {
-    const now = event.timestamp || Date.now();
-    const prev = lastProgressAt.get(event.callId);
-    if (prev !== undefined && now - prev < PROGRESS_THROTTLE_MS) return;
-    lastProgressAt.set(event.callId, now);
-
-    const preview = formatProgressPreview(event.outputChunk);
-    const pidSuffix = event.pid ? ` pid=${event.pid}` : '';
-    const previewSuffix = preview
-      ? ` — ${truncate(preview, MAX_PROGRESS_PREVIEW)}`
-      : '';
-    write(
-      `[${new Date(now).toISOString()}] Tool progress: callId=${event.callId}${pidSuffix}${previewSuffix}`,
-    );
-  };
-
-  const onToolResult = (event: AgentToolResultEvent) => {
-    lastProgressAt.delete(event.callId);
-    const status = event.success ? 'OK' : 'ERROR';
-    const duration = event.durationMs ? ` (${event.durationMs}ms)` : '';
-    let line = `[${new Date(event.timestamp).toISOString()}] Tool result: ${event.name} → ${status}${duration}`;
-    if (event.error) {
-      line += ` — ${truncate(event.error, 200)}`;
-    }
-    write(line);
   };
 
   const onRoundText = (event: AgentRoundTextEvent) => {
-    if (event.text) {
-      write(
-        `[${new Date(event.timestamp).toISOString()}] Agent response: ${truncate(event.text, 500)}`,
-      );
-    }
+    if (!event.text) return;
+    append({
+      ...baseFields('assistant'),
+      message: { role: 'model', parts: [{ text: event.text }] },
+    });
   };
 
-  const onFinish = (event: AgentFinishEvent) => {
-    // Clear any orphan throttle entries from tools that never emitted a
-    // TOOL_RESULT (abort/crash mid-stream). Without this, lastProgressAt
-    // grows for the lifetime of the emitter.
-    lastProgressAt.clear();
-    write(
-      `[${new Date(event.timestamp).toISOString()}] Agent finished: ${event.terminateReason}` +
-        (event.rounds ? ` (${event.rounds} rounds)` : '') +
-        (event.totalTokens ? `, ${event.totalTokens} tokens` : '') +
-        (event.totalToolCalls ? `, ${event.totalToolCalls} tool calls` : ''),
-    );
+  const onToolCall = (event: AgentToolCallEvent) => {
+    append({
+      ...baseFields('assistant'),
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: event.callId,
+              name: event.name,
+              args: event.args,
+            },
+          },
+        ],
+      },
+    });
   };
 
-  emitter.on(AgentEventType.START, onStart);
-  emitter.on(AgentEventType.TOOL_CALL, onToolCall);
-  emitter.on(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
-  emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+  const onToolResult = (event: AgentToolResultEvent) => {
+    // Prefer the real response parts the model saw; fall back to a status
+    // stub only when the agent aborted before a response was formed.
+    const parts = event.responseParts ?? [
+      {
+        functionResponse: {
+          id: event.callId,
+          name: event.name,
+          response: {
+            success: event.success,
+            ...(event.error ? { error: event.error } : {}),
+          },
+        },
+      },
+    ];
+    append({
+      ...baseFields('tool_result'),
+      message: { role: 'user', parts },
+      toolCallResult: {
+        callId: event.callId,
+        ...(event.durationMs !== undefined
+          ? { durationMs: event.durationMs }
+          : {}),
+      },
+    });
+  };
+
+  const recordUserMessage = (text: string) => {
+    if (!text) return;
+    append({
+      ...baseFields('user'),
+      message: { role: 'user', parts: [{ text }] },
+    });
+  };
+
+  const onExternalMessage = (event: AgentExternalMessageEvent) => {
+    recordUserMessage(event.text);
+  };
+
+  if (options.initialUserPrompt) {
+    recordUserMessage(options.initialUserPrompt);
+  }
+
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
-  emitter.on(AgentEventType.FINISH, onFinish);
+  emitter.on(AgentEventType.TOOL_CALL, onToolCall);
+  emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+  emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
 
-  return () => {
-    emitter.off(AgentEventType.START, onStart);
-    emitter.off(AgentEventType.TOOL_CALL, onToolCall);
-    emitter.off(AgentEventType.TOOL_OUTPUT_UPDATE, onToolOutputUpdate);
-    emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+  const cleanup = () => {
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
-    emitter.off(AgentEventType.FINISH, onFinish);
+    emitter.off(AgentEventType.TOOL_CALL, onToolCall);
+    emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+    emitter.off(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
     if (fd !== null) {
       try {
         fs.closeSync(fd);
@@ -226,4 +277,6 @@ export function attachTranscriptWriter(
       fd = null;
     }
   };
+
+  return { cleanup };
 }

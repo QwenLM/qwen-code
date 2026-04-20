@@ -87,6 +87,7 @@ describe('AgentTool', () => {
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
+      getCliVersion: vi.fn().mockReturnValue('test-version'),
       getSubagentManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -1450,7 +1451,7 @@ describe('AgentTool', () => {
         'getBackgroundTaskRegistry'
       ] = vi.fn().mockReturnValue(mockRegistry);
       (config as unknown as Record<string, unknown>)['storage'] = {
-        getProjectTempDir: () => '/tmp/qwen-test',
+        getProjectDir: () => '/tmp/qwen-test',
       };
       (mockAgent as unknown as Record<string, unknown>)[
         'setExternalMessageProvider'

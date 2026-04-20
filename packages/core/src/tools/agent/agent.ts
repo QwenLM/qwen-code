@@ -56,9 +56,12 @@ import { PermissionMode } from '../../hooks/types.js';
 import type { StopHookOutput } from '../../hooks/types.js';
 import { ApprovalMode } from '../../config/config.js';
 import {
-  getAgentTranscriptPath,
-  attachTranscriptWriter,
+  getAgentJsonlPath,
+  getAgentMetaPath,
+  attachJsonlTranscriptWriter,
+  writeAgentMeta,
 } from '../../agents/agent-transcript.js';
+import { getGitBranch } from '../../utils/gitUtils.js';
 
 export interface AgentParams {
   description: string;
@@ -1047,15 +1050,44 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
         const registry = this.config.getBackgroundTaskRegistry();
 
-        const projectTempDir = this.config.storage.getProjectTempDir();
-        const transcriptPath = getAgentTranscriptPath(
-          projectTempDir,
+        const projectDir = this.config.storage.getProjectDir();
+        const sessionId = this.config.getSessionId();
+        const jsonlPath = getAgentJsonlPath(
+          projectDir,
+          sessionId,
           hookOpts.agentId,
         );
-        const cleanupTranscript = attachTranscriptWriter(
-          bgEventEmitter,
-          transcriptPath,
+        const metaPath = getAgentMetaPath(
+          projectDir,
+          sessionId,
+          hookOpts.agentId,
         );
+        const projectRoot = this.config.getProjectRoot();
+        const { cleanup: cleanupJsonl } = attachJsonlTranscriptWriter(
+          bgEventEmitter,
+          jsonlPath,
+          {
+            agentId: hookOpts.agentId,
+            agentName: subagentConfig.name,
+            agentColor: subagentConfig.color,
+            sessionId,
+            cwd: projectRoot,
+            version: this.config.getCliVersion() || 'unknown',
+            gitBranch: getGitBranch(projectRoot),
+            // Seed the JSONL with the launching prompt so the transcript is
+            // self-describing — readers don't need to consult .meta.json to
+            // know what the agent was asked to do.
+            initialUserPrompt: this.params.prompt,
+          },
+        );
+        writeAgentMeta(metaPath, {
+          agentId: hookOpts.agentId,
+          agentType: hookOpts.agentType,
+          description: this.params.description,
+          parentSessionId: sessionId,
+          parentAgentId: null,
+          createdAt: new Date().toISOString(),
+        });
 
         registry.register({
           agentId: hookOpts.agentId,
@@ -1065,7 +1097,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           startTime: Date.now(),
           abortController: bgAbortController,
           toolUseId: this.callId,
-          outputFile: transcriptPath,
+          outputFile: jsonlPath,
         });
 
         // Wire external message drain so SendMessage can inject messages
@@ -1143,14 +1175,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
             }
           } finally {
-            cleanupTranscript?.();
+            cleanupJsonl?.();
           }
         };
         void (isFork ? runInForkContext(bgBody) : bgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
         return {
-          llmContent: `Background agent launched: "${this.params.description}" (ID: ${hookOpts.agentId}).\nTranscript file: ${transcriptPath}\nYou will be notified when it completes. Use task_stop to cancel, send_message to communicate, or read_file on the transcript to check progress.`,
+          llmContent: `Background agent launched: "${this.params.description}" (ID: ${hookOpts.agentId}).\nTranscript file (JSON lines): ${jsonlPath}\nYou will be notified when it completes. Use task_stop to cancel, send_message to communicate, or read_file on the transcript (each line is a JSON record) to check progress.`,
           returnDisplay: this.currentDisplay!,
         };
       }

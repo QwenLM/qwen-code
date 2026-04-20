@@ -101,6 +101,15 @@ export interface ChatRecord {
     | UiTelemetryRecordPayload
     | AtCommandRecordPayload
     | NotificationRecordPayload;
+
+  /** Background subagent that produced this record (e.g. "explore-7f3c"). */
+  agentId?: string;
+  /** Display name for the subagent (e.g. "Explore"). */
+  agentName?: string;
+  /** UI hint for tools rendering subagent transcripts. */
+  agentColor?: string;
+  /** True for records produced by a subagent (a sidechain off the parent session). */
+  isSidechain?: boolean;
 }
 
 export interface NotificationRecordPayload {

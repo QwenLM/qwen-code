@@ -555,6 +555,17 @@ export class AgentCore {
               text: `\n${EXTERNAL_MESSAGE_PREFIX} ${text}`,
             })),
           );
+          // Emit one event per injection so observers (e.g. the JSONL
+          // transcript writer) can persist each external message as a
+          // user-role record. The framing prefix is stripped — the prefix
+          // is a model-facing detail, not part of the original message.
+          for (const text of externalMsgs) {
+            this.eventEmitter?.emit(AgentEventType.EXTERNAL_MESSAGE, {
+              subagentId: this.subagentId,
+              text,
+              timestamp: Date.now(),
+            });
+          }
         }
       } else {
         // No tool calls — treat this as the model's final answer.
