@@ -17,7 +17,6 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
 const MAX_DESCRIPTION_LENGTH = 40;
-const MAX_RESULT_LENGTH = 2000;
 
 // Grace period after cancel() before emitting a fallback cancelled
 // notification. The natural handler (bgBody) almost always settles and
@@ -321,14 +320,6 @@ export class BackgroundTaskRegistry {
     const label = this.buildDisplayLabel(entry);
     const displayLine = `Background agent "${label}" ${statusText}.`;
 
-    // Truncate before escaping so we don't slice through an escape
-    // sequence (e.g. mid-`&amp;`) and emit malformed XML.
-    const rawResult = entry.result
-      ? entry.result.length > MAX_RESULT_LENGTH
-        ? entry.result.slice(0, MAX_RESULT_LENGTH) + '\n[truncated]'
-        : entry.result
-      : undefined;
-
     const xmlParts: string[] = [
       '<task-notification>',
       `<task-id>${escapeXml(entry.agentId)}</task-id>`,
@@ -340,8 +331,8 @@ export class BackgroundTaskRegistry {
       `<status>${escapeXml(entry.status)}</status>`,
       `<summary>Agent "${escapeXml(entry.description)}" ${statusText}.</summary>`,
     );
-    if (rawResult) {
-      xmlParts.push(`<result>${escapeXml(rawResult)}</result>`);
+    if (entry.result) {
+      xmlParts.push(`<result>${escapeXml(entry.result)}</result>`);
     }
     if (entry.error) {
       xmlParts.push(`<result>Error: ${escapeXml(entry.error)}</result>`);
