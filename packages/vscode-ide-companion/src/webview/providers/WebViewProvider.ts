@@ -1175,10 +1175,24 @@ export class WebViewProvider {
       await new Promise((resolve) => setTimeout(resolve, 300));
       await this.doInitializeAgentConnection({ autoAuthenticate: false });
 
-      this.sendMessageToWebView({
-        type: 'authSuccess',
-        data: { message: 'Provider configured successfully!' },
-      });
+      // Only emit authSuccess when the reconnection actually authenticated.
+      // doInitializeAgentConnection updates this.authState via sendMessageToWebView;
+      // if credentials were rejected, authState will be false and we should not
+      // claim success (which would briefly show a success toast then re-open auth).
+      if (this.authState === true) {
+        this.sendMessageToWebView({
+          type: 'authSuccess',
+          data: { message: 'Provider configured successfully!' },
+        });
+      } else {
+        this.sendMessageToWebView({
+          type: 'authError',
+          data: {
+            message:
+              'Connection established but authentication failed. Please check your credentials.',
+          },
+        });
+      }
     } catch (error) {
       const errorMsg = getErrorMessage(error);
       console.error('[WebViewProvider] authInteractive failed:', error);
