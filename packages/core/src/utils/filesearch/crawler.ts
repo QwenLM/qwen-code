@@ -417,7 +417,12 @@ function hasReachedFileBudget(
 }
 
 function existingTrackedPath(gitRoot: string, normalizedFile: string): boolean {
-  return fs.existsSync(path.join(gitRoot, normalizedFile));
+  try {
+    fs.lstatSync(path.join(gitRoot, normalizedFile));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function listUntrackedFiles(

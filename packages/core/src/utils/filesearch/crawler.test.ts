@@ -812,6 +812,39 @@ describe('crawler', () => {
       expect(results).not.toContain('deleted.txt');
     });
 
+    it('should include tracked dangling symlinks', async () => {
+      if (process.platform === 'win32') {
+        return;
+      }
+
+      tmpDir = await createTmpDir({
+        'alive.txt': '',
+      });
+      await fs.symlink(
+        'missing-target.txt',
+        path.join(tmpDir, 'broken-link.txt'),
+      );
+      await initGitRepo(tmpDir);
+
+      const ignore = loadIgnoreRules({
+        projectRoot: tmpDir,
+        useGitignore: false,
+        useQwenignore: false,
+        ignoreDirs: [],
+      });
+
+      const results = await crawl({
+        crawlDirectory: tmpDir,
+        cwd: tmpDir,
+        ignore,
+        cache: false,
+        cacheTtl: 0,
+      });
+
+      expect(results).toContain('alive.txt');
+      expect(results).toContain('broken-link.txt');
+    });
+
     it('should fall back to fdir when not in a git repo and ripgrep unavailable', async () => {
       __setCommandRunnerForTests(async (command) => {
         if (command === 'git' || command === 'rg') {
