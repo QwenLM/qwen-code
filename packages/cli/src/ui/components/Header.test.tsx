@@ -56,10 +56,15 @@ describe('<Header />', () => {
     expect(lastFrame()).toContain('Built-in DataWorks Official Skills');
   });
 
-  // Auth-type tests removed: dataworks Header.tsx no longer renders the
-  // auth/model panel (the destructured props and the JSX block are commented
-  // out). The AuthDisplayType prop is still accepted for API compatibility
-  // but is intentionally not displayed.
+  it('displays model name', () => {
+    const { lastFrame } = render(<Header {...defaultProps} />);
+    expect(lastFrame()).toContain('qwen-coder-plus');
+  });
+
+  it('shows model change hint on wide terminal', () => {
+    const { lastFrame } = render(<Header {...defaultProps} />);
+    expect(lastFrame()).toContain('/model to change');
+  });
 
   it('displays working directory', () => {
     const { lastFrame } = render(<Header {...defaultProps} />);

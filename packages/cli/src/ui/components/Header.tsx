@@ -10,7 +10,7 @@ import Gradient from 'ink-gradient';
 import { shortenPath, tildeifyPath } from '@qwen-code/qwen-code-core';
 import { theme } from '../semantic-colors.js';
 import { shortAsciiLogo } from './AsciiArt.js';
-import { getAsciiArtWidth } from '../utils/textUtils.js';
+import { getAsciiArtWidth, getCachedStringWidth } from '../utils/textUtils.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
 /**
@@ -36,7 +36,7 @@ export const Header: React.FC<HeaderProps> = ({
   customAsciiArt,
   version,
   // authDisplayType,
-  // model,
+  model,
   workingDirectory,
 }) => {
   const { columns: terminalWidth } = useTerminalSize();
@@ -77,16 +77,15 @@ export const Header: React.FC<HeaderProps> = ({
     availableInfoPanelWidth - infoPanelChromeWidth,
   );
 
-  // const infoPanelContentWidth = Math.max(
-  //   0,
-  //   availableInfoPanelWidth - infoPanelChromeWidth,
-  // );
-  // const authModelText = `${formattedAuthType} | ${model}`;
-  // const modelHintText = ' (/model to change)';
-  // const showModelHint =
-  //   infoPanelContentWidth > 0 &&
-  //   getCachedStringWidth(authModelText + modelHintText) <=
-  //     infoPanelContentWidth;
+  const infoPanelContentWidth = Math.max(
+    0,
+    availableInfoPanelWidth - infoPanelChromeWidth,
+  );
+  const modelText = `Model: ${model}`;
+  const modelHintText = ' (/model to change)';
+  const showModelHint =
+    infoPanelContentWidth > 0 &&
+    getCachedStringWidth(modelText + modelHintText) <= infoPanelContentWidth;
 
   // Now shorten the path to fit the available space
   const tildeifiedPath = tildeifyPath(workingDirectory);
@@ -145,13 +144,13 @@ export const Header: React.FC<HeaderProps> = ({
         <Text color={theme.text.secondary}>
           Built-in DataWorks Official Skills
         </Text>
-        {/* Auth and Model line */}
-        {/* <Text>
-          <Text color={theme.text.secondary}>{authModelText}</Text>
+        {/* Model line */}
+        <Text>
+          <Text color={theme.text.secondary}>{modelText}</Text>
           {showModelHint && (
             <Text color={theme.text.secondary}>{modelHintText}</Text>
           )}
-        </Text> */}
+        </Text>
         {/* Directory line */}
         <Text color={theme.text.secondary}>{displayPath}</Text>
       </Box>
