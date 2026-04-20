@@ -83,10 +83,15 @@ export function themeFromOscColor(data: string): DetectedTheme | undefined {
  * Sends an OSC 11 query (`ESC ] 11 ; ? BEL`) to the terminal and waits
  * for the response containing the background colour.
  *
- * Returns `undefined` when:
- *   - stdin/stdout is not a TTY (piped, non-interactive)
- *   - the terminal does not respond within {@link OSC11_TIMEOUT_MS}
- *   - raw-mode cannot be enabled
+ * The caller is responsible for having stdin in raw mode with an active
+ * consumer (so the stream is in flowing mode). This probe only attaches
+ * an extra listener to parse the OSC 11 response — it does NOT flip raw
+ * mode or resume/pause stdin, because doing so interleaves with other
+ * early-startup stdin consumers (kitty protocol detection, early input
+ * capture) and causes terminal response bytes to leak into the TUI.
+ *
+ * Returns `undefined` when stdin/stdout is not a TTY or when no response
+ * arrives within {@link OSC11_TIMEOUT_MS}.
  */
 export function detectOsc11Theme(): Promise<DetectedTheme | undefined> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
@@ -95,34 +100,14 @@ export function detectOsc11Theme(): Promise<DetectedTheme | undefined> {
 
   return new Promise<DetectedTheme | undefined>((resolve) => {
     const stdin = process.stdin;
-    let wasRaw: boolean;
     let resolved = false;
     let buffer = '';
-
-    try {
-      wasRaw = stdin.isRaw;
-      stdin.setRawMode(true);
-    } catch {
-      resolve(undefined);
-      return;
-    }
 
     const finish = (result: DetectedTheme | undefined) => {
       if (resolved) return;
       resolved = true;
       clearTimeout(timer);
       stdin.removeListener('data', onData);
-      try {
-        stdin.setRawMode(wasRaw);
-      } catch {
-        /* ignore */
-      }
-      // At startup stdin is paused + non-raw.  We called resume() above, so
-      // pause it again to stop the stream from keeping the event loop alive.
-      // When wasRaw is true another consumer is already managing stdin.
-      if (!wasRaw) {
-        stdin.pause();
-      }
       resolve(result);
     };
 
@@ -139,7 +124,6 @@ export function detectOsc11Theme(): Promise<DetectedTheme | undefined> {
     };
 
     stdin.on('data', onData);
-    stdin.resume();
     process.stdout.write('\x1b]11;?\x07');
   });
 }

@@ -338,15 +338,11 @@ export async function main() {
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
-  } else if (!configuredTheme) {
-    // Unset theme: auto-detect synchronously (COLORFGBG + macOS) so fresh
-    // installs match the terminal without running the OSC 11 probe — the
-    // probe manipulates stdin raw mode and can interleave with kitty
-    // protocol detection, leaking characters into the input box. Users on
-    // terminals that need OSC 11 (e.g., GNOME Terminal) should set
-    // ui.theme to 'auto' explicitly to opt into the async path.
-    themeManager.setActiveTheme(AUTO_THEME_NAME);
   }
+  // When configuredTheme is 'auto' or unset, the theme is resolved later
+  // inside the interactive block so the OSC 11 probe can run alongside
+  // early input capture (its filter absorbs the response bytes that would
+  // otherwise leak into the TUI input).
 
   // hop into sandbox if we are outside and sandboxing is enabled
   if (!process.env['SANDBOX']) {
@@ -462,14 +458,6 @@ export async function main() {
   // may have side effects.
   profileCheckpoint('after_sandbox_check');
 
-  // Async auto-detect (OSC 11 probe) runs only when the user explicitly
-  // opts in via ui.theme = 'auto'. Placed after the sandbox-check gate so
-  // the ~200ms probe does not block a process that is about to exec into
-  // the sandbox child.
-  if (configuredTheme === AUTO_THEME_NAME) {
-    await themeManager.resolveAutoThemeAsync();
-  }
-
   // Initialize output language file before config loads to ensure it's included in context
   if (!isBareMode(argv.bare)) {
     initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
@@ -524,6 +512,16 @@ export async function main() {
 
       // Detect and enable Kitty keyboard protocol once at startup.
       kittyProtocolDetectionComplete = detectAndEnableKittyProtocol();
+
+      // Auto-detect theme (OSC 11 + COLORFGBG + macOS) when the user has
+      // opted into 'auto' or has not configured a theme at all. Running
+      // this inside the early-capture window is deliberate: the filter in
+      // startEarlyInputCapture absorbs the OSC 11 response bytes so they
+      // cannot leak into the TUI input, even though our probe attaches
+      // its own listener to parse the RGB value.
+      if (!configuredTheme || configuredTheme === AUTO_THEME_NAME) {
+        await themeManager.resolveAutoThemeAsync();
+      }
     }
 
     setMaxSizedBoxDebugging(isDebugMode);
