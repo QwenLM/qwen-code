@@ -16,6 +16,7 @@ import {
 } from './shared/index.js';
 import type { BaseToolCallProps } from './shared/index.js';
 import { getToolDisplayLabel } from './labelUtils.js';
+import { MarkdownRenderer } from '../messages/MarkdownRenderer/MarkdownRenderer.js';
 
 type WebVariant = 'fetch' | 'search';
 
@@ -70,7 +71,9 @@ const OutputCard: FC<{
             OUT
           </div>
           <div
-            className={`whitespace-pre-wrap break-words m-0 p-1 overflow-hidden ${
+            className={`break-words m-0 p-1 overflow-hidden ${
+              isError ? 'whitespace-pre-wrap' : ''
+            } ${
               !isExpanded && isLongContent
                 ? `max-h-[${COLLAPSED_HEIGHT}px] [mask-image:linear-gradient(to_bottom,var(--app-primary-background)_80px,transparent_${COLLAPSED_HEIGHT}px)]`
                 : ''
@@ -81,13 +84,15 @@ const OutputCard: FC<{
                 : undefined
             }
           >
-            <pre
-              className={`m-0 overflow-hidden font-mono text-[0.85em] ${
-                isError ? 'text-[#c74e39]' : ''
-              }`}
-            >
-              {content}
-            </pre>
+            {isError ? (
+              <pre className="m-0 overflow-hidden font-mono text-[0.85em] text-[#c74e39]">
+                {content}
+              </pre>
+            ) : (
+              <div className="text-[0.85em]">
+                <MarkdownRenderer content={content} />
+              </div>
+            )}
           </div>
         </div>
 
