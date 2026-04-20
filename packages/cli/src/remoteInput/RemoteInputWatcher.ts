@@ -11,17 +11,21 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 const debugLogger = createDebugLogger('REMOTE_INPUT');
 
 /**
- * JSONL command format written by external processes (e.g. OpenCode ChatUI).
+ * JSONL command shapes written by an external process (IDE extension,
+ * web frontend, automation script) into the file passed to --input-file.
+ *
+ * - `submit`: enqueue a user message that the TUI processes as if typed
+ *   into the prompt.
+ * - `confirmation_response`: reply to a pending tool-permission
+ *   `control_request` previously emitted on the dual-output channel.
  */
-// [CUSTOM] Changed from interface to type union to support confirmation_response
 export type RemoteInputCommand =
   | { type: 'submit'; text: string }
   | { type: 'confirmation_response'; request_id: string; allowed: boolean };
 
 /**
- * Callback for handling external tool confirmation responses.
+ * Callback invoked when a `confirmation_response` command is read.
  */
-// [CUSTOM] Added for dual-output confirmation bridging
 export type ConfirmationHandler = (requestId: string, allowed: boolean) => void;
 
 /**
@@ -42,17 +46,19 @@ export type SubmitFn = (
  */
 export class RemoteInputWatcher {
   private submitFn: SubmitFn | null = null;
-  // [CUSTOM] Handler for external tool confirmation responses
   private confirmationHandler: ConfirmationHandler | null = null;
   private queue: Array<Extract<RemoteInputCommand, { type: 'submit' }>> = [];
   private processing = false;
   private active = true;
   private bytesRead = 0;
+  private reading = false;
   private filePath: string;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly pollIntervalMs: number;
 
-  constructor(filePath: string) {
+  constructor(filePath: string, options?: { pollIntervalMs?: number }) {
     this.filePath = filePath;
+    this.pollIntervalMs = options?.pollIntervalMs ?? 500;
     this.startWatching();
   }
 
@@ -65,7 +71,11 @@ export class RemoteInputWatcher {
     this.processQueue();
   }
 
-  // [CUSTOM] Register handler for external tool confirmation responses
+  /**
+   * Register the handler invoked when a `confirmation_response` command is
+   * read from the input file. Used to bridge external approvals back into
+   * the tool's `onConfirm` callback.
+   */
   setConfirmationHandler(fn: ConfirmationHandler): void {
     this.confirmationHandler = fn;
   }
@@ -89,7 +99,7 @@ export class RemoteInputWatcher {
       this.bytesRead = 0;
     }
 
-    watchFile(this.filePath, { interval: 500 }, () => {
+    watchFile(this.filePath, { interval: this.pollIntervalMs }, () => {
       if (!this.active) return;
       this.readNewLines();
     });
@@ -97,17 +107,30 @@ export class RemoteInputWatcher {
     debugLogger.debug(`RemoteInput: watching ${this.filePath}`);
   }
 
-  private readNewLines(): void {
+  /**
+   * Manually trigger a check for new input. Returns a promise that resolves
+   * once any new lines have been read and processed. In production the
+   * `watchFile` poll calls this automatically; tests can call it directly
+   * to avoid depending on filesystem-polling timing.
+   */
+  checkForNewInput(): Promise<void> {
+    return this.readNewLines();
+  }
+
+  private readNewLines(): Promise<void> {
+    if (!this.active || this.reading) return Promise.resolve();
+
     let currentSize: number;
     try {
       const stat = statSync(this.filePath);
       currentSize = stat.size;
     } catch {
-      return;
+      return Promise.resolve();
     }
 
-    if (currentSize <= this.bytesRead) return;
+    if (currentSize <= this.bytesRead) return Promise.resolve();
 
+    this.reading = true;
     const stream = createReadStream(this.filePath, {
       start: this.bytesRead,
       encoding: 'utf-8',
@@ -119,7 +142,9 @@ export class RemoteInputWatcher {
       if (!trimmed) return;
       try {
         const cmd = JSON.parse(trimmed);
-        // [CUSTOM] Handle confirmation_response immediately (not queued)
+        // confirmation_response is dispatched immediately rather than queued:
+        // a pending tool call is blocking and the response must reach
+        // onConfirm without waiting for any earlier `submit` to finish.
         if (
           cmd &&
           cmd.type === 'confirmation_response' &&
@@ -151,9 +176,13 @@ export class RemoteInputWatcher {
       }
     });
 
-    rl.on('close', () => {
-      this.bytesRead = currentSize;
-      this.processQueue();
+    return new Promise<void>((resolve) => {
+      rl.on('close', () => {
+        this.bytesRead = currentSize;
+        this.reading = false;
+        this.processQueue();
+        resolve();
+      });
     });
   }
 

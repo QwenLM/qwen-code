@@ -871,7 +871,7 @@ export const AppContainer = (props: AppContainerProps) => {
         confirmRequestMap.current.set(requestId, tc.request.callId);
         confirmCallIdMap.current.set(tc.request.callId, requestId);
         confirmEmitted.current.add(tc.request.callId);
-        dualOutput.emitControlRequest(
+        dualOutput.emitPermissionRequest(
           requestId,
           tc.request.name,
           tc.request.callId,
@@ -932,14 +932,6 @@ export const AppContainer = (props: AppContainerProps) => {
       remoteInput.setConfirmationHandler(() => {});
     };
   }, [remoteInput, pendingToolCalls]);
-
-  useEffect(() => {
-    if (!dualOutput) return;
-    dualOutput.emitSystemMessage('session_start', {
-      session_id: sessionStats.sessionId,
-      cwd: process.cwd(),
-    });
-  }, [dualOutput, sessionStats.sessionId]);
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it

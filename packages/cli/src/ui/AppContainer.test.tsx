@@ -758,9 +758,8 @@ describe('AppContainer State Management', () => {
       };
       const dualOutput = {
         isConnected: true,
-        emitControlRequest: vi.fn(),
+        emitPermissionRequest: vi.fn(),
         emitControlResponse: vi.fn(),
-        emitSystemMessage: vi.fn(),
       };
 
       mockedUseGeminiStream.mockReturnValue({
@@ -799,15 +798,9 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      expect(dualOutput.emitControlRequest).toHaveBeenCalledTimes(1);
+      expect(dualOutput.emitPermissionRequest).toHaveBeenCalledTimes(1);
       expect(remoteInput.setConfirmationHandler).toHaveBeenCalledWith(
         expect.any(Function),
-      );
-      expect(dualOutput.emitSystemMessage).toHaveBeenCalledWith(
-        'session_start',
-        expect.objectContaining({
-          session_id: 'session-123',
-        }),
       );
     });
   });
