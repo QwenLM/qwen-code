@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import * as os from 'os';
-
+import { ChildProcess } from 'node:child_process';
 import open from 'open';
 import { EventEmitter } from 'events';
 import type { Config } from '../config/config.js';
@@ -717,7 +717,7 @@ async function authWithQwenDeviceFlow(
 
   // Helper to handle browser launch with error handling
   const launchBrowser = async (url: string): Promise<void> => {
-    let childProcess: any;
+    let childProcess: ChildProcess | undefined;
 
     try {
       // Call open and get the process
