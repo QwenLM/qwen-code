@@ -8,7 +8,7 @@ import { useEffect, useRef } from 'react';
 import { generateSessionRecap, type Config } from '@qwen-code/qwen-code-core';
 import type { HistoryItemAwayRecap } from '../types.js';
 
-const AWAY_THRESHOLD_MS = 5 * 60 * 1000;
+const DEFAULT_AWAY_THRESHOLD_MINUTES = 5;
 
 export interface UseAwaySummaryOptions {
   enabled: boolean;
@@ -16,6 +16,12 @@ export interface UseAwaySummaryOptions {
   isFocused: boolean;
   isIdle: boolean;
   setAwayRecapItem: (item: HistoryItemAwayRecap | null) => void;
+  /**
+   * Minutes the terminal must be blurred before an auto-recap fires on
+   * the next focus-in. Falsy / non-positive values fall back to the
+   * 5-minute default (matching Claude Code).
+   */
+  awayThresholdMinutes?: number;
 }
 
 /**
@@ -27,7 +33,14 @@ export interface UseAwaySummaryOptions {
  * a single back-and-forth produces at most one recap.
  */
 export function useAwaySummary(options: UseAwaySummaryOptions): void {
-  const { enabled, config, isFocused, isIdle, setAwayRecapItem } = options;
+  const {
+    enabled,
+    config,
+    isFocused,
+    isIdle,
+    setAwayRecapItem,
+    awayThresholdMinutes,
+  } = options;
 
   const blurredAtRef = useRef<number | null>(null);
   const recapPendingRef = useRef(false);
@@ -35,6 +48,13 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
 
   const isIdleRef = useRef(isIdle);
   isIdleRef.current = isIdle;
+
+  const thresholdMs =
+    (awayThresholdMinutes && awayThresholdMinutes > 0
+      ? awayThresholdMinutes
+      : DEFAULT_AWAY_THRESHOLD_MINUTES) *
+    60 *
+    1000;
 
   useEffect(() => {
     if (!enabled || !config) {
@@ -54,7 +74,7 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
     const blurredAt = blurredAtRef.current;
     if (blurredAt === null) return;
 
-    if (Date.now() - blurredAt < AWAY_THRESHOLD_MS) {
+    if (Date.now() - blurredAt < thresholdMs) {
       // Brief blur; reset and wait for the next away cycle.
       blurredAtRef.current = null;
       return;
@@ -86,7 +106,7 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
         }
         recapPendingRef.current = false;
       });
-  }, [enabled, config, isFocused, isIdle, setAwayRecapItem]);
+  }, [enabled, config, isFocused, isIdle, setAwayRecapItem, thresholdMs]);
 
   useEffect(
     () => () => {

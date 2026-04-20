@@ -205,10 +205,11 @@ and a null `pendingItem`.
 
 ### User-facing knobs
 
-| Setting                    | Default | Notes                                                             |
-| -------------------------- | ------- | ----------------------------------------------------------------- |
-| `general.showSessionRecap` | `false` | Auto-trigger only. Manual `/recap` ignores this.                  |
-| `fastModel`                | unset   | Recommended (e.g. `qwen3-coder-flash`) for fast and cheap recaps. |
+| Setting                                    | Default | Notes                                                                               |
+| ------------------------------------------ | ------- | ----------------------------------------------------------------------------------- |
+| `general.showSessionRecap`                 | `false` | Auto-trigger only. Manual `/recap` ignores this.                                    |
+| `general.sessionRecapAwayThresholdMinutes` | `5`     | Minutes blurred before auto-recap fires on focus-in. Matches Claude Code's default. |
+| `fastModel`                                | unset   | Recommended (e.g. `qwen3-coder-flash`) for fast and cheap recaps.                   |
 
 ### Model fallback
 

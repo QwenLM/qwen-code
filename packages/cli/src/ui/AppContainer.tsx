@@ -1282,6 +1282,8 @@ export const AppContainer = (props: AppContainerProps) => {
     isFocused,
     isIdle: streamingState === StreamingState.Idle,
     setAwayRecapItem,
+    awayThresholdMinutes:
+      settings.merged.general?.sessionRecapAwayThresholdMinutes,
   });
 
   // Context file names computation
