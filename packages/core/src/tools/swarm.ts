@@ -27,6 +27,9 @@ const DEFAULT_MAX_TURNS = 8;
 const DEFAULT_WORKER_NAME = 'swarm-worker';
 const DEFAULT_WORKER_DISALLOWED_TOOLS: readonly string[] = [
   ToolNames.ASK_USER_QUESTION,
+  ToolNames.AGENT,
+  ToolNames.SKILL,
+  ToolNames.SWARM,
 ];
 
 const DEFAULT_WORKER_SYSTEM_PROMPT = `You are a lightweight swarm worker.

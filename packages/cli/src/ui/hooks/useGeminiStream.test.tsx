@@ -17,6 +17,7 @@ import type {
   TrackedToolCall,
   TrackedCompletedToolCall,
   TrackedExecutingToolCall,
+  TrackedScheduledToolCall,
   TrackedCancelledToolCall,
   TrackedWaitingToolCall,
 } from './useReactToolScheduler.js';
@@ -521,7 +522,8 @@ describe('useGeminiStream', () => {
       const beforeToolExecution = mockUseReactToolScheduler.mock
         .calls[0][4] as (toolCall: TrackedToolCall) => Promise<void>;
 
-      await beforeToolExecution({
+      const toolCall: TrackedScheduledToolCall = {
+        status: 'scheduled',
         request: {
           callId: 'call-write-before-execute',
           name: 'write_file',
@@ -532,7 +534,18 @@ describe('useGeminiStream', () => {
           isClientInitiated: false,
           prompt_id: 'prompt-id-yolo',
         },
-      } as TrackedToolCall);
+        tool: {
+          name: 'write_file',
+          displayName: 'WriteFile',
+          description: 'Write file',
+          build: vi.fn(),
+        } as any,
+        invocation: {
+          getDescription: () => 'Write file',
+        } as unknown as AnyToolInvocation,
+      };
+
+      await beforeToolExecution(toolCall);
 
       const [checkpointName] = await fs.readdir(checkpointsDir);
       const checkpoint = JSON.parse(
@@ -2543,7 +2556,7 @@ describe('useGeminiStream', () => {
               type: ServerGeminiEventType.Retry,
             };
             yield {
-              type: ServerGeminiEventType.Text,
+              type: ServerGeminiEventType.Content,
               value: 'Success after retry',
             };
             yield {
@@ -2849,7 +2862,7 @@ describe('useGeminiStream', () => {
       mockSendMessageStream.mockReturnValueOnce(
         (async function* () {
           yield {
-            type: ServerGeminiEventType.Text,
+            type: ServerGeminiEventType.Content,
             value: 'Success response',
           };
         })(),

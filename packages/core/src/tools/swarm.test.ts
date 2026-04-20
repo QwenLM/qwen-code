@@ -188,6 +188,9 @@ describe('SwarmTool', () => {
     };
     expect(toolConfig.disallowedTools).toEqual([
       ToolNames.ASK_USER_QUESTION,
+      ToolNames.AGENT,
+      ToolNames.SKILL,
+      ToolNames.SWARM,
       ToolNames.SHELL,
     ]);
   });

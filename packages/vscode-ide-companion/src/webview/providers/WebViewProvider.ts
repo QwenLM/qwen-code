@@ -38,8 +38,7 @@ export class WebViewProvider {
   // a diff, auto-allow read/execute, or auto-reject on cancel).
   private pendingPermissionRequest: RequestPermissionRequest | null = null;
   private pendingPermissionResolve: ((optionId: string) => void) | null = null;
-  // Track a pending ask user question request and its resolver
-  private pendingAskUserQuestionRequest: AskUserQuestionRequest | null = null;
+  // Track a pending ask user question resolver
   private pendingAskUserQuestionResolve:
     | ((result: { optionId: string; answers?: Record<string, string> }) => void)
     | null = null;
@@ -63,7 +62,7 @@ export class WebViewProvider {
   private isReconnecting = false;
 
   constructor(
-    private context: vscode.ExtensionContext,
+    context: vscode.ExtensionContext,
     private extensionUri: vscode.Uri,
   ) {
     this.agentManager = new QwenAgentManager();
@@ -78,7 +77,6 @@ export class WebViewProvider {
       if (this.pendingAskUserQuestionResolve) {
         this.pendingAskUserQuestionResolve({ optionId: 'cancel' });
         this.pendingAskUserQuestionResolve = null;
-        this.pendingAskUserQuestionRequest = null;
       }
       // Disconnect the ACP agent process to prevent orphan processes
       this.agentManager.disconnect();
@@ -233,10 +231,14 @@ export class WebViewProvider {
       // If sessionUpdate is missing, infer from content:
       // - If has kind/title/rawInput, it's likely initial tool_call
       // - If only has status/content updates, it's tool_call_update
-      let messageType = updateData.sessionUpdate as string | undefined;
+      let messageType = updateData['sessionUpdate'] as string | undefined;
       if (!messageType) {
         // Infer type: if has kind or title, assume initial call; otherwise update
-        if (updateData.kind || updateData.title || updateData.rawInput) {
+        if (
+          updateData['kind'] ||
+          updateData['title'] ||
+          updateData['rawInput']
+        ) {
           messageType = 'tool_call';
         } else {
           messageType = 'tool_call_update';
@@ -411,14 +413,12 @@ export class WebViewProvider {
           optionId: string;
           answers?: Record<string, string>;
         }>((resolve) => {
-          // Cache the pending request and its resolver
-          this.pendingAskUserQuestionRequest = request;
+          // Cache the pending resolver
           this.pendingAskUserQuestionResolve = (result) => {
             try {
               resolve(result);
             } finally {
               // Always clear pending state
-              this.pendingAskUserQuestionRequest = null;
               this.pendingAskUserQuestionResolve = null;
               // Instruct the webview UI to close the dialog
               this.sendMessageToWebView({
@@ -1743,7 +1743,6 @@ export class WebViewProvider {
     if (this.pendingAskUserQuestionResolve) {
       this.pendingAskUserQuestionResolve({ optionId: 'cancel' });
       this.pendingAskUserQuestionResolve = null;
-      this.pendingAskUserQuestionRequest = null;
     }
     this.panelManager.dispose();
     this.agentManager.disconnect();
