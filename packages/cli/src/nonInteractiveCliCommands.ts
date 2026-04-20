@@ -216,6 +216,36 @@ export const handleSlashCommand = async (
         typeof cmd.description === 'string' ? cmd.description : cmd.description,
     })),
   );
+  // Register executor so SkillTool can invoke model-invocable commands
+  // (e.g. MCP prompts) that are not file-based skills.
+  config.setModelInvocableCommandsExecutor(
+    async (name: string, args: string = '') => {
+      const commands = commandService.getModelInvocableCommands();
+      const cmd = commands.find((c) => c.name === name);
+      if (!cmd?.action) return null;
+      const minimalContext = {
+        executionMode,
+        invocation: {
+          raw: args ? `/${name} ${args}` : `/${name}`,
+          name,
+          args,
+        },
+        services: { config, settings, git: undefined, logger: null },
+      } as unknown as CommandContext;
+      const result = await cmd.action(minimalContext, args);
+      if (!result || result.type !== 'submit_prompt') return null;
+      const content = result.content;
+      if (typeof content === 'string') return content;
+      if (Array.isArray(content)) {
+        return content
+          .map((p) =>
+            typeof p === 'string' ? p : ((p as { text?: string }).text ?? ''),
+          )
+          .join('');
+      }
+      return null;
+    },
+  );
   const allCommands = commandService.getCommands();
   const filteredCommands = commandService.getCommandsForMode(executionMode);
 

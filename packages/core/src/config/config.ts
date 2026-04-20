@@ -539,6 +539,9 @@ export class Config {
   private modelInvocableCommandsProvider:
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null = null;
+  private modelInvocableCommandsExecutor:
+    | ((name: string, args?: string) => Promise<string | null>)
+    | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -2336,6 +2339,27 @@ export class Config {
     | (() => ReadonlyArray<{ name: string; description: string }>)
     | null {
     return this.modelInvocableCommandsProvider;
+  }
+
+  /**
+   * Registers an executor that can invoke a model-invocable command by name
+   * (e.g., MCP prompts). Returns the prompt content as a string, or null if
+   * the command cannot be found or executed. Called by the CLI layer.
+   */
+  setModelInvocableCommandsExecutor(
+    executor: (name: string, args?: string) => Promise<string | null>,
+  ): void {
+    this.modelInvocableCommandsExecutor = executor;
+  }
+
+  /**
+   * Returns the registered model-invocable commands executor, or null if none
+   * has been registered (e.g., in SDK mode).
+   */
+  getModelInvocableCommandsExecutor():
+    | ((name: string, args?: string) => Promise<string | null>)
+    | null {
+    return this.modelInvocableCommandsExecutor;
   }
 
   getPermissionManager(): PermissionManager | null {

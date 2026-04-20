@@ -249,7 +249,6 @@ export const useSlashCommandProcessor = (
   );
   const commandContext = useMemo(
     (): CommandContext => ({
-      executionMode: 'interactive',
       services: {
         config,
         settings,
@@ -359,6 +358,40 @@ export const useSlashCommandProcessor = (
                   : cmd.description,
             })),
           );
+          // Register executor so SkillTool can actually invoke model-invocable
+          // commands (e.g. MCP prompts) that are not file-based skills.
+          config.setModelInvocableCommandsExecutor(
+            async (name: string, args: string = '') => {
+              const commands = commandService.getModelInvocableCommands();
+              const cmd = commands.find((c) => c.name === name);
+              if (!cmd?.action) return null;
+              // Build a minimal context; submit_prompt actions only need
+              // invocation + services.config, not UI state.
+              const minimalContext = {
+                executionMode: 'non_interactive' as const,
+                invocation: {
+                  raw: args ? `/${name} ${args}` : `/${name}`,
+                  name,
+                  args,
+                },
+                services: { config, settings, git: gitService, logger: null },
+              } as unknown as Parameters<typeof cmd.action>[0];
+              const result = await cmd.action(minimalContext, args);
+              if (!result || result.type !== 'submit_prompt') return null;
+              const content = result.content;
+              if (typeof content === 'string') return content;
+              if (Array.isArray(content)) {
+                return content
+                  .map((p) =>
+                    typeof p === 'string'
+                      ? p
+                      : ((p as { text?: string }).text ?? ''),
+                  )
+                  .join('');
+              }
+              return null;
+            },
+          );
         }
         // Avoid overwriting newer results from a subsequent effect run
         if (!controller.signal.aborted) {
@@ -374,7 +407,7 @@ export const useSlashCommandProcessor = (
     return () => {
       controller.abort();
     };
-  }, [config, reloadTrigger, isConfigInitialized]);
+  }, [config, reloadTrigger, isConfigInitialized, settings, gitService]);
 
   const handleSlashCommand = useCallback(
     async (

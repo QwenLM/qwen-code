@@ -12,6 +12,7 @@ import type {
 } from '@google/genai';
 import type {
   Config,
+  GeminiChat,
   ToolCallConfirmationDetails,
   ToolResult,
   ChatRecord,
@@ -581,12 +582,12 @@ export class Session implements SessionContext {
       // Get response text from the chat history
       const history = chat.getHistory();
       const lastModelMessage = history
-        .filter((msg) => msg.role === 'model')
+        .filter((msg: Content) => msg.role === 'model')
         .pop();
       const responseText =
         lastModelMessage?.parts
-          ?.filter((p): p is { text: string } => 'text' in p)
-          .map((p) => p.text)
+          ?.filter((p: Part): p is { text: string } & Part => 'text' in p)
+          .map((p: { text: string }) => p.text)
           .join('') || '[no response text]';
 
       const response = await messageBus.request<

@@ -77,6 +77,7 @@ describe('SkillTool', () => {
       getSkillManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
+      getModelInvocableCommandsExecutor: vi.fn().mockReturnValue(null),
     } as unknown as Config;
 
     changeListeners = [];
@@ -432,6 +433,162 @@ describe('SkillTool', () => {
       expect(result.returnDisplay).toBe(
         'Specialized skill for reviewing code quality',
       );
+    });
+  });
+
+  describe('modelInvocableCommands integration', () => {
+    const mockCommands = [
+      { name: 'review', description: 'Bundled code review skill' },
+      { name: 'mcp-prompt-a', description: 'An MCP prompt' },
+    ];
+
+    it('should show non-skill commands in <available_skills> section', async () => {
+      // 'review' and 'mcp-prompt-a' don't overlap with file skills
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => mockCommands,
+      );
+
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).not.toContain('<available_commands>');
+      expect(tool.description).toContain('<available_skills>');
+      expect(tool.description).toContain('review');
+      expect(tool.description).toContain('mcp-prompt-a');
+    });
+
+    it('should not duplicate commands already present as file-based skills', async () => {
+      // 'code-review' matches a skill in mockSkills → should be filtered out
+      const commandsIncludingSkill = [
+        { name: 'code-review', description: 'Bundled version of code-review' },
+        { name: 'mcp-prompt-a', description: 'An MCP prompt' },
+      ];
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => commandsIncludingSkill,
+      );
+
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      // 'code-review' is already in <available_skills> as a file skill, must NOT appear twice
+      const codeReviewMatches = (tool.description.match(/code-review/g) || [])
+        .length;
+      expect(codeReviewMatches).toBe(1);
+      // 'mcp-prompt-a' is not a file-based skill, must appear in the unified list
+      expect(tool.description).toContain('mcp-prompt-a');
+    });
+
+    it('should hide <available_commands> when all commands are already covered by skills', async () => {
+      // Both command names match existing skills
+      const commandsAllOverlapping = [
+        { name: 'code-review', description: 'Bundled code-review' },
+        { name: 'testing', description: 'Bundled testing' },
+      ];
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => commandsAllOverlapping,
+      );
+
+      const tool = new SkillTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).not.toContain('<available_commands>');
+      // All commands overlapped with file skills, so no extra entries added
+      expect(tool.description).toContain('<available_skills>');
+    });
+  });
+
+  describe('validateToolParams with modelInvocableCommands', () => {
+    beforeEach(async () => {
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [{ name: 'mcp-prompt-a', description: 'An MCP prompt' }],
+      );
+      await skillTool.refreshSkills();
+    });
+
+    it('should accept a model-invocable command name that is not a file skill', () => {
+      const result = skillTool.validateToolParams({ skill: 'mcp-prompt-a' });
+      expect(result).toBeNull();
+    });
+
+    it('should reject a name not in skills or commands, listing both in error', () => {
+      const result = skillTool.validateToolParams({ skill: 'unknown' });
+      expect(result).toContain('"unknown" not found');
+      expect(result).toContain('code-review');
+      expect(result).toContain('mcp-prompt-a');
+    });
+  });
+
+  describe('commandExecutor fallback in execute()', () => {
+    beforeEach(async () => {
+      // Expose an MCP-only command that has no file-based skill
+      vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
+        () => [{ name: 'mcp-prompt-a', description: 'An MCP prompt' }],
+      );
+      await skillTool.refreshSkills();
+    });
+
+    it('should invoke commandExecutor when loadSkillForRuntime returns null', async () => {
+      const executor = vi.fn().mockResolvedValue('Prompt content from MCP');
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      const result = await invocation.execute();
+
+      expect(executor).toHaveBeenCalledWith('mcp-prompt-a');
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('Prompt content from MCP');
+      expect(result.returnDisplay).toBe('Executed command: mcp-prompt-a');
+    });
+
+    it('should fall through to not-found error when executor returns null', async () => {
+      const executor = vi.fn().mockResolvedValue(null);
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('"mcp-prompt-a" not found');
+    });
+
+    it('should skip commandExecutor when no executor is registered', async () => {
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(null);
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(null);
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'mcp-prompt-a' });
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('"mcp-prompt-a" not found');
+    });
+
+    it('should use loadSkillForRuntime first and skip executor when skill is found', async () => {
+      const executor = vi.fn().mockResolvedValue('Should not be called');
+      vi.mocked(config.getModelInvocableCommandsExecutor).mockReturnValue(
+        executor,
+      );
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockSkills[0],
+      );
+
+      const invocation = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await invocation.execute();
+
+      expect(executor).not.toHaveBeenCalled();
     });
   });
 
