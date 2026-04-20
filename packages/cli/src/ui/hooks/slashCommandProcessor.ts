@@ -353,11 +353,9 @@ export const useSlashCommandProcessor = (
           new BundledSkillLoader(config),
           new FileCommandLoader(config),
         ];
-        const disabled = config?.getDisabledSlashCommands() ?? [];
         const commandService = await CommandService.create(
           loaders,
           controller.signal,
-          disabled.length > 0 ? new Set(disabled) : undefined,
         );
         // Register model-invocable commands provider so SkillTool can include
         // bundled skills, file commands, and MCP prompts in its description.
