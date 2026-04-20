@@ -338,11 +338,15 @@ export async function main() {
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
       writeStderrLine(`Warning: Theme "${configuredTheme}" not found.`);
     }
+  } else {
+    // 'auto' or unset: resolve a synchronous baseline (COLORFGBG + macOS)
+    // so non-interactive runs and any pre-render UI (e.g. the --resume
+    // session picker) already have a sensible theme. The interactive
+    // startup block refines this with an OSC 11 probe later on, which is
+    // intentionally deferred to run inside the early-capture window so
+    // terminal response bytes cannot leak into the TUI input.
+    themeManager.setActiveTheme(AUTO_THEME_NAME);
   }
-  // When configuredTheme is 'auto' or unset, the theme is resolved later
-  // inside the interactive block so the OSC 11 probe can run alongside
-  // early input capture (its filter absorbs the response bytes that would
-  // otherwise leak into the TUI input).
 
   // hop into sandbox if we are outside and sandboxing is enabled
   if (!process.env['SANDBOX']) {
