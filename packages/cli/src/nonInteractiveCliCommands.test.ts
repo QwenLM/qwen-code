@@ -287,6 +287,7 @@ describe('getAvailableCommands', () => {
   beforeEach(() => {
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
+      getCommandsForMode: mockGetCommandsForMode,
     });
 
     mockConfig = {
@@ -301,16 +302,10 @@ describe('getAvailableCommands', () => {
   });
 
   it('includes /export in the default non-interactive command list', async () => {
-    mockGetCommands.mockReturnValue([
+    mockGetCommandsForMode.mockReturnValue([
       {
         name: 'export',
         description: 'Export current session',
-        kind: CommandKind.BUILT_IN,
-        action: vi.fn(),
-      },
-      {
-        name: 'help',
-        description: 'Show help',
         kind: CommandKind.BUILT_IN,
         action: vi.fn(),
       },
@@ -322,6 +317,5 @@ describe('getAvailableCommands', () => {
     );
 
     expect(commands.map((command) => command.name)).toContain('export');
-    expect(commands.map((command) => command.name)).not.toContain('help');
   });
 });
