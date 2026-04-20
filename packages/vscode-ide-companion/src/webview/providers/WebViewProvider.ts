@@ -498,6 +498,11 @@ export class WebViewProvider {
           this.handleWebviewReady();
           return;
         }
+        if (message.type === 'copyToClipboard') {
+          const { text } = message.data as { text: string };
+          await vscode.env.clipboard.writeText(text);
+          return;
+        }
         if (message.type === 'resolveImagePaths') {
           this.handleResolveImagePaths(message.data, webview);
           return;
@@ -655,6 +660,11 @@ export class WebViewProvider {
         }
         if (message.type === 'webviewReady') {
           this.handleWebviewReady();
+          return;
+        }
+        if (message.type === 'copyToClipboard') {
+          const { text } = message.data as { text: string };
+          await vscode.env.clipboard.writeText(text);
           return;
         }
         if (message.type === 'resolveImagePaths') {
@@ -1309,6 +1319,17 @@ export class WebViewProvider {
   }
 
   /**
+   * Send a copy command to the webview (triggered by native context menu).
+   * The webview resolves the content and posts back a 'copyToClipboard' message.
+   */
+  sendCopyCommand(action: string): boolean {
+    const webview = this.getActiveWebview();
+    if (!webview) return false;
+    webview.postMessage({ type: 'copyCommand', data: { action } });
+    return true;
+  }
+
+  /**
    * Send message to WebView
    */
   private sendMessageToWebView(message: unknown): void {
@@ -1492,6 +1513,11 @@ export class WebViewProvider {
         }
         if (message.type === 'webviewReady') {
           this.handleWebviewReady();
+          return;
+        }
+        if (message.type === 'copyToClipboard') {
+          const { text } = message.data as { text: string };
+          await vscode.env.clipboard.writeText(text);
           return;
         }
         if (message.type === 'resolveImagePaths') {

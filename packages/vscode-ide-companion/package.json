@@ -125,6 +125,18 @@
       {
         "command": "qwen-code.showLogs",
         "title": "Qwen Code: Show Logs"
+      },
+      {
+        "command": "qwen-code.copyMessage",
+        "title": "%qwen-code.copyMessage.title%"
+      },
+      {
+        "command": "qwen-code.copyAllMessages",
+        "title": "%qwen-code.copyAllMessages.title%"
+      },
+      {
+        "command": "qwen-code.copyLastReply",
+        "title": "%qwen-code.copyLastReply.title%"
       }
     ],
     "menus": {
@@ -140,6 +152,35 @@
         {
           "command": "qwen-code.login",
           "when": "false"
+        },
+        {
+          "command": "qwen-code.copyMessage",
+          "when": "false"
+        },
+        {
+          "command": "qwen-code.copyAllMessages",
+          "when": "false"
+        },
+        {
+          "command": "qwen-code.copyLastReply",
+          "when": "false"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "qwen-code.copyMessage",
+          "when": "webviewSection == 'chat-messages'",
+          "group": "9_cutcopypaste@1"
+        },
+        {
+          "command": "qwen-code.copyAllMessages",
+          "when": "webviewSection == 'chat-messages'",
+          "group": "9_cutcopypaste@2"
+        },
+        {
+          "command": "qwen-code.copyLastReply",
+          "when": "webviewSection == 'chat-messages'",
+          "group": "9_cutcopypaste@3"
         }
       ],
       "editor/title": [

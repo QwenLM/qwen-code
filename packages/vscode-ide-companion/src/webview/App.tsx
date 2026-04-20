@@ -812,6 +812,144 @@ export const App: React.FC = () => {
 
   console.log('[App] Rendering messages:', allMessages);
 
+  // Format a tool call's content for clipboard copy
+  const formatToolCallForCopy = useCallback((tc: ToolCallData): string => {
+    const parts: string[] = [];
+    if (tc.content) {
+      for (const c of tc.content) {
+        if (c.type === 'content' && c.content?.text) {
+          parts.push(c.content.text);
+        } else if (c.type === 'diff') {
+          const filePath = c.path || '';
+          if (c.oldText) {
+            // Edit: unified diff format
+            const oldLines = c.oldText
+              .split('\n')
+              .map((l) => `-${l}`)
+              .join('\n');
+            const newLines = (c.newText || '')
+              .split('\n')
+              .map((l) => `+${l}`)
+              .join('\n');
+            parts.push(
+              `\`\`\`diff\n--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}\n\`\`\``,
+            );
+          } else {
+            // Write: show new content in code block
+            parts.push(`${filePath}:\n\`\`\`\n${c.newText || ''}\n\`\`\``);
+          }
+        }
+      }
+    }
+    return parts.join('\n\n');
+  }, []);
+
+  // Track the right-click target so we can identify which message was clicked
+  const contextMenuTargetRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    const trackTarget = (e: MouseEvent) => {
+      contextMenuTargetRef.current = e.target as HTMLElement;
+    };
+    document.addEventListener('contextmenu', trackTarget, true);
+    return () => document.removeEventListener('contextmenu', trackTarget, true);
+  }, []);
+
+  // Stamp data-msg-idx on each rendered message element after render.
+  // renderMessages() returns exactly allMessages.length elements as the first N children of the container.
+  useLayoutEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const children = container.children;
+    const count = Math.min(children.length, allMessages.length);
+    for (let i = 0; i < count; i++) {
+      (children[i] as HTMLElement).setAttribute('data-msg-idx', String(i));
+    }
+  }, [allMessages]);
+
+  // Copy text via the extension host's clipboard API (more reliable than navigator.clipboard in webview)
+  const copyToClipboard = useCallback(
+    (text: string) => {
+      vscode.postMessage({ type: 'copyToClipboard', data: { text } });
+    },
+    [vscode],
+  );
+
+  // Handle copy commands from VSCode native context menu
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      const message = event.data;
+      if (message?.type !== 'copyCommand') return;
+
+      const { action } = message.data as { action: string };
+
+      if (action === 'copyMessage') {
+        const target = contextMenuTargetRef.current;
+        if (target) {
+          const msgEl = target.closest('[data-msg-idx]') as HTMLElement | null;
+          if (msgEl) {
+            const idx = parseInt(
+              msgEl.getAttribute('data-msg-idx') || '-1',
+              10,
+            );
+            if (idx >= 0 && idx < allMessages.length) {
+              const item = allMessages[idx];
+              if (item.type === 'message') {
+                const msg = item.data as TextMessage;
+                copyToClipboard(msg.content || '');
+              } else if (
+                item.type === 'completed-tool-call' ||
+                item.type === 'in-progress-tool-call'
+              ) {
+                copyToClipboard(
+                  formatToolCallForCopy(item.data as ToolCallData),
+                );
+              }
+            }
+          }
+        }
+      } else if (action === 'copyAllMessages') {
+        const parts: string[] = [];
+        for (const item of allMessages) {
+          if (item.type === 'message') {
+            const msg = item.data as TextMessage;
+            if (msg.role === 'user') {
+              parts.push(`**User:** ${msg.content || ''}`);
+            } else if (msg.role === 'thinking') {
+              parts.push(`**Thinking:** ${msg.content || ''}`);
+            } else {
+              parts.push(`**Qwen Code:** ${msg.content || ''}`);
+            }
+          } else if (
+            item.type === 'completed-tool-call' ||
+            item.type === 'in-progress-tool-call'
+          ) {
+            const text = formatToolCallForCopy(item.data as ToolCallData);
+            if (text) {
+              parts.push(
+                `**[Tool: ${(item.data as ToolCallData).kind}]**\n\n${text}`,
+              );
+            }
+          }
+        }
+        copyToClipboard(parts.join('\n\n---\n\n'));
+      } else if (action === 'copyLastReply') {
+        for (let i = allMessages.length - 1; i >= 0; i--) {
+          const item = allMessages[i];
+          if (item.type === 'message') {
+            const msg = item.data as TextMessage;
+            if (msg.role === 'assistant') {
+              copyToClipboard(msg.content || '');
+              return;
+            }
+          }
+        }
+      }
+    };
+
+    window.addEventListener('message', handler);
+    return () => window.removeEventListener('message', handler);
+  }, [allMessages, copyToClipboard, formatToolCallForCopy]);
+
   // Render all messages and tool calls
   const renderMessages = useCallback<() => React.ReactNode>(() => {
     let imageIndex = 0;
@@ -943,6 +1081,9 @@ export const App: React.FC = () => {
       <div
         ref={messagesContainerRef}
         className="chat-messages messages-container flex-1 overflow-y-auto overflow-x-hidden pt-5 pr-5 pl-5 pb-[140px] flex flex-col relative min-w-0 focus:outline-none [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:bg-white/20 [&::-webkit-scrollbar-thumb]:rounded-sm [&::-webkit-scrollbar-thumb]:hover:bg-white/30 [&>*]:flex [&>*]:gap-0 [&>*]:items-start [&>*]:text-left [&>*]:py-2 [&>*:not(:last-child)]:pb-[8px] [&>*]:flex-col [&>*]:relative [&>*]:animate-[fadeIn_0.2s_ease-in]"
+        data-vscode-context={
+          hasContent ? '{"webviewSection": "chat-messages"}' : undefined
+        }
       >
         {!hasContent && !isLoading ? (
           isAuthenticated === false ? (
