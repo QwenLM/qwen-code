@@ -28,6 +28,13 @@ export interface AuthenticateUpdateNotification {
   };
 }
 
+export interface SlashCommandNotification {
+  sessionId: string;
+  command: string;
+  messageType: 'info' | 'error';
+  message: string;
+}
+
 export interface SessionUpdateMeta {
   usage?: Usage | null;
   durationMs?: number | null;

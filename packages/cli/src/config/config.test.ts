@@ -579,6 +579,12 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.extensions).toEqual(['ext1', 'ext2']);
   });
+
+  it('should parse --bare', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    expect(argv.bare).toBe(true);
+  });
 });
 
 describe('loadCliConfig', () => {
@@ -1242,6 +1248,17 @@ describe('Approval mode tool exclusion logic', () => {
     }
   });
 
+  it('should keep the bare toolset available in non-interactive bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare', '-p', 'test'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    const excludedTools = config.getPermissionsDeny();
+    expect(excludedTools).not.toContain(ToolNames.SHELL);
+    expect(excludedTools).not.toContain(ToolNames.EDIT);
+    expect(excludedTools).not.toContain(ToolNames.WRITE_FILE);
+  });
+
   it('should merge approval mode exclusions with settings exclusions in auto-edit mode', async () => {
     process.argv = [
       'node',
@@ -1647,6 +1664,90 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getWorkspaceContext().getDirectories()).toHaveLength(
       expected.length,
     );
+  });
+
+  it('should ignore implicit startup context inputs in bare mode', async () => {
+    const mockCwd = path.resolve(path.sep, 'home', 'user', 'project');
+    const cliPath = path.resolve(path.sep, 'cli', 'path1');
+    const settingsPath = path.resolve(path.sep, 'settings', 'path1');
+
+    process.argv = [
+      'node',
+      'script.js',
+      '--bare',
+      '--include-directories',
+      cliPath,
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      context: {
+        includeDirectories: [settingsPath],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getWorkspaceContext().getDirectories()).toEqual([
+      mockCwd,
+      cliPath,
+    ]);
+  });
+
+  it('should force minimal startup behavior in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [ToolNames.WEB_FETCH],
+        allowed: [ToolNames.WEB_FETCH],
+        exclude: [ToolNames.ASK_USER_QUESTION],
+      },
+      hooks: {
+        PreToolUse: [],
+      } as Record<string, unknown>,
+      memory: {
+        enableManagedAutoMemory: true,
+      },
+      security: {
+        allowedHttpHookUrls: ['https://hooks.example.com/*'],
+      },
+      mcp: {
+        allowed: ['test-server'],
+      },
+      mcpServers: {
+        'test-server': {
+          command: 'node',
+          args: ['server.js'],
+        },
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.EDIT,
+      ToolNames.SHELL,
+    ]);
+    expect(config.getDisableAllHooks()).toBe(true);
+    expect(config.getManagedAutoMemoryEnabled()).toBe(false);
+    expect(config.getToolDiscoveryCommand()).toBeUndefined();
+    expect(config.getToolCallCommand()).toBeUndefined();
+    expect(config.getMcpServers()).toEqual({});
+    expect(config.getWebSearchConfig()).toBeUndefined();
+    expect(config.isLspEnabled()).toBe(false);
+  });
+
+  it('should ignore coreTools overrides in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare', '--core-tools', 'web_fetch'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getCoreTools()).toEqual([
+      ToolNames.READ_FILE,
+      ToolNames.EDIT,
+      ToolNames.SHELL,
+    ]);
   });
 });
 

@@ -71,6 +71,7 @@ export * from './core/coreToolScheduler.js';
 export * from './core/permission-helpers.js';
 export * from './core/geminiChat.js';
 export * from './core/geminiRequest.js';
+export * from './core/insightProtocol.js';
 export * from './core/logger.js';
 export * from './core/nonInteractiveToolExecutor.js';
 export * from './core/prompts.js';
@@ -149,8 +150,10 @@ export * from './services/fileDiscoveryService.js';
 export * from './services/fileSystemService.js';
 export * from './services/gitService.js';
 export * from './services/gitWorktreeService.js';
+export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/shellExecutionService.js';
+export * from './utils/bareMode.js';
 
 // ============================================================================
 // Managed Auto-Memory

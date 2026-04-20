@@ -141,6 +141,12 @@ interface UseWebViewMessagesProps {
       error?: string;
     } | null,
   ) => void;
+  // Latest generated insight report path
+  setInsightReportPath?: (path: string | null) => void;
+  // Latest structured insight progress update
+  setInsightProgress?: (
+    progress: { stage: string; progress: number; detail?: string } | null,
+  ) => void;
 }
 
 type ConversationResetHandlers = {
@@ -214,6 +220,8 @@ export const useWebViewMessages = ({
   setAvailableCommands,
   setAvailableModels,
   setAccountInfo,
+  setInsightReportPath,
+  setInsightProgress,
 }: UseWebViewMessagesProps) => {
   // VS Code API for posting messages back to the extension host
   const vscode = useVSCode();
@@ -231,6 +239,7 @@ export const useWebViewMessages = ({
   // Track active long-running tool calls (execute/bash/command) so we can
   // keep the bottom "waiting" message visible until all of them complete.
   const activeExecToolCallsRef = useRef<Set<string>>(new Set());
+  const activeInsightRunRef = useRef(false);
   const modelInfoRef = useRef<ModelInfo | null>(null);
   // Track the active requestId from the latest streamStart so we can
   // discard stale streamEnd events from cancelled/previous requests.
@@ -251,6 +260,8 @@ export const useWebViewMessages = ({
     setAvailableCommands,
     setAvailableModels,
     setAccountInfo,
+    setInsightReportPath,
+    setInsightProgress,
   });
 
   // Track last "Updated Plan" snapshot toolcall to support merge/dedupe
@@ -285,6 +296,29 @@ export const useWebViewMessages = ({
     return true;
   };
 
+  const clearInsightState = () => {
+    activeInsightRunRef.current = false;
+    handlersRef.current.setInsightProgress?.(null);
+    handlersRef.current.setInsightReportPath?.(null);
+  };
+
+  const setInsightProgressState = (progress: {
+    stage: string;
+    progress: number;
+    detail?: string;
+  }) => {
+    activeInsightRunRef.current = true;
+    handlersRef.current.setInsightReportPath?.(null);
+    handlersRef.current.messageHandling.clearWaitingForResponse();
+    handlersRef.current.setInsightProgress?.(progress);
+  };
+
+  const setInsightReportReadyState = (path: string | null) => {
+    activeInsightRunRef.current = false;
+    handlersRef.current.setInsightProgress?.(null);
+    handlersRef.current.setInsightReportPath?.(path);
+  };
+
   // Update refs
   useEffect(() => {
     handlersRef.current = {
@@ -302,6 +336,8 @@ export const useWebViewMessages = ({
       setAvailableCommands,
       setAvailableModels,
       setAccountInfo,
+      setInsightReportPath,
+      setInsightProgress,
     };
   });
 
@@ -495,6 +531,7 @@ export const useWebViewMessages = ({
 
         case 'conversationLoaded': {
           const conversation = message.data as Conversation;
+          clearInsightState();
           clearImageResolutions();
           handlers.messageHandling.setMessages(
             materializeMessages(conversation.messages as WebViewMessageBase[]),
@@ -604,6 +641,9 @@ export const useWebViewMessages = ({
             if (FORCE_CLEAR_STREAM_END_REASONS.has(reason)) {
               // Clear active execution tool call tracking, reset state
               activeExecToolCallsRef.current.clear();
+              if (activeInsightRunRef.current) {
+                clearInsightState();
+              }
               // Clear waiting response state to ensure UI returns to normal
               handlers.messageHandling.clearWaitingForResponse();
               break;
@@ -628,6 +668,9 @@ export const useWebViewMessages = ({
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearThinking();
           activeExecToolCallsRef.current.clear();
+          if (activeInsightRunRef.current) {
+            clearInsightState();
+          }
           handlers.messageHandling.clearWaitingForResponse();
           // Display error message to user so they know what went wrong
           const errorMessage =
@@ -928,6 +971,7 @@ export const useWebViewMessages = ({
 
         case 'qwenSessionSwitched':
           handlers.sessionManagement.setShowSessionSelector(false);
+          clearInsightState();
           if (message.data.sessionId) {
             handlers.sessionManagement.setCurrentSessionId(
               message.data.sessionId as string,
@@ -983,6 +1027,7 @@ export const useWebViewMessages = ({
           break;
 
         case 'conversationCleared':
+          clearInsightState();
           resetConversationState({
             handlers: {
               ...handlers,
@@ -1082,11 +1127,39 @@ export const useWebViewMessages = ({
           );
           break;
         }
+
+        case 'insightProgress': {
+          const stage = message.data?.stage as string | undefined;
+          const progress = message.data?.progress as number | undefined;
+          const detail = message.data?.detail as string | undefined;
+          if (typeof stage === 'string' && typeof progress === 'number') {
+            setInsightProgressState({
+              stage,
+              progress,
+              detail,
+            });
+          }
+          break;
+        }
+
+        case 'insightProgressCleared': {
+          clearInsightState();
+          break;
+        }
+
+        case 'insightReportReady': {
+          const path = message.data?.path as string | undefined;
+          setInsightReportReadyState(path ?? null);
+          break;
+        }
         case 'cancelStreaming':
           // Handle cancel streaming response from extension
           // Note: The "Interrupted" message is already added by handleCancel in App.tsx
           // to provide immediate UI feedback. We only need to ensure streaming states
           // are properly cleaned up here.
+          if (activeInsightRunRef.current) {
+            clearInsightState();
+          }
           handlers.messageHandling.endStreaming();
           handlers.messageHandling.clearWaitingForResponse();
           break;

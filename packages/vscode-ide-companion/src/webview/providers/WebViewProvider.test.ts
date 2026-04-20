@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
   mockConfigChangeHandlers,
+  availableCommandsCallbackRef,
   mockCreateImagePathResolver,
   mockConfigGet,
   mockConfigUpdate,
@@ -17,14 +18,21 @@ const {
   mockOnDidChangeConfiguration,
   mockOnDidChangeActiveTextEditor,
   mockOnDidChangeTextEditorSelection,
+  mockOpenExternal,
   mockReadQwenSettingsForVSCode,
   mockWriteCodingPlanConfig,
   mockWriteModelProvidersConfig,
+  slashCommandNotificationCallbackRef,
   mockQwenAgentManagerInstances,
 } = vi.hoisted(() => ({
   mockConfigChangeHandlers: [] as Array<
     (event: { affectsConfiguration: (section: string) => boolean }) => unknown
   >,
+  availableCommandsCallbackRef: {
+    current: undefined as
+      | ((commands: Array<{ name: string; description?: string }>) => void)
+      | undefined,
+  },
   mockCreateImagePathResolver: vi.fn(),
   mockConfigGet: vi.fn(),
   mockConfigUpdate: vi.fn(),
@@ -50,6 +58,7 @@ const {
   ),
   mockOnDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
   mockOnDidChangeTextEditorSelection: vi.fn(() => ({ dispose: vi.fn() })),
+  mockOpenExternal: vi.fn(),
   mockReadQwenSettingsForVSCode: vi.fn<
     () => {
       provider: 'coding-plan' | 'api-key';
@@ -59,17 +68,33 @@ const {
   >(() => null),
   mockWriteCodingPlanConfig: vi.fn(() => ({})),
   mockWriteModelProvidersConfig: vi.fn(),
+  slashCommandNotificationCallbackRef: {
+    current: undefined as
+      | ((event: {
+          sessionId: string;
+          command: string;
+          messageType: 'info' | 'error';
+          message: string;
+        }) => void)
+      | undefined,
+  },
   mockQwenAgentManagerInstances: [] as Array<{
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt: ReturnType<typeof vi.fn>;
   }>,
 }));
 
-vi.mock('@qwen-code/qwen-code-core', () => ({
-  Storage: {
-    getGlobalTempDir: mockGetGlobalTempDir,
-  },
-}));
+vi.mock('@qwen-code/qwen-code-core', async () => {
+  const actual = await vi.importActual<
+    typeof import('@qwen-code/qwen-code-core')
+  >('@qwen-code/qwen-code-core');
+  return {
+    ...actual,
+    Storage: {
+      getGlobalTempDir: mockGetGlobalTempDir,
+    },
+  };
+});
 
 vi.mock('vscode', () => ({
   ConfigurationTarget: {
@@ -80,6 +105,9 @@ vi.mock('vscode', () => ({
       fsPath: `${base.fsPath ?? ''}/${parts.join('/')}`.replace(/\/+/g, '/'),
     })),
     file: vi.fn((filePath: string) => ({ fsPath: filePath })),
+  },
+  env: {
+    openExternal: mockOpenExternal,
   },
   window: {
     onDidChangeActiveTextEditor: mockOnDidChangeActiveTextEditor,
@@ -120,8 +148,28 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
     onUsageUpdate = vi.fn();
     onModelInfo = vi.fn();
     onModelChanged = vi.fn();
-    onAvailableCommands = vi.fn();
+    onAvailableCommands = vi.fn(
+      (
+        callback: (
+          commands: Array<{ name: string; description?: string }>,
+        ) => void,
+      ) => {
+        availableCommandsCallbackRef.current = callback;
+      },
+    );
     onAvailableModels = vi.fn();
+    onSlashCommandNotification = vi.fn(
+      (
+        callback: (event: {
+          sessionId: string;
+          command: string;
+          messageType: 'info' | 'error';
+          message: string;
+        }) => void,
+      ) => {
+        slashCommandNotificationCallbackRef.current = callback;
+      },
+    );
     onEndTurn = vi.fn();
     onToolCall = vi.fn();
     onPlan = vi.fn();
@@ -228,6 +276,57 @@ const createConfigChangeEvent = (...affectedSections: string[]) => ({
   affectsConfiguration: (section: string) => affectedSections.includes(section),
 });
 
+type WebViewMessageHandler = (message: {
+  type: string;
+  data?: unknown;
+}) => Promise<void>;
+
+/**
+ * Create a mock webview + provider and attach them.
+ * If `captureMessageHandler` is true, the `onDidReceiveMessage` handler is
+ * captured and returned so the test can simulate messages from the webview.
+ */
+async function setupAttachedProvider(options?: {
+  captureMessageHandler?: boolean;
+}) {
+  let messageHandler: WebViewMessageHandler | undefined;
+
+  const postMessage = vi.fn();
+  const webview = {
+    options: undefined as unknown,
+    html: '',
+    postMessage,
+    asWebviewUri: vi.fn((uri: { fsPath: string }) => ({
+      toString: () => `webview:${uri.fsPath}`,
+    })),
+    onDidReceiveMessage: vi.fn((handler: WebViewMessageHandler) => {
+      if (options?.captureMessageHandler) {
+        messageHandler = handler;
+      } else {
+        void handler;
+      }
+      return { dispose: vi.fn() };
+    }),
+  };
+
+  const provider = new WebViewProvider(
+    { subscriptions: [] } as never,
+    { fsPath: '/extension-root' } as never,
+  );
+
+  await provider.attachToView(
+    {
+      webview,
+      visible: true,
+      onDidChangeVisibility: vi.fn(() => ({ dispose: vi.fn() })),
+      onDidDispose: vi.fn(() => ({ dispose: vi.fn() })),
+    } as never,
+    'qwen-code.chatView.sidebar',
+  );
+
+  return { webview, postMessage, provider, messageHandler };
+}
+
 beforeEach(() => {
   mockConfigChangeHandlers.length = 0;
 });
@@ -241,6 +340,8 @@ describe('WebViewProvider.attachToView', () => {
     mockConfigGet.mockImplementation(
       (_key: string, defaultValue: unknown) => defaultValue,
     );
+    availableCommandsCallbackRef.current = undefined;
+    slashCommandNotificationCallbackRef.current = undefined;
     mockCreateImagePathResolver.mockReturnValue((paths: string[]) =>
       paths.map((entry) => ({
         path: entry,
@@ -329,6 +430,151 @@ describe('WebViewProvider.attachToView', () => {
         ],
         requestId: 7,
       },
+    });
+  });
+
+  it('streams slash-command notifications into the attached webview', async () => {
+    const { postMessage } = await setupAttachedProvider();
+
+    slashCommandNotificationCallbackRef.current?.({
+      sessionId: 'session-1',
+      command: '/summary',
+      messageType: 'info',
+      message: 'Generating project summary...',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'streamChunk',
+      data: {
+        chunk: 'Generating project summary...\n',
+      },
+    });
+  });
+
+  it('re-sends cached available commands when the webview becomes ready', async () => {
+    const { postMessage, messageHandler } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+
+    availableCommandsCallbackRef.current?.([
+      {
+        name: 'insight',
+        description: 'Generate personalized insights',
+      },
+    ]);
+    postMessage.mockClear();
+
+    await messageHandler?.({
+      type: 'webviewReady',
+      data: {},
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'availableCommands',
+      data: {
+        commands: [
+          {
+            name: 'insight',
+            description: 'Generate personalized insights',
+          },
+        ],
+      },
+    });
+  });
+
+  it('does not special-case plain insight slash notifications in the provider', async () => {
+    const { postMessage } = await setupAttachedProvider();
+
+    slashCommandNotificationCallbackRef.current?.({
+      sessionId: 'session-1',
+      command: '/insight',
+      messageType: 'info',
+      message: 'Starting insight generation...',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'streamChunk',
+      data: {
+        chunk: 'Starting insight generation...\n',
+      },
+    });
+  });
+
+  it('routes structured insight progress markers into the attached webview', async () => {
+    const { postMessage } = await setupAttachedProvider();
+
+    slashCommandNotificationCallbackRef.current?.({
+      sessionId: 'session-1',
+      command: '/insight',
+      messageType: 'info',
+      message:
+        '{"insight_progress":{"stage":"Analyzing sessions","progress":42,"detail":"21/50"}}',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'insightProgress',
+      data: {
+        stage: 'Analyzing sessions',
+        progress: 42,
+        detail: '21/50',
+      },
+    });
+  });
+
+  it('routes structured insight progress markers even when command text is normalized differently', async () => {
+    const { postMessage } = await setupAttachedProvider();
+
+    slashCommandNotificationCallbackRef.current?.({
+      sessionId: 'session-1',
+      command: 'insight',
+      messageType: 'info',
+      message:
+        '{"insight_progress":{"stage":"Analyzing sessions","progress":42,"detail":"21/50"}}',
+    });
+
+    expect(postMessage).toHaveBeenCalledWith({
+      type: 'insightProgress',
+      data: {
+        stage: 'Analyzing sessions',
+        progress: 42,
+        detail: '21/50',
+      },
+    });
+  });
+
+  it('clears structured insight progress when the ready marker arrives', async () => {
+    const { webview } = await setupAttachedProvider();
+
+    slashCommandNotificationCallbackRef.current?.({
+      sessionId: 'session-1',
+      command: '/insight',
+      messageType: 'info',
+      message: '{"insight_ready":{"path":"/tmp/insight-report.html"}}',
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(webview.postMessage).toHaveBeenCalledWith({
+      type: 'insightReportReady',
+      data: {
+        path: '/tmp/insight-report.html',
+      },
+    });
+  });
+
+  it('opens the insight report in the browser when requested from the webview', async () => {
+    const { messageHandler } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+
+    await messageHandler?.({
+      type: 'openInsightReport',
+      data: { path: '/tmp/insight-report.html' },
+    });
+
+    expect(mockOpenExternal).toHaveBeenCalledWith({
+      fsPath: '/tmp/insight-report.html',
     });
   });
 
