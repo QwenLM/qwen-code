@@ -2479,12 +2479,19 @@ describe('GeminiChat', async () => {
           ?.finishReason,
       ).toBe('STOP');
 
-      // History should NOT end with a dangling user recovery message.
+      // History should NOT end with a dangling user recovery message,
+      // and roles must strictly alternate so providers don't reject the
+      // next turn with "consecutive same-role content" errors.
       const history = chat.getHistory();
+      for (let i = 1; i < history.length; i++) {
+        expect(history[i]!.role).not.toBe(history[i - 1]!.role);
+      }
       const lastEntry = history[history.length - 1]!;
       // Last entry should be the escalated model response, not a user
-      // recovery message.
+      // recovery message, and must carry actual parts so the turn is
+      // not an empty placeholder.
       expect(lastEntry.role).toBe('model');
+      expect(lastEntry.parts!.length).toBeGreaterThan(0);
     });
 
     it('should stop recovery mid-loop when a later iteration emits functionCall', async () => {
