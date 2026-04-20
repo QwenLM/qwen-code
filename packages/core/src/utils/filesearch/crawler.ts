@@ -564,13 +564,17 @@ async function crawlWithGitLsFiles(
   const results = buildResultsFromFileSet(fileSet);
   const filteredResults = applyFilters(results, options, relativeToCrawlDir);
 
-  updateChangeState(
-    stateKey,
-    crawlDirectory,
-    filteredResults,
-    untrackedFiles ?? undefined,
-  );
-  recordRebuild(stateKey);
+  // Avoid caching a partial git snapshot when untracked listing fails.
+  // A missing untracked snapshot can hide files during the throttle window.
+  if (untrackedFiles !== null) {
+    updateChangeState(
+      stateKey,
+      crawlDirectory,
+      filteredResults,
+      untrackedFiles,
+    );
+    recordRebuild(stateKey);
+  }
 
   return { success: true, files: filteredResults, isGitRepo: true };
 }
@@ -596,7 +600,7 @@ async function crawlWithRipgrep(
 ): Promise<{ success: boolean; files: string[] }> {
   const rgResult = await commandRunner(
     'rg',
-    ['--files', '--no-require-git', '--hidden', '--no-ignore'],
+    ['--files', '--no-require-git', '--hidden'],
     crawlDirectory,
     20_000,
   );
