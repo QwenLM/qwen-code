@@ -1066,5 +1066,123 @@ describe('Session', () => {
         });
       });
     });
+
+    describe('tool call concurrency', () => {
+      it('runs multiple Agent tool calls concurrently (issue #2516)', async () => {
+        // Build a controllable Agent invocation whose execute() blocks until
+        // the test resolves it. If the ACP loop runs Agent calls sequentially
+        // the second `execute` would never be invoked while the first is
+        // still pending — the concurrent implementation starts both before
+        // either resolves.
+        type Deferred = {
+          promise: Promise<core.ToolResult>;
+          resolve: (v: core.ToolResult) => void;
+        };
+        const makeDeferred = (): Deferred => {
+          let resolve!: (v: core.ToolResult) => void;
+          const promise = new Promise<core.ToolResult>((r) => {
+            resolve = r;
+          });
+          return { promise, resolve };
+        };
+
+        const defs: Record<string, Deferred> = {
+          'call-a': makeDeferred(),
+          'call-b': makeDeferred(),
+        };
+        const executeSpies: Record<string, ReturnType<typeof vi.fn>> = {};
+        const invocationsBuilt: string[] = [];
+
+        const agentTool = {
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+            const id = args['_test_id'] as string;
+            invocationsBuilt.push(id);
+            const execute = vi.fn().mockImplementation(() => defs[id].promise);
+            executeSpies[id] = execute;
+            return {
+              params: args,
+              eventEmitter: undefined,
+              getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+              getDescription: vi.fn().mockReturnValue(`agent ${id}`),
+              toolLocations: vi.fn().mockReturnValue([]),
+              execute,
+            };
+          }),
+        };
+
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.AGENT ? agentTool : undefined,
+        );
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
+
+        // Model returns two Agent calls, then an empty stream once results
+        // are fed back (to terminate the prompt loop).
+        const sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-a',
+                      name: core.ToolNames.AGENT,
+                      args: { _test_id: 'call-a', subagent_type: 'explore' },
+                    },
+                    {
+                      id: 'call-b',
+                      name: core.ToolNames.AGENT,
+                      args: { _test_id: 'call-b', subagent_type: 'explore' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        mockChat.sendMessageStream = sendMessageStream;
+
+        const promptPromise = session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'spawn two agents' }],
+        });
+
+        // Yield to the microtask queue repeatedly so the session has a chance
+        // to fan out both Agent calls before we resolve anything. 10 ticks is
+        // generous for the `build → permission-eval → execute` path.
+        for (let i = 0; i < 10; i++) await Promise.resolve();
+
+        // Proof of concurrency: both execute() were invoked before either
+        // resolved. Under the old sequential for-loop this assertion fails
+        // because call-b's execute would only run after call-a resolved.
+        expect(executeSpies['call-a']).toHaveBeenCalledTimes(1);
+        expect(executeSpies['call-b']).toHaveBeenCalledTimes(1);
+
+        // Resolve out of order to also verify that final part ordering
+        // follows the original functionCalls order, not resolution order.
+        defs['call-b'].resolve({ llmContent: 'B-done', returnDisplay: 'B' });
+        defs['call-a'].resolve({ llmContent: 'A-done', returnDisplay: 'A' });
+
+        await promptPromise;
+
+        // The second sendMessageStream invocation carries the tool responses
+        // that will be fed back to the model — assert their order matches
+        // the original function-call order (A before B).
+        expect(sendMessageStream).toHaveBeenCalledTimes(2);
+        const followUp = sendMessageStream.mock.calls[1][1] as {
+          message: Array<{ functionResponse?: { id?: string } }>;
+        };
+        const ids = followUp.message
+          .filter((p) => p.functionResponse)
+          .map((p) => p.functionResponse?.id);
+        expect(ids).toEqual(['call-a', 'call-b']);
+      });
+    });
   });
 });
