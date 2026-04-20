@@ -12,20 +12,19 @@ const mockFetch = vi.fn().mockResolvedValue(undefined);
 global.fetch = mockFetch;
 
 // Mock the shared dispatcher functions from core
-const { mockGetOrCreateSharedDispatcher } = vi.hoisted(() => {
+const { mockGetOrCreateSharedDispatcher, mockDebugLogger } = vi.hoisted(() => {
   const dispatcher = { fake: 'dispatcher' };
+  const mockDebugLogger = { debug: vi.fn() };
   return {
     mockGetOrCreateSharedDispatcher: vi.fn(() => dispatcher),
+    mockDebugLogger,
   };
 });
-vi.mock('@qwen-code/qwen-code-core', async () => {
-  const { createDebugLogger } = await import('@qwen-code/qwen-code-core');
-  return {
-    createDebugLogger,
-    detectRuntime: () => 'node',
-    getOrCreateSharedDispatcher: mockGetOrCreateSharedDispatcher,
-  };
-});
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  createDebugLogger: () => mockDebugLogger,
+  detectRuntime: () => 'node',
+  getOrCreateSharedDispatcher: mockGetOrCreateSharedDispatcher,
+}));
 
 describe('apiPreconnect', () => {
   beforeEach(() => {
