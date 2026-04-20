@@ -68,25 +68,42 @@ async function addMcpServer(
 
   let newServer: Partial<MCPServerConfig> = {};
 
-  // Build OAuth config if any OAuth options are provided
-  const oauthConfig: MCPOAuthConfig = {};
-  if (oauthClientId) oauthConfig.clientId = oauthClientId;
-  if (oauthClientSecret) oauthConfig.clientSecret = oauthClientSecret;
-  if (oauthRedirectUri) oauthConfig.redirectUri = oauthRedirectUri;
-  if (oauthAuthorizationUrl)
-    oauthConfig.authorizationUrl = oauthAuthorizationUrl;
-  if (oauthTokenUrl) oauthConfig.tokenUrl = oauthTokenUrl;
-  if (oauthScopes && oauthScopes.length > 0) {
-    // Split comma-separated scopes
-    oauthConfig.scopes = oauthScopes
-      .flatMap((s) => s.split(','))
-      .filter(Boolean);
+  const scopes = oauthScopes
+    ?.flatMap((s) => s.split(','))
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const hasOAuth = Boolean(
+    oauthClientId ||
+      oauthClientSecret ||
+      oauthRedirectUri ||
+      oauthAuthorizationUrl ||
+      oauthTokenUrl ||
+      (scopes && scopes.length > 0),
+  );
+
+  // OAuth only applies to remote HTTP/SSE transports. Reject mixing with stdio
+  // so users don't silently persist unused configuration.
+  if (hasOAuth && transport === 'stdio') {
+    writeStderrLine(
+      'Error: OAuth options (--oauth-*) are only supported with --transport sse or --transport http.',
+    );
+    process.exit(1);
   }
 
-  const hasOAuth = Object.keys(oauthConfig).length > 0;
-  if (hasOAuth) {
-    oauthConfig.enabled = true;
-  }
+  const oauthConfig: MCPOAuthConfig | undefined = hasOAuth
+    ? {
+        enabled: true,
+        ...(oauthClientId && { clientId: oauthClientId }),
+        ...(oauthClientSecret && { clientSecret: oauthClientSecret }),
+        ...(oauthRedirectUri && { redirectUri: oauthRedirectUri }),
+        ...(oauthAuthorizationUrl && {
+          authorizationUrl: oauthAuthorizationUrl,
+        }),
+        ...(oauthTokenUrl && { tokenUrl: oauthTokenUrl }),
+        ...(scopes && scopes.length > 0 && { scopes }),
+      }
+    : undefined;
 
   const headers = header?.reduce(
     (acc, curr) => {
@@ -110,7 +127,7 @@ async function addMcpServer(
         description,
         includeTools,
         excludeTools,
-        oauth: hasOAuth ? oauthConfig : undefined,
+        oauth: oauthConfig,
       };
       break;
     case 'http':
@@ -122,7 +139,7 @@ async function addMcpServer(
         description,
         includeTools,
         excludeTools,
-        oauth: hasOAuth ? oauthConfig : undefined,
+        oauth: oauthConfig,
       };
       break;
     case 'stdio':
@@ -145,7 +162,6 @@ async function addMcpServer(
         description,
         includeTools,
         excludeTools,
-        oauth: hasOAuth ? oauthConfig : undefined,
       };
       break;
   }

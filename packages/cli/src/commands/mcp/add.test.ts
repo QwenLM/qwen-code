@@ -437,5 +437,47 @@ describe('mcp add command', () => {
         }),
       );
     });
+
+    it('should reject OAuth options when transport is stdio', async () => {
+      const mockProcessExit = vi
+        .spyOn(process, 'exit')
+        .mockImplementation((() => {
+          throw new Error('process.exit called');
+        }) as (code?: number) => never);
+
+      await expect(
+        parser.parseAsync(
+          'add stdio-server /usr/bin/my-server --transport stdio ' +
+            '--oauth-client-id id',
+        ),
+      ).rejects.toThrow('process.exit called');
+
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'OAuth options (--oauth-*) are only supported with --transport sse or --transport http.',
+        ),
+      );
+      expect(mockProcessExit).toHaveBeenCalledWith(1);
+      expect(mockSetValue).not.toHaveBeenCalled();
+    });
+
+    it('should split comma-separated scopes and trim whitespace', async () => {
+      await parser.parseAsync(
+        'add oauth-server https://example.com/mcp --transport http ' +
+          '--oauth-scopes "read, write , admin"',
+      );
+
+      expect(mockSetValue).toHaveBeenCalledWith(
+        SettingScope.User,
+        'mcpServers',
+        expect.objectContaining({
+          'oauth-server': expect.objectContaining({
+            oauth: expect.objectContaining({
+              scopes: ['read', 'write', 'admin'],
+            }),
+          }),
+        }),
+      );
+    });
   });
 });

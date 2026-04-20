@@ -352,10 +352,13 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 | `--include-tools`           | A comma-separated list of tools to include.                         | all tools included                     | `--include-tools mytool,othertool`                                 |
 | `--exclude-tools`           | A comma-separated list of tools to exclude.                         | none                                   | `--exclude-tools mytool`                                           |
 | `--oauth-client-id`         | OAuth client ID for MCP server authentication.                      | —                                      | `--oauth-client-id your-client-id`                                 |
+| `--oauth-client-secret`     | OAuth client secret for MCP server authentication.                  | —                                      | `--oauth-client-secret your-client-secret`                         |
 | `--oauth-redirect-uri`      | OAuth redirect URI for authentication callback.                     | `http://localhost:7777/oauth/callback` | `--oauth-redirect-uri https://your-server.com/oauth/callback`      |
 | `--oauth-authorization-url` | OAuth authorization URL.                                            | —                                      | `--oauth-authorization-url https://provider.example.com/authorize` |
 | `--oauth-token-url`         | OAuth token URL.                                                    | —                                      | `--oauth-token-url https://provider.example.com/token`             |
 | `--oauth-scopes`            | OAuth scopes (comma-separated).                                     | —                                      | `--oauth-scopes scope1,scope2`                                     |
+
+> `--oauth-*` flags apply only to `--transport sse` and `--transport http`. Combining them with `--transport stdio` is rejected.
 
 #### Removing a server (`qwen mcp remove`)
 
