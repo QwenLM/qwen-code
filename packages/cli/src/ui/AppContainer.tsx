@@ -52,7 +52,10 @@ import {
   type SpeculationState,
   IDLE_SPECULATION,
   ApprovalMode,
+  ConditionalRulesRegistry,
   type PermissionMode,
+  ToolConfirmationOutcome,
+  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import { buildResumedHistoryItems } from './utils/resumeHistoryUtils.js';
 import { validateAuthMethod } from '../config/auth.js';
@@ -88,6 +91,7 @@ import { isBtwCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
+import { useAwaySummary } from './hooks/useAwaySummary.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
@@ -123,7 +127,12 @@ import { useAgentsManagerDialog } from './hooks/useAgentsManagerDialog.js';
 import { useExtensionsManagerDialog } from './hooks/useExtensionsManagerDialog.js';
 import { useMcpDialog } from './hooks/useMcpDialog.js';
 import { useHooksDialog } from './hooks/useHooksDialog.js';
+import { useMemoryDialog } from './hooks/useMemoryDialog.js';
 import { useAttentionNotifications } from './hooks/useAttentionNotifications.js';
+import { useContextualTips } from './hooks/useContextualTips.js';
+import { getTipHistory } from '../services/tips/index.js';
+import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
+import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
@@ -358,10 +367,25 @@ export const AppContainer = (props: AppContainerProps) => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
 
-  useEffect(
-    () => setUpdateHandler(historyManager.addItem, setUpdateInfo),
-    [historyManager.addItem],
-  );
+  // Track idle state via ref so the update handler can defer notifications
+  // while the model is streaming, without triggering re-renders.
+  // Note: isIdleRef.current is assigned after streamingState becomes available
+  // (see the assignment below useGeminiStream).
+  const isIdleRef = useRef(true);
+  const updateHandlerRef = useRef<{
+    cleanup: () => void;
+    flush: () => void;
+  } | null>(null);
+
+  useEffect(() => {
+    const handler = setUpdateHandler(
+      historyManager.addItem,
+      setUpdateInfo,
+      isIdleRef,
+    );
+    updateHandlerRef.current = handler;
+    return () => handler?.cleanup();
+  }, [historyManager.addItem]);
 
   // Watch for model changes (e.g., user switches model via /model)
   useEffect(() => {
@@ -529,6 +553,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { isSettingsDialogOpen, openSettingsDialog, closeSettingsDialog } =
     useSettingsCommand();
+  const { isMemoryDialogOpen, openMemoryDialog, closeMemoryDialog } =
+    useMemoryDialog();
 
   const {
     isModelDialogOpen,
@@ -577,6 +603,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       openSettingsDialog,
       openModelDialog,
       openTrustDialog,
@@ -604,6 +631,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openAuthDialog,
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       openSettingsDialog,
       openModelDialog,
       openArenaDialog,
@@ -642,6 +670,7 @@ export const AppContainer = (props: AppContainerProps) => {
     toggleVimEnabled,
     isProcessing,
     setIsProcessing,
+    isIdleRef,
     setGeminiMdFileCount,
     slashCommandActions,
     extensionsUpdateStateInternal,
@@ -666,19 +695,24 @@ export const AppContainer = (props: AppContainerProps) => {
       Date.now(),
     );
     try {
-      const { memoryContent, fileCount } = await loadHierarchicalGeminiMemory(
-        process.cwd(),
-        settings.merged.context?.loadFromIncludeDirectories
-          ? config.getWorkspaceContext().getDirectories()
-          : [],
-        config.getFileService(),
-        config.getExtensionContextFilePaths(),
-        config.isTrustedFolder(),
-        settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
-      );
+      const { memoryContent, fileCount, conditionalRules, projectRoot } =
+        await loadHierarchicalGeminiMemory(
+          process.cwd(),
+          settings.merged.context?.loadFromIncludeDirectories
+            ? config.getWorkspaceContext().getDirectories()
+            : [],
+          config.getFileService(),
+          config.getExtensionContextFilePaths(),
+          config.isTrustedFolder(),
+          settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
+          config.getContextRuleExcludes(),
+        );
 
       config.setUserMemory(memoryContent);
       config.setGeminiMdFileCount(fileCount);
+      config.setConditionalRulesRegistry(
+        new ConditionalRulesRegistry(conditionalRules, projectRoot),
+      );
       setGeminiMdFileCount(fileCount);
 
       historyManager.addItem(
@@ -725,6 +759,7 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    pendingToolCalls,
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -746,6 +781,36 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     midTurnDrainRef,
   );
+
+  // Now that streamingState is available, keep isIdleRef in sync and
+  // flush any deferred update notifications when the model finishes responding.
+  isIdleRef.current = streamingState === StreamingState.Idle;
+
+  useEffect(() => {
+    if (streamingState === StreamingState.Idle) {
+      updateHandlerRef.current?.flush();
+    }
+  }, [streamingState]);
+
+  // Contextual tips — show tips based on context usage after model responses
+  // Defer TipHistory loading when tips are disabled to avoid side effects
+  // (sessionCount increment + disk write) when the user has opted out.
+  const tipsDisabled = !!(
+    settings.merged.ui?.hideTips || config.getScreenReader()
+  );
+  const tipHistory = useMemo(
+    () => (tipsDisabled ? null : getTipHistory()),
+    [tipsDisabled],
+  );
+  useContextualTips({
+    streamingState,
+    lastPromptTokenCount: sessionStats.lastPromptTokenCount,
+    sessionPromptCount: sessionStats.promptCount,
+    config,
+    tipHistory,
+    addItem: historyManager.addItem,
+    hideTips: tipsDisabled,
+  });
 
   // Track whether suggestions are visible for Tab key handling
   const [hasSuggestionsVisible, setHasSuggestionsVisible] = useState(false);
@@ -776,23 +841,143 @@ export const AppContainer = (props: AppContainerProps) => {
     disabled: agentViewState.activeView !== 'main',
   });
 
-  const {
-    messageQueue,
-    addMessage,
-    clearQueue,
-    getQueuedMessagesText,
-    popAllMessages,
-    drainQueue,
-  } = useMessageQueue({
-    isConfigInitialized,
-    streamingState,
-    submitQuery,
-  });
+  const { messageQueue, addMessage, popAllMessages, drainQueue } =
+    useMessageQueue({
+      isConfigInitialized,
+      streamingState,
+      submitQuery,
+    });
 
   // Bridge message queue to mid-turn drain via ref.
   // drainQueue reads the synchronous queueRef inside the hook, so it
   // stays consistent with popAllMessages even before React re-renders.
   midTurnDrainRef.current = drainQueue;
+
+  // Connect remote input watcher to submitQuery for bidirectional sync.
+  // When an external process writes a command to the input-file,
+  // the watcher calls submitQuery as if the user typed it in the TUI.
+  const remoteInput = useRemoteInput();
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setSubmitFn((text: string) => submitQuery(text));
+  }, [remoteInput, submitQuery]);
+
+  // Notify remote input watcher when TUI becomes idle so it can
+  // retry queued commands that were deferred while TUI was busy.
+  useEffect(() => {
+    if (!remoteInput) return;
+    if (streamingState === StreamingState.Idle) {
+      remoteInput.notifyIdle();
+    }
+  }, [remoteInput, streamingState]);
+
+  // Dual-output tool-confirmation bridge.
+  //
+  // When a tool call enters awaiting_approval we emit a `control_request`
+  // (subtype: can_use_tool) on the dual-output channel so an external
+  // consumer can decide. Whichever side resolves first (TUI native UI or
+  // `confirmation_response` written to --input-file) wins; we always emit
+  // a `control_response` mirroring the final decision so observers stay in
+  // sync.
+  const dualOutput = useDualOutput();
+  const confirmRequestMap = useRef(new Map<string, string>()); // requestId → callId
+  const confirmCallIdMap = useRef(new Map<string, string>()); // callId → requestId
+  const confirmEmitted = useRef(new Set<string>());
+
+  useEffect(() => {
+    if (!dualOutput || !dualOutput.isConnected) return;
+    for (const tc of pendingToolCalls) {
+      if (
+        tc.status === 'awaiting_approval' &&
+        !confirmEmitted.current.has(tc.request.callId)
+      ) {
+        const requestId = crypto.randomUUID();
+        confirmRequestMap.current.set(requestId, tc.request.callId);
+        confirmCallIdMap.current.set(tc.request.callId, requestId);
+        confirmEmitted.current.add(tc.request.callId);
+        dualOutput.emitPermissionRequest(
+          requestId,
+          tc.request.name,
+          tc.request.callId,
+          tc.request.args,
+        );
+      }
+    }
+    // Detect tools that left awaiting_approval (TUI-native resolution) so we
+    // can emit a matching control_response back to external consumers.
+    for (const [callId, requestId] of confirmCallIdMap.current) {
+      const tc = pendingToolCalls.find((t) => t.request.callId === callId);
+      if (
+        tc &&
+        tc.status !== 'awaiting_approval' &&
+        confirmEmitted.current.has(callId)
+      ) {
+        const allowed = tc.status !== 'cancelled' && tc.status !== 'error';
+        dualOutput.emitControlResponse(requestId, allowed);
+        confirmRequestMap.current.delete(requestId);
+        confirmCallIdMap.current.delete(callId);
+        confirmEmitted.current.delete(callId);
+      }
+    }
+  }, [dualOutput, pendingToolCalls]);
+
+  // Keep latest state in refs so the confirmation handler (registered once)
+  // always reads current values without needing re-registration.
+  const pendingToolCallsRef = useRef(pendingToolCalls);
+  pendingToolCallsRef.current = pendingToolCalls;
+  const dualOutputRef = useRef(dualOutput);
+  dualOutputRef.current = dualOutput;
+
+  // Route confirmation_response commands written to --input-file back into
+  // the tool's onConfirm handler. Registered once (deps: [remoteInput]) to
+  // avoid teardown/re-registration churn on every pendingToolCalls change.
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setConfirmationHandler(
+      (requestId: string, allowed: boolean) => {
+        const callId = confirmRequestMap.current.get(requestId);
+        if (!callId) {
+          dualOutputRef.current?.emitControlError(
+            requestId,
+            'unknown request_id (already resolved, cancelled, or never issued)',
+          );
+          return;
+        }
+        const tc = pendingToolCallsRef.current.find(
+          (t) =>
+            t.request.callId === callId && t.status === 'awaiting_approval',
+        );
+        if (!tc) {
+          dualOutputRef.current?.emitControlError(
+            requestId,
+            'tool call is no longer awaiting approval',
+          );
+          return;
+        }
+        const waitingTc = tc as WaitingToolCall;
+        if (!waitingTc.confirmationDetails?.onConfirm) {
+          dualOutputRef.current?.emitControlError(
+            requestId,
+            'tool call has no onConfirm handler',
+          );
+          return;
+        }
+        void waitingTc.confirmationDetails.onConfirm(
+          allowed
+            ? ToolConfirmationOutcome.ProceedOnce
+            : ToolConfirmationOutcome.Cancel,
+        );
+        // Do NOT clean up maps here — let the mirror useEffect (line ~870)
+        // detect the state transition and emit control_response + clean up,
+        // keeping the emission path symmetric for both TUI-native and
+        // external-initiated resolutions.
+      },
+    );
+
+    return () => {
+      remoteInput.setConfirmationHandler(() => {});
+    };
+  }, [remoteInput]);
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
@@ -810,6 +995,16 @@ export const AppContainer = (props: AppContainerProps) => {
         isBtwCommand(submittedValue)
       ) {
         void submitQuery(submittedValue);
+        return;
+      }
+
+      // Handle bare exit/quit commands (without the / prefix)
+      if (
+        ['exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
+          submittedValue.trim(),
+        )
+      ) {
+        void handleSlashCommand('/quit');
         return;
       }
 
@@ -938,6 +1133,7 @@ export const AppContainer = (props: AppContainerProps) => {
       agentViewState,
       streamingState,
       submitQuery,
+      handleSlashCommand,
       config,
       geminiClient,
       historyManager,
@@ -977,23 +1173,24 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
 
-    const lastUserMessage = userMessages.at(-1);
-    let textToSet = lastUserMessage || '';
-
-    const queuedText = getQueuedMessagesText();
-    if (queuedText) {
-      textToSet = textToSet ? `${textToSet}\n\n${queuedText}` : queuedText;
-      clearQueue();
-    }
-
-    if (textToSet) {
-      buffer.setText(textToSet);
+    // Move any queued follow-up messages back into the buffer so the user
+    // can edit or resubmit them. Otherwise leave the buffer alone — in
+    // particular, do NOT repopulate it with the previous prompt; the user
+    // can still recall it via history navigation (Up/Ctrl+P).
+    //
+    // popAllMessages is atomic via the queue's synchronous ref, matching
+    // the drain behavior used during tool completion.
+    const popped = popAllMessages();
+    if (popped) {
+      const currentText = buffer.text;
+      // Preserve any in-progress draft the user typed since submitting (this
+      // is reachable via Ctrl+C cancel, which fires regardless of buffer
+      // content). Mirrors the popQueueIntoInput convention in InputPrompt.
+      buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
     }
   }, [
     buffer,
-    userMessages,
-    getQueuedMessagesText,
-    clearQueue,
+    popAllMessages,
     pendingSlashCommandHistoryItems,
     pendingGeminiHistoryItems,
   ]);
@@ -1057,6 +1254,14 @@ export const AppContainer = (props: AppContainerProps) => {
   const isFocused = useFocus();
   useBracketedPaste();
 
+  useAwaySummary({
+    enabled: settings.merged.general?.showSessionRecap ?? true,
+    config,
+    isFocused,
+    isIdle: streamingState === StreamingState.Idle,
+    addItem: historyManager.addItem,
+  });
+
   // Context file names computation
   const contextFileNames = useMemo(() => {
     const fromSettings = settings.merged.context?.fileName;
@@ -1113,24 +1318,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const followupSuggestionsEnabled =
     settings.merged.ui?.enableFollowupSuggestions === true;
 
-  // Resolve fastModel, validating it belongs to the current authType.
-  // If the configured fastModel is from a different provider, the API call
-  // would fail silently (DashScope/Qwen client rejects unknown model IDs),
-  // so fall back to the main model instead.
-  const resolveFastModel = useCallback((): string | undefined => {
-    const fastModel = settings.merged.fastModel;
-    if (!fastModel) return undefined;
-    const currentAuthType = config.getContentGeneratorConfig()?.authType;
-    if (!currentAuthType) return undefined;
-    const availableModels = config
-      .getModelsConfig()
-      .getAvailableModelsForAuthType(currentAuthType);
-    const belongsToCurrentAuth = availableModels.some(
-      (m) => m.id === fastModel,
-    );
-    return belongsToCurrentAuth ? fastModel : undefined;
-  }, [settings.merged.fastModel, config]);
-
   useEffect(() => {
     // Clear suggestion when feature is disabled at runtime
     if (!followupSuggestionsEnabled) {
@@ -1182,7 +1369,7 @@ export const AppContainer = (props: AppContainerProps) => {
       const fullHistory = geminiClient.getChat().getHistory(true);
       const conversationHistory =
         fullHistory.length > 40 ? fullHistory.slice(-40) : fullHistory;
-      const fastModel = resolveFastModel();
+      const fastModel = config.getFastModel();
       generatePromptSuggestion(config, conversationHistory, ac.signal, {
         enableCacheSharing: settings.merged.ui?.enableCacheSharing === true,
         model: fastModel,
@@ -1285,10 +1472,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [compactMode, setCompactMode] = useState<boolean>(
     settings.merged.ui?.compactMode ?? false,
   );
-  const [frozenSnapshot, setFrozenSnapshot] = useState<
-    HistoryItemWithoutId[] | null
-  >(null);
-
   const [ctrlCPressedOnce, setCtrlCPressedOnce] = useState(false);
   const ctrlCTimerRef = useRef<NodeJS.Timeout | null>(null);
   const [ctrlDPressedOnce, setCtrlDPressedOnce] = useState(false);
@@ -1302,18 +1485,6 @@ export const AppContainer = (props: AppContainerProps) => {
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
-
-  useEffect(() => {
-    // Clear frozen snapshot when streaming ends OR when entering confirmation
-    // state. During WaitingForConfirmation, the user needs to see the latest
-    // pending items (including the confirmation message) rather than a stale snapshot.
-    if (
-      streamingState === StreamingState.Idle ||
-      streamingState === StreamingState.WaitingForConfirmation
-    ) {
-      setFrozenSnapshot(null);
-    }
-  }, [streamingState]);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
     useFolderTrust(settings, setIsTrustedFolder);
@@ -1491,6 +1662,8 @@ export const AppContainer = (props: AppContainerProps) => {
     exitEditorDialog,
     isSettingsDialogOpen,
     closeSettingsDialog,
+    isMemoryDialogOpen,
+    closeMemoryDialog,
     activeArenaDialog,
     closeArenaDialog,
     isFolderTrustDialogOpen,
@@ -1706,13 +1879,6 @@ export const AppContainer = (props: AppContainerProps) => {
         setCompactMode(newValue);
         void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
         refreshStatic();
-        // Only freeze during the actual responding phase. WaitingForConfirmation
-        // must keep focus so the user can approve/cancel tool confirmation UI.
-        if (streamingState === StreamingState.Responding) {
-          setFrozenSnapshot([...pendingHistoryItems]);
-        } else {
-          setFrozenSnapshot(null);
-        }
       }
     },
     [
@@ -1748,8 +1914,6 @@ export const AppContainer = (props: AppContainerProps) => {
       isAuthenticating,
       compactMode,
       setCompactMode,
-      setFrozenSnapshot,
-      pendingHistoryItems,
       refreshStatic,
     ],
   );
@@ -1808,6 +1972,7 @@ export const AppContainer = (props: AppContainerProps) => {
     !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
+    isMemoryDialogOpen ||
     isModelDialogOpen ||
     isTrustDialogOpen ||
     activeArenaDialog !== null ||
@@ -1857,6 +2022,7 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
       isTrustDialogOpen,
@@ -1963,6 +2129,7 @@ export const AppContainer = (props: AppContainerProps) => {
       debugMessage,
       quittingMessages,
       isSettingsDialogOpen,
+      isMemoryDialogOpen,
       isModelDialogOpen,
       isFastModelMode,
       isTrustDialogOpen,
@@ -2061,6 +2228,7 @@ export const AppContainer = (props: AppContainerProps) => {
     () => ({
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -2073,6 +2241,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
       openArenaDialog,
@@ -2121,6 +2290,7 @@ export const AppContainer = (props: AppContainerProps) => {
     [
       openThemeDialog,
       openEditorDialog,
+      openMemoryDialog,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
@@ -2133,6 +2303,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEditorSelect,
       exitEditorDialog,
       closeSettingsDialog,
+      closeMemoryDialog,
       closeModelDialog,
       openModelDialog,
       openArenaDialog,
@@ -2179,8 +2350,8 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const compactModeValue = useMemo(
-    () => ({ compactMode, frozenSnapshot }),
-    [compactMode, frozenSnapshot],
+    () => ({ compactMode, setCompactMode }),
+    [compactMode, setCompactMode],
   );
 
   return (

@@ -395,6 +395,13 @@ export interface ToolResult {
     message: string; // raw error message
     type?: ToolErrorType; // An optional machine-readable error type (e.g., 'FILE_NOT_FOUND').
   };
+
+  /**
+   * Optional model override propagated from skill execution.
+   * When present, the client should use this model for subsequent
+   * turns within the same agentic loop.
+   */
+  modelOverride?: string;
 }
 
 /**
@@ -488,7 +495,7 @@ export interface AgentResultDisplay {
   subagentColor?: string;
   taskDescription: string;
   taskPrompt: string;
-  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'running' | 'completed' | 'failed' | 'cancelled' | 'background';
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;

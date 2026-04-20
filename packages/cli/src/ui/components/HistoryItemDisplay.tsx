@@ -28,6 +28,7 @@ import {
   ErrorMessage,
   RetryCountdownMessage,
   SuccessMessage,
+  AwayRecapMessage,
 } from './messages/StatusMessages.js';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
@@ -45,9 +46,11 @@ import { SkillsList } from './views/SkillsList.js';
 import { ToolsList } from './views/ToolsList.js';
 import { McpStatus } from './views/McpStatus.js';
 import { ContextUsage } from './views/ContextUsage.js';
+import { DoctorReport } from './views/DoctorReport.js';
 import { ArenaAgentCard, ArenaSessionCard } from './arena/ArenaCards.js';
 import { InsightProgressMessage } from './messages/InsightProgressMessage.js';
 import { BtwMessage } from './messages/BtwMessage.js';
+import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { useCompactMode } from '../contexts/CompactModeContext.js';
 
 interface HistoryItemDisplayProps {
@@ -97,6 +100,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'user' && (
         <UserMessage text={itemForDisplay.text} />
       )}
+      {itemForDisplay.type === 'notification' && (
+        <InfoMessage text={itemForDisplay.text} />
+      )}
       {itemForDisplay.type === 'user_shell' && (
         <UserShellMessage text={itemForDisplay.text} />
       )}
@@ -141,7 +147,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'info' && (
-        <InfoMessage text={itemForDisplay.text} />
+        <InfoMessage
+          text={itemForDisplay.text}
+          linkUrl={itemForDisplay.linkUrl}
+          linkText={itemForDisplay.linkText}
+        />
       )}
       {itemForDisplay.type === 'success' && (
         <SuccessMessage text={itemForDisplay.text} />
@@ -185,6 +195,8 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           isFocused={isFocused}
           activeShellPtyId={activeShellPtyId}
           embeddedShellFocused={embeddedShellFocused}
+          memoryWriteCount={itemForDisplay.memoryWriteCount}
+          memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
         />
       )}
@@ -220,6 +232,13 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           skills={itemForDisplay.skills}
           isEstimated={itemForDisplay.isEstimated}
           showDetails={itemForDisplay.showDetails}
+        />
+      )}
+      {itemForDisplay.type === 'doctor' && (
+        <DoctorReport
+          checks={itemForDisplay.checks}
+          summary={itemForDisplay.summary}
+          width={boxWidth}
         />
       )}
       {itemForDisplay.type === 'arena_agent_complete' && (
@@ -263,6 +282,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
             />
           </Box>
         </Box>
+      )}
+      {itemForDisplay.type === 'memory_saved' && (
+        <MemorySavedMessage item={itemForDisplay} />
+      )}
+      {itemForDisplay.type === 'away_recap' && (
+        <AwayRecapMessage text={itemForDisplay.text} />
       )}
     </Box>
   );

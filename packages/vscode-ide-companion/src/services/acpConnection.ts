@@ -32,6 +32,7 @@ import type {
 import type {
   AuthenticateUpdateNotification,
   AskUserQuestionRequest,
+  SlashCommandNotification,
 } from '../types/acpTypes.js';
 import type { ApprovalModeValue } from '../types/approvalModeValueTypes.js';
 import type { ChildProcess, SpawnOptions } from 'child_process';
@@ -64,6 +65,8 @@ export class AcpConnection {
       optionId: this.resolvePermissionOptionId(data) || '',
     });
   onAuthenticateUpdate: (data: AuthenticateUpdateNotification) => void =
+    () => {};
+  onSlashCommandNotification: (data: SlashCommandNotification) => void =
     () => {};
   onEndTurn: (reason?: string) => void = () => {};
   /** Invoked when the child process exits (expected or unexpected). */
@@ -344,6 +347,10 @@ export class AcpConnection {
             this.onAuthenticateUpdate(
               params as unknown as AuthenticateUpdateNotification,
             );
+          } else if (method === '_qwencode/slash_command') {
+            this.onSlashCommandNotification(
+              params as unknown as SlashCommandNotification,
+            );
           } else {
             console.warn(`[ACP] Unhandled extension notification: ${method}`);
           }
@@ -563,6 +570,24 @@ export class AcpConnection {
     });
     console.log('[ACP] set_mode response:', res);
     return res;
+  }
+
+  async getAccountInfo(): Promise<{
+    authType: string | null;
+    model: string | null;
+    baseUrl: string | null;
+    apiKeyEnvKey: string | null;
+  }> {
+    const conn = this.ensureConnection();
+    const result = await conn.extMethod('getAccountInfo', {
+      sessionId: this.sessionId,
+    });
+    return {
+      authType: (result['authType'] as string | null) ?? null,
+      model: (result['model'] as string | null) ?? null,
+      baseUrl: (result['baseUrl'] as string | null) ?? null,
+      apiKeyEnvKey: (result['apiKeyEnvKey'] as string | null) ?? null,
+    };
   }
 
   async setModel(modelId: string): Promise<SetSessionModelResponse> {

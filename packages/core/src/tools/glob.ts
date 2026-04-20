@@ -10,7 +10,8 @@ import { glob, escape } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { resolveAndValidatePath } from '../utils/paths.js';
+import { resolveAndValidatePath, isSubpath } from '../utils/paths.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
 import { type Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
@@ -113,7 +114,10 @@ class GlobToolInvocation extends BaseToolInvocation<
       this.config.getTargetDir(),
       this.params.path,
     );
-    if (workspaceContext.isPathWithinWorkspace(resolvedPath)) {
+    if (
+      workspaceContext.isPathWithinWorkspace(resolvedPath) ||
+      isSubpath(getMemoryBaseDir(), resolvedPath)
+    ) {
       return 'allow';
     }
     return 'ask';

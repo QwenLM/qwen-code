@@ -80,11 +80,6 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ListFilesTool: 'list_directory',
   ReadFolder: 'list_directory', // legacy display name
 
-  // Memory tool
-  save_memory: 'save_memory',
-  SaveMemory: 'save_memory',
-  SaveMemoryTool: 'save_memory',
-
   // TodoWrite tool
   todo_write: 'todo_write',
   TodoWrite: 'todo_write',
@@ -864,7 +859,7 @@ export function matchesDomainPattern(
  *   "mcp__puppeteer__*" wildcard syntax, also matches all tools from the server
  *   "mcp__puppeteer__puppeteer_navigate" matches only that exact tool
  */
-function matchesMcpPattern(pattern: string, toolName: string): boolean {
+export function matchesMcpPattern(pattern: string, toolName: string): boolean {
   if (pattern === toolName) {
     return true;
   }

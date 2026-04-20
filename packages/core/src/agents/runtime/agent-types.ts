@@ -21,13 +21,23 @@ import type { Content, FunctionDeclaration } from '@google/genai';
 export interface PromptConfig {
   /**
    * A single system prompt string that defines the agent's persona and instructions.
-   * Note: You should use either `systemPrompt` or `initialMessages`, but not both.
+   * Templated via ${var} substitution, optionally suffixed with non-interactive
+   * rules and user memory. Mutually exclusive with `renderedSystemPrompt`.
    */
   systemPrompt?: string;
 
   /**
-   * An array of user/model content pairs to seed the chat history for few-shot prompting.
-   * Note: You should use either `systemPrompt` or `initialMessages`, but not both.
+   * A pre-rendered system instruction consumed verbatim — no templating, no
+   * non-interactive suffix, no user-memory injection. Used by fork subagents
+   * to share the parent conversation's exact cache prefix. Mutually exclusive
+   * with `systemPrompt`.
+   */
+  renderedSystemPrompt?: string | Content;
+
+  /**
+   * Seed chat history. When set, fully replaces the default env bootstrap
+   * (the caller owns the full prior context, e.g. fork inheriting parent
+   * history). Can coexist with `systemPrompt` / `renderedSystemPrompt`.
    */
   initialMessages?: Content[];
 }
@@ -42,10 +52,6 @@ export interface ModelConfig {
    * TODO: In the future, this needs to support 'auto' or some other string to support routing use cases.
    */
   model?: string;
-  /** The temperature for the model's sampling process. */
-  temp?: number;
-  /** The top-p value for nucleus sampling. */
-  top_p?: number;
 }
 
 /**
@@ -72,6 +78,13 @@ export interface ToolConfig {
    * that the agent is permitted to use.
    */
   tools: Array<string | FunctionDeclaration>;
+
+  /**
+   * Optional list of tool names to exclude from the agent's tool pool.
+   * Applied after the allowlist and MCP bypass. Supports MCP server-level
+   * patterns (e.g., "mcp__server" blocks all tools from that server).
+   */
+  disallowedTools?: string[];
 }
 
 /**

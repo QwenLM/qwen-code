@@ -35,12 +35,22 @@ vi.mock('../TerminalOutput.js', () => ({
 }));
 
 vi.mock('../AnsiOutput.js', () => ({
-  AnsiOutputText: function MockAnsiOutputText({ data }: { data: AnsiOutput }) {
+  AnsiOutputText: function MockAnsiOutputText({
+    data,
+    maxWidth,
+  }: {
+    data: AnsiOutput;
+    maxWidth: number;
+  }) {
     // Simple serialization for snapshot stability
     const serialized = data
       .map((line) => line.map((token) => token.text || '').join(''))
       .join('\n');
-    return <Text>MockAnsiOutput:{serialized}</Text>;
+    return (
+      <Text>
+        MockAnsiOutput:{serialized}:width={maxWidth}
+      </Text>
+    );
   },
 }));
 
@@ -110,7 +120,7 @@ const renderWithContext = (
 ) => {
   const contextValue: StreamingState = streamingState;
   return render(
-    <CompactModeProvider value={{ compactMode, frozenSnapshot: null }}>
+    <CompactModeProvider value={{ compactMode }}>
       <SettingsContext.Provider value={mockSettings}>
         <StreamingContext.Provider value={contextValue}>
           {ui}
@@ -315,6 +325,7 @@ describe('<ToolMessage />', () => {
       StreamingState.Idle,
     );
     expect(lastFrame()).toContain('MockAnsiOutput:hello');
+    expect(lastFrame()).toContain('width=');
   });
 
   it('renders rejected plan content with plan text still visible', () => {

@@ -5,10 +5,10 @@ export default {
   shell: 'Shell',
   'todo-write': 'Todo Write',
   task: 'Task',
+  swarm: 'Swarm',
   'exit-plan-mode': 'Exit Plan Mode',
   'web-fetch': 'Web Fetch',
   'web-search': 'Web Search',
-  memory: 'Memory',
   'mcp-server': 'MCP Servers',
   sandbox: 'Sandboxing',
 };

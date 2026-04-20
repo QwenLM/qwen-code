@@ -6,6 +6,7 @@
 
 import type React from 'react';
 import { Box, Text } from 'ink';
+import Link from 'ink-link';
 import stringWidth from 'string-width';
 import { theme } from '../../semantic-colors.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
@@ -16,10 +17,13 @@ interface StatusMessageProps {
   prefixColor: string;
   textColor: string;
   children?: React.ReactNode;
+  footer?: React.ReactNode;
 }
 
 interface StatusTextProps {
   text: string;
+  linkUrl?: string;
+  linkText?: string;
 }
 
 /**
@@ -32,8 +36,9 @@ export const StatusMessage: React.FC<StatusMessageProps> = ({
   prefixColor,
   textColor,
   children,
+  footer,
 }) => {
-  if (!text || text.trim() === '') {
+  if ((!text || text.trim() === '') && !footer) {
     return null;
   }
 
@@ -44,22 +49,38 @@ export const StatusMessage: React.FC<StatusMessageProps> = ({
       <Box width={prefixWidth} flexShrink={0}>
         <Text color={prefixColor}>{prefix}</Text>
       </Box>
-      <Box flexGrow={1}>
-        <Text wrap="wrap" color={textColor}>
-          <RenderInline text={text} />
-          {children}
-        </Text>
+      <Box flexGrow={1} flexDirection="column">
+        {text && text.trim() !== '' && (
+          <Text wrap="wrap" color={textColor}>
+            <RenderInline text={text} />
+            {children}
+          </Text>
+        )}
+        {footer}
       </Box>
     </Box>
   );
 };
 
-export const InfoMessage: React.FC<StatusTextProps> = ({ text }) => (
+export const InfoMessage: React.FC<StatusTextProps> = ({
+  text,
+  linkUrl,
+  linkText,
+}) => (
   <StatusMessage
     text={text}
     prefix="●"
     prefixColor={theme.text.primary}
     textColor={theme.text.primary}
+    footer={
+      linkUrl && (
+        <Link url={linkUrl}>
+          <Text color={theme.text.link} underline>
+            {linkText ?? linkUrl}
+          </Text>
+        </Link>
+      )
+    }
   />
 );
 
@@ -99,6 +120,15 @@ export const RetryCountdownMessage: React.FC<StatusTextProps> = ({ text }) => (
   <StatusMessage
     text={text}
     prefix="↻"
+    prefixColor={theme.text.secondary}
+    textColor={theme.text.secondary}
+  />
+);
+
+export const AwayRecapMessage: React.FC<StatusTextProps> = ({ text }) => (
+  <StatusMessage
+    text={text}
+    prefix="❯"
     prefixColor={theme.text.secondary}
     textColor={theme.text.secondary}
   />

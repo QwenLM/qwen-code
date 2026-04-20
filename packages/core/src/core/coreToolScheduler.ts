@@ -40,7 +40,6 @@ import {
   ToolCallEvent,
   InputFormat,
   Kind,
-  SkillTool,
 } from '../index.js';
 import type {
   FunctionResponse,
@@ -299,6 +298,15 @@ function toParts(input: PartListUnion): Part[] {
   return parts;
 }
 
+const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
+
+/** Directive injected when a tool call repeatedly fails validation. */
+const RETRY_LOOP_STOP_DIRECTIVE =
+  '\n\n⚠️ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
+  'STOP retrying the same approach. Re-examine the tool schema and parameter requirements, then try a ' +
+  'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
+  'instead of retrying.';
+
 const createErrorResponse = (
   request: ToolCallRequestInfo,
   error: Error,
@@ -397,6 +405,7 @@ export class CoreToolScheduler {
   private chatRecordingService?: ChatRecordingService;
   private isFinalizingToolCalls = false;
   private isScheduling = false;
+  private validationRetryCounts = new Map<string, number>();
   private requestQueue: Array<{
     request: ToolCallRequestInfo | ToolCallRequestInfo[];
     signal: AbortSignal;
@@ -463,6 +472,8 @@ export class CoreToolScheduler {
 
       switch (newStatus) {
         case 'success': {
+          // Successful execution only resets retry state for this tool
+          this.clearRetryCountsForTool(currentCall.request.name);
           const durationMs = existingStartTime
             ? Date.now() - existingStartTime
             : undefined;
@@ -610,6 +621,7 @@ export class CoreToolScheduler {
       const invocationOrError = this.buildInvocation(
         call.tool,
         args as Record<string, unknown>,
+        targetCallId,
       );
       if (invocationOrError instanceof Error) {
         const response = createErrorResponse(
@@ -646,9 +658,17 @@ export class CoreToolScheduler {
   private buildInvocation(
     tool: AnyDeclarativeTool,
     args: object,
+    callId?: string,
   ): AnyToolInvocation | Error {
     try {
-      return tool.build(structuredClone(args));
+      const invocation = tool.build(structuredClone(args));
+      if (callId) {
+        const maybeAware = invocation as { setCallId?: (id: string) => void };
+        if (typeof maybeAware.setCallId === 'function') {
+          maybeAware.setCallId(callId);
+        }
+      }
+      return invocation;
     } catch (e) {
       if (e instanceof Error) {
         return e;
@@ -661,13 +681,18 @@ export class CoreToolScheduler {
    * Generates error message for unknown tool. Returns early with skill-specific
    * message if the name matches a skill, otherwise uses Levenshtein suggestions.
    */
-  private getToolNotFoundMessage(unknownToolName: string, topN = 3): string {
+  private async getToolNotFoundMessage(
+    unknownToolName: string,
+    topN = 3,
+  ): Promise<string> {
     // Check if the unknown tool name matches an available skill name.
     // This handles the case where the model tries to invoke a skill as a tool
     // (e.g., Tool: "pdf" instead of Tool: "Skill" with skill: "pdf")
-    const skillTool = this.toolRegistry.getTool(ToolNames.SKILL);
-    if (skillTool instanceof SkillTool) {
-      const availableSkillNames = skillTool.getAvailableSkillNames();
+    const skillTool = await this.toolRegistry.ensureTool(ToolNames.SKILL);
+    if (skillTool && 'getAvailableSkillNames' in skillTool) {
+      const availableSkillNames = (
+        skillTool as { getAvailableSkillNames(): string[] }
+      ).getAvailableSkillNames();
       if (availableSkillNames.includes(unknownToolName)) {
         return `"${unknownToolName}" is a skill name, not a tool name. To use this skill, invoke the "${ToolNames.SKILL}" tool with parameter: skill: "${unknownToolName}"`;
       }
@@ -742,6 +767,20 @@ export class CoreToolScheduler {
     return this._schedule(request, signal);
   }
 
+  /**
+   * Removes all validation retry counters for the given tool. Keys are
+   * "<toolName>:<errorMessage>", so a plain `Map.delete(toolName)` would not
+   * match anything.
+   */
+  private clearRetryCountsForTool(toolName: string): void {
+    const prefix = `${toolName}:`;
+    for (const key of this.validationRetryCounts.keys()) {
+      if (key.startsWith(prefix)) {
+        this.validationRetryCounts.delete(key);
+      }
+    }
+  }
+
   private async _schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
@@ -754,6 +793,23 @@ export class CoreToolScheduler {
         );
       }
       const requestsToProcess = Array.isArray(request) ? request : [request];
+
+      // Prune validation retry state per-tool, not wholesale. Keys are
+      // "<toolName>:<errorMessage>"; retain counters only for tools actually
+      // present in the current batch. Keeping every tracked tool's counters
+      // whenever any current request matched caused stale counts for
+      // unrelated tools to survive and fire RETRY LOOP DETECTED prematurely
+      // the next time those tools were used.
+      if (this.validationRetryCounts.size > 0) {
+        const currentToolNames = new Set(requestsToProcess.map((r) => r.name));
+        for (const key of [...this.validationRetryCounts.keys()]) {
+          const sep = key.indexOf(':');
+          const toolName = sep === -1 ? key : key.slice(0, sep);
+          if (!currentToolNames.has(toolName)) {
+            this.validationRetryCounts.delete(key);
+          }
+        }
+      }
 
       const newToolCalls: ToolCall[] = [];
       for (const reqInfo of requestsToProcess) {
@@ -807,10 +863,10 @@ export class CoreToolScheduler {
           }
         }
 
-        const toolInstance = this.toolRegistry.getTool(reqInfo.name);
+        const toolInstance = await this.toolRegistry.ensureTool(reqInfo.name);
         if (!toolInstance) {
           // Tool is not in registry and not excluded - likely hallucinated or typo
-          const errorMessage = this.getToolNotFoundMessage(reqInfo.name);
+          const errorMessage = await this.getToolNotFoundMessage(reqInfo.name);
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
@@ -827,26 +883,48 @@ export class CoreToolScheduler {
         const invocationOrError = this.buildInvocation(
           toolInstance,
           reqInfo.args,
+          reqInfo.callId,
         );
         if (invocationOrError instanceof Error) {
-          const error = reqInfo.wasOutputTruncated
+          const baseError = reqInfo.wasOutputTruncated
             ? new Error(
                 `${invocationOrError.message} ${TRUNCATION_PARAM_GUIDANCE}`,
               )
             : invocationOrError;
+
+          // Track validation retry for loop detection. Counts accumulate per
+          // (tool, error message) pair so a different validation mistake on
+          // the same tool starts fresh rather than tripping the threshold.
+          const errorKey = `${reqInfo.name}:${baseError.message}`;
+          const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
+          for (const key of this.validationRetryCounts.keys()) {
+            if (key.startsWith(`${reqInfo.name}:`) && key !== errorKey) {
+              this.validationRetryCounts.delete(key);
+            }
+          }
+          this.validationRetryCounts.set(errorKey, count);
+
+          const finalError =
+            count >= VALIDATION_RETRY_LOOP_THRESHOLD
+              ? new Error(`${baseError.message}${RETRY_LOOP_STOP_DIRECTIVE}`)
+              : baseError;
+
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
             tool: toolInstance,
             response: createErrorResponse(
               reqInfo,
-              error,
+              finalError,
               ToolErrorType.INVALID_TOOL_PARAMS,
             ),
             durationMs: 0,
           });
           continue;
         }
+
+        // Reset all validation retry counters for this tool since it passed validation
+        this.clearRetryCountsForTool(reqInfo.name);
 
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content.
@@ -1011,12 +1089,12 @@ export class CoreToolScheduler {
             /**
              * In non-interactive mode, automatically deny.
              */
-            const shouldAutoDeny =
+            const isNonInteractiveDeny =
               !this.config.isInteractive() &&
               !this.config.getExperimentalZedIntegration() &&
               this.config.getInputFormat() !== InputFormat.STREAM_JSON;
 
-            if (shouldAutoDeny) {
+            if (isNonInteractiveDeny) {
               const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
               this.setStatusInternal(
                 reqInfo.callId,
@@ -1031,6 +1109,8 @@ export class CoreToolScheduler {
             }
 
             // Fire PermissionRequest hook before showing the permission dialog.
+            // Hooks run before the background-agent auto-deny so they can
+            // override the denial with policy-based decisions.
             const messageBus = this.config.getMessageBus() as
               | MessageBus
               | undefined;
@@ -1093,6 +1173,22 @@ export class CoreToolScheduler {
                 }
                 continue;
               }
+            }
+
+            // Background agents can't show interactive prompts.
+            // Auto-deny after hooks have had a chance to decide.
+            if (this.config.getShouldAvoidPermissionPrompts?.()) {
+              const errorMessage = `Tool "${reqInfo.name}" requires permission, but background agents cannot prompt for confirmation. The tool call was denied.`;
+              this.setStatusInternal(
+                reqInfo.callId,
+                'error',
+                createErrorResponse(
+                  reqInfo,
+                  new Error(errorMessage),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+              );
+              continue;
             }
 
             // Allow IDE to resolve confirmation
@@ -1594,6 +1690,21 @@ export class CoreToolScheduler {
           }
         }
 
+        // Inject conditional rules when the model accesses a matching file.
+        // Rules are injected at most once per session per rule file.
+        const filePath = toolInput?.['file_path'];
+        if (typeof filePath === 'string') {
+          const rulesCtx = this.config
+            .getConditionalRulesRegistry()
+            ?.matchAndConsume(filePath);
+          if (rulesCtx) {
+            content = appendAdditionalContext(
+              content,
+              `<system-reminder>\n${rulesCtx}\n</system-reminder>`,
+            );
+          }
+        }
+
         const response = convertToFunctionResponse(toolName, callId, content);
         const successResponse: ToolCallResponseInfo = {
           callId,
@@ -1602,6 +1713,11 @@ export class CoreToolScheduler {
           error: undefined,
           errorType: undefined,
           contentLength,
+          // Propagate modelOverride from skill tools. Use `in` to distinguish
+          // "skill returned undefined (inherit)" from "non-skill tool (no field)".
+          ...('modelOverride' in toolResult
+            ? { modelOverride: toolResult.modelOverride }
+            : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
       } else {

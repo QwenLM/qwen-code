@@ -562,12 +562,12 @@ describe('useSlashCompletion', () => {
 
       const slashCommands = [
         createTestCommand({
-          name: 'memory',
-          description: 'Manage memory',
+          name: 'config',
+          description: 'Manage configuration',
           subCommands: [
             createTestCommand({
-              name: 'show',
-              description: 'Show memory',
+              name: 'set',
+              description: 'Set configuration',
               completion: mockCompletionFn,
             }),
           ],
@@ -577,7 +577,7 @@ describe('useSlashCompletion', () => {
       const { result } = renderHook(() =>
         useTestHarnessForSlashCompletion(
           true,
-          '/memory show --project',
+          '/config set --project',
           slashCommands,
           mockCommandContext,
         ),
@@ -587,8 +587,8 @@ describe('useSlashCompletion', () => {
         expect(mockCompletionFn).toHaveBeenCalledWith(
           expect.objectContaining({
             invocation: {
-              raw: '/memory show --project',
-              name: 'show',
+              raw: '/config set --project',
+              name: 'set',
               args: '--project',
             },
           }),

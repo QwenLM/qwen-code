@@ -260,7 +260,8 @@ function hasAnyProviderEntries(modelProviders: unknown): boolean {
   }
 
   return Object.values(modelProviders).some(
-    (providerModels) => Array.isArray(providerModels) && providerModels.length > 0,
+    (providerModels) =>
+      Array.isArray(providerModels) && providerModels.length > 0,
   );
 }
 
@@ -272,15 +273,15 @@ function getModelProvidersOverrideWarnings(
     return [];
   }
 
-  const userOriginal =
-    loadedSettings.user.originalSettings as unknown as Record<string, unknown>;
-  const workspaceOriginal =
-    loadedSettings.workspace.originalSettings as unknown as Record<
-      string,
-      unknown
-    >;
+  const userOriginal = loadedSettings.user
+    .originalSettings as unknown as Record<string, unknown>;
+  const workspaceOriginal = loadedSettings.workspace
+    .originalSettings as unknown as Record<string, unknown>;
 
-  if (!hasOwnModelProviders(userOriginal) || !hasOwnModelProviders(workspaceOriginal)) {
+  if (
+    !hasOwnModelProviders(userOriginal) ||
+    !hasOwnModelProviders(workspaceOriginal)
+  ) {
     return [];
   }
 
@@ -290,7 +291,10 @@ function getModelProvidersOverrideWarnings(
     isPlainObject(workspaceModelProviders) &&
     Object.keys(workspaceModelProviders).length === 0;
 
-  if (!workspaceIsEmptyModelProviders || !hasAnyProviderEntries(userModelProviders)) {
+  if (
+    !workspaceIsEmptyModelProviders ||
+    !hasAnyProviderEntries(userModelProviders)
+  ) {
     return [];
   }
 
@@ -432,6 +436,26 @@ export class LoadedSettings {
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
     saveSettings(settingsFile, createSettingsUpdate(key, value));
+  }
+
+  /**
+   * Get user-level hooks from user settings (not merged with workspace).
+   * These hooks should always be loaded regardless of folder trust.
+   */
+  getUserHooks(): Record<string, unknown> | undefined {
+    return this.user.settings.hooks;
+  }
+
+  /**
+   * Get project-level hooks from workspace settings (not merged).
+   * Returns undefined if workspace is not trusted (hooks filtered out).
+   */
+  getProjectHooks(): Record<string, unknown> | undefined {
+    // Only return project hooks if workspace is trusted
+    if (!this.isTrusted) {
+      return undefined;
+    }
+    return this.workspace.settings.hooks;
   }
 }
 

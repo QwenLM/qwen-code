@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useMemo,
+  useEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from 'react';
 import { type PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { ArenaDialogType } from './useArenaCommand.js';
@@ -73,6 +80,7 @@ interface SlashCommandProcessorActions {
   openArenaDialog?: (type: Exclude<ArenaDialogType, null>) => void;
   openThemeDialog: () => void;
   openEditorDialog: () => void;
+  openMemoryDialog: () => void;
   openSettingsDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
   openTrustDialog: () => void;
@@ -103,6 +111,7 @@ export const useSlashCommandProcessor = (
   toggleVimEnabled: () => Promise<boolean>,
   isProcessing: boolean,
   setIsProcessing: (isProcessing: boolean) => void,
+  isIdleRef: MutableRefObject<boolean>,
   setGeminiMdFileCount: (count: number) => void,
   actions: SlashCommandProcessorActions,
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
@@ -248,6 +257,7 @@ export const useSlashCommandProcessor = (
   );
   const commandContext = useMemo(
     (): CommandContext => ({
+      executionMode: 'interactive',
       services: {
         config,
         settings,
@@ -257,6 +267,7 @@ export const useSlashCommandProcessor = (
       ui: {
         addItem,
         clear: () => {
+          cancelBtw();
           clearItems();
           clearScreen();
           refreshStatic();
@@ -269,6 +280,7 @@ export const useSlashCommandProcessor = (
         setBtwItem,
         cancelBtw,
         btwAbortControllerRef,
+        isIdleRef,
         toggleVimEnabled,
         setGeminiMdFileCount,
         reloadCommands,
@@ -305,6 +317,7 @@ export const useSlashCommandProcessor = (
       setGeminiMdFileCount,
       reloadCommands,
       extensionsUpdateState,
+      isIdleRef,
     ],
   );
 
@@ -340,9 +353,11 @@ export const useSlashCommandProcessor = (
           new BundledSkillLoader(config),
           new FileCommandLoader(config),
         ];
+        const disabled = config?.getDisabledSlashCommands() ?? [];
         const commandService = await CommandService.create(
           loaders,
           controller.signal,
+          disabled.length > 0 ? new Set(disabled) : undefined,
         );
         // Avoid overwriting newer results from a subsequent effect run
         if (!controller.signal.aborted) {
@@ -513,6 +528,9 @@ export const useSlashCommandProcessor = (
                     case 'settings':
                       actions.openSettingsDialog();
                       return { type: 'handled' };
+                    case 'memory':
+                      actions.openMemoryDialog();
+                      return { type: 'handled' };
                     case 'model':
                       actions.openModelDialog();
                       return { type: 'handled' };
@@ -573,6 +591,7 @@ export const useSlashCommandProcessor = (
                   return {
                     type: 'submit_prompt',
                     content: result.content,
+                    onComplete: result.onComplete,
                   };
                 case 'confirm_shell_commands': {
                   const { outcome, approvedCommands } = await new Promise<{

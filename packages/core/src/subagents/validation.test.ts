@@ -22,6 +22,11 @@ describe('SubagentValidator', () => {
         'code_reviewer',
         'agent123',
         'my-helper',
+        '项目管理',
+        'コードレビュー',
+        '코드리뷰',
+        '项目-manager',
+        'проект_менеджер',
       ];
 
       for (const name of validNames) {
@@ -116,6 +121,14 @@ describe('SubagentValidator', () => {
       const result = validator.validateName('TestAgent');
       expect(result.isValid).toBe(true);
       expect(result.warnings).toContain(
+        'Consider using lowercase names for consistency',
+      );
+    });
+
+    it('should not warn about case for non-Latin names', () => {
+      const result = validator.validateName('项目管理');
+      expect(result.isValid).toBe(true);
+      expect(result.warnings).not.toContain(
         'Consider using lowercase names for consistency',
       );
     });
@@ -342,6 +355,36 @@ describe('SubagentValidator', () => {
       const result = validator.validateConfig(validConfig);
       expect(result.isValid).toBe(true);
       expect(result.errors).toHaveLength(0);
+    });
+
+    it('should accept valid disallowedTools', () => {
+      const result = validator.validateConfig({
+        ...validConfig,
+        disallowedTools: ['write_file', 'mcp__slack'],
+      });
+      expect(result.isValid).toBe(true);
+      expect(result.errors).toHaveLength(0);
+    });
+
+    it('should reject non-string entries in disallowedTools', () => {
+      const result = validator.validateConfig({
+        ...validConfig,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        disallowedTools: [123, 'write_file'] as any,
+      });
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain(
+        'Tool name must be a string, got: number',
+      );
+    });
+
+    it('should reject empty strings in disallowedTools', () => {
+      const result = validator.validateConfig({
+        ...validConfig,
+        disallowedTools: ['', 'write_file'],
+      });
+      expect(result.isValid).toBe(false);
+      expect(result.errors).toContain('Tool name cannot be empty');
     });
 
     it('should collect errors from all validation steps', () => {

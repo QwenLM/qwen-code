@@ -9,8 +9,12 @@ export * from './shared/index.js';
 
 // Business ToolCall components
 export { ThinkToolCall } from './ThinkToolCall.js';
-export { SaveMemoryToolCall } from './SaveMemoryToolCall.js';
 export { GenericToolCall } from './GenericToolCall.js';
+export {
+  AgentToolCall,
+  isAgentExecutionRawOutput,
+  isAgentExecutionToolCall,
+} from './AgentToolCall.js';
 export { EditToolCall } from './EditToolCall.js';
 export { WriteToolCall } from './WriteToolCall.js';
 export { SearchToolCall } from './SearchToolCall.js';
