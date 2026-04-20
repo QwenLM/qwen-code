@@ -763,7 +763,8 @@ describe('mapToDisplay', () => {
       tool: toolForCall2,
       invocation: toolForCall2.build(baseRequest.args),
       liveOutput: 'markdown output',
-      startTime: 1234567890,
+      startTime: 1000000000,
+      executionStartTime: 1234567890,
     } as ToolCall;
 
     const display = mapToDisplay([toolCall1, toolCall2]);
