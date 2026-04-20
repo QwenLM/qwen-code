@@ -28,7 +28,6 @@ import {
   ErrorMessage,
   RetryCountdownMessage,
   SuccessMessage,
-  AwayRecapMessage,
 } from './messages/StatusMessages.js';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
@@ -285,9 +284,6 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'memory_saved' && (
         <MemorySavedMessage item={itemForDisplay} />
-      )}
-      {itemForDisplay.type === 'away_recap' && (
-        <AwayRecapMessage text={itemForDisplay.text} />
       )}
     </Box>
   );

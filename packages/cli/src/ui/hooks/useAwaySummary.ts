@@ -6,7 +6,7 @@
 
 import { useEffect, useRef } from 'react';
 import { generateSessionRecap, type Config } from '@qwen-code/qwen-code-core';
-import type { HistoryItemAwayRecap, HistoryItemWithoutId } from '../types.js';
+import type { HistoryItemAwayRecap } from '../types.js';
 
 const AWAY_THRESHOLD_MS = 5 * 60 * 1000;
 
@@ -15,7 +15,7 @@ export interface UseAwaySummaryOptions {
   config: Config | null;
   isFocused: boolean;
   isIdle: boolean;
-  addItem: (item: HistoryItemWithoutId, baseTimestamp: number) => number;
+  setAwayRecapItem: (item: HistoryItemAwayRecap | null) => void;
 }
 
 /**
@@ -27,7 +27,7 @@ export interface UseAwaySummaryOptions {
  * a single back-and-forth produces at most one recap.
  */
 export function useAwaySummary(options: UseAwaySummaryOptions): void {
-  const { enabled, config, isFocused, isIdle, addItem } = options;
+  const { enabled, config, isFocused, isIdle, setAwayRecapItem } = options;
 
   const blurredAtRef = useRef<number | null>(null);
   const recapPendingRef = useRef(false);
@@ -78,7 +78,7 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
           type: 'away_recap',
           text: recap.text,
         };
-        addItem(item, Date.now());
+        setAwayRecapItem(item);
       })
       .finally(() => {
         if (inFlightRef.current === controller) {
@@ -86,7 +86,7 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
         }
         recapPendingRef.current = false;
       });
-  }, [enabled, config, isFocused, isIdle, addItem]);
+  }, [enabled, config, isFocused, isIdle, setAwayRecapItem]);
 
   useEffect(
     () => () => {
