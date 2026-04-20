@@ -16,7 +16,7 @@ name: 'NPM Publish'
 
 triggers:
   push:
-    branches: ['dataworks-release/*']
+    branches: ['main', 'dataworks-release/*']
 
 params:
   tag:
@@ -71,7 +71,13 @@ jobs:
 
       - name: 'Publish packages'
         run: |
-          ARGS="--token ${{ secrets.inner_npm_publish_token }} --tag ${{ params.tag }}"
+          # main 分支发布正式版（latest），其他分支使用参数指定的 tag（默认 beta）
+          if [ "${{git.branch}}" = "main" ]; then
+            PUBLISH_TAG="latest"
+          else
+            PUBLISH_TAG="${{ params.tag }}"
+          fi
+          ARGS="--token ${{ secrets.inner_npm_publish_token }} --tag $PUBLISH_TAG"
           [ "${{ params.dry_run }}" = "true" ] && ARGS="$ARGS --dry-run"
           [ "${{ params.auto_version }}" = "true" ] && ARGS="$ARGS --auto-version"
           node scripts/publish-packages.js $ARGS
