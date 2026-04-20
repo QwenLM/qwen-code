@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { t } from '../../../../i18n/index.js';
 import type { AuthenticateStepProps } from '../types.js';
 import { useConfig } from '../../../contexts/ConfigContext.js';
@@ -42,12 +43,30 @@ function wrapForMultiplexer(osc: string): string {
 /**
  * Wrap a URL in an OSC 8 hyperlink escape sequence. Supported terminals
  * (iTerm2, WezTerm, Kitty, Windows Terminal, VS Code, GNOME Terminal, …)
- * render it as a single clickable link even when the visible text wraps
- * across multiple lines; terminals without OSC 8 support ignore the
- * escapes and still show the raw text.
+ * render it as a clickable link; terminals without OSC 8 support ignore
+ * the escapes and still show the raw text.
  */
 function osc8Hyperlink(url: string, label = url): string {
   return `\x1b]8;;${url}\x1b\\${label}\x1b]8;;\x1b\\`;
+}
+
+/**
+ * Slice a string into chunks of up to `width` characters. We pre-split the
+ * URL ourselves instead of relying on Ink / wrap-ansi so that:
+ *   1. Each visible line is an independent, complete OSC 8 hyperlink
+ *      (wrap-ansi preserves SGR codes across wraps but does not re-open
+ *      OSC 8 hyperlinks, which would leave all lines but the first
+ *      unclickable).
+ *   2. No line exceeds the container width, avoiding overflow past the
+ *      dialog border.
+ */
+function sliceIntoLines(text: string, width: number): string[] {
+  if (width <= 0) return [text];
+  const lines: string[] = [];
+  for (let i = 0; i < text.length; i += width) {
+    lines.push(text.slice(i, i + width));
+  }
+  return lines.length > 0 ? lines : [''];
 }
 
 /**
@@ -80,6 +99,7 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
   onBack,
 }) => {
   const config = useConfig();
+  const { columns } = useTerminalSize();
   const [authState, setAuthState] = useState<AuthState>('idle');
   const [messages, setMessages] = useState<string[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -88,6 +108,16 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
     { status: 'idle' } | { status: 'copied' | 'unsupported'; nonce: number }
   >({ status: 'idle' });
   const isRunning = useRef(false);
+
+  // MCPManagementDialog wraps us in a box of `columns - 4` with a
+  // single-line border and padding of 1 on each side, so our usable
+  // content width is `columns - 8`. Clamp low so the URL still renders
+  // on extremely narrow terminals.
+  const urlLineWidth = Math.max(20, columns - 8);
+  const authUrlLines = useMemo(
+    () => (authUrl ? sliceIntoLines(authUrl, urlLineWidth) : []),
+    [authUrl, urlLineWidth],
+  );
 
   const runAuthentication = useCallback(async () => {
     if (!server || !config || isRunning.current) return;
@@ -280,10 +310,12 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
         )}
         {authState === 'authenticating' && authUrl && (
           <>
-            <Box marginTop={1}>
-              <Text color={theme.text.accent} wrap="wrap">
-                {osc8Hyperlink(authUrl)}
-              </Text>
+            <Box flexDirection="column" marginTop={1}>
+              {authUrlLines.map((line, i) => (
+                <Text key={i} color={theme.text.accent} wrap="truncate">
+                  {osc8Hyperlink(authUrl, line)}
+                </Text>
+              ))}
             </Box>
             <Text
               bold={copyState.status === 'idle'}
