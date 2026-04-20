@@ -178,7 +178,7 @@ class QwenAgent implements Agent {
     private settings: LoadedSettings,
     private argv: CliArgs,
     private connection: AgentSideConnection,
-  ) { }
+  ) {}
 
   async initialize(args: InitializeRequest): Promise<InitializeResponse> {
     this.clientCapabilities = args.clientCapabilities;
@@ -297,10 +297,22 @@ class QwenAgent implements Agent {
   ): Promise<ListSessionsResponse> {
     const cwd = params.cwd || process.cwd();
     const numericCursor = params.cursor ? Number(params.cursor) : undefined;
+
+    // The ACP spec's ListSessionsRequest doesn't include a page-size field,
+    // so the SDK's zod validator strips any top-level `size` the client sends
+    // before it reaches this handler. Carry page size through `_meta.size`
+    // (same pattern filesystem.ts uses for `_meta.bom` / `_meta.encoding`).
+    const metaSize = params._meta?.['size'];
+    const size =
+      typeof metaSize === 'number' && metaSize > 0
+        ? Math.floor(metaSize)
+        : undefined;
+
     const result = await runWithAcpRuntimeOutputDir(this.settings, cwd, () => {
       const sessionService = new SessionService(cwd);
       return sessionService.listSessions({
         cursor: Number.isNaN(numericCursor) ? undefined : numericCursor,
+        size,
       });
     });
 
@@ -661,9 +673,9 @@ class QwenAgent implements Agent {
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
     const currentModelId = activeRuntimeSnapshot
       ? formatAcpModelId(
-        activeRuntimeSnapshot.id,
-        activeRuntimeSnapshot.authType,
-      )
+          activeRuntimeSnapshot.id,
+          activeRuntimeSnapshot.authType,
+        )
       : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
 
     const mappedAvailableModels = allConfiguredModels.map((model) => {
@@ -712,9 +724,9 @@ class QwenAgent implements Agent {
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
     const currentModelId = activeRuntimeSnapshot
       ? formatAcpModelId(
-        activeRuntimeSnapshot.id,
-        activeRuntimeSnapshot.authType,
-      )
+          activeRuntimeSnapshot.id,
+          activeRuntimeSnapshot.authType,
+        )
       : this.formatCurrentModelId(rawCurrentModelId, currentAuthType);
 
     const modeOptions = APPROVAL_MODES.map((mode) => ({
