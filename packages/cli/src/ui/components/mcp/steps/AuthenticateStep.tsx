@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { Box, Static, Text } from 'ink';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { t } from '../../../../i18n/index.js';
@@ -91,19 +91,6 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
     { status: 'idle' } | { status: 'copied' | 'unsupported'; nonce: number }
   >({ status: 'idle' });
   const isRunning = useRef(false);
-
-  // We emit the authorization URL through <Static> as a single logical
-  // line whose Ink-level box is sized to the URL length. That prevents
-  // Ink (and wrap-ansi) from splitting the URL across Ink rows — the
-  // terminal is the one that wraps the line visually. Because the whole
-  // URL is a single OSC 8 hyperlink sequence, the hyperlink state
-  // persists across the terminal's soft-wrap boundaries, so every
-  // visible line stays clickable. The item is keyed by URL so a fresh
-  // auth attempt emits a new line without redrawing the previous one.
-  const staticAuthUrlItems = useMemo(
-    () => (authUrl ? [{ key: authUrl, url: authUrl }] : []),
-    [authUrl],
-  );
 
   const runAuthentication = useCallback(async () => {
     if (!server || !config || isRunning.current) return;
@@ -262,22 +249,6 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
 
   return (
     <Box flexDirection="column" gap={1}>
-      {/*
-        Render the authorization URL through <Static>, which writes
-        permanently to stdout above the dynamic UI. The inner Box is
-        sized to the URL length so Ink does not wrap the URL — the
-        terminal wraps it visually, and the single OSC 8 hyperlink state
-        carries across those soft-wrap boundaries, keeping every
-        wrapped line clickable in terminals that support OSC 8.
-      */}
-      <Static items={staticAuthUrlItems}>
-        {(item) => (
-          <Box key={item.key} width={item.url.length}>
-            <Text color={theme.text.accent}>{osc8Hyperlink(item.url)}</Text>
-          </Box>
-        )}
-      </Static>
-
       {/* Server info */}
       <Box>
         <Text color={theme.text.secondary}>
@@ -312,6 +283,19 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
         )}
         {authState === 'authenticating' && authUrl && (
           <>
+            {/*
+              Render the URL in a Box whose width matches the URL so Ink
+              does not wrap it. The line overflows the dialog's border
+              horizontally; Ink hands one long row to log-update, whose
+              wrap-ansi pass wraps it at terminal width and re-emits the
+              OSC 8 escape at every wrap boundary, so each visible line
+              stays clickable in terminals that support OSC 8. Because
+              the row is a normal (non-Static) Ink child, log-update
+              correctly erases it when the component unmounts.
+            */}
+            <Box marginTop={1} width={authUrl.length}>
+              <Text color={theme.text.accent}>{osc8Hyperlink(authUrl)}</Text>
+            </Box>
             <Text
               bold={copyState.status === 'idle'}
               color={
