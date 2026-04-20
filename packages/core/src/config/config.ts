@@ -44,30 +44,12 @@ import {
 import { GitService } from '../services/gitService.js';
 import { CronScheduler } from '../services/cronScheduler.js';
 
-// Tools
-import { AskUserQuestionTool } from '../tools/askUserQuestion.js';
-import { EditTool } from '../tools/edit.js';
-import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
-import { GlobTool } from '../tools/glob.js';
-import { GrepTool } from '../tools/grep.js';
-import { LSTool } from '../tools/ls.js';
+// Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
 import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
 import { setGeminiMdFilename } from '../memory/const.js';
-import { ReadFileTool } from '../tools/read-file.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { RipGrepTool } from '../tools/ripGrep.js';
-import { ShellTool } from '../tools/shell.js';
-import { SkillTool } from '../tools/skill.js';
-import { AgentTool } from '../tools/agent.js';
-import { TodoWriteTool } from '../tools/todoWrite.js';
-import { ToolRegistry } from '../tools/tool-registry.js';
-import { WebFetchTool } from '../tools/web-fetch.js';
-import { WebSearchTool } from '../tools/web-search/index.js';
-import { WriteFileTool } from '../tools/write-file.js';
-import { LspTool } from '../tools/lsp.js';
-import { CronCreateTool } from '../tools/cron-create.js';
-import { CronListTool } from '../tools/cron-list.js';
-import { CronDeleteTool } from '../tools/cron-delete.js';
+import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type { LspClient } from '../lsp/types.js';
 
 // Other modules
@@ -78,6 +60,7 @@ import { SkillManager } from '../skills/skill-manager.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
+import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -132,6 +115,7 @@ import {
 } from '../services/sessionService.js';
 import { randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
 import {
   createDebugLogger,
   setDebugLogSession,
@@ -352,6 +336,14 @@ export interface ConfigParameters {
   coreTools?: string[];
   allowedTools?: string[];
   excludeTools?: string[];
+  /**
+   * Pre-merged list of slash command names that should be hidden from the
+   * CLI surface. Matched case-insensitively on the final (post-rename)
+   * command name. Sourced from settings (`slashCommands.disabled`, UNION
+   * merged across scopes), the `--disabled-slash-commands` CLI flag, and
+   * the `QWEN_DISABLED_SLASH_COMMANDS` environment variable.
+   */
+  disabledSlashCommands?: string[];
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -438,9 +430,30 @@ export interface ConfigParameters {
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
   skipStartupContext?: boolean;
+  bareMode?: boolean;
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
+  /**
+   * File descriptor number for structured JSON event output (dual output mode).
+   * When set, Qwen Code outputs structured JSON events to this fd while
+   * continuing to render the TUI on stdout. The caller must provide this fd
+   * via spawn stdio configuration.
+   * Mutually exclusive with jsonFile.
+   */
+  jsonFd?: number;
+  /**
+   * File path for structured JSON event output (dual output mode).
+   * Can be a regular file, FIFO (named pipe), or /dev/fd/N.
+   * Mutually exclusive with jsonFd.
+   */
+  jsonFile?: string;
+  /**
+   * File path for receiving remote input commands (bidirectional sync mode).
+   * An external process writes JSONL commands to this file, and the TUI
+   * watches it to process messages as if the user typed them.
+   */
+  inputFile?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
   /** Multi-agent collaboration settings (Arena, Team, Swarm) */
@@ -476,6 +489,8 @@ export interface ConfigParameters {
   projectHooks?: Record<string, unknown>;
 
   hooks?: Record<string, unknown>;
+  /** Glob patterns to exclude from .qwen/rules/ loading. */
+  contextRuleExcludes?: string[];
   /** Warnings generated during configuration resolution */
   warnings?: string[];
   /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
@@ -526,6 +541,12 @@ export interface ConfigInitializeOptions {
   sendSdkMcpMessage?: SendSdkMcpMessage;
 }
 
+const DEFAULT_BARE_CORE_TOOLS = [
+  ToolNames.READ_FILE,
+  ToolNames.EDIT,
+  ToolNames.SHELL,
+];
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
@@ -533,6 +554,7 @@ export class Config {
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
+  private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
@@ -557,6 +579,7 @@ export class Config {
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
+  private readonly disabledSlashCommands: readonly string[];
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -572,6 +595,8 @@ export class Config {
   private userMemory: string;
   private sdkMode: boolean;
   private geminiMdFileCount: number;
+  private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
+  private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
@@ -594,6 +619,7 @@ export class Config {
   private readonly checkpointing: boolean;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
+  private readonly explicitIncludeDirectories: string[];
   private readonly bugCommand: BugCommandSettings | undefined;
   private readonly outputLanguageFilePath?: string;
   private readonly noBrowser: boolean;
@@ -637,6 +663,7 @@ export class Config {
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
+  private readonly bareMode: boolean;
   private readonly warnings: string[];
   private readonly allowedHttpHookUrls: string[];
   private readonly onPersistPermissionRuleCallback?: (
@@ -651,6 +678,9 @@ export class Config {
   private readonly truncateToolOutputLines: number;
   private readonly eventEmitter?: EventEmitter;
   private readonly channel: string | undefined;
+  private readonly jsonFd: number | undefined;
+  private readonly jsonFile: string | undefined;
+  private readonly inputFile: string | undefined;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
@@ -675,9 +705,12 @@ export class Config {
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.explicitIncludeDirectories = Array.from(
+      new Set(params.includeDirectories ?? []),
+    );
     this.workspaceContext = new WorkspaceContext(
       this.targetDir,
-      params.includeDirectories ?? [],
+      this.explicitIncludeDirectories,
     );
     this.debugMode = params.debugMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -692,6 +725,9 @@ export class Config {
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
+    this.disabledSlashCommands = Object.freeze([
+      ...(params.disabledSlashCommands ?? []),
+    ]);
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -707,6 +743,7 @@ export class Config {
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
+    this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.accessibility = params.accessibility ?? {};
     this.telemetrySettings = {
@@ -770,6 +807,7 @@ export class Config {
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
+    this.bareMode = params.bareMode ?? false;
     this.warnings = params.warnings ?? [];
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
@@ -793,6 +831,9 @@ export class Config {
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
     this.channel = params.channel;
+    this.jsonFd = params.jsonFd;
+    this.jsonFile = params.jsonFile;
+    this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -867,11 +908,18 @@ export class Config {
     }
     this.promptRegistry = new PromptRegistry();
     this.extensionManager.setConfig(this);
-    await this.extensionManager.refreshCache();
+    const explicitExtensionNames = this.getExplicitExtensionNames();
+    if (!this.getBareMode()) {
+      await this.extensionManager.refreshCache();
+    } else if (explicitExtensionNames.length > 0) {
+      await this.extensionManager.refreshCache({
+        names: explicitExtensionNames,
+      });
+    }
     this.debugLogger.debug('Extension manager initialized');
 
-    // Initialize hook system if enabled
-    if (!this.disableAllHooks) {
+    // Bare mode skips all hook loading and execution.
+    if (!this.getDisableAllHooks()) {
       this.hookSystem = new HookSystem(this);
       await this.hookSystem.initialize();
       this.debugLogger.debug('Hook system initialized');
@@ -1039,7 +1087,11 @@ export class Config {
 
     this.subagentManager = new SubagentManager(this);
     this.skillManager = new SkillManager(this);
-    await this.skillManager.startWatching();
+    if (this.getBareMode()) {
+      await this.skillManager.refreshCache();
+    } else {
+      await this.skillManager.startWatching();
+    }
     this.debugLogger.debug('Skill manager initialized');
 
     this.permissionManager = new PermissionManager(this);
@@ -1051,13 +1103,16 @@ export class Config {
       this.subagentManager.loadSessionSubagents(this.sessionSubagents);
     }
 
-    await this.extensionManager.refreshCache();
+    if (!this.getBareMode()) {
+      await this.extensionManager.refreshCache();
+    }
 
     await this.refreshHierarchicalMemory();
     this.debugLogger.debug('Hierarchical memory loaded');
 
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
+      this.getBareMode() ? { skipDiscovery: true } : undefined,
     );
     this.debugLogger.info(
       `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
@@ -1069,21 +1124,26 @@ export class Config {
     // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
     this.modelsConfig.detectAndCaptureRuntimeModel();
 
+    // Warm all lazy tool factories so telemetry can access tool metadata synchronously.
+    // Use strict mode so a broken built-in tool surfaces immediately at startup.
+    await this.toolRegistry.warmAll({ strict: true });
+
     logStartSession(this, new StartSessionEvent(this));
     this.debugLogger.info('Config initialization completed');
   }
 
   async refreshHierarchicalMemory(): Promise<void> {
-    const { memoryContent, fileCount } = await loadServerHierarchicalMemory(
-      this.getWorkingDir(),
-      this.shouldLoadMemoryFromIncludeDirectories()
-        ? this.getWorkspaceContext().getDirectories()
-        : [],
-      this.getFileService(),
-      this.getExtensionContextFilePaths(),
-      this.isTrustedFolder(),
-      this.getImportFormat(),
-    );
+    const { memoryContent, fileCount, conditionalRules, projectRoot } =
+      await loadServerHierarchicalMemory(
+        this.getWorkingDir(),
+        this.getMemoryDiscoveryDirectories(),
+        this.getFileService(),
+        this.getExtensionContextFilePaths(),
+        this.isTrustedFolder(),
+        this.getImportFormat(),
+        this.contextRuleExcludes,
+        { explicitOnly: this.getBareMode() },
+      );
     if (this.getManagedAutoMemoryEnabled()) {
       const managedAutoMemoryIndex = await readAutoMemoryIndex(
         this.getProjectRoot(),
@@ -1099,6 +1159,41 @@ export class Config {
       this.setUserMemory(memoryContent);
     }
     this.setGeminiMdFileCount(fileCount);
+    this.conditionalRulesRegistry = new ConditionalRulesRegistry(
+      conditionalRules,
+      projectRoot,
+    );
+  }
+
+  private getMemoryDiscoveryDirectories(): string[] {
+    if (!this.shouldLoadMemoryFromIncludeDirectories()) {
+      return [];
+    }
+
+    if (this.getBareMode()) {
+      return this.explicitIncludeDirectories;
+    }
+
+    return [...this.getWorkspaceContext().getDirectories()];
+  }
+
+  getConditionalRulesRegistry(): ConditionalRulesRegistry | undefined {
+    return this.conditionalRulesRegistry;
+  }
+
+  /**
+   * Update the conditional rules registry. Called after external refresh
+   * paths (e.g. /memory refresh or /directory add) that bypass
+   * refreshHierarchicalMemory().
+   */
+  setConditionalRulesRegistry(
+    registry: ConditionalRulesRegistry | undefined,
+  ): void {
+    this.conditionalRulesRegistry = registry;
+  }
+
+  getContextRuleExcludes(): string[] {
+    return this.contextRuleExcludes;
   }
 
   getContentGenerator(): ContentGenerator {
@@ -1334,6 +1429,12 @@ export class Config {
       return;
     }
 
+    // Strip thinking blocks from conversation history on model switch.
+    // reasoning_content is a non-standard field that causes strict
+    // OpenAI-compatible providers to reject requests with 422 errors
+    // when thought parts from a previous model leak into the payload (#3304).
+    this.geminiClient.stripThoughtsFromHistory();
+
     // Hot update path: only supported for qwen-oauth.
     // For other auth types we always refresh to recreate the ContentGenerator.
     //
@@ -1502,6 +1603,8 @@ export class Config {
         await this.toolRegistry.stop();
       }
 
+      this.backgroundTaskRegistry.abortAll();
+
       await this.cleanupArenaRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
@@ -1531,6 +1634,9 @@ export class Config {
 
   /** @deprecated Use getPermissionsAllow() instead. */
   getCoreTools(): string[] | undefined {
+    if (this.getBareMode()) {
+      return DEFAULT_BARE_CORE_TOOLS;
+    }
     return this.coreTools;
   }
 
@@ -1583,6 +1689,18 @@ export class Config {
       if (t && !merged.includes(t)) merged.push(t);
     }
     return merged;
+  }
+
+  /**
+   * Returns the pre-merged list of slash command names that should be hidden
+   * from the CLI surface. Callers should treat this as a case-insensitive
+   * denylist; `CommandService.create` handles the normalization.
+   *
+   * CLI callers (loadCliConfig) populate this from settings, the
+   * `--disabled-slash-commands` flag, and `QWEN_DISABLED_SLASH_COMMANDS`.
+   */
+  getDisabledSlashCommands(): readonly string[] {
+    return this.disabledSlashCommands;
   }
 
   getToolDiscoveryCommand(): string | undefined {
@@ -1647,7 +1765,7 @@ export class Config {
   }
 
   isLspEnabled(): boolean {
-    return this.lspEnabled;
+    return this.lspEnabled && !this.getBareMode();
   }
 
   getLspClient(): LspClient | undefined {
@@ -1982,15 +2100,15 @@ export class Config {
    * Check if all hooks are disabled.
    */
   getDisableAllHooks(): boolean {
-    return this.disableAllHooks;
+    return this.disableAllHooks || this.getBareMode();
   }
 
   getManagedAutoMemoryEnabled(): boolean {
-    return this.enableManagedAutoMemory;
+    return this.enableManagedAutoMemory && !this.getBareMode();
   }
 
   getManagedAutoDreamEnabled(): boolean {
-    return this.enableManagedAutoDream;
+    return this.enableManagedAutoDream && !this.getBareMode();
   }
 
   /**
@@ -2025,6 +2143,9 @@ export class Config {
    * Used by HookRegistry to load project-specific hooks with proper source attribution.
    */
   getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    if (this.getBareMode()) {
+      return undefined;
+    }
     // Only return project hooks if workspace is trusted
     if (!this.isTrustedFolder()) {
       return undefined;
@@ -2040,6 +2161,9 @@ export class Config {
    * Used by HookRegistry to load user-specific hooks with proper source attribution.
    */
   getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    if (this.getBareMode()) {
+      return undefined;
+    }
     // Prefer new userHooks field, fall back to hooks for backward compatibility
     const hooks = this.userHooks ?? this.hooks;
     return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
@@ -2048,12 +2172,21 @@ export class Config {
   getExtensions(): Extension[] {
     const extensions = this.extensionManager.getLoadedExtensions();
     if (this.overrideExtensions) {
+      const overrideExtensionNames = new Set(
+        this.overrideExtensions.map((name) => name.toLowerCase()),
+      );
       return extensions.filter((e) =>
-        this.overrideExtensions?.includes(e.name),
+        overrideExtensionNames.has(e.name.toLowerCase()),
       );
     } else {
       return extensions;
     }
+  }
+
+  private getExplicitExtensionNames(): string[] {
+    return (this.overrideExtensions ?? []).filter(
+      (name) => name.trim() !== '' && name.toLowerCase() !== 'none',
+    );
   }
 
   getActiveExtensions(): Extension[] {
@@ -2101,7 +2234,7 @@ export class Config {
 
   // Web search provider configuration
   getWebSearchConfig() {
-    return this.webSearch;
+    return this.getBareMode() ? undefined : this.webSearch;
   }
 
   getIdeMode(): boolean {
@@ -2125,7 +2258,7 @@ export class Config {
    * If empty, all URLs are allowed (subject to SSRF protection).
    */
   getAllowedHttpHookUrls(): string[] {
-    return this.allowedHttpHookUrls;
+    return this.getBareMode() ? [] : this.allowedHttpHookUrls;
   }
 
   isTrustedFolder(): boolean {
@@ -2161,6 +2294,31 @@ export class Config {
 
   getChannel(): string | undefined {
     return this.channel;
+  }
+
+  /**
+   * Get the file descriptor for dual output JSON event stream.
+   * When set, the TUI mode will also emit structured JSON events to this fd.
+   */
+  getJsonFd(): number | undefined {
+    return this.jsonFd;
+  }
+
+  /**
+   * Get the file path for dual output JSON event stream.
+   * When set, the TUI mode will also emit structured JSON events to this file.
+   */
+  getJsonFile(): string | undefined {
+    return this.jsonFile;
+  }
+
+  /**
+   * Get the file path for remote input commands (bidirectional sync).
+   * When set, the TUI mode will watch this file for JSONL commands written
+   * by an external process and submit them as user messages.
+   */
+  getInputFile(): string | undefined {
+    return this.inputFile;
   }
 
   /**
@@ -2233,6 +2391,10 @@ export class Config {
 
   getSkipStartupContext(): boolean {
     return this.skipStartupContext;
+  }
+
+  getBareMode(): boolean {
+    return this.bareMode;
   }
 
   getTruncateToolOutputThreshold(): number {
@@ -2309,6 +2471,19 @@ export class Config {
     return this.subagentManager;
   }
 
+  getBackgroundTaskRegistry(): BackgroundTaskRegistry {
+    return this.backgroundTaskRegistry;
+  }
+
+  /**
+   * Whether interactive permission prompts should be auto-denied.
+   * True for background agents that have no UI to show prompts.
+   * PermissionRequest hooks still run and can override the denial.
+   */
+  getShouldAvoidPermissionPrompts(): boolean {
+    return false;
+  }
+
   getSkillManager(): SkillManager | null {
     return this.skillManager;
   }
@@ -2341,45 +2516,74 @@ export class Config {
       sendSdkMcpMessage,
     );
 
-    // Helper to create & register core tools that are enabled
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const registerCoreTool = async (ToolClass: any, ...args: unknown[]) => {
-      const toolName = ToolClass?.Name as ToolName | undefined;
-      const className = ToolClass?.name ?? 'UnknownTool';
-
-      if (!toolName) {
-        // Log warning and skip this tool instead of crashing
+    // Helper: check permission then register a lazy factory (no module import
+    // happens here — the dynamic import() only runs when the tool is first used).
+    const registerLazy = async (
+      toolName: ToolName,
+      factory: ToolFactory,
+    ): Promise<void> => {
+      // PermissionManager handles both the coreTools allowlist (registry-level)
+      // and deny rules (runtime-level) in a single check.
+      let pmEnabled = true;
+      try {
+        pmEnabled = this.permissionManager
+          ? await this.permissionManager.isToolEnabled(toolName)
+          : true; // Should never reach here after initialize(), but safe default.
+      } catch (error) {
         this.debugLogger.warn(
-          `Skipping tool registration: ${className} is missing static Name property. ` +
-            `Tools must define a static Name property to be registered.`,
+          `Failed to check permissions for tool "${toolName}", skipping registration:`,
+          error,
         );
         return;
       }
 
-      // PermissionManager handles both the coreTools allowlist (registry-level)
-      // and deny rules (runtime-level) in a single check.
-      const pmEnabled = this.permissionManager
-        ? await this.permissionManager.isToolEnabled(toolName)
-        : true; // Should never reach here after initialize(), but safe default.
-
       if (pmEnabled) {
-        try {
-          registry.registerTool(new ToolClass(...args));
-        } catch (error) {
-          this.debugLogger.error(
-            `Failed to register tool ${className} (${toolName}):`,
-            error,
-          );
-          throw error; // Re-throw after logging context
-        }
+        registry.registerFactory(toolName, factory);
       }
     };
 
-    await registerCoreTool(AgentTool, this);
-    await registerCoreTool(SkillTool, this);
-    await registerCoreTool(LSTool, this);
-    await registerCoreTool(ReadFileTool, this);
+    if (this.getBareMode()) {
+      await registerLazy(ToolNames.READ_FILE, async () => {
+        const { ReadFileTool } = await import('../tools/read-file.js');
+        return new ReadFileTool(this);
+      });
+      await registerLazy(ToolNames.EDIT, async () => {
+        const { EditTool } = await import('../tools/edit.js');
+        return new EditTool(this);
+      });
+      await registerLazy(ToolNames.SHELL, async () => {
+        const { ShellTool } = await import('../tools/shell.js');
+        return new ShellTool(this);
+      });
+      this.debugLogger.debug(
+        `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
+      );
+      return registry;
+    }
 
+    // --- Core tools (always registered) ---
+    await registerLazy(ToolNames.AGENT, async () => {
+      const { AgentTool } = await import('../tools/agent/agent.js');
+      return new AgentTool(this);
+    });
+    await registerLazy(ToolNames.SWARM, async () => {
+      const { SwarmTool } = await import('../tools/swarm.js');
+      return new SwarmTool(this);
+    });
+    await registerLazy(ToolNames.SKILL, async () => {
+      const { SkillTool } = await import('../tools/skill.js');
+      return new SkillTool(this);
+    });
+    await registerLazy(ToolNames.LS, async () => {
+      const { LSTool } = await import('../tools/ls.js');
+      return new LSTool(this);
+    });
+    await registerLazy(ToolNames.READ_FILE, async () => {
+      const { ReadFileTool } = await import('../tools/read-file.js');
+      return new ReadFileTool(this);
+    });
+
+    // --- Grep / RipGrep (conditional) ---
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
       let errorString: undefined | string = undefined;
@@ -2389,9 +2593,11 @@ export class Config {
         errorString = getErrorMessage(error);
       }
       if (useRipgrep) {
-        await registerCoreTool(RipGrepTool, this);
+        await registerLazy(ToolNames.GREP, async () => {
+          const { RipGrepTool } = await import('../tools/ripGrep.js');
+          return new RipGrepTool(this);
+        });
       } else {
-        // Log for telemetry
         logRipgrepFallback(
           this,
           new RipgrepFallbackEvent(
@@ -2400,34 +2606,82 @@ export class Config {
             errorString || 'ripgrep is not available',
           ),
         );
-        await registerCoreTool(GrepTool, this);
+        await registerLazy(ToolNames.GREP, async () => {
+          const { GrepTool } = await import('../tools/grep.js');
+          return new GrepTool(this);
+        });
       }
     } else {
-      await registerCoreTool(GrepTool, this);
+      await registerLazy(ToolNames.GREP, async () => {
+        const { GrepTool } = await import('../tools/grep.js');
+        return new GrepTool(this);
+      });
     }
 
-    await registerCoreTool(GlobTool, this);
-    await registerCoreTool(EditTool, this);
-    await registerCoreTool(WriteFileTool, this);
-    await registerCoreTool(ShellTool, this);
-    await registerCoreTool(TodoWriteTool, this);
-    await registerCoreTool(AskUserQuestionTool, this);
-    !this.sdkMode && (await registerCoreTool(ExitPlanModeTool, this));
-    await registerCoreTool(WebFetchTool, this);
+    await registerLazy(ToolNames.GLOB, async () => {
+      const { GlobTool } = await import('../tools/glob.js');
+      return new GlobTool(this);
+    });
+    await registerLazy(ToolNames.EDIT, async () => {
+      const { EditTool } = await import('../tools/edit.js');
+      return new EditTool(this);
+    });
+    await registerLazy(ToolNames.WRITE_FILE, async () => {
+      const { WriteFileTool } = await import('../tools/write-file.js');
+      return new WriteFileTool(this);
+    });
+    await registerLazy(ToolNames.SHELL, async () => {
+      const { ShellTool } = await import('../tools/shell.js');
+      return new ShellTool(this);
+    });
+    await registerLazy(ToolNames.TODO_WRITE, async () => {
+      const { TodoWriteTool } = await import('../tools/todoWrite.js');
+      return new TodoWriteTool(this);
+    });
+    await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
+      const { AskUserQuestionTool } = await import(
+        '../tools/askUserQuestion.js'
+      );
+      return new AskUserQuestionTool(this);
+    });
+    if (!this.sdkMode) {
+      await registerLazy(ToolNames.EXIT_PLAN_MODE, async () => {
+        const { ExitPlanModeTool } = await import('../tools/exitPlanMode.js');
+        return new ExitPlanModeTool(this);
+      });
+    }
+    await registerLazy(ToolNames.WEB_FETCH, async () => {
+      const { WebFetchTool } = await import('../tools/web-fetch.js');
+      return new WebFetchTool(this);
+    });
     // Conditionally register web search tool if web search provider is configured
     if (this.getWebSearchConfig()) {
-      await registerCoreTool(WebSearchTool, this);
+      await registerLazy(ToolNames.WEB_SEARCH, async () => {
+        const { WebSearchTool } = await import('../tools/web-search/index.js');
+        return new WebSearchTool(this);
+      });
     }
     if (this.isLspEnabled() && this.getLspClient()) {
-      // Register the unified LSP tool
-      await registerCoreTool(LspTool, this);
+      await registerLazy(ToolNames.LSP, async () => {
+        const { LspTool } = await import('../tools/lsp.js');
+        return new LspTool(this);
+      });
     }
 
     // Register cron tools unless disabled
     if (this.isCronEnabled()) {
-      await registerCoreTool(CronCreateTool, this);
-      await registerCoreTool(CronListTool, this);
-      await registerCoreTool(CronDeleteTool, this);
+      await registerLazy(ToolNames.CRON_CREATE, async () => {
+        const { CronCreateTool } = await import('../tools/cron-create.js');
+        return new CronCreateTool(this);
+      });
+      await registerLazy(ToolNames.CRON_LIST, async () => {
+        const { CronListTool } = await import('../tools/cron-list.js');
+        return new CronListTool(this);
+      });
+      await registerLazy(ToolNames.CRON_DELETE, async () => {
+        const { CronDeleteTool } = await import('../tools/cron-delete.js');
+        return new CronDeleteTool(this);
+      });
     }
 
     if (!options?.skipDiscovery) {

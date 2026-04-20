@@ -6,10 +6,15 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as yaml from 'yaml';
-import { SkillManager } from './skill-manager.js';
+import {
+  SkillManager,
+  watcherIgnored,
+  WATCHER_MAX_DEPTH,
+} from './skill-manager.js';
 import { type SkillConfig, SkillError } from './types.js';
 import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
@@ -17,6 +22,24 @@ import { makeFakeConfig } from '../test-utils/config.js';
 // Mock file system operations
 vi.mock('fs/promises');
 vi.mock('os');
+
+const { mockWatch, mockWatcher } = vi.hoisted(() => {
+  const mockWatcher = {
+    on: vi.fn().mockReturnThis(),
+    close: vi.fn().mockResolvedValue(undefined),
+  };
+  const mockWatch = vi.fn().mockReturnValue(mockWatcher);
+  return { mockWatch, mockWatcher };
+});
+
+vi.mock('chokidar', () => ({
+  watch: mockWatch,
+}));
+
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+});
 
 // Mock yaml parser - use vi.hoisted for proper hoisting
 const mockParseYaml = vi.hoisted(() => vi.fn());
@@ -717,6 +740,16 @@ Review content`);
       expect(reviewSkills[0].level).toBe('user');
     });
 
+    it('should skip all skills in bare mode', async () => {
+      vi.spyOn(mockConfig, 'getBareMode').mockReturnValue(true);
+      mockReaddirForLevels(new Set(['project', 'user', 'bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toEqual([]);
+    });
+
     it('should fall back to bundled level in loadSkill', async () => {
       // Project, user, extension all empty; bundled has the skill
       mockReaddirForLevels(new Set(['bundled']));
@@ -899,6 +932,58 @@ Symlinked skill content`);
         'regular-skill',
         'symlink-skill',
       ]);
+    });
+  });
+
+  describe('file watchers', () => {
+    it('should pass ignored function and shallow depth to chokidar', async () => {
+      const projectSkillsDir = path.join('/test/project', '.qwen', 'skills');
+      vi.mocked(fsSync.existsSync).mockImplementation(
+        (p) => String(p) === projectSkillsDir,
+      );
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      mockWatch.mockClear();
+      mockWatcher.on.mockClear();
+
+      await manager.startWatching();
+
+      expect(mockWatch).toHaveBeenCalledWith(projectSkillsDir, {
+        ignoreInitial: true,
+        ignored: watcherIgnored,
+        depth: WATCHER_MAX_DEPTH,
+      });
+      expect(WATCHER_MAX_DEPTH).toBe(2);
+    });
+
+    it('watcherIgnored should reject .git directories', () => {
+      expect(watcherIgnored(path.join('/skills', '.git', 'config'))).toBe(true);
+      expect(watcherIgnored(path.join('/skills', '.git'))).toBe(true);
+      expect(watcherIgnored(path.join('/skills', 'my-skill', 'SKILL.md'))).toBe(
+        false,
+      );
+    });
+
+    it('watcherIgnored should reject special file types', () => {
+      const socketStats = {
+        isFile: () => false,
+        isDirectory: () => false,
+      } as fsSync.Stats;
+      const fileStats = {
+        isFile: () => true,
+        isDirectory: () => false,
+      } as fsSync.Stats;
+      const dirStats = {
+        isFile: () => false,
+        isDirectory: () => true,
+      } as fsSync.Stats;
+
+      expect(watcherIgnored('/skills/some.sock', socketStats)).toBe(true);
+      expect(watcherIgnored('/skills/SKILL.md', fileStats)).toBe(false);
+      expect(watcherIgnored('/skills/my-skill', dirStats)).toBe(false);
     });
   });
 

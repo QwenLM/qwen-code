@@ -226,8 +226,6 @@ export interface AgentPathParams {
   systemPrompt: string;
   /** Model override (defaults to config.getFastModel() ?? config.getModel()). */
   model?: string;
-  /** Sampling temperature (default: 0 for deterministic output). */
-  temp?: number;
   /** Maximum number of agent turns (default: unlimited). */
   maxTurns?: number;
   /** Maximum execution time in minutes (default: unlimited). */
@@ -244,11 +242,6 @@ export interface AgentPathParams {
    * Must end with a `model` role entry; call buildAgentHistory() to enforce this.
    */
   extraHistory?: Content[];
-  /**
-   * Skip env bootstrap injection in createChat() when extraHistory already
-   * contains the env context from the parent conversation.
-   */
-  skipEnvHistory?: boolean;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
 }
@@ -393,11 +386,13 @@ export async function runForkedAgent(
     }
   });
 
-  const promptConfig: PromptConfig = { systemPrompt: params.systemPrompt };
+  const promptConfig: PromptConfig = {
+    systemPrompt: params.systemPrompt,
+    initialMessages: params.extraHistory,
+  };
   const modelConfig: ModelConfig = {
     model:
       params.model ?? params.config.getFastModel() ?? params.config.getModel(),
-    temp: params.temp ?? 0,
   };
   const runConfig: RunConfig = {
     max_turns: params.maxTurns,
@@ -418,10 +413,7 @@ export async function runForkedAgent(
 
   const context = new ContextState();
   context.set('task_prompt', params.taskPrompt);
-  await headless.execute(context, params.abortSignal, {
-    extraHistory: params.extraHistory,
-    skipEnvHistory: params.skipEnvHistory,
-  });
+  await headless.execute(context, params.abortSignal);
 
   const terminateReason = headless.getTerminateMode();
   const finalText = headless.getFinalText() || undefined;

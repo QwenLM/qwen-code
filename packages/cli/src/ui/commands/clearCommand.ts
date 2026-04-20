@@ -12,7 +12,6 @@ import {
   SessionEndReason,
   SessionStartSource,
   ToolNames,
-  SkillTool,
   type PermissionMode,
 } from '@qwen-code/qwen-code-core';
 
@@ -46,8 +45,8 @@ export const clearCommand: SlashCommand = {
         .getToolRegistry()
         ?.getAllTools()
         .find((tool) => tool.name === ToolNames.SKILL);
-      if (skillTool instanceof SkillTool) {
-        skillTool.clearLoadedSkills();
+      if (skillTool && 'clearLoadedSkills' in skillTool) {
+        (skillTool as { clearLoadedSkills(): void }).clearLoadedSkills();
       }
 
       if (newSessionId && context.session.startNewSession) {

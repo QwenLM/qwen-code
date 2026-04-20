@@ -22,6 +22,47 @@ import { appEvents, AppEvent } from '../../../../utils/events.js';
 type AuthState = 'idle' | 'authenticating' | 'success' | 'error';
 
 const AUTO_BACK_DELAY_MS = 2000;
+const COPY_FEEDBACK_MS = 2000;
+
+/**
+ * Wrap an OSC sequence for terminal multiplexers so the host terminal
+ * receives it. tmux requires a DCS passthrough with inner ESCs doubled;
+ * GNU screen uses a plain DCS envelope.
+ */
+function wrapForMultiplexer(osc: string): string {
+  if (process.env['TMUX']) {
+    return `\x1bPtmux;${osc.split('\x1b').join('\x1b\x1b')}\x1b\\`;
+  }
+  if (process.env['STY']) {
+    return `\x1bP${osc}\x1b\\`;
+  }
+  return osc;
+}
+
+/**
+ * Copy a string to the user's clipboard using the OSC 52 terminal escape
+ * sequence. Works through SSH and most web terminals (iTerm2, Windows
+ * Terminal, xterm.js-based emulators) without spawning a subprocess.
+ * Returns true if the sequence was written to a TTY; false otherwise.
+ * A return of true does not guarantee the terminal accepted the write —
+ * some terminals disable OSC 52 by default.
+ */
+function copyToClipboardViaOsc52(text: string): boolean {
+  const base64 = Buffer.from(text, 'utf8').toString('base64');
+  const seq = wrapForMultiplexer(`\x1b]52;c;${base64}\x07`);
+  const stream = process.stderr.isTTY
+    ? process.stderr
+    : process.stdout.isTTY
+      ? process.stdout
+      : null;
+  if (!stream) return false;
+  try {
+    stream.write(seq);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
   server,
@@ -31,6 +72,10 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
   const [authState, setAuthState] = useState<AuthState>('idle');
   const [messages, setMessages] = useState<string[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [authUrl, setAuthUrl] = useState<string | null>(null);
+  const [copyState, setCopyState] = useState<
+    { status: 'idle' } | { status: 'copied' | 'unsupported'; nonce: number }
+  >({ status: 'idle' });
   const isRunning = useRef(false);
 
   const runAuthentication = useCallback(async () => {
@@ -40,15 +85,6 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
     setAuthState('authenticating');
     setMessages([]);
     setErrorMessage(null);
-
-    // Listen for OAuth display messages - supports both plain strings and
-    // structured i18n messages ({ key, params }) emitted by the core layer.
-    const displayListener = (message: OAuthDisplayPayload) => {
-      const text =
-        typeof message === 'string' ? message : t(message.key, message.params);
-      setMessages((prev) => [...prev, text]);
-    };
-    appEvents.on(AppEvent.OauthDisplayMessage, displayListener);
 
     try {
       setMessages([
@@ -117,9 +153,29 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
       setAuthState('error');
     } finally {
       isRunning.current = false;
-      appEvents.removeListener(AppEvent.OauthDisplayMessage, displayListener);
     }
   }, [server, config]);
+
+  // Subscribe to OAuth events for the lifetime of this component. Keeping
+  // the subscription tied to mount/unmount (rather than to runAuthentication's
+  // async flow) ensures listeners are released immediately on unmount even if
+  // the authentication promise is still pending.
+  useEffect(() => {
+    const displayListener = (message: OAuthDisplayPayload) => {
+      const text =
+        typeof message === 'string' ? message : t(message.key, message.params);
+      setMessages((prev) => [...prev, text]);
+    };
+    const authUrlListener = (url: string) => {
+      setAuthUrl(url);
+    };
+    appEvents.on(AppEvent.OauthDisplayMessage, displayListener);
+    appEvents.on(AppEvent.OauthAuthUrl, authUrlListener);
+    return () => {
+      appEvents.removeListener(AppEvent.OauthDisplayMessage, displayListener);
+      appEvents.removeListener(AppEvent.OauthAuthUrl, authUrlListener);
+    };
+  }, []);
 
   useEffect(() => {
     runAuthentication();
@@ -139,10 +195,35 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
     (key) => {
       if (key.name === 'escape') {
         onBack();
+        return;
+      }
+      if (
+        key.name === 'c' &&
+        !key.ctrl &&
+        !key.meta &&
+        !key.paste &&
+        authUrl &&
+        authState === 'authenticating'
+      ) {
+        const ok = copyToClipboardViaOsc52(authUrl);
+        setCopyState({
+          status: ok ? 'copied' : 'unsupported',
+          nonce: Date.now(),
+        });
       }
     },
     { isActive: true },
   );
+
+  useEffect(() => {
+    if (copyState.status === 'idle') return;
+    const timer = setTimeout(
+      () => setCopyState({ status: 'idle' }),
+      COPY_FEEDBACK_MS,
+    );
+    return () => clearTimeout(timer);
+    // Depend on the nonce so repeated presses reset the timer.
+  }, [copyState]);
 
   if (!server) {
     return (
@@ -180,10 +261,30 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
       )}
 
       {/* Action hints */}
-      <Box>
+      <Box flexDirection="column">
         {authState === 'authenticating' && (
           <Text color={theme.text.secondary}>
             {t('Authenticating... Please complete the login in your browser.')}
+          </Text>
+        )}
+        {authState === 'authenticating' && authUrl && (
+          <Text
+            bold={copyState.status === 'idle'}
+            color={
+              copyState.status === 'copied'
+                ? theme.status.success
+                : copyState.status === 'unsupported'
+                  ? theme.status.warning
+                  : theme.text.accent
+            }
+          >
+            {copyState.status === 'copied'
+              ? t(
+                  'Copy request sent to your terminal. If paste is empty, copy the URL above manually.',
+                )
+              : copyState.status === 'unsupported'
+                ? t('Cannot write to terminal — copy the URL above manually.')
+                : t('Press c to copy the authorization URL to your clipboard.')}
           </Text>
         )}
         {authState === 'success' && (

@@ -297,7 +297,7 @@ async function runSpeculativeLoop(
       // SECURITY: Only reaches here for read-only tools or writes gated by approvalMode
       try {
         const toolRegistry = config.getToolRegistry();
-        const tool = toolRegistry.getTool(name);
+        const tool = await toolRegistry.ensureTool(name);
         if (!tool) {
           functionResponses.push({
             functionResponse: {

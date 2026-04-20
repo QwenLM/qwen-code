@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { createCombinedAbortSignal } from './combinedAbortSignal.js';
 
 describe('createCombinedAbortSignal', () => {
@@ -57,6 +57,26 @@ describe('createCombinedAbortSignal', () => {
 
     // Wait longer than timeout - should not abort because timer was cleared
     await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(signal.aborted).toBe(false);
+  });
+
+  it('should remove external abort listener on cleanup', () => {
+    const externalController = new AbortController();
+    const removeListenerSpy = vi.spyOn(
+      externalController.signal,
+      'removeEventListener',
+    );
+    const { signal, cleanup } = createCombinedAbortSignal(
+      externalController.signal,
+    );
+
+    cleanup();
+    externalController.abort();
+
+    expect(removeListenerSpy).toHaveBeenCalledWith(
+      'abort',
+      expect.any(Function),
+    );
     expect(signal.aborted).toBe(false);
   });
 

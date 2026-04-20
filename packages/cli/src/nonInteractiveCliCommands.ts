@@ -224,13 +224,22 @@ export const handleSlashCommand = async (
     );
 
     if (knownCommand) {
+      if (isDisabled(knownCommand)) {
+        return {
+          type: 'unsupported',
+          reason: t(
+            'The command "/{{command}}" is disabled by the current configuration.',
+            { command: knownCommand.name },
+          ),
+          originalType: 'filtered_command',
+        };
+      }
       // Command exists but is not allowed in this mode
       return {
         type: 'unsupported',
-        reason: t(
-          'The command "/{{command}}" is not supported in non-interactive mode.',
-          { command: knownCommand.name },
-        ),
+        reason: t('The command "/{{command}}" is not supported in this mode.', {
+          command: knownCommand.name,
+        }),
         originalType: 'filtered_command',
       };
     }
