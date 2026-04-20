@@ -73,7 +73,6 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
 import {
-  ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
   handleSlashCommand,
   getAvailableCommands,
   type NonInteractiveSlashCommandResult,
@@ -81,11 +80,6 @@ import {
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
-
-const ACP_ALLOWED_COMMANDS = [
-  ...ALLOWED_BUILTIN_COMMANDS_NON_INTERACTIVE,
-  'insight',
-];
 
 // Import modular session components
 import type {
@@ -330,13 +324,12 @@ export class Session implements SessionContext {
         let parts: Part[] | null;
 
         if (isSlashCommand(inputText)) {
-          // ACP supports the standard non-interactive built-ins plus /insight.
+          // Handle slash command in ACP mode using capability-based filtering
           const slashCommandResult = await handleSlashCommand(
             inputText,
             pendingSend,
             this.config,
             this.settings,
-            ACP_ALLOWED_COMMANDS,
           );
 
           parts = await this.#processSlashCommandResult(
@@ -968,11 +961,11 @@ export class Session implements SessionContext {
   async sendAvailableCommandsUpdate(): Promise<void> {
     const abortController = new AbortController();
     try {
-      // Use default allowed commands from getAvailableCommands
+      // Load commands available in ACP mode
       const slashCommands = await getAvailableCommands(
         this.config,
         abortController.signal,
-        ACP_ALLOWED_COMMANDS,
+        'acp',
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol

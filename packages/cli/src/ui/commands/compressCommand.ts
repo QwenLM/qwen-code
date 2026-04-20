@@ -17,6 +17,8 @@ export const compressCommand: SlashCommand = {
     return t('Compresses the context by replacing it with a summary.');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context) => {
     const { ui } = context;
     const executionMode = context.executionMode ?? 'interactive';

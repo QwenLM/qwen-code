@@ -22,6 +22,7 @@ export const clearCommand: SlashCommand = {
     return t('Clear conversation history and free up context');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: async (context, _args) => {
     const { config } = context.services;
 

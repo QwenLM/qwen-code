@@ -21,6 +21,7 @@ export const modelCommand: SlashCommand = {
     return t('Switch the model for this session (--fast for suggestion model)');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   completion: async (_context, partialArg) => {
     if (partialArg && '--fast'.startsWith(partialArg)) {
       return [

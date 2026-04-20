@@ -196,20 +196,15 @@ export function computeUsageFromMetrics(metrics: SessionMetrics): Usage {
  * Load slash command names using getAvailableCommands
  *
  * @param config - Config instance
- * @param allowedBuiltinCommandNames - Optional array of allowed built-in command names.
- *   If not provided, uses the default from getAvailableCommands.
  * @returns Promise resolving to array of slash command names
  */
-async function loadSlashCommandNames(
-  config: Config,
-  allowedBuiltinCommandNames?: string[],
-): Promise<string[]> {
+async function loadSlashCommandNames(config: Config): Promise<string[]> {
   const controller = new AbortController();
   try {
     const commands = await getAvailableCommands(
       config,
       controller.signal,
-      allowedBuiltinCommandNames,
+      'non_interactive',
     );
 
     // Extract command names and sort
@@ -240,15 +235,12 @@ async function loadSlashCommandNames(
  * @param config - Config instance
  * @param sessionId - Session identifier
  * @param permissionMode - Current permission/approval mode
- * @param allowedBuiltinCommandNames - Optional array of allowed built-in command names.
- *   If not provided, defaults to empty array (only file commands will be included).
  * @returns Promise resolving to CLISystemMessage
  */
 export async function buildSystemMessage(
   config: Config,
   sessionId: string,
   permissionMode: PermissionMode,
-  allowedBuiltinCommandNames?: string[],
 ): Promise<CLISystemMessage> {
   const toolRegistry = config.getToolRegistry();
   const tools = toolRegistry ? toolRegistry.getAllToolNames() : [];
@@ -261,11 +253,8 @@ export async function buildSystemMessage(
       }))
     : [];
 
-  // Load slash commands with filtering based on allowed built-in commands
-  const slashCommands = await loadSlashCommandNames(
-    config,
-    allowedBuiltinCommandNames,
-  );
+  // Load slash commands available in ACP mode
+  const slashCommands = await loadSlashCommandNames(config);
 
   // Load subagent names from config
   let agentNames: string[] = [];
