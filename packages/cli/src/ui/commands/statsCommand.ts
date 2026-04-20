@@ -21,6 +21,7 @@ export const statsCommand: SlashCommand = {
     return t('check session stats. Usage: /stats [model|tools]');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: (context: CommandContext) => {
     const now = new Date();
     const { sessionStartTime } = context.session.stats;
@@ -50,6 +51,7 @@ export const statsCommand: SlashCommand = {
         return t('Show model-specific usage statistics.');
       },
       kind: CommandKind.BUILT_IN,
+      commandType: 'local-jsx',
       action: (context: CommandContext) => {
         context.ui.addItem(
           {
@@ -65,6 +67,7 @@ export const statsCommand: SlashCommand = {
         return t('Show tool-specific usage statistics.');
       },
       kind: CommandKind.BUILT_IN,
+      commandType: 'local-jsx',
       action: (context: CommandContext) => {
         context.ui.addItem(
           {

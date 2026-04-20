@@ -173,6 +173,50 @@ describe('<AskUserQuestionDialog />', () => {
       );
       unmount();
     });
+    it('auto-submits when pressing a number key for a predefined option', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails();
+
+      const { stdin, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      // Press '2' to select the second option (Blue) — should auto-submit
+      stdin.write('2');
+      await wait();
+
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnce,
+        { answers: { 0: 'Blue' } },
+      );
+      unmount();
+    });
+
+    it('does not auto-submit when pressing number key for "Other" custom input', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails();
+
+      const { stdin, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      // Press '4' to select the "Other" option (index 3, after 3 predefined options)
+      stdin.write('4');
+      await wait();
+
+      // Should NOT auto-submit — just highlight "Other" for text input
+      expect(onConfirm).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it('cancels with Escape', async () => {
       const onConfirm = vi.fn();
       const details = createConfirmationDetails();
@@ -194,6 +238,28 @@ describe('<AskUserQuestionDialog />', () => {
   });
 
   describe('multi-select interaction', () => {
+    it('does not auto-submit when pressing number key in multi-select mode', async () => {
+      const onConfirm = vi.fn();
+      const details = createConfirmationDetails({
+        questions: [createSingleQuestion({ multiSelect: true })],
+      });
+
+      const { stdin, unmount } = renderWithProviders(
+        <AskUserQuestionDialog
+          confirmationDetails={details}
+          onConfirm={onConfirm}
+        />,
+      );
+      await wait();
+
+      // Press '2' — should only move highlight, not submit
+      stdin.write('2');
+      await wait();
+
+      expect(onConfirm).not.toHaveBeenCalled();
+      unmount();
+    });
+
     it('toggles options with Space', async () => {
       const onConfirm = vi.fn();
       const details = createConfirmationDetails({
@@ -219,6 +285,40 @@ describe('<AskUserQuestionDialog />', () => {
   });
 
   describe('multiple questions', () => {
+    it.skipIf(process.platform === 'win32')(
+      'does not auto-submit when pressing number key on Submit tab',
+      async () => {
+        const onConfirm = vi.fn();
+        const details = createConfirmationDetails({
+          questions: [
+            createSingleQuestion({ header: 'Q1' }),
+            createSingleQuestion({ header: 'Q2' }),
+          ],
+        });
+
+        const { stdin, unmount } = renderWithProviders(
+          <AskUserQuestionDialog
+            confirmationDetails={details}
+            onConfirm={onConfirm}
+          />,
+        );
+        await wait();
+
+        // Navigate to Submit tab
+        stdin.write('\u001B[C'); // Right
+        await wait();
+        stdin.write('\u001B[C'); // Right
+        await wait();
+
+        // Press '1' on Submit tab — should only highlight, not submit
+        stdin.write('1');
+        await wait();
+
+        expect(onConfirm).not.toHaveBeenCalled();
+        unmount();
+      },
+    );
+
     it.skipIf(process.platform === 'win32')(
       'shows unanswered questions as (not answered) in Submit tab',
       async () => {

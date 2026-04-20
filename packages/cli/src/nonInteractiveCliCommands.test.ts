@@ -8,10 +8,12 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { handleSlashCommand } from './nonInteractiveCliCommands.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './config/settings.js';
-import { CommandKind } from './ui/commands/types.js';
+import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
+import { filterCommandsForMode } from './services/commandUtils.js';
 
 // Mock the CommandService
 const mockGetCommands = vi.hoisted(() => vi.fn());
+const mockGetCommandsForMode = vi.hoisted(() => vi.fn());
 const mockCommandServiceCreate = vi.hoisted(() => vi.fn());
 vi.mock('./services/CommandService.js', () => ({
   CommandService: {
@@ -25,8 +27,13 @@ describe('handleSlashCommand', () => {
   let abortController: AbortController;
 
   beforeEach(() => {
+    // getCommandsForMode applies real mode filtering on top of getCommands()
+    mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
+      filterCommandsForMode(mockGetCommands(), mode),
+    );
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
+      getCommandsForMode: mockGetCommandsForMode,
     });
 
     mockConfig = {
@@ -36,6 +43,7 @@ describe('handleSlashCommand', () => {
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getDisabledSlashCommands: vi.fn().mockReturnValue([]),
       storage: {},
     } as unknown as Config;
 
@@ -73,11 +81,12 @@ describe('handleSlashCommand', () => {
     expect(result.type).toBe('no_command');
   });
 
-  it('should return unsupported for known built-in commands not in allowed list', async () => {
+  it('should return unsupported for built-in commands without non-interactive supportedModes', async () => {
     const mockHelpCommand = {
       name: 'help',
       description: 'Show help',
       kind: CommandKind.BUILT_IN,
+      // No commandType → falls back to BUILT_IN → interactive only
       action: vi.fn(),
     };
     mockGetCommands.mockReturnValue([mockHelpCommand]);
@@ -87,7 +96,6 @@ describe('handleSlashCommand', () => {
       abortController,
       mockConfig,
       mockSettings,
-      [], // Empty allowed list
     );
 
     expect(result.type).toBe('unsupported');
@@ -117,16 +125,18 @@ describe('handleSlashCommand', () => {
     expect(result.type).toBe('unsupported');
     if (result.type === 'unsupported') {
       expect(result.reason).toBe(
-        'The command "/help" is not supported in non-interactive mode.',
+        'The command "/help" is not supported in this mode.',
       );
     }
   });
 
-  it('should execute allowed built-in commands', async () => {
+  it('should execute local commands with non_interactive supportedModes', async () => {
     const mockInitCommand = {
       name: 'init',
       description: 'Initialize project',
       kind: CommandKind.BUILT_IN,
+      commandType: 'local' as const,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: vi.fn().mockResolvedValue({
         type: 'message',
         messageType: 'info',
@@ -140,7 +150,6 @@ describe('handleSlashCommand', () => {
       abortController,
       mockConfig,
       mockSettings,
-      ['init'], // init is in the allowed list
     );
 
     expect(result.type).toBe('message');
@@ -149,11 +158,13 @@ describe('handleSlashCommand', () => {
     }
   });
 
-  it('should execute /btw when using the default allowed list', async () => {
+  it('should execute /btw with non_interactive supportedModes', async () => {
     const mockBtwCommand = {
       name: 'btw',
       description: 'Ask a side question',
       kind: CommandKind.BUILT_IN,
+      commandType: 'local' as const,
+      supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
       action: vi.fn().mockResolvedValue({
         type: 'message',
         messageType: 'info',
@@ -176,7 +187,7 @@ describe('handleSlashCommand', () => {
     }
   });
 
-  it('should execute file commands regardless of allowed list', async () => {
+  it('should execute FILE commands in any mode without explicit supportedModes', async () => {
     const mockFileCommand = {
       name: 'custom',
       description: 'Custom file command',
@@ -193,7 +204,6 @@ describe('handleSlashCommand', () => {
       abortController,
       mockConfig,
       mockSettings,
-      [], // Empty allowed list, but FILE commands should still work
     );
 
     expect(result.type).toBe('submit_prompt');

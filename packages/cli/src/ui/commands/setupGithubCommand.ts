@@ -99,6 +99,7 @@ export const setupGithubCommand: SlashCommand = {
     return t('Set up GitHub Actions');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: async (
     context: CommandContext,
   ): Promise<SlashCommandActionReturn> => {

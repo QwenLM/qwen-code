@@ -51,6 +51,7 @@ Qwen Code's built-in tools can be broadly categorized as follows:
 - **[Memory Tool](./memory.md) (`save_memory`):** For saving and recalling information across sessions.
 - **[Todo Write Tool](./todo-write.md) (`todo_write`):** For creating and managing structured task lists during coding sessions.
 - **[Task Tool](./task.md) (`task`):** For delegating complex tasks to specialized subagents.
+- **[Swarm Tool](./swarm.md) (`swarm`):** For running many independent lightweight workers in parallel and aggregating their results.
 - **[Exit Plan Mode Tool](./exit-plan-mode.md) (`exit_plan_mode`):** For exiting plan mode and proceeding with implementation.
 
 Additionally, these tools incorporate:

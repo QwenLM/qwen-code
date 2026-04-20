@@ -20,7 +20,7 @@ export { ToolCallDecision };
 import type { OutputFormat } from '../output/types.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { SkillTool } from '../tools/skill.js';
-import type { AgentTool } from '../tools/agent.js';
+import type { AgentTool } from '../tools/agent/agent.js';
 
 export interface BaseTelemetryEvent {
   'event.name': string;
@@ -383,6 +383,9 @@ export class RipgrepFallbackEvent implements BaseTelemetryEvent {
 export enum LoopType {
   CONSECUTIVE_IDENTICAL_TOOL_CALLS = 'consecutive_identical_tool_calls',
   CHANTING_IDENTICAL_SENTENCES = 'chanting_identical_sentences',
+  REPETITIVE_THOUGHTS = 'repetitive_thoughts',
+  READ_FILE_LOOP = 'read_file_loop',
+  ACTION_STAGNATION = 'action_stagnation',
 }
 
 export class LoopDetectedEvent implements BaseTelemetryEvent {

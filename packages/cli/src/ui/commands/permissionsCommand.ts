@@ -14,6 +14,7 @@ export const permissionsCommand: SlashCommand = {
     return t('Manage permission rules');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: (): OpenDialogActionReturn => ({
     type: 'dialog',
     dialog: 'permissions',

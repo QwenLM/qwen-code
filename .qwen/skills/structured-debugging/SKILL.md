@@ -1,6 +1,6 @@
 ---
 name: structured-debugging
-description:
+description: >
   Hypothesis-driven debugging methodology for hard bugs. Use this skill whenever
   you're investigating non-trivial bugs, unexpected behavior, flaky tests, or
   tracing issues through complex systems. Activate proactively when debugging
@@ -32,11 +32,9 @@ Good: "The leader hangs because `hasActiveTeammates()` returns true after all ag
 have reported completed, likely because terminal status isn't being set on the agent
 object after the backend process exits."
 
-Create a side note file for the investigation:
-
-```
-~/.qwen/investigations/<project>-<issue>.md
-```
+For bugs you expect to take more than one round, create a side note file
+for the investigation in whichever location the project uses for such
+notes.
 
 Write your hypothesis there. This file persists across conversation turns and even
 across sessions — it's your investigation journal.
@@ -48,6 +46,12 @@ confirm or reject your hypothesis. Think about what data you need to see.
 
 Don't scatter `console.log` everywhere. Identify the 2-3 places where your
 hypothesis makes a testable prediction, and instrument those.
+
+Prefer logging _values_ (return codes, payload contents, stream types,
+message bodies, env state) over _presence checks_ ("was this function
+called?", "was this branch taken?"). Code-path traces tell you what ran;
+data traces tell you what it ran on. Most non-trivial bugs are correct
+code processing wrong data.
 
 Ask yourself: "If my hypothesis is correct, what will I see at point X?
 If it's wrong, what will I see instead?"
@@ -129,6 +133,23 @@ is still broken if the inbox contains stale messages from a previous run.
 Always inspect the _content_ flowing through the code, not just whether the code
 runs. Check payloads, message contents, file data, and database state.
 
+### Reframing the user's report instead of investigating it
+
+When the user reports a symptom your own run doesn't reproduce, the
+contradiction _is_ the evidence — the two environments differ in some way
+you haven't identified yet. The wrong move is to reframe their report
+("they must be on a stale SHA", "they must be confused about what they
+saw", "must be a flake") so that your run becomes the ground truth. Once
+you do that, every later piece of evidence gets bent to defend the
+reframing, and the actual bug stays hidden.
+
+The right move: catalogue what differs between their environment and
+yours (TTY vs pipe, terminal emulator, shell, locale, env vars, prior
+state, build artifacts) before forming any hypothesis. For ambiguous
+symptoms ("no output", "it's slow", "it's wrong") ask one disambiguating
+question first — e.g., "does it hang or exit cleanly?" — that prunes the
+hypothesis space cheaply before any test run.
+
 ### Losing context across attempts
 
 After several debugging rounds, you start forgetting what you already tried and
@@ -164,3 +185,10 @@ Fix: [what you're changing and why it addresses the root cause]
 ```
 
 Then apply the fix, remove instrumentation, and verify with a clean run.
+
+## Worked examples
+
+- [`examples/headless-bg-agent-empty-stdout.md`](examples/headless-bg-agent-empty-stdout.md)
+  — pipe-captured runs all passed; the user's TTY printed nothing. The
+  contradiction _was_ the bug. Illustrates _reproduction contradiction is
+  data_ and _instrument data, not code paths_.

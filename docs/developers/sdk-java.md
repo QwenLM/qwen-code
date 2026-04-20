@@ -94,8 +94,8 @@ public static void runStreamingExample() {
                 }
 
                 @Override
-                public void onThinking(Session session, ThingkingAssistantContent thingkingAssistantContent) {
-                    logger.info("Thinking content received: {}", thingkingAssistantContent.getThinking());
+                public void onThinking(Session session, ThinkingAssistantContent thinkingAssistantContent) {
+                    logger.info("Thinking content received: {}", thinkingAssistantContent.getThinking());
                 }
 
                 @Override
@@ -170,7 +170,7 @@ The `SessionEventConsumers` interface provides callbacks for different types of 
 The `AssistantContentConsumers` interface handles different types of content within assistant messages:
 
 - `onText`: Handles text content (receives Session and TextAssistantContent)
-- `onThinking`: Handles thinking content (receives Session and ThingkingAssistantContent)
+- `onThinking`: Handles thinking content (receives Session and ThinkingAssistantContent)
 - `onToolUse`: Handles tool use content (receives Session and ToolUseAssistantContent)
 - `onToolResult`: Handles tool result content (receives Session and ToolResultAssistantContent)
 - `onOtherContent`: Handles other content types (receives Session and AssistantContent)

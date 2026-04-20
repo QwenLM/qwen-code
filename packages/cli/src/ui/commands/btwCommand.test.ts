@@ -52,6 +52,12 @@ describe('btwCommand', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockGetCacheSafeParams.mockReturnValue({
+      generationConfig: {},
+      history: [],
+      model: 'test-model',
+      version: 1,
+    });
     mockContext = createMockCommandContext({
       services: {
         config: createConfig(),
@@ -153,6 +159,107 @@ describe('btwCommand', () => {
         expect.objectContaining({
           cacheSafeParams: expect.objectContaining({ model: 'test-model' }),
           userMessage: expect.stringContaining('my question'),
+        }),
+      );
+    });
+
+    it('should fall back to live Gemini client context when no saved cache params exist', async () => {
+      mockGetCacheSafeParams.mockReturnValue(null);
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
+      });
+
+      const geminiClient = {
+        getHistory: vi
+          .fn()
+          .mockReturnValue([
+            { role: 'user', parts: [{ text: '杭州天气如何？' }] },
+          ]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'You are helpful',
+            tools: [],
+          }),
+        }),
+      };
+
+      const liveContext = createMockCommandContext({
+        services: {
+          config: createConfig({
+            getGeminiClient: () => geminiClient,
+          }),
+        },
+      });
+
+      await btwCommand.action!(liveContext, 'how ?');
+      await flushPromises();
+
+      expect(mockRunForkedAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cacheSafeParams: expect.objectContaining({
+            generationConfig: expect.objectContaining({
+              systemInstruction: 'You are helpful',
+            }),
+            history: [{ role: 'user', parts: [{ text: '杭州天气如何？' }] }],
+            model: 'test-model',
+          }),
+          userMessage: expect.stringContaining('how ?'),
+        }),
+      );
+    });
+
+    it('should prefer live Gemini client history over a stale saved cache snapshot', async () => {
+      mockGetCacheSafeParams.mockReturnValue({
+        generationConfig: {
+          systemInstruction: 'stale system prompt',
+          tools: [],
+        },
+        history: [{ role: 'user', parts: [{ text: '旧问题' }] }],
+        model: 'stale-model',
+        version: 99,
+      });
+      mockRunForkedAgent.mockResolvedValue({
+        text: 'answer',
+        usage: { inputTokens: 5, outputTokens: 2, cacheHitTokens: 0 },
+      });
+
+      const geminiClient = {
+        getHistory: vi.fn().mockReturnValue([
+          { role: 'user', parts: [{ text: '杭州天气如何？' }] },
+          { role: 'user', parts: [{ text: '请顺便解释一下湿度怎么看' }] },
+        ]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'live system prompt',
+            tools: [],
+          }),
+        }),
+      };
+
+      const liveContext = createMockCommandContext({
+        services: {
+          config: createConfig({
+            getGeminiClient: () => geminiClient,
+          }),
+        },
+      });
+
+      await btwCommand.action!(liveContext, 'how ?');
+      await flushPromises();
+
+      expect(mockRunForkedAgent).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cacheSafeParams: expect.objectContaining({
+            generationConfig: expect.objectContaining({
+              systemInstruction: 'live system prompt',
+            }),
+            history: [
+              { role: 'user', parts: [{ text: '杭州天气如何？' }] },
+              { role: 'user', parts: [{ text: '请顺便解释一下湿度怎么看' }] },
+            ],
+            model: 'test-model',
+          }),
         }),
       );
     });

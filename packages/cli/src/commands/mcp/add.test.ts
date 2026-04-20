@@ -5,8 +5,10 @@
  */
 
 import yargs from 'yargs';
+import type { Argv } from 'yargs';
 import { addCommand } from './add.js';
 import { loadSettings, SettingScope } from '../../config/settings.js';
+import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
@@ -45,11 +47,11 @@ vi.mock('../../config/settings.js', async () => {
   };
 });
 
-const mockedLoadSettings = loadSettings as vi.Mock;
+const mockedLoadSettings = loadSettings as Mock;
 
 describe('mcp add command', () => {
-  let parser: yargs.Argv;
-  let mockSetValue: vi.Mock;
+  let parser: Argv;
+  let mockSetValue: Mock;
 
   beforeEach(() => {
     vi.resetAllMocks();

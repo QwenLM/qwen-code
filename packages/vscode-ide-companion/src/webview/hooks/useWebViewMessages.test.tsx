@@ -35,6 +35,7 @@ function renderHookHarness(overrides?: {
   setUsageStats?: ReturnType<typeof vi.fn>;
   endStreaming?: ReturnType<typeof vi.fn>;
   clearWaitingForResponse?: ReturnType<typeof vi.fn>;
+  setInsightReportPath?: ReturnType<typeof vi.fn>;
 }) {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -43,6 +44,7 @@ function renderHookHarness(overrides?: {
   const setUsageStats = overrides?.setUsageStats ?? vi.fn();
   const endStreaming = overrides?.endStreaming ?? vi.fn();
   const clearWaitingForResponse = overrides?.clearWaitingForResponse ?? vi.fn();
+  const setInsightReportPath = overrides?.setInsightReportPath ?? vi.fn();
 
   const handlers = {
     sessionManagement: {
@@ -89,6 +91,7 @@ function renderHookHarness(overrides?: {
     setModelInfo: vi.fn(),
     setAvailableCommands: vi.fn(),
     setAvailableModels: vi.fn(),
+    setInsightReportPath,
   };
 
   function Harness() {
@@ -107,6 +110,7 @@ function renderHookHarness(overrides?: {
     setUsageStats,
     endStreaming,
     clearWaitingForResponse,
+    setInsightReportPath,
   };
 }
 
@@ -219,5 +223,51 @@ describe('useWebViewMessages', () => {
     });
 
     expect(rendered.clearWaitingForResponse).toHaveBeenCalled();
+  });
+
+  it('clears the generic waiting state when insight progress starts', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'insightProgress',
+            data: {
+              stage: 'Analyzing sessions',
+              progress: 42,
+              detail: '21/50',
+            },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.clearWaitingForResponse).toHaveBeenCalled();
+  });
+
+  it('stores the latest insight report path when the ready event arrives', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'insightReportReady',
+            data: {
+              path: '/tmp/insight-report.html',
+            },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.setInsightReportPath).toHaveBeenCalledWith(
+      '/tmp/insight-report.html',
+    );
   });
 });

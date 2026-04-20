@@ -11,26 +11,26 @@ import {
   resolveSubagentApprovalMode,
 } from './agent.js';
 import type { PartListUnion } from '@google/genai';
-import type { ToolResultDisplay, AgentResultDisplay } from './tools.js';
-import { ToolConfirmationOutcome } from './tools.js';
-import { type Config, ApprovalMode } from '../config/config.js';
-import { SubagentManager } from '../subagents/subagent-manager.js';
-import type { SubagentConfig } from '../subagents/types.js';
-import { AgentTerminateMode } from '../agents/runtime/agent-types.js';
+import type { ToolResultDisplay, AgentResultDisplay } from '../tools.js';
+import { ToolConfirmationOutcome } from '../tools.js';
+import { type Config, ApprovalMode } from '../../config/config.js';
+import { SubagentManager } from '../../subagents/subagent-manager.js';
+import type { SubagentConfig } from '../../subagents/types.js';
+import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import {
-  type AgentHeadless,
+  AgentHeadless,
   ContextState,
-} from '../agents/runtime/agent-headless.js';
-import { AgentEventType } from '../agents/runtime/agent-events.js';
+} from '../../agents/runtime/agent-headless.js';
+import { AgentEventType } from '../../agents/runtime/agent-events.js';
 import type {
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentApprovalRequestEvent,
   AgentEventEmitter,
-} from '../agents/runtime/agent-events.js';
-import { partToString } from '../utils/partUtils.js';
-import type { HookSystem } from '../hooks/hookSystem.js';
-import { PermissionMode } from '../hooks/types.js';
+} from '../../agents/runtime/agent-events.js';
+import { partToString } from '../../utils/partUtils.js';
+import type { HookSystem } from '../../hooks/hookSystem.js';
+import { PermissionMode } from '../../hooks/types.js';
 
 // Type for accessing protected methods in tests
 type AgentToolInvocation = {
@@ -50,8 +50,8 @@ type AgentToolWithProtectedMethods = AgentTool & {
 };
 
 // Mock dependencies
-vi.mock('../subagents/subagent-manager.js');
-vi.mock('../agents/runtime/agent-headless.js');
+vi.mock('../../subagents/subagent-manager.js');
+vi.mock('../../agents/runtime/agent-headless.js');
 
 const MockedSubagentManager = vi.mocked(SubagentManager);
 const MockedContextState = vi.mocked(ContextState);
@@ -404,12 +404,6 @@ describe('AgentTool', () => {
       expect(mockAgent.execute).toHaveBeenCalledWith(
         mockContextState,
         undefined, // signal parameter (undefined when not provided)
-        {
-          extraHistory: undefined,
-          generationConfigOverride: undefined,
-          toolsOverride: undefined,
-          skipEnvHistory: false,
-        },
       );
 
       const llmText = partToString(result.llmContent);
@@ -559,6 +553,99 @@ describe('AgentTool', () => {
       const description = invocation.getDescription();
 
       expect(description).toBe('Search files');
+    });
+  });
+
+  describe('Fork dispatch (subagent_type omitted)', () => {
+    let mockAgent: AgentHeadless;
+    let mockContextState: ContextState;
+
+    beforeEach(() => {
+      mockAgent = {
+        execute: vi.fn().mockResolvedValue(undefined),
+        getFinalText: vi.fn().mockReturnValue(''),
+        getExecutionSummary: vi.fn().mockReturnValue({
+          rounds: 0,
+          totalDurationMs: 0,
+          totalToolCalls: 0,
+          successfulToolCalls: 0,
+          failedToolCalls: 0,
+          successRate: 0,
+          inputTokens: 0,
+          outputTokens: 0,
+          totalTokens: 0,
+          estimatedCost: 0,
+          toolUsage: [],
+        }),
+        getStatistics: vi.fn().mockReturnValue({
+          rounds: 0,
+          totalDurationMs: 0,
+          totalToolCalls: 0,
+          successfulToolCalls: 0,
+          failedToolCalls: 0,
+        }),
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+      } as unknown as AgentHeadless;
+
+      mockContextState = {
+        set: vi.fn(),
+      } as unknown as ContextState;
+
+      MockedContextState.mockImplementation(() => mockContextState);
+
+      // Parent conversation history: empty (first-turn fork — falls back to
+      // the fork agent's own systemPrompt + wildcard tools because no
+      // cache params have been captured yet).
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      vi.mocked(AgentHeadless.create).mockResolvedValue(mockAgent);
+    });
+
+    it('should call AgentHeadless.create directly and execute without options', async () => {
+      const params: AgentParams = {
+        description: 'fork task',
+        prompt: 'do the thing',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      // Fork path: AgentHeadless.create invoked directly, bypassing
+      // SubagentManager.createAgentHeadless.
+      expect(AgentHeadless.create).toHaveBeenCalledTimes(1);
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+
+      const createArgs = vi.mocked(AgentHeadless.create).mock.calls[0];
+      expect(createArgs[0]).toBe('fork'); // name
+      // First-turn fork (no cache params): systemPrompt path, no
+      // renderedSystemPrompt. initialMessages is undefined (empty history).
+      const promptConfig = createArgs[2];
+      expect(promptConfig.renderedSystemPrompt).toBeUndefined();
+      expect(promptConfig.systemPrompt).toBeDefined();
+      // ToolConfig inherits wildcard for first-turn fallback.
+      const toolConfig = createArgs[5];
+      expect(toolConfig?.tools).toEqual(['*']);
+
+      // Fork returns the placeholder synchronously.
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe('Fork started — processing in background');
+
+      // Drain the background executeSubagent() promise so its assertions
+      // become visible before the test ends.
+      await vi.runAllTimersAsync();
+
+      // execute() called without a third options argument.
+      expect(mockAgent.execute).toHaveBeenCalledWith(
+        mockContextState,
+        undefined,
+      );
     });
   });
 
@@ -1021,7 +1108,7 @@ describe('AgentTool', () => {
         .calls[0]?.[0] as string;
 
       expect(startAgentId).toBe(stopAgentId);
-      expect(startAgentId).toMatch(/^file-search-\d+$/);
+      expect(startAgentId).toMatch(/^file-search-[0-9a-f]{8}$/);
     });
   });
 
@@ -1313,6 +1400,171 @@ describe('AgentTool', () => {
 
       // The onConfirm callback should have cleared pendingConfirmation
       expect(snapshots.some((s) => !s.hasPendingConfirmation)).toBe(true);
+    });
+  });
+
+  describe('Agent-level background: true', () => {
+    let mockAgent: AgentHeadless;
+    let mockContextState: ContextState;
+    let mockRegistry: {
+      register: ReturnType<typeof vi.fn>;
+      complete: ReturnType<typeof vi.fn>;
+      fail: ReturnType<typeof vi.fn>;
+    };
+
+    const bgSubagent: SubagentConfig = {
+      name: 'monitor',
+      description: 'Background monitor agent',
+      systemPrompt: 'You are a monitor.',
+      level: 'project',
+      filePath: '/project/.qwen/agents/monitor.md',
+      background: true,
+    };
+
+    beforeEach(() => {
+      mockAgent = {
+        execute: vi.fn().mockResolvedValue(undefined),
+        getFinalText: vi.fn().mockReturnValue('Monitor done'),
+        getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
+        getExecutionSummary: vi.fn().mockReturnValue({}),
+      } as unknown as AgentHeadless;
+
+      mockContextState = { set: vi.fn() } as unknown as ContextState;
+      MockedContextState.mockImplementation(() => mockContextState);
+
+      mockRegistry = {
+        register: vi.fn(),
+        complete: vi.fn(),
+        fail: vi.fn(),
+      };
+
+      vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
+      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
+        .fn()
+        .mockReturnValue(true);
+      (config as unknown as Record<string, unknown>)[
+        'getBackgroundTaskRegistry'
+      ] = vi.fn().mockReturnValue(mockRegistry);
+
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
+      vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
+        mockAgent,
+      );
+    });
+
+    it('should run in background when agent definition has background: true', async () => {
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('Background agent launched');
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({
+          description: 'Start monitor',
+          subagentType: 'monitor',
+          status: 'running',
+        }),
+      );
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('background');
+    });
+
+    it('should run in background when run_in_background is true even without background config', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        run_in_background: true,
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('Background agent launched');
+      expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('should run in foreground when neither flag is set', async () => {
+      const fgSubagent: SubagentConfig = {
+        ...bgSubagent,
+        name: 'file-search',
+        background: undefined,
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(fgSubagent);
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).not.toContain('Background agent launched');
+      expect(mockRegistry.register).not.toHaveBeenCalled();
+    });
+
+    it('should allow background in non-interactive mode (headless support)', async () => {
+      vi.mocked(
+        config.isInteractive as ReturnType<typeof vi.fn>,
+      ).mockReturnValue(false);
+
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toContain('Background agent launched');
+      expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('forwards the scheduler-provided callId as toolUseId on the registry entry', async () => {
+      const params: AgentParams = {
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      (invocation as unknown as { setCallId: (id: string) => void }).setCallId(
+        'call-xyz-789',
+      );
+      await invocation.execute();
+
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ toolUseId: 'call-xyz-789' }),
+      );
     });
   });
 });
