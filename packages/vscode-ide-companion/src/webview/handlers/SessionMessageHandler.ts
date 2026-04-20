@@ -773,14 +773,19 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // If we are connected, try to create a fresh ACP session so user can interact
         if (this.agentManager.isConnected) {
           try {
-            const newAcpSessionId = await this.agentManager.createNewSession(
-              workingDir,
-              {
-                forceNew: true,
-              },
-            );
+            await this.agentManager.createNewSession(workingDir, {
+              forceNew: true,
+            });
 
-            this.currentConversationId = newAcpSessionId;
+            // Keep the viewed session identity aligned with what the webview sees
+            // (the archived sessionId). The live ACP session lives on
+            // agentManager.currentSessionId; the sync-on-first-message path
+            // (see streamEnd handler) will flip both sides to the ACP id once
+            // the user actually sends a message. Setting currentConversationId
+            // to the new ACP id here would desync the backend from the webview
+            // and cause rename/delete/title-update flows to target the wrong
+            // session during the fallback window.
+            this.currentConversationId = sessionId;
 
             this.sendToWebView({
               type: 'qwenSessionSwitched',
