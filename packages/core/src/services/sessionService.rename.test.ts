@@ -330,6 +330,72 @@ describe('SessionService - rename and custom title', () => {
       expect(matches).toHaveLength(0);
     });
 
+    it('should not skip matches when multiple sessions share the same mtime (regression for PR #3093 review)', async () => {
+      // Three sessions sharing identical mtimes would fall on the page
+      // boundary of a paginated listSessions() and the third would be
+      // dropped by the strict `mtime < cursor` filter. Verify the exhaustive
+      // scan path returns all three.
+      const sessionIdC = '7ba7b810-9dad-11d1-80b4-00c04fd430c9';
+      const recordC1: ChatRecord = {
+        uuid: 'c1',
+        parentUuid: null,
+        sessionId: sessionIdC,
+        timestamp: '2024-01-03T00:00:00Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hi session c' }] },
+        cwd: '/test/project/root',
+        version: '1.0.0',
+        gitBranch: 'main',
+      };
+
+      const titleContent =
+        JSON.stringify({
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'shared-name' },
+        }) + '\n';
+
+      readdirSyncSpy.mockReturnValue([
+        `${sessionIdA}.jsonl`,
+        `${sessionIdB}.jsonl`,
+        `${sessionIdC}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+
+      const sharedMtime = now;
+      statSyncSpy.mockImplementation(
+        () =>
+          ({
+            mtimeMs: sharedMtime,
+            size: titleContent.length,
+            isFile: () => true,
+          }) as unknown as fs.Stats,
+      );
+
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          if (filePath.includes(sessionIdC)) return [recordC1];
+          return [];
+        },
+      );
+
+      readSyncSpy.mockImplementation(
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (_fd: number, buffer: any) => {
+          const data = Buffer.from(titleContent);
+          data.copy(buffer);
+          return data.length;
+        },
+      );
+
+      const matches = await sessionService.findSessionsByTitle('shared-name');
+
+      expect(matches).toHaveLength(3);
+      const matchedIds = matches.map((m) => m.sessionId).sort();
+      expect(matchedIds).toEqual([sessionIdA, sessionIdB, sessionIdC].sort());
+    });
+
     it('should return multiple matches for duplicate titles', async () => {
       const titleContent =
         JSON.stringify({

@@ -676,19 +676,75 @@ export class SessionService {
   async findSessionsByTitle(title: string): Promise<SessionListItem[]> {
     const normalizedTitle = title.toLowerCase().trim();
     const matches: SessionListItem[] = [];
+    const chatsDir = this.getChatsDir();
 
-    // Paginate through all sessions to avoid missing older ones
-    let cursor: number | undefined;
-    let hasMore = true;
-    while (hasMore) {
-      const result = await this.listSessions({ size: 50, cursor });
-      for (const item of result.items) {
-        if (item.customTitle?.toLowerCase().trim() === normalizedTitle) {
-          matches.push(item);
-        }
+    // Scan all session files directly rather than paging through
+    // listSessions(): the mtime-only cursor there uses a strict `<` boundary,
+    // so sessions that share an mtime with the page's last entry are skipped,
+    // which would silently drop valid title matches.
+    let fileNames: string[];
+    try {
+      fileNames = fs.readdirSync(chatsDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return matches;
       }
-      hasMore = result.hasMore;
-      cursor = result.nextCursor;
+      throw error;
+    }
+
+    const files: Array<{ name: string; mtime: number }> = [];
+    for (const name of fileNames) {
+      if (!SESSION_FILE_PATTERN.test(name)) continue;
+      const filePath = path.join(chatsDir, name);
+      try {
+        const stats = fs.statSync(filePath);
+        files.push({ name, mtime: stats.mtimeMs });
+      } catch {
+        continue;
+      }
+    }
+
+    // Sort most-recent first, with filename as a stable tie-breaker so runs
+    // are deterministic even when multiple files share an mtime.
+    files.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name));
+
+    let filesProcessed = 0;
+    for (const file of files) {
+      if (filesProcessed >= MAX_FILES_TO_PROCESS) break;
+      filesProcessed++;
+
+      const filePath = path.join(chatsDir, file.name);
+
+      // Cheap check first: tail-read the title and skip non-matches before
+      // doing the full hydration work (first-record read, project filter,
+      // message count, prompt extraction).
+      const customTitle = this.readSessionTitleFromFile(filePath);
+      if (customTitle?.toLowerCase().trim() !== normalizedTitle) continue;
+
+      const records = await jsonl.readLines<ChatRecord>(
+        filePath,
+        MAX_PROMPT_SCAN_LINES,
+      );
+      if (records.length === 0) continue;
+      const firstRecord = records[0];
+
+      const recordProjectHash = getProjectHash(firstRecord.cwd);
+      if (recordProjectHash !== this.projectHash) continue;
+
+      const messageCount = await this.countSessionMessages(filePath);
+      const prompt = this.extractFirstPromptFromRecords(records);
+
+      matches.push({
+        sessionId: firstRecord.sessionId,
+        cwd: firstRecord.cwd,
+        startTime: firstRecord.timestamp,
+        mtime: file.mtime,
+        prompt,
+        gitBranch: firstRecord.gitBranch,
+        filePath,
+        messageCount,
+        customTitle,
+      });
     }
 
     return matches;
