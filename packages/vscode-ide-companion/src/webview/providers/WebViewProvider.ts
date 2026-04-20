@@ -1633,13 +1633,6 @@ export class WebViewProvider {
       });
     }
 
-    if (this.cachedAvailableCommands !== null) {
-      this.sendMessageToWebView({
-        type: 'availableCommands',
-        data: { commands: this.cachedAvailableCommands },
-      });
-    }
-
     // Send cached available models to webview
     if (this.cachedAvailableModels && this.cachedAvailableModels.length > 0) {
       console.log(
