@@ -29,14 +29,14 @@ const CollapsibleOutput: FC<{ content: string }> = ({ content }) => {
   return (
     <div className="flex flex-col gap-[3px]">
       <div
-        className={`text-[13px] opacity-90 overflow-hidden ${
-          !isExpanded && isLongContent
-            ? `[mask-image:linear-gradient(to_bottom,var(--app-primary-background)_140px,transparent_${COLLAPSED_HEIGHT}px)]`
-            : ''
-        }`}
+        className="text-[13px] opacity-90 overflow-hidden"
         style={
           !isExpanded && isLongContent
-            ? { maxHeight: `${COLLAPSED_HEIGHT}px` }
+            ? {
+                maxHeight: `${COLLAPSED_HEIGHT}px`,
+                maskImage: `linear-gradient(to bottom, var(--app-primary-background) 140px, transparent ${COLLAPSED_HEIGHT}px)`,
+                WebkitMaskImage: `linear-gradient(to bottom, var(--app-primary-background) 140px, transparent ${COLLAPSED_HEIGHT}px)`,
+              }
             : undefined
         }
       >

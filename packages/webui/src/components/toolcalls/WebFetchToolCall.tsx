@@ -73,14 +73,14 @@ const OutputCard: FC<{
           <div
             className={`break-words m-0 p-1 overflow-hidden ${
               isError ? 'whitespace-pre-wrap' : ''
-            } ${
-              !isExpanded && isLongContent
-                ? `max-h-[${COLLAPSED_HEIGHT}px] [mask-image:linear-gradient(to_bottom,var(--app-primary-background)_80px,transparent_${COLLAPSED_HEIGHT}px)]`
-                : ''
             }`}
             style={
               !isExpanded && isLongContent
-                ? { maxHeight: `${COLLAPSED_HEIGHT}px` }
+                ? {
+                    maxHeight: `${COLLAPSED_HEIGHT}px`,
+                    maskImage: `linear-gradient(to bottom, var(--app-primary-background) 80px, transparent ${COLLAPSED_HEIGHT}px)`,
+                    WebkitMaskImage: `linear-gradient(to bottom, var(--app-primary-background) 80px, transparent ${COLLAPSED_HEIGHT}px)`,
+                  }
                 : undefined
             }
           >
@@ -90,7 +90,7 @@ const OutputCard: FC<{
               </pre>
             ) : (
               <div className="text-[0.85em]">
-                <MarkdownRenderer content={content} />
+                <MarkdownRenderer content={content} enableFileLinks={false} />
               </div>
             )}
           </div>
