@@ -55,6 +55,10 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 import { PermissionMode } from '../../hooks/types.js';
 import type { StopHookOutput } from '../../hooks/types.js';
 import { ApprovalMode } from '../../config/config.js';
+import {
+  getAgentTranscriptPath,
+  attachTranscriptWriter,
+} from '../../agents/agent-transcript.js';
 
 export interface AgentParams {
   description: string;
@@ -606,7 +610,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
    * Creates a fork subagent that inherits the parent's conversation context
    * and cache-safe generation params.
    */
-  private async createForkSubagent(agentConfig: Config): Promise<{
+  private async createForkSubagent(
+    agentConfig: Config,
+    eventEmitter: AgentEventEmitter = this.eventEmitter,
+  ): Promise<{
     subagent: AgentHeadless;
     taskPrompt: string;
   }> {
@@ -705,7 +712,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       {},
       {} as RunConfig,
       toolConfig,
-      this.eventEmitter,
+      eventEmitter,
     );
 
     return { subagent, taskPrompt };
@@ -1018,18 +1025,38 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // Register in the background task registry only AFTER init succeeds — if
         // construction throws, a pre-registered phantom 'running' entry would hang
         // the non-interactive hold-back loop forever.
+        // Dedicated emitter for this background agent so the transcript
+        // writer only sees *this* agent's events. Reusing the parent tool's
+        // UI emitter (this.eventEmitter) would mix events from every
+        // concurrent fork/subagent into the same transcript.
+        const bgEventEmitter = new AgentEventEmitter();
         let bgSubagent: AgentHeadless;
         if (isFork) {
-          const fork = await this.createForkSubagent(bgConfig as Config);
+          const fork = await this.createForkSubagent(
+            bgConfig as Config,
+            bgEventEmitter,
+          );
           bgSubagent = fork.subagent;
         } else {
           bgSubagent = await this.subagentManager.createAgentHeadless(
             subagentConfig,
             bgConfig as Config,
+            { eventEmitter: bgEventEmitter },
           );
         }
 
         const registry = this.config.getBackgroundTaskRegistry();
+
+        const projectTempDir = this.config.storage.getProjectTempDir();
+        const transcriptPath = getAgentTranscriptPath(
+          projectTempDir,
+          hookOpts.agentId,
+        );
+        const cleanupTranscript = attachTranscriptWriter(
+          bgEventEmitter,
+          transcriptPath,
+        );
+
         registry.register({
           agentId: hookOpts.agentId,
           description: this.params.description,
@@ -1038,7 +1065,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           startTime: Date.now(),
           abortController: bgAbortController,
           toolUseId: this.callId,
+          outputFile: transcriptPath,
         });
+
+        // Wire external message drain so SendMessage can inject messages
+        // into this agent's reasoning loop between tool rounds.
+        bgSubagent.setExternalMessageProvider(() =>
+          registry.drainMessages(hookOpts.agentId),
+        );
 
         const getCompletionStats = () => {
           const summary = bgSubagent.getExecutionSummary();
@@ -1067,14 +1101,23 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               });
             }
 
-            // Report terminate mode: only GOAL counts as success. ERROR,
-            // MAX_TURNS, and TIMEOUT are surfaced as failures so the parent
-            // model (and the UI) don't treat incomplete runs as completed.
+            // Report terminate mode: only GOAL counts as success. CANCELLED
+            // keeps the 'cancelled' status so the model sees task_stop's
+            // effect accurately (with any partial result attached). ERROR,
+            // MAX_TURNS, TIMEOUT, and SHUTDOWN are surfaced as failures so
+            // the parent model (and the UI) don't treat incomplete runs as
+            // completed.
             const terminateMode = bgSubagent.getTerminateMode();
             const finalText = bgSubagent.getFinalText();
             const completionStats = getCompletionStats();
             if (terminateMode === AgentTerminateMode.GOAL) {
               registry.complete(hookOpts.agentId, finalText, completionStats);
+            } else if (terminateMode === AgentTerminateMode.CANCELLED) {
+              registry.finalizeCancelled(
+                hookOpts.agentId,
+                finalText,
+                completionStats,
+              );
             } else {
               registry.fail(
                 hookOpts.agentId,
@@ -1087,14 +1130,27 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               error instanceof Error ? error.message : String(error);
             debugLogger.error(`[Agent] Background agent failed: ${errorMsg}`);
 
-            registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+            // If the error came from a cancellation, preserve the cancelled
+            // status so the model's notification matches what task_stop
+            // requested rather than reporting it as a generic failure.
+            if (bgAbortController.signal.aborted) {
+              registry.finalizeCancelled(
+                hookOpts.agentId,
+                errorMsg,
+                getCompletionStats(),
+              );
+            } else {
+              registry.fail(hookOpts.agentId, errorMsg, getCompletionStats());
+            }
+          } finally {
+            cleanupTranscript?.();
           }
         };
         void (isFork ? runInForkContext(bgBody) : bgBody());
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
         return {
-          llmContent: `Background agent launched: "${this.params.description}" (ID: ${hookOpts.agentId}). You will be notified when it completes.`,
+          llmContent: `Background agent launched: "${this.params.description}" (ID: ${hookOpts.agentId}).\nTranscript file: ${transcriptPath}\nYou will be notified when it completes. Use task_stop to cancel, send_message to communicate, or read_file on the transcript to check progress.`,
           returnDisplay: this.currentDisplay!,
         };
       }

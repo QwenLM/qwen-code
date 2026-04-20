@@ -77,7 +77,14 @@ describe('BackgroundTaskRegistry', () => {
     expect(displayText).toContain('failed');
   });
 
-  it('cancels a running background agent', () => {
+  it('cancels a running background agent without emitting a notification', () => {
+    // cancel() is intent-only: it aborts the signal and marks the entry
+    // cancelled, but does not emit a task-notification. The natural
+    // completion handler (bgBody) emits the terminal notification with
+    // the agent's real partial/final result via complete()/fail().
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
     const abortController = new AbortController();
 
     registry.register({
@@ -92,6 +99,87 @@ describe('BackgroundTaskRegistry', () => {
 
     expect(registry.get('test-1')!.status).toBe('cancelled');
     expect(abortController.signal.aborted).toBe(true);
+    expect(callback).not.toHaveBeenCalled();
+  });
+
+  it('emits a fallback cancelled notification after the grace period when the natural handler never runs', () => {
+    vi.useFakeTimers();
+    try {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.cancel('test-1');
+      expect(callback).not.toHaveBeenCalled();
+
+      // Pathological tool case: bgBody never emits. After the grace period
+      // the fallback fires so hasUnfinalizedAgents() stops reporting true
+      // and the headless wait loop can exit.
+      vi.runAllTimers();
+
+      expect(callback).toHaveBeenCalledOnce();
+      const [, modelText] = callback.mock.calls[0] as [string, string];
+      expect(modelText).toContain('<status>cancelled</status>');
+      expect(registry.hasUnfinalizedAgents()).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('skips the fallback notification when the natural handler finalizes first', () => {
+    vi.useFakeTimers();
+    try {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.cancel('test-1');
+      // Natural handler wins the race with the partial result.
+      registry.finalizeCancelled('test-1', 'partial output');
+      expect(callback).toHaveBeenCalledOnce();
+      callback.mockClear();
+
+      vi.runAllTimers();
+
+      // Fallback lands on a notified entry and no-ops.
+      expect(callback).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('finalizeCancellationIfPending emits a fallback cancelled notification', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'test-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.cancel('test-1');
+    registry.finalizeCancellationIfPending('test-1');
+
+    expect(callback).toHaveBeenCalledOnce();
+    const [, modelText] = callback.mock.calls[0] as [string, string];
+    expect(modelText).toContain('<status>cancelled</status>');
   });
 
   it('does not cancel a non-running agent', () => {
@@ -135,7 +223,10 @@ describe('BackgroundTaskRegistry', () => {
     expect(running[0].agentId).toBe('b');
   });
 
-  it('aborts all running agents', () => {
+  it('aborts all running agents and emits fallback notifications', () => {
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
     const ac1 = new AbortController();
     const ac2 = new AbortController();
 
@@ -160,9 +251,63 @@ describe('BackgroundTaskRegistry', () => {
     expect(ac2.signal.aborted).toBe(true);
     expect(registry.get('a')!.status).toBe('cancelled');
     expect(registry.get('b')!.status).toBe('cancelled');
+    // abortAll is a shutdown path — no natural handler will fire, so
+    // finalizeCancellationIfPending emits one cancelled notification per
+    // agent to keep the SDK contract intact.
+    expect(callback).toHaveBeenCalledTimes(2);
   });
 
-  it('complete is a no-op after cancellation (state race guard)', () => {
+  it('hasUnfinalizedAgents reports cancelled-but-not-notified entries', () => {
+    // Headless runs rely on this to keep the event loop alive after a
+    // task_stop until the agent's natural handler has emitted the
+    // terminal task-notification — otherwise the matching notification
+    // can be dropped before stream-json/SDK consumers observe it.
+    registry.register({
+      agentId: 'test-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    expect(registry.hasUnfinalizedAgents()).toBe(true);
+
+    registry.cancel('test-1');
+    expect(registry.get('test-1')!.status).toBe('cancelled');
+    expect(registry.hasUnfinalizedAgents()).toBe(true);
+
+    registry.finalizeCancelled('test-1', '');
+    expect(registry.hasUnfinalizedAgents()).toBe(false);
+  });
+
+  it('hasUnfinalizedAgents clears once every entry has been notified', () => {
+    registry.register({
+      agentId: 'a',
+      description: 'agent a',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+    registry.register({
+      agentId: 'b',
+      description: 'agent b',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    expect(registry.hasUnfinalizedAgents()).toBe(true);
+    registry.complete('a', 'done');
+    expect(registry.hasUnfinalizedAgents()).toBe(true);
+    registry.fail('b', 'boom');
+    expect(registry.hasUnfinalizedAgents()).toBe(false);
+  });
+
+  it('complete after cancellation surfaces the real result', () => {
+    // When cancel races with the natural completion handler, the agent's
+    // reasoning loop may have finished with a real result before the abort
+    // landed. complete() transitions cancelled → completed and emits the
+    // terminal notification carrying that real result, instead of letting
+    // the bare "cancelled" notification discard it.
     const callback = vi.fn();
     registry.setNotificationCallback(callback);
 
@@ -175,18 +320,19 @@ describe('BackgroundTaskRegistry', () => {
     });
 
     registry.cancel('test-1');
-    registry.complete('test-1', 'late result');
+    registry.complete('test-1', 'real result after cancel race');
 
-    // Status should remain 'cancelled', not flip to 'completed'
-    expect(registry.get('test-1')!.status).toBe('cancelled');
-    // Exactly one notification, emitted by cancel() itself — the late
-    // complete() must be no-op'd by the running-status guard.
+    expect(registry.get('test-1')!.status).toBe('completed');
+    expect(registry.get('test-1')!.result).toBe(
+      'real result after cancel race',
+    );
     expect(callback).toHaveBeenCalledTimes(1);
     const [, modelText] = callback.mock.calls[0];
-    expect(modelText).toContain('<status>cancelled</status>');
+    expect(modelText).toContain('<status>completed</status>');
+    expect(modelText).toContain('real result after cancel race');
   });
 
-  it('fail is a no-op after cancellation (state race guard)', () => {
+  it('fail after cancellation surfaces the real error', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);
 
@@ -199,12 +345,34 @@ describe('BackgroundTaskRegistry', () => {
     });
 
     registry.cancel('test-1');
+    registry.fail('test-1', 'real error after cancel race');
+
+    expect(registry.get('test-1')!.status).toBe('failed');
+    expect(registry.get('test-1')!.error).toBe('real error after cancel race');
+    expect(callback).toHaveBeenCalledTimes(1);
+    const [, modelText] = callback.mock.calls[0];
+    expect(modelText).toContain('<status>failed</status>');
+  });
+
+  it('second terminal call does not double-notify', () => {
+    // Once a terminal notification has fired, subsequent terminal calls
+    // (from late fire-and-forget paths) must not produce a duplicate.
+    const callback = vi.fn();
+    registry.setNotificationCallback(callback);
+
+    registry.register({
+      agentId: 'test-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+    });
+
+    registry.complete('test-1', 'first');
     registry.fail('test-1', 'late error');
 
-    expect(registry.get('test-1')!.status).toBe('cancelled');
     expect(callback).toHaveBeenCalledTimes(1);
-    const [, modelText] = callback.mock.calls[0];
-    expect(modelText).toContain('<status>cancelled</status>');
+    expect(registry.get('test-1')!.status).toBe('completed');
   });
 
   it('does not send notification without callback', () => {
@@ -283,5 +451,114 @@ describe('BackgroundTaskRegistry', () => {
     expect(modelText).toContain('&lt;/task-notification&gt;');
     expect(modelText).toContain('&lt;b&gt;bold&lt;/b&gt;');
     expect(modelText).toContain('&amp;');
+  });
+
+  describe('queueMessage', () => {
+    it('queues a message for a running agent', () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      const result = registry.queueMessage('test-1', 'hello');
+      expect(result).toBe(true);
+      expect(registry.get('test-1')!.pendingMessages).toEqual(['hello']);
+    });
+
+    it('returns false for non-existent agent', () => {
+      expect(registry.queueMessage('nope', 'hello')).toBe(false);
+    });
+
+    it('returns false for non-running agent', () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+      registry.complete('test-1', 'done');
+
+      expect(registry.queueMessage('test-1', 'hello')).toBe(false);
+    });
+  });
+
+  describe('drainMessages', () => {
+    it('drains all messages and clears the queue', () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.queueMessage('test-1', 'msg-1');
+      registry.queueMessage('test-1', 'msg-2');
+
+      const messages = registry.drainMessages('test-1');
+      expect(messages).toEqual(['msg-1', 'msg-2']);
+      expect(registry.get('test-1')!.pendingMessages).toEqual([]);
+    });
+
+    it('returns empty array when no messages queued', () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      expect(registry.drainMessages('test-1')).toEqual([]);
+    });
+
+    it('returns empty array for non-existent agent', () => {
+      expect(registry.drainMessages('nope')).toEqual([]);
+    });
+  });
+
+  describe('notification XML', () => {
+    it('includes output-file tag when outputFile is set', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        outputFile: '/tmp/agents/test-1.txt',
+      });
+
+      registry.complete('test-1', 'done');
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain(
+        '<output-file>/tmp/agents/test-1.txt</output-file>',
+      );
+    });
+
+    it('omits output-file tag when outputFile is not set', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+      });
+
+      registry.complete('test-1', 'done');
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).not.toContain('<output-file>');
+    });
   });
 });

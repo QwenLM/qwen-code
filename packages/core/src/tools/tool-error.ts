@@ -69,4 +69,12 @@ export enum ToolErrorType {
 
   // Truncation Errors
   OUTPUT_TRUNCATED = 'output_truncated',
+
+  // TaskStop-specific Errors
+  TASK_STOP_AGENT_NOT_FOUND = 'task_stop_agent_not_found',
+  TASK_STOP_AGENT_NOT_RUNNING = 'task_stop_agent_not_running',
+
+  // SendMessage-specific Errors
+  SEND_MESSAGE_AGENT_NOT_FOUND = 'send_message_agent_not_found',
+  SEND_MESSAGE_AGENT_NOT_RUNNING = 'send_message_agent_not_running',
 }

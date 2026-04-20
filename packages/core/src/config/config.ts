@@ -2463,6 +2463,14 @@ export class Config {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
     });
+    await registerLazy(ToolNames.TASK_STOP, async () => {
+      const { TaskStopTool } = await import('../tools/task-stop.js');
+      return new TaskStopTool(this);
+    });
+    await registerLazy(ToolNames.SEND_MESSAGE, async () => {
+      const { SendMessageTool } = await import('../tools/send-message.js');
+      return new SendMessageTool(this);
+    });
     await registerLazy(ToolNames.SKILL, async () => {
       const { SkillTool } = await import('../tools/skill.js');
       return new SkillTool(this);

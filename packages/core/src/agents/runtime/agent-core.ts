@@ -77,6 +77,13 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_DELETE,
 ]);
 
+/**
+ * Prefix applied to each external message injected into a background agent's
+ * reasoning loop via getExternalMessages. Kept here so tests and any future
+ * parsers can import the same literal.
+ */
+export const EXTERNAL_MESSAGE_PREFIX = '[Message from parent agent]:';
+
 export interface ReasoningLoopResult {
   /** The final model text response (empty if terminated by abort/limits). */
   text: string;
@@ -96,6 +103,12 @@ export interface ReasoningLoopOptions {
   maxTimeMinutes?: number;
   /** Start time in ms (for timeout calculation). Defaults to Date.now(). */
   startTimeMs?: number;
+  /**
+   * Optional callback to drain external messages between tool rounds.
+   * Called after processFunctionCalls completes. Returned strings are
+   * appended to the next model request as user-role content.
+   */
+  getExternalMessages?: () => string[];
 }
 
 /**
@@ -530,6 +543,19 @@ export class AgentCore {
           toolsList,
           currentResponseId,
         );
+
+        const externalMsgs = options?.getExternalMessages?.() ?? [];
+        if (externalMsgs.length > 0) {
+          // Append to the tool-response user message so external input rides
+          // alongside the tool results the model is about to see.
+          // processFunctionCalls always returns exactly one user-role entry.
+          const last = currentMessages[currentMessages.length - 1];
+          last.parts!.push(
+            ...externalMsgs.map((text) => ({
+              text: `\n${EXTERNAL_MESSAGE_PREFIX} ${text}`,
+            })),
+          );
+        }
       } else {
         // No tool calls — treat this as the model's final answer.
         if (roundText && roundText.trim().length > 0) {

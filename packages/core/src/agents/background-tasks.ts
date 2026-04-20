@@ -19,6 +19,15 @@ const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 const MAX_DESCRIPTION_LENGTH = 40;
 const MAX_RESULT_LENGTH = 2000;
 
+// Grace period after cancel() before emitting a fallback cancelled
+// notification. The natural handler (bgBody) almost always settles and
+// emits the terminal notification with the real partial result well
+// within this window; the timeout only fires for pathological tools
+// that ignore AbortSignal. Must be long enough that normal scheduler
+// unwind wins the race, short enough that a stuck headless wait loop
+// doesn't feel hung.
+const CANCEL_GRACE_MS = 5000;
+
 // Escape text so it is safe to interpolate into an XML element body.
 // Subagent-produced strings (description, result, error) can contain `<`,
 // `>`, or literal `</task-notification>` — without escaping, a subagent
@@ -56,6 +65,17 @@ export interface BackgroundAgentEntry {
   abortController: AbortController;
   stats?: AgentCompletionStats;
   toolUseId?: string;
+  /** Absolute path to the agent's plain-text transcript file. */
+  outputFile?: string;
+  /** Messages queued by SendMessage, drained between tool rounds. */
+  pendingMessages?: string[];
+  /**
+   * True once a terminal task-notification has been emitted for this entry.
+   * Prevents duplicate notifications when cancel races with the natural
+   * completion path (cancel aborts the signal; the agent's own handler then
+   * fires the notification with the real partial/final result).
+   */
+  notified?: boolean;
 }
 
 export interface NotificationMeta {
@@ -79,6 +99,7 @@ export class BackgroundTaskRegistry {
   private registerCallback?: BackgroundRegisterCallback;
 
   register(entry: BackgroundAgentEntry): void {
+    if (!entry.pendingMessages) entry.pendingMessages = [];
     this.agents.set(entry.agentId, entry);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
 
@@ -91,14 +112,23 @@ export class BackgroundTaskRegistry {
     }
   }
 
-  // No-op if not 'running' — guards against race with concurrent cancellation.
+  // Transition a still-running entry to 'completed' and emit the terminal
+  // notification. No-op if the entry is already terminal *and* has been
+  // notified — protects against duplicate emission when cancel aborts the
+  // signal and the natural handler also races to completion.
   complete(
     agentId: string,
     result: string,
     stats?: AgentCompletionStats,
   ): void {
     const entry = this.agents.get(agentId);
-    if (!entry || entry.status !== 'running') return;
+    if (!entry) return;
+    // Allow running → completed (normal path) and cancelled → completed
+    // (cancel raced the natural handler: the reasoning loop finished with
+    // a real result before the abort landed, and we prefer to surface that
+    // real result over the bare cancel).
+    if (entry.status !== 'running' && entry.status !== 'cancelled') return;
+    if (entry.notified) return;
 
     entry.status = 'completed';
     entry.endTime = Date.now();
@@ -109,10 +139,12 @@ export class BackgroundTaskRegistry {
     this.emitNotification(entry);
   }
 
-  // No-op if not 'running' — guards against race with concurrent cancellation.
+  // See complete() for the cancelled → terminal path rationale.
   fail(agentId: string, error: string, stats?: AgentCompletionStats): void {
     const entry = this.agents.get(agentId);
-    if (!entry || entry.status !== 'running') return;
+    if (!entry) return;
+    if (entry.status !== 'running' && entry.status !== 'cancelled') return;
+    if (entry.notified) return;
 
     entry.status = 'failed';
     entry.endTime = Date.now();
@@ -123,10 +155,14 @@ export class BackgroundTaskRegistry {
     this.emitNotification(entry);
   }
 
-  // Emit the terminal notification here — the fire-and-forget complete()/fail()
-  // path is guarded by `status !== 'running'` and will no-op, so without this the
-  // SDK contract breaks: consumers saw task_started but never receive a matching
-  // task_notification.
+  // Cancellation aborts the signal and marks the entry as cancelled, but
+  // does *not* emit the terminal notification immediately. The natural
+  // completion path (bgBody) fires complete()/fail()/finalizeCancelled()
+  // with the real partial/final result, which carries far more information
+  // than a bare "cancelled" message. A deferred fallback handles the rare
+  // case where a tool ignores AbortSignal and bgBody never settles — the
+  // timeout lands on finalizeCancellationIfPending(), which is a no-op
+  // once the natural handler has already emitted.
   cancel(agentId: string): void {
     const entry = this.agents.get(agentId);
     if (!entry || entry.status !== 'running') return;
@@ -136,6 +172,42 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     debugLogger.info(`Background agent cancelled: ${agentId}`);
 
+    const timer = setTimeout(() => {
+      this.finalizeCancellationIfPending(agentId);
+    }, CANCEL_GRACE_MS);
+    timer.unref?.();
+  }
+
+  // Emit the terminal cancelled notification once the agent's natural
+  // handler has confirmed that the reasoning loop ended because of the
+  // abort (terminateMode === CANCELLED). Attaches the partial result and
+  // stats so the parent model still sees whatever work the agent had
+  // captured before the abort landed, instead of a bare "cancelled" line.
+  finalizeCancelled(
+    agentId: string,
+    partialResult: string,
+    stats?: AgentCompletionStats,
+  ): void {
+    const entry = this.agents.get(agentId);
+    if (!entry) return;
+    if (entry.status !== 'running' && entry.status !== 'cancelled') return;
+    if (entry.notified) return;
+
+    entry.status = 'cancelled';
+    entry.endTime ??= Date.now();
+    if (partialResult) entry.result = partialResult;
+    entry.stats = stats;
+    this.emitNotification(entry);
+  }
+
+  // Emit the terminal cancelled notification for entries that were cancelled
+  // but for which no natural handler delivered a follow-up complete()/fail()/
+  // finalizeCancelled(). Used by shutdown paths (abortAll) to guarantee the
+  // SDK contract (every registered agent produces exactly one
+  // task-notification).
+  finalizeCancellationIfPending(agentId: string): void {
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'cancelled' || entry.notified) return;
     this.emitNotification(entry);
   }
 
@@ -147,6 +219,50 @@ export class BackgroundTaskRegistry {
     return Array.from(this.agents.values()).filter(
       (e) => e.status === 'running',
     );
+  }
+
+  /**
+   * True if any registered agent has not yet emitted its terminal
+   * task-notification. Covers `running` (still executing) and
+   * `cancelled`-but-not-finalized (cancel requested, but the natural
+   * handler hasn't fired finalizeCancelled() yet). Headless callers
+   * must keep their event loop alive while this returns true, so every
+   * task_started is paired with a matching task_notification.
+   */
+  hasUnfinalizedAgents(): boolean {
+    for (const entry of this.agents.values()) {
+      if (!entry.notified) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Enqueue a message for delivery to a running background agent.
+   * The agent drains this queue between tool rounds.
+   */
+  queueMessage(agentId: string, message: string): boolean {
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'running') return false;
+    const queue = entry.pendingMessages!;
+    queue.push(message);
+    debugLogger.info(
+      `Queued message for background agent ${agentId} (${queue.length} pending)`,
+    );
+    return true;
+  }
+
+  /**
+   * Drain all pending messages for an agent. Returns the messages
+   * and clears the queue. Called by the agent's reasoning loop.
+   */
+  drainMessages(agentId: string): string[] {
+    const entry = this.agents.get(agentId);
+    if (!entry || !entry.pendingMessages!.length) return [];
+    const messages = entry.pendingMessages!.splice(0);
+    debugLogger.info(
+      `Drained ${messages.length} message(s) for background agent ${agentId}`,
+    );
+    return messages;
   }
 
   setNotificationCallback(
@@ -162,6 +278,9 @@ export class BackgroundTaskRegistry {
   abortAll(): void {
     for (const entry of Array.from(this.agents.values())) {
       this.cancel(entry.agentId);
+      // Shutdown path: no natural handler will run, so emit the cancelled
+      // notification here to honour the one-notification-per-agent contract.
+      this.finalizeCancellationIfPending(entry.agentId);
     }
     debugLogger.info('Aborted all background agents');
   }
@@ -184,6 +303,12 @@ export class BackgroundTaskRegistry {
   }
 
   private emitNotification(entry: BackgroundAgentEntry): void {
+    // Mark notified *before* invoking the callback so that a re-entrant
+    // terminal call inside the callback chain (cancel → complete race)
+    // sees the flag and short-circuits, rather than firing twice.
+    if (entry.notified) return;
+    entry.notified = true;
+
     if (!this.notificationCallback) return;
 
     const statusText =
@@ -220,6 +345,11 @@ export class BackgroundTaskRegistry {
     }
     if (entry.error) {
       xmlParts.push(`<result>Error: ${escapeXml(entry.error)}</result>`);
+    }
+    if (entry.outputFile) {
+      xmlParts.push(
+        `<output-file>${escapeXml(entry.outputFile)}</output-file>`,
+      );
     }
     if (entry.stats) {
       xmlParts.push(

@@ -1410,6 +1410,8 @@ describe('AgentTool', () => {
       register: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
       fail: ReturnType<typeof vi.fn>;
+      finalizeCancelled: ReturnType<typeof vi.fn>;
+      drainMessages: ReturnType<typeof vi.fn>;
     };
 
     const bgSubagent: SubagentConfig = {
@@ -1436,6 +1438,8 @@ describe('AgentTool', () => {
         register: vi.fn(),
         complete: vi.fn(),
         fail: vi.fn(),
+        finalizeCancelled: vi.fn(),
+        drainMessages: vi.fn().mockReturnValue([]),
       };
 
       vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
@@ -1445,6 +1449,12 @@ describe('AgentTool', () => {
       (config as unknown as Record<string, unknown>)[
         'getBackgroundTaskRegistry'
       ] = vi.fn().mockReturnValue(mockRegistry);
+      (config as unknown as Record<string, unknown>)['storage'] = {
+        getProjectTempDir: () => '/tmp/qwen-test',
+      };
+      (mockAgent as unknown as Record<string, unknown>)[
+        'setExternalMessageProvider'
+      ] = vi.fn();
 
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
       vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue(
