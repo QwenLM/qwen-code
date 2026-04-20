@@ -30,6 +30,6 @@ Add to `settings.json`:
     "timeoutMs": 60000
   }
 }
-
-`timeoutMs` 控制每次 rewrite LLM 调用的超时（毫秒），默认 30000。
 ```
+
+`timeoutMs` sets the per-rewrite LLM call timeout in milliseconds. Defaults to 30000.
