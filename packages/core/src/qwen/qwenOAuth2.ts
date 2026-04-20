@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import path from 'node:path';
 import { promises as fs } from 'node:fs';
 import * as os from 'os';
-import { ChildProcess } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import open from 'open';
 import { EventEmitter } from 'events';
 import type { Config } from '../config/config.js';
