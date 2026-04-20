@@ -52,7 +52,7 @@
           "default": true
         },
         "showSessionRecap": {
-          "description": "Auto-show a brief \"where you left off\" recap (1-2 sentences) when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.",
+          "description": "Auto-show a one-line \"where you left off\" recap when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.",
           "type": "boolean",
           "default": false
         },

@@ -335,7 +335,7 @@ const SETTINGS_SCHEMA = {
         // Manual `/recap` works regardless.
         default: false,
         description:
-          'Auto-show a brief "where you left off" recap (1-2 sentences) when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.',
+          'Auto-show a one-line "where you left off" recap when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.',
         showInDialog: true,
       },
       sessionRecapAwayThresholdMinutes: {

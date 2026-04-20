@@ -24,7 +24,7 @@ These commands help you save, restore, and summarize work progress.
 | `/summary`  | Generate project summary based on conversation history    | `/summary`                           |
 | `/compress` | Replace chat history with summary to save Tokens          | `/compress`                          |
 | `/resume`   | Resume a previous conversation session                    | `/resume`                            |
-| `/recap`    | Generate a session recap now                              | `/recap`                             |
+| `/recap`    | Generate a one-line session recap now                     | `/recap`                             |
 | `/restore`  | Restore files to state before tool execution              | `/restore` (list) or `/restore <ID>` |
 
 ### 1.2 Interface and Workspace Control
@@ -163,9 +163,9 @@ The `/recap` command generates a short "where you left off" summary of the
 current session, so you can resume an old conversation without scrolling
 back through pages of history.
 
-| Command  | Description                             |
-| -------- | --------------------------------------- |
-| `/recap` | Generate and show a brief session recap |
+| Command  | Description                                |
+| -------- | ------------------------------------------ |
+| `/recap` | Generate and show a one-line session recap |
 
 **How it works:**
 
