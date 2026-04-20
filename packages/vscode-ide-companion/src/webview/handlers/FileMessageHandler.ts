@@ -37,20 +37,6 @@ export class FileMessageHandler extends BaseMessageHandler {
   // invalidation and skip re-caching the stale index.
   private readonly fileSearchInitTokens = new Map<string, symbol>();
   private readonly fileWatchers = new Map<string, vscode.FileSystemWatcher>();
-  private readonly globSpecialChars = new Set([
-    '\\',
-    '*',
-    '?',
-    '[',
-    ']',
-    '{',
-    '}',
-    '(',
-    ')',
-    '!',
-    '+',
-    '@',
-  ]);
 
   canHandle(messageType: string): boolean {
     return [
@@ -220,13 +206,13 @@ export class FileMessageHandler extends BaseMessageHandler {
 
       case 'getWorkspaceFiles':
         await this.handleGetWorkspaceFiles(
-          data?.query as string | undefined,
-          data?.requestId as number | undefined,
+          data?.['query'] as string | undefined,
+          data?.['requestId'] as number | undefined,
         );
         break;
 
       case 'openFile':
-        await this.handleOpenFile(data?.path as string | undefined);
+        await this.handleOpenFile(data?.['path'] as string | undefined);
         break;
 
       case 'openDiff':
@@ -623,9 +609,9 @@ export class FileMessageHandler extends BaseMessageHandler {
 
     try {
       await vscode.commands.executeCommand(showDiffCommand, {
-        path: (data.path as string) || '',
-        oldText: (data.oldText as string) || '',
-        newText: (data.newText as string) || '',
+        path: (data['path'] as string) || '',
+        oldText: (data['oldText'] as string) || '',
+        newText: (data['newText'] as string) || '',
       });
     } catch (error) {
       console.error('[FileMessageHandler] Failed to open diff:', error);
@@ -649,8 +635,8 @@ export class FileMessageHandler extends BaseMessageHandler {
     }
 
     try {
-      const content = (data.content as string) || '';
-      const fileName = (data.fileName as string) || 'temp';
+      const content = (data['content'] as string) || '';
+      const fileName = (data['fileName'] as string) || 'temp';
 
       // Get readonly file system provider from global singleton
       const readonlyProvider = ReadonlyFileSystemProvider.getInstance();
@@ -733,19 +719,5 @@ export class FileMessageHandler extends BaseMessageHandler {
         `Failed to create and open temporary file: ${getErrorMessage(error)}`,
       );
     }
-  }
-
-  private buildCaseInsensitiveGlob(query: string): string {
-    let pattern = '';
-    for (const char of query) {
-      if (/[a-zA-Z]/.test(char)) {
-        pattern += `[${char.toLowerCase()}${char.toUpperCase()}]`;
-      } else if (this.globSpecialChars.has(char)) {
-        pattern += `\\${char}`;
-      } else {
-        pattern += char;
-      }
-    }
-    return pattern;
   }
 }
