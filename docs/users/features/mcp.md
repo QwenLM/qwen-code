@@ -259,20 +259,28 @@ You can always configure MCP servers by manually editing `settings.json`, but th
 qwen mcp add [options] <name> <commandOrUrl> [args...]
 ```
 
-| Argument/Option     | Description                                                         | Default            | Example                                   |
-| ------------------- | ------------------------------------------------------------------- | ------------------ | ----------------------------------------- |
-| `<name>`            | A unique name for the server.                                       | —                  | `example-server`                          |
-| `<commandOrUrl>`    | The command to execute (for `stdio`) or the URL (for `http`/`sse`). | —                  | `/usr/bin/python` or `http://localhost:8` |
-| `[args...]`         | Optional arguments for a `stdio` command.                           | —                  | `--port 5000`                             |
-| `-s`, `--scope`     | Configuration scope (user or project).                              | `project`          | `-s user`                                 |
-| `-t`, `--transport` | Transport type (`stdio`, `sse`, `http`).                            | `stdio`            | `-t sse`                                  |
-| `-e`, `--env`       | Set environment variables.                                          | —                  | `-e KEY=value`                            |
-| `-H`, `--header`    | Set HTTP headers for SSE and HTTP transports.                       | —                  | `-H "X-Api-Key: abc123"`                  |
-| `--timeout`         | Set connection timeout in milliseconds.                             | —                  | `--timeout 30000`                         |
-| `--trust`           | Trust the server (bypass all tool call confirmation prompts).       | — (`false`)        | `--trust`                                 |
-| `--description`     | Set the description for the server.                                 | —                  | `--description "Local tools"`             |
-| `--include-tools`   | A comma-separated list of tools to include.                         | all tools included | `--include-tools mytool,othertool`        |
-| `--exclude-tools`   | A comma-separated list of tools to exclude.                         | none               | `--exclude-tools mytool`                  |
+| Argument/Option             | Description                                                         | Default                                | Example                                                            |
+| --------------------------- | ------------------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------ |
+| `<name>`                    | A unique name for the server.                                       | —                                      | `example-server`                                                   |
+| `<commandOrUrl>`            | The command to execute (for `stdio`) or the URL (for `http`/`sse`). | —                                      | `/usr/bin/python` or `http://localhost:8`                          |
+| `[args...]`                 | Optional arguments for a `stdio` command.                           | —                                      | `--port 5000`                                                      |
+| `-s`, `--scope`             | Configuration scope (user or project).                              | `project`                              | `-s user`                                                          |
+| `-t`, `--transport`         | Transport type (`stdio`, `sse`, `http`).                            | `stdio`                                | `-t sse`                                                           |
+| `-e`, `--env`               | Set environment variables.                                          | —                                      | `-e KEY=value`                                                     |
+| `-H`, `--header`            | Set HTTP headers for SSE and HTTP transports.                       | —                                      | `-H "X-Api-Key: abc123"`                                           |
+| `--timeout`                 | Set connection timeout in milliseconds.                             | —                                      | `--timeout 30000`                                                  |
+| `--trust`                   | Trust the server (bypass all tool call confirmation prompts).       | — (`false`)                            | `--trust`                                                          |
+| `--description`             | Set the description for the server.                                 | —                                      | `--description "Local tools"`                                      |
+| `--include-tools`           | A comma-separated list of tools to include.                         | all tools included                     | `--include-tools mytool,othertool`                                 |
+| `--exclude-tools`           | A comma-separated list of tools to exclude.                         | none                                   | `--exclude-tools mytool`                                           |
+| `--oauth-client-id`         | OAuth client ID for MCP server authentication.                      | —                                      | `--oauth-client-id your-client-id`                                 |
+| `--oauth-client-secret`     | OAuth client secret for MCP server authentication.                  | —                                      | `--oauth-client-secret your-client-secret`                         |
+| `--oauth-redirect-uri`      | OAuth redirect URI for authentication callback.                     | `http://localhost:7777/oauth/callback` | `--oauth-redirect-uri https://your-server.com/oauth/callback`      |
+| `--oauth-authorization-url` | OAuth authorization URL.                                            | —                                      | `--oauth-authorization-url https://provider.example.com/authorize` |
+| `--oauth-token-url`         | OAuth token URL.                                                    | —                                      | `--oauth-token-url https://provider.example.com/token`             |
+| `--oauth-scopes`            | OAuth scopes (comma-separated).                                     | —                                      | `--oauth-scopes scope1,scope2`                                     |
+
+> `--oauth-*` flags apply only to `--transport sse` and `--transport http`. Combining them with `--transport stdio` is rejected.
 
 #### Removing a server (`qwen mcp remove`)
 

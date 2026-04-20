@@ -788,6 +788,14 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 - `--description`: Set the description for the server.
 - `--include-tools`: A comma-separated list of tools to include.
 - `--exclude-tools`: A comma-separated list of tools to exclude.
+- `--oauth-client-id`: OAuth client ID for MCP server authentication.
+- `--oauth-client-secret`: OAuth client secret for MCP server authentication.
+- `--oauth-redirect-uri`: OAuth redirect URI (e.g., `https://your-server.com/oauth/callback`). Defaults to `http://localhost:7777/oauth/callback` for local setups. **Important for remote deployments**: When running Qwen Code on remote/cloud servers, set this to a publicly accessible URL.
+- `--oauth-authorization-url`: OAuth authorization URL.
+- `--oauth-token-url`: OAuth token URL.
+- `--oauth-scopes`: OAuth scopes (comma-separated).
+
+> `--oauth-*` flags apply only to `--transport sse` and `--transport http`. Combining them with `--transport stdio` is rejected.
 
 #### Adding an stdio server
 
@@ -832,6 +840,13 @@ qwen mcp add --transport sse sse-server https://api.example.com/sse/
 
 # Example: Adding an SSE server with an authentication header
 qwen mcp add --transport sse secure-sse https://api.example.com/sse/ --header "Authorization: Bearer abc123"
+
+# Example: Adding an OAuth-enabled SSE server
+qwen mcp add --transport sse oauth-server https://api.example.com/sse/ \
+  --oauth-client-id your-client-id \
+  --oauth-redirect-uri https://your-server.com/oauth/callback \
+  --oauth-authorization-url https://provider.example.com/authorize \
+  --oauth-token-url https://provider.example.com/token
 ```
 
 ### Managing Servers (`qwen mcp`)
