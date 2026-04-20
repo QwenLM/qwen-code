@@ -682,11 +682,17 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   // Wrap handleResume so the sticky recap from the previous session
-  // doesn't carry over into the new one.
+  // doesn't carry over into the new one. Only clear after the inner
+  // handler confirms a session was actually loaded — otherwise (no
+  // session data, missing deps) we'd drop the current session's recap
+  // for no reason.
   const handleResume = useCallback(
-    (sessionId: string) => {
-      setAwayRecapItem(null);
-      return handleResumeInner(sessionId);
+    async (sessionId: string): Promise<boolean> => {
+      const switched = await handleResumeInner(sessionId);
+      if (switched) {
+        setAwayRecapItem(null);
+      }
+      return switched;
     },
     [handleResumeInner, setAwayRecapItem],
   );

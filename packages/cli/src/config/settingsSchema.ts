@@ -334,7 +334,7 @@ const SETTINGS_SCHEMA = {
         // background call). Setting an explicit true/false overrides.
         default: undefined,
         description:
-          'Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. When unset, auto-trigger is on if `fastModel` is configured. Use /recap to trigger manually regardless.',
+          'Show a one-line "where you left off" recap when returning to the terminal after being away for 5+ minutes. When unset, auto-trigger is on if `fastModel` is configured. Use /recap to trigger manually regardless.',
         showInDialog: true,
       },
       gitCoAuthor: {

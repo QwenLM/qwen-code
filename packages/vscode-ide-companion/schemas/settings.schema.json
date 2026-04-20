@@ -52,7 +52,7 @@
           "default": true
         },
         "showSessionRecap": {
-          "description": "Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. When unset, auto-trigger is on if `fastModel` is configured. Use /recap to trigger manually regardless.",
+          "description": "Show a one-line \"where you left off\" recap when returning to the terminal after being away for 5+ minutes. When unset, auto-trigger is on if `fastModel` is configured. Use /recap to trigger manually regardless.",
           "type": "boolean"
         },
         "gitCoAuthor": {
