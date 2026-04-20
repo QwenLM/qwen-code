@@ -72,7 +72,6 @@ import { type ContextState, templateString } from './agent-headless.js';
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
-  ToolNames.SWARM,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
