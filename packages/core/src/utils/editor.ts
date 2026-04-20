@@ -55,13 +55,13 @@ export function commandExists(cmd: string): boolean {
 }
 
 /**
- * Possible paths for Zed.app on macOS.
- * Zed can be installed system-wide or for the current user.
+ * Get possible paths for Zed.app on macOS.
+ * Returns paths lazily to avoid calling os.homedir() at module initialization time,
+ * which would break tests that mock node:os without providing a homedir mock.
  */
-const zedMacOsPaths = [
-  '/Applications/Zed.app',
-  join(homedir(), 'Applications/Zed.app'),
-];
+function getZedAppPaths(): string[] {
+  return ['/Applications/Zed.app', join(homedir(), 'Applications/Zed.app')];
+}
 
 /**
  * Editor command configurations for different platforms.
@@ -97,7 +97,7 @@ function getZedCommand(): string | null {
 
   // On macOS, check for app bundle CLI
   if (process.platform === 'darwin') {
-    for (const appPath of zedMacOsPaths) {
+    for (const appPath of getZedAppPaths()) {
       const cliPath = join(appPath, 'Contents/MacOS/cli');
       if (existsSync(cliPath)) {
         return cliPath;
@@ -125,9 +125,9 @@ export function getEditorExecutable(editorType: EditorType): string | null {
     return found;
   }
 
-  // Special handling for Zed on macOS: check app bundle CLI as fallback
+    // Special handling for Zed on macOS: check app bundle CLI as fallback
   if (editorType === 'zed' && process.platform === 'darwin') {
-    for (const appPath of zedMacOsPaths) {
+    for (const appPath of getZedAppPaths()) {
       const cliPath = join(appPath, 'Contents/MacOS/cli');
       if (existsSync(cliPath)) {
         return cliPath;
