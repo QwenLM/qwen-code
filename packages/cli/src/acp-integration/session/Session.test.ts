@@ -56,7 +56,10 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
-  let mockToolRegistry: { getTool: ReturnType<typeof vi.fn> };
+  let mockToolRegistry: {
+    getTool: ReturnType<typeof vi.fn>;
+    ensureTool: ReturnType<typeof vi.fn>;
+  };
   beforeEach(() => {
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
@@ -73,7 +76,13 @@ describe('Session', () => {
       getHistory: vi.fn().mockReturnValue([]),
     } as unknown as GeminiChat;
 
-    mockToolRegistry = { getTool: vi.fn() };
+    mockToolRegistry = {
+      getTool: vi.fn(),
+      // #executePrompt → #buildInitialSystemReminders calls
+      // getToolRegistry().ensureTool(ToolNames.AGENT) on every session.prompt(),
+      // so the default mock must provide it (#1151 / #3479).
+      ensureTool: vi.fn().mockResolvedValue(true),
+    };
     const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
 
     mockConfig = {
@@ -91,6 +100,12 @@ describe('Session', () => {
         recordToolResult: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
+      // #buildInitialSystemReminders iterates listSubagents() on every
+      // session.prompt(). Default to an empty list so tests that don't
+      // exercise subagent reminders don't need to stub it (#1151 / #3479).
+      getSubagentManager: vi.fn().mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([]),
+      }),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
