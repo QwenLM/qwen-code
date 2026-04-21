@@ -162,7 +162,7 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
           config.getChatRecordingService?.()?.recordSlashCommand({
             phase: 'result',
             rawCommand: '/recap',
-            outputHistoryItems: [item as Record<string, unknown>],
+            outputHistoryItems: [{ ...item } as Record<string, unknown>],
           });
         } catch {
           // Recap is best-effort — never let a recording failure surface.
