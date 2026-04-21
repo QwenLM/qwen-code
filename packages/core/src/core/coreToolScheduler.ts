@@ -888,6 +888,24 @@ export class CoreToolScheduler {
           continue;
         }
 
+        // Reject file-modifying calls when truncated to prevent
+        // writing incomplete content, even if params failed schema validation.
+        if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
+          const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
+          newToolCalls.push({
+            status: 'error',
+            request: reqInfo,
+            tool: toolInstance,
+            response: createErrorResponse(
+              reqInfo,
+              truncationError,
+              ToolErrorType.OUTPUT_TRUNCATED,
+            ),
+            durationMs: 0,
+          });
+          continue;
+        }
+
         const invocationOrError = this.buildInvocation(
           toolInstance,
           reqInfo.args,
@@ -933,24 +951,6 @@ export class CoreToolScheduler {
 
         // Reset all validation retry counters for this tool since it passed validation
         this.clearRetryCountsForTool(reqInfo.name);
-
-        // Reject file-modifying calls when truncated to prevent
-        // writing incomplete content.
-        if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
-          const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
-          newToolCalls.push({
-            status: 'error',
-            request: reqInfo,
-            tool: toolInstance,
-            response: createErrorResponse(
-              reqInfo,
-              truncationError,
-              ToolErrorType.OUTPUT_TRUNCATED,
-            ),
-            durationMs: 0,
-          });
-          continue;
-        }
 
         newToolCalls.push({
           status: 'validating',

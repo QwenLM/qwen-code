@@ -48,6 +48,7 @@ import type {
   ToolConfig,
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
+import { WriteFileTool } from '../../tools/write-file.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -1226,6 +1227,100 @@ describe('subagent.ts', () => {
         const readResult = toolResultEvents.find((e) => e.name === 'read_file');
         expect(readResult).toBeDefined();
         expect(readResult!.success).toBe(true);
+      });
+
+      it('should mark truncated subagent write_file calls as output-truncated errors', async () => {
+        const writeFileToolDef: FunctionDeclaration = {
+          name: WriteFileTool.Name,
+          description: 'Writes a file',
+          parameters: { type: Type.OBJECT, properties: {} },
+        };
+
+        const { config } = await createMockConfig({
+          getFunctionDeclarationsFiltered: vi
+            .fn()
+            .mockReturnValue([writeFileToolDef]),
+          getTool: vi.fn().mockImplementation((name: string) => {
+            if (name === WriteFileTool.Name) {
+              return new WriteFileTool(config);
+            }
+            return undefined;
+          }),
+        });
+
+        const toolConfig: ToolConfig = { tools: [WriteFileTool.Name] };
+        const toolResultEvents: AgentToolResultEvent[] = [];
+        const eventEmitter = new AgentEventEmitter();
+        eventEmitter.on(AgentEventType.TOOL_RESULT, (event: unknown) => {
+          toolResultEvents.push(event as AgentToolResultEvent);
+        });
+
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call_write',
+                    name: WriteFileTool.Name,
+                    args: { file_path: '/tmp/truncated.txt' },
+                  },
+                ],
+              },
+            };
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    finishReason: 'MAX_TOKENS',
+                    content: { parts: [] },
+                  },
+                ],
+              },
+            };
+            yield {
+              type: 'chunk',
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'done' }],
+                    },
+                  },
+                ],
+              },
+            };
+          })(),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+          toolConfig,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        const writeResult = toolResultEvents.find(
+          (event) => event.name === WriteFileTool.Name,
+        );
+        expect(writeResult).toBeDefined();
+        expect(writeResult!.success).toBe(false);
+        expect(writeResult!.error).toContain(
+          'truncated due to max_tokens limit',
+        );
+        expect(writeResult!.error).toContain(
+          'rejected to prevent writing truncated content',
+        );
+        expect(writeResult!.error).not.toContain(
+          "params must have required property 'content'",
+        );
       });
     });
   });
