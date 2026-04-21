@@ -5,19 +5,23 @@
  */
 
 import { Agent, ProxyAgent, type Dispatcher } from 'undici';
+import {
+  isRunningWithBun,
+  isInBundledMode,
+  getRuntimeMode,
+} from './bundledMode.js';
 
 /**
  * JavaScript runtime type
  */
-export type Runtime = 'node' | 'bun' | 'unknown';
+export type Runtime = 'node' | 'bun' | 'native' | 'unknown';
 
 /**
  * Detect the current JavaScript runtime
  */
 export function detectRuntime(): Runtime {
-  if (typeof process !== 'undefined' && process.versions?.['bun']) {
-    return 'bun';
-  }
+  if (isInBundledMode()) return 'native';
+  if (isRunningWithBun()) return 'bun';
   if (typeof process !== 'undefined' && process.versions?.node) {
     return 'node';
   }
@@ -86,6 +90,7 @@ export function buildRuntimeFetchOptions(
   // ensure user-configured timeouts work as expected for long-running requests.
 
   switch (runtime) {
+    case 'native':
     case 'bun': {
       if (sdkType === 'openai') {
         // Bun: Disable built-in 300s timeout to let OpenAI SDK timeout control
@@ -150,4 +155,19 @@ function buildFetchOptionsWithDispatcher(
   } catch {
     return sdkType === 'openai' ? undefined : {};
   }
+}
+
+/**
+ * Get runtime context for analytics.
+ */
+export function getRuntimeContext(): {
+  runtime: Runtime;
+  mode: 'native' | 'bun' | 'node' | 'unknown';
+  isBundled: boolean;
+} {
+  return {
+    runtime: detectRuntime(),
+    mode: getRuntimeMode(),
+    isBundled: isInBundledMode(),
+  };
 }
