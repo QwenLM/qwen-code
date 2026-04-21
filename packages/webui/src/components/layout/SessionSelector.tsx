@@ -89,6 +89,7 @@ export const SessionSelector: FC<SessionSelectorProps> = ({
   const [originalRenameValue, setOriginalRenameValue] = useState('');
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement>(null);
+  const isCancelingRenameRef = useRef(false);
 
   useEffect(() => {
     if (renamingSessionId && renameInputRef.current) {
@@ -202,11 +203,19 @@ export const SessionSelector: FC<SessionSelectorProps> = ({
                               if (e.key === 'Enter') {
                                 handleRenameSubmit(sessionId);
                               } else if (e.key === 'Escape') {
+                                isCancelingRenameRef.current = true;
                                 setRenamingSessionId(null);
                                 setRenameValue('');
+                                setOriginalRenameValue('');
                               }
                             }}
-                            onBlur={() => handleRenameSubmit(sessionId)}
+                            onBlur={() => {
+                              if (isCancelingRenameRef.current) {
+                                isCancelingRenameRef.current = false;
+                                return;
+                              }
+                              handleRenameSubmit(sessionId);
+                            }}
                           />
                         </div>
                       );
