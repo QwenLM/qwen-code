@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useMemo,
+  useEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from 'react';
 import { type PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { ArenaDialogType } from './useArenaCommand.js';
@@ -24,6 +31,7 @@ import type {
   Message,
   HistoryItemWithoutId,
   HistoryItemBtw,
+  HistoryItemAwayRecap,
   SlashCommandProcessorResult,
   HistoryItem,
   ConfirmationRequest,
@@ -104,6 +112,7 @@ export const useSlashCommandProcessor = (
   toggleVimEnabled: () => Promise<boolean>,
   isProcessing: boolean,
   setIsProcessing: (isProcessing: boolean) => void,
+  isIdleRef: MutableRefObject<boolean>,
   setGeminiMdFileCount: (count: number) => void,
   actions: SlashCommandProcessorActions,
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
@@ -146,6 +155,9 @@ export const useSlashCommandProcessor = (
 
   const [btwItem, setBtwItem] = useState<HistoryItemBtw | null>(null);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
+
+  const [awayRecapItem, setAwayRecapItem] =
+    useState<HistoryItemAwayRecap | null>(null);
 
   const cancelBtw = useCallback(() => {
     btwAbortControllerRef.current?.abort();
@@ -259,6 +271,8 @@ export const useSlashCommandProcessor = (
       ui: {
         addItem,
         clear: () => {
+          cancelBtw();
+          setAwayRecapItem(null);
           clearItems();
           clearScreen();
           refreshStatic();
@@ -271,6 +285,9 @@ export const useSlashCommandProcessor = (
         setBtwItem,
         cancelBtw,
         btwAbortControllerRef,
+        awayRecapItem,
+        setAwayRecapItem,
+        isIdleRef,
         toggleVimEnabled,
         setGeminiMdFileCount,
         reloadCommands,
@@ -302,11 +319,14 @@ export const useSlashCommandProcessor = (
       btwItem,
       setBtwItem,
       cancelBtw,
+      awayRecapItem,
+      setAwayRecapItem,
       toggleVimEnabled,
       sessionShellAllowlist,
       setGeminiMdFileCount,
       reloadCommands,
       extensionsUpdateState,
+      isIdleRef,
     ],
   );
 
@@ -342,13 +362,15 @@ export const useSlashCommandProcessor = (
           new BundledSkillLoader(config),
           new FileCommandLoader(config),
         ];
+        const disabled = config?.getDisabledSlashCommands() ?? [];
         const commandService = await CommandService.create(
           loaders,
           controller.signal,
+          disabled.length > 0 ? new Set(disabled) : undefined,
         );
         // Avoid overwriting newer results from a subsequent effect run
         if (!controller.signal.aborted) {
-          setCommands(commandService.getCommands());
+          setCommands(commandService.getCommandsForMode('interactive'));
         }
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);
@@ -772,6 +794,8 @@ export const useSlashCommandProcessor = (
     btwItem,
     setBtwItem,
     cancelBtw,
+    awayRecapItem,
+    setAwayRecapItem,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,

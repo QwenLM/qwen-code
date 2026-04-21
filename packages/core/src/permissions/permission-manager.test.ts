@@ -186,7 +186,32 @@ describe('parseRule', () => {
 
   it('handles malformed pattern (no closing paren)', async () => {
     const r = parseRule('Bash(git status');
+    expect(r.invalid).toBe(true);
+    expect(r.toolName).toBe('run_shell_command');
     expect(r.specifier).toBeUndefined();
+    // Must not match any command
+    expect(matchesRule(r, 'run_shell_command', 'git status')).toBe(false);
+    expect(matchesRule(r, 'run_shell_command', 'rm -rf /')).toBe(false);
+  });
+
+  it('handles malformed pattern with trailing junk after paren', async () => {
+    const r = parseRule('Bash(rm -rf /)*');
+    expect(r.invalid).toBe(true);
+    expect(matchesRule(r, 'run_shell_command', 'git status')).toBe(false);
+    expect(matchesRule(r, 'run_shell_command', 'rm -rf /')).toBe(false);
+  });
+
+  it('handles malformed pattern with only open paren', async () => {
+    const r = parseRule('Bash(');
+    expect(r.invalid).toBe(true);
+    expect(matchesRule(r, 'run_shell_command', 'ls')).toBe(false);
+  });
+
+  it('still parses well-formed rules correctly', async () => {
+    const r = parseRule('Bash(rm -rf /)');
+    expect(r.invalid).toBeUndefined();
+    expect(matchesRule(r, 'run_shell_command', 'rm -rf /')).toBe(true);
+    expect(matchesRule(r, 'run_shell_command', 'git status')).toBe(false);
   });
 });
 
@@ -1353,6 +1378,29 @@ describe('PermissionManager', () => {
       pm.addSessionDenyRule('run_shell_command');
       expect(await pm.evaluate({ toolName: 'run_shell_command' })).toBe('deny');
     });
+
+    it('malformed session allow rule is silently ignored', async () => {
+      pm.addSessionAllowRule('Bash(git commit');
+      // 'git commit' is not readonly, so default is 'ask'.
+      // The malformed rule must not act as catch-all allow.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git commit',
+        }),
+      ).toBe('ask');
+    });
+
+    it('malformed session deny rule is silently ignored', async () => {
+      pm.addSessionDenyRule('Bash(rm -rf /)*');
+      // Should NOT deny — the malformed rule must not act as catch-all
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'git status',
+        }),
+      ).not.toBe('deny');
+    });
   });
 
   describe('allowedTools via permissionsAllow', () => {
@@ -1388,6 +1436,21 @@ describe('PermissionManager', () => {
         (r) => r.scope === 'session' && r.type === 'allow',
       );
       expect(sessionAllow?.rule.toolName).toBe('run_shell_command');
+    });
+
+    it('excludes malformed rules from listing', async () => {
+      pm = new PermissionManager(
+        makeConfig({
+          permissionsAllow: ['ReadFileTool'],
+          permissionsDeny: ['Bash(rm -rf /)*'],
+        }),
+      );
+      pm.initialize();
+
+      const rules = pm.listRules();
+      // The malformed deny rule should be filtered out
+      expect(rules.length).toBe(1);
+      expect(rules[0]!.rule.toolName).toBe('read_file');
     });
   });
 

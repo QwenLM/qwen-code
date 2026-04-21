@@ -35,6 +35,8 @@ export const useMessageHandling = () => {
   const streamingMessageIndexRef = useRef<number | null>(null);
   // Track the index of the current aggregated thinking message
   const thinkingMessageIndexRef = useRef<number | null>(null);
+  // Preserve one stable timestamp for all message segments in the same turn.
+  const currentStreamTimestampRef = useRef<number | null>(null);
 
   /**
    * Add message
@@ -54,6 +56,9 @@ export const useMessageHandling = () => {
    * Start streaming response
    */
   const startStreaming = useCallback((timestamp?: number) => {
+    const resolvedTimestamp =
+      typeof timestamp === 'number' ? timestamp : Date.now();
+    currentStreamTimestampRef.current = resolvedTimestamp;
     // Create an assistant placeholder message immediately so tool calls won't jump before it
     setMessages((prev) => {
       // Record index of the placeholder to update on chunks
@@ -63,8 +68,8 @@ export const useMessageHandling = () => {
         {
           role: 'assistant',
           content: '',
-          // Use provided timestamp (from extension) to keep ordering stable
-          timestamp: typeof timestamp === 'number' ? timestamp : Date.now(),
+          // Use one stable turn timestamp so later split segments sort correctly.
+          timestamp: resolvedTimestamp,
         },
       ];
     });
@@ -89,7 +94,11 @@ export const useMessageHandling = () => {
         if (idx === null) {
           idx = next.length;
           streamingMessageIndexRef.current = idx;
-          next.push({ role: 'assistant', content: '', timestamp: Date.now() });
+          next.push({
+            role: 'assistant',
+            content: '',
+            timestamp: currentStreamTimestampRef.current ?? Date.now(),
+          });
         }
 
         if (idx < 0 || idx >= next.length) {
@@ -122,6 +131,7 @@ export const useMessageHandling = () => {
     setIsStreaming(false);
     streamingMessageIndexRef.current = null;
     thinkingMessageIndexRef.current = null;
+    currentStreamTimestampRef.current = null;
   }, []);
 
   /**
@@ -173,7 +183,7 @@ export const useMessageHandling = () => {
             assistantIdx >= 0 &&
             assistantIdx < next.length
               ? next[assistantIdx].timestamp
-              : Date.now();
+              : (currentStreamTimestampRef.current ?? Date.now());
           next.push({
             role: 'thinking',
             content: '',

@@ -26,7 +26,8 @@ import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import { vi, type Mock, type MockInstance } from 'vitest';
 import type { LoadedSettings } from './config/settings.js';
-import { CommandKind } from './ui/commands/types.js';
+import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
+import { filterCommandsForMode } from './services/commandUtils.js';
 
 // Mock core modules
 vi.mock('./ui/hooks/atCommandProcessor.js');
@@ -54,6 +55,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 const mockGetCommands = vi.hoisted(() => vi.fn());
+const mockGetCommandsForMode = vi.hoisted(() => vi.fn());
 const mockCommandServiceCreate = vi.hoisted(() => vi.fn());
 vi.mock('./services/CommandService.js', () => ({
   CommandService: {
@@ -79,8 +81,12 @@ describe('runNonInteractive', () => {
   beforeEach(async () => {
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
+    mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
+      filterCommandsForMode(mockGetCommands(), mode),
+    );
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
+      getCommandsForMode: mockGetCommandsForMode,
     });
 
     processStdoutSpy = vi
@@ -153,6 +159,7 @@ describe('runNonInteractive', () => {
         hasUnfinalizedAgents: vi.fn().mockReturnValue(false),
         abortAll: vi.fn(),
       }),
+      getDisabledSlashCommands: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
     mockSettings = {
@@ -977,7 +984,7 @@ describe('runNonInteractive', () => {
 
     // Should write error message through adapter to stdout (TEXT mode goes through JsonOutputAdapter)
     expect(processStderrSpy).toHaveBeenCalledWith(
-      'The command "/help" is not supported in non-interactive mode.\n',
+      'The command "/help" is not supported in this mode.\n',
     );
   });
 

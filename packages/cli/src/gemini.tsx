@@ -8,7 +8,9 @@ import {
   AuthType,
   InputFormat,
   isDebugLoggingDegraded,
+  isBareMode,
   logUserPrompt,
+  QWEN_CODE_SIMPLE_ENV_VAR,
   Storage,
   type Config,
   createDebugLogger,
@@ -23,7 +25,11 @@ import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
 import { loadCliConfig, parseArguments } from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
-import { getSettingsWarnings, loadSettings } from './config/settings.js';
+import {
+  createMinimalSettings,
+  getSettingsWarnings,
+  loadSettings,
+} from './config/settings.js';
 import {
   initializeApp,
   type InitializationResult,
@@ -63,6 +69,10 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
+import {
+  startEarlyInputCapture,
+  stopAndGetCapturedInput,
+} from './utils/earlyInputCapture.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
@@ -204,6 +214,11 @@ export async function startInteractiveUI(
     }
   }
 
+  // Drain the early-captured input exactly once, before any React rendering.
+  // Must be outside any component/effect so StrictMode's mount/cleanup/remount
+  // always reads from the same stable prop rather than the (now empty) module buffer.
+  const initialCapturedInput = stopAndGetCapturedInput();
+
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
@@ -221,6 +236,7 @@ export async function startInteractiveUI(
               pasteWorkaround={
                 process.platform === 'win32' || nodeMajorVersion < 20
               }
+              initialCapturedInput={initialCapturedInput}
             >
               <SessionStatsProvider sessionId={config.getSessionId()}>
                 <VimModeProvider settings={settings}>
@@ -269,9 +285,9 @@ export async function startInteractiveUI(
       });
   }
 
-  registerCleanup(() => {
+  registerCleanup(async () => {
     remoteInputWatcher?.shutdown();
-    dualOutputBridge?.shutdown();
+    await dualOutputBridge?.shutdown();
     instance.unmount();
     restoreTerminalRedrawOptimizer();
   });
@@ -280,12 +296,23 @@ export async function startInteractiveUI(
 export async function main() {
   profileCheckpoint('main_entry');
   setupUnhandledRejectionHandler();
-  const settings = loadSettings();
-  await cleanupCheckpoints();
-  profileCheckpoint('after_load_settings');
+
+  if (process.argv.includes('--bare')) {
+    process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
+  }
 
   let argv = await parseArguments();
   profileCheckpoint('after_parse_arguments');
+
+  if (isBareMode(argv.bare)) {
+    process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
+  }
+
+  const settings = isBareMode(argv.bare)
+    ? createMinimalSettings()
+    : loadSettings();
+  await cleanupCheckpoints();
+  profileCheckpoint('after_load_settings');
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
@@ -429,7 +456,9 @@ export async function main() {
   profileCheckpoint('after_sandbox_check');
 
   // Initialize output language file before config loads to ensure it's included in context
-  initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  if (!isBareMode(argv.bare)) {
+    initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  }
 
   {
     const config = await loadCliConfig(
@@ -464,6 +493,11 @@ export async function main() {
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
       process.stdin.setRawMode(true);
+
+      // Startup optimization: start early input capture
+      startEarlyInputCapture();
+      // Ensure the stdin listener is removed on any exit path (error, signal, etc.)
+      registerCleanup(() => stopAndGetCapturedInput());
 
       // This cleanup isn't strictly needed but may help in certain situations.
       process.on('SIGTERM', () => {

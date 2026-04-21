@@ -1083,6 +1083,12 @@ export default {
     'Press Enter to start authentication, Esc to go back',
   'Authenticating... Please complete the login in your browser.':
     'Authenticating... Please complete the login in your browser.',
+  'Press c to copy the authorization URL to your clipboard.':
+    'Press c to copy the authorization URL to your clipboard.',
+  'Copy request sent to your terminal. If paste is empty, copy the URL above manually.':
+    'Copy request sent to your terminal. If paste is empty, copy the URL above manually.',
+  'Cannot write to terminal — copy the URL above manually.':
+    'Cannot write to terminal — copy the URL above manually.',
   'Press Enter or Esc to go back': 'Press Enter or Esc to go back',
 
   // MCP Tool List
@@ -1941,6 +1947,11 @@ export default {
   // Context Usage Component
   // ============================================================================
   'Context Usage': 'Context Usage',
+  '% used': '% used',
+  '% context used': '% context used',
+  'Context exceeds limit! Use /compress or /clear to reduce.':
+    'Context exceeds limit! Use /compress or /clear to reduce.',
+  'Use /compress or /clear': 'Use /compress or /clear',
   'No API response yet. Send a message to see actual usage.':
     'No API response yet. Send a message to see actual usage.',
   'Estimated pre-conversation overhead': 'Estimated pre-conversation overhead',

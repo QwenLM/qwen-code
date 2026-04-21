@@ -91,10 +91,12 @@ import { isBtwCommand } from './utils/commandUtils.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
 import { useFocus } from './hooks/useFocus.js';
+import { useAwaySummary } from './hooks/useAwaySummary.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
+import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
 import { type IdeIntegrationNudgeResult } from './IdeIntegrationNudge.js';
@@ -568,7 +570,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isResumeDialogOpen,
     openResumeDialog,
     closeResumeDialog,
-    handleResume,
+    handleResume: handleResumeInner,
   } = useResumeCommand({
     config,
     historyManager,
@@ -656,6 +658,8 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     setBtwItem,
     cancelBtw,
+    awayRecapItem,
+    setAwayRecapItem,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -669,11 +673,28 @@ export const AppContainer = (props: AppContainerProps) => {
     toggleVimEnabled,
     isProcessing,
     setIsProcessing,
+    isIdleRef,
     setGeminiMdFileCount,
     slashCommandActions,
     extensionsUpdateStateInternal,
     isConfigInitialized,
     logger,
+  );
+
+  // Wrap handleResume so the sticky recap from the previous session
+  // doesn't carry over into the new one. Only clear after the inner
+  // handler confirms a session was actually loaded — otherwise (no
+  // session data, missing deps) we'd drop the current session's recap
+  // for no reason.
+  const handleResume = useCallback(
+    async (sessionId: string): Promise<boolean> => {
+      const switched = await handleResumeInner(sessionId);
+      if (switched) {
+        setAwayRecapItem(null);
+      }
+      return switched;
+    },
+    [handleResumeInner, setAwayRecapItem],
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -1161,6 +1182,9 @@ export const AppContainer = (props: AppContainerProps) => {
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
 
+  // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
+  useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
+
   cancelHandlerRef.current = useCallback(() => {
     const pendingHistoryItems = [
       ...pendingSlashCommandHistoryItems,
@@ -1224,7 +1248,7 @@ export const AppContainer = (props: AppContainerProps) => {
         setControlsHeight(fullFooterMeasurement.height);
       }
     }
-  }, [buffer, terminalWidth, terminalHeight]);
+  }, [buffer, terminalWidth, terminalHeight, awayRecapItem, btwItem]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
@@ -1251,6 +1275,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const isFocused = useFocus();
   useBracketedPaste();
+
+  useAwaySummary({
+    enabled: settings.merged.general?.showSessionRecap ?? false,
+    config,
+    isFocused,
+    isIdle: streamingState === StreamingState.Idle,
+    setAwayRecapItem,
+  });
 
   // Context file names computation
   const contextFileNames = useMemo(() => {
@@ -2069,6 +2101,8 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
+      awayRecapItem,
+      setAwayRecapItem,
       nightly,
       branchName,
       sessionStats,
@@ -2175,6 +2209,8 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
+      awayRecapItem,
+      setAwayRecapItem,
       nightly,
       branchName,
       sessionStats,

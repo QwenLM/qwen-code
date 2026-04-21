@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { FC } from 'react';
+import { MarkdownRenderer } from './messages/MarkdownRenderer/MarkdownRenderer.js';
 
 export interface PermissionOption {
   name: string;
@@ -103,6 +104,9 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
         </>
       );
     }
+    if (toolCall.kind === 'switch_mode') {
+      return 'Would you like to proceed?';
+    }
     return toolCall.title || 'Permission Required';
   };
 
@@ -178,6 +182,25 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
     }
   }, [isOpen, options.length]);
 
+  const planText = useMemo(() => {
+    if (toolCall.kind !== 'switch_mode' || !Array.isArray(toolCall.content)) {
+      return null;
+    }
+    for (const item of toolCall.content) {
+      if (
+        item.type === 'content' &&
+        typeof item.content === 'object' &&
+        item.content !== null
+      ) {
+        const inner = item.content as { type?: string; text?: string };
+        if (inner.type === 'text' && typeof inner.text === 'string') {
+          return inner.text;
+        }
+      }
+    }
+    return null;
+  }, [toolCall.kind, toolCall.content]);
+
   if (!isOpen) {
     return null;
   }
@@ -187,7 +210,7 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
       {/* Main container */}
       <div
         ref={containerRef}
-        className="relative flex flex-col rounded-large border p-2 outline-none animate-slide-up"
+        className={`relative flex flex-col rounded-large border p-2 outline-none animate-slide-up${planText ? ' max-h-[60vh]' : ''}`}
         style={{
           backgroundColor: 'var(--app-input-secondary-background)',
           borderColor: 'var(--app-input-border)',
@@ -226,6 +249,13 @@ export const PermissionDrawer: FC<PermissionDrawerProps> = ({
               </div>
             )}
         </div>
+
+        {/* Plan content for switch_mode (exit_plan_mode) */}
+        {planText && (
+          <div className="relative z-[1] overflow-y-auto mb-2 rounded-[4px] max-h-[40vh] py-2 px-3 text-[13px] leading-normal bg-[var(--app-primary-background)] border border-[var(--app-input-border)] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-[var(--app-foreground-muted)]/30">
+            <MarkdownRenderer content={planText} />
+          </div>
+        )}
 
         {/* Options */}
         <div className="relative z-[1] flex flex-col gap-1 pb-1">

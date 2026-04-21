@@ -433,6 +433,69 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('');
     });
 
+    it('should handle Jupyter notebook file', async () => {
+      const nbPath = path.join(tempRootDir, 'test.ipynb');
+      const notebook = {
+        cells: [
+          {
+            cell_type: 'code',
+            source: ['print("hello")'],
+            execution_count: 1,
+            outputs: [{ output_type: 'stream', text: ['hello\n'] }],
+            metadata: {},
+          },
+        ],
+        metadata: { language_info: { name: 'python' } },
+      };
+      await fsp.writeFile(nbPath, JSON.stringify(notebook), 'utf-8');
+      const params: ReadFileToolParams = { file_path: nbPath };
+      const invocation = tool.build(params) as ToolInvocation<
+        ReadFileToolParams,
+        ToolResult
+      >;
+
+      const result = await invocation.execute(abortSignal);
+      expect(typeof result.llmContent).toBe('string');
+      expect(result.llmContent).toContain('Jupyter Notebook');
+      expect(result.llmContent).toContain('print("hello")');
+      expect(result.llmContent).toContain('hello');
+      expect(result.returnDisplay).toBe('Read notebook: test.ipynb');
+    });
+
+    it('should reject invalid pages parameter', () => {
+      const params: ReadFileToolParams = {
+        file_path: '/tmp/test.pdf',
+        pages: 'abc',
+      };
+      expect(() => tool.build(params)).toThrow('Invalid pages parameter');
+    });
+
+    it('should reject pages range exceeding 20', () => {
+      const params: ReadFileToolParams = {
+        file_path: '/tmp/test.pdf',
+        pages: '1-25',
+      };
+      expect(() => tool.build(params)).toThrow(
+        'Pages range exceeds maximum of 20',
+      );
+    });
+
+    it('should reject open-ended pages range', () => {
+      const params: ReadFileToolParams = {
+        file_path: '/tmp/test.pdf',
+        pages: '3-',
+      };
+      expect(() => tool.build(params)).toThrow('Open-ended page ranges');
+    });
+
+    it('should accept valid pages parameter', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.pdf'),
+        pages: '1-5',
+      };
+      expect(() => tool.build(params)).not.toThrow();
+    });
+
     it('should support offset and limit for text files', async () => {
       const filePath = path.join(tempRootDir, 'paginated.txt');
       const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1}`);

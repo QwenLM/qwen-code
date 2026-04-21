@@ -701,6 +701,10 @@ export class AgentCore {
     // tool spawns a PTY. Shared with outputUpdateHandler via closure so the
     // PID is included in TOOL_OUTPUT_UPDATE events for interactive shell support.
     const pidMap = new Map<string, number>();
+    // Tracks calls that already had their executionStartTime broadcast, so
+    // onToolCallsUpdate only fires the transition event once per callId even
+    // though the callback runs repeatedly while the tool executes.
+    const executionStartedEmitted = new Set<string>();
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       outputUpdateHandler: (callId, outputChunk) => {
@@ -775,22 +779,36 @@ export class AgentCore {
         for (const call of calls) {
           // Track PTY PIDs so TOOL_OUTPUT_UPDATE events can carry them.
           if (call.status === 'executing') {
-            const pid = (call as ExecutingToolCall).pid;
+            const executing = call as ExecutingToolCall;
+            const pid = executing.pid;
+            const isNewPid =
+              pid !== undefined && !pidMap.has(call.request.callId);
             if (pid !== undefined) {
-              const isNewPid = !pidMap.has(call.request.callId);
               pidMap.set(call.request.callId, pid);
-              // Emit immediately so the UI can offer interactive shell
-              // focus (Ctrl+F) before the tool produces its first output.
-              if (isNewPid) {
-                this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
-                  subagentId: this.subagentId,
-                  round: currentRound,
-                  callId: call.request.callId,
-                  outputChunk: (call as ExecutingToolCall).liveOutput ?? '',
-                  pid,
-                  timestamp: Date.now(),
-                } as AgentToolOutputUpdateEvent);
-              }
+            }
+
+            const needsExecutionStartEmit =
+              executing.executionStartTime !== undefined &&
+              !executionStartedEmitted.has(call.request.callId);
+            if (needsExecutionStartEmit) {
+              executionStartedEmitted.add(call.request.callId);
+            }
+
+            if (isNewPid || needsExecutionStartEmit) {
+              // Emit so the agent-view UI can (a) offer interactive shell
+              // focus (Ctrl+F) before the tool produces its first output,
+              // and (b) start the elapsed-time indicator from the
+              // executing-transition timestamp rather than the first output
+              // event.
+              this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+                subagentId: this.subagentId,
+                round: currentRound,
+                callId: call.request.callId,
+                outputChunk: executing.liveOutput ?? '',
+                pid,
+                executionStartTime: executing.executionStartTime,
+                timestamp: Date.now(),
+              } as AgentToolOutputUpdateEvent);
             }
           }
 

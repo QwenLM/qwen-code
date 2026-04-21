@@ -47,6 +47,44 @@ function buildBtwPrompt(question: string): string {
   ].join('\n');
 }
 
+function getBtwCacheSafeParams(
+  context: CommandContext,
+): ReturnType<typeof getCacheSafeParams> {
+  const geminiClient = context.services.config?.getGeminiClient();
+  if (
+    geminiClient &&
+    typeof geminiClient === 'object' &&
+    typeof geminiClient.getChat === 'function' &&
+    typeof geminiClient.getHistory === 'function'
+  ) {
+    const chat = geminiClient.getChat();
+    if (
+      chat &&
+      typeof chat === 'object' &&
+      typeof chat.getGenerationConfig === 'function'
+    ) {
+      const generationConfig = chat.getGenerationConfig();
+      if (generationConfig) {
+        const fullHistory = geminiClient.getHistory(true);
+        const maxHistoryEntries = 40;
+        const history =
+          fullHistory.length > maxHistoryEntries
+            ? fullHistory.slice(-maxHistoryEntries)
+            : fullHistory;
+
+        return {
+          generationConfig,
+          history,
+          model: context.services.config?.getModel() ?? '',
+          version: 0,
+        };
+      }
+    }
+  }
+
+  return getCacheSafeParams();
+}
+
 /**
  * Run a side question using runForkedAgent (cache path).
  *
@@ -63,7 +101,7 @@ async function askBtw(
   const { config } = context.services;
   if (!config) throw new Error('Config not loaded');
 
-  const cacheSafeParams = getCacheSafeParams();
+  const cacheSafeParams = getBtwCacheSafeParams(context);
   if (!cacheSafeParams)
     throw new Error(t('No conversation context available for /btw'));
 
@@ -85,6 +123,8 @@ export const btwCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     args: string,

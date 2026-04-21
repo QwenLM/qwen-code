@@ -85,6 +85,12 @@ export class AgentInteractive {
   // The UI reads this via getShellPids() to enable interactive shell input.
   private readonly shellPids = new Map<string, number>();
 
+  // Wall-clock timestamp when each currently-executing tool transitioned into
+  // the scheduler's `executing` state. Keyed by callId. First TOOL_OUTPUT_UPDATE
+  // carrying executionStartTime wins; later events that re-carry it are ignored
+  // so the timer is stable.
+  private readonly executionStartTimes = new Map<string, number>();
+
   constructor(config: AgentInteractiveConfig, core: AgentCore) {
     this.config = config;
     this.core = core;
@@ -334,6 +340,17 @@ export class AgentInteractive {
   }
 
   /**
+   * Returns wall-clock start timestamps (ms since epoch) for currently-
+   * executing tools, from the scheduler's `→ executing` transition.
+   * Keyed by callId; entries are cleared when TOOL_RESULT arrives. The UI
+   * uses this to render an elapsed-time indicator that excludes approval
+   * and scheduling wait.
+   */
+  getExecutionStartTimes(): ReadonlyMap<string, number> {
+    return this.executionStartTimes;
+  }
+
+  /**
    * Wait for the run loop to finish (used by InProcessBackend).
    */
   async waitForCompletion(): Promise<void> {
@@ -424,12 +441,19 @@ export class AgentInteractive {
         if (event.pid !== undefined) {
           this.shellPids.set(event.callId, event.pid);
         }
+        if (
+          event.executionStartTime !== undefined &&
+          !this.executionStartTimes.has(event.callId)
+        ) {
+          this.executionStartTimes.set(event.callId, event.executionStartTime);
+        }
       },
     );
 
     emitter.on(AgentEventType.TOOL_RESULT, (event: AgentToolResultEvent) => {
       this.liveOutputs.delete(event.callId);
       this.shellPids.delete(event.callId);
+      this.executionStartTimes.delete(event.callId);
       this.pendingApprovals.delete(event.callId);
 
       const statusText = event.success ? 'succeeded' : 'failed';

@@ -69,6 +69,7 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
+  executionStartTime?: number;
   /** If this tool call operated on a managed-auto-memory file, indicates whether it was a read or write. */
   isMemoryOp?: 'read' | 'write';
 }
@@ -388,6 +389,17 @@ export type HistoryItemBtw = HistoryItemBase & {
 };
 
 /**
+ * Away-summary recap shown when the user returns to the session after a
+ * period of inactivity (or via /recap). Rendered as a sticky banner above
+ * the input box (NOT part of the scrolling history), so it is intentionally
+ * excluded from the HistoryItemWithoutId union.
+ */
+export type HistoryItemAwayRecap = HistoryItemBase & {
+  type: 'away_recap';
+  text: string;
+};
+
+/**
  * UserPromptSubmit hook blocked event.
  * Displayed when a UserPromptSubmit hook blocks the user's prompt.
  */
@@ -415,6 +427,24 @@ export type HistoryItemStopHookLoop = HistoryItemBase & {
 export type HistoryItemStopHookSystemMessage = HistoryItemBase & {
   type: 'stop_hook_system_message';
   message: string;
+};
+
+// --- Doctor diagnostics types ---
+
+export type DoctorCheckStatus = 'pass' | 'warn' | 'fail';
+
+export interface DoctorCheckResult {
+  category: string;
+  name: string;
+  status: DoctorCheckStatus;
+  message: string;
+  detail?: string;
+}
+
+export type HistoryItemDoctor = HistoryItemBase & {
+  type: 'doctor';
+  checks: DoctorCheckResult[];
+  summary: { pass: number; warn: number; fail: number };
 };
 
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
@@ -456,7 +486,8 @@ export type HistoryItemWithoutId =
   | HistoryItemMemorySaved
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
-  | HistoryItemStopHookSystemMessage;
+  | HistoryItemStopHookSystemMessage
+  | HistoryItemDoctor;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 

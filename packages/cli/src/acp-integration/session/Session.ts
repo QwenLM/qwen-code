@@ -324,7 +324,7 @@ export class Session implements SessionContext {
         let parts: Part[] | null;
 
         if (isSlashCommand(inputText)) {
-          // Handle slash command - uses default allowed commands (init, summary, compress)
+          // Handle slash command in ACP mode using capability-based filtering
           const slashCommandResult = await handleSlashCommand(
             inputText,
             pendingSend,
@@ -961,10 +961,11 @@ export class Session implements SessionContext {
   async sendAvailableCommandsUpdate(): Promise<void> {
     const abortController = new AbortController();
     try {
-      // Use default allowed commands from getAvailableCommands
+      // Load commands available in ACP mode
       const slashCommands = await getAvailableCommands(
         this.config,
         abortController.signal,
+        'acp',
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol

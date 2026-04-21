@@ -24,7 +24,7 @@ import type {
   RuleWithSource,
   RuleType,
 } from '@qwen-code/qwen-code-core';
-import { isPathWithinRoot } from '@qwen-code/qwen-code-core';
+import { isPathWithinRoot, parseRule } from '@qwen-code/qwen-code-core';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -164,6 +164,7 @@ export function PermissionsDialog({
   // --- Dialog view state machine ---
   const [view, setView] = useState<DialogView>('rule-list');
   const [newRuleInput, setNewRuleInput] = useState('');
+  const [ruleInputError, setRuleInputError] = useState('');
   const [pendingRuleText, setPendingRuleText] = useState('');
   const [deleteTarget, setDeleteTarget] = useState<RuleWithSource | null>(null);
 
@@ -455,6 +456,7 @@ export function PermissionsDialog({
     (value: string) => {
       if (value === '__add__') {
         setNewRuleInput('');
+        setRuleInputError('');
         setView('add-rule-input');
         return;
       }
@@ -471,6 +473,16 @@ export function PermissionsDialog({
   const handleAddRuleSubmit = useCallback(() => {
     const trimmed = newRuleInput.trim();
     if (!trimmed) return;
+    const rule = parseRule(trimmed);
+    if (rule.invalid) {
+      setRuleInputError(
+        t(
+          'Malformed rule: unbalanced parentheses. Use the format ToolName(specifier).',
+        ),
+      );
+      return;
+    }
+    setRuleInputError('');
     setPendingRuleText(trimmed);
     setView('add-rule-scope');
   }, [newRuleInput]);
@@ -812,6 +824,12 @@ export function PermissionsDialog({
               isActive={true}
             />
           </Box>
+          {ruleInputError && (
+            <>
+              <Box height={1} />
+              <Text color={theme.status.error}>{ruleInputError}</Text>
+            </>
+          )}
         </Box>
         <Box marginTop={1} marginLeft={1}>
           <Text color={theme.text.secondary}>
