@@ -44,11 +44,8 @@ function wrapForMultiplexer(osc: string): string {
  * Wrap a URL in an OSC 8 hyperlink escape sequence. Supported terminals
  * (iTerm2, WezTerm, Kitty, Windows Terminal, VS Code, GNOME Terminal, …)
  * render it as a clickable link; terminals without OSC 8 support ignore
- * the escapes and still show the raw text.
- *
- * We terminate with BEL (\x07) rather than ST (ESC \\). Both are valid
- * per the OSC 8 spec, but Ink's renderer uses @alcalzone/ansi-tokenize,
- * which only recognizes OSC 8 sequences ended with BEL.
+ * the escapes and print the raw text. BEL (\x07) terminates the OSC
+ * sequence — more broadly supported than ST (ESC \\).
  */
 function osc8Hyperlink(url: string, label = url): string {
   return `\x1b]8;;${url}\x07${label}\x1b]8;;\x07`;
@@ -209,16 +206,18 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
   useEffect(() => {
     if (!authUrl) return;
     const columns = Math.max(1, stdout.columns ?? 80);
-    // One leading + one trailing blank row frames the URL visually.
     const urlVisualLines = Math.max(1, Math.ceil(authUrl.length / columns));
-    write(`\n${osc8Hyperlink(authUrl)}\n`);
+    // When the URL length is an exact multiple of the terminal width,
+    // the terminal's auto-wrap pushes the cursor past the last row,
+    // leaving an extra blank row we also need to erase on unmount.
+    const autoWrapOverflow = authUrl.length % columns === 0 ? 1 : 0;
+    const rowsWritten = urlVisualLines + autoWrapOverflow;
+    write(`${osc8Hyperlink(authUrl)}\n`);
     return () => {
       // After Ink's writeToStdout clears the dynamic frame, the cursor
-      // sits one row below the trailing blank we wrote. Step up once to
-      // reach that blank, then erase it plus the URL rows plus the
-      // leading blank.
-      const totalRowsToErase = urlVisualLines + 2;
-      write(ansiEscapes.cursorUp(1) + ansiEscapes.eraseLines(totalRowsToErase));
+      // sits one row below the rows we wrote. Step up once to reach the
+      // bottom URL row, then erase upward to remove all URL rows.
+      write(ansiEscapes.cursorUp(1) + ansiEscapes.eraseLines(rowsWritten));
     };
   }, [authUrl, write, stdout]);
 
