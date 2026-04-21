@@ -361,6 +361,7 @@ describe('<ToolMessage />', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage
         {...baseProps}
+        name="Shell"
         resultDisplay={ansiOutputDisplay}
         availableTerminalHeight={100}
       />,
@@ -369,6 +370,38 @@ describe('<ToolMessage />', () => {
     const output = lastFrame()!;
     expect(output).toContain('height=5');
     expect(output).toContain('MockShellStatsBar:displayHeight=5');
+  });
+
+  it('does not cap non-shell ANSI output', () => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="some-other-tool"
+        resultDisplay={ansiOutputDisplay}
+        availableTerminalHeight={100}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    // availableHeight = 100 - STATIC_HEIGHT(1) - RESERVED_LINE_COUNT(5) = 94
+    expect(output).toContain('height=94');
   });
 
   it('bypasses cap when forceShowResult is true', () => {
@@ -392,6 +425,7 @@ describe('<ToolMessage />', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage
         {...baseProps}
+        name="Shell"
         resultDisplay={ansiOutputDisplay}
         availableTerminalHeight={100}
         forceShowResult={true}
@@ -430,6 +464,7 @@ describe('<ToolMessage />', () => {
           <StreamingContext.Provider value={StreamingState.Idle}>
             <ToolMessage
               {...baseProps}
+              name="Shell"
               resultDisplay={ansiOutputDisplay}
               availableTerminalHeight={100}
             />
@@ -468,6 +503,7 @@ describe('<ToolMessage />', () => {
           <StreamingContext.Provider value={StreamingState.Idle}>
             <ToolMessage
               {...baseProps}
+              name="Shell"
               resultDisplay={ansiOutputDisplay}
               availableTerminalHeight={100}
             />
@@ -477,6 +513,54 @@ describe('<ToolMessage />', () => {
     );
     const output = lastFrame()!;
     expect(output).toContain('height=12');
+  });
+
+  it('caps shell completed string output (returnDisplayMessage path)', () => {
+    // shell.ts emits the final result as a plain string via
+    // `returnDisplayMessage = result.output`, so the completed shell
+    // tool flows through StringResultRenderer, not the ANSI branch.
+    // The cap must still apply.
+    const longString = Array.from(
+      { length: 30 },
+      (_, i) => `line ${i + 1}`,
+    ).join('\n');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="Shell"
+        resultDisplay={longString}
+        status={ToolCallStatus.Success}
+        availableTerminalHeight={100}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    // With cap=5, only the last few lines should be visible (MaxSizedBox
+    // reserves 1 row for an overflow indicator when content exceeds maxHeight).
+    expect(output).not.toContain('line 1\n');
+    expect(output).not.toContain('line 10');
+    expect(output).toContain('line 30');
+  });
+
+  it('does not cap non-shell string output', () => {
+    const longString = Array.from(
+      { length: 30 },
+      (_, i) => `line ${i + 1}`,
+    ).join('\n');
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="some-other-tool"
+        resultDisplay={longString}
+        status={ToolCallStatus.Success}
+        availableTerminalHeight={100}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    // availableHeight = 94, well above 30 lines → all visible
+    expect(output).toContain('line 1');
+    expect(output).toContain('line 30');
   });
 
   it('renders rejected plan content with plan text still visible', () => {

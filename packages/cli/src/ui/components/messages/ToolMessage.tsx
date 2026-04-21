@@ -346,11 +346,18 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         MIN_LINES_SHOWN + 1, // enforce minimum lines shown
       )
     : undefined;
-  // Cap inline shell output; ShellStatsBar surfaces hidden lines via `+N lines`.
+  // Cap inline shell output. Applies to both the streaming ANSI display and
+  // the completed string display (shell.ts emits the final result as a plain
+  // string via `returnDisplayMessage = result.output`). ShellStatsBar surfaces
+  // hidden lines via `+N lines` for ANSI; MaxSizedBox handles overflow for string.
+  const isShellTool = name === SHELL_COMMAND_NAME || name === SHELL_NAME;
   const shellOutputMaxLines =
     settings.merged.ui?.shellOutputMaxLines ?? DEFAULT_SHELL_OUTPUT_MAX_LINES;
-  const ansiAvailableHeight =
-    shellOutputMaxLines > 0 && !forceShowResult && !isThisShellFocused
+  const shellCapHeight =
+    isShellTool &&
+    shellOutputMaxLines > 0 &&
+    !forceShowResult &&
+    !isThisShellFocused
       ? Math.min(availableHeight ?? shellOutputMaxLines, shellOutputMaxLines)
       : availableHeight;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
@@ -428,13 +435,13 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               <>
                 <AnsiOutputText
                   data={effectiveDisplayRenderer.data}
-                  availableTerminalHeight={ansiAvailableHeight}
+                  availableTerminalHeight={shellCapHeight}
                   maxWidth={innerWidth}
                 />
                 {effectiveDisplayRenderer.stats && (
                   <ShellStatsBar
                     {...effectiveDisplayRenderer.stats}
-                    displayHeight={ansiAvailableHeight}
+                    displayHeight={shellCapHeight}
                   />
                 )}
               </>
@@ -443,7 +450,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               <StringResultRenderer
                 data={effectiveDisplayRenderer.data}
                 renderAsMarkdown={renderOutputAsMarkdown}
-                availableHeight={availableHeight}
+                availableHeight={shellCapHeight}
                 childWidth={innerWidth}
               />
             )}
