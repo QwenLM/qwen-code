@@ -329,6 +329,19 @@ describe('Query', () => {
       await transport2.close();
     });
 
+    it('should use resume parameter as session ID if provided', async () => {
+      const resumeId = '123e4567-e89b-12d3-a456-426614174000';
+      const query = new Query(transport, {
+        cwd: '/test',
+        resume: resumeId,
+      });
+
+      expect(query.getSessionId()).toBe(resumeId);
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
     it('should handle initialization errors', async () => {
       const query = new Query(transport, {
         cwd: '/test',
@@ -1171,6 +1184,68 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should provide getContextUsage() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const usagePromise = query.getContextUsage(true);
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const usageMsg = findControlRequest(
+          messages,
+          ControlRequestType.GET_CONTEXT_USAGE,
+        );
+        expect(usageMsg).toBeDefined();
+      });
+
+      // Respond with context usage data
+      const messages = transport.getAllWrittenMessages();
+      const usageMsg = findControlRequest(
+        messages,
+        ControlRequestType.GET_CONTEXT_USAGE,
+      )!;
+
+      expect((usageMsg.request as Record<string, unknown>).show_details).toBe(
+        true,
+      );
+
+      transport.simulateMessage(
+        createControlResponse(usageMsg.request_id, true, {
+          subtype: 'get_context_usage',
+          modelName: 'test-model',
+          totalTokens: 50000,
+          contextWindowSize: 200000,
+          breakdown: {
+            systemPrompt: 5000,
+            builtinTools: 10000,
+            mcpTools: 0,
+            memoryFiles: 2000,
+            skills: 3000,
+            messages: 25000,
+            freeSpace: 145000,
+            autocompactBuffer: 10000,
+          },
+          builtinTools: [{ name: 'Read', tokens: 500 }],
+          mcpTools: [],
+          memoryFiles: [],
+          skills: [],
+          showDetails: true,
+        }),
+      );
+
+      const result = await usagePromise;
+      expect(result).toMatchObject({
+        modelName: 'test-model',
+        totalTokens: 50000,
+        contextWindowSize: 200000,
+        showDetails: true,
+      });
+
+      await query.close();
+    });
+
     it('should throw if methods called on closed query', async () => {
       const query = new Query(transport, { cwd: '/test' });
       await respondToInitialize(transport, query);
@@ -1185,6 +1260,7 @@ describe('Query', () => {
         'Query is closed',
       );
       await expect(query.mcpServerStatus()).rejects.toThrow('Query is closed');
+      await expect(query.getContextUsage()).rejects.toThrow('Query is closed');
     });
   });
 

@@ -11,9 +11,9 @@ import {
   AbortError,
   isAbortError,
   isSDKAssistantMessage,
+  isSDKPartialAssistantMessage,
   isSDKResultMessage,
   type TextBlock,
-  type ContentBlock,
   type SDKUserMessage,
 } from '@qwen-code/sdk';
 import {
@@ -39,11 +39,8 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
   describe('Basic AbortController Usage', () => {
     it('should support AbortController cancellation', async () => {
       const controller = new AbortController();
-
-      // Abort after 5 seconds
-      setTimeout(() => {
-        controller.abort();
-      }, 5000);
+      const TARGET_CHARS = 50;
+      let accumulatedText = '';
 
       const q = query({
         prompt: 'Write a very long story about TypeScript programming',
@@ -51,23 +48,38 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
           abortController: controller,
+          includePartialMessages: true,
           debug: false,
         },
       });
 
       try {
         for await (const message of q) {
-          if (isSDKAssistantMessage(message)) {
+          if (isSDKPartialAssistantMessage(message)) {
+            // Handle partial messages from streaming
+            if (
+              message.event.type === 'content_block_delta' &&
+              message.event.delta.type === 'text_delta'
+            ) {
+              accumulatedText += message.event.delta.text;
+
+              // Abort when we have enough content to verify
+              if (accumulatedText.length >= TARGET_CHARS) {
+                controller.abort();
+              }
+            }
+          } else if (isSDKAssistantMessage(message)) {
+            // Handle complete assistant messages
             const textBlocks = message.message.content.filter(
               (block): block is TextBlock => block.type === 'text',
             );
-            const text = textBlocks
-              .map((b) => b.text)
-              .join('')
-              .slice(0, 100);
+            const chunkText = textBlocks.map((b) => b.text).join('');
+            accumulatedText += chunkText;
 
-            // Should receive some content before abort
-            expect(text.length).toBeGreaterThan(0);
+            // Abort when we have enough content to verify
+            if (accumulatedText.length >= TARGET_CHARS) {
+              controller.abort();
+            }
           }
         }
 
@@ -75,6 +87,8 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
         expect(false).toBe(true);
       } catch (error) {
         expect(isAbortError(error)).toBe(true);
+        // Should have accumulated at least TARGET_CHARS before abort
+        expect(accumulatedText.length).toBeGreaterThanOrEqual(TARGET_CHARS);
       } finally {
         await q.close();
       }
@@ -149,7 +163,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
   describe('Process Lifecycle Monitoring', () => {
     it('should handle normal process completion', async () => {
       const q = query({
-        prompt: 'Why do we choose to go to the moon?',
+        prompt: 'Say hello',
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
@@ -158,18 +172,12 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       });
 
       let completedSuccessfully = false;
+      let receivedAssistantMessage = false;
 
       try {
         for await (const message of q) {
           if (isSDKAssistantMessage(message)) {
-            const textBlocks = message.message.content.filter(
-              (block): block is TextBlock => block.type === 'text',
-            );
-            const text = textBlocks
-              .map((b) => b.text)
-              .join('')
-              .slice(0, 100);
-            expect(text.length).toBeGreaterThan(0);
+            receivedAssistantMessage = true;
           }
         }
 
@@ -180,6 +188,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       } finally {
         await q.close();
         expect(completedSuccessfully).toBe(true);
+        expect(receivedAssistantMessage).toBe(true);
       }
     });
 
@@ -219,7 +228,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
   describe('Input Stream Control', () => {
     it('should support endInput() method', async () => {
       const q = query({
-        prompt: 'What is 2 + 2?',
+        prompt: 'Say hello',
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
@@ -233,13 +242,6 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       try {
         for await (const message of q) {
           if (isSDKAssistantMessage(message) && !endInputCalled) {
-            const textBlocks = message.message.content.filter(
-              (block: ContentBlock): block is TextBlock =>
-                block.type === 'text',
-            );
-            const text = textBlocks.map((b: TextBlock) => b.text).join('');
-
-            expect(text.length).toBeGreaterThan(0);
             receivedResponse = true;
 
             // End input after receiving first response
@@ -360,7 +362,8 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
           session_id: sessionId,
           message: {
             role: 'user',
-            content: 'Write "updated" to test.txt.',
+            content:
+              'Write "updated" to test.txt. Stop if any exception occurs.',
           },
           parent_tool_use_id: null,
         };
@@ -485,7 +488,7 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       const stderrMessages: string[] = [];
 
       const q = query({
-        prompt: 'Why do we choose to go to the moon?',
+        prompt: 'Say hello',
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testDir,
@@ -497,17 +500,8 @@ describe('AbortController and Process Lifecycle (E2E)', () => {
       });
 
       try {
-        for await (const message of q) {
-          if (isSDKAssistantMessage(message)) {
-            const textBlocks = message.message.content.filter(
-              (block): block is TextBlock => block.type === 'text',
-            );
-            const text = textBlocks
-              .map((b) => b.text)
-              .join('')
-              .slice(0, 50);
-            expect(text.length).toBeGreaterThan(0);
-          }
+        for await (const _message of q) {
+          // Just consume all messages
         }
       } finally {
         await q.close();

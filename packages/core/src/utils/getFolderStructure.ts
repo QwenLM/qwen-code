@@ -11,6 +11,9 @@ import { getErrorMessage, isNodeError } from './errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { FileFilteringOptions } from '../config/constants.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('FOLDER_STRUCTURE');
 
 const MAX_ITEMS = 20;
 const TRUNCATION_INDICATOR = '...';
@@ -104,7 +107,7 @@ async function readFullStructure(
         isNodeError(error) &&
         (error.code === 'EACCES' || error.code === 'ENOENT')
       ) {
-        console.warn(
+        debugLogger.warn(
           `Warning: Could not read directory ${currentPath}: ${error.message}`,
         );
         if (currentPath === rootPath && error.code === 'ENOENT') {
@@ -322,27 +325,12 @@ export async function getFolderStructure(
     formatStructure(structureRoot, '', true, true, structureLines);
 
     // 3. Build the final output string
-    function isTruncated(node: FullFolderInfo): boolean {
-      if (node.hasMoreFiles || node.hasMoreSubfolders || node.isIgnored) {
-        return true;
-      }
-      for (const sub of node.subFolders) {
-        if (isTruncated(sub)) {
-          return true;
-        }
-      }
-      return false;
-    }
-
-    let summary = `Showing up to ${mergedOptions.maxItems} items (files + folders).`;
-
-    if (isTruncated(structureRoot)) {
-      summary += ` Folders or files indicated with ${TRUNCATION_INDICATOR} contain more items not shown, were ignored, or the display limit (${mergedOptions.maxItems} items) was reached.`;
-    }
-
-    return `${summary}\n\n${resolvedPath}${path.sep}\n${structureLines.join('\n')}`;
+    return `Showing up to ${mergedOptions.maxItems} items:\n\n${resolvedPath}${path.sep}\n${structureLines.join('\n')}`;
   } catch (error: unknown) {
-    console.error(`Error getting folder structure for ${resolvedPath}:`, error);
+    debugLogger.error(
+      `Error getting folder structure for ${resolvedPath}:`,
+      error,
+    );
     return `Error processing directory "${resolvedPath}": ${getErrorMessage(error)}`;
   }
 }

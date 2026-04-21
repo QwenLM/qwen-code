@@ -18,15 +18,12 @@ import type {
   ToolCallConfirmationDetails,
   ToolExecuteConfirmationDetails,
   ToolConfirmationPayload,
-} from './tools.js';
-import {
-  BaseDeclarativeTool,
-  BaseToolInvocation,
   ToolConfirmationOutcome,
-  Kind,
 } from './tools.js';
+import type { PermissionDecision } from '../permissions/types.js';
+import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
-import { summarizeToolOutput } from '../utils/summarizer.js';
+import { truncateToolOutput } from '../utils/truncation.js';
 import type {
   ShellExecutionConfig,
   ShellOutputEvent,
@@ -34,13 +31,20 @@ import type {
 import { ShellExecutionService } from '../services/shellExecutionService.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths } from '../utils/paths.js';
 import {
+  getCommandRoot,
   getCommandRoots,
-  isCommandAllowed,
-  isCommandNeedsPermission,
+  splitCommands,
   stripShellWrapper,
 } from '../utils/shell-utils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  isShellCommandReadOnlyAST,
+  extractCommandRules,
+} from '../utils/shellAstParser.js';
+
+const debugLogger = createDebugLogger('SHELL');
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
@@ -60,7 +64,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
   constructor(
     private readonly config: Config,
     params: ShellToolParams,
-    private readonly allowlist: Set<string>,
   ) {
     super(params);
   }
@@ -86,36 +89,105 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return description;
   }
 
-  override async shouldConfirmExecute(
-    _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
+  /**
+   * AST-based permission check for the shell command.
+   * - Read-only commands (via AST analysis) → 'allow'
+   * - All other commands → 'ask'
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
     const command = stripShellWrapper(this.params.command);
-    const rootCommands = [...new Set(getCommandRoots(command))];
-    const commandsToConfirm = rootCommands.filter(
-      (command) => !this.allowlist.has(command),
-    );
 
-    if (commandsToConfirm.length === 0) {
-      return false; // already approved and allowlisted
+    // AST-based read-only detection
+    try {
+      const isReadOnly = await isShellCommandReadOnlyAST(command);
+      if (isReadOnly) {
+        return 'allow';
+      }
+    } catch (e) {
+      debugLogger.warn('AST read-only check failed, falling back to ask:', e);
     }
 
-    const permissionCheck = isCommandNeedsPermission(command);
-    if (!permissionCheck.requiresPermission) {
-      return false;
+    return 'ask';
+  }
+
+  /**
+   * Constructs confirmation dialog details for a shell command that needs
+   * user approval.  For compound commands (e.g. `cd foo && npm run build`),
+   * sub-commands that are already allowed (read-only) are excluded from both
+   * the displayed root-command list and the suggested permission rules.
+   */
+  override async getConfirmationDetails(
+    _abortSignal: AbortSignal,
+  ): Promise<ToolCallConfirmationDetails> {
+    const command = stripShellWrapper(this.params.command);
+    const pm = this.config.getPermissionManager?.();
+
+    // Split compound command and filter out already-allowed (read-only) sub-commands
+    const subCommands = splitCommands(command);
+    const confirmableSubCommands: string[] = [];
+    for (const sub of subCommands) {
+      let isReadOnly = false;
+      try {
+        isReadOnly = await isShellCommandReadOnlyAST(sub);
+      } catch {
+        // conservative: treat unknown commands as requiring confirmation
+      }
+
+      if (isReadOnly) {
+        continue;
+      }
+
+      if (pm) {
+        try {
+          if ((await pm.isCommandAllowed(sub)) === 'allow') {
+            continue;
+          }
+        } catch (e) {
+          debugLogger.warn('PermissionManager command check failed:', e);
+        }
+      }
+
+      confirmableSubCommands.push(sub);
+    }
+
+    // Fallback to all sub-commands if everything was filtered out (shouldn't
+    // normally happen since getDefaultPermission already returned 'ask').
+    const effectiveSubCommands =
+      confirmableSubCommands.length > 0 ? confirmableSubCommands : subCommands;
+
+    const rootCommands = [
+      ...new Set(
+        effectiveSubCommands
+          .map((c) => getCommandRoot(c))
+          .filter((c): c is string => !!c),
+      ),
+    ];
+
+    // Extract minimum-scope permission rules only for sub-commands that
+    // actually need confirmation.
+    let permissionRules: string[] = [];
+    try {
+      const allRules: string[] = [];
+      for (const sub of effectiveSubCommands) {
+        const rules = await extractCommandRules(sub);
+        allRules.push(...rules);
+      }
+      permissionRules = [...new Set(allRules)].map((rule) => `Bash(${rule})`);
+    } catch (e) {
+      debugLogger.warn('Failed to extract command rules:', e);
     }
 
     const confirmationDetails: ToolExecuteConfirmationDetails = {
       type: 'exec',
       title: 'Confirm Shell Command',
       command: this.params.command,
-      rootCommand: commandsToConfirm.join(', '),
+      rootCommand: rootCommands.join(', '),
+      permissionRules,
       onConfirm: async (
-        outcome: ToolConfirmationOutcome,
+        _outcome: ToolConfirmationOutcome,
         _payload?: ToolConfirmationPayload,
       ) => {
-        if (outcome === ToolConfirmationOutcome.ProceedAlways) {
-          commandsToConfirm.forEach((command) => this.allowlist.add(command));
-        }
+        // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
     return confirmationDetails;
@@ -178,21 +250,24 @@ export class ShellToolInvocation extends BaseToolInvocation<
         finalCommand = finalCommand.trim().replace(/&+$/, '').trim();
       }
 
-      // pgrep is not available on Windows, so we can't get background PIDs
-      const commandToExecute = isWindows
-        ? finalCommand
-        : (() => {
-            // wrap command to append subprocess pids (via pgrep) to temporary file
-            let command = finalCommand.trim();
-            if (!command.endsWith('&')) command += ';';
-            return `{ ${command} }; __code=$?; pgrep -g 0 >${tempFilePath} 2>&1; exit $__code;`;
-          })();
+      // On non-Windows background commands, wrap with pgrep to capture
+      // subprocess PIDs so we can report them to the user.
+      const commandToExecute =
+        !isWindows && shouldRunInBackground
+          ? (() => {
+              let command = finalCommand.trim();
+              if (!command.endsWith('&')) command += ';';
+              return `{ ${command} }; __code=$?; pgrep -g 0 >${tempFilePath} 2>&1; exit $__code;`;
+            })()
+          : finalCommand;
 
       const cwd = this.params.directory || this.config.getTargetDir();
 
       let cumulativeOutput: string | AnsiOutput = '';
       let lastUpdateTime = Date.now();
       let isBinaryStream = false;
+      let totalLines = 0;
+      let totalBytes = 0;
 
       const { result: resultPromise, pid } =
         await ShellExecutionService.execute(
@@ -205,6 +280,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
               case 'data':
                 if (isBinaryStream) break;
                 cumulativeOutput = event.chunk;
+                // Stats are only consumed by the ANSI-output branch below,
+                // so skip the per-chunk accounting for plain string chunks.
+                if (Array.isArray(event.chunk)) {
+                  totalLines = event.chunk.length;
+                  totalBytes = event.chunk.reduce(
+                    (sum, line) =>
+                      sum +
+                      line.reduce(
+                        (ls, token) =>
+                          ls + Buffer.byteLength(token.text, 'utf-8'),
+                        0,
+                      ),
+                    0,
+                  );
+                }
                 shouldUpdate = true;
                 break;
               case 'binary_detected':
@@ -228,16 +318,26 @@ export class ShellToolInvocation extends BaseToolInvocation<
             }
 
             if (shouldUpdate && updateOutput) {
-              updateOutput(
-                typeof cumulativeOutput === 'string'
-                  ? cumulativeOutput
-                  : { ansiOutput: cumulativeOutput },
-              );
+              if (typeof cumulativeOutput === 'string') {
+                updateOutput(cumulativeOutput);
+              } else {
+                updateOutput({
+                  ansiOutput: cumulativeOutput,
+                  totalLines,
+                  totalBytes,
+                  // Only include timeout when user explicitly set it
+                  ...(this.params.timeout != null && {
+                    timeoutMs: this.params.timeout,
+                  }),
+                });
+              }
               lastUpdateTime = Date.now();
             }
           },
           combinedSignal,
-          this.config.getShouldUseNodePtyShell(),
+          shouldRunInBackground
+            ? false
+            : this.config.getShouldUseNodePtyShell(),
           shellExecutionConfig ?? {},
         );
 
@@ -245,14 +345,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
         setPidCallback(pid);
       }
 
-      if (shouldRunInBackground) {
-        // For background tasks, return immediately with PID info
-        // Note: We cannot reliably detect startup errors for background processes
-        // since their stdio is typically detached/ignored
+      // On Windows, background commands rely on early return since there's
+      // no & backgrounding or pgrep. Awaiting would block until completion.
+      if (shouldRunInBackground && isWindows) {
         const pidMsg = pid ? ` PID: ${pid}` : '';
-        const killHint = isWindows
-          ? ' (Use taskkill /F /T /PID <pid> to stop)'
-          : ' (Use kill <pid> to stop)';
+        const killHint = ' (Use taskkill /F /T /PID <pid> to stop)';
 
         return {
           llmContent: `Background command started.${pidMsg}${killHint}`,
@@ -262,27 +359,42 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
       const result = await resultPromise;
 
-      const backgroundPIDs: number[] = [];
-      if (os.platform() !== 'win32') {
-        if (fs.existsSync(tempFilePath)) {
-          const pgrepLines = fs
-            .readFileSync(tempFilePath, 'utf8')
-            .split(EOL)
-            .filter(Boolean);
-          for (const line of pgrepLines) {
-            if (!/^\d+$/.test(line)) {
-              console.error(`pgrep: ${line}`);
+      if (shouldRunInBackground) {
+        // Read subprocess PIDs captured by the pgrep wrapper (non-Windows only)
+        const backgroundPIDs: number[] = [];
+        if (!isWindows) {
+          if (fs.existsSync(tempFilePath)) {
+            const pgrepLines = fs
+              .readFileSync(tempFilePath, 'utf8')
+              .split(EOL)
+              .filter(Boolean);
+            for (const line of pgrepLines) {
+              if (!/^\d+$/.test(line)) {
+                debugLogger.warn(`pgrep: ${line}`);
+                continue;
+              }
+              const bgPid = Number(line);
+              if (bgPid !== result.pid) {
+                backgroundPIDs.push(bgPid);
+              }
             }
-            const pid = Number(line);
-            if (pid !== result.pid) {
-              backgroundPIDs.push(pid);
-            }
-          }
-        } else {
-          if (!signal.aborted) {
-            console.error('missing pgrep output');
+          } else if (!signal.aborted) {
+            debugLogger.warn('missing pgrep output');
           }
         }
+
+        const bgPidMsg =
+          backgroundPIDs.length > 0
+            ? ` PIDs: ${backgroundPIDs.join(', ')}`
+            : pid
+              ? ` PID: ${pid}`
+              : '';
+        const killHint = ' (Use kill <pid> to stop)';
+
+        return {
+          llmContent: `Background command started.${bgPidMsg}${killHint}`,
+          returnDisplay: `Background command started.${bgPidMsg}${killHint}`,
+        };
       }
 
       let llmContent = '';
@@ -324,9 +436,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
           `Error: ${finalError}`, // Use the cleaned error string.
           `Exit Code: ${result.exitCode ?? '(none)'}`,
           `Signal: ${result.signal ?? '(none)'}`,
-          `Background PIDs: ${
-            backgroundPIDs.length ? backgroundPIDs.join(', ') : '(none)'
-          }`,
           `Process Group PGID: ${result.pid ?? '(none)'}`,
         ].join('\n');
       }
@@ -363,7 +472,22 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       }
 
-      const summarizeConfig = this.config.getSummarizeToolOutputConfig();
+      // Truncate large output and save full content to a temp file.
+      if (typeof llmContent === 'string') {
+        const truncatedResult = await truncateToolOutput(
+          this.config,
+          ShellTool.Name,
+          llmContent,
+        );
+
+        if (truncatedResult.outputFile) {
+          llmContent = truncatedResult.content;
+          returnDisplayMessage +=
+            (returnDisplayMessage ? '\n' : '') +
+            `Output too long and was saved to: ${truncatedResult.outputFile}`;
+        }
+      }
+
       const executionError = result.error
         ? {
             error: {
@@ -372,19 +496,6 @@ export class ShellToolInvocation extends BaseToolInvocation<
             },
           }
         : {};
-      if (summarizeConfig && summarizeConfig[ShellTool.Name]) {
-        const summary = await summarizeToolOutput(
-          llmContent,
-          this.config.getGeminiClient(),
-          signal,
-          summarizeConfig[ShellTool.Name].tokenBudget,
-        );
-        return {
-          llmContent: summary,
-          returnDisplay: returnDisplayMessage,
-          ...executionError,
-        };
-      }
 
       return {
         llmContent,
@@ -473,6 +584,18 @@ IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO N
   - Edit files: Use ${ToolNames.EDIT} (NOT sed/awk)
   - Write files: Use ${ToolNames.WRITE_FILE} (NOT echo >/cat <<EOF)
   - Communication: Output text directly (NOT echo/printf)
+- **Shell argument quoting and special characters**: When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent the shell from misinterpreting them as shell syntax:
+  - **Single quotes** \`'...'\` pass everything literally, but cannot contain a literal single quote.
+  - **ANSI-C quoting** \`$'...'\` supports escape sequences (e.g. \`\\n\` for newline, \`\\'\` for single quote) and is the safest approach for multi-line strings or strings with single quotes.
+  - **Heredoc** is the most robust approach for large, multi-line text with mixed quotes:
+    \`\`\`bash
+    gh pr create --title "My Title" --body "$(cat <<'HEREDOC'
+    Multi-line body with (parentheses), \`backticks\`, and 'single-quotes'.
+    HEREDOC
+    )"
+    \`\`\`
+  - NEVER use unescaped single quotes inside single-quoted strings (e.g. \`'it\\'s'\` is wrong; use \`$'it\\'s'\` or \`"it's"\` instead).
+  - If unsure, prefer double-quoting arguments and escape inner double-quotes as \`\\"\`.
 - When issuing multiple commands:
   - If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.
   - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.
@@ -505,18 +628,10 @@ ${processGroupNote}
 }
 
 function getCommandDescription(): string {
-  const cmd_substitution_warning =
-    '\n*** WARNING: Command substitution using $(), `` ` ``, <(), or >() is not allowed for security reasons.';
   if (os.platform() === 'win32') {
-    return (
-      'Exact command to execute as `cmd.exe /c <command>`' +
-      cmd_substitution_warning
-    );
+    return 'Exact command to execute as `cmd.exe /c <command>`';
   } else {
-    return (
-      'Exact bash command to execute as `bash -c <command>`' +
-      cmd_substitution_warning
-    );
+    return 'Exact bash command to execute as `bash -c <command>`';
   }
 }
 
@@ -525,7 +640,6 @@ export class ShellTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static Name: string = ToolNames.SHELL;
-  private allowlist: Set<string> = new Set();
 
   constructor(private readonly config: Config) {
     super(
@@ -543,7 +657,7 @@ export class ShellTool extends BaseDeclarativeTool<
           is_background: {
             type: 'boolean',
             description:
-              'Whether to run the command in background. Default is false. Set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.',
+              'Optional: Whether to run the command in background. If not specified, defaults to false (foreground execution). Explicitly set to true for long-running processes like development servers, watchers, or daemons that should continue running without blocking further commands.',
           },
           timeout: {
             type: 'number',
@@ -560,7 +674,7 @@ export class ShellTool extends BaseDeclarativeTool<
               '(OPTIONAL) The absolute path of the directory to run the command in. If not provided, the project root directory is used. Must be a directory within the workspace and must already exist.',
           },
         },
-        required: ['command', 'is_background'],
+        required: ['command'],
       },
       false, // output is not markdown
       true, // output can be updated
@@ -570,16 +684,9 @@ export class ShellTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: ShellToolParams,
   ): string | null {
-    const commandCheck = isCommandAllowed(params.command, this.config);
-    if (!commandCheck.allowed) {
-      if (!commandCheck.reason) {
-        console.error(
-          'Unexpected: isCommandAllowed returned false without a reason',
-        );
-        return `Command is not allowed: ${params.command}`;
-      }
-      return commandCheck.reason;
-    }
+    // NOTE: Permission checks (read-only detection, PM rules) are handled at
+    // L3 (getDefaultPermission) and L4 (PM override) in coreToolScheduler.
+    // This method only performs pure parameter validation.
     if (!params.command.trim()) {
       return 'Command cannot be empty.';
     }
@@ -605,10 +712,10 @@ export class ShellTool extends BaseDeclarativeTool<
         return 'Directory must be an absolute path.';
       }
 
-      const userSkillsDir = this.config.storage.getUserSkillsDir();
+      const userSkillsDirs = this.config.storage.getUserSkillsDirs();
       const resolvedDirectoryPath = path.resolve(params.directory);
-      const isWithinUserSkills = isSubpath(
-        userSkillsDir,
+      const isWithinUserSkills = isSubpaths(
+        userSkillsDirs,
         resolvedDirectoryPath,
       );
       if (isWithinUserSkills) {
@@ -630,6 +737,6 @@ export class ShellTool extends BaseDeclarativeTool<
   protected createInvocation(
     params: ShellToolParams,
   ): ToolInvocation<ShellToolParams, ToolResult> {
-    return new ShellToolInvocation(this.config, params, this.allowlist);
+    return new ShellToolInvocation(this.config, params);
   }
 }

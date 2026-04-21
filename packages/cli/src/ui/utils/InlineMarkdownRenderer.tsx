@@ -8,6 +8,7 @@ import React from 'react';
 import { Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import stringWidth from 'string-width';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 // Constants for Markdown parsing
 const BOLD_MARKER_LENGTH = 2; // For "**"
@@ -16,6 +17,8 @@ const STRIKETHROUGH_MARKER_LENGTH = 2; // For "~~")
 const INLINE_CODE_MARKER_LENGTH = 1; // For "`"
 const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
+
+const debugLogger = createDebugLogger('INLINE_MARKDOWN');
 
 interface RenderInlineProps {
   text: string;
@@ -100,7 +103,7 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         const codeMatch = fullMatch.match(/^(`+)(.+?)\1$/s);
         if (codeMatch && codeMatch[2]) {
           renderedNode = (
-            <Text key={key} color={theme.text.accent}>
+            <Text key={key} color={theme.text.code}>
               {codeMatch[2]}
             </Text>
           );
@@ -143,7 +146,7 @@ const RenderInlineInternal: React.FC<RenderInlineProps> = ({
         );
       }
     } catch (e) {
-      console.error('Error parsing inline markdown part:', fullMatch, e);
+      debugLogger.error('Error parsing inline markdown part:', fullMatch, e);
       renderedNode = null;
     }
 

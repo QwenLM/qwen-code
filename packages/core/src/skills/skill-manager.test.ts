@@ -6,9 +6,15 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs/promises';
+import * as fsSync from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { SkillManager } from './skill-manager.js';
+import * as yaml from 'yaml';
+import {
+  SkillManager,
+  watcherIgnored,
+  WATCHER_MAX_DEPTH,
+} from './skill-manager.js';
 import { type SkillConfig, SkillError } from './types.js';
 import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
@@ -17,9 +23,29 @@ import { makeFakeConfig } from '../test-utils/config.js';
 vi.mock('fs/promises');
 vi.mock('os');
 
+const { mockWatch, mockWatcher } = vi.hoisted(() => {
+  const mockWatcher = {
+    on: vi.fn().mockReturnThis(),
+    close: vi.fn().mockResolvedValue(undefined),
+  };
+  const mockWatch = vi.fn().mockReturnValue(mockWatcher);
+  return { mockWatch, mockWatcher };
+});
+
+vi.mock('chokidar', () => ({
+  watch: mockWatch,
+}));
+
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  return { ...actual, existsSync: vi.fn(actual.existsSync) };
+});
+
 // Mock yaml parser - use vi.hoisted for proper hoisting
 const mockParseYaml = vi.hoisted(() => vi.fn());
 
+// Only mock yaml-parser for non-hooks tests
+// For hooks tests, we'll use the real parser by unmocking selectively
 vi.mock('../utils/yaml-parser.js', () => ({
   parse: mockParseYaml,
   stringify: vi.fn(),
@@ -45,6 +71,10 @@ describe('SkillManager', () => {
     // Setup yaml parser mocks with sophisticated behavior
     mockParseYaml.mockImplementation((yamlString: string) => {
       // Handle different test cases based on YAML content
+      if (yamlString.includes('hooks:')) {
+        // For hooks tests, use real YAML parser
+        return yaml.parse(yamlString);
+      }
       if (yamlString.includes('allowedTools:')) {
         return {
           name: 'test-skill',
@@ -72,6 +102,14 @@ describe('SkillManager', () => {
       }
       if (yamlString.includes('name: regular-skill')) {
         return { name: 'regular-skill', description: 'A regular skill' };
+      }
+      if (yamlString.includes('name: shared-skill')) {
+        const desc = yamlString.includes('From qwen dir')
+          ? 'From qwen dir'
+          : yamlString.includes('From agent dir')
+            ? 'From agent dir'
+            : 'A shared skill';
+        return { name: 'shared-skill', description: desc };
       }
       if (!yamlString.includes('name:')) {
         return { description: 'A test skill' }; // Missing name case
@@ -391,42 +429,61 @@ You are a helpful assistant.
 
   describe('listSkills', () => {
     beforeEach(() => {
-      // Mock directory listing for skills directories (with Dirent objects)
-      vi.mocked(fs.readdir)
-        .mockResolvedValueOnce([
-          {
-            name: 'skill1',
-            isDirectory: () => true,
-            isFile: () => false,
-            isSymbolicLink: () => false,
-          },
-          {
-            name: 'skill2',
-            isDirectory: () => true,
-            isFile: () => false,
-            isSymbolicLink: () => false,
-          },
-          {
-            name: 'not-a-dir.txt',
-            isDirectory: () => false,
-            isFile: () => true,
-            isSymbolicLink: () => false,
-          },
-        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>)
-        .mockResolvedValueOnce([
-          {
-            name: 'skill3',
-            isDirectory: () => true,
-            isFile: () => false,
-            isSymbolicLink: () => false,
-          },
-          {
-            name: 'skill1',
-            isDirectory: () => true,
-            isFile: () => false,
-            isSymbolicLink: () => false,
-          },
-        ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+      // Mock directory listing based on path to handle multiple base dirs per level.
+      // Use path.join to construct expected paths so separators match on all platforms.
+      const projectQwenSkillsDir = path.join(
+        '/test/project',
+        '.qwen',
+        'skills',
+      );
+      const userQwenSkillsDir = path.join('/home/user', '.qwen', 'skills');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockImplementation((dirPath: any) => {
+        const pathStr = String(dirPath);
+        if (pathStr === projectQwenSkillsDir) {
+          return Promise.resolve([
+            {
+              name: 'skill1',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+            {
+              name: 'skill2',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+            {
+              name: 'not-a-dir.txt',
+              isDirectory: () => false,
+              isFile: () => true,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        if (pathStr === userQwenSkillsDir) {
+          return Promise.resolve([
+            {
+              name: 'skill3',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+            {
+              name: 'skill1',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        // Other provider dirs (.agents, .cursor, .codex, .claude) return empty
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
 
       vi.mocked(fs.access).mockResolvedValue(undefined);
 
@@ -483,6 +540,66 @@ Skill 3 content`);
       expect(projectSkills.every((s) => s.level === 'project')).toBe(true);
     });
 
+    it('should deduplicate same-name skills across provider dirs within a level', async () => {
+      // Override readdir to return the same skill name from both .qwen and .agents dirs
+      vi.mocked(fs.readdir).mockReset();
+      const projectQwenDir = path.join('/test/project', '.qwen', 'skills');
+      const projectAgentDir = path.join('/test/project', '.agents', 'skills');
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockImplementation((dirPath: any) => {
+        const pathStr = String(dirPath);
+        if (pathStr === projectQwenDir) {
+          return Promise.resolve([
+            {
+              name: 'shared-skill',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        if (pathStr === projectAgentDir) {
+          return Promise.resolve([
+            {
+              name: 'shared-skill',
+              isDirectory: () => true,
+              isFile: () => false,
+              isSymbolicLink: () => false,
+            },
+          ] as unknown as Awaited<ReturnType<typeof fs.readdir>>);
+        }
+        return Promise.resolve(
+          [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+        );
+      });
+
+      vi.mocked(fs.readFile).mockImplementation((filePath) => {
+        const pathStr = String(filePath);
+        if (pathStr.includes('.qwen') && pathStr.includes('shared-skill')) {
+          return Promise.resolve(
+            `---\nname: shared-skill\ndescription: From qwen dir\n---\nQwen content`,
+          );
+        }
+        if (pathStr.includes('.agents') && pathStr.includes('shared-skill')) {
+          return Promise.resolve(
+            `---\nname: shared-skill\ndescription: From agents dir\n---\nAgents content`,
+          );
+        }
+        return Promise.reject(new Error('File not found'));
+      });
+
+      const skills = await manager.listSkills({
+        level: 'project',
+        force: true,
+      });
+
+      // Only one instance should remain, from .qwen (first in PROVIDER_CONFIG_DIRS)
+      expect(skills).toHaveLength(1);
+      expect(skills[0].name).toBe('shared-skill');
+      expect(skills[0].description).toBe('From qwen dir');
+    });
+
     it('should handle empty directories', async () => {
       vi.mocked(fs.readdir).mockReset();
       vi.mocked(fs.readdir).mockResolvedValue(
@@ -504,17 +621,145 @@ Skill 3 content`);
     });
   });
 
-  describe('getSkillsBaseDir', () => {
-    it('should return project-level base dir', () => {
-      const baseDir = manager.getSkillsBaseDir('project');
+  describe('getSkillsBaseDirs', () => {
+    it('should return all project-level base dirs', () => {
+      const baseDirs = manager.getSkillsBaseDirs('project');
 
-      expect(baseDir).toBe(path.join('/test/project', '.qwen', 'skills'));
+      expect(baseDirs).toHaveLength(2);
+      expect(baseDirs).toContain(path.join('/test/project', '.qwen', 'skills'));
+      expect(baseDirs).toContain(
+        path.join('/test/project', '.agents', 'skills'),
+      );
     });
 
-    it('should return user-level base dir', () => {
-      const baseDir = manager.getSkillsBaseDir('user');
+    it('should return all user-level base dirs', () => {
+      const baseDirs = manager.getSkillsBaseDirs('user');
 
-      expect(baseDir).toBe(path.join('/home/user', '.qwen', 'skills'));
+      expect(baseDirs).toHaveLength(2);
+      expect(baseDirs).toContain(path.join('/home/user', '.qwen', 'skills'));
+      expect(baseDirs).toContain(path.join('/home/user', '.agents', 'skills'));
+    });
+
+    it('should return bundled-level base dir', () => {
+      const baseDirs = manager.getSkillsBaseDirs('bundled');
+
+      expect(baseDirs[0]).toMatch(/skills[/\\]bundled$/);
+    });
+
+    it('should throw for extension level', () => {
+      expect(() => manager.getSkillsBaseDirs('extension')).toThrow(
+        'Extension skills do not have a base directory',
+      );
+    });
+  });
+
+  describe('bundled skills', () => {
+    const bundledDirSegment = path.join('skills', 'bundled');
+    const projectDirSegment = path.join('.qwen', 'skills');
+    const userDirSegment = path.join('.qwen', 'skills');
+    const projectPrefix = path.join('/test/project');
+    const userPrefix = path.join('/home/user');
+
+    const reviewDirEntry = {
+      name: 'review',
+      isDirectory: () => true,
+      isFile: () => false,
+      isSymbolicLink: () => false,
+    };
+
+    const emptyDir = [] as unknown as Awaited<ReturnType<typeof fs.readdir>>;
+
+    function mockReaddirForLevels(levels: Set<string>) {
+      vi.mocked(fs.readdir).mockImplementation((dirPath) => {
+        const pathStr = String(dirPath);
+        const isBundled =
+          pathStr.endsWith(bundledDirSegment) && !pathStr.includes('.qwen');
+        const isProject =
+          pathStr.includes(projectDirSegment) &&
+          pathStr.startsWith(projectPrefix);
+        const isUser =
+          pathStr.includes(userDirSegment) && pathStr.startsWith(userPrefix);
+
+        if (
+          (levels.has('bundled') && isBundled) ||
+          (levels.has('project') && isProject) ||
+          (levels.has('user') && isUser)
+        ) {
+          return Promise.resolve([reviewDirEntry] as unknown as Awaited<
+            ReturnType<typeof fs.readdir>
+          >);
+        }
+        return Promise.resolve(emptyDir);
+      });
+    }
+
+    function setupReviewSkillMocks() {
+      vi.mocked(fs.access).mockResolvedValue(undefined);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: review
+description: Review code changes
+---
+Review content`);
+
+      mockParseYaml.mockReturnValue({
+        name: 'review',
+        description: 'Review code changes',
+      });
+    }
+
+    it('should load bundled skills in listSkills', async () => {
+      mockReaddirForLevels(new Set(['bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills.some((s) => s.name === 'review')).toBe(true);
+      const reviewSkill = skills.find((s) => s.name === 'review');
+      expect(reviewSkill!.level).toBe('bundled');
+    });
+
+    it('should prioritize project-level over bundled skills with same name', async () => {
+      mockReaddirForLevels(new Set(['project', 'bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await manager.listSkills({ force: true });
+
+      const reviewSkills = skills.filter((s) => s.name === 'review');
+      expect(reviewSkills).toHaveLength(1);
+      expect(reviewSkills[0].level).toBe('project');
+    });
+
+    it('should prioritize user-level over bundled skills with same name', async () => {
+      mockReaddirForLevels(new Set(['user', 'bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await manager.listSkills({ force: true });
+
+      const reviewSkills = skills.filter((s) => s.name === 'review');
+      expect(reviewSkills).toHaveLength(1);
+      expect(reviewSkills[0].level).toBe('user');
+    });
+
+    it('should skip all skills in bare mode', async () => {
+      vi.spyOn(mockConfig, 'getBareMode').mockReturnValue(true);
+      mockReaddirForLevels(new Set(['project', 'user', 'bundled']));
+      setupReviewSkillMocks();
+
+      const skills = await manager.listSkills({ force: true });
+
+      expect(skills).toEqual([]);
+    });
+
+    it('should fall back to bundled level in loadSkill', async () => {
+      // Project, user, extension all empty; bundled has the skill
+      mockReaddirForLevels(new Set(['bundled']));
+      setupReviewSkillMocks();
+
+      const skill = await manager.loadSkill('review');
+
+      expect(skill).toBeDefined();
+      expect(skill!.name).toBe('review');
+      expect(skill!.level).toBe('bundled');
     });
   });
 
@@ -687,6 +932,200 @@ Symlinked skill content`);
         'regular-skill',
         'symlink-skill',
       ]);
+    });
+  });
+
+  describe('file watchers', () => {
+    it('should pass ignored function and shallow depth to chokidar', async () => {
+      const projectSkillsDir = path.join('/test/project', '.qwen', 'skills');
+      vi.mocked(fsSync.existsSync).mockImplementation(
+        (p) => String(p) === projectSkillsDir,
+      );
+
+      vi.mocked(fs.readdir).mockResolvedValue(
+        [] as unknown as Awaited<ReturnType<typeof fs.readdir>>,
+      );
+
+      mockWatch.mockClear();
+      mockWatcher.on.mockClear();
+
+      await manager.startWatching();
+
+      expect(mockWatch).toHaveBeenCalledWith(projectSkillsDir, {
+        ignoreInitial: true,
+        ignored: watcherIgnored,
+        depth: WATCHER_MAX_DEPTH,
+      });
+      expect(WATCHER_MAX_DEPTH).toBe(2);
+    });
+
+    it('watcherIgnored should reject .git directories', () => {
+      expect(watcherIgnored(path.join('/skills', '.git', 'config'))).toBe(true);
+      expect(watcherIgnored(path.join('/skills', '.git'))).toBe(true);
+      expect(watcherIgnored(path.join('/skills', 'my-skill', 'SKILL.md'))).toBe(
+        false,
+      );
+    });
+
+    it('watcherIgnored should reject special file types', () => {
+      const socketStats = {
+        isFile: () => false,
+        isDirectory: () => false,
+      } as fsSync.Stats;
+      const fileStats = {
+        isFile: () => true,
+        isDirectory: () => false,
+      } as fsSync.Stats;
+      const dirStats = {
+        isFile: () => false,
+        isDirectory: () => true,
+      } as fsSync.Stats;
+
+      expect(watcherIgnored('/skills/some.sock', socketStats)).toBe(true);
+      expect(watcherIgnored('/skills/SKILL.md', fileStats)).toBe(false);
+      expect(watcherIgnored('/skills/my-skill', dirStats)).toBe(false);
+    });
+  });
+
+  describe('hooks parsing', () => {
+    it('should parse hooks configuration from frontmatter', () => {
+      const markdown = `---
+name: hook-skill
+description: Skill with hooks
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: 'echo "checking"'
+          timeout: 5
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      expect(config.hooks).toBeDefined();
+      expect(config.hooks?.PreToolUse).toBeDefined();
+      expect(config.hooks?.PreToolUse).toHaveLength(1);
+      expect(config.hooks?.PreToolUse?.[0]?.matcher).toBe('Bash');
+      expect(config.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(1);
+    });
+
+    it('should parse multiple hooks for same event', () => {
+      const markdown = `---
+name: multi-hook-skill
+description: Skill with multiple hooks
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: 'echo "first"'
+        - type: command
+          command: 'echo "second"'
+    - matcher: "Write"
+      hooks:
+        - type: http
+          url: 'https://example.com/hook'
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      expect(config.hooks?.PreToolUse).toHaveLength(2);
+      expect(config.hooks?.PreToolUse?.[0]?.hooks).toHaveLength(2);
+      expect(config.hooks?.PreToolUse?.[1]?.matcher).toBe('Write');
+    });
+
+    it('should parse HTTP hooks with headers', () => {
+      const markdown = `---
+name: http-hook-skill
+description: Skill with HTTP hooks
+hooks:
+  PostToolUse:
+    - matcher: "*"
+      hooks:
+        - type: http
+          url: 'https://audit.example.com/log'
+          headers:
+            Authorization: 'Bearer token'
+          allowedEnvVars:
+            - API_KEY
+          timeout: 10
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      expect(config.hooks?.PostToolUse).toHaveLength(1);
+      const hook = config.hooks?.PostToolUse?.[0]?.hooks?.[0];
+      expect(hook?.type).toBe('http');
+      if (hook?.type === 'http') {
+        expect(hook.url).toBe('https://audit.example.com/log');
+        expect(hook.headers).toEqual({ Authorization: 'Bearer token' });
+        expect(hook.allowedEnvVars).toEqual(['API_KEY']);
+        expect(hook.timeout).toBe(10);
+      }
+    });
+
+    it('should ignore unknown hook events', () => {
+      const markdown = `---
+name: unknown-event-skill
+description: Skill with unknown event
+hooks:
+  UnknownEvent:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: 'echo "test"'
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      // Unknown events are ignored, only valid HookEventNames are kept
+      expect(config.hooks).toBeDefined();
+      // UnknownEvent should not be in the parsed hooks
+      expect(Object.keys(config.hooks || {})).not.toContain('UnknownEvent');
+    });
+
+    it('should set skillRoot from filePath', () => {
+      const markdown = `---
+name: skillroot-skill
+description: Skill with skillRoot
+hooks:
+  PreToolUse:
+    - matcher: "Bash"
+      hooks:
+        - type: command
+          command: 'echo $QWEN_SKILL_ROOT'
+---
+Skill content`;
+
+      const config = manager.parseSkillContent(
+        markdown,
+        '/test/skill/SKILL.md',
+        'user',
+      );
+
+      // skillRoot should be set to the directory containing SKILL.md
+      expect(config.skillRoot).toBe('/test/skill');
     });
   });
 });

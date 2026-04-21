@@ -23,6 +23,12 @@ import {
 } from './mcp-client.js';
 import type { ToolRegistry } from './tool-registry.js';
 
+const mockExistsSync = vi.hoisted(() => vi.fn(() => true));
+const ORIGINAL_ENV = process.env;
+
+vi.mock('node:fs', () => ({
+  existsSync: mockExistsSync,
+}));
 vi.mock('@modelcontextprotocol/sdk/client/stdio.js');
 vi.mock('@modelcontextprotocol/sdk/client/index.js');
 vi.mock('@google/genai');
@@ -32,6 +38,7 @@ vi.mock('../mcp/oauth-token-storage.js');
 describe('mcp-client', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    process.env = ORIGINAL_ENV;
   });
 
   describe('McpClient', () => {
@@ -78,9 +85,6 @@ describe('mcp-client', () => {
     });
 
     it('should not skip tools even if a parameter is missing a type', async () => {
-      const consoleWarnSpy = vi
-        .spyOn(console, 'warn')
-        .mockImplementation(() => {});
       const mockedClient = {
         connect: vi.fn(),
         discover: vi.fn(),
@@ -137,14 +141,9 @@ describe('mcp-client', () => {
       await client.connect();
       await client.discover({} as Config);
       expect(mockedToolRegistry.registerTool).toHaveBeenCalledTimes(2);
-      expect(consoleWarnSpy).not.toHaveBeenCalled();
-      consoleWarnSpy.mockRestore();
     });
 
     it('should handle errors when discovering prompts', async () => {
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
       const mockedClient = {
         connect: vi.fn(),
         discover: vi.fn(),
@@ -178,10 +177,6 @@ describe('mcp-client', () => {
       await expect(client.discover({} as Config)).rejects.toThrow(
         'No prompts or tools found on the server.',
       );
-      expect(consoleErrorSpy).toHaveBeenCalledWith(
-        `Error discovering prompts from test-server: Test error`,
-      );
-      consoleErrorSpy.mockRestore();
     });
   });
   describe('appendMcpServerCommand', () => {
@@ -296,9 +291,111 @@ describe('mcp-client', () => {
         command: 'test-command',
         args: ['--foo', 'bar'],
         cwd: 'test/cwd',
-        env: { ...process.env, FOO: 'bar' },
+        // Use objectContaining because normalizePathEnvForWindows deduplicates
+        // PATH entries on Windows, so the env won't be an exact spread match.
+        env: expect.objectContaining({ FOO: 'bar' }),
         stderr: 'pipe',
       });
+    });
+
+    it('should normalize PATH-like env keys on Windows for stdio transport', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      process.env = {
+        ...ORIGINAL_ENV,
+        PATH: 'C:\\Windows\\System32;C:\\Shared\\Tools',
+        Path: 'C:\\Users\\tester\\bin;C:\\Shared\\Tools',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport(
+        'test-server',
+        {
+          command: 'test-command',
+          env: { FOO: 'bar' },
+        },
+        false,
+      );
+
+      expect(mockedTransport).toHaveBeenCalledWith({
+        command: 'test-command',
+        args: [],
+        cwd: undefined,
+        env: expect.objectContaining({
+          PATH: 'C:\\Windows\\System32;C:\\Shared\\Tools;C:\\Users\\tester\\bin',
+          FOO: 'bar',
+        }),
+        stderr: 'pipe',
+      });
+      const transportOptions = mockedTransport.mock.calls[0]?.[0];
+      expect(transportOptions?.env?.['Path']).toBeUndefined();
+    });
+
+    it('should let server config PATH override parent PATH on Windows', async () => {
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      process.env = {
+        ...ORIGINAL_ENV,
+        PATH: 'C:\\Windows\\System32;C:\\Shared\\Tools',
+        Path: 'C:\\Users\\tester\\bin;C:\\Shared\\Tools',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport(
+        'test-server',
+        {
+          command: 'test-command',
+          env: { PATH: 'C:\\ServerToolchain\\bin' },
+        },
+        false,
+      );
+
+      const transportOptions = mockedTransport.mock.calls[0]?.[0];
+      // Server-provided PATH should fully replace the parent PATH, not merge
+      expect(transportOptions?.env?.['PATH']).toBe('C:\\ServerToolchain\\bin');
+      expect(transportOptions?.env?.['Path']).toBeUndefined();
+    });
+
+    it('should connect via command without cwd', async () => {
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport(
+        'test-server',
+        {
+          command: 'test-command',
+          args: ['--foo', 'bar'],
+        },
+        false,
+      );
+
+      expect(mockedTransport).toHaveBeenCalledWith({
+        command: 'test-command',
+        args: ['--foo', 'bar'],
+        cwd: undefined,
+        env: expect.any(Object),
+        stderr: 'pipe',
+      });
+    });
+
+    it('should throw if cwd does not exist', async () => {
+      mockExistsSync.mockReturnValueOnce(false);
+
+      await expect(
+        createTransport(
+          'test-server',
+          {
+            command: 'test-command',
+            cwd: '/nonexistent/path',
+          },
+          false,
+        ),
+      ).rejects.toThrow(
+        "MCP server 'test-server': configured cwd does not exist: /nonexistent/path",
+      );
     });
 
     describe('useGoogleCredentialProvider', () => {

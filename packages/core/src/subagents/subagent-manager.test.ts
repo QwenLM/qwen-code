@@ -13,6 +13,7 @@ import { type SubagentConfig, SubagentError } from './types.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
+import { AuthType } from '../core/contentGenerator.js';
 
 // Mock file system operations
 vi.mock('fs/promises');
@@ -40,6 +41,24 @@ vi.mock('./validation.js', () => ({
 
 vi.mock('./subagent.js');
 
+// Mock AgentHeadless for createAgentHeadless tests
+const mockAgentHeadlessCreate = vi.hoisted(() => vi.fn());
+vi.mock('../agents/runtime/agent-headless.js', () => ({
+  AgentHeadless: { create: mockAgentHeadlessCreate },
+  ContextState: class {},
+}));
+
+// Mock createContentGenerator for model override tests
+const mockCreateContentGenerator = vi.hoisted(() => vi.fn());
+vi.mock('../core/contentGenerator.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../core/contentGenerator.js')>();
+  return {
+    ...original,
+    createContentGenerator: mockCreateContentGenerator,
+  };
+});
+
 describe('SubagentManager', () => {
   let manager: SubagentManager;
   let mockToolRegistry: ToolRegistry;
@@ -47,6 +66,7 @@ describe('SubagentManager', () => {
 
   beforeEach(() => {
     mockToolRegistry = {
+      warmAll: vi.fn().mockResolvedValue(undefined),
       getAllTools: vi.fn().mockReturnValue([
         { name: 'read_file', displayName: 'Read File' },
         { name: 'write_file', displayName: 'Write File' },
@@ -76,6 +96,22 @@ describe('SubagentManager', () => {
     // Setup yaml parser mocks with sophisticated behavior
     mockParseYaml.mockImplementation((yamlString: string) => {
       // Handle different test cases based on YAML content
+      // Check disallowedTools before tools to avoid substring match
+      if (yamlString.includes('disallowedTools: write_file')) {
+        // Scalar form
+        return {
+          name: 'test-agent',
+          description: 'A test subagent',
+          disallowedTools: 'write_file',
+        };
+      }
+      if (yamlString.includes('disallowedTools:')) {
+        return {
+          name: 'test-agent',
+          description: 'A test subagent',
+          disallowedTools: ['write_file', 'mcp__slack'],
+        };
+      }
       if (yamlString.includes('tools:')) {
         return {
           name: 'test-agent',
@@ -83,11 +119,11 @@ describe('SubagentManager', () => {
           tools: ['read_file', 'write_file'],
         };
       }
-      if (yamlString.includes('modelConfig:')) {
+      if (yamlString.includes('model:')) {
         return {
           name: 'test-agent',
           description: 'A test subagent',
-          modelConfig: { model: 'custom-model', temp: 0.5 },
+          model: 'custom-model',
         };
       }
       if (yamlString.includes('runConfig:')) {
@@ -95,6 +131,16 @@ describe('SubagentManager', () => {
           name: 'test-agent',
           description: 'A test subagent',
           runConfig: { max_time_minutes: 5, max_turns: 10 },
+        };
+      }
+      if (yamlString.includes('background:')) {
+        const bgMatch = yamlString.match(/background:\s*"?(true|false)"?/);
+        const bgValue = bgMatch?.[1] === 'true' ? true : false;
+        return {
+          name: yamlString.match(/name:\s*(\S+)/)?.[1] ?? 'test-agent',
+          description:
+            yamlString.match(/description:\s*(.+)/)?.[1] ?? 'A test subagent',
+          background: bgValue,
         };
       }
       if (yamlString.includes('name: agent1')) {
@@ -128,19 +174,12 @@ describe('SubagentManager', () => {
     mockStringifyYaml.mockImplementation((obj: Record<string, unknown>) => {
       let yaml = '';
       for (const [key, value] of Object.entries(obj)) {
-        if (key === 'tools' && Array.isArray(value)) {
+        if (key === 'disallowedTools' && Array.isArray(value)) {
+          yaml += `disallowedTools:\n${value.map((t) => `  - ${t}`).join('\n')}\n`;
+        } else if (key === 'tools' && Array.isArray(value)) {
           yaml += `tools:\n${value.map((tool) => `  - ${tool}`).join('\n')}\n`;
-        } else if (
-          key === 'modelConfig' &&
-          typeof value === 'object' &&
-          value
-        ) {
-          yaml += `modelConfig:\n`;
-          for (const [k, v] of Object.entries(
-            value as Record<string, unknown>,
-          )) {
-            yaml += `  ${k}: ${v}\n`;
-          }
+        } else if (key === 'model') {
+          yaml += `model: ${value}\n`;
         } else if (key === 'runConfig' && typeof value === 'object' && value) {
           yaml += `runConfig:\n`;
           for (const [k, v] of Object.entries(
@@ -193,6 +232,21 @@ You are a helpful assistant.
       expect(config.filePath).toBe(validConfig.filePath);
     });
 
+    it('should parse valid markdown content with CRLF line endings', () => {
+      const markdownWithCRLF = `---\r\nname: test-agent\r\ndescription: A test subagent\r\n---\r\n\r\nYou are a helpful assistant.\r\n`;
+      const config = manager.parseSubagentContent(
+        markdownWithCRLF,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.name).toBe('test-agent');
+      expect(config.description).toBe('A test subagent');
+      // The system prompt logic applies .trim(), so the trailing \r is removed regardless,
+      // but the central test is that frontmatterRegex didn't throw an error.
+      expect(config.systemPrompt).toBe('You are a helpful assistant.');
+    });
+
     it('should parse content with tools', () => {
       const markdownWithTools = `---
 name: test-agent
@@ -214,13 +268,51 @@ You are a helpful assistant.
       expect(config.tools).toEqual(['read_file', 'write_file']);
     });
 
-    it('should parse content with model config', () => {
+    it('should parse content with disallowedTools array', () => {
+      const markdownWithDisallowed = `---
+name: test-agent
+description: A test subagent
+disallowedTools:
+  - write_file
+  - mcp__slack
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithDisallowed,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.disallowedTools).toEqual(['write_file', 'mcp__slack']);
+    });
+
+    it('should normalize scalar disallowedTools to array', () => {
+      const markdownWithScalar = `---
+name: test-agent
+description: A test subagent
+disallowedTools: write_file
+---
+
+You are a helpful assistant.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithScalar,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.disallowedTools).toEqual(['write_file']);
+    });
+
+    it('should parse content with model selector', () => {
       const markdownWithModel = `---
 name: test-agent
 description: A test subagent
-modelConfig:
-  model: custom-model
-  temp: 0.5
+model: custom-model
 ---
 
 You are a helpful assistant.
@@ -232,7 +324,33 @@ You are a helpful assistant.
         'project',
       );
 
-      expect(config.modelConfig).toEqual({ model: 'custom-model', temp: 0.5 });
+      expect(config.model).toBe('custom-model');
+    });
+
+    it('should parse legacy modelConfig frontmatter for compatibility', () => {
+      const markdownWithLegacyModel = `---
+name: test-agent
+description: A test subagent
+modelConfig:
+  model: legacy-model
+---
+
+You are a helpful assistant.
+`;
+
+      mockParseYaml.mockReturnValueOnce({
+        name: 'test-agent',
+        description: 'A test subagent',
+        modelConfig: { model: 'legacy-model' },
+      });
+
+      const config = manager.parseSubagentContent(
+        markdownWithLegacyModel,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.model).toBe('legacy-model');
     });
 
     it('should parse content with run config', () => {
@@ -379,6 +497,73 @@ You are a helpful assistant.
 
       consoleSpy.mockRestore();
     });
+
+    it('should parse background: true from frontmatter', () => {
+      const markdownWithBackground = `---
+name: monitor
+description: A background monitor
+background: true
+---
+
+You are a monitor.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithBackground,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.background).toBe(true);
+    });
+
+    it('should parse background: "true" string from frontmatter', () => {
+      const markdownWithBgString = `---
+name: monitor
+description: A background monitor
+background: "true"
+---
+
+You are a monitor.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithBgString,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.background).toBe(true);
+    });
+
+    it('should not set background when background: false', () => {
+      const markdownWithBgFalse = `---
+name: monitor
+description: A foreground agent
+background: false
+---
+
+You are an agent.
+`;
+
+      const config = manager.parseSubagentContent(
+        markdownWithBgFalse,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.background).toBeUndefined();
+    });
+
+    it('should not set background when omitted', () => {
+      const config = manager.parseSubagentContent(
+        validMarkdown,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(config.background).toBeUndefined();
+    });
   });
 
   describe('serializeSubagent', () => {
@@ -404,25 +589,89 @@ You are a helpful assistant.
       expect(serialized).toContain('- write_file');
     });
 
-    it('should serialize configuration with model config', () => {
+    it('should serialize configuration with model selector', () => {
       const configWithModel: SubagentConfig = {
         ...validConfig,
-        modelConfig: { model: 'custom-model', temp: 0.5 },
+        model: 'custom-model',
       };
 
       const serialized = manager.serializeSubagent(configWithModel);
 
-      expect(serialized).toContain('modelConfig:');
       expect(serialized).toContain('model: custom-model');
-      expect(serialized).toContain('temp: 0.5');
     });
 
     it('should not include empty optional fields', () => {
       const serialized = manager.serializeSubagent(validConfig);
 
       expect(serialized).not.toContain('tools:');
-      expect(serialized).not.toContain('modelConfig:');
+      expect(serialized).not.toContain('model:');
       expect(serialized).not.toContain('runConfig:');
+      expect(serialized).not.toContain('disallowedTools:');
+    });
+
+    it('should serialize configuration with disallowedTools', () => {
+      const configWithDisallowed: SubagentConfig = {
+        ...validConfig,
+        disallowedTools: ['write_file', 'mcp__slack'],
+      };
+
+      const serialized = manager.serializeSubagent(configWithDisallowed);
+
+      expect(serialized).toContain('disallowedTools:');
+      expect(serialized).toContain('- write_file');
+      expect(serialized).toContain('- mcp__slack');
+    });
+
+    it('should roundtrip disallowedTools through serialize and parse', () => {
+      const configWithDisallowed: SubagentConfig = {
+        ...validConfig,
+        disallowedTools: ['write_file', 'mcp__slack'],
+      };
+
+      const serialized = manager.serializeSubagent(configWithDisallowed);
+
+      expect(serialized).toContain('disallowedTools:');
+      expect(serialized).toContain('- write_file');
+      expect(serialized).toContain('- mcp__slack');
+
+      const parsed = manager.parseSubagentContent(
+        serialized,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(parsed.disallowedTools).toEqual(['write_file', 'mcp__slack']);
+    });
+
+    it('should serialize background: true', () => {
+      const configWithBackground: SubagentConfig = {
+        ...validConfig,
+        background: true,
+      };
+
+      const serialized = manager.serializeSubagent(configWithBackground);
+      expect(serialized).toContain('background: true');
+    });
+
+    it('should not serialize background when undefined', () => {
+      const serialized = manager.serializeSubagent(validConfig);
+      expect(serialized).not.toContain('background');
+    });
+
+    it('should roundtrip background through serialize and parse', () => {
+      const configWithBackground: SubagentConfig = {
+        ...validConfig,
+        background: true,
+      };
+
+      const serialized = manager.serializeSubagent(configWithBackground);
+      const parsed = manager.parseSubagentContent(
+        serialized,
+        validConfig.filePath!,
+        'project',
+      );
+
+      expect(parsed.background).toBe(true);
     });
   });
 
@@ -899,12 +1148,14 @@ System prompt 3`);
     it('should list subagents from both levels', async () => {
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(4); // agent1 (project takes precedence), agent2, agent3, general-purpose (built-in)
+      expect(subagents).toHaveLength(6); // agent1 (project takes precedence), agent2, agent3, general-purpose, Explore, statusline-setup (built-in)
       expect(subagents.map((s) => s.name)).toEqual([
         'agent1',
         'agent2',
         'agent3',
         'general-purpose',
+        'Explore',
+        'statusline-setup',
       ]);
     });
 
@@ -931,7 +1182,14 @@ System prompt 3`);
       });
 
       const names = subagents.map((s) => s.name);
-      expect(names).toEqual(['agent1', 'agent2', 'agent3', 'general-purpose']);
+      expect(names).toEqual([
+        'agent1',
+        'agent2',
+        'agent3',
+        'Explore',
+        'general-purpose',
+        'statusline-setup',
+      ]);
     });
 
     it('should handle empty directories', async () => {
@@ -942,9 +1200,13 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(1); // Only built-in agents remain
-      expect(subagents[0].name).toBe('general-purpose');
-      expect(subagents[0].level).toBe('builtin');
+      expect(subagents).toHaveLength(3); // Only built-in agents remain
+      expect(subagents.map((s) => s.name)).toEqual([
+        'general-purpose',
+        'Explore',
+        'statusline-setup',
+      ]);
+      expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
 
     it('should handle directory read errors', async () => {
@@ -954,9 +1216,13 @@ System prompt 3`);
 
       const subagents = await manager.listSubagents();
 
-      expect(subagents).toHaveLength(1); // Only built-in agents remain
-      expect(subagents[0].name).toBe('general-purpose');
-      expect(subagents[0].level).toBe('builtin');
+      expect(subagents).toHaveLength(3); // Only built-in agents remain
+      expect(subagents.map((s) => s.name)).toEqual([
+        'general-purpose',
+        'Explore',
+        'statusline-setup',
+      ]);
+      expect(subagents.every((s) => s.level === 'builtin')).toBe(true);
     });
   });
 
@@ -1031,8 +1297,8 @@ System prompt 3`);
 
   describe('Runtime Configuration Methods', () => {
     describe('convertToRuntimeConfig', () => {
-      it('should convert basic configuration', () => {
-        const runtimeConfig = manager.convertToRuntimeConfig(validConfig);
+      it('should convert basic configuration', async () => {
+        const runtimeConfig = await manager.convertToRuntimeConfig(validConfig);
 
         expect(runtimeConfig.promptConfig.systemPrompt).toBe(
           validConfig.systemPrompt,
@@ -1042,13 +1308,14 @@ System prompt 3`);
         expect(runtimeConfig.toolConfig).toBeUndefined();
       });
 
-      it('should include tool configuration when tools are specified', () => {
+      it('should include tool configuration when tools are specified', async () => {
         const configWithTools: SubagentConfig = {
           ...validConfig,
           tools: ['read_file', 'write_file'],
         };
 
-        const runtimeConfig = manager.convertToRuntimeConfig(configWithTools);
+        const runtimeConfig =
+          await manager.convertToRuntimeConfig(configWithTools);
 
         expect(runtimeConfig.toolConfig).toBeDefined();
         expect(runtimeConfig.toolConfig!.tools).toEqual([
@@ -1057,13 +1324,13 @@ System prompt 3`);
         ]);
       });
 
-      it('should transform display names to tool names in tool configuration', () => {
+      it('should transform display names to tool names in tool configuration', async () => {
         const configWithDisplayNames: SubagentConfig = {
           ...validConfig,
           tools: ['Read File', 'write_file', 'Search Files', 'unknown_tool'],
         };
 
-        const runtimeConfig = manager.convertToRuntimeConfig(
+        const runtimeConfig = await manager.convertToRuntimeConfig(
           configWithDisplayNames,
         );
 
@@ -1076,26 +1343,30 @@ System prompt 3`);
         ]);
       });
 
-      it('should merge custom model and run configurations', () => {
+      it('should set modelConfig.model from model selector and merge run configurations', async () => {
         const configWithCustom: SubagentConfig = {
           ...validConfig,
-          modelConfig: { model: 'custom-model', temp: 0.5 },
+          model: 'custom-model',
           runConfig: { max_time_minutes: 5 },
         };
 
-        const runtimeConfig = manager.convertToRuntimeConfig(configWithCustom);
+        const runtimeConfig =
+          await manager.convertToRuntimeConfig(configWithCustom);
 
         expect(runtimeConfig.modelConfig.model).toBe('custom-model');
-        expect(runtimeConfig.modelConfig.temp).toBe(0.5);
         expect(runtimeConfig.runConfig.max_time_minutes).toBe(5);
-        // No default values are provided anymore
-        expect(Object.keys(runtimeConfig.modelConfig)).toEqual([
-          'model',
-          'temp',
-        ]);
-        expect(Object.keys(runtimeConfig.runConfig)).toEqual([
-          'max_time_minutes',
-        ]);
+      });
+
+      it('should accept cross-provider model selectors', async () => {
+        const configWithCrossProvider: SubagentConfig = {
+          ...validConfig,
+          model: 'openai:gpt-4',
+        };
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          configWithCrossProvider,
+        );
+        expect(runtimeConfig.modelConfig.model).toBe('gpt-4');
       });
     });
 
@@ -1116,21 +1387,104 @@ System prompt 3`);
       it('should merge nested configurations', () => {
         const configWithNested: SubagentConfig = {
           ...validConfig,
-          modelConfig: { model: 'original-model', temp: 0.7 },
+          model: 'original-model',
           runConfig: { max_time_minutes: 10, max_turns: 20 },
         };
 
         const updates = {
-          modelConfig: { temp: 0.5 },
+          model: 'updated-model',
           runConfig: { max_time_minutes: 5 },
         };
 
         const merged = manager.mergeConfigurations(configWithNested, updates);
 
-        expect(merged.modelConfig!.model).toBe('original-model'); // Should keep original
-        expect(merged.modelConfig!.temp).toBe(0.5); // Should update
+        expect(merged.model).toBe('updated-model');
         expect(merged.runConfig!.max_time_minutes).toBe(5); // Should update
         expect(merged.runConfig!.max_turns).toBe(20); // Should keep original
+      });
+    });
+
+    describe('createAgentHeadless model override', () => {
+      const agentConfig: SubagentConfig = {
+        name: 'model-test-agent',
+        description: 'Test agent',
+        systemPrompt: 'You are a test agent.',
+        level: 'session' as const,
+      };
+
+      beforeEach(() => {
+        mockAgentHeadlessCreate.mockResolvedValue({
+          execute: vi.fn(),
+          getResult: vi.fn(),
+        });
+        mockCreateContentGenerator.mockResolvedValue({
+          generateContentStream: vi.fn(),
+        });
+
+        vi.spyOn(mockConfig, 'getContentGeneratorConfig').mockReturnValue({
+          model: 'parent-model',
+          authType: AuthType.USE_OPENAI,
+          apiKey: 'parent-key',
+        });
+        vi.spyOn(mockConfig, 'getModelsConfig').mockReturnValue({
+          getResolvedModel: vi.fn().mockReturnValue(undefined),
+        } as unknown as ReturnType<Config['getModelsConfig']>);
+      });
+
+      afterEach(() => {
+        mockAgentHeadlessCreate.mockReset();
+        mockCreateContentGenerator.mockReset();
+      });
+
+      it('should create a new ContentGenerator for bare model IDs', async () => {
+        const config = { ...agentConfig, model: 'custom-model' };
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({ model: 'custom-model' }),
+          expect.anything(),
+        );
+      });
+
+      it('should create a new ContentGenerator for cross-provider selectors', async () => {
+        const config = { ...agentConfig, model: 'anthropic:claude-sonnet' };
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'claude-sonnet',
+            authType: 'anthropic',
+          }),
+          expect.anything(),
+        );
+      });
+
+      it('should NOT create a new ContentGenerator for inherit', async () => {
+        const config = { ...agentConfig, model: 'inherit' };
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it('should NOT create a new ContentGenerator when model is omitted', async () => {
+        await manager.createAgentHeadless(agentConfig, mockConfig);
+
+        expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it('should pass the overridden Config to AgentHeadless.create', async () => {
+        const config = { ...agentConfig, model: 'custom-model' };
+        const fakeGenerator = { generateContentStream: vi.fn() };
+        mockCreateContentGenerator.mockResolvedValue(fakeGenerator);
+
+        await manager.createAgentHeadless(config, mockConfig);
+
+        const passedConfig = mockAgentHeadlessCreate.mock.calls[0][1];
+        expect(passedConfig.getContentGenerator()).toBe(fakeGenerator);
+        expect(passedConfig.getModel()).toBe('custom-model');
       });
     });
   });

@@ -36,7 +36,6 @@ export type {
   ControlCancelRequest,
   SubagentConfig,
   SubagentLevel,
-  ModelConfig,
   RunConfig,
 } from './types/protocol.js';
 
@@ -55,6 +54,8 @@ export type {
   PermissionMode,
   CanUseTool,
   PermissionResult,
+  QuerySystemPrompt,
+  QuerySystemPromptPreset,
   CLIMcpServerConfig,
   McpServerConfig,
   McpOAuthConfig,

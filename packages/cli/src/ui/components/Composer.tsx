@@ -5,15 +5,12 @@
  */
 
 import { Box, useIsScreenReaderEnabled } from 'ink';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useState } from 'react';
 import { LoadingIndicator } from './LoadingIndicator.js';
-import { DetailedMessagesDisplay } from './DetailedMessagesDisplay.js';
-import { InputPrompt, calculatePromptWidths } from './InputPrompt.js';
+import { InputPrompt } from './InputPrompt.js';
 import { Footer } from './Footer.js';
-import { ShowMoreLines } from './ShowMoreLines.js';
 import { QueuedMessageDisplay } from './QueuedMessageDisplay.js';
 import { KeyboardShortcuts } from './KeyboardShortcuts.js';
-import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
@@ -29,10 +26,18 @@ export const Composer = () => {
   const uiState = useUIState();
   const uiActions = useUIActions();
   const { vimEnabled } = useVimMode();
-  const terminalWidth = process.stdout.columns;
-  const debugConsoleMaxHeight = Math.floor(Math.max(terminalWidth * 0.2, 5));
 
-  const { showAutoAcceptIndicator } = uiState;
+  const { showAutoAcceptIndicator, sessionStats, taskStartTokens } = uiState;
+
+  const tokens = Object.values(sessionStats.metrics?.models ?? {}).reduce(
+    (acc, model) => ({
+      prompt: acc.prompt + (model.tokens?.prompt ?? 0),
+      candidates: acc.candidates + (model.tokens?.candidates ?? 0),
+    }),
+    { prompt: 0, candidates: 0 },
+  );
+
+  const taskTokens = tokens.candidates - taskStartTokens;
 
   // State for keyboard shortcuts display toggle
   const [showShortcuts, setShowShortcuts] = useState(false);
@@ -42,53 +47,40 @@ export const Composer = () => {
 
   // State for suggestions visibility
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const handleSuggestionsVisibilityChange = useCallback((visible: boolean) => {
-    setShowSuggestions(visible);
-  }, []);
-
-  // Use the container width of InputPrompt for width of DetailedMessagesDisplay
-  const { containerWidth } = useMemo(
-    () => calculatePromptWidths(uiState.terminalWidth),
-    [uiState.terminalWidth],
+  const handleSuggestionsVisibilityChange = useCallback(
+    (visible: boolean) => {
+      setShowSuggestions(visible);
+      // Also notify AppContainer for Tab key handling
+      uiActions.onSuggestionsVisibilityChange(visible);
+    },
+    [uiActions],
   );
 
   return (
     <Box flexDirection="column" marginTop={1}>
       {!uiState.embeddedShellFocused && (
         <LoadingIndicator
+          // Hide loading phrases when enableLoadingPhrases is explicitly false.
+          // Using === false ensures phrases show by default when undefined.
           thought={
             uiState.streamingState === StreamingState.WaitingForConfirmation ||
-            config.getAccessibility()?.disableLoadingPhrases
+            config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined
               : uiState.thought
           }
           currentLoadingPhrase={
-            config.getAccessibility()?.disableLoadingPhrases
+            config.getAccessibility()?.enableLoadingPhrases === false
               ? undefined
               : uiState.currentLoadingPhrase
           }
           elapsedTime={uiState.elapsedTime}
+          candidatesTokens={taskTokens}
         />
       )}
 
       {!uiState.isConfigInitialized && <ConfigInitDisplay />}
 
       <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
-
-      {uiState.showErrorDetails && (
-        <OverflowProvider>
-          <Box flexDirection="column">
-            <DetailedMessagesDisplay
-              messages={uiState.filteredConsoleMessages}
-              maxHeight={
-                uiState.constrainHeight ? debugConsoleMaxHeight : undefined
-              }
-              width={containerWidth}
-            />
-            <ShowMoreLines constrainHeight={uiState.constrainHeight} />
-          </Box>
-        </OverflowProvider>
-      )}
 
       {uiState.isFeedbackDialogOpen && <FeedbackDialog />}
 
@@ -118,11 +110,15 @@ export const Composer = () => {
               ? '  ' + t("Press 'i' for INSERT mode and 'Esc' for NORMAL mode.")
               : '  ' + t('Type your message or @path/to/file')
           }
+          promptSuggestion={uiState.promptSuggestion}
+          onPromptSuggestionDismiss={uiState.dismissPromptSuggestion}
         />
       )}
 
       {/* Exclusive area: only one component visible at a time */}
-      {!showSuggestions &&
+      {/* Hide footer when a confirmation dialog (e.g. ask_user_question) is active */}
+      {uiState.isInputActive &&
+        !showSuggestions &&
         (showShortcuts ? (
           <KeyboardShortcuts />
         ) : (

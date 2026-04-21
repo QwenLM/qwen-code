@@ -56,6 +56,9 @@ describe('parseInstallSource', () => {
 
   describe('owner/repo format parsing', () => {
     it('should parse owner/repo format without plugin name', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
       const result = await parseInstallSource('owner/repo');
 
       expect(result.source).toBe('https://github.com/owner/repo');
@@ -64,6 +67,9 @@ describe('parseInstallSource', () => {
     });
 
     it('should parse owner/repo format with plugin name', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
       const result = await parseInstallSource('owner/repo:my-plugin');
 
       expect(result.source).toBe('https://github.com/owner/repo');
@@ -72,6 +78,9 @@ describe('parseInstallSource', () => {
     });
 
     it('should handle owner/repo with dashes and underscores', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
       const result = await parseInstallSource('my-org/my_repo:plugin-name');
 
       expect(result.source).toBe('https://github.com/my-org/my_repo');
@@ -81,6 +90,9 @@ describe('parseInstallSource', () => {
 
   describe('HTTPS URL parsing', () => {
     it('should parse HTTPS GitHub URL without plugin name', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
       const result = await parseInstallSource('https://github.com/owner/repo');
 
       expect(result.source).toBe('https://github.com/owner/repo');
@@ -89,6 +101,9 @@ describe('parseInstallSource', () => {
     });
 
     it('should parse HTTPS GitHub URL with plugin name', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
       const result = await parseInstallSource(
         'https://github.com/owner/repo:my-plugin',
       );
@@ -99,6 +114,9 @@ describe('parseInstallSource', () => {
     });
 
     it('should not treat port number as plugin name', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
       const result = await parseInstallSource('https://example.com:8080/repo');
 
       expect(result.source).toBe('https://example.com:8080/repo');
@@ -108,6 +126,9 @@ describe('parseInstallSource', () => {
 
   describe('git@ URL parsing', () => {
     it('should parse git@ URL without plugin name', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
       const result = await parseInstallSource('git@github.com:owner/repo.git');
 
       expect(result.source).toBe('git@github.com:owner/repo.git');
@@ -116,6 +137,9 @@ describe('parseInstallSource', () => {
     });
 
     it('should parse git@ URL with plugin name', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
       const result = await parseInstallSource(
         'git@github.com:owner/repo.git:my-plugin',
       );
@@ -127,6 +151,36 @@ describe('parseInstallSource', () => {
   });
 
   describe('local path parsing', () => {
+    it('should parse relative path with ../ correctly', async () => {
+      vi.mocked(fs.stat).mockResolvedValueOnce({} as never);
+
+      const result = await parseInstallSource('../claude-code');
+
+      expect(result.source).toBe('../claude-code');
+      expect(result.type).toBe('local');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should parse relative path with ./../ correctly', async () => {
+      vi.mocked(fs.stat).mockResolvedValueOnce({} as never);
+
+      const result = await parseInstallSource('./../claude-code');
+
+      expect(result.source).toBe('./../claude-code');
+      expect(result.type).toBe('local');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should parse relative path with ./ correctly', async () => {
+      vi.mocked(fs.stat).mockResolvedValueOnce({} as never);
+
+      const result = await parseInstallSource('./my-extension');
+
+      expect(result.source).toBe('./my-extension');
+      expect(result.type).toBe('local');
+      expect(result.pluginName).toBeUndefined();
+    });
+
     it('should parse local path without plugin name', async () => {
       vi.mocked(fs.stat).mockResolvedValueOnce({} as never);
 
@@ -147,12 +201,23 @@ describe('parseInstallSource', () => {
       expect(result.pluginName).toBe('my-plugin');
     });
 
-    it('should throw error for non-existent local path', async () => {
+    it('should throw error for non-existent path that looks like owner/repo', async () => {
+      // First call to stat fails (path doesn't exist)
       vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
 
-      await expect(parseInstallSource('/nonexistent/path')).rejects.toThrow(
-        'Install source not found: /nonexistent/path',
-      );
+      // Should fall through to owner/repo check and try to convert to GitHub URL
+      const result = await parseInstallSource('some-org/some-repo');
+
+      expect(result.source).toBe('https://github.com/some-org/some-repo');
+      expect(result.type).toBe('git');
+    });
+
+    it('should throw error for non-existent path that is not valid format', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      await expect(
+        parseInstallSource('invalid-format-no-slash'),
+      ).rejects.toThrow('Install source not found: invalid-format-no-slash');
     });
 
     it('should handle Windows drive letter correctly', async () => {
@@ -167,8 +232,55 @@ describe('parseInstallSource', () => {
     });
   });
 
+  describe('scoped npm package parsing', () => {
+    it('should parse scoped npm package without version', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('@ali/openclaw-tmcp-dingtalk');
+
+      expect(result.source).toBe('@ali/openclaw-tmcp-dingtalk');
+      expect(result.type).toBe('npm');
+      expect(result.pluginName).toBeUndefined();
+    });
+
+    it('should parse scoped npm package with version', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        '@ali/openclaw-tmcp-dingtalk@1.2.0',
+      );
+
+      expect(result.source).toBe('@ali/openclaw-tmcp-dingtalk@1.2.0');
+      expect(result.type).toBe('npm');
+    });
+
+    it('should parse scoped npm package with latest tag', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource('@scope/my-extension@latest');
+
+      expect(result.source).toBe('@scope/my-extension@latest');
+      expect(result.type).toBe('npm');
+    });
+
+    it('should parse scoped npm package with plugin name', async () => {
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
+      const result = await parseInstallSource(
+        '@ali/openclaw-tmcp-dingtalk:my-plugin',
+      );
+
+      expect(result.source).toBe('@ali/openclaw-tmcp-dingtalk');
+      expect(result.type).toBe('npm');
+      expect(result.pluginName).toBe('my-plugin');
+    });
+  });
+
   describe('marketplace config detection', () => {
     it('should detect marketplace type when config exists', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
       const mockMarketplaceConfig = {
         name: 'test-marketplace',
         owner: { name: 'Test Owner' },
@@ -196,11 +308,14 @@ describe('parseInstallSource', () => {
 
       const result = await parseInstallSource('owner/repo');
 
-      expect(result.type).toBe('marketplace');
+      expect(result.originSource).toBe('Claude');
       expect(result.marketplaceConfig).toEqual(mockMarketplaceConfig);
     });
 
     it('should remain git type when marketplace config not found', async () => {
+      // Mock stat to fail (not a local path)
+      vi.mocked(fs.stat).mockRejectedValueOnce(new Error('ENOENT'));
+
       // HTTPS returns 404 (default mock behavior)
       const result = await parseInstallSource('owner/repo');
 

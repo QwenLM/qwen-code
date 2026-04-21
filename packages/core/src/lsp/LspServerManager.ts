@@ -28,6 +28,9 @@ import type {
   LspServerStatus,
   LspSocketOptions,
 } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('LSP');
 
 export interface LspServerManagerOptions {
   requireTrustedWorkspace: boolean;
@@ -91,20 +94,24 @@ export class LspServerManager {
   /**
    * Ensure tsserver has at least one file open so navto/navtree requests succeed.
    * Sets warmedUp flag only after successful warm-up to allow retry on failure.
+   *
+   * @param handle - The LSP server handle
+   * @param force - Force re-warmup even if already warmed up
+   * @returns The URI of the file opened during warmup, or undefined if no file was opened
    */
   async warmupTypescriptServer(
     handle: LspServerHandle,
     force = false,
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     if (!handle.connection || !this.isTypescriptServer(handle)) {
-      return;
+      return undefined;
     }
     if (handle.warmedUp && !force) {
-      return;
+      return undefined;
     }
     const tsFile = this.findFirstTypescriptFile();
     if (!tsFile) {
-      return;
+      return undefined;
     }
 
     const uri = pathToFileURL(tsFile).toString();
@@ -135,9 +142,11 @@ export class LspServerManager {
       );
       // Only mark as warmed up after successful completion
       handle.warmedUp = true;
+      return uri;
     } catch (error) {
       // Do not set warmedUp to true on failure, allowing retry
-      console.warn('TypeScript server warm-up failed:', error);
+      debugLogger.warn('TypeScript server warm-up failed:', error);
+      return undefined;
     }
   }
 
@@ -197,7 +206,7 @@ export class LspServerManager {
       (this.requireTrustedWorkspace || handle.config.trustRequired) &&
       !workspaceTrusted
     ) {
-      console.log(
+      debugLogger.warn(
         `LSP server ${name} requires trusted workspace, skipping startup`,
       );
       handle.status = 'FAILED';
@@ -211,7 +220,7 @@ export class LspServerManager {
       workspaceTrusted,
     );
     if (!consent) {
-      console.log(`User declined to start LSP server ${name}`);
+      debugLogger.info(`User declined to start LSP server ${name}`);
       handle.status = 'FAILED';
       return;
     }
@@ -226,7 +235,7 @@ export class LspServerManager {
           commandCwd,
         ))
       ) {
-        console.warn(
+        debugLogger.warn(
           `LSP server ${name} command not found: ${handle.config.command}`,
         );
         handle.status = 'FAILED';
@@ -237,7 +246,7 @@ export class LspServerManager {
       if (
         !this.isPathSafe(handle.config.command, this.workspaceRoot, commandCwd)
       ) {
-        console.warn(
+        debugLogger.warn(
           `LSP server ${name} command path is unsafe: ${handle.config.command}`,
         );
         handle.status = 'FAILED';
@@ -260,11 +269,11 @@ export class LspServerManager {
 
       handle.status = 'READY';
       this.attachRestartHandler(name, handle);
-      console.log(`LSP server ${name} started successfully`);
+      debugLogger.info(`LSP server ${name} started successfully`);
     } catch (error) {
       handle.status = 'FAILED';
       handle.error = error as Error;
-      console.error(`LSP server ${name} failed to start:`, error);
+      debugLogger.error(`LSP server ${name} failed to start:`, error);
     }
   }
 
@@ -281,7 +290,7 @@ export class LspServerManager {
       try {
         await this.shutdownConnection(handle);
       } catch (error) {
-        console.error(`Error closing LSP server ${name}:`, error);
+        debugLogger.error(`Error closing LSP server ${name}:`, error);
       }
     } else if (handle.process && handle.process.exitCode === null) {
       handle.process.kill();
@@ -333,14 +342,14 @@ export class LspServerManager {
       }
       const attempts = handle.restartAttempts ?? 0;
       if (attempts >= maxRestarts) {
-        console.warn(
+        debugLogger.warn(
           `LSP server ${name} reached max restart attempts (${maxRestarts}), stopping restarts`,
         );
         handle.status = 'FAILED';
         return;
       }
       handle.restartAttempts = attempts + 1;
-      console.warn(
+      debugLogger.warn(
         `LSP server ${name} exited (code ${code ?? 'unknown'}), restarting (${handle.restartAttempts}/${maxRestarts})`,
       );
       this.resetHandle(handle);
@@ -520,7 +529,7 @@ export class LspServerManager {
           codeAction: { dynamicRegistration: true },
         },
         workspace: {
-          workspaceFolders: { supported: true },
+          workspaceFolders: true,
         },
       },
       initializationOptions: config.initializationOptions,
@@ -556,40 +565,22 @@ export class LspServerManager {
       });
     }
 
-    // Warm up TypeScript server by opening a workspace file so it can create a project.
-    if (
-      config.name.includes('typescript') ||
-      (config.command?.includes('typescript') ?? false)
-    ) {
-      try {
-        const tsFile = this.findFirstTypescriptFile();
-        if (tsFile) {
-          const uri = pathToFileURL(tsFile).toString();
-          const languageId = tsFile.endsWith('.tsx')
-            ? 'typescriptreact'
-            : 'typescript';
-          const text = fs.readFileSync(tsFile, 'utf-8');
-          connection.connection.send({
-            jsonrpc: '2.0',
-            method: 'textDocument/didOpen',
-            params: {
-              textDocument: {
-                uri,
-                languageId,
-                version: 1,
-                text,
-              },
-            },
-          });
-        }
-      } catch (error) {
-        console.warn('TypeScript LSP warm-up failed:', error);
-      }
-    }
+    // Note: TypeScript server warm-up is handled by warmupTypescriptServer()
+    // which is called before every LSP request. This avoids duplicate
+    // textDocument/didOpen notifications that aren't tracked in openedDocuments.
   }
 
   /**
-   * Check if command exists
+   * Check if command exists by spawning it with --version.
+   * Only returns false when the spawn itself fails (e.g. ENOENT).
+   * A timeout means the process started successfully (command exists)
+   * but didn't exit in time — common for servers like jdtls that
+   * don't support --version and start their full runtime instead.
+   *
+   * @param command - The command to check
+   * @param env - Optional environment variables
+   * @param cwd - Optional working directory
+   * @returns true if the command can be spawned, false if not found
    */
   private async commandExists(
     command: string,
@@ -613,16 +604,20 @@ export class LspServerManager {
         if (settled) {
           return;
         }
-        // If command exists, it typically returns 0 or other non-error codes
-        // Some commands with --version may return non-0, but won't throw error
-        resolve(code !== 127); // 127 typically indicates command not found
+        settled = true;
+        // 127 typically indicates command not found in shell
+        resolve(code !== 127);
       });
 
-      // Set timeout to avoid long waits
+      // If the process is still running after the timeout, it means the
+      // command was found and started — it just didn't finish in time.
+      // This is expected for servers like jdtls that don't support --version.
       setTimeout(() => {
-        settled = true;
-        child.kill();
-        resolve(false);
+        if (!settled) {
+          settled = true;
+          child.kill();
+          resolve(true);
+        }
       }, DEFAULT_LSP_COMMAND_CHECK_TIMEOUT_MS);
     });
   }
@@ -667,13 +662,13 @@ export class LspServerManager {
     }
 
     if (this.requireTrustedWorkspace || serverConfig.trustRequired) {
-      console.log(
+      debugLogger.warn(
         `Workspace not trusted, skipping LSP server ${serverName} (${serverConfig.command ?? serverConfig.transport})`,
       );
       return false;
     }
 
-    console.log(
+    debugLogger.info(
       `Untrusted workspace, but LSP server ${serverName} has trustRequired=false, attempting cautious startup`,
     );
     return true;

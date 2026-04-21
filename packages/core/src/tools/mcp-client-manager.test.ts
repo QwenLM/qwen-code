@@ -44,6 +44,7 @@ describe('McpClientManager', () => {
       getPromptRegistry: () => ({}),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
     } as unknown as Config;
     const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
     await manager.discoverAllMcpTools(mockConfig);
@@ -68,6 +69,7 @@ describe('McpClientManager', () => {
       getPromptRegistry: () => ({}),
       getWorkspaceContext: () => ({}),
       getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
     } as unknown as Config;
     const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
     await manager.discoverAllMcpTools(mockConfig);
@@ -97,11 +99,13 @@ describe('McpClientManager', () => {
       getPromptRegistry: () => ({}) as PromptRegistry,
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
     } as unknown as Config;
     const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
     // First connect to create the clients
     await manager.discoverAllMcpTools({
       isTrustedFolder: () => true,
+      isMcpServerDisabled: () => false,
     } as unknown as Config);
 
     // Clear the disconnect calls from initial stop() in discoverAllMcpTools
@@ -131,10 +135,12 @@ describe('McpClientManager', () => {
       getPromptRegistry: () => ({}) as PromptRegistry,
       getWorkspaceContext: () => ({}) as WorkspaceContext,
       getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
     } as unknown as Config;
     const manager = new McpClientManager(mockConfig, {} as ToolRegistry);
     await manager.discoverAllMcpTools({
       isTrustedFolder: () => true,
+      isMcpServerDisabled: () => false,
     } as unknown as Config);
 
     // Call stop multiple times - should not throw

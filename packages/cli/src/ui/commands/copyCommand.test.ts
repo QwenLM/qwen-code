@@ -34,6 +34,12 @@ describe('copyCommand', () => {
           getGeminiClient: () => ({
             getChat: mockGetChat,
           }),
+          getDebugLogger: () => ({
+            debug: vi.fn(),
+            info: vi.fn(),
+            warn: vi.fn(),
+            error: vi.fn(),
+          }),
         },
       },
     });

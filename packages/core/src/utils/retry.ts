@@ -7,6 +7,10 @@
 import type { GenerateContentResponse } from '@google/genai';
 import { AuthType } from '../core/contentGenerator.js';
 import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
+import { createDebugLogger } from './debugLogger.js';
+import { getErrorStatus } from './errors.js';
+
+const debugLogger = createDebugLogger('RETRY');
 
 export interface HttpError extends Error {
   status?: number;
@@ -107,7 +111,12 @@ export async function retryWithBackoff<T>(
       // Check for Qwen OAuth quota exceeded error - throw immediately without retry
       if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
         throw new Error(
-          `Qwen API quota exceeded: Your Qwen API quota has been exhausted. Please wait for your quota to reset.`,
+          `Qwen OAuth free tier has been discontinued as of 2026-04-15.\n\n` +
+            `To continue using Qwen Code, try one of these alternatives:\n` +
+            `  - OpenRouter:    https://openrouter.ai/docs/quickstart\n` +
+            `  - Fireworks AI:  https://docs.fireworks.ai/api-reference/introduction\n` +
+            `  - ModelStudio:   https://help.aliyun.com/zh/model-studio/coding-plan\n\n` +
+            `After setting up your API key, run /auth to configure your provider.`,
         );
       }
 
@@ -121,7 +130,7 @@ export async function retryWithBackoff<T>(
 
       if (retryAfterMs > 0) {
         // Respect Retry-After header if present and parsed
-        console.warn(
+        debugLogger.warn(
           `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
           error,
         );
@@ -142,38 +151,6 @@ export async function retryWithBackoff<T>(
   // This line should theoretically be unreachable due to the throw in the catch block.
   // Added for type safety and to satisfy the compiler that a promise is always returned.
   throw new Error('Retry attempts exhausted');
-}
-
-/**
- * Extracts the HTTP status code from an error object.
- *
- * Checks the following properties in order of priority:
- * 1. `error.status` - OpenAI, Anthropic, Gemini SDK errors
- * 2. `error.statusCode` - Some HTTP client libraries
- * 3. `error.response.status` - Axios-style errors
- * 4. `error.error.code` - Nested error objects
- *
- * @param error The error object.
- * @returns The HTTP status code (100-599), or undefined if not found.
- */
-export function getErrorStatus(error: unknown): number | undefined {
-  if (typeof error !== 'object' || error === null) {
-    return undefined;
-  }
-
-  const err = error as {
-    status?: unknown;
-    statusCode?: unknown;
-    response?: { status?: unknown };
-    error?: { code?: unknown };
-  };
-
-  const value =
-    err.status ?? err.statusCode ?? err.response?.status ?? err.error?.code;
-
-  return typeof value === 'number' && value >= 100 && value <= 599
-    ? value
-    : undefined;
 }
 
 /**
@@ -230,10 +207,10 @@ function logRetryAttempt(
     : `Attempt ${attempt} failed. Retrying with backoff...`;
 
   if (errorStatus === 429) {
-    console.warn(message, error);
+    debugLogger.warn(message, error);
   } else if (errorStatus && errorStatus >= 500 && errorStatus < 600) {
-    console.error(message, error);
+    debugLogger.error(message, error);
   } else {
-    console.warn(message, error);
+    debugLogger.warn(message, error);
   }
 }

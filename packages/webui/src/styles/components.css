@@ -180,7 +180,10 @@
   align-items: center;
   justify-content: space-between;
   padding: 8px 12px;
-  background: var(--app-input-secondary-background, var(--app-background-secondary));
+  background: var(
+    --app-input-secondary-background,
+    var(--app-background-secondary)
+  );
   border-bottom: 1px solid var(--app-input-border);
 }
 
@@ -393,7 +396,10 @@
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   transition: border-color 0.2s;
   z-index: 1;
-  background: var(--app-input-secondary-background, var(--app-background-secondary));
+  background: var(
+    --app-input-secondary-background,
+    var(--app-background-secondary)
+  );
   color: var(--app-input-foreground);
 }
 
@@ -424,7 +430,7 @@
 }
 
 .composer-input:empty::before,
-.composer-input[data-empty="true"]::before {
+.composer-input[data-empty='true']::before {
   content: attr(data-placeholder);
   color: var(--app-input-placeholder-foreground);
   pointer-events: none;
@@ -435,12 +441,28 @@
   max-width: calc(100% - 28px);
 }
 
+/* Prompt suggestion styling - different from normal placeholder */
+.composer-input[data-has-suggestion='true']:empty::before,
+.composer-input[data-has-suggestion='true'][data-empty='true']::before {
+  color: var(--app-primary, #3b82f6);
+  opacity: 0.7;
+  font-style: italic;
+}
+
+.composer-input[data-has-suggestion='true']:hover:empty::before,
+.composer-input[data-has-suggestion='true']:hover[data-empty='true']::before {
+  opacity: 0.9;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 2px;
+}
+
 .composer-input:focus {
   outline: none;
 }
 
 .composer-input:disabled,
-.composer-input[contenteditable="false"] {
+.composer-input[contenteditable='false'] {
   color: #999;
   cursor: not-allowed;
 }

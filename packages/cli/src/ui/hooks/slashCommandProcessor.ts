@@ -4,12 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useEffect, useState } from 'react';
+import {
+  useCallback,
+  useMemo,
+  useEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from 'react';
 import { type PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
+import type { ArenaDialogType } from './useArenaCommand.js';
 import {
   type Logger,
   type Config,
+  createDebugLogger,
   GitService,
   logSlashCommand,
   makeSlashCommandEvent,
@@ -21,6 +30,8 @@ import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
   Message,
   HistoryItemWithoutId,
+  HistoryItemBtw,
+  HistoryItemAwayRecap,
   SlashCommandProcessorResult,
   HistoryItem,
   ConfirmationRequest,
@@ -30,15 +41,20 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { type CommandContext, type SlashCommand } from '../commands/types.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
+import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
+import { isBtwCommand } from '../utils/commandUtils.js';
+import { clearScreen } from '../../utils/stdioHelpers.js';
+import { useKeypress } from './useKeypress.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
 } from '../state/extensions.js';
 
 type SerializableHistoryItem = Record<string, unknown>;
+const debugLogger = createDebugLogger('SLASH_COMMAND_PROCESSOR');
 
 function serializeHistoryItemForRecording(
   item: Omit<HistoryItem, 'id'>,
@@ -57,14 +73,18 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'reset',
   'new',
   'resume',
+  'btw',
 ]);
 
 interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
+  openArenaDialog?: (type: Exclude<ArenaDialogType, null>) => void;
   openThemeDialog: () => void;
   openEditorDialog: () => void;
+  openMemoryDialog: () => void;
   openSettingsDialog: () => void;
-  openModelDialog: () => void;
+  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
+  openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
   openResumeDialog: () => void;
@@ -74,6 +94,9 @@ interface SlashCommandProcessorActions {
   addConfirmUpdateExtensionRequest: (request: ConfirmationRequest) => void;
   openSubagentCreateDialog: () => void;
   openAgentsManagerDialog: () => void;
+  openExtensionsManagerDialog: () => void;
+  openMcpDialog: () => void;
+  openHooksDialog: () => void;
 }
 
 /**
@@ -87,7 +110,9 @@ export const useSlashCommandProcessor = (
   loadHistory: UseHistoryManagerReturn['loadHistory'],
   refreshStatic: () => void,
   toggleVimEnabled: () => Promise<boolean>,
+  isProcessing: boolean,
   setIsProcessing: (isProcessing: boolean) => void,
+  isIdleRef: MutableRefObject<boolean>,
   setGeminiMdFileCount: (count: number) => void,
   actions: SlashCommandProcessorActions,
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
@@ -126,6 +151,47 @@ export const useSlashCommandProcessor = (
 
   const [pendingItem, setPendingItem] = useState<HistoryItemWithoutId | null>(
     null,
+  );
+
+  const [btwItem, setBtwItem] = useState<HistoryItemBtw | null>(null);
+  const btwAbortControllerRef = useRef<AbortController | null>(null);
+
+  const [awayRecapItem, setAwayRecapItem] =
+    useState<HistoryItemAwayRecap | null>(null);
+
+  const cancelBtw = useCallback(() => {
+    btwAbortControllerRef.current?.abort();
+    btwAbortControllerRef.current = null;
+    setBtwItem(null);
+  }, []);
+
+  // AbortController for cancelling async slash commands via ESC
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const cancelSlashCommand = useCallback(() => {
+    cancelBtw();
+    if (!abortControllerRef.current) {
+      return;
+    }
+    abortControllerRef.current.abort();
+    addItem(
+      {
+        type: MessageType.INFO,
+        text: 'Command cancelled.',
+      },
+      Date.now(),
+    );
+    setPendingItem(null);
+    setIsProcessing(false);
+  }, [addItem, setIsProcessing, cancelBtw]);
+
+  useKeypress(
+    (key) => {
+      if (key.name === 'escape') {
+        cancelSlashCommand();
+      }
+    },
+    { isActive: isProcessing },
   );
 
   const pendingHistoryItems = useMemo(() => {
@@ -178,6 +244,11 @@ export const useSlashCommandProcessor = (
           type: 'summary',
           summary: message.summary,
         };
+      } else if (message.type === MessageType.INSIGHT_PROGRESS) {
+        historyItemContent = {
+          type: 'insight_progress',
+          progress: message.progress,
+        };
       } else {
         historyItemContent = {
           type: message.type,
@@ -190,6 +261,7 @@ export const useSlashCommandProcessor = (
   );
   const commandContext = useMemo(
     (): CommandContext => ({
+      executionMode: 'interactive',
       services: {
         config,
         settings,
@@ -199,14 +271,23 @@ export const useSlashCommandProcessor = (
       ui: {
         addItem,
         clear: () => {
+          cancelBtw();
+          setAwayRecapItem(null);
           clearItems();
-          console.clear();
+          clearScreen();
           refreshStatic();
         },
         loadHistory,
         setDebugMessage: actions.setDebugMessage,
         pendingItem,
         setPendingItem,
+        btwItem,
+        setBtwItem,
+        cancelBtw,
+        btwAbortControllerRef,
+        awayRecapItem,
+        setAwayRecapItem,
+        isIdleRef,
         toggleVimEnabled,
         setGeminiMdFileCount,
         reloadCommands,
@@ -235,11 +316,17 @@ export const useSlashCommandProcessor = (
       actions,
       pendingItem,
       setPendingItem,
+      btwItem,
+      setBtwItem,
+      cancelBtw,
+      awayRecapItem,
+      setAwayRecapItem,
       toggleVimEnabled,
       sessionShellAllowlist,
       setGeminiMdFileCount,
       reloadCommands,
       extensionsUpdateState,
+      isIdleRef,
     ],
   );
 
@@ -268,16 +355,26 @@ export const useSlashCommandProcessor = (
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
-      const loaders = [
-        new McpPromptLoader(config),
-        new BuiltinCommandLoader(config),
-        new FileCommandLoader(config),
-      ];
-      const commandService = await CommandService.create(
-        loaders,
-        controller.signal,
-      );
-      setCommands(commandService.getCommands());
+      try {
+        const loaders = [
+          new McpPromptLoader(config),
+          new BuiltinCommandLoader(config),
+          new BundledSkillLoader(config),
+          new FileCommandLoader(config),
+        ];
+        const disabled = config?.getDisabledSlashCommands() ?? [];
+        const commandService = await CommandService.create(
+          loaders,
+          controller.signal,
+          disabled.length > 0 ? new Set(disabled) : undefined,
+        );
+        // Avoid overwriting newer results from a subsequent effect run
+        if (!controller.signal.aborted) {
+          setCommands(commandService.getCommandsForMode('interactive'));
+        }
+      } catch (error) {
+        debugLogger.error('Failed to load slash commands:', error);
+      }
     };
 
     load();
@@ -316,11 +413,17 @@ export const useSlashCommandProcessor = (
 
       setIsProcessing(true);
 
+      // Create a new AbortController for this command execution
+      const abortController = new AbortController();
+      abortControllerRef.current = abortController;
+
       const userMessageTimestamp = Date.now();
-      addItemWithRecording(
-        { type: MessageType.USER, text: trimmed },
-        userMessageTimestamp,
-      );
+      if (!isBtwCommand(trimmed)) {
+        addItemWithRecording(
+          { type: MessageType.USER, text: trimmed },
+          userMessageTimestamp,
+        );
+      }
 
       let hasError = false;
       const {
@@ -349,6 +452,7 @@ export const useSlashCommandProcessor = (
                 args,
               },
               overwriteConfirmed,
+              abortSignal: abortController.signal,
             };
 
             // If a one-time list is provided for a "Proceed" action, temporarily
@@ -362,10 +466,27 @@ export const useSlashCommandProcessor = (
                 ]),
               };
             }
-            const result = await commandToExecute.action(
-              fullCommandContext,
-              args,
-            );
+            // Race the command action against the abort signal so that
+            // ESC cancellation immediately unblocks the await chain.
+            // Without this, commands like /compress whose underlying
+            // operation (tryCompressChat) doesn't accept an AbortSignal
+            // would keep submitQuery stuck until the operation completes.
+            const abortPromise = new Promise<undefined>((resolve) => {
+              abortController.signal.addEventListener(
+                'abort',
+                () => resolve(undefined),
+                { once: true },
+              );
+            });
+            const result = await Promise.race([
+              commandToExecute.action(fullCommandContext, args),
+              abortPromise,
+            ]);
+
+            // If the command was cancelled via ESC while executing, skip result processing
+            if (abortController.signal.aborted) {
+              return { type: 'handled' };
+            }
 
             if (result) {
               switch (result.type) {
@@ -392,6 +513,18 @@ export const useSlashCommandProcessor = (
                   return { type: 'handled' };
                 case 'dialog':
                   switch (result.dialog) {
+                    case 'arena_start':
+                      actions.openArenaDialog?.('start');
+                      return { type: 'handled' };
+                    case 'arena_select':
+                      actions.openArenaDialog?.('select');
+                      return { type: 'handled' };
+                    case 'arena_stop':
+                      actions.openArenaDialog?.('stop');
+                      return { type: 'handled' };
+                    case 'arena_status':
+                      actions.openArenaDialog?.('status');
+                      return { type: 'handled' };
                     case 'auth':
                       actions.openAuthDialog();
                       return { type: 'handled' };
@@ -404,8 +537,17 @@ export const useSlashCommandProcessor = (
                     case 'settings':
                       actions.openSettingsDialog();
                       return { type: 'handled' };
+                    case 'memory':
+                      actions.openMemoryDialog();
+                      return { type: 'handled' };
                     case 'model':
                       actions.openModelDialog();
+                      return { type: 'handled' };
+                    case 'fast-model':
+                      actions.openModelDialog({ fastModelMode: true });
+                      return { type: 'handled' };
+                    case 'trust':
+                      actions.openTrustDialog();
                       return { type: 'handled' };
                     case 'permissions':
                       actions.openPermissionsDialog();
@@ -416,11 +558,20 @@ export const useSlashCommandProcessor = (
                     case 'subagent_list':
                       actions.openAgentsManagerDialog();
                       return { type: 'handled' };
+                    case 'mcp':
+                      actions.openMcpDialog();
+                      return { type: 'handled' };
+                    case 'hooks':
+                      actions.openHooksDialog();
+                      return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();
                       return { type: 'handled' };
                     case 'resume':
                       actions.openResumeDialog();
+                      return { type: 'handled' };
+                    case 'extensions_manage':
+                      actions.openExtensionsManagerDialog();
                       return { type: 'handled' };
                     case 'help':
                       return { type: 'handled' };
@@ -449,6 +600,7 @@ export const useSlashCommandProcessor = (
                   return {
                     type: 'submit_prompt',
                     content: result.content,
+                    onComplete: result.onComplete,
                   };
                 case 'confirm_shell_commands': {
                   const { outcome, approvedCommands } = await new Promise<{
@@ -558,6 +710,10 @@ export const useSlashCommandProcessor = (
 
         return { type: 'handled' };
       } catch (e: unknown) {
+        // If cancelled via ESC, the cancelSlashCommand callback already handled cleanup
+        if (abortController.signal.aborted) {
+          return { type: 'handled' };
+        }
         hasError = true;
         if (config) {
           const event = makeSlashCommandEvent({
@@ -600,12 +756,10 @@ export const useSlashCommandProcessor = (
               });
             }
           } catch (recordError) {
-            if (config.getDebugMode()) {
-              console.error(
-                '[slashCommand] Failed to record slash command:',
-                recordError,
-              );
-            }
+            debugLogger.error(
+              '[slashCommand] Failed to record slash command:',
+              recordError,
+            );
           }
         }
         if (config && resolvedCommandPath[0] && !hasError) {
@@ -637,6 +791,11 @@ export const useSlashCommandProcessor = (
     handleSlashCommand,
     slashCommands: commands,
     pendingHistoryItems,
+    btwItem,
+    setBtwItem,
+    cancelBtw,
+    awayRecapItem,
+    setAwayRecapItem,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,

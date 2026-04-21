@@ -17,6 +17,9 @@ import type {
   LspServerConfig,
   LspSocketOptions,
 } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('LSP');
 
 export class LspConfigLoader {
   constructor(private readonly workspaceRoot: string) {}
@@ -36,7 +39,7 @@ export class LspConfigLoader {
       const data = JSON.parse(configContent);
       return this.parseConfigSource(data, lspConfigPath);
     } catch (error) {
-      console.warn('Failed to load user .lsp.json config:', error);
+      debugLogger.warn('Failed to load user .lsp.json config:', error);
       return [];
     }
   }
@@ -62,7 +65,9 @@ export class LspConfigLoader {
           lspServers,
         );
         if (!fs.existsSync(configPath)) {
-          console.warn(`LSP config not found for ${originBase}: ${configPath}`);
+          debugLogger.warn(
+            `LSP config not found for ${originBase}: ${configPath}`,
+          );
           continue;
         }
 
@@ -77,7 +82,7 @@ export class LspConfigLoader {
             ),
           );
         } catch (error) {
-          console.warn(
+          debugLogger.warn(
             `Failed to load extension LSP config from ${configPath}:`,
             error,
           );
@@ -91,7 +96,7 @@ export class LspConfigLoader {
           ...this.parseConfigSource(hydrated, `${originBase} (lspServers)`),
         );
       } else {
-        console.warn(
+        debugLogger.warn(
           `LSP config for ${originBase} must be an object or a JSON file path.`,
         );
       }
@@ -101,18 +106,17 @@ export class LspConfigLoader {
   }
 
   /**
-   * Merge configs: built-in presets + extension configs + user configs
+   * Merge configs: extension configs + user configs
+   * Note: Built-in presets are disabled. LSP servers must be explicitly configured
+   * by the user via .lsp.json or through extensions.
    */
   mergeConfigs(
-    detectedLanguages: string[],
+    _detectedLanguages: string[],
     extensionConfigs: LspServerConfig[],
     userConfigs: LspServerConfig[],
   ): LspServerConfig[] {
-    // Built-in preset configurations
-    const presets = this.getBuiltInPresets(detectedLanguages);
-
     // Merge configs, user configs take priority
-    const mergedConfigs = [...presets];
+    const mergedConfigs: LspServerConfig[] = [];
 
     const applyConfigs = (configs: LspServerConfig[]) => {
       for (const config of configs) {
@@ -154,71 +158,6 @@ export class LspConfigLoader {
       }
     }
     return overrides;
-  }
-
-  /**
-   * Get built-in preset configurations
-   */
-  private getBuiltInPresets(detectedLanguages: string[]): LspServerConfig[] {
-    const presets: LspServerConfig[] = [];
-
-    // Convert directory path to file URI format
-    const rootUri = pathToFileURL(this.workspaceRoot).toString();
-
-    // Generate corresponding LSP server config based on detected languages
-    if (
-      detectedLanguages.includes('typescript') ||
-      detectedLanguages.includes('javascript')
-    ) {
-      presets.push({
-        name: 'typescript-language-server',
-        languages: [
-          'typescript',
-          'javascript',
-          'typescriptreact',
-          'javascriptreact',
-        ],
-        command: 'typescript-language-server',
-        args: ['--stdio'],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    if (detectedLanguages.includes('python')) {
-      presets.push({
-        name: 'pylsp',
-        languages: ['python'],
-        command: 'pylsp',
-        args: [],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    if (detectedLanguages.includes('go')) {
-      presets.push({
-        name: 'gopls',
-        languages: ['go'],
-        command: 'gopls',
-        args: [],
-        transport: 'stdio',
-        initializationOptions: {},
-        rootUri,
-        workspaceFolder: this.workspaceRoot,
-        trustRequired: true,
-      });
-    }
-
-    // Additional language presets can be added as needed
-
-    return presets;
   }
 
   /**
@@ -316,12 +255,14 @@ export class LspConfigLoader {
     const socket = this.normalizeSocketOptions(spec);
 
     if (transport === 'stdio' && !command) {
-      console.warn(`LSP config error in ${origin}: ${name} missing command`);
+      debugLogger.warn(
+        `LSP config error in ${origin}: ${name} missing command`,
+      );
       return null;
     }
 
     if (transport !== 'stdio' && !socket) {
-      console.warn(
+      debugLogger.warn(
         `LSP config error in ${origin}: ${name} missing socket info`,
       );
       return null;
@@ -485,7 +426,7 @@ export class LspConfigLoader {
       return resolved;
     }
 
-    console.warn(
+    debugLogger.warn(
       `LSP workspaceFolder must be within ${this.workspaceRoot}; using workspace root instead.`,
     );
     return this.workspaceRoot;

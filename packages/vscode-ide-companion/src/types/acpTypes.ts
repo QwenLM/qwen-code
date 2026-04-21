@@ -3,171 +3,38 @@
  * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
+
+import type { Usage } from '@agentclientprotocol/sdk';
+
 import type { ApprovalModeValue } from './approvalModeValueTypes.js';
 
-export const JSONRPC_VERSION = '2.0' as const;
+// ---------------------------------------------------------------------------
+// Private / Qwen-specific types (not part of ACP spec)
+// ---------------------------------------------------------------------------
+
 export const authMethod = 'qwen-oauth';
 
-export interface AcpRequest {
-  jsonrpc: typeof JSONRPC_VERSION;
-  id: number;
-  method: string;
-  params?: unknown;
-}
-
-export interface AcpResponse {
-  jsonrpc: typeof JSONRPC_VERSION;
-  id: number;
-  result?: unknown;
-  capabilities?: {
-    [key: string]: unknown;
-  };
-  error?: {
-    code: number;
-    message: string;
-    data?: unknown;
+/**
+ * Authenticate update notification (Qwen extension, not ACP spec).
+ * Sent by agent during the OAuth flow.
+ */
+export interface AuthenticateUpdateNotification {
+  _meta: {
+    authUri: string;
   };
 }
 
-export interface AcpNotification {
-  jsonrpc: typeof JSONRPC_VERSION;
-  method: string;
-  params?: unknown;
-}
-
-export interface BaseSessionUpdate {
+export interface SlashCommandNotification {
   sessionId: string;
-}
-
-// Content block type (simplified version, use schema.ContentBlock for validation)
-export interface ContentBlock {
-  type: 'text' | 'image';
-  text?: string;
-  data?: string;
-  mimeType?: string;
-  uri?: string;
-}
-
-export interface UsageMetadata {
-  promptTokens?: number | null;
-  completionTokens?: number | null;
-  thoughtsTokens?: number | null;
-  totalTokens?: number | null;
-  cachedTokens?: number | null;
+  command: string;
+  messageType: 'info' | 'error';
+  message: string;
 }
 
 export interface SessionUpdateMeta {
-  usage?: UsageMetadata | null;
+  usage?: Usage | null;
   durationMs?: number | null;
-}
-
-export type AcpMeta = Record<string, unknown>;
-export type ModelId = string;
-
-export interface ModelInfo {
-  _meta?: AcpMeta | null;
-  description?: string | null;
-  modelId: ModelId;
-  name: string;
-}
-
-export interface SessionModelState {
-  _meta?: AcpMeta | null;
-  availableModels: ModelInfo[];
-  currentModelId: ModelId;
-}
-
-export interface UserMessageChunkUpdate extends BaseSessionUpdate {
-  update: {
-    sessionUpdate: 'user_message_chunk';
-    content: ContentBlock;
-  };
-}
-
-export interface AgentMessageChunkUpdate extends BaseSessionUpdate {
-  update: {
-    sessionUpdate: 'agent_message_chunk';
-    content: ContentBlock;
-    _meta?: SessionUpdateMeta;
-  };
-}
-
-export interface AgentThoughtChunkUpdate extends BaseSessionUpdate {
-  update: {
-    sessionUpdate: 'agent_thought_chunk';
-    content: ContentBlock;
-    _meta?: SessionUpdateMeta;
-  };
-}
-
-export interface ToolCallUpdate extends BaseSessionUpdate {
-  update: {
-    sessionUpdate: 'tool_call';
-    toolCallId: string;
-    status: 'pending' | 'in_progress' | 'completed' | 'failed';
-    title: string;
-    kind:
-      | 'read'
-      | 'edit'
-      | 'execute'
-      | 'delete'
-      | 'move'
-      | 'search'
-      | 'fetch'
-      | 'think'
-      | 'other';
-    rawInput?: unknown;
-    content?: Array<{
-      type: 'content' | 'diff';
-      content?: {
-        type: 'text';
-        text: string;
-      };
-      path?: string;
-      oldText?: string | null;
-      newText?: string;
-    }>;
-    locations?: Array<{
-      path: string;
-      line?: number | null;
-    }>;
-  };
-}
-
-export interface ToolCallStatusUpdate extends BaseSessionUpdate {
-  update: {
-    sessionUpdate: 'tool_call_update';
-    toolCallId: string;
-    status?: 'pending' | 'in_progress' | 'completed' | 'failed';
-    title?: string;
-    kind?: string;
-    rawInput?: unknown;
-    content?: Array<{
-      type: 'content' | 'diff';
-      content?: {
-        type: 'text';
-        text: string;
-      };
-      path?: string;
-      oldText?: string | null;
-      newText?: string;
-    }>;
-    locations?: Array<{
-      path: string;
-      line?: number | null;
-    }>;
-  };
-}
-
-export interface PlanUpdate extends BaseSessionUpdate {
-  update: {
-    sessionUpdate: 'plan';
-    entries: Array<{
-      content: string;
-      priority: 'high' | 'medium' | 'low';
-      status: 'pending' | 'in_progress' | 'completed';
-    }>;
-  };
+  timestamp?: number | null;
 }
 
 export {
@@ -177,91 +44,32 @@ export {
   getApprovalModeInfoFromString,
 } from './approvalModeTypes.js';
 
-// Cyclic next-mode mapping used by UI toggles and other consumers
 export const NEXT_APPROVAL_MODE: {
   [k in ApprovalModeValue]: ApprovalModeValue;
 } = {
-  // Hide "plan" from the public toggle sequence for now
-  // Cycle: default -> auto-edit -> yolo -> default
+  plan: 'default',
   default: 'auto-edit',
   'auto-edit': 'yolo',
-  plan: 'yolo',
-  yolo: 'default',
+  yolo: 'plan',
 };
 
-// Current mode update (sent by agent when mode changes)
-export interface CurrentModeUpdate extends BaseSessionUpdate {
-  update: {
-    sessionUpdate: 'current_mode_update';
-    modeId: ApprovalModeValue;
-  };
-}
-
-// Current model update (sent by agent when model changes)
-export interface CurrentModelUpdate extends BaseSessionUpdate {
-  update: {
-    sessionUpdate: 'current_model_update';
-    model: ModelInfo;
-  };
-}
-
-// Available command definition
-export interface AvailableCommand {
-  name: string;
+// Ask User Question types
+export interface QuestionOption {
+  label: string;
   description: string;
-  input?: {
-    hint?: string;
-  } | null;
 }
 
-// Available commands update (sent by agent after session creation)
-export interface AvailableCommandsUpdate extends BaseSessionUpdate {
-  update: {
-    sessionUpdate: 'available_commands_update';
-    availableCommands: AvailableCommand[];
-  };
+export interface Question {
+  question: string;
+  header: string;
+  options: QuestionOption[];
+  multiSelect: boolean;
 }
 
-// Authenticate update (sent by agent during authentication process)
-export interface AuthenticateUpdateNotification {
-  _meta: {
-    authUri: string;
-  };
-}
-
-export type AcpSessionUpdate =
-  | UserMessageChunkUpdate
-  | AgentMessageChunkUpdate
-  | AgentThoughtChunkUpdate
-  | ToolCallUpdate
-  | ToolCallStatusUpdate
-  | PlanUpdate
-  | CurrentModeUpdate
-  | CurrentModelUpdate
-  | AvailableCommandsUpdate;
-
-// Permission request (simplified version, use schema.RequestPermissionRequest for validation)
-export interface AcpPermissionRequest {
+export interface AskUserQuestionRequest {
   sessionId: string;
-  options: Array<{
-    optionId: string;
-    name: string;
-    kind: 'allow_once' | 'allow_always' | 'reject_once' | 'reject_always';
-  }>;
-  toolCall: {
-    toolCallId: string;
-    rawInput?: {
-      command?: string;
-      description?: string;
-      [key: string]: unknown;
-    };
-    title?: string;
-    kind?: string;
+  questions: Question[];
+  metadata?: {
+    source?: string;
   };
 }
-
-export type AcpMessage =
-  | AcpRequest
-  | AcpNotification
-  | AcpResponse
-  | AcpSessionUpdate;

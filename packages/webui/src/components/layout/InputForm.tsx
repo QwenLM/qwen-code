@@ -22,6 +22,7 @@ import { CompletionMenu } from './CompletionMenu.js';
 import { ContextIndicator } from './ContextIndicator.js';
 import type { CompletionItem } from '../../types/completion.js';
 import type { ContextUsage } from './ContextIndicator.js';
+import type { FollowupState } from '../../types/followup.js';
 
 /**
  * Edit mode display information
@@ -64,7 +65,7 @@ export interface InputFormProps {
   /** Current input text */
   inputText: string;
   /** Ref for the input field */
-  inputFieldRef: React.RefObject<HTMLDivElement>;
+  inputFieldRef: React.RefObject<HTMLDivElement | null>;
   /** Whether AI is currently generating */
   isStreaming: boolean;
   /** Whether waiting for response */
@@ -91,8 +92,11 @@ export interface InputFormProps {
   onCompositionEnd: () => void;
   /** Key down callback */
   onKeyDown: (e: React.KeyboardEvent) => void;
-  /** Submit callback */
-  onSubmit: (e: React.FormEvent) => void;
+  /** Submit callback. When explicitText is provided, submit that value instead of reading from input state. */
+  onSubmit(
+    e: React.FormEvent | React.KeyboardEvent,
+    explicitText?: string,
+  ): void;
   /** Cancel callback */
   onCancel: () => void;
   /** Toggle edit mode callback */
@@ -111,12 +115,29 @@ export interface InputFormProps {
   completionIsOpen: boolean;
   /** Completion items */
   completionItems?: CompletionItem[];
-  /** Completion select callback */
+  /** Completion select callback (Enter / click) */
   onCompletionSelect?: (item: CompletionItem) => void;
+  /** Completion fill callback (Tab — fill without executing). Falls back to onCompletionSelect. */
+  onCompletionFill?: (item: CompletionItem) => void;
   /** Completion close callback */
   onCompletionClose?: () => void;
+  /** Optional paste handler for the contentEditable input */
+  onPaste?: (e: React.ClipboardEvent) => void;
+  /** Optional content rendered between the input and actions */
+  extraContent?: ReactNode;
   /** Placeholder text */
   placeholder?: string;
+  /** Whether the current draft is eligible to submit */
+  canSubmit?: boolean;
+  /** Prompt suggestion state */
+  followupState?: FollowupState;
+  /** Callback to accept prompt suggestion */
+  onAcceptFollowup?: (
+    method?: 'tab' | 'enter' | 'right',
+    options?: { skipOnAccept?: boolean },
+  ) => void;
+  /** Callback to dismiss prompt suggestion */
+  onDismissFollowup?: () => void;
 }
 
 /**
@@ -170,16 +191,36 @@ export const InputForm: FC<InputFormProps> = ({
   completionIsOpen,
   completionItems,
   onCompletionSelect,
+  onCompletionFill,
   onCompletionClose,
+  onPaste,
+  extraContent,
   placeholder = 'Ask Qwen Code …',
+  canSubmit,
+  followupState,
+  onAcceptFollowup,
+  onDismissFollowup,
 }) => {
   const composerDisabled = isStreaming || isWaitingForResponse;
+  const hasDraftContent =
+    canSubmit ?? inputText.replace(/\u200B/g, '').trim().length > 0;
   const completionItemsResolved = completionItems ?? [];
   const completionActive =
     completionIsOpen &&
     completionItemsResolved.length > 0 &&
     !!onCompletionSelect &&
     !!onCompletionClose;
+
+  // Prompt suggestion handling
+  const followupSuggestion =
+    followupState?.isVisible && followupState.suggestion
+      ? followupState.suggestion
+      : null;
+  const hasFollowup = !!followupSuggestion;
+
+  // Compute actual placeholder
+  const actualPlaceholder =
+    hasFollowup && !inputText ? followupSuggestion! : placeholder;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // Let the completion menu handle Escape when it's active.
@@ -195,10 +236,45 @@ export const InputForm: FC<InputFormProps> = ({
       onCancel();
       return;
     }
+    // Tab to accept prompt suggestion (only when callback is wired)
+    if (
+      e.key === 'Tab' &&
+      hasFollowup &&
+      onAcceptFollowup &&
+      !inputText &&
+      !completionActive
+    ) {
+      e.preventDefault();
+      e.stopPropagation();
+      onAcceptFollowup('tab');
+      return;
+    }
+    // Right arrow to accept prompt suggestion (only when callback is wired)
+    if (
+      e.key === 'ArrowRight' &&
+      hasFollowup &&
+      onAcceptFollowup &&
+      !inputText &&
+      !completionActive
+    ) {
+      e.preventDefault();
+      onAcceptFollowup?.('right');
+      return;
+    }
     // If composing (Chinese IME input), don't process Enter key
     if (e.key === 'Enter' && !e.shiftKey && !isComposing) {
       // If CompletionMenu is open, let it handle Enter key
       if (completionActive) {
+        return;
+      }
+      // Accept and submit prompt suggestion on Enter when input is empty
+      if (hasFollowup && !inputText && followupSuggestion) {
+        e.preventDefault();
+        // Skip onAccept callback — we pass the text directly to onSubmit.
+        // Without skipOnAccept the microtask in accept() would re-insert
+        // the suggestion into the input after it was already cleared.
+        onAcceptFollowup?.('enter', { skipOnAccept: true });
+        onSubmit(e, followupSuggestion);
         return;
       }
       e.preventDefault();
@@ -228,8 +304,8 @@ export const InputForm: FC<InputFormProps> = ({
     : '';
 
   return (
-    <div className="p-1 px-4 pb-4 absolute bottom-0 left-0 right-0 bg-gradient-to-b from-transparent to-[var(--app-primary-background)]">
-      <div className="block">
+    <div className="p-1 px-4 pb-4 absolute bottom-0 left-0 right-0 bg-gradient-to-b from-transparent to-[var(--app-primary-background)] pointer-events-none">
+      <div className="block pointer-events-auto">
         <form className="composer-form" onSubmit={onSubmit}>
           {/* Inner background layer */}
           <div className="composer-overlay" />
@@ -242,6 +318,7 @@ export const InputForm: FC<InputFormProps> = ({
               <CompletionMenu
                 items={completionItemsResolved}
                 onSelect={onCompletionSelect}
+                onFill={onCompletionFill}
                 onClose={onCompletionClose}
                 title={undefined}
               />
@@ -254,7 +331,9 @@ export const InputForm: FC<InputFormProps> = ({
               role="textbox"
               aria-label="Message input"
               aria-multiline="true"
-              data-placeholder={placeholder}
+              data-placeholder={actualPlaceholder}
+              // Indicate when a prompt suggestion is active
+              data-has-suggestion={hasFollowup ? 'true' : 'false'}
               // Use a data flag so CSS can show placeholder even if the browser
               // inserts an invisible <br> into contentEditable (so :empty no longer matches)
               data-empty={
@@ -267,13 +346,22 @@ export const InputForm: FC<InputFormProps> = ({
                 // Filter out zero-width space that we use to maintain height
                 const text = target.textContent?.replace(/\u200B/g, '') || '';
                 onInputChange(text);
+                // Dismiss follow-up suggestion when user starts typing
+                if (hasFollowup && !inputText && text) {
+                  onDismissFollowup?.();
+                }
               }}
               onCompositionStart={onCompositionStart}
               onCompositionEnd={onCompositionEnd}
               onKeyDown={handleKeyDown}
+              onPaste={onPaste}
               suppressContentEditableWarning
             />
           </div>
+
+          {extraContent ? (
+            <div className="relative z-[1]">{extraContent}</div>
+          ) : null}
 
           <div className="composer-actions">
             {/* Edit mode button */}
@@ -353,7 +441,7 @@ export const InputForm: FC<InputFormProps> = ({
               <button
                 type="submit"
                 className="btn-send-compact [&>svg]:w-5 [&>svg]:h-5"
-                disabled={composerDisabled || !inputText.trim()}
+                disabled={composerDisabled || !hasDraftContent}
                 aria-label="Send message"
               >
                 <ArrowUpIcon />

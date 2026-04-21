@@ -8,6 +8,9 @@ import type { UpdateInfo } from 'update-notifier';
 import updateNotifier from 'update-notifier';
 import semver from 'semver';
 import { getPackageJson } from '../../utils/package.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('UPDATE_CHECK');
 
 export const FETCH_TIMEOUT_MS = 2000;
 
@@ -95,7 +98,7 @@ export async function checkForUpdates(): Promise<UpdateObject | null> {
 
     return null;
   } catch (e) {
-    console.warn('Failed to check for updates: ' + e);
+    debugLogger.warn('Failed to check for updates: ' + e);
     return null;
   }
 }

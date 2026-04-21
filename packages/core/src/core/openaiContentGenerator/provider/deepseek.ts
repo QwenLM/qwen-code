@@ -26,6 +26,11 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
     return baseUrl.toLowerCase().includes('api.deepseek.com');
   }
 
+  /**
+   * DeepSeek's API requires message content to be a plain string, not an
+   * array of content parts. Flatten any text-part arrays into joined strings
+   * and reject non-text parts that DeepSeek cannot handle.
+   */
   override buildRequest(
     request: OpenAI.Chat.ChatCompletionCreateParams,
     userPromptId: string,
@@ -56,15 +61,15 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
 
       const text = content
         .map((part) => {
-          if (part.type !== 'text') {
-            throw new Error(
-              `DeepSeek provider only supports text content. Found non-text part of type '${part.type}' in message with role '${message.role}'.`,
-            );
+          if (typeof part === 'string') {
+            return part;
           }
-
-          return part.text ?? '';
+          if (part.type === 'text') {
+            return part.text ?? '';
+          }
+          return `[Unsupported content type: ${part.type}]`;
         })
-        .join('');
+        .join('\n\n');
 
       return {
         ...message,

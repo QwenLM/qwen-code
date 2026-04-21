@@ -8,7 +8,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import * as readline from 'readline';
-import * as crypto from 'crypto';
+import { getProjectHash } from '@qwen-code/qwen-code-core/src/utils/paths.js';
+import { truncatePanelTitle } from '../webview/utils/panelTitleUtils.js';
 
 export interface QwenMessage {
   id: string;
@@ -58,7 +59,7 @@ export class QwenSessionReader {
 
       if (!allProjects && workingDir) {
         // Current project only
-        const projectHash = await this.getProjectHash(workingDir);
+        const projectHash = getProjectHash(workingDir);
         const chatsDir = path.join(this.qwenDir, 'tmp', projectHash, 'chats');
         const projectSessions = await this.readSessionsFromDir(chatsDir);
         sessions.push(...projectSessions);
@@ -178,34 +179,19 @@ export class QwenSessionReader {
   }
 
   /**
-   * Calculate project hash (needs to be consistent with Qwen CLI)
-   * Qwen CLI uses SHA256 hash of project path
-   */
-  private async getProjectHash(workingDir: string): Promise<string> {
-    return crypto.createHash('sha256').update(workingDir).digest('hex');
-  }
-
-  /**
    * Get session title (based on first user message)
    */
   getSessionTitle(session: QwenSession): string {
     // Prefer cached prompt text to avoid loading messages for JSONL sessions
-    if (session.firstUserText) {
-      return (
-        session.firstUserText.substring(0, 50) +
-        (session.firstUserText.length > 50 ? '...' : '')
-      );
+    const text = session.firstUserText
+      ? session.firstUserText
+      : (session.messages.find((m) => m.type === 'user')?.content ?? '');
+
+    if (!text) {
+      return 'Untitled Session';
     }
 
-    const firstUserMessage = session.messages.find((m) => m.type === 'user');
-    if (firstUserMessage) {
-      // Extract first 50 characters as title
-      return (
-        firstUserMessage.content.substring(0, 50) +
-        (firstUserMessage.content.length > 50 ? '...' : '')
-      );
-    }
-    return 'Untitled Session';
+    return truncatePanelTitle(text);
   }
 
   /**
@@ -289,7 +275,7 @@ export class QwenSessionReader {
       }
 
       const projectHash = cwd
-        ? await this.getProjectHash(cwd)
+        ? getProjectHash(cwd)
         : path.basename(path.dirname(path.dirname(filePath)));
 
       return {

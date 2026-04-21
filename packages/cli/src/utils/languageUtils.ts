@@ -89,16 +89,17 @@ function generateOutputLanguageFileContent(language: string): string {
   return `# Output language preference: ${language}
 <!-- ${LLM_OUTPUT_LANGUAGE_MARKER_PREFIX} ${safeLanguage} -->
 
-## Goal
-Prefer responding in **${language}** for normal assistant messages and explanations.
+## Rule
+You MUST always respond in **${language}** regardless of the user's input language.
+This is a mandatory requirement, not a preference.
+
+## Exception
+If the user **explicitly** requests a response in a specific language (e.g., "please reply in English", "用中文回答"), switch to the user's requested language for the remainder of the conversation.
 
 ## Keep technical artifacts unchanged
 Do **not** translate or rewrite:
 - Code blocks, CLI commands, file paths, stack traces, logs, JSON keys, identifiers
 - Exact quoted text from the user (keep quotes verbatim)
-
-## When a conflict exists
-If higher-priority instructions (system/developer) require a different behavior, follow them.
 
 ## Tool / system outputs
 Raw tool/system outputs may contain fixed-format English. Preserve them verbatim, and if needed, add a short **${language}** explanation below.
@@ -174,17 +175,19 @@ export function updateOutputLanguageFile(settingValue: string): void {
  * @param outputLanguage - The output language setting value (e.g., 'auto', 'Chinese', etc.)
  *
  * Behavior:
- * - Resolves the setting value ('auto' -> detected system language, or use as-is)
- * - Ensures the rule file matches the resolved language
- * - Creates the file if it doesn't exist
+ * - If the rule file already exists and contains a valid language setting, do nothing (preserve user modifications)
+ * - If the rule file doesn't exist, create it with the resolved language ('auto' -> detected system language, or use as-is)
  */
 export function initializeLlmOutputLanguage(outputLanguage?: string): void {
-  // Resolve 'auto' or undefined to the detected system language
-  const resolved = resolveOutputLanguage(outputLanguage);
+  // Check if the file already exists and has valid content
   const currentFileLanguage = readOutputLanguageFromFile();
 
-  // Only write if the file doesn't match the resolved language
-  if (currentFileLanguage !== resolved) {
-    writeOutputLanguageFile(resolved);
+  // If file exists with valid language, preserve user's setting - do nothing
+  if (currentFileLanguage) {
+    return;
   }
+
+  // File doesn't exist or has invalid content, create it with resolved language
+  const resolved = resolveOutputLanguage(outputLanguage);
+  writeOutputLanguageFile(resolved);
 }

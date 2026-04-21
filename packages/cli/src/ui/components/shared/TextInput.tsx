@@ -21,22 +21,33 @@ export interface TextInputProps {
   value: string;
   onChange: (text: string) => void;
   onSubmit?: () => void;
+  /** Called when Tab is pressed; if provided, prevents the default tab-insertion behaviour. */
+  onTab?: () => void;
+  /** Called when ↑ is pressed; if provided, prevents cursor-up in the buffer. */
+  onUp?: () => void;
+  /** Called when ↓ is pressed; if provided, prevents cursor-down in the buffer. */
+  onDown?: () => void;
   placeholder?: string;
   height?: number; // lines in viewport; >1 enables multiline
   isActive?: boolean; // when false, ignore keypresses
   validationErrors?: string[];
   inputWidth?: number;
+  initialCursorOffset?: number;
 }
 
 export function TextInput({
   value,
   onChange,
   onSubmit,
+  onTab,
+  onUp,
+  onDown,
   placeholder,
   height = 1,
   isActive = true,
   validationErrors = [],
   inputWidth = 80,
+  initialCursorOffset,
 }: TextInputProps) {
   const allowMultiline = height > 1;
 
@@ -51,6 +62,7 @@ export function TextInput({
 
   const buffer = useTextBuffer({
     initialText: value || '',
+    initialCursorOffset,
     viewport: { height, width: inputWidth },
     isValidPath: () => false,
     onChange: stableOnChange,
@@ -65,27 +77,37 @@ export function TextInput({
     (key: Key) => {
       if (!buffer || !isActive) return;
 
-      // Submit on Enter
-      if (keyMatchers[Command.SUBMIT](key) || key.name === 'return') {
-        if (allowMultiline) {
-          const [row, col] = buffer.cursor;
-          const line = buffer.lines[row];
-          const charBefore = col > 0 ? cpSlice(line, col - 1, col) : '';
-          if (charBefore === '\\') {
-            buffer.backspace();
-            buffer.newline();
-          } else {
-            handleSubmit();
-          }
-        } else {
-          handleSubmit();
-        }
+      // Tab completion: delegate to caller instead of inserting a tab character
+      // During paste, let tab through as literal content (e.g. Excel tab-separated data)
+      if (key.name === 'tab' && !key.paste) {
+        onTab?.();
         return;
       }
 
-      // Multiline newline insertion (Shift+Enter etc.)
+      // Arrow-key completion navigation: delegate to caller
+      if (key.name === 'up' && onUp) {
+        onUp();
+        return;
+      }
+      if (key.name === 'down' && onDown) {
+        onDown();
+        return;
+      }
+
+      // Multiline newline insertion (Shift+Enter etc.) — check before SUBMIT
+      // so that modified-Return keys aren't swallowed by the submit branch.
       if (allowMultiline && keyMatchers[Command.NEWLINE](key)) {
         buffer.newline();
+        return;
+      }
+
+      // Submit on Enter (plain Return). In single-line mode any Return
+      // variant submits since there is no newline concept.
+      if (
+        keyMatchers[Command.SUBMIT](key) ||
+        (!allowMultiline && key.name === 'return')
+      ) {
+        handleSubmit();
         return;
       }
 

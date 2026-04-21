@@ -4,21 +4,42 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { vi, describe, it, expect, beforeEach, type Mock } from 'vitest';
+import {
+  vi,
+  describe,
+  it,
+  expect,
+  beforeEach,
+  afterEach,
+  type Mock,
+} from 'vitest';
 import EventEmitter from 'node:events';
 import type { Readable } from 'node:stream';
 import { type ChildProcess } from 'node:child_process';
+import pkg from '@xterm/headless';
 import type { ShellOutputEvent } from './shellExecutionService.js';
 import { ShellExecutionService } from './shellExecutionService.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 
+const { Terminal } = pkg;
+
 // Hoisted Mocks
+const mockGetSystemEncoding = vi.hoisted(() =>
+  vi.fn().mockReturnValue('utf-8'),
+);
 const mockPtySpawn = vi.hoisted(() => vi.fn());
 const mockCpSpawn = vi.hoisted(() => vi.fn());
 const mockIsBinary = vi.hoisted(() => vi.fn());
 const mockPlatform = vi.hoisted(() => vi.fn());
 const mockGetPty = vi.hoisted(() => vi.fn());
 const mockSerializeTerminalToObject = vi.hoisted(() => vi.fn());
+const mockGetShellConfiguration = vi.hoisted(() =>
+  vi.fn().mockReturnValue({
+    executable: 'bash',
+    argsPrefix: ['-c'],
+    shell: 'bash',
+  }),
+);
 
 // Top-level Mocks
 vi.mock('@lydell/node-pty', () => ({
@@ -54,6 +75,13 @@ vi.mock('../utils/getPty.js', () => ({
 vi.mock('../utils/terminalSerializer.js', () => ({
   serializeTerminalToObject: mockSerializeTerminalToObject,
 }));
+vi.mock('../utils/shell-utils.js', () => ({
+  getShellConfiguration: mockGetShellConfiguration,
+}));
+vi.mock('../utils/systemEncoding.js', () => ({
+  getCachedEncodingForBuffer: vi.fn().mockReturnValue('utf-8'),
+  getSystemEncoding: mockGetSystemEncoding,
+}));
 
 const mockProcessKill = vi
   .spyOn(process, 'kill')
@@ -66,6 +94,13 @@ const shellExecutionConfig = {
   showColor: false,
   disableDynamicLineTrimming: true,
 };
+
+const WINDOWS_SYSTEM_PATH = 'C:\\Windows\\System32;C:\\Shared\\Tools';
+const WINDOWS_USER_PATH = 'C:\\Users\\tester\\bin;C:\\Shared\\Tools';
+const EXPECTED_MERGED_WINDOWS_PATH =
+  'C:\\Windows\\System32;C:\\Shared\\Tools;C:\\Users\\tester\\bin';
+
+let originalProcessEnv: NodeJS.ProcessEnv;
 
 const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
   const lines = Array.isArray(text) ? text : text.split('\n');
@@ -85,6 +120,19 @@ const createExpectedAnsiOutput = (text: string | string[]): AnsiOutput => {
     ],
   );
   return expected;
+};
+
+const setupConflictingPathEnv = () => {
+  process.env = {
+    ...originalProcessEnv,
+    PATH: WINDOWS_SYSTEM_PATH,
+    Path: WINDOWS_USER_PATH,
+  };
+};
+
+const expectNormalizedWindowsPathEnv = (env: NodeJS.ProcessEnv) => {
+  expect(env['PATH']).toBe(EXPECTED_MERGED_WINDOWS_PATH);
+  expect(env['Path']).toBeUndefined();
 };
 
 describe('ShellExecutionService', () => {
@@ -109,6 +157,7 @@ describe('ShellExecutionService', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    originalProcessEnv = process.env;
 
     mockIsBinary.mockReturnValue(false);
     mockPlatform.mockReturnValue('linux');
@@ -145,6 +194,11 @@ describe('ShellExecutionService', () => {
     };
 
     mockPtySpawn.mockReturnValue(mockPtyProcess);
+  });
+
+  afterEach(() => {
+    process.env = originalProcessEnv;
+    vi.unstubAllEnvs();
   });
 
   // Helper function to run a standard execution simulation
@@ -248,6 +302,68 @@ describe('ShellExecutionService', () => {
       await handle.result;
       expect(handle.pid).toBe(12345);
     });
+
+    it('should preserve full raw output when terminal writes are backlogged', async () => {
+      vi.useFakeTimers();
+      const originalWrite = Terminal.prototype.write;
+      const delayedWrite = vi
+        .spyOn(Terminal.prototype, 'write')
+        .mockImplementation(function (
+          this: pkg.Terminal,
+          data: string | Uint8Array,
+          callback?: () => void,
+        ) {
+          setTimeout(() => {
+            originalWrite.call(this, data, callback);
+          }, 10);
+        });
+
+      try {
+        const abortController = new AbortController();
+        const handle = await ShellExecutionService.execute(
+          'fast-output',
+          '/test/dir',
+          onOutputEventMock,
+          abortController.signal,
+          true,
+          shellExecutionConfig,
+        );
+
+        const onData = mockPtyProcess.onData.mock.calls[0][0] as (
+          data: string,
+        ) => void;
+        for (let i = 1; i <= 500; i++) {
+          onData(`Line ${String(i).padStart(4, '0')}\n`);
+        }
+
+        const resultPromise = handle.result;
+        mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+
+        await vi.advanceTimersByTimeAsync(250);
+        const result = await resultPromise;
+
+        const lines = result.output.split('\n');
+        expect(lines).toHaveLength(500);
+        expect(lines[0]).toBe('Line 0001');
+        expect(lines[499]).toBe('Line 0500');
+      } finally {
+        delayedWrite.mockRestore();
+        vi.clearAllTimers();
+        vi.useRealTimers();
+      }
+    });
+
+    it('should collapse carriage-return progress updates in final output', async () => {
+      const { result } = await simulateExecution('progress-output', (pty) => {
+        pty.onData.mock.calls[0][0]('Compressing objects: 14% (1/7)\r');
+        pty.onData.mock.calls[0][0]('Compressing objects: 28% (2/7)\r');
+        pty.onData.mock.calls[0][0]('Compressing objects: 42% (3/7)\r');
+        pty.onData.mock.calls[0][0]('Compressing objects: 100% (7/7), done.\n');
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.output).toBe('Compressing objects: 100% (7/7), done.');
+    });
   });
 
   describe('pty interaction', () => {
@@ -262,17 +378,28 @@ describe('ShellExecutionService', () => {
 
     it('should write to the pty and trigger a render', async () => {
       vi.useFakeTimers();
-      await simulateExecution('interactive-app', (pty) => {
-        ShellExecutionService.writeToPty(pty.pid!, 'input');
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
-      });
+      try {
+        const abortController = new AbortController();
+        const handle = await ShellExecutionService.execute(
+          'interactive-app',
+          '/test/dir',
+          onOutputEventMock,
+          abortController.signal,
+          true,
+          shellExecutionConfig,
+        );
 
-      expect(mockPtyProcess.write).toHaveBeenCalledWith('input');
-      // Use fake timers to check for the delayed render
-      await vi.advanceTimersByTimeAsync(17);
-      // The render will cause an output event
-      expect(onOutputEventMock).toHaveBeenCalled();
-      vi.useRealTimers();
+        ShellExecutionService.writeToPty(handle.pid!, 'input');
+        mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+
+        await vi.runAllTimersAsync();
+        await handle.result;
+
+        expect(mockPtyProcess.write).toHaveBeenCalledWith('input');
+        expect(onOutputEventMock).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('should resize the pty and the headless terminal', async () => {
@@ -284,6 +411,67 @@ describe('ShellExecutionService', () => {
 
       expect(mockPtyProcess.resize).toHaveBeenCalledWith(100, 40);
       expect(mockHeadlessTerminal.resize).toHaveBeenCalledWith(100, 40);
+    });
+
+    it('should ignore expected PTY read EIO errors on process exit', async () => {
+      const { result } = await simulateExecution('ls -l', (pty) => {
+        const eioError = Object.assign(new Error('read EIO'), { code: 'EIO' });
+        pty.emit('error', eioError);
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      expect(result.exitCode).toBe(0);
+    });
+
+    it('should throw unexpected PTY errors from error event', async () => {
+      const abortController = new AbortController();
+      const handle = await ShellExecutionService.execute(
+        'ls -l',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        true,
+        shellExecutionConfig,
+      );
+      await new Promise((resolve) => process.nextTick(resolve));
+
+      const unexpectedError = Object.assign(new Error('unexpected pty error'), {
+        code: 'EPIPE',
+      });
+      expect(() => mockPtyProcess.emit('error', unexpectedError)).toThrow(
+        'unexpected pty error',
+      );
+
+      mockPtyProcess.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      await handle.result;
+    });
+
+    it('should ignore ioctl EBADF message-only resize race errors', async () => {
+      mockPtyProcess.resize.mockImplementationOnce(() => {
+        throw new Error('ioctl(2) failed, EBADF');
+      });
+
+      await simulateExecution('ls -l', (pty) => {
+        pty.onData.mock.calls[0][0]('file1.txt\n');
+        expect(() =>
+          ShellExecutionService.resizePty(pty.pid!, 100, 40),
+        ).not.toThrow();
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+    });
+
+    it('should ignore exited-pty message-only resize race errors', async () => {
+      mockPtyProcess.resize.mockImplementationOnce(() => {
+        throw new Error('Cannot resize a pty that has already exited');
+      });
+
+      await simulateExecution('ls -l', (pty) => {
+        pty.onData.mock.calls[0][0]('file1.txt\n');
+        expect(() =>
+          ShellExecutionService.resizePty(pty.pid!, 100, 40),
+        ).not.toThrow();
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
     });
 
     it('should scroll the headless terminal', async () => {
@@ -410,15 +598,66 @@ describe('ShellExecutionService', () => {
   describe('Platform-Specific Behavior', () => {
     it('should use cmd.exe on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
       await simulateExecution('dir "foo bar"', (pty) =>
         pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
       );
 
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        '/c dir "foo bar"',
+        '/d /s /c dir "foo bar"',
         expect.any(Object),
       );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should use PowerShell on Windows with array args and UTF-8 prefix', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'powershell.exe',
+        argsPrefix: ['-NoProfile', '-Command'],
+        shell: 'powershell',
+      });
+      await simulateExecution('Test-Path "C:\\Temp\\"', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      // PowerShell commands on Windows are prefixed with UTF-8 output encoding
+      expect(mockPtySpawn).toHaveBeenCalledWith(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-Command',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Test-Path "C:\\Temp\\"',
+        ],
+        expect.any(Object),
+      );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should normalize PATH-like env keys on Windows for pty execution', async () => {
+      mockPlatform.mockReturnValue('win32');
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      setupConflictingPathEnv();
+
+      await simulateExecution('dir', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      const spawnOptions = mockPtySpawn.mock.calls[0][2];
+      expectNormalizedWindowsPathEnv(spawnOptions.env);
     });
 
     it('should use bash on Linux', async () => {
@@ -528,6 +767,7 @@ describe('ShellExecutionService child_process fallback', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    originalProcessEnv = process.env;
 
     mockIsBinary.mockReturnValue(false);
     mockPlatform.mockReturnValue('linux');
@@ -547,6 +787,11 @@ describe('ShellExecutionService child_process fallback', () => {
     });
 
     mockCpSpawn.mockReturnValue(mockChildProcess);
+  });
+
+  afterEach(() => {
+    process.env = originalProcessEnv;
+    vi.unstubAllEnvs();
   });
 
   // Helper function to run a standard execution simulation
@@ -820,20 +1065,74 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe and hide window on Windows', async () => {
+    it('should use cmd.exe with windowsVerbatimArguments on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
       await simulateExecution('dir "foo bar"', (cp) =>
         cp.emit('exit', 0, null),
       );
 
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        ['/c', 'dir "foo bar"'],
+        ['/d', '/s', '/c', 'dir "foo bar"'],
         expect.objectContaining({
           detached: false,
           windowsHide: true,
+          windowsVerbatimArguments: true,
         }),
       );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should use PowerShell with UTF-8 prefix without windowsVerbatimArguments on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'powershell.exe',
+        argsPrefix: ['-NoProfile', '-Command'],
+        shell: 'powershell',
+      });
+      await simulateExecution('Test-Path "C:\\Temp\\"', (cp) =>
+        cp.emit('exit', 0, null),
+      );
+
+      // PowerShell commands on Windows are prefixed with UTF-8 output encoding
+      expect(mockCpSpawn).toHaveBeenCalledWith(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-Command',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Test-Path "C:\\Temp\\"',
+        ],
+        expect.objectContaining({
+          detached: false,
+          windowsHide: true,
+          windowsVerbatimArguments: false,
+        }),
+      );
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
+    });
+
+    it('should normalize PATH-like env keys on Windows for child_process fallback', async () => {
+      mockPlatform.mockReturnValue('win32');
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      setupConflictingPathEnv();
+
+      await simulateExecution('dir', (cp) => cp.emit('exit', 0, null));
+
+      const spawnOptions = mockCpSpawn.mock.calls[0][2];
+      expectNormalizedWindowsPathEnv(spawnOptions.env);
     });
 
     it('should use bash and detached process group on Linux', async () => {

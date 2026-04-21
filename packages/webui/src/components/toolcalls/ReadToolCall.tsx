@@ -8,7 +8,7 @@
  */
 
 import type { FC } from 'react';
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { FileLink } from '../layout/FileLink.js';
 import {
   groupContent,
@@ -19,6 +19,7 @@ import type {
   BaseToolCallProps,
   ToolCallContainerProps,
 } from './shared/index.js';
+import { getToolDisplayLabel } from './labelUtils.js';
 
 /**
  * Simple container for Read tool calls
@@ -65,9 +66,10 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
   isFirst,
   isLast,
 }) => {
-  const { content, locations, toolCallId } = toolCall;
+  const { kind, title, content, locations, toolCallId } = toolCall;
   const platform = usePlatform();
   const openedDiffsRef = useRef<Map<string, string>>(new Map());
+  const [isExpanded, setIsExpanded] = useState(false);
 
   // Group content by type; memoize to avoid new array identities on every render
   const { errors, diffs, textOutputs } = useMemo(
@@ -135,13 +137,14 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
 
   // Compute container status based on toolCall.status
   const containerStatus = mapToolStatusToContainerStatus(toolCall.status);
+  const displayLabel = getToolDisplayLabel({ kind, title });
 
   // Error case: show error from content
   if (errors.length > 0) {
     const path = locations?.[0]?.path || '';
     return (
       <ReadToolCallContainer
-        label="Read"
+        label={displayLabel}
         className="read-tool-call-error"
         status="error"
         toolCallId={toolCallId}
@@ -169,7 +172,7 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
       textOutputs.length > 0 ? textOutputs.join('\n') : 'Read operation failed';
     return (
       <ReadToolCallContainer
-        label="Read"
+        label={displayLabel}
         className="read-tool-call-error"
         status="error"
         toolCallId={toolCallId}
@@ -195,7 +198,7 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
     const path = diffs[0]?.path || locations?.[0]?.path || '';
     return (
       <ReadToolCallContainer
-        label="Read"
+        label={displayLabel}
         className="read-tool-call-success"
         status={containerStatus}
         toolCallId={toolCallId}
@@ -216,12 +219,16 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
     );
   }
 
-  // Success case: show which file was read
+  // Success case: show which file was read (with optional content)
   if (locations && locations.length > 0) {
     const path = locations[0].path;
+    const textContent = textOutputs.length > 0 ? textOutputs.join('\n') : '';
+    const EXPAND_THRESHOLD = 300;
+    const isLongContent = textContent.length > EXPAND_THRESHOLD;
+
     return (
       <ReadToolCallContainer
-        label="Read"
+        label={displayLabel}
         className="read-tool-call-success"
         status={containerStatus}
         toolCallId={toolCallId}
@@ -237,11 +244,97 @@ export const ReadToolCall: FC<BaseToolCallProps> = ({
           ) : undefined
         }
       >
-        {null}
+        {textContent ? (
+          <div className="border border-[var(--app-input-border)] rounded-[5px] bg-[var(--app-tool-background)] overflow-hidden">
+            <div
+              className={`p-2 ${
+                !isExpanded && isLongContent
+                  ? 'max-h-[100px] overflow-hidden'
+                  : ''
+              }`}
+              style={
+                !isExpanded && isLongContent
+                  ? {
+                      maskImage:
+                        'linear-gradient(to bottom, var(--app-primary-background) 60px, transparent 100px)',
+                    }
+                  : undefined
+              }
+            >
+              <pre className="whitespace-pre-wrap break-words text-xs font-mono m-0">
+                {textContent}
+              </pre>
+            </div>
+            {isLongContent && (
+              <button
+                onClick={() => setIsExpanded(!isExpanded)}
+                className="flex items-center justify-center w-full py-1 px-2 border-t border-[var(--app-input-border)] cursor-pointer text-[var(--app-secondary-foreground)] text-[0.75em] opacity-70 hover:opacity-100 hover:bg-[var(--app-code-background)] transition-opacity bg-transparent"
+              >
+                {isExpanded ? '▲ Collapse' : '▼ Show more'}
+              </button>
+            )}
+          </div>
+        ) : null}
       </ReadToolCallContainer>
     );
   }
 
-  // No file info, don't show
+  /**
+   * Fallback case: ACP message has content but no locations field.
+   * This can happen when:
+   * 1. IDE companion missed the initial tool_call event (which contains locations)
+   * 2. The CLI sent tool_call_update without locations
+   * 3. External tools (like MCP tools) don't provide location metadata
+   *
+   * In these cases, we still render the content to avoid silently dropping the output.
+   */
+  if (textOutputs.length > 0) {
+    const textContent = textOutputs.join('\n');
+    const EXPAND_THRESHOLD = 300;
+    const isLongContent = textContent.length > EXPAND_THRESHOLD;
+
+    return (
+      <ReadToolCallContainer
+        label={displayLabel}
+        className="read-tool-call-success"
+        status={containerStatus}
+        toolCallId={toolCallId}
+        isFirst={isFirst}
+        isLast={isLast}
+      >
+        <div className="border border-[var(--app-input-border)] rounded-[5px] bg-[var(--app-tool-background)] overflow-hidden">
+          <div
+            className={`p-2 ${
+              !isExpanded && isLongContent
+                ? 'max-h-[100px] overflow-hidden'
+                : ''
+            }`}
+            style={
+              !isExpanded && isLongContent
+                ? {
+                    maskImage:
+                      'linear-gradient(to bottom, var(--app-primary-background) 60px, transparent 100px)',
+                  }
+                : undefined
+            }
+          >
+            <pre className="whitespace-pre-wrap break-words text-xs font-mono m-0">
+              {textContent}
+            </pre>
+          </div>
+          {isLongContent && (
+            <button
+              onClick={() => setIsExpanded(!isExpanded)}
+              className="flex items-center justify-center w-full py-1 px-2 border-t border-[var(--app-input-border)] cursor-pointer text-[var(--app-secondary-foreground)] text-[0.75em] opacity-70 hover:opacity-100 hover:bg-[var(--app-code-background)] transition-opacity bg-transparent"
+            >
+              {isExpanded ? '▲ Collapse' : '▼ Show more'}
+            </button>
+          )}
+        </div>
+      </ReadToolCallContainer>
+    );
+  }
+
+  // No file info and no content - nothing to display
   return null;
 };

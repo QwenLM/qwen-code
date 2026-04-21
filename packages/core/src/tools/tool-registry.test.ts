@@ -118,10 +118,6 @@ describe('ToolRegistry', () => {
     } as fs.Stats);
     config = new Config(baseConfigParams);
     toolRegistry = new ToolRegistry(config);
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.spyOn(console, 'error').mockImplementation(() => {});
-    vi.spyOn(console, 'debug').mockImplementation(() => {});
-    vi.spyOn(console, 'log').mockImplementation(() => {});
 
     mockMcpClientConnect.mockReset().mockResolvedValue(undefined);
     mockStdioTransportClose.mockReset();
@@ -188,6 +184,18 @@ describe('ToolRegistry', () => {
       // Assert that the returned array contains all tool names
       expect(toolNames).toEqual(['c-tool', 'a-tool', 'b-tool']);
     });
+
+    it('should include factory-registered tools that have not yet been loaded', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'loaded-tool' }));
+      toolRegistry.registerFactory('lazy-tool', async () => {
+        throw new Error('should not be called');
+      });
+
+      const names = toolRegistry.getAllToolNames();
+
+      expect(names).toContain('loaded-tool');
+      expect(names).toContain('lazy-tool');
+    });
   });
 
   describe('getToolsByServer', () => {
@@ -242,7 +250,11 @@ describe('ToolRegistry', () => {
 
       // Assert that the array has the correct tools and is sorted by name
       expect(toolsFromServer1).toHaveLength(3);
-      expect(toolNames).toEqual(['apple-tool', 'banana-tool', 'zebra-tool']);
+      expect(toolNames).toEqual([
+        'mcp__mcp-server-uno__apple-tool',
+        'mcp__mcp-server-uno__banana-tool',
+        'mcp__mcp-server-uno__zebra-tool',
+      ]);
 
       // Assert that all returned tools are indeed from the correct server
       for (const tool of toolsFromServer1) {
@@ -427,6 +439,122 @@ describe('ToolRegistry', () => {
       const invocation = tool.build(params);
       const description = invocation.getDescription();
       expect(description).toBe(JSON.stringify(params));
+    });
+  });
+
+  describe('ensureTool concurrency', () => {
+    it('runs the factory only once when two calls are made concurrently', async () => {
+      let callCount = 0;
+      const tool = new MockTool({ name: 'concurrent-tool' });
+      toolRegistry.registerFactory('concurrent-tool', async () => {
+        callCount++;
+        return tool;
+      });
+
+      const [result1, result2] = await Promise.all([
+        toolRegistry.ensureTool('concurrent-tool'),
+        toolRegistry.ensureTool('concurrent-tool'),
+      ]);
+
+      expect(callCount).toBe(1);
+      expect(result1).toBe(tool);
+      expect(result2).toBe(tool);
+    });
+
+    it('runs the factory only once when warmAll() and ensureTool() overlap', async () => {
+      let callCount = 0;
+      const tool = new MockTool({ name: 'overlap-tool' });
+      toolRegistry.registerFactory('overlap-tool', async () => {
+        callCount++;
+        return tool;
+      });
+
+      const warmPromise = toolRegistry.warmAll();
+      const ensurePromise = toolRegistry.ensureTool('overlap-tool');
+      await Promise.all([warmPromise, ensurePromise]);
+
+      expect(callCount).toBe(1);
+    });
+
+    it('clears the inflight entry on failure so subsequent calls can retry', async () => {
+      let callCount = 0;
+      const tool = new MockTool({ name: 'retry-tool' });
+      toolRegistry.registerFactory('retry-tool', async () => {
+        callCount++;
+        if (callCount === 1) throw new Error('transient failure');
+        return tool;
+      });
+
+      await expect(toolRegistry.ensureTool('retry-tool')).rejects.toThrow(
+        'transient failure',
+      );
+
+      // Factory remains in the registry after a failure — the second call retries it.
+      const result = await toolRegistry.ensureTool('retry-tool');
+      expect(result).toBe(tool);
+      expect(callCount).toBe(2);
+    });
+  });
+
+  describe('warmAll strict mode', () => {
+    it('throws when a factory fails and strict is true', async () => {
+      toolRegistry.registerFactory('bad-tool', async () => {
+        throw new Error('factory error');
+      });
+
+      await expect(toolRegistry.warmAll({ strict: true })).rejects.toThrow(
+        'factory error',
+      );
+    });
+
+    it('does not throw when a factory fails and strict is false (default)', async () => {
+      toolRegistry.registerFactory('bad-tool', async () => {
+        throw new Error('factory error');
+      });
+
+      await expect(toolRegistry.warmAll()).resolves.toBeUndefined();
+    });
+
+    it('still loads successful tools before throwing in strict mode', async () => {
+      const goodTool = new MockTool({ name: 'good-tool' });
+      toolRegistry.registerFactory('good-tool', async () => goodTool);
+      toolRegistry.registerFactory('bad-tool', async () => {
+        throw new Error('factory error');
+      });
+
+      await expect(toolRegistry.warmAll({ strict: true })).rejects.toThrow(
+        'factory error',
+      );
+
+      // The good tool should still have been loaded despite the failure.
+      expect(await toolRegistry.ensureTool('good-tool')).toBe(goodTool);
+    });
+  });
+
+  describe('stop', () => {
+    it('disposes tools that were still inflight when stop() was called', async () => {
+      let resolveFactory!: (tool: MockTool) => void;
+      const factoryPromise = new Promise<MockTool>((resolve) => {
+        resolveFactory = resolve;
+      });
+
+      const disposeSpy = vi.fn();
+      const tool = new MockTool({ name: 'inflight-tool' });
+      (tool as unknown as { dispose: () => void }).dispose = disposeSpy;
+
+      toolRegistry.registerFactory('inflight-tool', () => factoryPromise);
+
+      // Start loading the tool but don't await — it's inflight when stop() is called.
+      const ensurePromise = toolRegistry.ensureTool('inflight-tool');
+
+      // Resolve the factory after stop() has started but before it returns.
+      const stopPromise = toolRegistry.stop();
+      resolveFactory(tool);
+
+      await stopPromise;
+      await ensurePromise;
+
+      expect(disposeSpy).toHaveBeenCalledOnce();
     });
   });
 });

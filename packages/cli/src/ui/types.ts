@@ -11,6 +11,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationOutcome,
   ToolResultDisplay,
+  AgentStatus,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import { type ReactNode } from 'react';
@@ -68,7 +69,9 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
-  outputFile?: string;
+  executionStartTime?: number;
+  /** If this tool call operated on a managed-auto-memory file, indicates whether it was a read or write. */
+  isMemoryOp?: 'read' | 'write';
 }
 
 export interface CompressionProps {
@@ -116,15 +119,28 @@ export type HistoryItemGeminiThoughtContent = HistoryItemBase & {
 export type HistoryItemInfo = HistoryItemBase & {
   type: 'info';
   text: string;
+  linkUrl?: string;
+  linkText?: string;
 };
 
 export type HistoryItemError = HistoryItemBase & {
   type: 'error';
   text: string;
+  hint?: string; // Optional inline hint (e.g., retry countdown) displayed in secondary color
 };
 
 export type HistoryItemWarning = HistoryItemBase & {
   type: 'warning';
+  text: string;
+};
+
+export type HistoryItemSuccess = HistoryItemBase & {
+  type: 'success';
+  text: string;
+};
+
+export type HistoryItemRetryCountdown = HistoryItemBase & {
+  type: 'retry_countdown';
   text: string;
 };
 
@@ -171,9 +187,31 @@ export type HistoryItemQuit = HistoryItemBase & {
   duration: string;
 };
 
+/**
+ * Displayed after a turn when managed-auto-memory files were written
+ * (either in-turn by the model, or by the post-turn dream/extract pipeline).
+ */
+export type HistoryItemMemorySaved = HistoryItemBase & {
+  type: 'memory_saved';
+  /** Number of memory files written / updated. */
+  writtenCount: number;
+  /** Verb to display, e.g. 'Saved' or 'Updated'. Defaults to 'Saved'. */
+  verb?: string;
+};
+
 export type HistoryItemToolGroup = HistoryItemBase & {
   type: 'tool_group';
   tools: IndividualToolCallDisplay[];
+  /** Count of tool calls that wrote to managed-auto-memory files. Pre-computed for badge rendering. */
+  memoryWriteCount?: number;
+  /** Count of tool calls that read from managed-auto-memory files. Pre-computed for badge rendering. */
+  memoryReadCount?: number;
+  isUserInitiated?: boolean;
+};
+
+export type HistoryItemNotification = HistoryItemBase & {
+  type: 'notification';
+  text: string;
 };
 
 export type HistoryItemUserShell = HistoryItemBase & {
@@ -251,12 +289,171 @@ export type HistoryItemMcpStatus = HistoryItemBase & {
   showTips: boolean;
 };
 
+// --- Context Usage types ---
+
+export interface ContextCategoryBreakdown {
+  systemPrompt: number;
+  builtinTools: number;
+  mcpTools: number;
+  memoryFiles: number;
+  skills: number;
+  messages: number;
+  freeSpace: number;
+  autocompactBuffer: number;
+}
+
+export interface ContextToolDetail {
+  name: string;
+  tokens: number;
+}
+
+export interface ContextMemoryDetail {
+  path: string;
+  tokens: number;
+}
+
+export interface ContextSkillDetail {
+  name: string;
+  /** Token cost of the skill listing (name+description) in the tool definition */
+  tokens: number;
+  /** Whether this skill has been invoked and its full body loaded into context */
+  loaded?: boolean;
+  /** Token cost of the loaded SKILL.md body (only set when loaded is true) */
+  bodyTokens?: number;
+}
+
+export type HistoryItemContextUsage = HistoryItemBase & {
+  type: 'context_usage';
+  modelName: string;
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: ContextCategoryBreakdown;
+  builtinTools: ContextToolDetail[];
+  mcpTools: ContextToolDetail[];
+  memoryFiles: ContextMemoryDetail[];
+  skills: ContextSkillDetail[];
+  /** True when totalTokens is estimated (no API call yet) rather than from API response */
+  isEstimated?: boolean;
+  /** When true, show per-item detail sections (tools, memory, skills). Default: false (compact). */
+  showDetails?: boolean;
+};
+
+/**
+ * Arena agent completion card data.
+ */
+export interface ArenaAgentCardData {
+  label: string;
+  status: AgentStatus;
+  durationMs: number;
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  toolCalls: number;
+  successfulToolCalls: number;
+  failedToolCalls: number;
+  rounds: number;
+  error?: string;
+  diff?: string;
+}
+
+export type HistoryItemArenaAgentComplete = HistoryItemBase & {
+  type: 'arena_agent_complete';
+  agent: ArenaAgentCardData;
+};
+
+export type HistoryItemArenaSessionComplete = HistoryItemBase & {
+  type: 'arena_session_complete';
+  sessionStatus: string;
+  task: string;
+  totalDurationMs: number;
+  agents: ArenaAgentCardData[];
+};
+
+/**
+ * Insight progress message.
+ */
+export type HistoryItemInsightProgress = HistoryItemBase & {
+  type: 'insight_progress';
+  progress: InsightProgressProps;
+};
+
+export interface BtwProps {
+  question: string;
+  answer: string;
+  isPending: boolean;
+}
+
+export type HistoryItemBtw = HistoryItemBase & {
+  type: 'btw';
+  btw: BtwProps;
+};
+
+/**
+ * Away-summary recap shown when the user returns to the session after a
+ * period of inactivity (or via /recap). Rendered as a sticky banner above
+ * the input box (NOT part of the scrolling history), so it is intentionally
+ * excluded from the HistoryItemWithoutId union.
+ */
+export type HistoryItemAwayRecap = HistoryItemBase & {
+  type: 'away_recap';
+  text: string;
+};
+
+/**
+ * UserPromptSubmit hook blocked event.
+ * Displayed when a UserPromptSubmit hook blocks the user's prompt.
+ */
+export type HistoryItemUserPromptSubmitBlocked = HistoryItemBase & {
+  type: 'user_prompt_submit_blocked';
+  reason: string;
+  originalPrompt: string;
+};
+
+/**
+ * Stop hook loop event.
+ * Displayed when Stop hooks create a loop, forcing the agent to continue.
+ */
+export type HistoryItemStopHookLoop = HistoryItemBase & {
+  type: 'stop_hook_loop';
+  iterationCount: number;
+  reasons: string[];
+  stopHookCount: number;
+};
+
+/**
+ * Stop hook system message.
+ * Displayed when Stop hooks return a systemMessage to show to the user.
+ */
+export type HistoryItemStopHookSystemMessage = HistoryItemBase & {
+  type: 'stop_hook_system_message';
+  message: string;
+};
+
+// --- Doctor diagnostics types ---
+
+export type DoctorCheckStatus = 'pass' | 'warn' | 'fail';
+
+export interface DoctorCheckResult {
+  category: string;
+  name: string;
+  status: DoctorCheckStatus;
+  message: string;
+  detail?: string;
+}
+
+export type HistoryItemDoctor = HistoryItemBase & {
+  type: 'doctor';
+  checks: DoctorCheckResult[];
+  summary: { pass: number; warn: number; fail: number };
+};
+
 // Using Omit<HistoryItem, 'id'> seems to have some issues with typescript's
 // type inference e.g. historyItem.type === 'tool_group' isn't auto-inferring that
 // 'tools' in historyItem.
 // Individually exported types extending HistoryItemBase
 export type HistoryItemWithoutId =
   | HistoryItemUser
+  | HistoryItemNotification
   | HistoryItemUserShell
   | HistoryItemGemini
   | HistoryItemGeminiContent
@@ -265,6 +462,8 @@ export type HistoryItemWithoutId =
   | HistoryItemInfo
   | HistoryItemError
   | HistoryItemWarning
+  | HistoryItemSuccess
+  | HistoryItemRetryCountdown
   | HistoryItemAbout
   | HistoryItemHelp
   | HistoryItemToolGroup
@@ -278,13 +477,24 @@ export type HistoryItemWithoutId =
   | HistoryItemExtensionsList
   | HistoryItemToolsList
   | HistoryItemSkillsList
-  | HistoryItemMcpStatus;
+  | HistoryItemMcpStatus
+  | HistoryItemContextUsage
+  | HistoryItemArenaAgentComplete
+  | HistoryItemArenaSessionComplete
+  | HistoryItemInsightProgress
+  | HistoryItemBtw
+  | HistoryItemMemorySaved
+  | HistoryItemUserPromptSubmitBlocked
+  | HistoryItemStopHookLoop
+  | HistoryItemStopHookSystemMessage
+  | HistoryItemDoctor;
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
 // Message types used by internal command feedback (subset of HistoryItem types)
 export enum MessageType {
   INFO = 'info',
+  SUCCESS = 'success',
   ERROR = 'error',
   WARNING = 'warning',
   USER = 'user',
@@ -301,6 +511,19 @@ export enum MessageType {
   TOOLS_LIST = 'tools_list',
   SKILLS_LIST = 'skills_list',
   MCP_STATUS = 'mcp_status',
+  CONTEXT_USAGE = 'context_usage',
+  ARENA_AGENT_COMPLETE = 'arena_agent_complete',
+  ARENA_SESSION_COMPLETE = 'arena_session_complete',
+  INSIGHT_PROGRESS = 'insight_progress',
+  BTW = 'btw',
+}
+
+export interface InsightProgressProps {
+  stage: string;
+  progress: number;
+  detail?: string;
+  isComplete?: boolean;
+  error?: string;
 }
 
 // Simplified message structure for internal feedback
@@ -367,6 +590,11 @@ export type Message =
       type: MessageType.SUMMARY;
       summary: SummaryProps;
       timestamp: Date;
+    }
+  | {
+      type: MessageType.INSIGHT_PROGRESS;
+      progress: InsightProgressProps;
+      timestamp: Date;
     };
 
 export interface ConsoleMessageItem {
@@ -382,6 +610,8 @@ export interface ConsoleMessageItem {
 export interface SubmitPromptResult {
   type: 'submit_prompt';
   content: PartListUnion;
+  /** Optional callback invoked after the agent turn completes successfully. */
+  onComplete?: () => Promise<void>;
 }
 
 /**

@@ -32,6 +32,10 @@ const createMockUIActions = (overrides: Partial<UIActions> = {}): UIActions => {
   // AuthDialog only uses handleAuthSelect
   const baseActions = {
     handleAuthSelect: vi.fn(),
+    handleCodingPlanSubmit: vi.fn(),
+    handleAlibabaStandardSubmit: vi.fn(),
+    onAuthError: vi.fn(),
+    handleRetryLastPrompt: vi.fn(),
   } as Partial<UIActions>;
 
   return {
@@ -169,9 +173,9 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Since the auth dialog only shows OpenAI option now,
+      // Since the auth dialog shows API Key option now,
       // it won't show GEMINI_API_KEY messages
-      expect(lastFrame()).toContain('OpenAI');
+      expect(lastFrame()).toContain('API Key');
     });
 
     it('should not show the GEMINI_API_KEY message if QWEN_DEFAULT_AUTH_TYPE is set to something else', () => {
@@ -257,15 +261,17 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Since the auth dialog only shows OpenAI option now,
+      // Since the auth dialog shows API Key option now,
       // it won't show GEMINI_API_KEY messages
-      expect(lastFrame()).toContain('OpenAI');
+      expect(lastFrame()).toContain('API Key');
     });
   });
 
   describe('QWEN_DEFAULT_AUTH_TYPE environment variable', () => {
     it('should select the auth type specified by QWEN_DEFAULT_AUTH_TYPE', () => {
-      process.env['QWEN_DEFAULT_AUTH_TYPE'] = AuthType.USE_OPENAI;
+      // QWEN_OAUTH is the only valid AuthType that can be selected via env var
+      // API-KEY is not an AuthType enum value, so it cannot be selected this way
+      process.env['QWEN_DEFAULT_AUTH_TYPE'] = AuthType.QWEN_OAUTH;
 
       const settings: LoadedSettings = new LoadedSettings(
         {
@@ -302,8 +308,8 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // This is a bit brittle, but it's the best way to check which item is selected.
-      expect(lastFrame()).toContain('● 2. OpenAI');
+      // QWEN_OAUTH is the first option, so it should be selected
+      expect(lastFrame()).toContain('Qwen OAuth');
     });
 
     it('should fall back to default if QWEN_DEFAULT_AUTH_TYPE is not set', () => {
@@ -342,8 +348,8 @@ describe('AuthDialog', () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is Qwen OAuth (first option)
-      expect(lastFrame()).toContain('● 1. Qwen OAuth');
+      // Default is Coding Plan (first option); Qwen OAuth is last (discontinued)
+      expect(lastFrame()).toContain('Alibaba Cloud Coding Plan');
     });
 
     it('should show an error and fall back to default if QWEN_DEFAULT_AUTH_TYPE is invalid', () => {
@@ -386,7 +392,7 @@ describe('AuthDialog', () => {
 
       // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
       // it will just show the default Qwen OAuth option
-      expect(lastFrame()).toContain('● 1. Qwen OAuth');
+      expect(lastFrame()).toContain('Qwen OAuth');
     });
   });
 

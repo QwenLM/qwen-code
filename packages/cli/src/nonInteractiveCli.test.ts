@@ -20,12 +20,14 @@ import {
   uiTelemetryService,
   FatalInputError,
   ApprovalMode,
+  SendMessageType,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { runNonInteractive } from './nonInteractiveCli.js';
 import { vi, type Mock, type MockInstance } from 'vitest';
 import type { LoadedSettings } from './config/settings.js';
-import { CommandKind } from './ui/commands/types.js';
+import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
+import { filterCommandsForMode } from './services/commandUtils.js';
 
 // Mock core modules
 vi.mock('./ui/hooks/atCommandProcessor.js');
@@ -53,6 +55,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
 });
 
 const mockGetCommands = vi.hoisted(() => vi.fn());
+const mockGetCommandsForMode = vi.hoisted(() => vi.fn());
 const mockCommandServiceCreate = vi.hoisted(() => vi.fn());
 vi.mock('./services/CommandService.js', () => ({
   CommandService: {
@@ -66,7 +69,6 @@ describe('runNonInteractive', () => {
   let mockToolRegistry: ToolRegistry;
   let mockCoreExecuteToolCall: Mock;
   let mockShutdownTelemetry: Mock;
-  let consoleErrorSpy: MockInstance;
   let processStdoutSpy: MockInstance;
   let processStderrSpy: MockInstance;
   let mockGeminiClient: {
@@ -79,11 +81,14 @@ describe('runNonInteractive', () => {
   beforeEach(async () => {
     mockCoreExecuteToolCall = vi.mocked(executeToolCall);
     mockShutdownTelemetry = vi.mocked(shutdownTelemetry);
+    mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
+      filterCommandsForMode(mockGetCommands(), mode),
+    );
     mockCommandServiceCreate.mockResolvedValue({
       getCommands: mockGetCommands,
+      getCommandsForMode: mockGetCommandsForMode,
     });
 
-    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     processStdoutSpy = vi
       .spyOn(process.stdout, 'write')
       .mockImplementation(() => true);
@@ -145,6 +150,14 @@ describe('runNonInteractive', () => {
       }),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(false),
+      isCronEnabled: vi.fn().mockReturnValue(false),
+      getCronScheduler: vi.fn().mockReturnValue(null),
+      getBackgroundTaskRegistry: vi.fn().mockReturnValue({
+        setNotificationCallback: vi.fn(),
+        setRegisterCallback: vi.fn(),
+        getRunning: vi.fn().mockReturnValue([]),
+      }),
+      getDisabledSlashCommands: vi.fn().mockReturnValue([]),
     } as unknown as Config;
 
     mockSettings = {
@@ -252,9 +265,9 @@ describe('runNonInteractive', () => {
       [{ text: 'Test input' }],
       expect.any(AbortSignal),
       'prompt-id-1',
-      { isContinuation: false },
+      { type: SendMessageType.UserQuery },
     );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Hello World');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
   });
 
@@ -298,25 +311,27 @@ describe('runNonInteractive', () => {
       mockConfig,
       expect.objectContaining({ name: 'testTool' }),
       expect.any(AbortSignal),
-      undefined,
+      expect.objectContaining({
+        outputUpdateHandler: expect.any(Function),
+      }),
     );
-    // Verify first call has isContinuation: false
+    // Verify first call has type: UserQuery
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       1,
       [{ text: 'Use a tool' }],
       expect.any(AbortSignal),
       'prompt-id-2',
-      { isContinuation: false },
+      { type: SendMessageType.UserQuery },
     );
-    // Verify second call (after tool execution) has isContinuation: true
+    // Verify second call (after tool execution) has type: ToolResult
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
       [{ text: 'Tool response' }],
       expect.any(AbortSignal),
       'prompt-id-2',
-      { isContinuation: true },
+      { type: SendMessageType.ToolResult },
     );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Final answer\n');
   });
 
   it('should handle error during tool execution and should send error back to the model', async () => {
@@ -360,9 +375,6 @@ describe('runNonInteractive', () => {
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(createStreamFromEvents(finalResponse));
 
-    // Enable debug mode so handleToolError logs to console.error
-    (mockConfig.getDebugMode as Mock).mockReturnValue(true);
-
     await runNonInteractive(
       mockConfig,
       mockSettings,
@@ -371,9 +383,6 @@ describe('runNonInteractive', () => {
     );
 
     expect(mockCoreExecuteToolCall).toHaveBeenCalled();
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      'Error executing tool errorTool: Execution failed',
-    );
     expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
     expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
       2,
@@ -389,9 +398,9 @@ describe('runNonInteractive', () => {
       ],
       expect.any(AbortSignal),
       'prompt-id-3',
-      { isContinuation: true },
+      { type: SendMessageType.ToolResult },
     );
-    expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Sorry, let me try again.\n');
   });
 
   it('should exit with error if sendMessageStream throws initially', async () => {
@@ -443,9 +452,6 @@ describe('runNonInteractive', () => {
       .mockReturnValueOnce(createStreamFromEvents([toolCallEvent]))
       .mockReturnValueOnce(createStreamFromEvents(finalResponse));
 
-    // Enable debug mode so handleToolError logs to console.error
-    (mockConfig.getDebugMode as Mock).mockReturnValue(true);
-
     await runNonInteractive(
       mockConfig,
       mockSettings,
@@ -454,12 +460,9 @@ describe('runNonInteractive', () => {
     );
 
     expect(mockCoreExecuteToolCall).toHaveBeenCalled();
-    expect(consoleErrorSpy).toHaveBeenCalledWith(
-      'Error executing tool nonexistentTool: Tool "nonexistentTool" not found in registry.',
-    );
     expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(2);
     expect(processStdoutSpy).toHaveBeenCalledWith(
-      "Sorry, I can't find that tool.",
+      "Sorry, I can't find that tool.\n",
     );
   });
 
@@ -519,11 +522,11 @@ describe('runNonInteractive', () => {
       processedParts,
       expect.any(AbortSignal),
       'prompt-id-7',
-      { isContinuation: false },
+      { type: SendMessageType.UserQuery },
     );
 
     // 6. Assert the final output is correct
-    expect(processStdoutSpy).toHaveBeenCalledWith('Summary complete.');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Summary complete.\n');
   });
 
   it('should process input and write JSON output with stats', async () => {
@@ -551,7 +554,7 @@ describe('runNonInteractive', () => {
       [{ text: 'Test input' }],
       expect.any(AbortSignal),
       'prompt-id-1',
-      { isContinuation: false },
+      { type: SendMessageType.UserQuery },
     );
 
     // JSON adapter emits array of messages, last one is result with stats
@@ -655,7 +658,9 @@ describe('runNonInteractive', () => {
       mockConfig,
       expect.objectContaining({ name: 'testTool' }),
       expect.any(AbortSignal),
-      undefined,
+      expect.objectContaining({
+        outputUpdateHandler: expect.any(Function),
+      }),
     );
 
     // JSON adapter emits array of messages, last one is result with stats
@@ -704,7 +709,7 @@ describe('runNonInteractive', () => {
       [{ text: 'Empty response test' }],
       expect.any(AbortSignal),
       'prompt-id-empty',
-      { isContinuation: false },
+      { type: SendMessageType.UserQuery },
     );
 
     // JSON adapter emits array of messages, last one is result with stats
@@ -738,11 +743,6 @@ describe('runNonInteractive', () => {
       throw testError;
     });
 
-    // Mock console.error to capture JSON error output
-    const consoleErrorJsonSpy = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
-
     let thrownError: Error | null = null;
     try {
       await runNonInteractive(
@@ -760,19 +760,18 @@ describe('runNonInteractive', () => {
     // Should throw because of mocked process.exit
     expect(thrownError?.message).toBe('process.exit(1) called');
 
-    expect(consoleErrorJsonSpy).toHaveBeenCalledWith(
-      JSON.stringify(
-        {
-          error: {
-            type: 'Error',
-            message: 'Invalid input provided',
-            code: 1,
-          },
+    const jsonError = JSON.stringify(
+      {
+        error: {
+          type: 'Error',
+          message: 'Invalid input provided',
+          code: 1,
         },
-        null,
-        2,
-      ),
+      },
+      null,
+      2,
     );
+    expect(processStderrSpy).toHaveBeenCalledWith(`${jsonError}\n`);
   });
 
   it('should handle API errors in text mode and exit with error code', async () => {
@@ -830,11 +829,6 @@ describe('runNonInteractive', () => {
       throw fatalError;
     });
 
-    // Mock console.error to capture JSON error output
-    const consoleErrorJsonSpy = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
-
     let thrownError: Error | null = null;
     try {
       await runNonInteractive(
@@ -852,19 +846,18 @@ describe('runNonInteractive', () => {
     // Should throw because of mocked process.exit with custom exit code
     expect(thrownError?.message).toBe('process.exit(42) called');
 
-    expect(consoleErrorJsonSpy).toHaveBeenCalledWith(
-      JSON.stringify(
-        {
-          error: {
-            type: 'FatalInputError',
-            message: 'Invalid command syntax provided',
-            code: 42,
-          },
+    const jsonError = JSON.stringify(
+      {
+        error: {
+          type: 'FatalInputError',
+          message: 'Invalid command syntax provided',
+          code: 42,
         },
-        null,
-        2,
-      ),
+      },
+      null,
+      2,
     );
+    expect(processStderrSpy).toHaveBeenCalledWith(`${jsonError}\n`);
   });
 
   it('should execute a slash command that returns a prompt', async () => {
@@ -903,10 +896,10 @@ describe('runNonInteractive', () => {
       [{ text: 'Prompt from command' }],
       expect.any(AbortSignal),
       'prompt-id-slash',
-      { isContinuation: false },
+      { type: SendMessageType.UserQuery },
     );
 
-    expect(processStdoutSpy).toHaveBeenCalledWith('Response from command');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Response from command\n');
   });
 
   it('should handle command that requires confirmation by returning early', async () => {
@@ -931,7 +924,7 @@ describe('runNonInteractive', () => {
 
     // Should write error message through adapter to stdout (TEXT mode goes through JsonOutputAdapter)
     expect(processStderrSpy).toHaveBeenCalledWith(
-      'Shell command confirmation is not supported in non-interactive mode. Use YOLO mode or pre-approve commands.',
+      'Shell command confirmation is not supported in non-interactive mode. Use YOLO mode or pre-approve commands.\n',
     );
   });
 
@@ -963,10 +956,10 @@ describe('runNonInteractive', () => {
       [{ text: '/unknowncommand' }],
       expect.any(AbortSignal),
       'prompt-id-unknown',
-      { isContinuation: false },
+      { type: SendMessageType.UserQuery },
     );
 
-    expect(processStdoutSpy).toHaveBeenCalledWith('Response to unknown');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Response to unknown\n');
   });
 
   it('should handle known but unsupported slash commands like /help by returning early', async () => {
@@ -989,7 +982,7 @@ describe('runNonInteractive', () => {
 
     // Should write error message through adapter to stdout (TEXT mode goes through JsonOutputAdapter)
     expect(processStderrSpy).toHaveBeenCalledWith(
-      'The command "/help" is not supported in non-interactive mode.',
+      'The command "/help" is not supported in this mode.\n',
     );
   });
 
@@ -1014,7 +1007,7 @@ describe('runNonInteractive', () => {
 
     // Should write error message to stderr
     expect(processStderrSpy).toHaveBeenCalledWith(
-      'Unknown command result type: unhandled',
+      'Unknown command result type: unhandled\n',
     );
   });
 
@@ -1052,7 +1045,7 @@ describe('runNonInteractive', () => {
 
     expect(mockAction).toHaveBeenCalledWith(expect.any(Object), 'arg1 arg2');
 
-    expect(processStdoutSpy).toHaveBeenCalledWith('Acknowledged');
+    expect(processStdoutSpy).toHaveBeenCalledWith('Acknowledged\n');
   });
 
   it('should emit stream-json envelopes when output format is stream-json', async () => {
@@ -1321,7 +1314,7 @@ describe('runNonInteractive', () => {
       [{ text: 'Message from stream-json input' }],
       expect.any(AbortSignal),
       'prompt-envelope',
-      { isContinuation: false },
+      { type: SendMessageType.UserQuery },
     );
   });
 
@@ -1797,7 +1790,7 @@ describe('runNonInteractive', () => {
       [{ text: 'Simple string content' }],
       expect.any(AbortSignal),
       'prompt-string-content',
-      { isContinuation: false },
+      { type: SendMessageType.UserQuery },
     );
 
     // UserMessage with array of text blocks
@@ -1830,7 +1823,7 @@ describe('runNonInteractive', () => {
       [{ text: 'First part' }, { text: 'Second part' }],
       expect.any(AbortSignal),
       'prompt-blocks-content',
-      { isContinuation: false },
+      { type: SendMessageType.UserQuery },
     );
   });
 });

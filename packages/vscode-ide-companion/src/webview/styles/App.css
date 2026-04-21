@@ -95,7 +95,10 @@
 
   /* Buttons - VSCode tokens */
   --app-ghost-button-hover-background: var(--vscode-toolbar-hoverBackground);
-  --app-button-foreground: var(--vscode-button-foreground, var(--app-qwen-ivory));
+  --app-button-foreground: var(
+    --vscode-button-foreground,
+    var(--app-qwen-ivory)
+  );
   --app-button-background: var(
     --vscode-button-background,
     var(--app-qwen-clay-button-orange)
@@ -169,4 +172,7 @@ button {
 /* VSCode panel uses 100vh instead of 100% */
 .chat-container {
   height: 100vh;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
 }

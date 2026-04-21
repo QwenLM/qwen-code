@@ -21,6 +21,9 @@ import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { getUrlOpenCommand } from '../../ui/utils/commandUtils.js';
 import { t } from '../../i18n/index.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('SETUP_GITHUB');
 
 export const GITHUB_WORKFLOW_PATHS = [
   'qwen-dispatch/qwen-dispatch.yml',
@@ -85,7 +88,7 @@ export async function updateGitignore(gitRepoRoot: string): Promise<void> {
       }
     }
   } catch (error) {
-    console.debug('Failed to update .gitignore:', error);
+    debugLogger.debug('Failed to update .gitignore:', error);
     // Continue without failing the whole command
   }
 }
@@ -96,10 +99,20 @@ export const setupGithubCommand: SlashCommand = {
     return t('Set up GitHub Actions');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: async (
     context: CommandContext,
   ): Promise<SlashCommandActionReturn> => {
     const abortController = new AbortController();
+
+    // If we have a context abort signal (from ESC cancellation), link it to our controller
+    if (context.abortSignal) {
+      context.abortSignal.addEventListener(
+        'abort',
+        () => abortController.abort(),
+        { once: true },
+      );
+    }
 
     if (!isGitHubRepository()) {
       throw new Error(
@@ -112,7 +125,7 @@ export const setupGithubCommand: SlashCommand = {
     try {
       gitRepoRoot = getGitRepoRoot();
     } catch (_error) {
-      console.debug(`Failed to get git repo root:`, _error);
+      debugLogger.debug(`Failed to get git repo root:`, _error);
       throw new Error(
         'Unable to determine the GitHub repository. /setup-github must be run from a git repository.',
       );
@@ -128,7 +141,7 @@ export const setupGithubCommand: SlashCommand = {
     try {
       await fs.promises.mkdir(githubWorkflowsDir, { recursive: true });
     } catch (_error) {
-      console.debug(
+      debugLogger.debug(
         `Failed to create ${githubWorkflowsDir} directory:`,
         _error,
       );

@@ -4,19 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  type MockInstance,
-} from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { disableCommand, handleDisable } from './disable.js';
 import yargs from 'yargs';
 import { SettingScope } from '../../config/settings.js';
 
 const mockDisableExtension = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('./utils.js', () => ({
   getExtensionManager: vi.fn().mockResolvedValue({
@@ -26,6 +21,12 @@ vi.mock('./utils.js', () => ({
 
 vi.mock('../../utils/errors.js', () => ({
   getErrorMessage: vi.fn((error: Error) => error.message),
+}));
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: mockWriteStderrLine,
+  clearScreen: vi.fn(),
 }));
 
 describe('extensions disable command', () => {
@@ -59,20 +60,15 @@ describe('extensions disable command', () => {
 });
 
 describe('handleDisable', () => {
-  let consoleLogSpy: MockInstance;
-  let consoleErrorSpy: MockInstance;
-  let processExitSpy: MockInstance;
-
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
-    processExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation(() => undefined as never);
     vi.clearAllMocks();
   });
 
   it('should disable an extension with user scope', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     await handleDisable({
       name: 'test-extension',
       scope: 'user',
@@ -82,12 +78,18 @@ describe('handleDisable', () => {
       'test-extension',
       SettingScope.User,
     );
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "test-extension" successfully disabled for scope "user".',
     );
+
+    processExitSpy.mockRestore();
   });
 
   it('should disable an extension with workspace scope', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     await handleDisable({
       name: 'test-extension',
       scope: 'workspace',
@@ -97,12 +99,18 @@ describe('handleDisable', () => {
       'test-extension',
       SettingScope.Workspace,
     );
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "test-extension" successfully disabled for scope "workspace".',
     );
+
+    processExitSpy.mockRestore();
   });
 
   it('should default to user scope when no scope is provided', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     await handleDisable({
       name: 'test-extension',
     });
@@ -111,9 +119,15 @@ describe('handleDisable', () => {
       'test-extension',
       SettingScope.User,
     );
+
+    processExitSpy.mockRestore();
   });
 
   it('should handle errors and exit with code 1', async () => {
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     mockDisableExtension.mockImplementationOnce(() => {
       throw new Error('Disable failed');
     });
@@ -123,7 +137,9 @@ describe('handleDisable', () => {
       scope: 'user',
     });
 
-    expect(consoleErrorSpy).toHaveBeenCalledWith('Disable failed');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith('Disable failed');
     expect(processExitSpy).toHaveBeenCalledWith(1);
+
+    processExitSpy.mockRestore();
   });
 });

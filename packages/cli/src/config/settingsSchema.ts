@@ -76,11 +76,134 @@ export interface SettingDefinition {
   mergeStrategy?: MergeStrategy;
   /** Enum type options  */
   options?: readonly SettingEnumOption[];
+  /** Schema for array items when type is 'array' */
+  items?: SettingItemDefinition;
+}
+
+/**
+ * Schema definition for array item types.
+ * Supports simple types (string, number, boolean) and complex object types.
+ */
+export interface SettingItemDefinition {
+  type: 'string' | 'number' | 'boolean' | 'object' | 'array';
+  properties?: Record<
+    string,
+    SettingItemDefinition & {
+      required?: boolean;
+      enum?: string[];
+      additionalProperties?: SettingItemDefinition;
+    }
+  >;
+  items?: SettingItemDefinition;
+  required?: boolean;
+  enum?: string[];
+  description?: string;
+  additionalProperties?: boolean | SettingItemDefinition;
 }
 
 export interface SettingsSchema {
   [key: string]: SettingDefinition;
 }
+
+/**
+ * Common items schema for hook definitions.
+ * Used by all hook event types in the hooks configuration.
+ */
+const HOOK_DEFINITION_ITEMS: SettingItemDefinition = {
+  type: 'object',
+  description:
+    'A hook definition with an optional matcher and a list of hook configurations.',
+  properties: {
+    matcher: {
+      type: 'string',
+      description:
+        'An optional matcher pattern to filter when this hook definition applies.',
+    },
+    sequential: {
+      type: 'boolean',
+      description:
+        'Whether the hooks should be executed sequentially instead of in parallel.',
+    },
+    hooks: {
+      type: 'array',
+      description: 'The list of hook configurations to execute.',
+      required: true,
+      items: {
+        type: 'object',
+        description:
+          'A hook configuration entry that defines a hook to execute.',
+        properties: {
+          type: {
+            type: 'string',
+            description:
+              'The type of hook. Note: "function" type is only available via SDK registration, not settings.json.',
+            enum: ['command', 'http'],
+            required: true,
+          },
+          command: {
+            type: 'string',
+            description:
+              'The command to execute when the hook is triggered. Required for "command" type.',
+          },
+          url: {
+            type: 'string',
+            description:
+              'The URL to send the POST request to. Required for "http" type.',
+          },
+          headers: {
+            type: 'object',
+            description:
+              'HTTP headers to include in the request. Supports env var interpolation ($VAR, ${VAR}).',
+            additionalProperties: { type: 'string' },
+          },
+          allowedEnvVars: {
+            type: 'array',
+            description:
+              'List of environment variables allowed for interpolation in headers and URL.',
+            items: { type: 'string' },
+          },
+          name: {
+            type: 'string',
+            description: 'An optional name for the hook.',
+          },
+          description: {
+            type: 'string',
+            description: 'An optional description of what the hook does.',
+          },
+          timeout: {
+            type: 'number',
+            description: 'Timeout in seconds for the hook execution.',
+          },
+          env: {
+            type: 'object',
+            description:
+              'Environment variables to set when executing the hook command.',
+            additionalProperties: { type: 'string' },
+          },
+          async: {
+            type: 'boolean',
+            description:
+              'Whether to execute the hook asynchronously (non-blocking, for "command" type only).',
+          },
+          once: {
+            type: 'boolean',
+            description:
+              'Whether to execute the hook only once per session (for "http" type).',
+          },
+          statusMessage: {
+            type: 'string',
+            description: 'A message to display while the hook is executing.',
+          },
+          shell: {
+            type: 'string',
+            description: 'The shell to use for command execution.',
+            enum: ['bash', 'powershell'],
+          },
+        },
+      },
+    },
+  },
+};
 
 export type MemoryImportFormat = 'tree' | 'flat';
 export type DnsResolutionOrder = 'ipv4first' | 'verbatim';
@@ -103,6 +226,18 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
 
+  // Channels configuration (Telegram, Discord, etc.)
+  channels: {
+    type: 'object',
+    label: 'Channels',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as Record<string, Record<string, unknown>>,
+    description: 'Configuration for messaging channels.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
   // Model providers configuration grouped by authType
   modelProviders: {
     type: 'object',
@@ -114,6 +249,42 @@ const SETTINGS_SCHEMA = {
       'Model providers configuration grouped by authType. Each authType contains an array of model configurations.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.REPLACE,
+  },
+
+  // Coding Plan configuration
+  codingPlan: {
+    type: 'object',
+    label: 'Coding Plan',
+    category: 'Model',
+    requiresRestart: false,
+    default: {},
+    description: 'Coding Plan template version tracking and configuration.',
+    showInDialog: false,
+    properties: {
+      version: {
+        type: 'string',
+        label: 'Coding Plan Template Version',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'SHA256 hash of the Coding Plan template. Used to detect template updates.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  // Environment variables fallback
+  env: {
+    type: 'object',
+    label: 'Environment Variables',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as Record<string, string>,
+    description:
+      'Environment variables to set as fallback defaults. These are loaded with the lowest priority: system environment variables > .env files > settings.json env field.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
 
   general: {
@@ -143,23 +314,29 @@ const SETTINGS_SCHEMA = {
         description: 'Enable Vim keybindings',
         showInDialog: true,
       },
-      disableAutoUpdate: {
+      enableAutoUpdate: {
         type: 'boolean',
-        label: 'Disable Auto Update',
+        label: 'Enable Auto Update',
         category: 'General',
         requiresRestart: false,
-        default: false,
-        description: 'Disable automatic updates',
+        default: true,
+        description:
+          'Enable automatic update checks and installations on startup.',
         showInDialog: true,
       },
-      disableUpdateNag: {
+      showSessionRecap: {
         type: 'boolean',
-        label: 'Disable Update Nag',
+        label: 'Show Session Recap',
         category: 'General',
         requiresRestart: false,
+        // Off by default — an ambient background LLM call isn't something
+        // users should be opted into silently, especially when `fastModel`
+        // is unset and the call would land on the main coding model.
+        // Manual `/recap` works regardless.
         default: false,
-        description: 'Disable update notification prompts.',
-        showInDialog: false,
+        description:
+          'Auto-show a one-line "where you left off" recap when returning to the terminal after being away for 5+ minutes. Off by default. Use /recap to trigger manually regardless of this setting.',
+        showInDialog: true,
       },
       gitCoAuthor: {
         type: 'boolean',
@@ -244,6 +421,20 @@ const SETTINGS_SCHEMA = {
           'Enable saving chat history to disk. Disabling this will also prevent --continue and --resume from working.',
         showInDialog: false,
       },
+      defaultFileEncoding: {
+        type: 'enum',
+        label: 'Default File Encoding',
+        category: 'General',
+        requiresRestart: false,
+        default: 'utf-8',
+        description:
+          'Default encoding for new files. Use "utf-8" (default) for UTF-8 without BOM, or "utf-8-bom" for UTF-8 with BOM. Only change this if your project specifically requires BOM.',
+        showInDialog: false,
+        options: [
+          { value: 'utf-8', label: 'UTF-8 (without BOM)' },
+          { value: 'utf-8-bom', label: 'UTF-8 with BOM' },
+        ],
+      },
     },
   },
   output: {
@@ -271,6 +462,44 @@ const SETTINGS_SCHEMA = {
     },
   },
 
+  dualOutput: {
+    type: 'object',
+    label: 'Dual Output',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Dual-output sidecar mode: emit structured JSON events to a ' +
+      'second channel while the TUI renders normally on stdout. See ' +
+      'docs/users/features/dual-output.md. CLI flags take precedence ' +
+      'over these settings.',
+    showInDialog: false,
+    properties: {
+      jsonFile: {
+        type: 'string',
+        label: 'JSON Event File',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'File path for structured JSON event output. Equivalent to ' +
+          '--json-file. Ignored if --json-fd or --json-file is also set.',
+        showInDialog: false,
+      },
+      inputFile: {
+        type: 'string',
+        label: 'Remote Input File',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'File path for remote input commands (JSONL). Equivalent to ' +
+          '--input-file. Ignored if --input-file is also set.',
+        showInDialog: false,
+      },
+    },
+  },
+
   ui: {
     type: 'object',
     label: 'UI',
@@ -288,6 +517,22 @@ const SETTINGS_SCHEMA = {
         default: 'Qwen Dark' as string,
         description: 'The color theme for the UI.',
         showInDialog: true,
+      },
+      statusLine: {
+        type: 'object',
+        label: 'Status Line',
+        category: 'UI',
+        requiresRestart: false,
+        default: undefined as
+          | {
+              type: 'command';
+              command: string;
+              refreshInterval?: number;
+            }
+          | undefined,
+        description:
+          'Custom status line display configuration. Optional `refreshInterval` (seconds, >= 1) re-runs the command on a timer so external data stays fresh.',
+        showInDialog: false,
       },
       customThemes: {
         type: 'object',
@@ -331,7 +576,7 @@ const SETTINGS_SCHEMA = {
         label: 'Show Line Numbers in Code',
         category: 'UI',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Show line numbers in the code output.',
         showInDialog: true,
       },
@@ -360,7 +605,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'Show welcome back dialog when returning to a project with conversation history.',
+          'Show welcome back dialog when returning to a project with conversation history. Choosing "Start new chat session" suppresses the dialog for that project until the project summary changes.',
         showInDialog: true,
       },
       enableUserFeedback: {
@@ -373,6 +618,36 @@ const SETTINGS_SCHEMA = {
           'Show optional feedback dialog after conversations to help improve Qwen performance.',
         showInDialog: true,
       },
+      enableFollowupSuggestions: {
+        type: 'boolean',
+        label: 'Enable Follow-up Suggestions',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Show context-aware follow-up suggestions after task completion. Press Tab or Right Arrow to accept, Enter to accept and submit.',
+        showInDialog: true,
+      },
+      enableCacheSharing: {
+        type: 'boolean',
+        label: 'Enable Cache Sharing for Suggestions',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Use cache-aware forked queries for suggestion generation. Reduces cost on providers that support prefix caching (experimental).',
+        showInDialog: false,
+      },
+      enableSpeculation: {
+        type: 'boolean',
+        label: 'Enable Speculative Execution',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Speculatively execute accepted suggestions before submission. Results appear instantly when you accept (experimental).',
+        showInDialog: false,
+      },
       accessibility: {
         type: 'object',
         label: 'Accessibility',
@@ -382,14 +657,14 @@ const SETTINGS_SCHEMA = {
         description: 'Accessibility settings.',
         showInDialog: false,
         properties: {
-          disableLoadingPhrases: {
+          enableLoadingPhrases: {
             type: 'boolean',
-            label: 'Disable Loading Phrases',
+            label: 'Enable Loading Phrases',
             category: 'UI',
             requiresRestart: true,
-            default: false,
-            description: 'Disable loading phrases for accessibility',
-            showInDialog: false,
+            default: true,
+            description: 'Enable loading phrases (disable for accessibility)',
+            showInDialog: true,
           },
           screenReader: {
             type: 'boolean',
@@ -411,6 +686,16 @@ const SETTINGS_SCHEMA = {
         default: 0,
         description: 'The last time the feedback dialog was shown.',
         showInDialog: false,
+      },
+      compactMode: {
+        type: 'boolean',
+        label: 'Compact Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
+        showInDialog: true,
       },
     },
   },
@@ -476,6 +761,17 @@ const SETTINGS_SCHEMA = {
     showInDialog: false,
   },
 
+  fastModel: {
+    type: 'string',
+    label: 'Fast Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model used for generating prompt suggestions and speculative execution. Leave empty to use the main model. A smaller/faster model (e.g., qwen3-coder-flash) reduces latency and cost.',
+    showInDialog: true,
+  },
+
   model: {
     type: 'object',
     label: 'Model',
@@ -502,17 +798,6 @@ const SETTINGS_SCHEMA = {
         default: -1,
         description:
           'Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.',
-        showInDialog: false,
-      },
-      summarizeToolOutput: {
-        type: 'object',
-        label: 'Summarize Tool Output',
-        category: 'Model',
-        requiresRestart: false,
-        default: undefined as
-          | Record<string, { tokenBudget?: number }>
-          | undefined,
-        description: 'Settings for summarizing tool output.',
         showInDialog: false,
       },
       chatCompression: {
@@ -547,7 +832,7 @@ const SETTINGS_SCHEMA = {
         label: 'Skip Loop Detection',
         category: 'Model',
         requiresRestart: false,
-        default: false,
+        default: true,
         description: 'Disable all loop detection checks (streaming and LLM).',
         showInDialog: false,
       },
@@ -609,13 +894,13 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
-          disableCacheControl: {
+          enableCacheControl: {
             type: 'boolean',
-            label: 'Disable Cache Control',
+            label: 'Enable Cache Control',
             category: 'Generation Configuration',
             requiresRestart: false,
-            default: false,
-            description: 'Disable cache control for DashScope providers.',
+            default: true,
+            description: 'Enable cache control for DashScope providers.',
             parentKey: 'generationConfig',
             showInDialog: false,
           },
@@ -697,6 +982,48 @@ const SETTINGS_SCHEMA = {
         description: 'Whether to load memory files from include directories.',
         showInDialog: false,
       },
+      clearContextOnIdle: {
+        type: 'object',
+        label: 'Clear Context On Idle',
+        category: 'Context',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for clearing stale context after idle periods. Use -1 to disable a threshold.',
+        showInDialog: false,
+        properties: {
+          thinkingThresholdMinutes: {
+            type: 'number',
+            label: 'Thinking Idle Threshold (minutes)',
+            category: 'Context',
+            requiresRestart: false,
+            default: 5 as number,
+            description:
+              'Minutes of inactivity before clearing old thinking blocks. Use -1 to disable.',
+            showInDialog: false,
+          },
+          toolResultsThresholdMinutes: {
+            type: 'number',
+            label: 'Tool Results Idle Threshold (minutes)',
+            category: 'Context',
+            requiresRestart: false,
+            default: 60 as number,
+            description:
+              'Minutes of inactivity before clearing old tool result content. Use -1 to disable.',
+            showInDialog: false,
+          },
+          toolResultsNumToKeep: {
+            type: 'number',
+            label: 'Tool Results Number To Keep',
+            category: 'Context',
+            requiresRestart: false,
+            default: 5 as number,
+            description:
+              'Number of most-recent compactable tool results to preserve when clearing. Floor at 1.',
+            showInDialog: false,
+          },
+        },
+      },
       fileFiltering: {
         type: 'object',
         label: 'File Filtering',
@@ -733,16 +1060,127 @@ const SETTINGS_SCHEMA = {
             description: 'Enable recursive file search functionality',
             showInDialog: false,
           },
-          disableFuzzySearch: {
+          enableFuzzySearch: {
             type: 'boolean',
-            label: 'Disable Fuzzy Search',
+            label: 'Enable Fuzzy Search',
             category: 'Context',
             requiresRestart: true,
-            default: false,
-            description: 'Disable fuzzy search when searching for files.',
-            showInDialog: false,
+            default: true,
+            description: 'Enable fuzzy search when searching for files.',
+            showInDialog: true,
           },
         },
+      },
+    },
+  },
+
+  memory: {
+    type: 'object',
+    label: 'Memory',
+    category: 'Memory',
+    requiresRestart: false,
+    default: {},
+    description: 'Settings for managed auto-memory.',
+    showInDialog: false,
+    properties: {
+      enableManagedAutoMemory: {
+        type: 'boolean',
+        label: 'Enable Managed Auto-Memory',
+        category: 'Memory',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Enable background extraction of memories from conversations.',
+        showInDialog: false,
+      },
+      enableManagedAutoDream: {
+        type: 'boolean',
+        label: 'Enable Managed Auto-Dream',
+        category: 'Memory',
+        requiresRestart: false,
+        default: false,
+        description:
+          'Enable automatic consolidation (dream) of collected memories.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  permissions: {
+    type: 'object',
+    label: 'Permissions',
+    category: 'Tools',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Permission rules controlling tool usage. Rules are evaluated in priority order: deny > ask > allow.',
+    showInDialog: false,
+    properties: {
+      allow: {
+        type: 'array',
+        label: 'Allow Rules',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Tools or commands that are auto-approved without confirmation. ' +
+          'Examples: "ShellTool", "Bash(git *)", "ReadFileTool".',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      ask: {
+        type: 'array',
+        label: 'Ask Rules',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Tools or commands that always require user confirmation. ' +
+          'Takes precedence over allow rules.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+      deny: {
+        type: 'array',
+        label: 'Deny Rules',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Tools or commands that are always blocked. Highest priority rule. ' +
+          'Examples: "ShellTool", "Bash(rm -rf *)".',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
+  slashCommands: {
+    type: 'object',
+    label: 'Slash Commands',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Configuration for slash commands exposed by the CLI. Useful for ' +
+      'locking down the command surface in multi-tenant or enterprise ' +
+      'deployments.',
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: 'array',
+        label: 'Disabled Slash Commands',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Slash command names to hide and refuse to execute. Matched ' +
+          'case-insensitively against the final command name (for extension ' +
+          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
+          'Merged as a union across settings scopes, so workspace settings ' +
+          'can add to but not remove entries defined in system/user settings.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
       },
     },
   },
@@ -766,6 +1204,16 @@ const SETTINGS_SCHEMA = {
           'Sandbox execution environment (can be a boolean or a path string).',
         showInDialog: false,
       },
+      sandboxImage: {
+        type: 'string',
+        label: 'Sandbox Image',
+        category: 'Tools',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.',
+        showInDialog: false,
+      },
       shell: {
         type: 'object',
         label: 'Shell',
@@ -780,9 +1228,9 @@ const SETTINGS_SCHEMA = {
             label: 'Interactive Shell (PTY)',
             category: 'Tools',
             requiresRestart: true,
-            default: false,
+            default: true,
             description:
-              'Use node-pty for an interactive shell experience. Fallback to child_process still applies.',
+              'Use node-pty for an interactive shell experience. Falls back to child_process if PTY is unavailable.',
             showInDialog: true,
           },
           pager: {
@@ -806,32 +1254,33 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      // Legacy tool permission fields – kept for backward compatibility.
+      // Use permissions.{allow,ask,deny} instead.
       core: {
         type: 'array',
-        label: 'Core Tools',
+        label: 'Core Tools (deprecated)',
         category: 'Tools',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description: 'Paths to core tool definitions.',
+        description: 'Deprecated. Use permissions.allow instead.',
         showInDialog: false,
       },
       allowed: {
         type: 'array',
-        label: 'Allowed Tools',
+        label: 'Allowed Tools (deprecated)',
         category: 'Advanced',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description:
-          'A list of tool names that will bypass the confirmation dialog.',
+        description: 'Deprecated. Use permissions.allow instead.',
         showInDialog: false,
       },
       exclude: {
         type: 'array',
-        label: 'Exclude Tools',
+        label: 'Exclude Tools (deprecated)',
         category: 'Tools',
         requiresRestart: true,
         default: undefined as string[] | undefined,
-        description: 'Tool names to exclude from discovery.',
+        description: 'Deprecated. Use permissions.deny instead.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
@@ -899,15 +1348,6 @@ const SETTINGS_SCHEMA = {
           'Use the bundled ripgrep binary. When set to false, the system-level "rg" command will be used instead. This setting is only effective when useRipgrep is true.',
         showInDialog: false,
       },
-      enableToolOutputTruncation: {
-        type: 'boolean',
-        label: 'Enable Tool Output Truncation',
-        category: 'General',
-        requiresRestart: true,
-        default: true,
-        description: 'Enable truncation of large tool outputs.',
-        showInDialog: false,
-      },
       truncateToolOutputThreshold: {
         type: 'number',
         label: 'Tool Output Truncation Threshold',
@@ -956,6 +1396,7 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description: 'A list of MCP servers to allow.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
       },
       excluded: {
         type: 'array',
@@ -965,17 +1406,9 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description: 'A list of MCP servers to exclude.',
         showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
       },
     },
-  },
-  useSmartEdit: {
-    type: 'boolean',
-    label: 'Use Smart Edit',
-    category: 'Advanced',
-    requiresRestart: false,
-    default: false,
-    description: 'Enable the smart-edit tool instead of the replace tool.',
-    showInDialog: false,
   },
   security: {
     type: 'object',
@@ -1063,6 +1496,20 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      allowedHttpHookUrls: {
+        type: 'array',
+        label: 'Allowed HTTP Hook URLs',
+        category: 'Security',
+        requiresRestart: false,
+        default: [] as string[],
+        description:
+          'Whitelist of URL patterns for HTTP hooks. Supports * wildcard. If empty, all URLs are allowed (subject to SSRF protection).',
+        showInDialog: false,
+        items: {
+          type: 'string',
+          description: 'URL pattern (supports * wildcard)',
+        },
+      },
     },
   },
 
@@ -1112,6 +1559,17 @@ const SETTINGS_SCHEMA = {
         description: 'Configuration for the bug report command.',
         showInDialog: false,
       },
+      runtimeOutputDir: {
+        type: 'string',
+        label: 'Runtime Output Directory',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string | undefined,
+        description:
+          'Custom directory for runtime output (temp files, debug logs, session data, todos, etc.). ' +
+          'Config files remain at ~/.qwen. Env var QWEN_RUNTIME_DIR takes priority.',
+        showInDialog: false,
+      },
       tavilyApiKey: {
         type: 'string',
         label: 'Tavily API Key (Deprecated)',
@@ -1143,6 +1601,265 @@ const SETTINGS_SCHEMA = {
     description: 'Configuration for web search providers.',
     showInDialog: false,
   },
+  agents: {
+    type: 'object',
+    label: 'Agents',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Settings for multi-agent collaboration features (Arena, Team, Swarm).',
+    showInDialog: false,
+    properties: {
+      displayMode: {
+        type: 'enum',
+        label: 'Display Mode',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Display mode for multi-agent sessions. Currently only "in-process" is supported.',
+        showInDialog: false,
+        options: [
+          { value: 'in-process', label: 'In-process' },
+          // { value: 'tmux', label: 'tmux' },
+          // { value: 'iterm2', label: 'iTerm2' },
+        ],
+      },
+      arena: {
+        type: 'object',
+        label: 'Arena',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: {},
+        description: 'Settings for Arena (multi-model competitive execution).',
+        showInDialog: false,
+        properties: {
+          worktreeBaseDir: {
+            type: 'string',
+            label: 'Worktree Base Directory',
+            category: 'Advanced',
+            requiresRestart: true,
+            default: undefined as string | undefined,
+            description:
+              'Custom base directory for Arena worktrees. Defaults to ~/.qwen/arena.',
+            showInDialog: false,
+          },
+          preserveArtifacts: {
+            type: 'boolean',
+            label: 'Preserve Arena Artifacts',
+            category: 'Advanced',
+            requiresRestart: false,
+            default: false,
+            description:
+              'When enabled, Arena worktrees and session state files are preserved after the session ends or the main agent exits.',
+            showInDialog: true,
+          },
+          maxRoundsPerAgent: {
+            type: 'number',
+            label: 'Max Rounds Per Agent',
+            category: 'Advanced',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Maximum number of rounds (turns) each agent can execute. No limit if unset.',
+            showInDialog: false,
+          },
+          timeoutSeconds: {
+            type: 'number',
+            label: 'Timeout (seconds)',
+            category: 'Advanced',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Total timeout in seconds for the Arena session. No limit if unset.',
+            showInDialog: false,
+          },
+        },
+      },
+      team: {
+        type: 'object',
+        label: 'Team',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for Agent Team (role-based collaborative execution). Reserved for future use.',
+        showInDialog: false,
+      },
+      swarm: {
+        type: 'object',
+        label: 'Swarm',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: {},
+        description:
+          'Settings for Agent Swarm (parallel sub-agent execution). Reserved for future use.',
+        showInDialog: false,
+      },
+    },
+  },
+
+  disableAllHooks: {
+    type: 'boolean',
+    label: 'Disable All Hooks',
+    category: 'Advanced',
+    requiresRestart: true, // Future enhancement: consider supporting mid-session toggle for better UX
+    default: false,
+    description:
+      'Temporarily disable all hooks without deleting configurations. Default is false (hooks enabled).',
+    showInDialog: false,
+  },
+
+  hooks: {
+    type: 'object',
+    label: 'Hooks',
+    category: 'Advanced',
+    requiresRestart: false,
+    default: {},
+    description:
+      'Hook event configurations for extending CLI behavior at various lifecycle points.',
+    showInDialog: false,
+    properties: {
+      UserPromptSubmit: {
+        type: 'array',
+        label: 'Before Agent Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute before agent processing. Can modify prompts or inject context.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      Stop: {
+        type: 'array',
+        label: 'After Agent Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute after agent processing. Can post-process responses or log interactions.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      Notification: {
+        type: 'array',
+        label: 'Notification Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description: 'Hooks that execute when notifications are sent.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      PreToolUse: {
+        type: 'array',
+        label: 'Pre Tool Use Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description: 'Hooks that execute before tool execution.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      PostToolUse: {
+        type: 'array',
+        label: 'Post Tool Use Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description: 'Hooks that execute after successful tool execution.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      PostToolUseFailure: {
+        type: 'array',
+        label: 'Post Tool Use Failure Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description: 'Hooks that execute when tool execution fails. ',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      SessionStart: {
+        type: 'array',
+        label: 'Session Start Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description: 'Hooks that execute when a new session starts or resumes.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      SessionEnd: {
+        type: 'array',
+        label: 'Session End Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description: 'Hooks that execute when a session ends.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      PreCompact: {
+        type: 'array',
+        label: 'Pre Compact Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description: 'Hooks that execute before conversation compaction.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      SubagentStart: {
+        type: 'array',
+        label: 'Subagent Start Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a subagent (Task tool call) is started.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      SubagentStop: {
+        type: 'array',
+        label: 'Subagent Stop Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute right before a subagent (Task tool call) concludes its response.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      PermissionRequest: {
+        type: 'array',
+        label: 'Permission Request Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a permission dialog is displayed.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+    },
+  },
 
   experimental: {
     type: 'object',
@@ -1150,38 +1867,18 @@ const SETTINGS_SCHEMA = {
     category: 'Experimental',
     requiresRestart: true,
     default: {},
-    description: 'Setting to enable experimental features',
+    description: 'Settings to enable experimental features.',
     showInDialog: false,
     properties: {
-      skills: {
+      cron: {
         type: 'boolean',
-        label: 'Experimental: Skills',
+        label: 'Enable Cron/Loop Tools',
         category: 'Experimental',
         requiresRestart: true,
         default: false,
         description:
-          'Enable experimental Agent Skills feature. When enabled, Qwen Code can use Skills from .qwen/skills/ and ~/.qwen/skills/.',
+          'Enable in-session cron/loop tools (experimental). When enabled, the model can create recurring prompts using cron_create, cron_list, and cron_delete tools. Can also be enabled via QWEN_CODE_ENABLE_CRON=1 environment variable.',
         showInDialog: true,
-      },
-      visionModelPreview: {
-        type: 'boolean',
-        label: 'Vision Model Preview',
-        category: 'Experimental',
-        requiresRestart: false,
-        default: true,
-        description:
-          'Enable vision model support and auto-switching functionality. When disabled, vision models like qwen-vl-max-latest will be hidden and auto-switching will not occur.',
-        showInDialog: false,
-      },
-      vlmSwitchMode: {
-        type: 'string',
-        label: 'VLM Switch Mode',
-        category: 'Experimental',
-        requiresRestart: false,
-        default: undefined as string | undefined,
-        description:
-          'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). If not set, user will be prompted each time. This is a temporary experimental feature.',
-        showInDialog: false,
       },
     },
   },

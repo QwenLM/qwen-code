@@ -64,30 +64,6 @@ function normalizeBasicCharacters(text: string): string {
   return normalized;
 }
 
-/**
- * Removes trailing whitespace from each line while keeping the original newline
- * separators intact.
- */
-function stripTrailingWhitespacePreserveNewlines(text: string): string {
-  const pieces = text.split(/(\r\n|\n|\r)/);
-  let result = '';
-
-  for (let i = 0; i < pieces.length; i++) {
-    const segment = pieces[i];
-    if (segment === undefined) {
-      continue;
-    }
-
-    if (i % 2 === 0) {
-      result += segment.trimEnd();
-    } else {
-      result += segment;
-    }
-  }
-
-  return result;
-}
-
 /* -------------------------------------------------------------------------- */
 /* Line-based search helpers                                                 */
 /* -------------------------------------------------------------------------- */
@@ -323,23 +299,26 @@ export interface NormalizedEditStrings {
 
 /**
  * Runs the core normalization pipeline:
- *   1. Strip trailing whitespace copied from numbered output.
- *   2. Attempt to find the literal text inside {@link fileContent}.
- *   3. If found through a relaxed match (smart quotes, line trims, etc.),
+ *   1. Attempt to find the literal text inside {@link fileContent}.
+ *   2. If found through a relaxed match (smart quotes, line trims, etc.),
  *      return the canonical slice from disk so later replacements operate on
  *      exact bytes.
+ *   3. Preserve newString as-is (it represents the LLM's intent).
+ *
+ * Note: Trailing whitespace in newString is intentionally NOT stripped.
+ * While LLMs may sometimes accidentally add trailing whitespace, stripping it
+ * unconditionally breaks legitimate use cases where trailing whitespace is
+ * intentional (e.g., multi-line strings, heredocs). See issue #1618.
  */
 export function normalizeEditStrings(
   fileContent: string | null,
   oldString: string,
   newString: string,
 ): NormalizedEditStrings {
-  const trimmedNewString = stripTrailingWhitespacePreserveNewlines(newString);
-
   if (fileContent === null || oldString === '') {
     return {
       oldString,
-      newString: trimmedNewString,
+      newString,
     };
   }
 
@@ -348,7 +327,7 @@ export function normalizeEditStrings(
     return {
       oldString: canonicalOriginal.slice,
       newString: adjustNewStringForTrailingLine(
-        trimmedNewString,
+        newString,
         canonicalOriginal.removedTrailingFinalEmptyLine,
       ),
     };
@@ -356,7 +335,7 @@ export function normalizeEditStrings(
 
   return {
     oldString,
-    newString: trimmedNewString,
+    newString,
   };
 }
 

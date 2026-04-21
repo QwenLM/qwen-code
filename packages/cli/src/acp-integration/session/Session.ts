@@ -16,56 +16,92 @@ import type {
   ToolCallConfirmationDetails,
   ToolResult,
   ChatRecord,
-  SubAgentEventEmitter,
+  AgentEventEmitter,
+  StopHookOutput,
+  HookExecutionRequest,
+  HookExecutionResponse,
+  MessageBus,
 } from '@qwen-code/qwen-code-core';
 import {
+  AuthType,
   ApprovalMode,
   convertToFunctionResponse,
+  createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
   ToolConfirmationOutcome,
   logToolCall,
   logUserPrompt,
   getErrorStatus,
-  isWithinRoot,
-  isNodeError,
-  TaskTool,
   UserPromptEvent,
-  TodoWriteTool,
-  ExitPlanModeTool,
+  readManyFiles,
+  Storage,
+  ToolNames,
+  buildPermissionCheckContext,
+  evaluatePermissionRules,
+  fireNotificationHook,
+  firePermissionRequestHook,
+  firePreToolUseHook,
+  firePostToolUseHook,
+  firePostToolUseFailureHook,
+  injectPermissionRulesIfMissing,
+  NotificationType,
+  persistPermissionOutcome,
+  createHookOutput,
+  generateToolUseId,
+  MessageBusType,
 } from '@qwen-code/qwen-code-core';
 
-import * as acp from '../acp.js';
+import { RequestError } from '@agentclientprotocol/sdk';
+import type {
+  AvailableCommand,
+  ContentBlock,
+  EmbeddedResourceResource,
+  PromptRequest,
+  PromptResponse,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+  SessionNotification,
+  SessionUpdate,
+  SetSessionModeRequest,
+  SetSessionModeResponse,
+  SetSessionModelRequest,
+  SetSessionModelResponse,
+  AgentSideConnection,
+} from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
-import * as fs from 'node:fs/promises';
-import * as path from 'node:path';
 import { z } from 'zod';
-import { getErrorMessage } from '../../utils/errors.js';
 import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
 import {
   handleSlashCommand,
   getAvailableCommands,
   type NonInteractiveSlashCommandResult,
 } from '../../nonInteractiveCliCommands.js';
-import type {
-  AvailableCommand,
-  AvailableCommandsUpdate,
-  SetModeRequest,
-  SetModeResponse,
-  SetModelRequest,
-  SetModelResponse,
-  ApprovalModeValue,
-  CurrentModeUpdate,
-} from '../schema.js';
 import { isSlashCommand } from '../../ui/utils/commandUtils.js';
+import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 
 // Import modular session components
-import type { SessionContext, ToolCallStartParams } from './types.js';
+import type {
+  ApprovalModeValue,
+  SessionContext,
+  ToolCallStartParams,
+} from './types.js';
 import { HistoryReplayer } from './HistoryReplayer.js';
 import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
 import { PlanEmitter } from './emitters/PlanEmitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
+import {
+  buildPermissionRequestContent,
+  toPermissionOptions,
+} from './permissionUtils.js';
+import {
+  MessageRewriteMiddleware,
+  loadRewriteConfig,
+} from './rewrite/index.js';
+
+const debugLogger = createDebugLogger('SESSION');
 
 /**
  * Session represents an active conversation session with the AI model.
@@ -77,13 +113,31 @@ import { SubAgentTracker } from './SubAgentTracker.js';
  */
 export class Session implements SessionContext {
   private pendingPrompt: AbortController | null = null;
+  /**
+   * Tracks the completion of the current prompt so that the next prompt
+   * can await it.  This prevents a new prompt from reading chat history
+   * before the previous prompt's tool results have been added —
+   * a race condition that causes malformed history on Windows where
+   * process termination is slow.
+   */
+  private pendingPromptCompletion: Promise<void> | null = null;
   private turn: number = 0;
+  private readonly runtimeBaseDir: string;
+
+  // Cron scheduling state
+  private cronQueue: string[] = [];
+  private cronProcessing = false;
+  private cronAbortController: AbortController | null = null;
+  private cronCompletion: Promise<void> | null = null;
 
   // Modular components
   private readonly historyReplayer: HistoryReplayer;
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly planEmitter: PlanEmitter;
   private readonly messageEmitter: MessageEmitter;
+
+  // Message rewrite middleware (optional, installed after history replay)
+  messageRewriter?: MessageRewriteMiddleware;
 
   // Implement SessionContext interface
   readonly sessionId: string;
@@ -92,10 +146,11 @@ export class Session implements SessionContext {
     id: string,
     private readonly chat: GeminiChat,
     readonly config: Config,
-    private readonly client: acp.Client,
+    private readonly client: AgentSideConnection,
     private readonly settings: LoadedSettings,
   ) {
     this.sessionId = id;
+    this.runtimeBaseDir = Storage.getRuntimeBaseDir();
 
     // Initialize modular components with this session as context
     this.toolCallEmitter = new ToolCallEmitter(this);
@@ -113,6 +168,22 @@ export class Session implements SessionContext {
   }
 
   /**
+   * Install the message rewrite middleware if configured.
+   * Must be called AFTER history replay to avoid rewriting historical messages.
+   */
+  installRewriter(): void {
+    const rewriteConfig = loadRewriteConfig(this.settings);
+    if (rewriteConfig?.enabled) {
+      debugLogger.info('Message rewrite middleware enabled');
+      this.messageRewriter = new MessageRewriteMiddleware(
+        this.config,
+        rewriteConfig,
+        (update) => this.sendUpdate(update),
+      );
+    }
+  }
+
+  /**
    * Replays conversation history to the client using modular components.
    * Delegates to HistoryReplayer for consistent event emission.
    */
@@ -121,170 +192,598 @@ export class Session implements SessionContext {
   }
 
   async cancelPendingPrompt(): Promise<void> {
-    if (!this.pendingPrompt) {
+    const hadPrompt = !!this.pendingPrompt;
+    const hadCron = !!this.cronAbortController;
+
+    if (!hadPrompt && !hadCron) {
       throw new Error('Not currently generating');
     }
 
-    this.pendingPrompt.abort();
-    this.pendingPrompt = null;
+    if (this.pendingPrompt) {
+      this.pendingPrompt.abort();
+      this.pendingPrompt = null;
+    }
+
+    // Cancel any in-progress cron execution
+    if (this.cronAbortController) {
+      this.cronAbortController.abort();
+      this.cronAbortController = null;
+      this.cronQueue = [];
+      this.cronProcessing = false;
+    }
+
+    // Stop scheduler and emit exit summary
+    const scheduler = this.config.isCronEnabled()
+      ? this.config.getCronScheduler()
+      : null;
+    if (scheduler) {
+      const summary = scheduler.getExitSummary();
+      scheduler.stop();
+      if (summary) {
+        await this.messageEmitter.emitAgentMessage(summary);
+      }
+    }
   }
 
-  async prompt(params: acp.PromptRequest): Promise<acp.PromptResponse> {
+  async prompt(params: PromptRequest): Promise<PromptResponse> {
+    // Install this prompt's AbortController before awaiting the previous
+    // prompt, so that a session/cancel during the wait targets us.
     this.pendingPrompt?.abort();
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
 
-    // Increment turn counter for each user prompt
-    this.turn += 1;
-
-    const chat = this.chat;
-    const promptId = this.config.getSessionId() + '########' + this.turn;
-
-    // Extract text from all text blocks to construct the full prompt text for logging
-    const promptText = params.prompt
-      .filter((block) => block.type === 'text')
-      .map((block) => (block.type === 'text' ? block.text : ''))
-      .join(' ');
-
-    // Log user prompt
-    logUserPrompt(
-      this.config,
-      new UserPromptEvent(
-        promptText.length,
-        promptId,
-        this.config.getContentGeneratorConfig()?.authType,
-        promptText,
-      ),
-    );
-
-    // record user message for session management
-    this.config.getChatRecordingService()?.recordUserMessage(promptText);
-
-    // Check if the input contains a slash command
-    // Extract text from the first text block if present
-    const firstTextBlock = params.prompt.find((block) => block.type === 'text');
-    const inputText = firstTextBlock?.text || '';
-
-    let parts: Part[] | null;
-
-    if (isSlashCommand(inputText)) {
-      // Handle slash command - uses default allowed commands (init, summary, compress)
-      const slashCommandResult = await handleSlashCommand(
-        inputText,
-        pendingSend,
-        this.config,
-        this.settings,
-      );
-
-      parts = await this.#processSlashCommandResult(
-        slashCommandResult,
-        params.prompt,
-      );
-
-      // If parts is null, the command was fully handled (e.g., /summary completed)
-      // Return early without sending to the model
-      if (parts === null) {
-        return { stopReason: 'end_turn' };
+    // Abort any in-progress cron execution (user prompt takes priority)
+    if (this.cronAbortController) {
+      this.cronAbortController.abort();
+      this.cronAbortController = null;
+      this.cronQueue = [];
+      this.cronProcessing = false;
+    }
+    if (this.cronCompletion) {
+      try {
+        await this.cronCompletion;
+      } catch {
+        // Expected: cron was aborted
       }
-    } else {
-      // Normal processing for non-slash commands
-      parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+      this.cronCompletion = null;
     }
 
-    let nextMessage: Content | null = { role: 'user', parts };
+    // Wait for the previous prompt to finish so chat history is consistent.
+    if (this.pendingPromptCompletion) {
+      try {
+        await this.pendingPromptCompletion;
+      } catch {
+        // Expected: previous prompt was cancelled or errored
+      }
+    }
 
-    while (nextMessage !== null) {
+    // Cancelled while waiting for the previous prompt to finish.
+    if (pendingSend.signal.aborted) {
+      return { stopReason: 'cancelled' };
+    }
+
+    // Track this prompt's completion for the next prompt to await
+    let resolveCompletion!: () => void;
+    this.pendingPromptCompletion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    try {
+      const result = await this.#executePrompt(params, pendingSend);
+      this.pendingPrompt = null;
+      this.#startCronSchedulerIfNeeded();
+      // Drain any cron prompts that queued while the prompt was active
+      void this.#drainCronQueue();
+      return result;
+    } finally {
+      resolveCompletion();
+    }
+  }
+
+  async #executePrompt(
+    params: PromptRequest,
+    pendingSend: AbortController,
+  ): Promise<PromptResponse> {
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      async () => {
+        // Increment turn counter for each user prompt
+        this.turn += 1;
+
+        const chat = this.chat;
+        const promptId = this.config.getSessionId() + '########' + this.turn;
+
+        // Extract text from all text blocks to construct the full prompt text for logging
+        const promptText = params.prompt
+          .filter((block) => block.type === 'text')
+          .map((block) => (block.type === 'text' ? block.text : ''))
+          .join(' ');
+
+        // Log user prompt
+        logUserPrompt(
+          this.config,
+          new UserPromptEvent(
+            promptText.length,
+            promptId,
+            this.config.getContentGeneratorConfig()?.authType,
+            promptText,
+          ),
+        );
+
+        // record user message for session management
+        this.config.getChatRecordingService()?.recordUserMessage(promptText);
+
+        // Check if the input contains a slash command
+        // Extract text from the first text block if present
+        const firstTextBlock = params.prompt.find(
+          (block) => block.type === 'text',
+        );
+        const inputText = firstTextBlock?.text || '';
+
+        let parts: Part[] | null;
+
+        if (isSlashCommand(inputText)) {
+          // Handle slash command in ACP mode using capability-based filtering
+          const slashCommandResult = await handleSlashCommand(
+            inputText,
+            pendingSend,
+            this.config,
+            this.settings,
+          );
+
+          parts = await this.#processSlashCommandResult(
+            slashCommandResult,
+            params.prompt,
+          );
+
+          // If parts is null, the command was fully handled (e.g., /summary completed)
+          // Return early without sending to the model
+          if (parts === null) {
+            return { stopReason: 'end_turn' };
+          }
+        } else {
+          // Normal processing for non-slash commands
+          parts = await this.#resolvePrompt(params.prompt, pendingSend.signal);
+        }
+
+        // Fire UserPromptSubmit hook through MessageBus (aligned with core path in client.ts)
+        const hooksEnabled = !this.config.getDisableAllHooks?.();
+        const messageBus = this.config.getMessageBus?.();
+        if (
+          hooksEnabled &&
+          messageBus &&
+          this.config.hasHooksForEvent?.('UserPromptSubmit')
+        ) {
+          const response = await messageBus.request<
+            HookExecutionRequest,
+            HookExecutionResponse
+          >(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName: 'UserPromptSubmit',
+              input: {
+                prompt: promptText,
+              },
+              signal: pendingSend.signal,
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+          const hookOutput = response.output
+            ? createHookOutput('UserPromptSubmit', response.output)
+            : undefined;
+
+          if (
+            hookOutput?.isBlockingDecision() ||
+            hookOutput?.shouldStopExecution()
+          ) {
+            // Hook blocked the prompt - send notification to UI and return
+            const blockReason =
+              hookOutput?.getEffectiveReason() || 'No reason provided';
+            await this.messageEmitter.emitAgentMessage(
+              `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+            );
+            return { stopReason: 'end_turn' };
+          }
+
+          // Add additional context from hooks to the request
+          const additionalContext = hookOutput?.getAdditionalContext();
+          if (additionalContext) {
+            parts = [...parts, { text: additionalContext }];
+          }
+        }
+
+        let nextMessage: Content | null = { role: 'user', parts };
+
+        while (nextMessage !== null) {
+          if (pendingSend.signal.aborted) {
+            chat.addHistory(nextMessage);
+            return { stopReason: 'cancelled' };
+          }
+
+          const functionCalls: FunctionCall[] = [];
+          let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+          const streamStartTime = Date.now();
+
+          try {
+            const responseStream = await chat.sendMessageStream(
+              this.config.getModel(),
+              {
+                message: nextMessage?.parts ?? [],
+                config: {
+                  abortSignal: pendingSend.signal,
+                },
+              },
+              promptId,
+            );
+            nextMessage = null;
+
+            for await (const resp of responseStream) {
+              if (pendingSend.signal.aborted) {
+                return { stopReason: 'cancelled' };
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) {
+                    continue;
+                  }
+
+                  this.messageEmitter.emitMessage(
+                    part.text,
+                    'assistant',
+                    part.thought,
+                  );
+                }
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
+              }
+            }
+          } catch (error) {
+            // Fire StopFailure hook (fire-and-forget, replaces Stop event for API errors)
+            // Aligned with useGeminiStream.ts handleFinishedWithErrorEvent
+            const errorStatus = getErrorStatus(error);
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            const errorType = classifyApiError({
+              message: errorMessage,
+              status: errorStatus,
+            });
+
+            const hookSystem = this.config.getHookSystem?.();
+            const hooksEnabledForStopFailure =
+              !this.config.getDisableAllHooks?.();
+            if (
+              hooksEnabledForStopFailure &&
+              hookSystem &&
+              this.config.hasHooksForEvent?.('StopFailure')
+            ) {
+              // Fire-and-forget: don't wait for hook to complete
+              hookSystem
+                .fireStopFailureEvent(errorType, errorMessage)
+                .catch((err) => {
+                  debugLogger.warn(`StopFailure hook failed: ${err}`);
+                });
+            }
+
+            if (errorStatus === 429) {
+              throw new RequestError(
+                429,
+                'Rate limit exceeded. Try again later.',
+              );
+            }
+
+            throw error;
+          }
+
+          if (usageMetadata) {
+            // Kick off rewrite in background (non-blocking, runs parallel to tools)
+            if (this.messageRewriter) {
+              this.messageRewriter.flushTurn(pendingSend.signal);
+            }
+
+            const durationMs = Date.now() - streamStartTime;
+            await this.messageEmitter.emitUsageMetadata(
+              usageMetadata,
+              '',
+              durationMs,
+            );
+          }
+
+          if (functionCalls.length > 0) {
+            const toolResponseParts: Part[] = [];
+
+            for (const fc of functionCalls) {
+              const response = await this.runTool(
+                pendingSend.signal,
+                promptId,
+                fc,
+              );
+              toolResponseParts.push(...response);
+            }
+
+            nextMessage = { role: 'user', parts: toolResponseParts };
+          }
+        }
+
+        // Wait for any pending rewrite before returning
+        if (this.messageRewriter) {
+          await this.messageRewriter.waitForPendingRewrites();
+        }
+
+        // Fire Stop hook loop (aligned with core path in client.ts)
+        // This is triggered after model response completes with no pending tool calls
+        return this.#handleStopHookLoop(
+          chat,
+          pendingSend,
+          promptId,
+          hooksEnabled,
+          messageBus,
+        );
+      },
+    );
+  }
+
+  /**
+   * Handles the Stop hook iteration loop.
+   * This method processes Stop hooks after a model response completes with no pending tool calls.
+   * If a Stop hook requests continuation, it sends a follow-up message and loops back.
+   * Maximum iterations (100) prevent infinite loops.
+   *
+   * @param chat - The GeminiChat instance
+   * @param pendingSend - The abort controller for the current prompt
+   * @param promptId - The prompt ID for tracking
+   * @param hooksEnabled - Whether hooks are enabled
+   * @param messageBus - The MessageBus for hook communication (may be undefined)
+   * @returns The stop reason ('end_turn' or 'cancelled')
+   */
+  async #handleStopHookLoop(
+    chat: GeminiChat,
+    pendingSend: AbortController,
+    promptId: string,
+    hooksEnabled: boolean,
+    messageBus: MessageBus | undefined,
+  ): Promise<{ stopReason: 'end_turn' | 'cancelled' }> {
+    const MAX_STOP_HOOK_ITERATIONS = 100;
+    let stopHookIterationCount = 0;
+    let stopHookReasons: string[] = [];
+
+    while (stopHookIterationCount < MAX_STOP_HOOK_ITERATIONS) {
+      if (
+        !hooksEnabled ||
+        !messageBus ||
+        pendingSend.signal.aborted ||
+        !this.config.hasHooksForEvent?.('Stop')
+      ) {
+        return { stopReason: 'end_turn' };
+      }
+
+      // Get response text from the chat history
+      const history = chat.getHistory();
+      const lastModelMessage = history
+        .filter((msg) => msg.role === 'model')
+        .pop();
+      const responseText =
+        lastModelMessage?.parts
+          ?.filter((p): p is { text: string } => 'text' in p)
+          .map((p) => p.text)
+          .join('') || '[no response text]';
+
+      const response = await messageBus.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'Stop',
+          input: {
+            stop_hook_active: true,
+            last_assistant_message: responseText,
+          },
+          signal: pendingSend.signal,
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      // Check if aborted after hook execution
       if (pendingSend.signal.aborted) {
-        chat.addHistory(nextMessage);
         return { stopReason: 'cancelled' };
       }
 
-      const functionCalls: FunctionCall[] = [];
-      let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
-      const streamStartTime = Date.now();
+      const hookOutput = response.output
+        ? createHookOutput('Stop', response.output)
+        : undefined;
 
-      try {
-        const responseStream = await chat.sendMessageStream(
-          this.config.getModel(),
-          {
-            message: nextMessage?.parts ?? [],
-            config: {
-              abortSignal: pendingSend.signal,
-            },
-          },
-          promptId,
-        );
-        nextMessage = null;
+      const stopOutput = hookOutput as StopHookOutput | undefined;
 
-        for await (const resp of responseStream) {
+      // Emit system message if provided by hook
+      if (stopOutput?.systemMessage) {
+        await this.messageEmitter.emitAgentMessage(stopOutput.systemMessage);
+      }
+
+      // For Stop hooks, blocking/stop execution should force continuation
+      if (
+        stopOutput?.isBlockingDecision() ||
+        stopOutput?.shouldStopExecution()
+      ) {
+        const continueReason = stopOutput.getEffectiveReason();
+
+        // Track Stop hook iterations
+        stopHookIterationCount++;
+        stopHookReasons = [...stopHookReasons, continueReason];
+
+        // Emit StopHookLoop event for iterations after the first one
+        if (stopHookIterationCount > 1) {
+          await this.messageEmitter.emitStopHookLoop(
+            stopHookIterationCount,
+            stopHookReasons,
+            response.stopHookCount ?? 1,
+          );
+        }
+
+        // Continue the conversation with the hook's reason
+        const continueParts: Part[] = [{ text: continueReason }];
+        let nextMessage: Content | null = {
+          role: 'user',
+          parts: continueParts,
+        };
+
+        // Process the follow-up message and any tool calls that result
+        while (nextMessage !== null) {
           if (pendingSend.signal.aborted) {
             return { stopReason: 'cancelled' };
           }
 
-          if (
-            resp.type === StreamEventType.CHUNK &&
-            resp.value.candidates &&
-            resp.value.candidates.length > 0
-          ) {
-            const candidate = resp.value.candidates[0];
-            for (const part of candidate.content?.parts ?? []) {
-              if (!part.text) {
-                continue;
+          const functionCalls: FunctionCall[] = [];
+          let usageMetadata: GenerateContentResponseUsageMetadata | null = null;
+          const streamStartTime = Date.now();
+
+          try {
+            const continueResponseStream = await chat.sendMessageStream(
+              this.config.getModel(),
+              {
+                message: nextMessage?.parts ?? [],
+                config: {
+                  abortSignal: pendingSend.signal,
+                },
+              },
+              promptId + '_stop_hook_' + stopHookIterationCount,
+            );
+            nextMessage = null;
+
+            for await (const resp of continueResponseStream) {
+              if (pendingSend.signal.aborted) {
+                return { stopReason: 'cancelled' };
               }
 
-              this.messageEmitter.emitMessage(
-                part.text,
-                'assistant',
-                part.thought,
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) continue;
+                  this.messageEmitter.emitMessage(
+                    part.text,
+                    'assistant',
+                    part.thought,
+                  );
+                }
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
+              }
+            }
+          } catch (error) {
+            // Fire StopFailure hook (fire-and-forget)
+            const errorStatus = getErrorStatus(error);
+            const errorMessage =
+              error instanceof Error ? error.message : String(error);
+            const errorType = classifyApiError({
+              message: errorMessage,
+              status: errorStatus,
+            });
+
+            const hookSystem = this.config.getHookSystem?.();
+            const hooksEnabledForStopFailure =
+              !this.config.getDisableAllHooks?.();
+            if (
+              hooksEnabledForStopFailure &&
+              hookSystem &&
+              this.config.hasHooksForEvent?.('StopFailure')
+            ) {
+              hookSystem
+                .fireStopFailureEvent(errorType, errorMessage)
+                .catch((err) => {
+                  debugLogger.warn(`StopFailure hook failed: ${err}`);
+                });
+            }
+
+            if (errorStatus === 429) {
+              throw new RequestError(
+                429,
+                'Rate limit exceeded. Try again later.',
               );
             }
+
+            throw error;
           }
 
-          if (resp.type === StreamEventType.CHUNK && resp.value.usageMetadata) {
-            usageMetadata = resp.value.usageMetadata;
+          if (usageMetadata) {
+            const durationMs = Date.now() - streamStartTime;
+            await this.messageEmitter.emitUsageMetadata(
+              usageMetadata,
+              '',
+              durationMs,
+            );
           }
 
-          if (resp.type === StreamEventType.CHUNK && resp.value.functionCalls) {
-            functionCalls.push(...resp.value.functionCalls);
+          // Process tool calls from the follow-up message
+          if (functionCalls.length > 0) {
+            const toolResponseParts: Part[] = [];
+
+            for (const fc of functionCalls) {
+              const toolResponse = await this.runTool(
+                pendingSend.signal,
+                promptId,
+                fc,
+              );
+              toolResponseParts.push(...toolResponse);
+            }
+
+            nextMessage = { role: 'user', parts: toolResponseParts };
           }
         }
-      } catch (error) {
-        if (getErrorStatus(error) === 429) {
-          throw new acp.RequestError(
-            429,
-            'Rate limit exceeded. Try again later.',
-          );
-        }
 
-        throw error;
+        // Loop continues to check Stop hook again after processing the follow-up
+        continue;
       }
 
-      if (usageMetadata) {
-        const durationMs = Date.now() - streamStartTime;
-        await this.messageEmitter.emitUsageMetadata(
-          usageMetadata,
-          '',
-          durationMs,
-        );
-      }
+      // Stop hook allowed stopping, exit the loop
+      break;
+    }
 
-      if (functionCalls.length > 0) {
-        const toolResponseParts: Part[] = [];
-
-        for (const fc of functionCalls) {
-          const response = await this.runTool(pendingSend.signal, promptId, fc);
-          toolResponseParts.push(...response);
-        }
-
-        nextMessage = { role: 'user', parts: toolResponseParts };
-      }
+    // If we exceeded max iterations, log a warning but still end gracefully
+    if (stopHookIterationCount >= MAX_STOP_HOOK_ITERATIONS) {
+      debugLogger.warn(
+        `Stop hook loop reached maximum iterations (${MAX_STOP_HOOK_ITERATIONS}), forcing stop`,
+      );
     }
 
     return { stopReason: 'end_turn' };
   }
 
-  async sendUpdate(update: acp.SessionUpdate): Promise<void> {
-    const params: acp.SessionNotification = {
+  async sendUpdate(update: SessionUpdate): Promise<void> {
+    const params: SessionNotification = {
       sessionId: this.sessionId,
       update,
     };
@@ -292,13 +791,181 @@ export class Session implements SessionContext {
     await this.client.sessionUpdate(params);
   }
 
+  /**
+   * Starts the cron scheduler if cron is enabled and jobs exist.
+   * The scheduler runs in the background, pushing fired prompts into
+   * `cronQueue` and triggering `#drainCronQueue`.
+   */
+  #startCronSchedulerIfNeeded(): void {
+    if (!this.config.isCronEnabled()) return;
+    const scheduler = this.config.getCronScheduler();
+    if (scheduler.size === 0) return;
+
+    scheduler.start((job: { prompt: string }) => {
+      this.cronQueue.push(job.prompt);
+      void this.#drainCronQueue();
+    });
+  }
+
+  /**
+   * Processes queued cron prompts one at a time. Uses `cronProcessing`
+   * as a mutex to prevent concurrent access to the chat.
+   */
+  async #drainCronQueue(): Promise<void> {
+    if (this.cronProcessing) return;
+    // Don't process cron while a user prompt is active — the queue will be
+    // drained after the prompt completes (see end of prompt()).
+    if (this.pendingPrompt) return;
+    this.cronProcessing = true;
+
+    let resolveCompletion!: () => void;
+    this.cronCompletion = new Promise<void>((resolve) => {
+      resolveCompletion = resolve;
+    });
+
+    try {
+      while (this.cronQueue.length > 0) {
+        const prompt = this.cronQueue.shift()!;
+        await this.#executeCronPrompt(prompt);
+      }
+    } finally {
+      this.cronProcessing = false;
+      resolveCompletion();
+      this.cronCompletion = null;
+
+      // Stop scheduler if all jobs were deleted during execution
+      if (this.config.isCronEnabled()) {
+        const scheduler = this.config.getCronScheduler();
+        if (scheduler.size === 0) {
+          scheduler.stop();
+        }
+      }
+    }
+  }
+
+  /**
+   * Executes a single cron-fired prompt: echoes it as a user message with
+   * `_meta.source='cron'`, streams the model response, and handles tool calls.
+   */
+  async #executeCronPrompt(prompt: string): Promise<void> {
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      async () => {
+        const ac = new AbortController();
+        this.cronAbortController = ac;
+        const promptId =
+          this.config.getSessionId() + '########cron' + Date.now();
+
+        try {
+          // Echo the cron prompt as a user message so the client sees it
+          await this.sendUpdate({
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: prompt },
+            _meta: { source: 'cron' },
+          });
+
+          let nextMessage: Content | null = {
+            role: 'user',
+            parts: [{ text: prompt }],
+          };
+
+          while (nextMessage !== null) {
+            if (ac.signal.aborted) return;
+
+            const functionCalls: FunctionCall[] = [];
+            let usageMetadata: GenerateContentResponseUsageMetadata | null =
+              null;
+            const streamStartTime = Date.now();
+
+            const responseStream = await this.chat.sendMessageStream(
+              this.config.getModel(),
+              {
+                message: nextMessage.parts ?? [],
+                config: { abortSignal: ac.signal },
+              },
+              promptId,
+            );
+            nextMessage = null;
+
+            for await (const resp of responseStream) {
+              if (ac.signal.aborted) return;
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.candidates &&
+                resp.value.candidates.length > 0
+              ) {
+                const candidate = resp.value.candidates[0];
+                for (const part of candidate.content?.parts ?? []) {
+                  if (!part.text) continue;
+                  this.messageEmitter.emitMessage(
+                    part.text,
+                    'assistant',
+                    part.thought,
+                  );
+                }
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.usageMetadata
+              ) {
+                usageMetadata = resp.value.usageMetadata;
+              }
+
+              if (
+                resp.type === StreamEventType.CHUNK &&
+                resp.value.functionCalls
+              ) {
+                functionCalls.push(...resp.value.functionCalls);
+              }
+            }
+
+            if (usageMetadata) {
+              // Kick off rewrite in background (non-blocking)
+              if (this.messageRewriter) {
+                this.messageRewriter.flushTurn(ac.signal);
+              }
+              const durationMs = Date.now() - streamStartTime;
+              await this.messageEmitter.emitUsageMetadata(
+                usageMetadata,
+                '',
+                durationMs,
+              );
+            }
+
+            if (functionCalls.length > 0) {
+              const toolResponseParts: Part[] = [];
+              for (const fc of functionCalls) {
+                const response = await this.runTool(ac.signal, promptId, fc);
+                toolResponseParts.push(...response);
+              }
+              nextMessage = { role: 'user', parts: toolResponseParts };
+            }
+          }
+        } catch (error) {
+          if (ac.signal.aborted) return;
+          debugLogger.error('Error processing cron prompt:', error);
+          const msg = error instanceof Error ? error.message : String(error);
+          await this.messageEmitter.emitAgentMessage(`[cron error] ${msg}`);
+        } finally {
+          if (this.cronAbortController === ac) {
+            this.cronAbortController = null;
+          }
+        }
+      },
+    );
+  }
+
   async sendAvailableCommandsUpdate(): Promise<void> {
     const abortController = new AbortController();
     try {
-      // Use default allowed commands from getAvailableCommands
+      // Load commands available in ACP mode
       const slashCommands = await getAvailableCommands(
         this.config,
         abortController.signal,
+        'acp',
       );
 
       // Convert SlashCommand[] to AvailableCommand[] format for ACP protocol
@@ -310,7 +977,7 @@ export class Session implements SessionContext {
         }),
       );
 
-      const update: AvailableCommandsUpdate = {
+      const update: SessionUpdate = {
         sessionUpdate: 'available_commands_update',
         availableCommands,
       };
@@ -318,7 +985,7 @@ export class Session implements SessionContext {
       await this.sendUpdate(update);
     } catch (error) {
       // Log error but don't fail session creation
-      console.error('Error sending available commands update:', error);
+      debugLogger.error('Error sending available commands update:', error);
     }
   }
 
@@ -327,8 +994,8 @@ export class Session implements SessionContext {
    * Used by SubAgentTracker for sub-agent approval requests.
    */
   async requestPermission(
-    params: acp.RequestPermissionRequest,
-  ): Promise<acp.RequestPermissionResponse> {
+    params: RequestPermissionRequest,
+  ): Promise<RequestPermissionResponse> {
     return this.client.requestPermission(params);
   }
 
@@ -336,7 +1003,9 @@ export class Session implements SessionContext {
    * Sets the approval mode for the current session.
    * Maps ACP approval mode values to core ApprovalMode enum.
    */
-  async setMode(params: SetModeRequest): Promise<SetModeResponse> {
+  async setMode(
+    params: SetSessionModeRequest,
+  ): Promise<SetSessionModeResponse | void> {
     const modeMap: Record<ApprovalModeValue, ApprovalMode> = {
       plan: ApprovalMode.PLAN,
       default: ApprovalMode.DEFAULT,
@@ -344,35 +1013,42 @@ export class Session implements SessionContext {
       yolo: ApprovalMode.YOLO,
     };
 
-    const approvalMode = modeMap[params.modeId];
+    const approvalMode = modeMap[params.modeId as ApprovalModeValue];
     this.config.setApprovalMode(approvalMode);
-
-    return { modeId: params.modeId };
   }
 
   /**
    * Sets the model for the current session.
    * Validates the model ID and switches the model via Config.
    */
-  async setModel(params: SetModelRequest): Promise<SetModelResponse> {
-    const modelId = params.modelId.trim();
+  async setModel(
+    params: SetSessionModelRequest,
+  ): Promise<SetSessionModelResponse | void> {
+    const rawModelId = params.modelId.trim();
 
-    if (!modelId) {
-      throw acp.RequestError.invalidParams('modelId cannot be empty');
+    if (!rawModelId) {
+      throw RequestError.invalidParams(undefined, 'modelId cannot be empty');
     }
 
-    // Attempt to set the model using config
-    await this.config.setModel(modelId, {
-      reason: 'user_request_acp',
-      context: 'session/set_model',
-    });
+    const parsed = parseAcpModelOption(rawModelId);
+    const previousAuthType = this.config.getAuthType?.();
+    const selectedAuthType = parsed.authType ?? previousAuthType;
 
-    // Get updated model info
-    const currentModel = this.config.getModel();
+    if (!selectedAuthType) {
+      throw RequestError.invalidParams(
+        undefined,
+        `authType cannot be determined for modelId "${parsed.modelId}"`,
+      );
+    }
 
-    return {
-      modelId: currentModel,
-    };
+    await this.config.switchModel(
+      selectedAuthType,
+      parsed.modelId,
+      selectedAuthType !== previousAuthType &&
+        selectedAuthType === AuthType.QWEN_OAUTH
+        ? { requireCachedCredentials: true }
+        : undefined,
+    );
   }
 
   /**
@@ -389,15 +1065,19 @@ export class Session implements SessionContext {
       case ToolConfirmationOutcome.ProceedAlways:
         newModeId = 'auto-edit';
         break;
+      case ToolConfirmationOutcome.RestorePrevious:
+        // onConfirm has already restored the mode; read the actual current mode
+        newModeId = this.config.getApprovalMode() as ApprovalModeValue;
+        break;
       case ToolConfirmationOutcome.ProceedOnce:
       default:
         newModeId = 'default';
         break;
     }
 
-    const update: CurrentModeUpdate = {
+    const update: SessionUpdate = {
       sessionUpdate: 'current_mode_update',
-      modeId: newModeId,
+      currentModeId: newModeId,
     };
 
     await this.sendUpdate(update);
@@ -409,7 +1089,7 @@ export class Session implements SessionContext {
     fc: FunctionCall,
   ): Promise<Part[]> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
-    const args = (fc.args ?? {}) as Record<string, unknown>;
+    let args = (fc.args ?? {}) as Record<string, unknown>;
 
     const startTime = Date.now();
 
@@ -442,44 +1122,80 @@ export class Session implements SessionContext {
       ];
     };
 
+    const earlyErrorResponse = async (
+      error: Error,
+      toolName = fc.name ?? 'unknown_tool',
+    ) => {
+      if (toolName !== ToolNames.TODO_WRITE) {
+        await this.toolCallEmitter.emitError(callId, toolName, error);
+      }
+
+      const errorParts = errorResponse(error);
+      this.config.getChatRecordingService()?.recordToolResult(errorParts, {
+        callId,
+        status: 'error',
+        resultDisplay: undefined,
+        error,
+        errorType: undefined,
+      });
+      return errorParts;
+    };
+
     if (!fc.name) {
-      return errorResponse(new Error('Missing function name'));
+      return earlyErrorResponse(new Error('Missing function name'));
     }
 
     const toolRegistry = this.config.getToolRegistry();
     const tool = toolRegistry.getTool(fc.name as string);
 
     if (!tool) {
-      return errorResponse(
+      return earlyErrorResponse(
         new Error(`Tool "${fc.name}" not found in registry.`),
       );
     }
 
+    // ---- L1: Tool enablement check ----
+    const pm = this.config.getPermissionManager?.();
+    if (pm && !(await pm.isToolEnabled(fc.name as string))) {
+      return earlyErrorResponse(
+        new Error(
+          `Qwen Code requires permission to use "${fc.name}", but that permission was declined.`,
+        ),
+        fc.name,
+      );
+    }
+
     // Detect TodoWriteTool early - route to plan updates instead of tool_call events
-    const isTodoWriteTool = tool.name === TodoWriteTool.Name;
-    const isTaskTool = tool.name === TaskTool.Name;
-    const isExitPlanModeTool = tool.name === ExitPlanModeTool.Name;
+    const isTodoWriteTool = tool.name === ToolNames.TODO_WRITE;
+    const isAgentTool = tool.name === ToolNames.AGENT;
+    const isExitPlanModeTool = tool.name === ToolNames.EXIT_PLAN_MODE;
 
     // Track cleanup functions for sub-agent event listeners
     let subAgentCleanupFunctions: Array<() => void> = [];
 
+    // Generate tool_use_id for hook tracking (aligned with core path)
+    const toolUseId = generateToolUseId();
+
+    // Get approval mode for hook context (defined outside try for catch block access)
+    const approvalMode = this.config.getApprovalMode();
+
     try {
       const invocation = tool.build(args);
 
-      if (isTaskTool && 'eventEmitter' in invocation) {
-        // Access eventEmitter from TaskTool invocation
+      if (isAgentTool && 'eventEmitter' in invocation) {
+        // Access eventEmitter from AgentTool invocation
         const taskEventEmitter = (
           invocation as {
-            eventEmitter: SubAgentEventEmitter;
+            eventEmitter: AgentEventEmitter;
           }
         ).eventEmitter;
 
-        // Extract subagent metadata from TaskTool call
+        // Extract subagent metadata from AgentTool call
         const parentToolCallId = callId;
         const subagentType = (args['subagent_type'] as string) ?? '';
 
         // Create a SubAgentTracker for this tool execution
-        const subAgentTracker = new SubAgentTracker(
+        const subSubAgentTracker = new SubAgentTracker(
           this,
           this.client,
           parentToolCallId,
@@ -487,89 +1203,238 @@ export class Session implements SessionContext {
         );
 
         // Set up sub-agent tool tracking
-        subAgentCleanupFunctions = subAgentTracker.setup(
+        subAgentCleanupFunctions = subSubAgentTracker.setup(
           taskEventEmitter,
           abortSignal,
         );
       }
 
-      const confirmationDetails =
-        this.config.getApprovalMode() !== ApprovalMode.YOLO
-          ? await invocation.shouldConfirmExecute(abortSignal)
-          : false;
+      // L3→L4→L5 Permission Flow (aligned with coreToolScheduler)
+      //
+      // L3: Tool's intrinsic default permission
+      // L4: PermissionManager rule override
+      // L5: ApprovalMode override (YOLO / AUTO_EDIT / PLAN)
+      //
+      // AUTO_EDIT auto-approval is handled HERE, same as coreToolScheduler.
+      // The VS Code extension is just a UI layer for requestPermission.
+      const isAskUserQuestionTool = fc.name === ToolNames.ASK_USER_QUESTION;
 
-      if (confirmationDetails) {
-        const content: acp.ToolCallContent[] = [];
+      // ---- L3: Tool's default permission ----
+      // In YOLO mode, force 'allow' for everything except ask_user_question.
+      const defaultPermission =
+        this.config.getApprovalMode() !== ApprovalMode.YOLO ||
+        isAskUserQuestionTool
+          ? await invocation.getDefaultPermission()
+          : 'allow';
 
-        if (confirmationDetails.type === 'edit') {
-          content.push({
-            type: 'diff',
-            path: confirmationDetails.fileName,
-            oldText: confirmationDetails.originalContent,
-            newText: confirmationDetails.newContent,
-          });
+      // ---- L4: PermissionManager override (if relevant rules exist) ----
+      const toolParams = invocation.params as Record<string, unknown>;
+      const pmCtx = buildPermissionCheckContext(
+        fc.name,
+        toolParams,
+        this.config.getTargetDir?.() ?? '',
+      );
+      const { finalPermission, pmForcedAsk } = await evaluatePermissionRules(
+        pm,
+        defaultPermission,
+        pmCtx,
+      );
+
+      const needsConfirmation = finalPermission === 'ask';
+
+      // ---- L5: ApprovalMode overrides ----
+      const isPlanMode = approvalMode === ApprovalMode.PLAN;
+
+      if (finalPermission === 'deny') {
+        return earlyErrorResponse(
+          new Error(
+            defaultPermission === 'deny'
+              ? `Tool "${fc.name}" is denied: command substitution is not allowed for security reasons.`
+              : `Tool "${fc.name}" is denied by permission rules.`,
+          ),
+          fc.name,
+        );
+      }
+
+      let didRequestPermission = false;
+      let confirmationDetails: ToolCallConfirmationDetails | undefined;
+
+      if (needsConfirmation) {
+        confirmationDetails =
+          await invocation.getConfirmationDetails(abortSignal);
+
+        // Centralised rule injection (for display and persistence)
+        injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
+
+        if (
+          isPlanMode &&
+          !isExitPlanModeTool &&
+          !isAskUserQuestionTool &&
+          confirmationDetails.type !== 'info'
+        ) {
+          return earlyErrorResponse(
+            new Error(
+              `Plan mode is active. The tool "${fc.name}" cannot be executed because it modifies the system. ` +
+                'Please use the exit_plan_mode tool to present your plan and exit plan mode before making changes.',
+            ),
+            fc.name,
+          );
         }
 
-        // Add plan content for exit_plan_mode
-        if (confirmationDetails.type === 'plan') {
-          content.push({
-            type: 'content',
-            content: {
-              type: 'text',
-              text: confirmationDetails.plan,
-            },
-          });
-        }
+        const messageBus = this.config.getMessageBus?.();
+        const hooksEnabled = !this.config.getDisableAllHooks?.();
+        let hookHandled = false;
 
-        // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
-        const mappedKind = this.toolCallEmitter.mapToolKind(tool.kind, fc.name);
+        if (hooksEnabled && messageBus) {
+          const hookResult = await firePermissionRequestHook(
+            messageBus,
+            fc.name,
+            args,
+            String(approvalMode),
+          );
 
-        const params: acp.RequestPermissionRequest = {
-          sessionId: this.sessionId,
-          options: toPermissionOptions(confirmationDetails),
-          toolCall: {
-            toolCallId: callId,
-            status: 'pending',
-            title: invocation.getDescription(),
-            content,
-            locations: invocation.toolLocations(),
-            kind: mappedKind,
-          },
-        };
+          if (hookResult.hasDecision) {
+            hookHandled = true;
+            if (hookResult.shouldAllow) {
+              if (hookResult.updatedInput) {
+                args = hookResult.updatedInput;
+                invocation.params =
+                  hookResult.updatedInput as typeof invocation.params;
+              }
 
-        const output = await this.client.requestPermission(params);
-        const outcome =
-          output.outcome.outcome === 'cancelled'
-            ? ToolConfirmationOutcome.Cancel
-            : z
-                .nativeEnum(ToolConfirmationOutcome)
-                .parse(output.outcome.optionId);
-
-        await confirmationDetails.onConfirm(outcome);
-
-        // After exit_plan_mode confirmation, send current_mode_update notification
-        if (isExitPlanModeTool && outcome !== ToolConfirmationOutcome.Cancel) {
-          await this.sendCurrentModeUpdateNotification(outcome);
-        }
-
-        switch (outcome) {
-          case ToolConfirmationOutcome.Cancel:
-            return errorResponse(
-              new Error(`Tool "${fc.name}" was canceled by the user.`),
-            );
-          case ToolConfirmationOutcome.ProceedOnce:
-          case ToolConfirmationOutcome.ProceedAlways:
-          case ToolConfirmationOutcome.ProceedAlwaysServer:
-          case ToolConfirmationOutcome.ProceedAlwaysTool:
-          case ToolConfirmationOutcome.ModifyWithEditor:
-            break;
-          default: {
-            const resultOutcome: never = outcome;
-            throw new Error(`Unexpected: ${resultOutcome}`);
+              await confirmationDetails.onConfirm(
+                ToolConfirmationOutcome.ProceedOnce,
+              );
+            } else {
+              return earlyErrorResponse(
+                new Error(
+                  hookResult.denyMessage ||
+                    `Permission denied by hook for "${fc.name}"`,
+                ),
+                fc.name,
+              );
+            }
           }
         }
-      } else if (!isTodoWriteTool) {
-        // Skip tool_call event for TodoWriteTool - use ToolCallEmitter
+
+        // AUTO_EDIT mode: auto-approve edit and info tools
+        // (same as coreToolScheduler L5 — NOT delegated to the extension)
+        if (
+          approvalMode === ApprovalMode.AUTO_EDIT &&
+          (confirmationDetails.type === 'edit' ||
+            confirmationDetails.type === 'info')
+        ) {
+          // Auto-approve, skip requestPermission.
+          // didRequestPermission stays false → emitStart below.
+        } else if (!hookHandled) {
+          // Show permission dialog via ACP requestPermission
+          didRequestPermission = true;
+          const content = buildPermissionRequestContent(confirmationDetails);
+
+          // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
+          const mappedKind = this.toolCallEmitter.mapToolKind(
+            tool.kind,
+            fc.name,
+          );
+
+          if (hooksEnabled && messageBus) {
+            void fireNotificationHook(
+              messageBus,
+              `Qwen Code needs your permission to use ${fc.name}`,
+              NotificationType.PermissionPrompt,
+              'Permission needed',
+            );
+          }
+
+          const params: RequestPermissionRequest = {
+            sessionId: this.sessionId,
+            options: toPermissionOptions(confirmationDetails, pmForcedAsk),
+            toolCall: {
+              toolCallId: callId,
+              status: 'pending',
+              title: invocation.getDescription(),
+              content,
+              locations: invocation.toolLocations(),
+              kind: mappedKind,
+              rawInput: args,
+            },
+          };
+
+          const output = (await this.client.requestPermission(
+            params,
+          )) as RequestPermissionResponse & {
+            answers?: Record<string, string>;
+          };
+          const outcome =
+            output.outcome.outcome === 'cancelled'
+              ? ToolConfirmationOutcome.Cancel
+              : z
+                  .nativeEnum(ToolConfirmationOutcome)
+                  .parse(output.outcome.optionId);
+
+          await confirmationDetails.onConfirm(outcome, {
+            answers: output.answers,
+          });
+
+          // Persist permission rules when user explicitly chose "Always Allow".
+          // This branch is only reached for tools that went through
+          // requestPermission (user saw dialog and made a choice).
+          // AUTO_EDIT auto-approved tools never reach here.
+          if (
+            outcome === ToolConfirmationOutcome.ProceedAlways ||
+            outcome === ToolConfirmationOutcome.ProceedAlwaysProject ||
+            outcome === ToolConfirmationOutcome.ProceedAlwaysUser
+          ) {
+            await persistPermissionOutcome(
+              outcome,
+              confirmationDetails,
+              this.config.getOnPersistPermissionRule?.(),
+              this.config.getPermissionManager?.(),
+              { answers: output.answers },
+            );
+          }
+
+          // After exit_plan_mode confirmation, send current_mode_update
+          if (
+            isExitPlanModeTool &&
+            outcome !== ToolConfirmationOutcome.Cancel
+          ) {
+            await this.sendCurrentModeUpdateNotification(outcome);
+          }
+
+          // After edit tool ProceedAlways, notify the client about mode change
+          if (
+            confirmationDetails.type === 'edit' &&
+            outcome === ToolConfirmationOutcome.ProceedAlways
+          ) {
+            await this.sendCurrentModeUpdateNotification(outcome);
+          }
+
+          switch (outcome) {
+            case ToolConfirmationOutcome.Cancel:
+              return errorResponse(
+                new Error(`Tool "${fc.name}" was canceled by the user.`),
+              );
+            case ToolConfirmationOutcome.ProceedOnce:
+            case ToolConfirmationOutcome.ProceedAlways:
+            case ToolConfirmationOutcome.ProceedAlwaysProject:
+            case ToolConfirmationOutcome.ProceedAlwaysUser:
+            case ToolConfirmationOutcome.ProceedAlwaysServer:
+            case ToolConfirmationOutcome.ProceedAlwaysTool:
+            case ToolConfirmationOutcome.ModifyWithEditor:
+            case ToolConfirmationOutcome.RestorePrevious:
+              break;
+            default: {
+              const resultOutcome: never = outcome;
+              throw new Error(`Unexpected: ${resultOutcome}`);
+            }
+          }
+        }
+      }
+
+      if (!didRequestPermission && !isTodoWriteTool) {
+        // Auto-approved (L3 allow / L4 PM allow / L5 YOLO|AUTO_EDIT)
+        // → emit tool_call start notification
         const startParams: ToolCallStartParams = {
           callId,
           toolName: fc.name,
@@ -577,6 +1442,41 @@ export class Session implements SessionContext {
           status: 'in_progress',
         };
         await this.toolCallEmitter.emitStart(startParams);
+      }
+
+      // Fire PreToolUse hook (aligned with core path in coreToolScheduler.ts)
+      const hooksEnabledForTool = !this.config.getDisableAllHooks?.();
+      const messageBusForTool = this.config.getMessageBus?.();
+      const permissionMode = String(approvalMode);
+
+      if (hooksEnabledForTool && messageBusForTool) {
+        const preHookResult = await firePreToolUseHook(
+          messageBusForTool,
+          fc.name,
+          args,
+          toolUseId,
+          permissionMode,
+          abortSignal,
+        );
+
+        if (!preHookResult.shouldProceed) {
+          // Hook blocked the tool execution - send notification to UI
+          const blockReason =
+            preHookResult.blockReason || 'Blocked by PreToolUse hook';
+          await this.messageEmitter.emitAgentMessage(
+            `🚫 **PreToolUse blocked**: ${fc.name} - ${blockReason}`,
+          );
+          return earlyErrorResponse(new Error(blockReason), fc.name);
+        }
+
+        // Add additional context from PreToolUse hook if provided
+        // Note: This context would need to be passed to the tool invocation
+        // For now, we just log it as the tool execution proceeds
+        if (preHookResult.additionalContext) {
+          debugLogger.debug(
+            `PreToolUse hook additional context for ${fc.name}: ${preHookResult.additionalContext}`,
+          );
+        }
       }
 
       const toolResult: ToolResult = await invocation.execute(abortSignal);
@@ -590,6 +1490,61 @@ export class Session implements SessionContext {
         callId,
         toolResult.llmContent,
       );
+
+      // Fire PostToolUse hook on successful execution (aligned with core path)
+      if (hooksEnabledForTool && messageBusForTool && !toolResult.error) {
+        // Use the same response shape as core (llmContent/returnDisplay)
+        const toolResponse = {
+          llmContent: toolResult.llmContent,
+          returnDisplay: toolResult.returnDisplay,
+        };
+        const postHookResult = await firePostToolUseHook(
+          messageBusForTool,
+          fc.name,
+          args,
+          toolResponse,
+          toolUseId,
+          permissionMode,
+          abortSignal,
+        );
+
+        // If hook indicates to stop, return an error response
+        if (postHookResult.shouldStop) {
+          const stopMessage =
+            postHookResult.stopReason ||
+            'Execution stopped by PostToolUse hook';
+          debugLogger.info(
+            `PostToolUse hook requested stop for ${fc.name}: ${stopMessage}`,
+          );
+          return earlyErrorResponse(new Error(stopMessage), fc.name);
+        }
+
+        // Add additional context from PostToolUse hook if provided
+        if (postHookResult.additionalContext) {
+          // Append additional context to the tool response
+          const contextPart = { text: postHookResult.additionalContext };
+          responseParts.push(contextPart);
+        }
+      } else if (hooksEnabledForTool && messageBusForTool && toolResult.error) {
+        // Fire PostToolUseFailure hook when tool returns an error (aligned with core path)
+        const failureHookResult = await firePostToolUseFailureHook(
+          messageBusForTool,
+          toolUseId,
+          fc.name ?? 'unknown_tool',
+          args,
+          toolResult.error.message,
+          false, // not an interrupt
+          permissionMode,
+          abortSignal,
+        );
+
+        // Log additional context if provided
+        if (failureHookResult.additionalContext) {
+          debugLogger.debug(
+            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
+          );
+        }
+      }
 
       // Handle TodoWriteTool: extract todos and send plan update
       if (isTodoWriteTool) {
@@ -655,6 +1610,31 @@ export class Session implements SessionContext {
 
       const error = e instanceof Error ? e : new Error(String(e));
 
+      // Fire PostToolUseFailure hook (aligned with core path in coreToolScheduler.ts)
+      const hooksEnabledForError = !this.config.getDisableAllHooks?.();
+      const messageBusForError = this.config.getMessageBus?.();
+      const isInterrupt = abortSignal.aborted;
+
+      if (hooksEnabledForError && messageBusForError) {
+        const failureHookResult = await firePostToolUseFailureHook(
+          messageBusForError,
+          toolUseId,
+          fc.name ?? 'unknown_tool',
+          args,
+          error.message,
+          isInterrupt,
+          String(approvalMode),
+          abortSignal,
+        );
+
+        // Log additional context if provided
+        if (failureHookResult.additionalContext) {
+          debugLogger.debug(
+            `PostToolUseFailure hook additional context for ${fc.name}: ${failureHookResult.additionalContext}`,
+          );
+        }
+      }
+
       // Use ToolCallEmitter for error handling
       await this.toolCallEmitter.emitError(
         callId,
@@ -702,7 +1682,7 @@ export class Session implements SessionContext {
    */
   async #processSlashCommandResult(
     result: NonInteractiveSlashCommandResult,
-    originalPrompt: acp.ContentBlock[],
+    originalPrompt: ContentBlock[],
   ): Promise<Part[] | null> {
     switch (result.type) {
       case 'submit_prompt':
@@ -711,9 +1691,7 @@ export class Session implements SessionContext {
         return normalizePartList(result.content);
 
       case 'message': {
-        // 'message' type is not ideal for ACP mode, but we handle it for compatibility
-        // by converting it to a stream_messages-like notification
-        await this.client.sendCustomNotification('_qwencode/slash_command', {
+        await this.client.extNotification('_qwencode/slash_command', {
           sessionId: this.sessionId,
           command: originalPrompt
             .filter((block) => block.type === 'text')
@@ -740,7 +1718,7 @@ export class Session implements SessionContext {
 
         // Stream all messages to the client
         for await (const msg of result.messages) {
-          await this.client.sendCustomNotification('_qwencode/slash_command', {
+          await this.client.extNotification('_qwencode/slash_command', {
             sessionId: this.sessionId,
             command,
             messageType: msg.messageType,
@@ -764,13 +1742,12 @@ export class Session implements SessionContext {
       }
 
       case 'no_command':
-        // No command was found or executed, use original prompt
-        return originalPrompt.map((block) => {
-          if (block.type === 'text') {
-            return { text: block.text };
-          }
-          throw new Error(`Unsupported block type: ${block.type}`);
-        });
+        // No command was found or executed, resolve the original prompt
+        // through the standard path that handles all block types
+        return this.#resolvePrompt(
+          originalPrompt,
+          new AbortController().signal,
+        );
 
       default: {
         // Exhaustiveness check
@@ -782,12 +1759,12 @@ export class Session implements SessionContext {
   }
 
   async #resolvePrompt(
-    message: acp.ContentBlock[],
+    message: ContentBlock[],
     abortSignal: AbortSignal,
   ): Promise<Part[]> {
     const FILE_URI_SCHEME = 'file://';
 
-    const embeddedContext: acp.EmbeddedResourceResource[] = [];
+    const embeddedContext: EmbeddedResourceResource[] = [];
 
     const parts = message.map((part) => {
       switch (part.type) {
@@ -831,120 +1808,11 @@ export class Session implements SessionContext {
       return parts;
     }
 
-    const atPathToResolvedSpecMap = new Map<string, string>();
-
-    // Get centralized file discovery service
-    const fileDiscovery = this.config.getFileService();
-    const respectGitIgnore = this.config.getFileFilteringRespectGitIgnore();
-
-    const pathSpecsToRead: string[] = [];
-    const contentLabelsForDisplay: string[] = [];
-    const ignoredPaths: string[] = [];
-
-    const toolRegistry = this.config.getToolRegistry();
-    const readManyFilesTool = toolRegistry.getTool('read_many_files');
-    const globTool = toolRegistry.getTool('glob');
-
-    if (!readManyFilesTool) {
-      throw new Error('Error: read_many_files tool not found.');
-    }
-
-    for (const atPathPart of atPathCommandParts) {
-      const pathName = atPathPart.fileData!.fileUri;
-      // Check if path should be ignored by git
-      if (fileDiscovery.shouldGitIgnoreFile(pathName)) {
-        ignoredPaths.push(pathName);
-        const reason = respectGitIgnore
-          ? 'git-ignored and will be skipped'
-          : 'ignored by custom patterns';
-        console.warn(`Path ${pathName} is ${reason}.`);
-        continue;
-      }
-      let currentPathSpec = pathName;
-      let resolvedSuccessfully = false;
-      try {
-        const absolutePath = path.resolve(this.config.getTargetDir(), pathName);
-        if (isWithinRoot(absolutePath, this.config.getTargetDir())) {
-          const stats = await fs.stat(absolutePath);
-          if (stats.isDirectory()) {
-            currentPathSpec = pathName.endsWith('/')
-              ? `${pathName}**`
-              : `${pathName}/**`;
-            this.debug(
-              `Path ${pathName} resolved to directory, using glob: ${currentPathSpec}`,
-            );
-          } else {
-            this.debug(`Path ${pathName} resolved to file: ${currentPathSpec}`);
-          }
-          resolvedSuccessfully = true;
-        } else {
-          this.debug(
-            `Path ${pathName} is outside the project directory. Skipping.`,
-          );
-        }
-      } catch (error) {
-        if (isNodeError(error) && error.code === 'ENOENT') {
-          if (this.config.getEnableRecursiveFileSearch() && globTool) {
-            this.debug(
-              `Path ${pathName} not found directly, attempting glob search.`,
-            );
-            try {
-              const globResult = await globTool.buildAndExecute(
-                {
-                  pattern: `**/*${pathName}*`,
-                  path: this.config.getTargetDir(),
-                },
-                abortSignal,
-              );
-              if (
-                globResult.llmContent &&
-                typeof globResult.llmContent === 'string' &&
-                !globResult.llmContent.startsWith('No files found') &&
-                !globResult.llmContent.startsWith('Error:')
-              ) {
-                const lines = globResult.llmContent.split('\n');
-                if (lines.length > 1 && lines[1]) {
-                  const firstMatchAbsolute = lines[1].trim();
-                  currentPathSpec = path.relative(
-                    this.config.getTargetDir(),
-                    firstMatchAbsolute,
-                  );
-                  this.debug(
-                    `Glob search for ${pathName} found ${firstMatchAbsolute}, using relative path: ${currentPathSpec}`,
-                  );
-                  resolvedSuccessfully = true;
-                } else {
-                  this.debug(
-                    `Glob search for '**/*${pathName}*' did not return a usable path. Path ${pathName} will be skipped.`,
-                  );
-                }
-              } else {
-                this.debug(
-                  `Glob search for '**/*${pathName}*' found no files or an error. Path ${pathName} will be skipped.`,
-                );
-              }
-            } catch (globError) {
-              console.error(
-                `Error during glob search for ${pathName}: ${getErrorMessage(globError)}`,
-              );
-            }
-          } else {
-            this.debug(
-              `Glob tool not found. Path ${pathName} will be skipped.`,
-            );
-          }
-        } else {
-          console.error(
-            `Error stating path ${pathName}. Path ${pathName} will be skipped.`,
-          );
-        }
-      }
-      if (resolvedSuccessfully) {
-        pathSpecsToRead.push(currentPathSpec);
-        atPathToResolvedSpecMap.set(pathName, currentPathSpec);
-        contentLabelsForDisplay.push(pathName);
-      }
-    }
+    // Extract paths from @ commands - pass directly to readManyFiles without filtering
+    // since this is user-triggered behavior, not LLM-triggered
+    const pathSpecsToRead: string[] = atPathCommandParts.map(
+      (part) => part.fileData!.fileUri,
+    );
 
     // Construct the initial part of the query for the LLM
     let initialQueryText = '';
@@ -952,70 +1820,49 @@ export class Session implements SessionContext {
       const chunk = parts[i];
       if ('text' in chunk) {
         initialQueryText += chunk.text;
-      } else {
-        // type === 'atPath'
-        const resolvedSpec =
-          chunk.fileData && atPathToResolvedSpecMap.get(chunk.fileData.fileUri);
+      } else if ('fileData' in chunk) {
+        const pathName = chunk.fileData!.fileUri;
         if (
           i > 0 &&
           initialQueryText.length > 0 &&
-          !initialQueryText.endsWith(' ') &&
-          resolvedSpec
+          !initialQueryText.endsWith(' ')
         ) {
-          // Add space if previous part was text and didn't end with space, or if previous was @path
-          const prevPart = parts[i - 1];
-          if (
-            'text' in prevPart ||
-            ('fileData' in prevPart &&
-              atPathToResolvedSpecMap.has(prevPart.fileData!.fileUri))
-          ) {
-            initialQueryText += ' ';
-          }
+          initialQueryText += ' ';
         }
-        // Append the resolved path spec for display purposes
-        if (resolvedSpec) {
-          initialQueryText += `@${resolvedSpec}`;
-        }
+        initialQueryText += `@${pathName}`;
       }
-    }
-
-    // Handle ignored paths message
-    let ignoredPathsMessage = '';
-    if (ignoredPaths.length > 0) {
-      const pathList = ignoredPaths.map((p) => `- ${p}`).join('\n');
-      ignoredPathsMessage = `Note: The following paths were skipped because they are ignored:\n${pathList}\n\n`;
     }
 
     const processedQueryParts: Part[] = [];
 
-    // Read files using read_many_files tool
+    // Read files using readManyFiles utility
     if (pathSpecsToRead.length > 0) {
-      const readResult = await readManyFilesTool.buildAndExecute(
-        {
-          paths: pathSpecsToRead,
-        },
-        abortSignal,
-      );
+      const readResult = await readManyFiles(this.config, {
+        paths: pathSpecsToRead,
+        signal: abortSignal,
+      });
 
-      const contentForLlm =
-        typeof readResult.llmContent === 'string'
-          ? readResult.llmContent
-          : JSON.stringify(readResult.llmContent);
+      const contentParts = Array.isArray(readResult.contentParts)
+        ? readResult.contentParts
+        : [readResult.contentParts];
 
-      // Combine content label, ignored paths message, file content, and user query
-      const combinedText = `${ignoredPathsMessage}${contentForLlm}`.trim();
-      processedQueryParts.push({ text: combinedText });
+      // Add initial query text first
       processedQueryParts.push({ text: initialQueryText });
+
+      // Then add content parts (preserving binary files as inlineData)
+      for (const part of contentParts) {
+        if (typeof part === 'string') {
+          processedQueryParts.push({ text: part });
+        } else {
+          processedQueryParts.push(part);
+        }
+      }
     } else if (embeddedContext.length > 0) {
       // No @path files to read, but we have embedded context
-      processedQueryParts.push({
-        text: `${ignoredPathsMessage}${initialQueryText}`.trim(),
-      });
+      processedQueryParts.push({ text: initialQueryText.trim() });
     } else {
-      // No @path files found or resolved
-      processedQueryParts.push({
-        text: `${ignoredPathsMessage}${initialQueryText}`.trim(),
-      });
+      // No @path files found
+      processedQueryParts.push({ text: initialQueryText.trim() });
     }
 
     // Process embedded context from resource blocks
@@ -1042,94 +1889,7 @@ export class Session implements SessionContext {
 
   debug(msg: string): void {
     if (this.config.getDebugMode()) {
-      console.warn(msg);
-    }
-  }
-}
-
-// ============================================================================
-// Helper functions
-// ============================================================================
-
-const basicPermissionOptions = [
-  {
-    optionId: ToolConfirmationOutcome.ProceedOnce,
-    name: 'Allow',
-    kind: 'allow_once',
-  },
-  {
-    optionId: ToolConfirmationOutcome.Cancel,
-    name: 'Reject',
-    kind: 'reject_once',
-  },
-] as const;
-
-function toPermissionOptions(
-  confirmation: ToolCallConfirmationDetails,
-): acp.PermissionOption[] {
-  switch (confirmation.type) {
-    case 'edit':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: 'Allow All Edits',
-          kind: 'allow_always',
-        },
-        ...basicPermissionOptions,
-      ];
-    case 'exec':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Always Allow ${confirmation.rootCommand}`,
-          kind: 'allow_always',
-        },
-        ...basicPermissionOptions,
-      ];
-    case 'mcp':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlwaysServer,
-          name: `Always Allow ${confirmation.serverName}`,
-          kind: 'allow_always',
-        },
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlwaysTool,
-          name: `Always Allow ${confirmation.toolName}`,
-          kind: 'allow_always',
-        },
-        ...basicPermissionOptions,
-      ];
-    case 'info':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Always Allow`,
-          kind: 'allow_always',
-        },
-        ...basicPermissionOptions,
-      ];
-    case 'plan':
-      return [
-        {
-          optionId: ToolConfirmationOutcome.ProceedAlways,
-          name: `Yes, and auto-accept edits`,
-          kind: 'allow_always',
-        },
-        {
-          optionId: ToolConfirmationOutcome.ProceedOnce,
-          name: `Yes, and manually approve edits`,
-          kind: 'allow_once',
-        },
-        {
-          optionId: ToolConfirmationOutcome.Cancel,
-          name: `No, keep planning (esc)`,
-          kind: 'reject_once',
-        },
-      ];
-    default: {
-      const unreachable: never = confirmation;
-      throw new Error(`Unexpected: ${unreachable}`);
+      debugLogger.warn(msg);
     }
   }
 }

@@ -12,6 +12,7 @@ export {
   type ResolvedModelConfig,
   type AvailableModel,
   type ModelSwitchMetadata,
+  type RuntimeModelSnapshot,
 } from './types.js';
 
 export { ModelRegistry } from './modelRegistry.js';

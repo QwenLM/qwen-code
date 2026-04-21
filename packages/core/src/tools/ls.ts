@@ -9,11 +9,19 @@ import path from 'node:path';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { makeRelative, shortenPath } from '../utils/paths.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths, isSubpath } from '../utils/paths.js';
 import type { Config } from '../config/config.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 import { ToolErrorType } from './tool-error.js';
 import { ToolDisplayNames, ToolNames } from './tool-names.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { Storage } from '../config/storage.js';
+import { getMemoryBaseDir } from '../memory/paths.js';
+
+const debugLogger = createDebugLogger('LS');
+
+const MAX_ENTRY_COUNT = 100;
 
 /**
  * Parameters for the LS tool
@@ -112,6 +120,27 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
     return shortenPath(relativePath);
   }
 
+  /**
+   * Returns 'ask' for paths outside the workspace/userSkills directories,
+   * so that external directory listings require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    const dirPath = path.resolve(this.params.path);
+    const workspaceContext = this.config.getWorkspaceContext();
+    const userSkillsDirs = this.config.storage.getUserSkillsDirs();
+    const userExtensionsDir = Storage.getUserExtensionsDir();
+
+    if (
+      workspaceContext.isPathWithinWorkspace(dirPath) ||
+      isSubpaths(userSkillsDirs, dirPath) ||
+      isSubpath(userExtensionsDir, dirPath) ||
+      isSubpath(getMemoryBaseDir(), dirPath)
+    ) {
+      return 'allow';
+    }
+    return 'ask';
+  }
+
   // Helper for consistent error formatting
   private errorResult(
     llmContent: string,
@@ -202,7 +231,7 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
           });
         } catch (error) {
           // Log error internally but don't fail the whole listing
-          console.error(`Error accessing ${fullPath}: ${error}`);
+          debugLogger.warn(`Error accessing ${fullPath}: ${error}`);
         }
       }
 
@@ -213,12 +242,27 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
         return a.name.localeCompare(b.name);
       });
 
-      // Create formatted content for LLM
-      const directoryContent = entries
+      const totalEntryCount = entries.length;
+      const entryLimit = Math.min(
+        MAX_ENTRY_COUNT,
+        this.config.getTruncateToolOutputLines(),
+      );
+      const truncated = totalEntryCount > entryLimit;
+
+      const entriesToShow = truncated ? entries.slice(0, entryLimit) : entries;
+
+      const directoryContent = entriesToShow
         .map((entry) => `${entry.isDirectory ? '[DIR] ' : ''}${entry.name}`)
         .join('\n');
 
-      let resultMessage = `Directory listing for ${this.params.path}:\n${directoryContent}`;
+      let resultMessage = `Listed ${totalEntryCount} item(s) in ${this.params.path}:\n---\n${directoryContent}`;
+
+      if (truncated) {
+        const omittedEntries = totalEntryCount - entryLimit;
+        const entryTerm = omittedEntries === 1 ? 'item' : 'items';
+        resultMessage += `\n---\n[${omittedEntries} ${entryTerm} truncated] ...`;
+      }
+
       const ignoredMessages = [];
       if (gitIgnoredCount > 0) {
         ignoredMessages.push(`${gitIgnoredCount} git-ignored`);
@@ -230,9 +274,12 @@ class LSToolInvocation extends BaseToolInvocation<LSToolParams, ToolResult> {
         resultMessage += `\n\n(${ignoredMessages.join(', ')})`;
       }
 
-      let displayMessage = `Listed ${entries.length} item(s).`;
+      let displayMessage = `Listed ${totalEntryCount} item(s)`;
       if (ignoredMessages.length > 0) {
         displayMessage += ` (${ignoredMessages.join(', ')})`;
+      }
+      if (truncated) {
+        displayMessage += ' (truncated)';
       }
 
       return {
@@ -312,19 +359,6 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
       return `Path must be absolute: ${params.path}`;
     }
 
-    const userSkillsBase = this.config.storage.getUserSkillsDir();
-    const isUnderUserSkills = isSubpath(userSkillsBase, params.path);
-
-    const workspaceContext = this.config.getWorkspaceContext();
-    if (
-      !workspaceContext.isPathWithinWorkspace(params.path) &&
-      !isUnderUserSkills
-    ) {
-      const directories = workspaceContext.getDirectories();
-      return `Path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )}`;
-    }
     return null;
   }
 

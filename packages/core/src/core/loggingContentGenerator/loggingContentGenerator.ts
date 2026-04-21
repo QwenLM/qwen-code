@@ -31,17 +31,20 @@ import {
   logApiRequest,
   logApiResponse,
 } from '../../telemetry/loggers.js';
+import { isInternalPromptId } from '../../utils/internalPromptIds.js';
+import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
+  InputModalities,
 } from '../contentGenerator.js';
-import { isStructuredError } from '../../utils/quotaErrorDetection.js';
 import { OpenAIContentConverter } from '../openaiContentGenerator/converter.js';
 import { OpenAILogger } from '../../utils/openaiLogger.js';
-
-interface StructuredError {
-  status: number;
-}
+import {
+  getErrorMessage,
+  getErrorStatus,
+  getErrorType,
+} from '../../utils/errors.js';
 
 /**
  * A decorator that wraps a ContentGenerator to add logging to API calls.
@@ -49,16 +52,22 @@ interface StructuredError {
 export class LoggingContentGenerator implements ContentGenerator {
   private openaiLogger?: OpenAILogger;
   private schemaCompliance?: 'auto' | 'openapi_30';
+  private modalities?: InputModalities;
 
   constructor(
     private readonly wrapped: ContentGenerator,
     private readonly config: Config,
     generatorConfig: ContentGeneratorConfig,
   ) {
+    this.modalities = generatorConfig.modalities;
+
     // Extract fields needed for initialization from passed config
     // (config.getContentGeneratorConfig() may not be available yet during refreshAuth)
     if (generatorConfig.enableOpenAILogging) {
-      this.openaiLogger = new OpenAILogger(generatorConfig.openAILoggingDir);
+      this.openaiLogger = new OpenAILogger(
+        generatorConfig.openAILoggingDir,
+        config.getWorkingDir(),
+      );
       this.schemaCompliance = generatorConfig.schemaCompliance;
     }
   }
@@ -75,7 +84,12 @@ export class LoggingContentGenerator implements ContentGenerator {
     const requestText = JSON.stringify(contents);
     logApiRequest(
       this.config,
-      new ApiRequestEvent(model, promptId, requestText),
+      new ApiRequestEvent(
+        model,
+        promptId,
+        requestText,
+        subagentNameContext.getStore(),
+      ),
     );
   }
 
@@ -97,6 +111,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         this.config.getAuthType(),
         usageMetadata,
         responseText,
+        subagentNameContext.getStore(),
       ),
     );
   }
@@ -108,33 +123,27 @@ export class LoggingContentGenerator implements ContentGenerator {
     model: string,
     prompt_id: string,
   ): void {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    const errorType =
-      (error as { type?: string })?.type ||
-      (error instanceof Error ? error.name : 'unknown');
+    const errorMessage = getErrorMessage(error);
+    const errorType = getErrorType(error);
     const errorResponseId =
       (error as { requestID?: string; request_id?: string })?.requestID ||
       (error as { requestID?: string; request_id?: string })?.request_id ||
       responseId;
-    const errorStatus =
-      (error as { code?: string | number; status?: number })?.code ??
-      (error as { status?: number })?.status ??
-      (isStructuredError(error)
-        ? (error as StructuredError).status
-        : undefined);
+    const errorStatus = getErrorStatus(error);
 
     logApiError(
       this.config,
-      new ApiErrorEvent(
-        errorResponseId,
+      new ApiErrorEvent({
+        responseId: errorResponseId,
         model,
-        errorMessage,
         durationMs,
-        prompt_id,
-        this.config.getAuthType(),
+        promptId: prompt_id,
+        authType: this.config.getAuthType(),
+        errorMessage,
         errorType,
-        errorStatus,
-      ),
+        statusCode: errorStatus,
+        subagentName: subagentNameContext.getStore(),
+      }),
     );
   }
 
@@ -143,8 +152,17 @@ export class LoggingContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<GenerateContentResponse> {
     const startTime = Date.now();
-    this.logApiRequest(this.toContents(req.contents), req.model, userPromptId);
-    const openaiRequest = await this.buildOpenAIRequestForLogging(req);
+    const isInternal = isInternalPromptId(userPromptId);
+    if (!isInternal) {
+      this.logApiRequest(
+        this.toContents(req.contents),
+        req.model,
+        userPromptId,
+      );
+    }
+    const openaiRequest = isInternal
+      ? undefined
+      : await this.buildOpenAIRequestForLogging(req);
     try {
       const response = await this.wrapped.generateContent(req, userPromptId);
       const durationMs = Date.now() - startTime;
@@ -154,14 +172,17 @@ export class LoggingContentGenerator implements ContentGenerator {
         response.modelVersion || req.model,
         userPromptId,
         response.usageMetadata,
-        JSON.stringify(response),
       );
-      await this.logOpenAIInteraction(openaiRequest, response);
+      if (!isInternal) {
+        await this.logOpenAIInteraction(openaiRequest, response);
+      }
       return response;
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      this._logApiError(undefined, durationMs, error, req.model, userPromptId);
-      await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      this._logApiError('', durationMs, error, req.model, userPromptId);
+      if (!isInternal) {
+        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      }
       throw error;
     }
   }
@@ -171,16 +192,27 @@ export class LoggingContentGenerator implements ContentGenerator {
     userPromptId: string,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const startTime = Date.now();
-    this.logApiRequest(this.toContents(req.contents), req.model, userPromptId);
-    const openaiRequest = await this.buildOpenAIRequestForLogging(req);
+    const isInternal = isInternalPromptId(userPromptId);
+    if (!isInternal) {
+      this.logApiRequest(
+        this.toContents(req.contents),
+        req.model,
+        userPromptId,
+      );
+    }
+    const openaiRequest = isInternal
+      ? undefined
+      : await this.buildOpenAIRequestForLogging(req);
 
     let stream: AsyncGenerator<GenerateContentResponse>;
     try {
       stream = await this.wrapped.generateContentStream(req, userPromptId);
     } catch (error) {
       const durationMs = Date.now() - startTime;
-      this._logApiError(undefined, durationMs, error, req.model, userPromptId);
-      await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      this._logApiError('', durationMs, error, req.model, userPromptId);
+      if (!isInternal) {
+        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      }
       throw error;
     }
 
@@ -200,12 +232,27 @@ export class LoggingContentGenerator implements ContentGenerator {
     model: string,
     openaiRequest?: OpenAI.Chat.ChatCompletionCreateParams,
   ): AsyncGenerator<GenerateContentResponse> {
+    const isInternal = isInternalPromptId(userPromptId);
+    // For internal prompts we only need the last usage metadata (for /stats);
+    // skip collecting full responses to avoid unnecessary memory overhead.
     const responses: GenerateContentResponse[] = [];
 
+    // Track first-seen IDs so _logApiResponse/_logApiError have accurate
+    // values even when we skip collecting full responses for internal prompts.
+    let firstResponseId = '';
+    let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     try {
       for await (const response of stream) {
-        responses.push(response);
+        if (!firstResponseId && response.responseId) {
+          firstResponseId = response.responseId;
+        }
+        if (!firstModelVersion && response.modelVersion) {
+          firstModelVersion = response.modelVersion;
+        }
+        if (!isInternal) {
+          responses.push(response);
+        }
         if (response.usageMetadata) {
           lastUsageMetadata = response.usageMetadata;
         }
@@ -214,26 +261,29 @@ export class LoggingContentGenerator implements ContentGenerator {
       // Only log successful API response if no error occurred
       const durationMs = Date.now() - startTime;
       this._logApiResponse(
-        responses[0]?.responseId ?? '',
+        firstResponseId,
         durationMs,
-        responses[0]?.modelVersion || model,
+        firstModelVersion || model,
         userPromptId,
         lastUsageMetadata,
-        JSON.stringify(responses),
       );
-      const consolidatedResponse =
-        this.consolidateGeminiResponsesForLogging(responses);
-      await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
+      if (!isInternal) {
+        const consolidatedResponse =
+          this.consolidateGeminiResponsesForLogging(responses);
+        await this.logOpenAIInteraction(openaiRequest, consolidatedResponse);
+      }
     } catch (error) {
       const durationMs = Date.now() - startTime;
       this._logApiError(
-        undefined,
+        firstResponseId,
         durationMs,
         error,
-        responses[0]?.modelVersion || model,
+        firstModelVersion || model,
         userPromptId,
       );
-      await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      if (!isInternal) {
+        await this.logOpenAIInteraction(openaiRequest, undefined, error);
+      }
       throw error;
     }
   }
@@ -249,6 +299,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       request.model,
       this.schemaCompliance,
     );
+    converter.setModalities(this.modalities ?? {});
     const messages = converter.convertGeminiRequestToOpenAI(request, {
       cleanOrphanToolCalls: false,
     });

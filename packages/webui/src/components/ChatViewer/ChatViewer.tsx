@@ -15,9 +15,9 @@ import { UserMessage } from '../messages/UserMessage.js';
 import { AssistantMessage } from '../messages/Assistant/AssistantMessage.js';
 import { ThinkingMessage } from '../messages/ThinkingMessage.js';
 import {
+  AgentToolCall,
   GenericToolCall,
   ThinkToolCall,
-  SaveMemoryToolCall,
   EditToolCall,
   WriteToolCall,
   SearchToolCall,
@@ -26,6 +26,7 @@ import {
   ReadToolCall,
   WebFetchToolCall,
   shouldShowToolCall,
+  isAgentExecutionToolCall,
 } from '../toolcalls/index.js';
 import type { ToolCallData as BaseToolCallData } from '../toolcalls/index.js';
 import './ChatViewer.css';
@@ -146,11 +147,20 @@ function parseTimestamp(isoString: string): number {
 /**
  * Get the appropriate tool call component based on kind
  */
-function getToolCallComponent(kind: string) {
-  const normalizedKind = kind.toLowerCase();
+function getToolCallComponent(toolCall: BaseToolCallData) {
+  if (isAgentExecutionToolCall(toolCall)) {
+    return AgentToolCall;
+  }
+
+  const normalizedKind = toolCall.kind.toLowerCase();
 
   switch (normalizedKind) {
     case 'read':
+    case 'read_file':
+    case 'read_many_files':
+    case 'readmanyfiles':
+    case 'list_directory':
+    case 'listfiles':
       return ReadToolCall;
     case 'write':
       return WriteToolCall;
@@ -174,10 +184,6 @@ function getToolCallComponent(kind: string) {
     case 'think':
     case 'thinking':
       return ThinkToolCall;
-    case 'save_memory':
-    case 'savememory':
-    case 'memory':
-      return SaveMemoryToolCall;
     case 'fetch':
     case 'web_fetch':
     case 'webfetch':
@@ -313,7 +319,7 @@ export const ChatViewer = forwardRef<ChatViewerHandle, ChatViewerProps>(
 
       // Handle tool calls
       if (msg.type === 'tool_call' && msg.toolCall) {
-        const ToolCallComponent = getToolCallComponent(msg.toolCall.kind);
+        const ToolCallComponent = getToolCallComponent(msg.toolCall);
 
         if (!ToolCallComponent) {
           return null;

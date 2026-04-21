@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { Box, Text } from 'ink';
+import { Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
@@ -21,21 +21,26 @@ export const AutoAcceptIndicator: React.FC<AutoAcceptIndicatorProps> = ({
   let textContent = '';
   let subText = '';
 
+  const cycleText =
+    process.platform === 'win32'
+      ? ` ${t('(tab to cycle)')}`
+      : ` ${t('(shift + tab to cycle)')}`;
+
   switch (approvalMode) {
     case ApprovalMode.PLAN:
       textColor = theme.status.success;
       textContent = t('plan mode');
-      subText = ` ${t('(shift + tab to cycle)')}`;
+      subText = cycleText;
       break;
     case ApprovalMode.AUTO_EDIT:
       textColor = theme.status.warning;
       textContent = t('auto-accept edits');
-      subText = ` ${t('(shift + tab to cycle)')}`;
+      subText = cycleText;
       break;
     case ApprovalMode.YOLO:
       textColor = theme.status.error;
       textContent = t('YOLO mode');
-      subText = ` ${t('(shift + tab to cycle)')}`;
+      subText = cycleText;
       break;
     case ApprovalMode.DEFAULT:
     default:
@@ -43,11 +48,9 @@ export const AutoAcceptIndicator: React.FC<AutoAcceptIndicatorProps> = ({
   }
 
   return (
-    <Box>
-      <Text color={textColor}>
-        {textContent}
-        {subText && <Text color={theme.text.secondary}>{subText}</Text>}
-      </Text>
-    </Box>
+    <Text color={textColor}>
+      {textContent}
+      {subText && <Text color={theme.text.secondary}>{subText}</Text>}
+    </Text>
   );
 };

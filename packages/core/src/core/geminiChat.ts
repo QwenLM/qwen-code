@@ -16,9 +16,14 @@ import type {
   Tool,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { createUserContent } from '@google/genai';
-import { getErrorStatus, retryWithBackoff } from '../utils/retry.js';
+import { createUserContent, FinishReason } from '@google/genai';
+import { retryWithBackoff } from '../utils/retry.js';
+import { getErrorStatus } from '../utils/errors.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { parseAndFormatApiError } from '../utils/errorParsing.js';
+import { isRateLimitError, type RetryInfo } from '../utils/rateLimit.js';
 import type { Config } from '../config/config.js';
+import { ESCALATED_MAX_TOKENS } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -30,7 +35,9 @@ import {
   ContentRetryEvent,
   ContentRetryFailureEvent,
 } from '../telemetry/types.js';
-import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
+import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
+
+const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
 
 export enum StreamEventType {
   /** A regular content chunk from the API. */
@@ -42,7 +49,7 @@ export enum StreamEventType {
 
 export type StreamEvent =
   | { type: StreamEventType.CHUNK; value: GenerateContentResponse }
-  | { type: StreamEventType.RETRY };
+  | { type: StreamEventType.RETRY; retryInfo?: RetryInfo };
 
 /**
  * Options for retrying due to invalid content from the model.
@@ -58,6 +65,74 @@ const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
   maxAttempts: 2, // 1 initial call + 1 retry
   initialDelayMs: 500,
 };
+
+// Some providers occasionally return transient stream anomalies: either an
+// empty stream (usage metadata only, no candidates), a stream that finishes
+// normally but contains no usable text, or a stream cut off without a finish
+// reason. All are retried with an independent budget (similar to rate-limit
+// retries) so they do not consume each other's retry budgets.
+const INVALID_STREAM_RETRY_CONFIG = {
+  maxRetries: 2,
+  initialDelayMs: 2000,
+};
+
+/**
+ * Options for retrying on rate-limit throttling errors returned as stream content.
+ * Fixed 60s delay matches the DashScope per-minute quota window.
+ * 10 retries aligns with Claude Code's retry behavior.
+ */
+const RATE_LIMIT_RETRY_OPTIONS = {
+  maxRetries: 10,
+  delayMs: 60000,
+};
+
+/**
+ * Creates a promise that resolves after the specified delay, but can be
+ * resolved early by calling the returned `skip` function.
+ *
+ * If an `AbortSignal` is provided and it fires before the delay completes,
+ * the promise rejects so the caller's `await` throws and normal error
+ * propagation takes over (e.g. the retry loop breaks and the generator exits).
+ */
+function delay(
+  delayMs: number,
+  signal?: AbortSignal,
+): {
+  promise: Promise<void>;
+  skip: () => void;
+} {
+  let resolveRef: () => void;
+  let timeoutId: ReturnType<typeof setTimeout>;
+
+  const promise = new Promise<void>((resolve, reject) => {
+    resolveRef = resolve;
+
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+
+    timeoutId = setTimeout(resolve, delayMs);
+
+    signal?.addEventListener(
+      'abort',
+      () => {
+        clearTimeout(timeoutId);
+        reject(signal.reason);
+      },
+      { once: true },
+    );
+  });
+
+  return {
+    promise,
+    skip: () => {
+      clearTimeout(timeoutId);
+      resolveRef();
+    },
+  };
+}
+
 /**
  * Returns true if the response is valid, false otherwise.
  *
@@ -208,12 +283,16 @@ export class GeminiChat {
    * @param history - Optional initial conversation history.
    * @param chatRecordingService - Optional recording service. If provided, chat
    *   messages will be recorded.
+   * @param telemetryService - Optional UI telemetry service. When provided,
+   *   prompt token counts are reported on each API response. Pass `undefined`
+   *   for sub-agent chats to avoid overwriting the main agent's context usage.
    */
   constructor(
     private readonly config: Config,
     private readonly generationConfig: GenerateContentConfig = {},
     private history: Content[] = [],
     private readonly chatRecordingService?: ChatRecordingService,
+    private readonly telemetryService?: UiTelemetryService,
   ) {
     validateHistory(history);
   }
@@ -268,6 +347,25 @@ export class GeminiChat {
     return (async function* () {
       try {
         let lastError: unknown = new Error('Request failed after all retries.');
+        let rateLimitRetryCount = 0;
+        let invalidStreamRetryCount = 0;
+
+        // Read per-config overrides; fall back to built-in defaults.
+        const cgConfig = self.config.getContentGeneratorConfig();
+        const maxRateLimitRetries =
+          cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
+        const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
+
+        // Max output tokens escalation: when no user/env override is set,
+        // the capped default (8K) is used. If the model hits MAX_TOKENS,
+        // retry once with escalated limit (64K).
+        let maxTokensEscalated = false;
+        const hasUserMaxTokensOverride =
+          (cgConfig?.samplingParams?.max_tokens !== undefined &&
+            cgConfig?.samplingParams?.max_tokens !== null) ||
+          !!process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+
+        let lastFinishReason: string | undefined;
 
         for (
           let attempt = 0;
@@ -275,7 +373,11 @@ export class GeminiChat {
           attempt++
         ) {
           try {
-            if (attempt > 0) {
+            if (
+              attempt > 0 ||
+              rateLimitRetryCount > 0 ||
+              invalidStreamRetryCount > 0
+            ) {
               yield { type: StreamEventType.RETRY };
             }
 
@@ -286,7 +388,10 @@ export class GeminiChat {
               prompt_id,
             );
 
+            lastFinishReason = undefined;
             for await (const chunk of stream) {
+              const fr = chunk.candidates?.[0]?.finishReason;
+              if (fr) lastFinishReason = fr;
               yield { type: StreamEventType.CHUNK, value: chunk };
             }
 
@@ -294,10 +399,82 @@ export class GeminiChat {
             break;
           } catch (error) {
             lastError = error;
-            const isContentError = error instanceof InvalidStreamError;
 
+            // Handle rate-limit / throttling errors returned as stream content.
+            // These arrive as StreamContentError with finish_reason="error_finish"
+            // from the pipeline, containing the throttling message in the content.
+            // Covers TPM throttling, GLM rate limits, and other provider throttling.
+            const isRateLimit = isRateLimitError(error, extraRetryErrorCodes);
+            if (isRateLimit && rateLimitRetryCount < maxRateLimitRetries) {
+              rateLimitRetryCount++;
+              const delayMs = RATE_LIMIT_RETRY_OPTIONS.delayMs;
+              const message = parseAndFormatApiError(
+                error instanceof Error ? error.message : String(error),
+              );
+              debugLogger.warn(
+                `Rate limit throttling detected (retry ${rateLimitRetryCount}/${maxRateLimitRetries}). ` +
+                  `Waiting ${delayMs / 1000}s before retrying...`,
+              );
+              const { promise: delayPromise, skip } = delay(
+                delayMs,
+                params.config?.abortSignal,
+              );
+              yield {
+                type: StreamEventType.RETRY,
+                retryInfo: {
+                  message,
+                  attempt: rateLimitRetryCount,
+                  maxRetries: maxRateLimitRetries,
+                  delayMs,
+                  skipDelay: skip,
+                },
+              };
+              // Don't count rate-limit retries against the content retry limit
+              attempt--;
+              await delayPromise;
+              continue;
+            }
+
+            // Transient stream anomalies (NO_FINISH_REASON / NO_RESPONSE_TEXT):
+            // independent retry budget, similar to rate-limit handling.
+            // Does NOT consume the content retry budget.
+            const isTransientStreamError = error instanceof InvalidStreamError;
+            if (
+              isTransientStreamError &&
+              invalidStreamRetryCount < INVALID_STREAM_RETRY_CONFIG.maxRetries
+            ) {
+              invalidStreamRetryCount++;
+              const delayMs =
+                INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
+                invalidStreamRetryCount;
+              debugLogger.warn(
+                `Invalid stream [${(error as InvalidStreamError).type}] ` +
+                  `(retry ${invalidStreamRetryCount}/${INVALID_STREAM_RETRY_CONFIG.maxRetries}). ` +
+                  `Waiting ${delayMs / 1000}s before retrying...`,
+              );
+              logContentRetry(
+                self.config,
+                new ContentRetryEvent(
+                  invalidStreamRetryCount - 1,
+                  (error as InvalidStreamError).type,
+                  delayMs,
+                  model,
+                ),
+              );
+              yield { type: StreamEventType.RETRY };
+              // Don't count transient retries against content retry limit.
+              attempt--;
+              await delay(delayMs, params.config?.abortSignal).promise;
+              continue;
+            }
+            // Transient budget exhausted — stop immediately.
+            if (isTransientStreamError) {
+              break;
+            }
+
+            // Other content validation errors (e.g. NO_FINISH_REASON).
+            const isContentError = error instanceof InvalidStreamError;
             if (isContentError) {
-              // Check if we have more attempts left.
               if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
                 logContentRetry(
                   self.config,
@@ -308,13 +485,10 @@ export class GeminiChat {
                     model,
                   ),
                 );
-                await new Promise((res) =>
-                  setTimeout(
-                    res,
-                    INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs *
-                      (attempt + 1),
-                  ),
-                );
+                await delay(
+                  INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs * (attempt + 1),
+                  params.config?.abortSignal,
+                ).promise;
                 continue;
               }
             }
@@ -322,13 +496,57 @@ export class GeminiChat {
           }
         }
 
+        // Max output tokens escalation: if the retry loop succeeded with
+        // the capped default (8K) but hit MAX_TOKENS, retry once at 64K.
+        // Placed outside the retry loop so that any errors from the
+        // escalated stream propagate directly (not caught by retry logic).
+        if (
+          lastError === null &&
+          lastFinishReason === FinishReason.MAX_TOKENS &&
+          !maxTokensEscalated &&
+          !hasUserMaxTokensOverride
+        ) {
+          maxTokensEscalated = true;
+          debugLogger.info(
+            `Output truncated at capped default. Escalating to ${ESCALATED_MAX_TOKENS} tokens.`,
+          );
+          // Remove partial model response from history
+          // (processStreamResponse already pushed it)
+          if (
+            self.history.length > 0 &&
+            self.history[self.history.length - 1].role === 'model'
+          ) {
+            self.history.pop();
+          }
+          // Signal UI to discard partial output
+          yield { type: StreamEventType.RETRY };
+          // Retry with escalated max_tokens
+          const escalatedParams: SendMessageParameters = {
+            ...params,
+            config: {
+              ...params.config,
+              maxOutputTokens: ESCALATED_MAX_TOKENS,
+            },
+          };
+          const escalatedStream = await self.makeApiCallAndProcessStream(
+            model,
+            requestContents,
+            escalatedParams,
+            prompt_id,
+          );
+          for await (const chunk of escalatedStream) {
+            yield { type: StreamEventType.CHUNK, value: chunk };
+          }
+        }
+
         if (lastError) {
           if (lastError instanceof InvalidStreamError) {
+            const totalAttempts = invalidStreamRetryCount + 1;
             logContentRetryFailure(
               self.config,
               new ContentRetryFailureEvent(
-                INVALID_CONTENT_RETRY_OPTIONS.maxAttempts,
-                (lastError as InvalidStreamError).type,
+                totalAttempts,
+                lastError.type,
                 model,
               ),
             );
@@ -465,8 +683,110 @@ export class GeminiChat {
       .filter((content) => content.parts && content.parts.length > 0);
   }
 
+  /**
+   * Strip thought parts from history, keeping the most recent `keepTurns`
+   * model turns that contain thinking blocks intact.
+   *
+   * Selection is based on thought-containing turns specifically (not all
+   * model turns) so the most recent reasoning chain is always preserved
+   * even if later model turns happen to have no thinking.
+   *
+   * Used for idle cleanup: after exceeding the configured idle threshold
+   * the old thinking blocks are no longer useful for reasoning coherence
+   * but still consume context tokens.
+   */
+  stripThoughtsFromHistoryKeepRecent(keepTurns: number): void {
+    keepTurns = Number.isFinite(keepTurns)
+      ? Math.max(0, Math.floor(keepTurns))
+      : 0;
+
+    // Find indices of model turns that contain thought parts
+    const modelTurnIndices: number[] = [];
+    for (let i = 0; i < this.history.length; i++) {
+      const content = this.history[i];
+      if (
+        content.role === 'model' &&
+        content.parts?.some(
+          (part) =>
+            part &&
+            typeof part === 'object' &&
+            'thought' in part &&
+            part.thought,
+        )
+      ) {
+        modelTurnIndices.push(i);
+      }
+    }
+
+    // Determine which model turns to keep (the most recent `keepTurns`)
+    const turnsToStrip = new Set(
+      modelTurnIndices.slice(
+        0,
+        Math.max(0, modelTurnIndices.length - keepTurns),
+      ),
+    );
+
+    if (turnsToStrip.size === 0) return;
+
+    this.history = this.history
+      .map((content, index) => {
+        if (!turnsToStrip.has(index) || !content.parts) return content;
+
+        // Strip thought parts from this turn
+        const filteredParts = content.parts
+          .filter(
+            (part) =>
+              !(
+                part &&
+                typeof part === 'object' &&
+                'thought' in part &&
+                part.thought
+              ),
+          )
+          .map((part) => {
+            if (
+              part &&
+              typeof part === 'object' &&
+              'thoughtSignature' in part
+            ) {
+              const newPart = { ...part };
+              delete (newPart as { thoughtSignature?: string })
+                .thoughtSignature;
+              return newPart;
+            }
+            return part;
+          });
+
+        return {
+          ...content,
+          parts: filteredParts,
+        };
+      })
+      // Remove Content objects that have no parts left after filtering
+      .filter((content) => content.parts && content.parts.length > 0);
+  }
+
+  /**
+   * Pop all orphaned trailing user entries from chat history.
+   * In a valid conversation the last entry is always a model response;
+   * any trailing user entries are leftovers from a request that failed.
+   */
+  stripOrphanedUserEntriesFromHistory(): void {
+    while (
+      this.history.length > 0 &&
+      this.history[this.history.length - 1]!.role === 'user'
+    ) {
+      this.history.pop();
+    }
+  }
+
   setTools(tools: Tool[]): void {
     this.generationConfig.tools = tools;
+  }
+
+  /** Returns a shallow copy of the current generation config (for cache param snapshots). */
+  getGenerationConfig(): GenerateContentConfig {
+    return { ...this.generationConfig };
   }
 
   async maybeIncludeSchemaDepthContext(error: StructuredError): Promise<void> {
@@ -476,7 +796,9 @@ export class GeminiChat {
       isSchemaDepthError(error.message) ||
       isInvalidArgumentError(error.message)
     ) {
-      const tools = this.config.getToolRegistry().getAllTools();
+      const toolRegistry = this.config.getToolRegistry();
+      await toolRegistry.warmAll();
+      const tools = toolRegistry.getAllTools();
       const cyclicSchemaTools: string[] = [];
       for (const tool of tools) {
         if (
@@ -509,8 +831,11 @@ export class GeminiChat {
     let hasFinishReason = false;
 
     for await (const chunk of streamResponse) {
-      hasFinishReason =
+      // Use ||= to avoid later usage-only chunks (no candidates) overwriting
+      // a finishReason that was already seen in an earlier chunk.
+      hasFinishReason ||=
         chunk?.candidates?.some((candidate) => candidate.finishReason) ?? false;
+
       if (isValidResponse(chunk)) {
         const content = chunk.candidates?.[0]?.content;
         if (content?.parts) {
@@ -526,10 +851,17 @@ export class GeminiChat {
       // Collect token usage for consolidated recording
       if (chunk.usageMetadata) {
         usageMetadata = chunk.usageMetadata;
+        // Use || instead of ?? so that totalTokenCount=0 falls back to promptTokenCount.
+        // Some providers omit total_tokens or return 0 in streaming usage chunks.
         const lastPromptTokenCount =
-          usageMetadata.totalTokenCount ?? usageMetadata.promptTokenCount;
-        if (lastPromptTokenCount) {
-          uiTelemetryService.setLastPromptTokenCount(lastPromptTokenCount);
+          usageMetadata.totalTokenCount || usageMetadata.promptTokenCount;
+        if (lastPromptTokenCount && this.telemetryService) {
+          this.telemetryService.setLastPromptTokenCount(lastPromptTokenCount);
+        }
+        if (usageMetadata.cachedContentTokenCount && this.telemetryService) {
+          this.telemetryService.setLastCachedContentTokenCount(
+            usageMetadata.cachedContentTokenCount,
+          );
         }
       }
 
@@ -581,6 +913,8 @@ export class GeminiChat {
 
     // Record assistant turn with raw Content and metadata
     if (thoughtContentPart || contentText || hasToolCall || usageMetadata) {
+      const contextWindowSize =
+        this.config.getContentGeneratorConfig()?.contextWindowSize;
       this.chatRecordingService?.recordAssistantTurn({
         model,
         message: [
@@ -593,17 +927,22 @@ export class GeminiChat {
             : []),
         ],
         tokens: usageMetadata,
+        contextWindowSize,
       });
     }
 
     // Stream validation logic: A stream is considered successful if:
     // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
-    // 2. There's a finish reason AND we have non-empty response text
+    // 2. There's a finish reason AND we have non-empty response text or thought text
     //
     // We throw an error only when there's no tool call AND:
     // - No finish reason, OR
-    // - Empty response text (e.g., only thoughts with no actual content)
-    if (!hasToolCall && (!hasFinishReason || !contentText)) {
+    // - Empty response text (e.g., no actual content and no thoughts)
+    //
+    // Note: Thoughts-only responses are valid for models that use thinking modes
+    // These models may send only reasoning content without explicit text output.
+    const hasAnyContent = contentText || thoughtText;
+    if (!hasToolCall && (!hasFinishReason || !hasAnyContent)) {
       if (!hasFinishReason) {
         throw new InvalidStreamError(
           'Model stream ended without a finish reason.',

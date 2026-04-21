@@ -10,26 +10,26 @@ import type { SessionContext } from './types.js';
 import type {
   Config,
   ToolRegistry,
-  SubAgentEventEmitter,
-  SubAgentToolCallEvent,
-  SubAgentToolResultEvent,
-  SubAgentApprovalRequestEvent,
-  SubAgentStreamTextEvent,
+  AgentEventEmitter,
+  AgentToolCallEvent,
+  AgentToolResultEvent,
+  AgentApprovalRequestEvent,
+  AgentStreamTextEvent,
   ToolEditConfirmationDetails,
   ToolInfoConfirmationDetails,
 } from '@qwen-code/qwen-code-core';
 import {
-  SubAgentEventType,
+  AgentEventType,
   ToolConfirmationOutcome,
-  TodoWriteTool,
+  ToolNames,
 } from '@qwen-code/qwen-code-core';
-import type * as acp from '../acp.js';
+import type { AgentSideConnection } from '@agentclientprotocol/sdk';
 import { EventEmitter } from 'node:events';
 
-// Helper to create a mock SubAgentToolCallEvent with required fields
+// Helper to create a mock AgentToolCallEvent with required fields
 function createToolCallEvent(
-  overrides: Partial<SubAgentToolCallEvent> & { name: string; callId: string },
-): SubAgentToolCallEvent {
+  overrides: Partial<AgentToolCallEvent> & { name: string; callId: string },
+): AgentToolCallEvent {
   return {
     subagentId: 'test-subagent',
     round: 1,
@@ -40,14 +40,14 @@ function createToolCallEvent(
   };
 }
 
-// Helper to create a mock SubAgentToolResultEvent with required fields
+// Helper to create a mock AgentToolResultEvent with required fields
 function createToolResultEvent(
-  overrides: Partial<SubAgentToolResultEvent> & {
+  overrides: Partial<AgentToolResultEvent> & {
     name: string;
     callId: string;
     success: boolean;
   },
-): SubAgentToolResultEvent {
+): AgentToolResultEvent {
   return {
     subagentId: 'test-subagent',
     round: 1,
@@ -56,15 +56,15 @@ function createToolResultEvent(
   };
 }
 
-// Helper to create a mock SubAgentApprovalRequestEvent with required fields
+// Helper to create a mock AgentApprovalRequestEvent with required fields
 function createApprovalEvent(
-  overrides: Partial<SubAgentApprovalRequestEvent> & {
+  overrides: Partial<AgentApprovalRequestEvent> & {
     name: string;
     callId: string;
-    confirmationDetails: SubAgentApprovalRequestEvent['confirmationDetails'];
-    respond: SubAgentApprovalRequestEvent['respond'];
+    confirmationDetails: AgentApprovalRequestEvent['confirmationDetails'];
+    respond: AgentApprovalRequestEvent['respond'];
   },
-): SubAgentApprovalRequestEvent {
+): AgentApprovalRequestEvent {
   return {
     subagentId: 'test-subagent',
     round: 1,
@@ -102,10 +102,10 @@ function createInfoConfirmation(
   };
 }
 
-// Helper to create a mock SubAgentStreamTextEvent with required fields
+// Helper to create a mock AgentStreamTextEvent with required fields
 function createStreamTextEvent(
-  overrides: Partial<SubAgentStreamTextEvent> & { text: string },
-): SubAgentStreamTextEvent {
+  overrides: Partial<AgentStreamTextEvent> & { text: string },
+): AgentStreamTextEvent {
   return {
     subagentId: 'test-subagent',
     round: 1,
@@ -116,11 +116,11 @@ function createStreamTextEvent(
 
 describe('SubAgentTracker', () => {
   let mockContext: SessionContext;
-  let mockClient: acp.Client;
+  let mockClient: AgentSideConnection;
   let sendUpdateSpy: ReturnType<typeof vi.fn>;
   let requestPermissionSpy: ReturnType<typeof vi.fn>;
   let tracker: SubAgentTracker;
-  let eventEmitter: SubAgentEventEmitter;
+  let eventEmitter: AgentEventEmitter;
   let abortController: AbortController;
 
   beforeEach(() => {
@@ -143,7 +143,7 @@ describe('SubAgentTracker', () => {
 
     mockClient = {
       requestPermission: requestPermissionSpy,
-    } as unknown as acp.Client;
+    } as unknown as AgentSideConnection;
 
     tracker = new SubAgentTracker(
       mockContext,
@@ -151,7 +151,7 @@ describe('SubAgentTracker', () => {
       'parent-call-123',
       'test-subagent',
     );
-    eventEmitter = new EventEmitter() as unknown as SubAgentEventEmitter;
+    eventEmitter = new EventEmitter() as unknown as AgentEventEmitter;
     abortController = new AbortController();
   });
 
@@ -169,19 +169,19 @@ describe('SubAgentTracker', () => {
       tracker.setup(eventEmitter, abortController.signal);
 
       expect(onSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_CALL,
         expect.any(Function),
       );
       expect(onSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_RESULT,
+        AgentEventType.TOOL_RESULT,
         expect.any(Function),
       );
       expect(onSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_WAITING_APPROVAL,
+        AgentEventType.TOOL_WAITING_APPROVAL,
         expect.any(Function),
       );
       expect(onSpy).toHaveBeenCalledWith(
-        SubAgentEventType.STREAM_TEXT,
+        AgentEventType.STREAM_TEXT,
         expect.any(Function),
       );
     });
@@ -193,19 +193,19 @@ describe('SubAgentTracker', () => {
       cleanups[0]();
 
       expect(offSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_CALL,
         expect.any(Function),
       );
       expect(offSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_RESULT,
+        AgentEventType.TOOL_RESULT,
         expect.any(Function),
       );
       expect(offSpy).toHaveBeenCalledWith(
-        SubAgentEventType.TOOL_WAITING_APPROVAL,
+        AgentEventType.TOOL_WAITING_APPROVAL,
         expect.any(Function),
       );
       expect(offSpy).toHaveBeenCalledWith(
-        SubAgentEventType.STREAM_TEXT,
+        AgentEventType.STREAM_TEXT,
         expect.any(Function),
       );
     });
@@ -222,7 +222,7 @@ describe('SubAgentTracker', () => {
         description: 'Reading file',
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_CALL, event);
+      eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
       // Allow async operations to complete
       await vi.waitFor(() => {
@@ -253,12 +253,12 @@ describe('SubAgentTracker', () => {
       tracker.setup(eventEmitter, abortController.signal);
 
       const event = createToolCallEvent({
-        name: TodoWriteTool.Name,
+        name: ToolNames.TODO_WRITE,
         callId: 'call-todo',
         args: { todos: [] },
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_CALL, event);
+      eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
       // Give time for any async operation
       await new Promise((resolve) => setTimeout(resolve, 10));
@@ -276,7 +276,7 @@ describe('SubAgentTracker', () => {
         args: {},
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_CALL, event);
+      eventEmitter.emit(AgentEventType.TOOL_CALL, event);
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -290,7 +290,7 @@ describe('SubAgentTracker', () => {
 
       // First emit tool call to store state
       eventEmitter.emit(
-        SubAgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_CALL,
         createToolCallEvent({
           name: 'read_file',
           callId: 'call-123',
@@ -306,7 +306,7 @@ describe('SubAgentTracker', () => {
         resultDisplay: 'File contents',
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_RESULT, resultEvent);
+      eventEmitter.emit(AgentEventType.TOOL_RESULT, resultEvent);
 
       await vi.waitFor(() => {
         expect(sendUpdateSpy).toHaveBeenCalledWith(
@@ -334,7 +334,7 @@ describe('SubAgentTracker', () => {
         resultDisplay: undefined,
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_RESULT, resultEvent);
+      eventEmitter.emit(AgentEventType.TOOL_RESULT, resultEvent);
 
       await vi.waitFor(() => {
         expect(sendUpdateSpy).toHaveBeenCalledWith(
@@ -356,9 +356,9 @@ describe('SubAgentTracker', () => {
 
       // Store args via tool call
       eventEmitter.emit(
-        SubAgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_CALL,
         createToolCallEvent({
-          name: TodoWriteTool.Name,
+          name: ToolNames.TODO_WRITE,
           callId: 'call-todo',
           args: {
             todos: [{ id: '1', content: 'Task 1', status: 'pending' }],
@@ -368,7 +368,7 @@ describe('SubAgentTracker', () => {
 
       // Emit result with todo_list display
       const resultEvent = createToolResultEvent({
-        name: TodoWriteTool.Name,
+        name: ToolNames.TODO_WRITE,
         callId: 'call-todo',
         success: true,
         resultDisplay: JSON.stringify({
@@ -377,7 +377,7 @@ describe('SubAgentTracker', () => {
         }),
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_RESULT, resultEvent);
+      eventEmitter.emit(AgentEventType.TOOL_RESULT, resultEvent);
 
       await vi.waitFor(() => {
         expect(sendUpdateSpy).toHaveBeenCalledWith({
@@ -393,7 +393,7 @@ describe('SubAgentTracker', () => {
       tracker.setup(eventEmitter, abortController.signal);
 
       eventEmitter.emit(
-        SubAgentEventType.TOOL_CALL,
+        AgentEventType.TOOL_CALL,
         createToolCallEvent({
           name: 'test_tool',
           callId: 'call-cleanup',
@@ -402,7 +402,7 @@ describe('SubAgentTracker', () => {
       );
 
       eventEmitter.emit(
-        SubAgentEventType.TOOL_RESULT,
+        AgentEventType.TOOL_RESULT,
         createToolResultEvent({
           name: 'test_tool',
           callId: 'call-cleanup',
@@ -413,7 +413,7 @@ describe('SubAgentTracker', () => {
       // Emit another result for same callId - should not have stored args
       sendUpdateSpy.mockClear();
       eventEmitter.emit(
-        SubAgentEventType.TOOL_RESULT,
+        AgentEventType.TOOL_RESULT,
         createToolResultEvent({
           name: 'test_tool',
           callId: 'call-cleanup',
@@ -447,7 +447,7 @@ describe('SubAgentTracker', () => {
         respond: respondSpy,
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
         expect(requestPermissionSpy).toHaveBeenCalled();
@@ -483,11 +483,14 @@ describe('SubAgentTracker', () => {
         respond: respondSpy,
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(
           ToolConfirmationOutcome.ProceedOnce,
+          {
+            answers: undefined,
+          },
         );
       });
     });
@@ -504,7 +507,7 @@ describe('SubAgentTracker', () => {
         respond: respondSpy,
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
         expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
@@ -525,11 +528,142 @@ describe('SubAgentTracker', () => {
         respond: respondSpy,
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
-        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.Cancel,
+          {
+            answers: undefined,
+          },
+        );
       });
+    });
+
+    it('should forward answers payload from ACP permission responses', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: {
+          outcome: 'selected',
+          optionId: ToolConfirmationOutcome.ProceedOnce,
+        },
+        answers: {
+          answer: 'yes',
+        },
+      });
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const confirmationDetails = {
+        type: 'ask_user_question',
+        title: 'Question',
+        questions: [
+          {
+            question: 'Continue?',
+            header: 'Question',
+            options: [],
+            multiSelect: false,
+          },
+        ],
+      } as unknown as AgentApprovalRequestEvent['confirmationDetails'];
+      const event = createApprovalEvent({
+        name: 'ask_user_question',
+        callId: 'call-ask',
+        confirmationDetails,
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(
+          ToolConfirmationOutcome.ProceedOnce,
+          {
+            answers: {
+              answer: 'yes',
+            },
+          },
+        );
+      });
+    });
+
+    it('should use filePath over fileName for diff content path', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-path-test',
+        description: 'Editing file',
+        confirmationDetails: createEditConfirmation({
+          fileName: 'test.ts',
+          filePath: '/workspace/src/test.ts',
+          originalContent: 'old content',
+          newContent: 'new content',
+        }),
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(requestPermissionSpy).toHaveBeenCalled();
+      });
+
+      expect(requestPermissionSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: [
+              {
+                type: 'diff',
+                path: '/workspace/src/test.ts',
+                oldText: 'old content',
+                newText: 'new content',
+              },
+            ],
+          }),
+        }),
+      );
+    });
+
+    it('should fall back to fileName when filePath is not available', async () => {
+      tracker.setup(eventEmitter, abortController.signal);
+
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      const event = createApprovalEvent({
+        name: 'edit_file',
+        callId: 'call-fallback-test',
+        description: 'Editing file',
+        confirmationDetails: {
+          type: 'edit' as const,
+          title: 'Edit file',
+          fileName: 'fallback.ts',
+          fileDiff: '',
+          originalContent: 'old',
+          newContent: 'new',
+        } as Omit<ToolEditConfirmationDetails, 'onConfirm'>,
+        respond: respondSpy,
+      });
+
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
+
+      await vi.waitFor(() => {
+        expect(requestPermissionSpy).toHaveBeenCalled();
+      });
+
+      expect(requestPermissionSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolCall: expect.objectContaining({
+            content: [
+              {
+                type: 'diff',
+                path: 'fallback.ts',
+                oldText: 'old',
+                newText: 'new',
+              },
+            ],
+          }),
+        }),
+      );
     });
   });
 
@@ -548,7 +682,7 @@ describe('SubAgentTracker', () => {
         respond: vi.fn(),
       });
 
-      eventEmitter.emit(SubAgentEventType.TOOL_WAITING_APPROVAL, event);
+      eventEmitter.emit(AgentEventType.TOOL_WAITING_APPROVAL, event);
 
       await vi.waitFor(() => {
         expect(requestPermissionSpy).toHaveBeenCalled();
@@ -572,7 +706,7 @@ describe('SubAgentTracker', () => {
         text: 'Hello, this is a response from the model.',
       });
 
-      eventEmitter.emit(SubAgentEventType.STREAM_TEXT, event);
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
 
       await vi.waitFor(() => {
         expect(sendUpdateSpy).toHaveBeenCalled();
@@ -593,15 +727,15 @@ describe('SubAgentTracker', () => {
       tracker.setup(eventEmitter, abortController.signal);
 
       eventEmitter.emit(
-        SubAgentEventType.STREAM_TEXT,
+        AgentEventType.STREAM_TEXT,
         createStreamTextEvent({ text: 'First chunk ' }),
       );
       eventEmitter.emit(
-        SubAgentEventType.STREAM_TEXT,
+        AgentEventType.STREAM_TEXT,
         createStreamTextEvent({ text: 'Second chunk ' }),
       );
       eventEmitter.emit(
-        SubAgentEventType.STREAM_TEXT,
+        AgentEventType.STREAM_TEXT,
         createStreamTextEvent({ text: 'Third chunk' }),
       );
 
@@ -640,7 +774,7 @@ describe('SubAgentTracker', () => {
         text: 'This should not be emitted',
       });
 
-      eventEmitter.emit(SubAgentEventType.STREAM_TEXT, event);
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
 
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -655,7 +789,7 @@ describe('SubAgentTracker', () => {
         thought: true,
       });
 
-      eventEmitter.emit(SubAgentEventType.STREAM_TEXT, event);
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
 
       await vi.waitFor(() => {
         expect(sendUpdateSpy).toHaveBeenCalled();
@@ -680,7 +814,7 @@ describe('SubAgentTracker', () => {
         thought: false,
       });
 
-      eventEmitter.emit(SubAgentEventType.STREAM_TEXT, event);
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
 
       await vi.waitFor(() => {
         expect(sendUpdateSpy).toHaveBeenCalled();
@@ -705,7 +839,7 @@ describe('SubAgentTracker', () => {
         text: 'Default behavior text.',
       });
 
-      eventEmitter.emit(SubAgentEventType.STREAM_TEXT, event);
+      eventEmitter.emit(AgentEventType.STREAM_TEXT, event);
 
       await vi.waitFor(() => {
         expect(sendUpdateSpy).toHaveBeenCalled();

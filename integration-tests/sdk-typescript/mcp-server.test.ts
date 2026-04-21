@@ -35,6 +35,10 @@ const SHARED_TEST_OPTIONS = {
   permissionMode: 'yolo' as const,
 };
 
+// MCP tool names are generated with the pattern: mcp__<serverName>__<toolName>
+const MCP_ADD_TOOL = 'mcp__test-math-server__add';
+const MCP_MULTIPLY_TOOL = 'mcp__test-math-server__multiply';
+
 describe('MCP Server Integration (E2E)', () => {
   let helper: SDKTestHelper;
   let serverScriptPath: string;
@@ -82,7 +86,7 @@ describe('MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, 'add');
+            const toolUseBlocks = findToolUseBlocks(message, MCP_ADD_TOOL);
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
             }
@@ -133,7 +137,7 @@ describe('MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, 'multiply');
+            const toolUseBlocks = findToolUseBlocks(message, MCP_MULTIPLY_TOOL);
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
             }
@@ -238,8 +242,8 @@ describe('MCP Server Integration (E2E)', () => {
         }
 
         // Validate both tools were called
-        expect(toolCalls).toContain('add');
-        expect(toolCalls).toContain('multiply');
+        expect(toolCalls).toContain(MCP_ADD_TOOL);
+        expect(toolCalls).toContain(MCP_MULTIPLY_TOOL);
 
         // Validate result: (10 + 5) * 2 = 30
         expect(assistantText).toMatch(/30/);
@@ -278,7 +282,7 @@ describe('MCP Server Integration (E2E)', () => {
           messages.push(message);
 
           if (isSDKAssistantMessage(message)) {
-            const toolUseBlocks = findToolUseBlocks(message, 'add');
+            const toolUseBlocks = findToolUseBlocks(message, MCP_ADD_TOOL);
             addToolCalls.push(...toolUseBlocks);
             assistantText += extractText(message.message.content);
           }
@@ -366,8 +370,8 @@ describe('MCP Server Integration (E2E)', () => {
           }
         }
 
-        expect(toolCalls).toContain('add');
-        expect(toolCalls).toContain('multiply');
+        expect(toolCalls).toContain(MCP_ADD_TOOL);
+        expect(toolCalls).toContain(MCP_MULTIPLY_TOOL);
         expect(assistantText).toMatch(/5/);
         expect(assistantText).toMatch(/20/);
 
@@ -454,10 +458,10 @@ describe('MCP Server Integration (E2E)', () => {
           }
         }
 
-        expect(toolCalls).toContain('add');
-        expect(toolCalls).toContain('multiply');
+        expect(toolCalls).toContain(MCP_ADD_TOOL);
+        expect(toolCalls).toContain(MCP_MULTIPLY_TOOL);
         expect(canUseToolCalls.map((call) => call.toolName)).toEqual(
-          expect.arrayContaining(['add', 'multiply']),
+          expect.arrayContaining([MCP_ADD_TOOL, MCP_MULTIPLY_TOOL]),
         );
         expect(assistantText).toMatch(/10/);
         expect(assistantText).toMatch(/12/);
@@ -499,7 +503,7 @@ describe('MCP Server Integration (E2E)', () => {
             const toolUseBlocks = findToolUseBlocks(message);
             if (toolUseBlocks.length > 0) {
               foundToolUse = true;
-              expect(toolUseBlocks[0].name).toBe('add');
+              expect(toolUseBlocks[0].name).toBe(MCP_ADD_TOOL);
               expect(toolUseBlocks[0].input).toBeDefined();
             }
           }

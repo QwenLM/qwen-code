@@ -7,7 +7,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { HttpError } from './retry.js';
-import { getErrorStatus, retryWithBackoff } from './retry.js';
+import { retryWithBackoff } from './retry.js';
+import { getErrorStatus } from './errors.js';
 import { setSimulate429 } from './testUtils.js';
 import { AuthType } from '../core/contentGenerator.js';
 
@@ -312,7 +313,10 @@ describe('retryWithBackoff', () => {
     });
 
     it('should throw immediately for Qwen OAuth with insufficient_quota message', async () => {
-      const errorWithInsufficientQuota = new Error('insufficient_quota');
+      const errorWithInsufficientQuota = Object.assign(
+        new Error('Free allocated quota exceeded.'),
+        { status: 429, code: 'insufficient_quota' },
+      );
 
       const fn = vi.fn().mockRejectedValue(errorWithInsufficientQuota);
 
@@ -323,15 +327,18 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen API quota exceeded/);
+      await expect(promise).rejects.toThrow(
+        /Qwen OAuth free tier has been discontinued/,
+      );
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
     });
 
     it('should throw immediately for Qwen OAuth with free allocated quota exceeded message', async () => {
-      const errorWithQuotaExceeded = new Error(
-        'Free allocated quota exceeded.',
+      const errorWithQuotaExceeded = Object.assign(
+        new Error('Free allocated quota exceeded.'),
+        { status: 429, code: 'insufficient_quota' },
       );
 
       const fn = vi.fn().mockRejectedValue(errorWithQuotaExceeded);
@@ -343,7 +350,9 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen API quota exceeded/);
+      await expect(promise).rejects.toThrow(
+        /Qwen OAuth free tier has been discontinued/,
+      );
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
@@ -403,7 +412,10 @@ describe('retryWithBackoff', () => {
     });
 
     it('should throw immediately for Qwen OAuth with quota message', async () => {
-      const errorWithQuota = new Error('quota exceeded');
+      const errorWithQuota = Object.assign(
+        new Error('Free allocated quota exceeded.'),
+        { status: 429, code: 'insufficient_quota' },
+      );
 
       const fn = vi.fn().mockRejectedValue(errorWithQuota);
 
@@ -414,7 +426,9 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen API quota exceeded/);
+      await expect(promise).rejects.toThrow(
+        /Qwen OAuth free tier has been discontinued/,
+      );
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
@@ -530,5 +544,30 @@ describe('getErrorStatus', () => {
     expect(getErrorStatus({})).toBeUndefined();
     expect(getErrorStatus({ response: {} })).toBeUndefined();
     expect(getErrorStatus({ error: {} })).toBeUndefined();
+  });
+
+  it('should parse HTTP_STATUS/NNN from streamed SSE error messages', () => {
+    // DashScope throttling: error opens with 200 OK, then surfaces as an SSE
+    // error frame. The SDK preserves the raw SSE text in error.message.
+    const dashscopeThrottle = new Error(
+      'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"x","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
+    );
+    expect(getErrorStatus(dashscopeThrottle)).toBe(429);
+
+    expect(getErrorStatus(new Error('upstream :HTTP_STATUS/503'))).toBe(503);
+  });
+
+  it('should prefer numeric status fields over HTTP_STATUS/NNN in message', () => {
+    const error: HttpError = new Error(':HTTP_STATUS/500');
+    error.status = 429;
+    expect(getErrorStatus(error)).toBe(429);
+  });
+
+  it('should ignore HTTP_STATUS/NNN outside the valid range', () => {
+    expect(getErrorStatus(new Error('HTTP_STATUS/999'))).toBeUndefined();
+  });
+
+  it('should not match HTTP_STATUS/NNN when adjacent to more digits', () => {
+    expect(getErrorStatus(new Error('HTTP_STATUS/4291'))).toBeUndefined();
   });
 });

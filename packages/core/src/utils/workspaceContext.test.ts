@@ -391,32 +391,147 @@ describe('WorkspaceContext with optional directories', () => {
     fs.mkdirSync(cwd, { recursive: true });
     fs.mkdirSync(existingDir1, { recursive: true });
     fs.mkdirSync(existingDir2, { recursive: true });
-
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   afterEach(() => {
     fs.rmSync(tempDir, { recursive: true, force: true });
-    vi.restoreAllMocks();
   });
 
-  it('should skip a missing optional directory and log a warning', () => {
+  it('should skip a missing optional directory', () => {
     const workspaceContext = new WorkspaceContext(cwd, [
       nonExistentDir,
       existingDir1,
     ]);
     const directories = workspaceContext.getDirectories();
     expect(directories).toEqual([cwd, existingDir1]);
-    expect(console.warn).toHaveBeenCalledTimes(1);
-    expect(console.warn).toHaveBeenCalledWith(
-      `[WARN] Skipping unreadable directory: ${nonExistentDir} (Directory does not exist: ${nonExistentDir})`,
-    );
   });
 
   it('should include an existing optional directory', () => {
     const workspaceContext = new WorkspaceContext(cwd, [existingDir1]);
     const directories = workspaceContext.getDirectories();
     expect(directories).toEqual([cwd, existingDir1]);
-    expect(console.warn).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkspaceContext removeDirectory', () => {
+  let tempDir: string;
+  let cwd: string;
+  let addedDir: string;
+  let anotherDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-context-remove-')),
+    );
+    cwd = path.join(tempDir, 'project');
+    addedDir = path.join(tempDir, 'added');
+    anotherDir = path.join(tempDir, 'another');
+
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(addedDir, { recursive: true });
+    fs.mkdirSync(anotherDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('should remove a runtime-added directory', () => {
+    const ctx = new WorkspaceContext(cwd);
+    ctx.addDirectory(addedDir);
+    expect(ctx.getDirectories()).toContain(addedDir);
+
+    const result = ctx.removeDirectory(addedDir);
+    expect(result).toBe(true);
+    expect(ctx.getDirectories()).not.toContain(addedDir);
+  });
+
+  it('should not remove the initial cwd directory', () => {
+    const ctx = new WorkspaceContext(cwd, [addedDir]);
+    // Only cwd is truly initial (non-removable)
+    const result = ctx.removeDirectory(cwd);
+    expect(result).toBe(false);
+    expect(ctx.getDirectories()).toContain(cwd);
+  });
+
+  it('should allow removing an additional directory passed at construction', () => {
+    const ctx = new WorkspaceContext(cwd, [addedDir]);
+    // additionalDirectories are NOT initial — they can be removed
+    const result = ctx.removeDirectory(addedDir);
+    expect(result).toBe(true);
+    expect(ctx.getDirectories()).not.toContain(addedDir);
+  });
+
+  it('should return false for non-existent directory', () => {
+    const ctx = new WorkspaceContext(cwd);
+    const result = ctx.removeDirectory('/non/existent/path');
+    expect(result).toBe(false);
+  });
+
+  it('should notify listeners when a directory is removed', () => {
+    const ctx = new WorkspaceContext(cwd);
+    ctx.addDirectory(addedDir);
+
+    const listener = vi.fn();
+    ctx.onDirectoriesChanged(listener);
+
+    ctx.removeDirectory(addedDir);
+    expect(listener).toHaveBeenCalledOnce();
+  });
+
+  it('should not notify listeners when removal fails', () => {
+    const ctx = new WorkspaceContext(cwd);
+
+    const listener = vi.fn();
+    ctx.onDirectoriesChanged(listener);
+
+    ctx.removeDirectory(addedDir); // not in workspace
+    expect(listener).not.toHaveBeenCalled();
+  });
+});
+
+describe('WorkspaceContext isInitialDirectory', () => {
+  let tempDir: string;
+  let cwd: string;
+  let additionalDir: string;
+  let runtimeDir: string;
+
+  beforeEach(() => {
+    tempDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'workspace-context-initial-')),
+    );
+    cwd = path.join(tempDir, 'project');
+    additionalDir = path.join(tempDir, 'additional');
+    runtimeDir = path.join(tempDir, 'runtime');
+
+    fs.mkdirSync(cwd, { recursive: true });
+    fs.mkdirSync(additionalDir, { recursive: true });
+    fs.mkdirSync(runtimeDir, { recursive: true });
+  });
+
+  afterEach(() => {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  it('should return true for the initial cwd directory', () => {
+    const ctx = new WorkspaceContext(cwd);
+    expect(ctx.isInitialDirectory(cwd)).toBe(true);
+  });
+
+  it('should return false for an additional directory passed at construction', () => {
+    const ctx = new WorkspaceContext(cwd, [additionalDir]);
+    // additionalDirectories are no longer considered 'initial'
+    expect(ctx.isInitialDirectory(additionalDir)).toBe(false);
+  });
+
+  it('should return false for a runtime-added directory', () => {
+    const ctx = new WorkspaceContext(cwd);
+    ctx.addDirectory(runtimeDir);
+    expect(ctx.isInitialDirectory(runtimeDir)).toBe(false);
+  });
+
+  it('should return false for a directory not in the workspace', () => {
+    const ctx = new WorkspaceContext(cwd);
+    expect(ctx.isInitialDirectory('/some/random/path')).toBe(false);
   });
 });

@@ -218,6 +218,43 @@ describe('languageUtils', () => {
         '<!-- qwen-code:llm-output-language: TestLanguage -->',
       );
     });
+
+    it('should use mandatory language rule instead of preference', () => {
+      writeOutputLanguageFile('Chinese');
+
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain(
+        'You MUST always respond in **Chinese**',
+      );
+      expect(writtenContent).toContain(
+        'This is a mandatory requirement, not a preference.',
+      );
+      expect(writtenContent).not.toContain('Prefer responding');
+    });
+
+    it('should include exception clause for explicit user language requests', () => {
+      writeOutputLanguageFile('English');
+
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain('## Exception');
+      expect(writtenContent).toContain(
+        "switch to the user's requested language for the remainder of the conversation",
+      );
+    });
+
+    it('should use the correct language name throughout the template', () => {
+      writeOutputLanguageFile('Japanese');
+
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain(
+        'You MUST always respond in **Japanese**',
+      );
+      expect(writtenContent).toContain('## Rule');
+      expect(writtenContent).toContain('## Exception');
+    });
   });
 
   describe('updateOutputLanguageFile', () => {
@@ -272,12 +309,12 @@ describe('languageUtils', () => {
       );
     });
 
-    it('should NOT overwrite file when content matches resolved language', () => {
+    it('should NOT overwrite file when it already exists with valid content', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(i18n.detectSystemLanguage).mockReturnValue('en');
       vi.mocked(fs.readFileSync).mockReturnValue(
-        `# Output language preference: English
-<!-- qwen-code:llm-output-language: English -->
+        `# Output language preference: French
+<!-- qwen-code:llm-output-language: French -->
 `,
       );
 
@@ -286,21 +323,18 @@ describe('languageUtils', () => {
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
-    it('should overwrite file when language setting differs', () => {
+    it('should NOT overwrite file even when setting differs from existing content', () => {
       vi.mocked(fs.existsSync).mockReturnValue(true);
       vi.mocked(fs.readFileSync).mockReturnValue(
-        `# Output language preference: English
-<!-- qwen-code:llm-output-language: English -->
+        `# Output language preference: French
+<!-- qwen-code:llm-output-language: French -->
 `,
       );
 
       initializeLlmOutputLanguage('Japanese');
 
-      expect(fs.writeFileSync).toHaveBeenCalledWith(
-        expect.stringContaining('output-language.md'),
-        expect.stringContaining('Japanese'),
-        'utf-8',
-      );
+      // Should NOT overwrite - user's existing file takes precedence
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
     it('should resolve "auto" to detected system language', () => {
@@ -378,6 +412,64 @@ describe('languageUtils', () => {
 
       // Should not overwrite since file already has Chinese
       expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('output-language.md path resolution priority', () => {
+    it('should prefer project-level path over global path', () => {
+      const projectPath = '/project/.qwen/output-language.md';
+      const globalPath = '/mock/home/.qwen/output-language.md';
+
+      vi.mocked(fs.existsSync).mockImplementation((p) => {
+        if (p.toString() === projectPath) return true;
+        if (p.toString() === globalPath) return true;
+        return false;
+      });
+
+      let resolvedPath: string | undefined;
+      if (fs.existsSync(projectPath)) {
+        resolvedPath = projectPath;
+      } else if (fs.existsSync(globalPath)) {
+        resolvedPath = globalPath;
+      }
+
+      expect(resolvedPath).toBe(projectPath);
+    });
+
+    it('should fall back to global path when project-level does not exist', () => {
+      const projectPath = '/project/.qwen/output-language.md';
+      const globalPath = '/mock/home/.qwen/output-language.md';
+
+      vi.mocked(fs.existsSync).mockImplementation((p) => {
+        if (p.toString() === projectPath) return false;
+        if (p.toString() === globalPath) return true;
+        return false;
+      });
+
+      let resolvedPath: string | undefined;
+      if (fs.existsSync(projectPath)) {
+        resolvedPath = projectPath;
+      } else if (fs.existsSync(globalPath)) {
+        resolvedPath = globalPath;
+      }
+
+      expect(resolvedPath).toBe(globalPath);
+    });
+
+    it('should return undefined when neither path exists', () => {
+      const projectPath = '/project/.qwen/output-language.md';
+      const globalPath = '/mock/home/.qwen/output-language.md';
+
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      let resolvedPath: string | undefined;
+      if (fs.existsSync(projectPath)) {
+        resolvedPath = projectPath;
+      } else if (fs.existsSync(globalPath)) {
+        resolvedPath = globalPath;
+      }
+
+      expect(resolvedPath).toBeUndefined();
     });
   });
 });

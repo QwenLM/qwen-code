@@ -15,6 +15,7 @@ export const copyCommand: SlashCommand = {
     return t('Copy the last result or code snippet to clipboard');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local-jsx',
   action: async (context, _args): Promise<SlashCommandActionReturn | void> => {
     const chat = await context.services.config?.getGeminiClient()?.getChat();
     const history = chat?.getHistory();
@@ -48,7 +49,7 @@ export const copyCommand: SlashCommand = {
         };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        console.debug(message);
+        context.services.config?.getDebugLogger().debug(message);
 
         return {
           type: 'message',

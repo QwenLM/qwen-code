@@ -7,12 +7,15 @@
 import { useCallback } from 'react';
 import type { VSCodeAPI } from './useVSCode.js';
 import { getRandomLoadingMessage } from '../../constants/loadingMessages.js';
+import type { ImageAttachment } from './useImage.js';
 
 interface UseMessageSubmitProps {
   vscode: VSCodeAPI;
   inputText: string;
   setInputText: (text: string) => void;
-  inputFieldRef: React.RefObject<HTMLDivElement>;
+  attachedImages?: ImageAttachment[];
+  clearImages?: () => void;
+  inputFieldRef: React.RefObject<HTMLDivElement | null>;
   isStreaming: boolean;
   isWaitingForResponse: boolean;
   // When true, do NOT auto-attach the active editor file/selection to context
@@ -31,6 +34,26 @@ interface UseMessageSubmitProps {
   };
 }
 
+export const shouldSendMessage = ({
+  inputText,
+  attachedImages,
+  isStreaming,
+  isWaitingForResponse,
+}: {
+  inputText: string;
+  attachedImages?: ImageAttachment[];
+  isStreaming: boolean;
+  isWaitingForResponse: boolean;
+}): boolean => {
+  if (isStreaming || isWaitingForResponse) {
+    return false;
+  }
+
+  const hasText = inputText.replace(/\u200B/g, '').trim().length > 0;
+  const hasAttachments = (attachedImages?.length ?? 0) > 0;
+  return hasText || hasAttachments;
+};
+
 /**
  * Message submit Hook
  * Handles message submission logic and context parsing
@@ -39,6 +62,8 @@ export const useMessageSubmit = ({
   vscode,
   inputText,
   setInputText,
+  attachedImages = [],
+  clearImages,
   inputFieldRef,
   isStreaming,
   isWaitingForResponse,
@@ -47,15 +72,36 @@ export const useMessageSubmit = ({
   messageHandling,
 }: UseMessageSubmitProps) => {
   const handleSubmit = useCallback(
-    (e: React.FormEvent) => {
+    (e: React.FormEvent | React.KeyboardEvent, explicitText?: string) => {
       e.preventDefault();
 
-      if (!inputText.trim() || isStreaming || isWaitingForResponse) {
+      // Use explicit text if provided (e.g., from prompt suggestion Enter accept)
+      const textToSend = explicitText ?? inputText;
+
+      if (
+        !shouldSendMessage({
+          inputText: textToSend,
+          attachedImages,
+          isStreaming,
+          isWaitingForResponse,
+        })
+      ) {
+        return;
+      }
+
+      // Handle /account command - show account info dialog
+      if (textToSend.trim() === '/account') {
+        setInputText('');
+        if (inputFieldRef.current) {
+          inputFieldRef.current.textContent = '\u200B';
+          inputFieldRef.current.setAttribute('data-empty', 'true');
+        }
+        vscode.postMessage({ type: 'getAccountInfo', data: {} });
         return;
       }
 
       // Handle /login command - show inline loading while extension authenticates
-      if (inputText.trim() === '/login') {
+      if (textToSend.trim() === '/login') {
         setInputText('');
         if (inputFieldRef.current) {
           // Use a zero-width space to maintain the height of the contentEditable element
@@ -89,7 +135,7 @@ export const useMessageSubmit = ({
       const fileRefPattern = /@([^\s]+)/g;
       let match;
 
-      while ((match = fileRefPattern.exec(inputText)) !== null) {
+      while ((match = fileRefPattern.exec(textToSend)) !== null) {
         const fileName = match[1];
         const filePath = fileContext.getFileReference(fileName);
 
@@ -139,9 +185,10 @@ export const useMessageSubmit = ({
       vscode.postMessage({
         type: 'sendMessage',
         data: {
-          text: inputText,
+          text: textToSend,
           context: context.length > 0 ? context : undefined,
           fileContext: fileContextForMessage,
+          attachments: attachedImages.length > 0 ? attachedImages : undefined,
         },
       });
 
@@ -153,9 +200,14 @@ export const useMessageSubmit = ({
         inputFieldRef.current.setAttribute('data-empty', 'true');
       }
       fileContext.clearFileReferences();
+      if (clearImages) {
+        clearImages();
+      }
     },
     [
       inputText,
+      attachedImages,
+      clearImages,
       isStreaming,
       setInputText,
       inputFieldRef,

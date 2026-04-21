@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type { ToolConfirmationOutcome } from '../tools.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -11,13 +12,14 @@ import {
   type ToolInvocation,
   type ToolCallConfirmationDetails,
   type ToolInfoConfirmationDetails,
-  ToolConfirmationOutcome,
+  type ToolConfirmationPayload,
 } from '../tools.js';
+import type { PermissionDecision } from '../../permissions/types.js';
 import { ToolErrorType } from '../tool-error.js';
 
 import type { Config } from '../../config/config.js';
-import { ApprovalMode } from '../../config/config.js';
 import { getErrorMessage } from '../../utils/errors.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
 import { buildContentWithSources } from './utils.js';
 import { TavilyProvider } from './providers/tavily-provider.js';
 import { GoogleProvider } from './providers/google-provider.js';
@@ -31,6 +33,8 @@ import type {
   DashScopeProviderConfig,
 } from './types.js';
 import { ToolNames, ToolDisplayNames } from '../tool-names.js';
+
+const debugLogger = createDebugLogger('WEB_SEARCH');
 
 class WebSearchToolInvocation extends BaseToolInvocation<
   WebSearchToolParams,
@@ -52,25 +56,32 @@ class WebSearchToolInvocation extends BaseToolInvocation<
     return ` (Searching the web via ${provider})`;
   }
 
-  override async shouldConfirmExecute(
+  /**
+   * WebSearch requires confirmation for external network requests.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    return 'ask';
+  }
+
+  /**
+   * Constructs the web search confirmation details.
+   */
+  override async getConfirmationDetails(
     _abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false> {
-    // Auto-execute in AUTO_EDIT mode and PLAN mode (read-only tool)
-    if (
-      this.config.getApprovalMode() === ApprovalMode.AUTO_EDIT ||
-      this.config.getApprovalMode() === ApprovalMode.PLAN
-    ) {
-      return false;
-    }
+  ): Promise<ToolCallConfirmationDetails> {
+    // Extract the domain for the permission rule.
+    const permissionRules = [`WebSearch`];
 
     const confirmationDetails: ToolInfoConfirmationDetails = {
       type: 'info',
       title: 'Confirm Web Search',
       prompt: `Search the web for: "${this.params.query}"`,
-      onConfirm: async (outcome: ToolConfirmationOutcome) => {
-        if (outcome === ToolConfirmationOutcome.ProceedAlways) {
-          this.config.setApprovalMode(ApprovalMode.AUTO_EDIT);
-        }
+      permissionRules,
+      onConfirm: async (
+        _outcome: ToolConfirmationOutcome,
+        _payload?: ToolConfirmationPayload,
+      ) => {
+        // No-op: persistence is handled by coreToolScheduler via PM rules
       },
     };
     return confirmationDetails;
@@ -114,7 +125,7 @@ class WebSearchToolInvocation extends BaseToolInvocation<
           providers.set(config.type, provider);
         }
       } catch (error) {
-        console.warn(`Failed to create ${config.type} provider:`, error);
+        debugLogger.warn(`Failed to create ${config.type} provider:`, error);
       }
     }
 
@@ -259,7 +270,7 @@ class WebSearchToolInvocation extends BaseToolInvocation<
       };
     } catch (error: unknown) {
       const errorMessage = `Error during web search: ${getErrorMessage(error)}`;
-      console.error(errorMessage, error);
+      debugLogger.error(errorMessage, error);
       return {
         llmContent: errorMessage,
         returnDisplay: 'Error performing web search.',

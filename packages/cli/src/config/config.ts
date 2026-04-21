@@ -10,28 +10,32 @@ import {
   Config,
   DEFAULT_QWEN_EMBEDDING_MODEL,
   FileDiscoveryService,
-  getCurrentGeminiMdFilename,
+  getAllGeminiMdFilenames,
   loadServerHierarchicalMemory,
+  type LoadServerHierarchicalMemoryResponse,
   setGeminiMdFilename as setServerGeminiMdFilename,
   resolveTelemetrySettings,
   FatalConfigError,
   Storage,
   InputFormat,
   OutputFormat,
-  isToolEnabled,
   SessionService,
   ideContextStore,
   type ResumedSessionData,
   type LspClient,
   type ToolName,
-  EditTool,
-  ShellTool,
-  WriteFileTool,
+  ToolNames,
   NativeLspClient,
+  createDebugLogger,
   NativeLspService,
+  isBareMode,
+  isToolEnabled,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
+import { hooksCommand } from '../commands/hooks.js';
 import type { Settings } from './settings.js';
+import { loadSettings, SettingScope } from './settings.js';
+import { authCommand } from '../commands/auth.js';
 import {
   resolveCliGenerationConfig,
   getAuthTypeFromEnv,
@@ -47,19 +51,26 @@ import { getCliVersion } from '../utils/version.js';
 import { loadSandboxConfig } from './sandboxConfig.js';
 import { appEvents } from '../utils/events.js';
 import { mcpCommand } from '../commands/mcp.js';
+import { channelCommand } from '../commands/channel.js';
+
+// UUID v4 regex pattern for validation
+const SESSION_ID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-agent-[a-zA-Z0-9_.-]+)?$/i;
+
+/**
+ * Validates if a string is a valid session ID format.
+ * Accepts a standard UUID, or a UUID followed by `-agent-{suffix}`
+ * (used by Arena to give each agent a deterministic session ID).
+ */
+function isValidSessionId(value: string): boolean {
+  return SESSION_ID_REGEX.test(value);
+}
 
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { buildWebSearchConfig } from './webSearch.js';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
 
-// Simple console logger for now - replace with actual logger if available
-const logger = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  debug: (...args: any[]) => console.debug('[DEBUG]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  warn: (...args: any[]) => console.warn('[WARN]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  error: (...args: any[]) => console.error('[ERROR]', ...args),
-};
+const debugLogger = createDebugLogger('CONFIG');
 
 const VALID_APPROVAL_MODE_VALUES = [
   'plan',
@@ -102,8 +113,10 @@ export interface CliArgs {
   debug: boolean | undefined;
   prompt: string | undefined;
   promptInteractive: string | undefined;
-  allFiles: boolean | undefined;
+  systemPrompt: string | undefined;
+  appendSystemPrompt: string | undefined;
   yolo: boolean | undefined;
+  bare: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
   checkpointing: boolean | undefined;
@@ -116,7 +129,6 @@ export interface CliArgs {
   allowedTools: string[] | undefined;
   acp: boolean | undefined;
   experimentalAcp: boolean | undefined;
-  experimentalSkills: boolean | undefined;
   experimentalLsp: boolean | undefined;
   extensions: string[] | undefined;
   listExtensions: boolean | undefined;
@@ -131,8 +143,6 @@ export interface CliArgs {
   googleSearchEngineId: string | undefined;
   webSearchDefault: string | undefined;
   screenReader: boolean | undefined;
-  vlmSwitchMode: string | undefined;
-  useSmartEdit: boolean | undefined;
   inputFormat?: string | undefined;
   outputFormat: string | undefined;
   includePartialMessages?: boolean;
@@ -145,11 +155,17 @@ export interface CliArgs {
   continue: boolean | undefined;
   /** Resume a specific session by its ID */
   resume: string | undefined;
+  /** Specify a session ID without session resumption */
+  sessionId: string | undefined;
   maxSessionTurns: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
+  disabledSlashCommands: string[] | undefined;
   authType: string | undefined;
   channel: string | undefined;
+  jsonFd?: number | undefined;
+  jsonFile?: string | undefined;
+  inputFile?: string | undefined;
 }
 
 function normalizeOutputFormat(
@@ -167,14 +183,15 @@ function normalizeOutputFormat(
   return OutputFormat.TEXT;
 }
 
-export async function parseArguments(settings: Settings): Promise<CliArgs> {
+export async function parseArguments(): Promise<CliArgs> {
   let rawArgv = hideBin(process.argv);
 
   // hack: if the first argument is the CLI entry point, remove it
   if (
     rawArgv.length > 0 &&
     (rawArgv[0].endsWith('/dist/qwen-cli/cli.js') ||
-      rawArgv[0].endsWith('/dist/cli.js'))
+      rawArgv[0].endsWith('/dist/cli.js') ||
+      rawArgv[0].endsWith('/dist/cli/cli.js'))
   ) {
     rawArgv = rawArgv.slice(1);
   }
@@ -246,6 +263,12 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
       description: 'Run in debug mode?',
       default: false,
     })
+    .option('bare', {
+      type: 'boolean',
+      description:
+        'Minimal mode: skip implicit startup auto-discovery and only honor explicitly provided CLI inputs.',
+      default: false,
+    })
     .option('proxy', {
       type: 'string',
       description: 'Proxy for Qwen Code, like schema://user:password@host:port',
@@ -281,6 +304,16 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           description:
             'Execute the provided prompt and continue in interactive mode',
         })
+        .option('system-prompt', {
+          type: 'string',
+          description:
+            'Override the main session system prompt for this run. Can be combined with --append-system-prompt.',
+        })
+        .option('append-system-prompt', {
+          type: 'string',
+          description:
+            'Append instructions to the main session system prompt for this run. Can be combined with --system-prompt.',
+        })
         .option('sandbox', {
           alias: 's',
           type: 'boolean',
@@ -289,12 +322,6 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         .option('sandbox-image', {
           type: 'string',
           description: 'Sandbox image URI.',
-        })
-        .option('all-files', {
-          alias: ['a'],
-          type: 'boolean',
-          description: 'Include ALL files in context?',
-          default: false,
         })
         .option('yolo', {
           alias: 'y',
@@ -326,15 +353,9 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         })
         .option('experimental-skills', {
           type: 'boolean',
-          description: 'Enable experimental Skills feature',
-          default: (() => {
-            const legacySkills = (
-              settings as Settings & {
-                tools?: { experimental?: { skills?: boolean } };
-              }
-            ).tools?.experimental?.skills;
-            return settings.experimental?.skills ?? legacySkills ?? false;
-          })(),
+          description:
+            'Deprecated: Skills are now enabled by default. This flag is ignored.',
+          hidden: true,
         })
         .option('experimental-lsp', {
           type: 'boolean',
@@ -383,6 +404,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           description: 'List all available extensions and exit.',
         })
         .option('include-directories', {
+          alias: 'add-dir',
           type: 'array',
           string: true,
           description:
@@ -430,13 +452,6 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           type: 'boolean',
           description: 'Enable screen reader mode for accessibility.',
         })
-        .option('vlm-switch-mode', {
-          type: 'string',
-          choices: ['once', 'session', 'persist'],
-          description:
-            'Default behavior when images are detected in input. Values: once (one-time switch), session (switch for entire session), persist (continue with current model). Overrides settings files.',
-          default: process.env['VLM_SWITCH_MODE'],
-        })
         .option('input-format', {
           type: 'string',
           choices: ['text', 'stream-json'],
@@ -455,6 +470,25 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
             'Include partial assistant messages when using stream-json output.',
           default: false,
         })
+        .option('json-fd', {
+          type: 'number',
+          description:
+            'File descriptor for structured JSON event output (dual output mode). ' +
+            'The TUI renders normally on stdout while JSON events are written to this fd. ' +
+            'The caller must provide this fd via spawn stdio configuration.',
+        })
+        .option('json-file', {
+          type: 'string',
+          description:
+            'File path for structured JSON event output (dual output mode). ' +
+            'Can be a regular file, FIFO (named pipe), or /dev/fd/N.',
+        })
+        .option('input-file', {
+          type: 'string',
+          description:
+            'File path for receiving remote input commands (bidirectional sync). ' +
+            'An external process writes JSONL commands; the TUI watches and processes them.',
+        })
         .option('continue', {
           alias: 'c',
           type: 'boolean',
@@ -467,6 +501,10 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           type: 'string',
           description:
             'Resume a specific session by its ID. Use without an ID to show session picker.',
+        })
+        .option('session-id', {
+          type: 'string',
+          description: 'Specify a session ID for this run.',
         })
         .option('max-session-turns', {
           type: 'number',
@@ -493,6 +531,17 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           coerce: (tools: string[]) =>
             tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
         })
+        .option('disabled-slash-commands', {
+          type: 'array',
+          string: true,
+          description:
+            'Slash command names to hide/disable (comma-separated or ' +
+            'repeated). Merged with the `slashCommands.disabled` setting ' +
+            'and QWEN_DISABLED_SLASH_COMMANDS. Matched case-insensitively ' +
+            'against the final command name.',
+          coerce: (names: string[]) =>
+            names.flatMap((n) => n.split(',').map((t) => t.trim())),
+        })
         .option('auth-type', {
           type: 'string',
           choices: [
@@ -506,15 +555,11 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         })
         .deprecateOption(
           'sandbox-image',
-          'Use the "tools.sandbox" setting in settings.json instead. This flag will be removed in a future version.',
+          'Use the "tools.sandboxImage" setting in settings.json instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
           'checkpointing',
           'Use the "general.checkpointing.enabled" setting in settings.json instead. This flag will be removed in a future version.',
-        )
-        .deprecateOption(
-          'all-files',
-          'Use @ includes in the application instead. This flag will be removed in a future version.',
         )
         .deprecateOption(
           'prompt',
@@ -522,7 +567,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
         )
         // Ensure validation flows through .fail() for clean UX
         .fail((msg: string, err: Error | undefined, yargs: Argv) => {
-          console.error(msg || err?.message || 'Unknown error');
+          writeStderrLine(msg || err?.message || 'Unknown error');
           yargs.showHelp();
           process.exit(1);
         })
@@ -558,13 +603,34 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
           if (argv['continue'] && argv['resume']) {
             return 'Cannot use both --continue and --resume together. Use --continue to resume the latest session, or --resume <sessionId> to resume a specific session.';
           }
+          if (argv['sessionId'] && (argv['continue'] || argv['resume'])) {
+            return 'Cannot use --session-id with --continue or --resume. Use --session-id to start a new session with a specific ID, or use --continue/--resume to resume an existing session.';
+          }
+          if (
+            argv['sessionId'] &&
+            !isValidSessionId(argv['sessionId'] as string)
+          ) {
+            return `Invalid --session-id: "${argv['sessionId']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
+          }
+          if (argv['resume'] && !isValidSessionId(argv['resume'] as string)) {
+            return `Invalid --resume: "${argv['resume']}". Must be a valid UUID (e.g., "123e4567-e89b-12d3-a456-426614174000").`;
+          }
+          if (argv['jsonFd'] != null && argv['jsonFile'] != null) {
+            return '--json-fd and --json-file are mutually exclusive. Use one or the other.';
+          }
           return true;
         }),
     )
     // Register MCP subcommands
     .command(mcpCommand)
     // Register Extension subcommands
-    .command(extensionsCommand);
+    .command(extensionsCommand)
+    // Register Auth subcommands
+    .command(authCommand)
+    // Register Hooks subcommands
+    .command(hooksCommand)
+    // Register Channel subcommands
+    .command(channelCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -583,9 +649,12 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
   // and not return to main CLI logic
   if (
     result._.length > 0 &&
-    (result._[0] === 'mcp' || result._[0] === 'extensions')
+    (result._[0] === 'mcp' ||
+      result._[0] === 'extensions' ||
+      result._[0] === 'hooks' ||
+      result._[0] === 'channel')
   ) {
-    // MCP commands handle their own execution and process exit
+    // MCP/Extensions/Hooks commands handle their own execution and process exit
     process.exit(0);
   }
 
@@ -614,7 +683,7 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
 
   // Handle deprecated --experimental-acp flag
   if (result['experimentalAcp']) {
-    console.warn(
+    writeStderrLine(
       '\x1b[33m⚠ Warning: --experimental-acp is deprecated and will be removed in a future release. Please use --acp instead.\x1b[0m',
     );
     // Map experimental-acp to acp if acp is not explicitly set
@@ -637,12 +706,12 @@ export async function parseArguments(settings: Settings): Promise<CliArgs> {
 export async function loadHierarchicalGeminiMemory(
   currentWorkingDirectory: string,
   includeDirectoriesToReadGemini: readonly string[] = [],
-  debugMode: boolean,
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   memoryImportFormat: 'flat' | 'tree' = 'tree',
-): Promise<{ memoryContent: string; fileCount: number }> {
+  contextRuleExcludes: string[] = [],
+): Promise<LoadServerHierarchicalMemoryResponse> {
   // FIX: Use real, canonical paths for a reliable comparison to handle symlinks.
   const realCwd = fs.realpathSync(path.resolve(currentWorkingDirectory));
   const realHome = fs.realpathSync(path.resolve(homedir()));
@@ -652,21 +721,15 @@ export async function loadHierarchicalGeminiMemory(
   // function to signal that it should skip the workspace search.
   const effectiveCwd = isHomeDirectory ? '' : currentWorkingDirectory;
 
-  if (debugMode) {
-    logger.debug(
-      `CLI: Delegating hierarchical memory load to server for CWD: ${currentWorkingDirectory} (memoryImportFormat: ${memoryImportFormat})`,
-    );
-  }
-
   // Directly call the server function with the corrected path.
   return loadServerHierarchicalMemory(
     effectiveCwd,
     includeDirectoriesToReadGemini,
-    debugMode,
     fileService,
     extensionContextFilePaths,
     folderTrust,
     memoryImportFormat,
+    contextRuleExcludes,
   );
 }
 
@@ -684,8 +747,22 @@ export async function loadCliConfig(
   argv: CliArgs,
   cwd: string = process.cwd(),
   overrideExtensions?: string[],
+  /**
+   * Optional separated hooks for proper source attribution.
+   * If provided, these override settings.hooks for hook loading.
+   */
+  hooksConfig?: {
+    userHooks?: Record<string, unknown>;
+    projectHooks?: Record<string, unknown>;
+  },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
+  const bareMode = isBareMode(argv.bare);
+
+  // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
+  // is auto-detected inside getRuntimeBaseDir() at each call site).
+  // Pass cwd so that relative paths like ".qwen" resolve per-project.
+  Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
 
   const ideMode = settings.ide?.enabled ?? false;
 
@@ -699,33 +776,40 @@ export async function loadCliConfig(
   if (settings.context?.fileName) {
     setServerGeminiMdFilename(settings.context.fileName);
   } else {
-    // Reset to default if not provided in settings.
-    setServerGeminiMdFilename(getCurrentGeminiMdFilename());
+    // Reset to default context filenames if not provided in settings.
+    setServerGeminiMdFilename(getAllGeminiMdFilenames());
   }
 
   // Automatically load output-language.md if it exists
-  let outputLanguageFilePath: string | undefined = path.join(
+  const projectStorage = new Storage(cwd);
+  const projectOutputLanguagePath = path.join(
+    projectStorage.getQwenDir(),
+    'output-language.md',
+  );
+  const globalOutputLanguagePath = path.join(
     Storage.getGlobalQwenDir(),
     'output-language.md',
   );
-  if (fs.existsSync(outputLanguageFilePath)) {
-    if (debugMode) {
-      logger.debug(
-        `Found output-language.md, adding to context files: ${outputLanguageFilePath}`,
-      );
+
+  let outputLanguageFilePath: string | undefined;
+  if (!bareMode) {
+    if (fs.existsSync(projectOutputLanguagePath)) {
+      outputLanguageFilePath = projectOutputLanguagePath;
+    } else if (fs.existsSync(globalOutputLanguagePath)) {
+      outputLanguageFilePath = globalOutputLanguagePath;
     }
-  } else {
-    outputLanguageFilePath = undefined;
   }
 
   const fileService = new FileDiscoveryService(cwd);
 
-  const includeDirectories = (settings.context?.includeDirectories || [])
+  const includeDirectories = (
+    bareMode ? [] : (settings.context?.includeDirectories ?? [])
+  )
     .map(resolvePath)
     .concat((argv.includeDirectories || []).map(resolvePath));
 
   // LSP configuration: enabled only via --experimental-lsp flag
-  const lspEnabled = argv.experimentalLsp === true;
+  const lspEnabled = !bareMode && argv.experimentalLsp === true;
   let lspClient: LspClient | undefined;
   const question = argv.promptInteractive || argv.prompt || '';
   const inputFormat: InputFormat =
@@ -751,7 +835,7 @@ export async function loadCliConfig(
     approvalMode = parseApprovalModeValue(argv.approvalMode);
   } else if (argv.yolo) {
     approvalMode = ApprovalMode.YOLO;
-  } else if (settings.tools?.approvalMode) {
+  } else if (!bareMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
   } else {
     approvalMode = ApprovalMode.DEFAULT;
@@ -763,7 +847,7 @@ export async function loadCliConfig(
     approvalMode !== ApprovalMode.DEFAULT &&
     approvalMode !== ApprovalMode.PLAN
   ) {
-    logger.warn(
+    writeStderrLine(
       `Approval mode overridden to "default" because the current folder is not trusted.`,
     );
     approvalMode = ApprovalMode.DEFAULT;
@@ -810,70 +894,142 @@ export async function loadCliConfig(
     // (fallback for edge cases where query/prompt is provided with TEXT output)
     interactive = false;
   }
-  // In non-interactive mode, exclude tools that require a prompt.
-  // However, if stream-json input is used, control can be requested via JSON messages,
-  // so tools should not be excluded in that case.
-  const extraExcludes: string[] = [];
-  const resolvedCoreTools = argv.coreTools || settings.tools?.core || [];
-  const resolvedAllowedTools =
-    argv.allowedTools || settings.tools?.allowed || [];
-  const isExplicitlyEnabled = (toolName: ToolName): boolean => {
-    if (resolvedCoreTools.length > 0) {
-      if (isToolEnabled(toolName, resolvedCoreTools, [])) {
-        return true;
-      }
+  // ── Unified permissions construction ─────────────────────────────────────
+  // All permission sources are merged here, before constructing Config.
+  // The resulting three arrays are the single source of truth that Config /
+  // PermissionManager will use.
+  //
+  // Sources (in order of precedence within each list):
+  //   1. settings.permissions.{allow,ask,deny}  (persistent, merged by LoadedSettings)
+  //   2. argv.coreTools   → allow  (allowlist mode: only these tools are available)
+  //   3. argv.allowedTools → allow  (auto-approve these tools/commands)
+  //   4. argv.excludeTools → deny   (block these tools completely)
+  //   5. Non-interactive mode exclusions → deny (unless explicitly allowed above)
+
+  // Start from settings-level rules.
+  // Read from both new `permissions` and legacy `tools` paths for compatibility.
+  // Note: settings.tools.core / argv.coreTools are intentionally NOT merged into
+  // mergedAllow — they have whitelist semantics (only listed tools are registered),
+  // not auto-approve semantics. They are passed via the `coreTools` Config param
+  // and handled by PermissionManager.coreToolsAllowList.
+  const resolvedCoreTools: string[] = [
+    ...(bareMode ? [] : (argv.coreTools ?? [])),
+    ...(bareMode ? [] : (settings.tools?.core ?? [])),
+  ];
+  const mergedAllow: string[] = [
+    ...(bareMode ? [] : (settings.permissions?.allow ?? [])),
+    ...(bareMode ? [] : (settings.tools?.allowed ?? [])),
+  ];
+  const mergedAsk: string[] = [
+    ...(bareMode ? [] : (settings.permissions?.ask ?? [])),
+  ];
+  const mergedDeny: string[] = [
+    ...(bareMode ? [] : (settings.permissions?.deny ?? [])),
+    ...(bareMode ? [] : (settings.tools?.exclude ?? [])),
+  ];
+
+  // argv.allowedTools adds allow rules (auto-approve).
+  for (const t of argv.allowedTools ?? []) {
+    if (t && !mergedAllow.includes(t)) mergedAllow.push(t);
+  }
+
+  // argv.excludeTools adds deny rules.
+  for (const t of argv.excludeTools ?? []) {
+    if (t && !mergedDeny.includes(t)) mergedDeny.push(t);
+  }
+
+  // Merge the slash-command denylist from settings + CLI flag + env var.
+  // Settings merge (UNION across scopes) is already handled upstream; we
+  // only de-duplicate while preserving case for diagnostic purposes.
+  const disabledSlashCommands: string[] = [];
+  const seenDisabled = new Set<string>();
+  const addDisabled = (value: string | undefined) => {
+    if (!value) return;
+    const trimmed = value.trim();
+    if (!trimmed) return;
+    const key = trimmed.toLowerCase();
+    if (!seenDisabled.has(key)) {
+      seenDisabled.add(key);
+      disabledSlashCommands.push(trimmed);
     }
-    if (resolvedAllowedTools.length > 0) {
-      if (isToolEnabled(toolName, resolvedAllowedTools, [])) {
-        return true;
-      }
+  };
+  for (const name of settings.slashCommands?.disabled ?? []) addDisabled(name);
+  for (const name of argv.disabledSlashCommands ?? []) addDisabled(name);
+  for (const name of (process.env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(
+    ',',
+  )) {
+    addDisabled(name);
+  }
+
+  // Helper: check if a tool is explicitly covered by an allow rule OR by the
+  // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
+  // to preserve the original behaviour where "ShellTool", "Shell", and
+  // "run_shell_command" are all accepted as the same tool.
+  const isExplicitlyAllowed = (toolName: ToolName): boolean => {
+    const name = toolName as string;
+    // 1. Check permissions.allow / allowedTools rules.
+    if (
+      mergedAllow.some((rule) => {
+        const openParen = rule.indexOf('(');
+        const ruleName =
+          openParen === -1 ? rule.trim() : rule.substring(0, openParen).trim();
+        return ruleName === name;
+      })
+    ) {
+      return true;
+    }
+    // 2. Check coreTools whitelist (with alias matching).
+    // If coreTools is non-empty and explicitly includes this tool, it is
+    // considered allowed for non-interactive mode exclusion purposes.
+    if (resolvedCoreTools.length > 0) {
+      return isToolEnabled(toolName, resolvedCoreTools, []);
     }
     return false;
   };
-  const excludeUnlessExplicit = (toolName: ToolName): void => {
-    if (!isExplicitlyEnabled(toolName)) {
-      extraExcludes.push(toolName);
-    }
-  };
 
-  // ACP mode check: must include both --acp (current) and --experimental-acp (deprecated).
-  // Without this check, edit, write_file, run_shell_command would be excluded in ACP mode.
+  // In non-interactive mode, tools that require a user prompt are denied unless
+  // the caller has explicitly allowed them. Stream-JSON input is excluded from
+  // this logic because approval can be sent programmatically via JSON messages.
   const isAcpMode = argv.acp || argv.experimentalAcp;
-  if (!interactive && !isAcpMode && inputFormat !== InputFormat.STREAM_JSON) {
+  if (
+    !bareMode &&
+    !interactive &&
+    !isAcpMode &&
+    inputFormat !== InputFormat.STREAM_JSON
+  ) {
+    const denyUnlessAllowed = (toolName: ToolName): void => {
+      if (!isExplicitlyAllowed(toolName)) {
+        const name = toolName as string;
+        if (!mergedDeny.includes(name)) mergedDeny.push(name);
+      }
+    };
+
     switch (approvalMode) {
       case ApprovalMode.PLAN:
       case ApprovalMode.DEFAULT:
-        // In default non-interactive mode, all tools that require approval are excluded,
-        // unless explicitly enabled via coreTools/allowedTools.
-        excludeUnlessExplicit(ShellTool.Name as ToolName);
-        excludeUnlessExplicit(EditTool.Name as ToolName);
-        excludeUnlessExplicit(WriteFileTool.Name as ToolName);
+        // Deny all write/execute tools unless explicitly allowed.
+        denyUnlessAllowed(ToolNames.SHELL as ToolName);
+        denyUnlessAllowed(ToolNames.EDIT as ToolName);
+        denyUnlessAllowed(ToolNames.WRITE_FILE as ToolName);
         break;
       case ApprovalMode.AUTO_EDIT:
-        // In auto-edit non-interactive mode, only tools that still require a prompt are excluded.
-        excludeUnlessExplicit(ShellTool.Name as ToolName);
+        // Only shell requires a prompt in auto-edit mode.
+        denyUnlessAllowed(ToolNames.SHELL as ToolName);
         break;
       case ApprovalMode.YOLO:
-        // No extra excludes for YOLO mode.
+        // No extra denials for YOLO mode.
         break;
       default:
-        // This should never happen due to validation earlier, but satisfies the linter
         break;
     }
   }
-
-  const excludeTools = mergeExcludeTools(
-    settings,
-    extraExcludes.length > 0 ? extraExcludes : undefined,
-    argv.excludeTools,
-  );
 
   let allowedMcpServers: Set<string> | undefined;
   let excludedMcpServers: Set<string> | undefined;
   if (argv.allowedMcpServerNames) {
     allowedMcpServers = new Set(argv.allowedMcpServerNames.filter(Boolean));
     excludedMcpServers = undefined;
-  } else {
+  } else if (!bareMode) {
     allowedMcpServers = settings.mcp?.allowed
       ? new Set(settings.mcp.allowed.filter(Boolean))
       : undefined;
@@ -884,7 +1040,7 @@ export async function loadCliConfig(
 
   const selectedAuthType =
     (argv.authType as AuthType | undefined) ||
-    settings.security?.auth?.selectedType ||
+    (bareMode ? undefined : settings.security?.auth?.selectedType) ||
     /* getAuthTypeFromEnv means no authType was explicitly provided, we infer the authType from env vars */
     getAuthTypeFromEnv();
 
@@ -904,14 +1060,14 @@ export async function loadCliConfig(
 
   const { model: resolvedModel } = resolvedCliConfig;
 
-  const sandboxConfig = await loadSandboxConfig(settings, argv);
+  const sandboxConfig = await loadSandboxConfig(
+    bareMode ? ({} as Settings) : settings,
+    argv,
+  );
   const screenReader =
     argv.screenReader !== undefined
       ? argv.screenReader
       : (settings.ui?.accessibility?.screenReader ?? false);
-
-  const vlmSwitchMode =
-    argv.vlmSwitchMode || settings.experimental?.vlmSwitchMode;
 
   let sessionId: string | undefined;
   let sessionData: ResumedSessionData | undefined;
@@ -930,10 +1086,21 @@ export async function loadCliConfig(
       sessionData = await sessionService.loadSession(argv.resume);
       if (!sessionData) {
         const message = `No saved session found with ID ${argv.resume}. Run \`qwen --resume\` without an ID to choose from existing sessions.`;
-        console.log(message);
+        writeStderrLine(message);
         process.exit(1);
       }
     }
+  } else if (argv['sessionId']) {
+    // Use provided session ID without session resumption
+    // Check if session ID is already in use
+    const sessionService = new SessionService(cwd);
+    const exists = await sessionService.sessionExists(argv['sessionId']);
+    if (exists) {
+      const message = `Error: Session Id ${argv['sessionId']} is already in use.`;
+      writeStderrLine(message);
+      process.exit(1);
+    }
+    sessionId = argv['sessionId'];
   }
 
   const modelProvidersConfig = settings.modelProviders;
@@ -945,19 +1112,50 @@ export async function loadCliConfig(
     sandbox: sandboxConfig,
     targetDir: cwd,
     includeDirectories,
-    loadMemoryFromIncludeDirectories:
-      settings.context?.loadFromIncludeDirectories || false,
+    loadMemoryFromIncludeDirectories: bareMode
+      ? includeDirectories.length > 0
+      : (settings.context?.loadFromIncludeDirectories ?? false),
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,
-    fullContext: argv.allFiles || false,
-    coreTools: argv.coreTools || settings.tools?.core || undefined,
-    allowedTools: argv.allowedTools || settings.tools?.allowed || undefined,
-    excludeTools,
-    toolDiscoveryCommand: settings.tools?.discoveryCommand,
-    toolCallCommand: settings.tools?.callCommand,
-    mcpServerCommand: settings.mcp?.serverCommand,
-    mcpServers: settings.mcpServers || {},
+    systemPrompt: argv.systemPrompt,
+    appendSystemPrompt: argv.appendSystemPrompt,
+    // Legacy fields – kept for backward compatibility with getCoreTools() etc.
+    coreTools: bareMode
+      ? undefined
+      : argv.coreTools || settings.tools?.core || undefined,
+    allowedTools: bareMode
+      ? argv.allowedTools || undefined
+      : argv.allowedTools || settings.tools?.allowed || undefined,
+    excludeTools: mergedDeny,
+    disabledSlashCommands:
+      disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
+    // New unified permissions (PermissionManager source of truth).
+    permissions: {
+      allow: mergedAllow.length > 0 ? mergedAllow : undefined,
+      ask: mergedAsk.length > 0 ? mergedAsk : undefined,
+      deny: mergedDeny.length > 0 ? mergedDeny : undefined,
+    },
+    // Permission rule persistence callback (writes to settings files).
+    onPersistPermissionRule: async (scope, ruleType, rule) => {
+      const currentSettings = loadSettings(cwd);
+      const settingScope =
+        scope === 'project' ? SettingScope.Workspace : SettingScope.User;
+      const key = `permissions.${ruleType}`;
+      const currentRules: string[] =
+        currentSettings.forScope(settingScope).settings.permissions?.[
+          ruleType
+        ] ?? [];
+      if (!currentRules.includes(rule)) {
+        currentSettings.setValue(settingScope, key, [...currentRules, rule]);
+      }
+    },
+    toolDiscoveryCommand: bareMode
+      ? undefined
+      : settings.tools?.discoveryCommand,
+    toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
+    mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
+    mcpServers: bareMode ? {} : settings.mcpServers || {},
     allowedMcpServers: allowedMcpServers
       ? Array.from(allowedMcpServers)
       : undefined,
@@ -971,6 +1169,7 @@ export async function loadCliConfig(
     },
     telemetry: telemetrySettings,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
+    clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     checkpointing:
       argv.checkpointing || settings.general?.checkpointing?.enabled,
@@ -989,7 +1188,7 @@ export async function loadCliConfig(
     maxSessionTurns:
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
-    experimentalSkills: argv.experimentalSkills || false,
+    cronEnabled: settings.experimental?.cron ?? false,
     listExtensions: argv.listExtensions || false,
     overrideExtensions: overrideExtensions || argv.extensions,
     noBrowser: !!process.env['NO_BROWSER'],
@@ -1000,9 +1199,15 @@ export async function loadCliConfig(
     modelProvidersConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
+    warnings: resolvedCliConfig.warnings,
+    bareMode,
+    allowedHttpHookUrls: bareMode
+      ? []
+      : (settings.security?.allowedHttpHookUrls ?? []),
     cliVersion: await getCliVersion(),
-    webSearch: buildWebSearchConfig(argv, settings, selectedAuthType),
-    summarizeToolOutput: settings.model?.summarizeToolOutput,
+    webSearch: bareMode
+      ? undefined
+      : buildWebSearchConfig(argv, settings, selectedAuthType),
     ideMode,
     chatCompression: settings.model?.chatCompression,
     folderTrust,
@@ -1012,27 +1217,56 @@ export async function loadCliConfig(
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     shouldUseNodePtyShell: settings.tools?.shell?.enableInteractiveShell,
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
-    skipLoopDetection: settings.model?.skipLoopDetection ?? false,
+    skipLoopDetection: settings.model?.skipLoopDetection ?? true,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
-    vlmSwitchMode,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,
-    enableToolOutputTruncation: settings.tools?.enableToolOutputTruncation,
     eventEmitter: appEvents,
-    useSmartEdit: argv.useSmartEdit ?? settings.useSmartEdit,
     gitCoAuthor: settings.general?.gitCoAuthor,
     output: {
       format: outputSettingsFormat,
     },
+    enableManagedAutoMemory: bareMode
+      ? false
+      : (settings.memory?.enableManagedAutoMemory ?? true),
+    enableManagedAutoDream: settings.memory?.enableManagedAutoDream ?? false,
+    fastModel: settings.fastModel || undefined,
+    // Use separated hooks if provided, otherwise fall back to merged hooks
+    userHooks: bareMode
+      ? undefined
+      : (hooksConfig?.userHooks ?? settings.hooks),
+    projectHooks: bareMode ? undefined : hooksConfig?.projectHooks,
+    hooks: bareMode ? undefined : settings.hooks, // Keep for backward compatibility
+    disableAllHooks: bareMode ? true : (settings.disableAllHooks ?? false),
     channel: argv.channel,
+    // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
+    // equivalent — fd passing is a spawn-time concern). `--json-file` and
+    // `--input-file` fall back to settings.dualOutput.* when the flag is
+    // absent.
+    jsonFd: argv.jsonFd,
+    jsonFile: argv.jsonFile ?? settings.dualOutput?.jsonFile,
+    inputFile: argv.inputFile ?? settings.dualOutput?.inputFile,
     // Precedence: explicit CLI flag > settings file > default(true).
     // NOTE: do NOT set a yargs default for `chat-recording`, otherwise argv will
     // always be true and the settings file can never disable recording.
     chatRecording:
       argv.chatRecording ?? settings.general?.chatRecording ?? true,
+    defaultFileEncoding: settings.general?.defaultFileEncoding,
     lsp: {
       enabled: lspEnabled,
     },
+    agents: settings.agents
+      ? {
+          displayMode: settings.agents.displayMode,
+          arena: settings.agents.arena
+            ? {
+                worktreeBaseDir: settings.agents.arena.worktreeBaseDir,
+                preserveArtifacts:
+                  settings.agents.arena.preserveArtifacts ?? false,
+              }
+            : undefined,
+        }
+      : undefined,
   });
 
   if (lspEnabled) {
@@ -1053,22 +1287,9 @@ export async function loadCliConfig(
       lspClient = new NativeLspClient(lspService);
       config.setLspClient(lspClient);
     } catch (err) {
-      logger.warn('Failed to initialize native LSP service:', err);
+      debugLogger.warn('Failed to initialize native LSP service:', err);
     }
   }
 
   return config;
-}
-
-function mergeExcludeTools(
-  settings: Settings,
-  extraExcludes?: string[] | undefined,
-  cliExcludeTools?: string[] | undefined,
-): string[] {
-  const allExcludeTools = new Set([
-    ...(cliExcludeTools || []),
-    ...(settings.tools?.exclude || []),
-    ...(extraExcludes || []),
-  ]);
-  return [...allExcludeTools];
 }

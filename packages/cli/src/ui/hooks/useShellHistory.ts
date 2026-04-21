@@ -7,9 +7,14 @@
 import { useState, useEffect, useCallback } from 'react';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
-import { isNodeError, Storage } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  isNodeError,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 
 const MAX_HISTORY_LENGTH = 100;
+const debugLogger = createDebugLogger('SHELL_HISTORY');
 
 export interface UseShellHistoryReturn {
   history: string[];
@@ -52,7 +57,7 @@ async function readHistoryFile(filePath: string): Promise<string[]> {
     return result;
   } catch (err) {
     if (isNodeError(err) && err.code === 'ENOENT') return [];
-    console.error('Error reading history:', err);
+    debugLogger.error('Error reading history:', err);
     return [];
   }
 }
@@ -65,7 +70,7 @@ async function writeHistoryFile(
     await fs.mkdir(path.dirname(filePath), { recursive: true });
     await fs.writeFile(filePath, history.join('\n'));
   } catch (error) {
-    console.error('Error writing shell history:', error);
+    debugLogger.error('Error writing shell history:', error);
   }
 }
 

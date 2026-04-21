@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect } from 'react';
 import * as fs from 'node:fs';
 import {
   type Config,
+  createDebugLogger,
   logUserFeedback,
   UserFeedbackEvent,
   type UserFeedbackRating,
@@ -24,6 +25,7 @@ const MIN_USER_MESSAGES = 5; // Minimum user messages to show feedback dialog
 
 // Fatigue mechanism constants
 const FEEDBACK_COOLDOWN_HOURS = 24; // Hours to wait before showing feedback dialog again
+const debugLogger = createDebugLogger('FEEDBACK_DIALOG');
 
 /**
  * Check if the last message in the conversation history is an AI response
@@ -43,7 +45,7 @@ const getFeedbackLastShownTimestampFromFile = (): number => {
     }
   } catch (error) {
     if (isNodeError(error) && error.code !== 'ENOENT') {
-      console.warn(
+      debugLogger.warn(
         'Failed to read feedbackLastShownTimestamp from settings file:',
         error,
       );

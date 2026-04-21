@@ -45,12 +45,13 @@ export enum Command {
   PASTE_CLIPBOARD_IMAGE = 'pasteClipboardImage',
 
   // App level bindings
-  SHOW_ERROR_DETAILS = 'showErrorDetails',
   TOGGLE_TOOL_DESCRIPTIONS = 'toggleToolDescriptions',
   TOGGLE_IDE_CONTEXT_DETAIL = 'toggleIDEContextDetail',
   QUIT = 'quit',
   EXIT = 'exit',
   SHOW_MORE_LINES = 'showMoreLines',
+  RETRY_LAST = 'retryLast',
+  TOGGLE_COMPACT_MODE = 'toggleCompactMode',
 
   // Shell commands
   REVERSE_SEARCH = 'reverseSearch',
@@ -79,6 +80,7 @@ export interface KeyBinding {
   command?: boolean;
   /** Paste operation requirement: true=must be paste, false=must not be paste, undefined=ignore */
   paste?: boolean;
+  meta?: boolean;
 }
 
 /**
@@ -153,15 +155,25 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'x', ctrl: true },
     { sequence: '\x18', ctrl: true },
   ],
-  [Command.PASTE_CLIPBOARD_IMAGE]: [{ key: 'v', ctrl: true }],
+  [Command.PASTE_CLIPBOARD_IMAGE]:
+    process.platform === 'win32'
+      ? [
+          { key: 'v', command: true },
+          { key: 'v', meta: true },
+        ]
+      : [
+          { key: 'v', ctrl: true },
+          { key: 'v', command: true },
+        ],
 
   // App level bindings
-  [Command.SHOW_ERROR_DETAILS]: [{ key: 'o', ctrl: true }],
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
   [Command.QUIT]: [{ key: 'c', ctrl: true }],
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
+  [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
+  [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
 
   // Shell commands
   [Command.REVERSE_SEARCH]: [{ key: 'r', ctrl: true }],

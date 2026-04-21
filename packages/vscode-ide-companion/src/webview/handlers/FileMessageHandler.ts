@@ -14,6 +14,12 @@ import {
 } from '../../utils/editorGroupUtils.js';
 import { ReadonlyFileSystemProvider } from '../../services/readonlyFileSystemProvider.js';
 import { FileDiscoveryService } from '@qwen-code/qwen-code-core/src/services/fileDiscoveryService.js';
+import {
+  FileSearchFactory,
+  type FileSearch,
+} from '@qwen-code/qwen-code-core/src/utils/filesearch/fileSearch.js';
+import * as crawlCache from '@qwen-code/qwen-code-core/src/utils/filesearch/crawlCache.js';
+import { getErrorMessage } from '../../utils/errorMessage.js';
 
 /**
  * File message handler
@@ -24,6 +30,9 @@ export class FileMessageHandler extends BaseMessageHandler {
     string,
     FileDiscoveryService
   >();
+  private readonly fileSearchInstances = new Map<string, FileSearch>();
+  private readonly fileSearchInitializing = new Map<string, Promise<void>>();
+  private readonly fileWatchers = new Map<string, vscode.FileSystemWatcher>();
   private readonly globSpecialChars = new Set([
     '\\',
     '*',
@@ -48,6 +57,122 @@ export class FileMessageHandler extends BaseMessageHandler {
       'openDiff',
       'createAndOpenTempFile',
     ].includes(messageType);
+  }
+
+  private async getOrCreateFileSearch(
+    rootPath: string,
+  ): Promise<FileSearch | null> {
+    const existing = this.fileSearchInstances.get(rootPath);
+    if (existing) {
+      return existing;
+    }
+
+    const initializing = this.fileSearchInitializing.get(rootPath);
+    if (initializing) {
+      await initializing;
+      return this.fileSearchInstances.get(rootPath) ?? null;
+    }
+
+    const initPromise = (async () => {
+      const search = FileSearchFactory.create({
+        projectRoot: rootPath,
+        ignoreDirs: ['.git', 'node_modules'],
+        useGitignore: true,
+        useQwenignore: false,
+        cache: true,
+        cacheTtl: 30000,
+        enableRecursiveFileSearch: true,
+        enableFuzzySearch: true,
+      });
+      await search.initialize();
+      this.fileSearchInstances.set(rootPath, search);
+    })();
+
+    this.fileSearchInitializing.set(rootPath, initPromise);
+
+    try {
+      await initPromise;
+      return this.fileSearchInstances.get(rootPath) ?? null;
+    } catch (error) {
+      this.fileSearchInitializing.delete(rootPath);
+      console.error(
+        '[FileMessageHandler] Failed to initialize file search:',
+        error,
+      );
+      return null;
+    }
+  }
+
+  private clearFileSearchCache(rootPath: string): void {
+    this.fileSearchInstances.delete(rootPath);
+    this.fileSearchInitializing.delete(rootPath);
+    crawlCache.clear();
+    console.log(
+      '[FileMessageHandler] Cleared file search cache, trigger:',
+      rootPath,
+    );
+  }
+
+  private createWatcherForFolder(folder: vscode.WorkspaceFolder): void {
+    const rootPath = folder.uri.fsPath;
+
+    // Skip if watcher already exists for this folder
+    if (this.fileWatchers.has(rootPath)) {
+      return;
+    }
+
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(folder, '**/*'),
+    );
+
+    const onFileAddOrDelete = () => this.clearFileSearchCache(rootPath);
+    watcher.onDidCreate(onFileAddOrDelete);
+    watcher.onDidDelete(onFileAddOrDelete);
+    // Note: onDidChange is not needed - file search is based on names, not content
+
+    this.fileWatchers.set(rootPath, watcher);
+  }
+
+  private disposeWatcherForFolder(rootPath: string): void {
+    const watcher = this.fileWatchers.get(rootPath);
+    if (watcher) {
+      watcher.dispose();
+      this.fileWatchers.delete(rootPath);
+    }
+  }
+
+  setupFileWatchers(): vscode.Disposable {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+    if (workspaceFolders) {
+      for (const folder of workspaceFolders) {
+        this.createWatcherForFolder(folder);
+      }
+    }
+
+    const foldersChangeListener = vscode.workspace.onDidChangeWorkspaceFolders(
+      (e) => {
+        for (const folder of e.removed) {
+          const rootPath = folder.uri.fsPath;
+          this.clearFileSearchCache(rootPath);
+          this.disposeWatcherForFolder(rootPath);
+        }
+        for (const folder of e.added) {
+          const rootPath = folder.uri.fsPath;
+          this.clearFileSearchCache(rootPath);
+          this.createWatcherForFolder(folder);
+        }
+      },
+    );
+
+    return {
+      dispose: () => {
+        for (const watcher of this.fileWatchers.values()) {
+          watcher.dispose();
+        }
+        this.fileWatchers.clear();
+        foldersChangeListener.dispose();
+      },
+    };
   }
 
   async handle(message: { type: string; data?: unknown }): Promise<void> {
@@ -118,9 +243,10 @@ export class FileMessageHandler extends BaseMessageHandler {
       }
     } catch (error) {
       console.error('[FileMessageHandler] Failed to attach file:', error);
+      const errorMsg = getErrorMessage(error);
       this.sendToWebView({
         type: 'error',
-        data: { message: `Failed to attach file: ${error}` },
+        data: { message: `Failed to attach file: ${errorMsg}` },
       });
     }
   }
@@ -203,9 +329,10 @@ export class FileMessageHandler extends BaseMessageHandler {
         '[FileMessageHandler] Failed to show context picker:',
         error,
       );
+      const errorMsg = getErrorMessage(error);
       this.sendToWebView({
         type: 'error',
-        data: { message: `Failed to show context picker: ${error}` },
+        data: { message: `Failed to show context picker: ${errorMsg}` },
       });
     }
   }
@@ -279,20 +406,43 @@ export class FileMessageHandler extends BaseMessageHandler {
 
       // Search or show recent files
       if (query) {
-        const includePattern = `**/*${this.buildCaseInsensitiveGlob(query)}*`;
-        // Query mode: perform filesystem search (may take longer on large workspaces)
         console.log(
-          '[FileMessageHandler] Searching workspace files for query',
+          '[FileMessageHandler] Searching workspace files with fuzzy search for query',
           query,
         );
-        const uris = await vscode.workspace.findFiles(
-          includePattern,
-          '**/{.git,node_modules}/**',
-          50,
-        );
 
-        for (const uri of uris) {
-          addFile(uri);
+        const workspaceFolders = vscode.workspace.workspaceFolders;
+        if (workspaceFolders) {
+          for (const folder of workspaceFolders) {
+            const rootPath = folder.uri.fsPath;
+            const fileSearch = await this.getOrCreateFileSearch(rootPath);
+            if (!fileSearch) {
+              continue;
+            }
+
+            const relativePaths = await fileSearch.search(query, {
+              maxResults: 50,
+            });
+
+            for (let relativePath of relativePaths) {
+              const isDirectory = relativePath.endsWith('/');
+              if (isDirectory) {
+                relativePath = relativePath.slice(0, -1);
+              }
+              const absolutePath = vscode.Uri.joinPath(
+                folder.uri,
+                relativePath,
+              ).fsPath;
+
+              files.push({
+                id: absolutePath,
+                label: relativePath,
+                description: relativePath,
+                path: absolutePath,
+              });
+              addedPaths.add(absolutePath);
+            }
+          }
         }
       } else {
         // Non-query mode: respond quickly with currently active and open files
@@ -360,9 +510,10 @@ export class FileMessageHandler extends BaseMessageHandler {
         '[FileMessageHandler] Failed to get workspace files:',
         error,
       );
+      const errorMsg = getErrorMessage(error);
       this.sendToWebView({
         type: 'error',
-        data: { message: `Failed to get workspace files: ${error}` },
+        data: { message: `Failed to get workspace files: ${errorMsg}` },
       });
     }
   }
@@ -422,7 +573,9 @@ export class FileMessageHandler extends BaseMessageHandler {
       console.log('[FileOperations] File opened successfully:', absolutePath);
     } catch (error) {
       console.error('[FileMessageHandler] Failed to open file:', error);
-      vscode.window.showErrorMessage(`Failed to open file: ${error}`);
+      vscode.window.showErrorMessage(
+        `Failed to open file: ${getErrorMessage(error)}`,
+      );
     }
   }
 
@@ -445,7 +598,9 @@ export class FileMessageHandler extends BaseMessageHandler {
       });
     } catch (error) {
       console.error('[FileMessageHandler] Failed to open diff:', error);
-      vscode.window.showErrorMessage(`Failed to open diff: ${error}`);
+      vscode.window.showErrorMessage(
+        `Failed to open diff: ${getErrorMessage(error)}`,
+      );
     }
   }
 
@@ -544,7 +699,7 @@ export class FileMessageHandler extends BaseMessageHandler {
         error,
       );
       vscode.window.showErrorMessage(
-        `Failed to create and open temporary file: ${error}`,
+        `Failed to create and open temporary file: ${getErrorMessage(error)}`,
       );
     }
   }

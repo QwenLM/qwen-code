@@ -19,13 +19,17 @@ import type {
   CLIControlInitializeRequest,
   CLIControlSetModelRequest,
   CLIMcpServerConfig,
+  CLIControlGetContextUsageRequest,
 } from '../../types.js';
 import { getAvailableCommands } from '../../../nonInteractiveCliCommands.js';
 import {
+  createDebugLogger,
   MCPServerConfig,
   AuthProviderType,
   type MCPOAuthConfig,
 } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('SYSTEM_CONTROLLER');
 
 export class SystemController extends BaseController {
   /**
@@ -58,8 +62,55 @@ export class SystemController extends BaseController {
       case 'supported_commands':
         return this.handleSupportedCommands(signal);
 
+      case 'get_context_usage':
+        return this.handleGetContextUsage(
+          payload as CLIControlGetContextUsageRequest,
+          signal,
+        );
+
       default:
         throw new Error(`Unsupported request subtype in SystemController`);
+    }
+  }
+
+  private async handleGetContextUsage(
+    payload: CLIControlGetContextUsageRequest,
+    signal: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    if (signal.aborted) {
+      throw new Error('Request aborted');
+    }
+
+    try {
+      const mod = await import('../../../ui/commands/contextCommand.js');
+      if (signal.aborted) {
+        throw new Error('Request aborted');
+      }
+      if (typeof mod.collectContextData !== 'function') {
+        throw new Error('collectContextData is not available');
+      }
+      const showDetails = payload.show_details ?? false;
+      const contextUsageItem = await mod.collectContextData(
+        this.context.config,
+        showDetails,
+      );
+      if (signal.aborted) {
+        throw new Error('Request aborted');
+      }
+
+      const { type: _type, ...contextData } = contextUsageItem;
+      return {
+        subtype: 'get_context_usage',
+        ...contextData,
+      };
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : 'Failed to get context usage';
+      debugLogger.error(
+        '[SystemController] Failed to get context usage:',
+        error,
+      );
+      throw new Error(errorMessage);
     }
   }
 
@@ -122,18 +173,14 @@ export class SystemController extends BaseController {
       if (sdkServerCount > 0) {
         try {
           this.context.config.addMcpServers(sdkServers);
-          if (this.context.debugMode) {
-            console.error(
-              `[SystemController] Added ${sdkServerCount} SDK MCP servers to config`,
-            );
-          }
+          debugLogger.debug(
+            `[SystemController] Added ${sdkServerCount} SDK MCP servers to config`,
+          );
         } catch (error) {
-          if (this.context.debugMode) {
-            console.error(
-              '[SystemController] Failed to add SDK MCP servers:',
-              error,
-            );
-          }
+          debugLogger.error(
+            '[SystemController] Failed to add SDK MCP servers:',
+            error,
+          );
         }
       }
     }
@@ -158,18 +205,14 @@ export class SystemController extends BaseController {
       if (externalCount > 0) {
         try {
           this.context.config.addMcpServers(externalServers);
-          if (this.context.debugMode) {
-            console.error(
-              `[SystemController] Added ${externalCount} external MCP servers to config`,
-            );
-          }
+          debugLogger.debug(
+            `[SystemController] Added ${externalCount} external MCP servers to config`,
+          );
         } catch (error) {
-          if (this.context.debugMode) {
-            console.error(
-              '[SystemController] Failed to add external MCP servers:',
-              error,
-            );
-          }
+          debugLogger.error(
+            '[SystemController] Failed to add external MCP servers:',
+            error,
+          );
         }
       }
     }
@@ -178,32 +221,27 @@ export class SystemController extends BaseController {
       try {
         this.context.config.setSessionSubagents(payload.agents);
 
-        if (this.context.debugMode) {
-          console.error(
-            `[SystemController] Added ${payload.agents.length} session subagents to config`,
-          );
-        }
+        debugLogger.debug(
+          `[SystemController] Added ${payload.agents.length} session subagents to config`,
+        );
       } catch (error) {
-        if (this.context.debugMode) {
-          console.error(
-            '[SystemController] Failed to add session subagents:',
-            error,
-          );
-        }
+        debugLogger.error(
+          '[SystemController] Failed to add session subagents:',
+          error,
+        );
       }
     }
 
     // Build capabilities for response
     const capabilities = this.buildControlCapabilities();
 
-    if (this.context.debugMode) {
-      console.error(
-        `[SystemController] Initialized with ${this.context.sdkMcpServers.size} SDK MCP servers`,
-      );
-    }
+    debugLogger.debug(
+      `[SystemController] Initialized with ${this.context.sdkMcpServers.size} SDK MCP servers`,
+    );
 
     return {
       subtype: 'initialize',
+      session_id: this.context.config.getSessionId(),
       capabilities,
     };
   }
@@ -222,6 +260,7 @@ export class SystemController extends BaseController {
       can_set_permission_mode:
         typeof this.context.config.setApprovalMode === 'function',
       can_set_model: typeof this.context.config.setModel === 'function',
+      can_get_context_usage: true,
       // SDK MCP servers are supported - messages routed through control plane
       can_handle_mcp_message: true,
     };
@@ -234,11 +273,9 @@ export class SystemController extends BaseController {
     config?: CLIMcpServerConfig,
   ): MCPServerConfig | null {
     if (!config || typeof config !== 'object') {
-      if (this.context.debugMode) {
-        console.error(
-          `[SystemController] Ignoring invalid MCP server config for '${serverName}'`,
-        );
-      }
+      debugLogger.warn(
+        `[SystemController] Ignoring invalid MCP server config for '${serverName}'`,
+      );
       return null;
     }
 
@@ -282,11 +319,9 @@ export class SystemController extends BaseController {
       case AuthProviderType.SERVICE_ACCOUNT_IMPERSONATION:
         return value;
       default:
-        if (this.context.debugMode) {
-          console.error(
-            `[SystemController] Unsupported authProviderType '${value}', skipping`,
-          );
-        }
+        debugLogger.warn(
+          `[SystemController] Unsupported authProviderType '${value}', skipping`,
+        );
         return undefined;
     }
   }
@@ -326,14 +361,10 @@ export class SystemController extends BaseController {
     // Abort the main signal to cancel ongoing operations
     if (this.context.abortSignal && !this.context.abortSignal.aborted) {
       // Note: We can't directly abort the signal, but the onInterrupt callback should handle this
-      if (this.context.debugMode) {
-        console.error('[SystemController] Interrupt signal triggered');
-      }
+      debugLogger.debug('[SystemController] Interrupt signal triggered');
     }
 
-    if (this.context.debugMode) {
-      console.error('[SystemController] Interrupt handled');
-    }
+    debugLogger.debug('[SystemController] Interrupt handled');
 
     return { subtype: 'interrupt' };
   }
@@ -362,9 +393,7 @@ export class SystemController extends BaseController {
       // Attempt to set the model using config
       await this.context.config.setModel(model);
 
-      if (this.context.debugMode) {
-        console.error(`[SystemController] Model switched to: ${model}`);
-      }
+      debugLogger.info(`[SystemController] Model switched to: ${model}`);
 
       return {
         subtype: 'set_model',
@@ -374,12 +403,10 @@ export class SystemController extends BaseController {
       const errorMessage =
         error instanceof Error ? error.message : 'Failed to set model';
 
-      if (this.context.debugMode) {
-        console.error(
-          `[SystemController] Failed to set model ${model}:`,
-          error,
-        );
-      }
+      debugLogger.error(
+        `[SystemController] Failed to set model ${model}:`,
+        error,
+      );
 
       throw new Error(errorMessage);
     }
@@ -417,7 +444,11 @@ export class SystemController extends BaseController {
     }
 
     try {
-      const commands = await getAvailableCommands(this.context.config, signal);
+      const commands = await getAvailableCommands(
+        this.context.config,
+        signal,
+        'non_interactive',
+      );
 
       if (signal.aborted) {
         return [];
@@ -431,12 +462,10 @@ export class SystemController extends BaseController {
         return [];
       }
 
-      if (this.context.debugMode) {
-        console.error(
-          '[SystemController] Failed to load slash commands:',
-          error,
-        );
-      }
+      debugLogger.error(
+        '[SystemController] Failed to load slash commands:',
+        error,
+      );
       return [];
     }
   }

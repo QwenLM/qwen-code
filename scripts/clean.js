@@ -33,7 +33,6 @@ rmSync(join(root, 'packages/cli/src/generated/'), {
   force: true,
 });
 const RMRF_OPTIONS = { recursive: true, force: true };
-rmSync(join(root, 'bundle'), RMRF_OPTIONS);
 // Dynamically clean dist directories in all workspaces
 const rootPackageJson = JSON.parse(
   readFileSync(join(root, 'package.json'), 'utf-8'),
@@ -43,6 +42,7 @@ for (const workspace of rootPackageJson.workspaces) {
   for (const pkgPath of packages) {
     const pkgDir = dirname(join(root, pkgPath));
     rmSync(join(pkgDir, 'dist'), RMRF_OPTIONS);
+    rmSync(join(pkgDir, 'tsconfig.tsbuildinfo'), { force: true });
   }
 }
 

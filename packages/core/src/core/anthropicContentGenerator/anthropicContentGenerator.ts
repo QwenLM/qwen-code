@@ -30,6 +30,14 @@ import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { AnthropicContentConverter } from './converter.js';
 import { buildRuntimeFetchOptions } from '../../utils/runtimeFetchOptions.js';
 import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+import {
+  tokenLimit,
+  CAPPED_DEFAULT_MAX_TOKENS,
+  hasExplicitOutputLimit,
+} from '../tokenLimits.js';
+
+const debugLogger = createDebugLogger('ANTHROPIC');
 
 type StreamingBlockState = {
   type: string;
@@ -75,6 +83,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     this.converter = new AnthropicContentConverter(
       contentGeneratorConfig.model,
       contentGeneratorConfig.schemaCompliance,
+      contentGeneratorConfig.enableCacheControl,
     );
   }
 
@@ -121,7 +130,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         totalTokens: result.totalTokens,
       };
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         'Failed to calculate tokens with tokenizer, ' +
           'falling back to simple method:',
         error,
@@ -219,8 +228,29 @@ export class AnthropicContentGenerator implements ContentGenerator {
       return configValue !== undefined ? configValue : requestValue;
     };
 
-    const maxTokens =
-      getParam<number>('max_tokens', 'maxOutputTokens') ?? 10_000;
+    // Apply output token limit logic consistent with OpenAI providers
+    const userMaxTokens = getParam<number>('max_tokens', 'maxOutputTokens');
+    const modelId = this.contentGeneratorConfig.model;
+    const modelLimit = tokenLimit(modelId, 'output');
+    const isKnownModel = hasExplicitOutputLimit(modelId);
+
+    let maxTokens: number;
+    if (userMaxTokens !== undefined && userMaxTokens !== null) {
+      maxTokens = isKnownModel
+        ? Math.min(userMaxTokens, modelLimit)
+        : userMaxTokens;
+    } else {
+      // No explicit user config — check env var, then use capped default.
+      const envVal = process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+      const envMaxTokens = envVal ? parseInt(envVal, 10) : NaN;
+      if (!isNaN(envMaxTokens) && envMaxTokens > 0) {
+        maxTokens = isKnownModel
+          ? Math.min(envMaxTokens, modelLimit)
+          : envMaxTokens;
+      } else {
+        maxTokens = Math.min(modelLimit, CAPPED_DEFAULT_MAX_TOKENS);
+      }
+    }
 
     return {
       max_tokens: maxTokens,

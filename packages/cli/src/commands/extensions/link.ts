@@ -7,6 +7,7 @@
 import type { CommandModule } from 'yargs';
 import { type ExtensionInstallMetadata } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   requestConsentNonInteractive,
   requestConsentOrFail,
@@ -31,16 +32,16 @@ export async function handleLink(args: InstallArgs) {
       requestConsentOrFail.bind(null, requestConsentNonInteractive),
     );
     if (!extension) {
-      console.log(t('Link extension failed to install.'));
+      writeStdoutLine(t('Link extension failed to install.'));
       return;
     }
-    console.log(
+    writeStdoutLine(
       t('Extension "{{name}}" linked successfully and enabled.', {
         name: extension.name,
       }),
     );
   } catch (error) {
-    console.error(getErrorMessage(error));
+    writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }
 }

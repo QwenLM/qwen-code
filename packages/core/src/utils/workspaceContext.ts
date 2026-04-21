@@ -8,6 +8,9 @@ import { isNodeError } from '../utils/errors.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as process from 'node:process';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('WORKSPACE');
 
 export type Unsubscribe = () => void;
 
@@ -28,10 +31,13 @@ export class WorkspaceContext {
    */
   constructor(directory: string, additionalDirectories: string[] = []) {
     this.addDirectory(directory);
+    // Snapshot only the primary working directory as "initial" (non-removable).
+    // Additional directories (from settings / CLI flags) are added after
+    // the snapshot so they remain removable by the user.
+    this.initialDirectories = new Set(this.directories);
     for (const additionalDirectory of additionalDirectories) {
       this.addDirectory(additionalDirectory);
     }
-    this.initialDirectories = new Set(this.directories);
   }
 
   /**
@@ -53,7 +59,7 @@ export class WorkspaceContext {
         listener();
       } catch (e) {
         // Don't let one listener break others.
-        console.error('Error in WorkspaceContext listener:', e);
+        debugLogger.error('Error in WorkspaceContext listener:', e);
       }
     }
   }
@@ -72,8 +78,8 @@ export class WorkspaceContext {
       this.directories.add(resolved);
       this.notifyDirectoriesChanged();
     } catch (err) {
-      console.warn(
-        `[WARN] Skipping unreadable directory: ${directory} (${err instanceof Error ? err.message : String(err)})`,
+      debugLogger.warn(
+        `Skipping unreadable directory: ${directory} (${err instanceof Error ? err.message : String(err)})`,
       );
     }
   }
@@ -109,6 +115,53 @@ export class WorkspaceContext {
     return Array.from(this.initialDirectories);
   }
 
+  /**
+   * Removes a directory from the workspace.
+   * Cannot remove initial directories (those set at construction time).
+   * @param directory The directory path to remove
+   * @returns True if the directory was removed, false if not found or is an initial directory
+   */
+  removeDirectory(directory: string): boolean {
+    // Resolve to match the stored form
+    let resolved: string;
+    try {
+      resolved = this.resolveAndValidateDir(directory);
+    } catch {
+      // If we can't resolve it, try matching by raw string (e.g. directory was deleted)
+      resolved = path.isAbsolute(directory)
+        ? directory
+        : path.resolve(process.cwd(), directory);
+    }
+
+    if (this.initialDirectories.has(resolved)) {
+      debugLogger.warn(`Cannot remove initial directory: ${resolved}`);
+      return false;
+    }
+
+    if (!this.directories.has(resolved)) {
+      return false;
+    }
+
+    this.directories.delete(resolved);
+    this.notifyDirectoriesChanged();
+    return true;
+  }
+
+  /**
+   * Checks whether a directory is an initial (non-removable) directory.
+   */
+  isInitialDirectory(directory: string): boolean {
+    try {
+      const resolved = this.resolveAndValidateDir(directory);
+      return this.initialDirectories.has(resolved);
+    } catch {
+      const absolutePath = path.isAbsolute(directory)
+        ? directory
+        : path.resolve(process.cwd(), directory);
+      return this.initialDirectories.has(absolutePath);
+    }
+  }
+
   setDirectories(directories: readonly string[]): void {
     const newDirectories = new Set<string>();
     for (const dir of directories) {
@@ -134,7 +187,7 @@ export class WorkspaceContext {
       const fullyResolvedPath = this.fullyResolvedPath(pathToCheck);
 
       for (const dir of this.directories) {
-        if (this.isPathWithinRoot(fullyResolvedPath, dir)) {
+        if (isPathWithinRoot(fullyResolvedPath, dir)) {
           return true;
         }
       }
@@ -169,24 +222,6 @@ export class WorkspaceContext {
   }
 
   /**
-   * Checks if a path is within a given root directory.
-   * @param pathToCheck The absolute path to check
-   * @param rootDirectory The absolute root directory
-   * @returns True if the path is within the root directory, false otherwise
-   */
-  private isPathWithinRoot(
-    pathToCheck: string,
-    rootDirectory: string,
-  ): boolean {
-    const relative = path.relative(rootDirectory, pathToCheck);
-    return (
-      !relative.startsWith(`..${path.sep}`) &&
-      relative !== '..' &&
-      !path.isAbsolute(relative)
-    );
-  }
-
-  /**
    * Checks if a file path is a symbolic link that points to a file.
    */
   private isFileSymlink(filePath: string): boolean {
@@ -196,4 +231,22 @@ export class WorkspaceContext {
       return false;
     }
   }
+}
+
+/**
+ * Checks if a path is within a given root directory.
+ * @param pathToCheck The absolute path to check
+ * @param rootDirectory The absolute root directory
+ * @returns True if the path is within the root directory, false otherwise
+ */
+export function isPathWithinRoot(
+  pathToCheck: string,
+  rootDirectory: string,
+): boolean {
+  const relative = path.relative(rootDirectory, pathToCheck);
+  return (
+    !relative.startsWith(`..${path.sep}`) &&
+    relative !== '..' &&
+    !path.isAbsolute(relative)
+  );
 }

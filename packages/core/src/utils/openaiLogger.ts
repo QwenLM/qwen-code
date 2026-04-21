@@ -8,6 +8,9 @@ import * as path from 'node:path';
 import { promises as fs } from 'node:fs';
 import { v4 as uuidv4 } from 'uuid';
 import * as os from 'os';
+import { createDebugLogger } from './debugLogger.js';
+
+const debugLogger = createDebugLogger('OPENAI_LOGGER');
 
 /**
  * Logger specifically for OpenAI API requests and responses
@@ -19,8 +22,12 @@ export class OpenAILogger {
   /**
    * Creates a new OpenAI logger
    * @param customLogDir Optional custom log directory path (supports relative paths, absolute paths, and ~ expansion)
+   * @param cwd Optional working directory for resolving relative paths. Defaults to process.cwd().
+   *            In ACP mode, process.cwd() may be '/' (filesystem root), so callers should
+   *            pass the project working directory from Config.getWorkingDir().
    */
-  constructor(customLogDir?: string) {
+  constructor(customLogDir?: string, cwd?: string) {
+    const baseCwd = cwd || process.cwd();
     if (customLogDir) {
       // Resolve relative paths to absolute paths
       // Handle ~ expansion
@@ -28,12 +35,12 @@ export class OpenAILogger {
       if (customLogDir === '~' || customLogDir.startsWith('~/')) {
         resolvedPath = path.join(os.homedir(), customLogDir.slice(1));
       } else if (!path.isAbsolute(customLogDir)) {
-        // If it's a relative path, resolve it relative to current working directory
-        resolvedPath = path.resolve(process.cwd(), customLogDir);
+        // If it's a relative path, resolve it relative to provided working directory
+        resolvedPath = path.resolve(baseCwd, customLogDir);
       }
       this.logDir = path.normalize(resolvedPath);
     } else {
-      this.logDir = path.join(process.cwd(), 'logs', 'openai');
+      this.logDir = path.join(baseCwd, 'logs', 'openai');
     }
   }
 
@@ -47,7 +54,7 @@ export class OpenAILogger {
       await fs.mkdir(this.logDir, { recursive: true });
       this.initialized = true;
     } catch (error) {
-      console.error('Failed to initialize OpenAI logger:', error);
+      debugLogger.error('Failed to initialize OpenAI logger:', error);
       throw new Error(`Failed to initialize OpenAI logger: ${error}`);
     }
   }
@@ -95,7 +102,7 @@ export class OpenAILogger {
       await fs.writeFile(filePath, JSON.stringify(logData, null, 2), 'utf-8');
       return filePath;
     } catch (writeError) {
-      console.error('Failed to write OpenAI log file:', writeError);
+      debugLogger.error('Failed to write OpenAI log file:', writeError);
       throw new Error(`Failed to write OpenAI log file: ${writeError}`);
     }
   }
@@ -123,7 +130,7 @@ export class OpenAILogger {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         return [];
       }
-      console.error('Failed to read OpenAI log directory:', error);
+      debugLogger.error('Failed to read OpenAI log directory:', error);
       return [];
     }
   }
@@ -138,7 +145,7 @@ export class OpenAILogger {
       const content = await fs.readFile(filePath, 'utf-8');
       return JSON.parse(content);
     } catch (error) {
-      console.error(`Failed to read log file ${filePath}:`, error);
+      debugLogger.error(`Failed to read log file ${filePath}:`, error);
       throw new Error(`Failed to read log file: ${error}`);
     }
   }

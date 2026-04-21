@@ -9,6 +9,7 @@ import { join, dirname, basename } from 'node:path';
 import type { CommandModule } from 'yargs';
 import { fileURLToPath } from 'node:url';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
 interface NewArgs {
   path: string;
@@ -52,7 +53,7 @@ async function handleNew(args: NewArgs) {
   try {
     if (args.template) {
       await copyDirectory(args.template, args.path);
-      console.log(
+      writeStdoutLine(
         `Successfully created new extension from template "${args.template}" at ${args.path}.`,
       );
     } else {
@@ -66,13 +67,13 @@ async function handleNew(args: NewArgs) {
         join(args.path, 'qwen-extension.json'),
         JSON.stringify(manifest, null, 2),
       );
-      console.log(`Successfully created new extension at ${args.path}.`);
+      writeStdoutLine(`Successfully created new extension at ${args.path}.`);
     }
-    console.log(
+    writeStdoutLine(
       `You can install this using "qwen extensions link ${args.path}" to test it out.`,
     );
   } catch (error) {
-    console.error(getErrorMessage(error));
+    writeStderrLine(getErrorMessage(error));
     throw error;
   }
 }

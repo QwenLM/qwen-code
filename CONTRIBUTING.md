@@ -44,7 +44,17 @@ Before submitting your PR, ensure that all automated checks are passing by runni
 
 If your PR introduces a user-facing change (e.g., a new command, a modified flag, or a change in behavior), you must also update the relevant documentation in the `/docs` directory.
 
-#### 6. Write Clear Commit Messages and a Good PR Description
+#### 6. Include a Screenshot or Video Demo
+
+To help reviewers understand your change quickly and prioritize reviews, please attach a screenshot or short video to your PR showing the change in action.
+
+- **For bug fixes:** Show the before and after behavior.
+- **For new features:** Show the feature working end-to-end.
+- **For refactors or internal-only changes:** Simply note "N/A — no user-facing change" in the demo section.
+
+PRs with visual demos tend to get reviewed much faster, so this is in your interest too!
+
+#### 7. Write Clear Commit Messages and a Good PR Description
 
 Your PR should have a clear, descriptive title and a detailed description of the changes. Follow the [Conventional Commits](https://www.conventionalcommits.org/) standard for your commit messages.
 

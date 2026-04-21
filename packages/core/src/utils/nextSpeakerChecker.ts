@@ -5,10 +5,13 @@
  */
 
 import type { Content } from '@google/genai';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import { isFunctionResponse } from './messageInspectors.js';
 import type { Config } from '../config/config.js';
+import { createDebugLogger } from './debugLogger.js';
+import { runSideQuery } from './sideQuery.js';
+
+const debugLogger = createDebugLogger('NEXT_SPEAKER');
 
 const CHECK_PROMPT = `Analyze *only* the content and structure of your immediately preceding response (your last turn in the conversation history). Based *strictly* on that response, determine who should logically speak next: the 'user' or the 'model' (you).
 **Decision Rules (apply in order):**
@@ -109,24 +112,15 @@ export async function checkNextSpeaker(
   ];
 
   try {
-    const parsedResponse = (await config.getBaseLlmClient().generateJson({
+    return await runSideQuery<NextSpeakerResponse>(config, {
       contents,
       schema: RESPONSE_SCHEMA,
-      model: config.getModel() || DEFAULT_QWEN_MODEL,
       abortSignal,
       promptId,
-    })) as unknown as NextSpeakerResponse;
-
-    if (
-      parsedResponse &&
-      parsedResponse.next_speaker &&
-      ['user', 'model'].includes(parsedResponse.next_speaker)
-    ) {
-      return parsedResponse;
-    }
-    return null;
+      purpose: 'next-speaker',
+    });
   } catch (error) {
-    console.warn(
+    debugLogger.warn(
       'Failed to talk to Gemini endpoint when seeing if conversation should continue.',
       error,
     );

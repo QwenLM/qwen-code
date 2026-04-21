@@ -4,8 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
-import { InputFormat, logUserPrompt } from '@qwen-code/qwen-code-core';
+import {
+  AuthType,
+  InputFormat,
+  isDebugLoggingDegraded,
+  isBareMode,
+  logUserPrompt,
+  QWEN_CODE_SIMPLE_ENV_VAR,
+  Storage,
+  type Config,
+  createDebugLogger,
+} from '@qwen-code/qwen-code-core';
 import { render } from 'ink';
 import dns from 'node:dns';
 import os from 'node:os';
@@ -16,7 +25,11 @@ import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
 import { loadCliConfig, parseArguments } from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
-import { getSettingsWarnings, loadSettings } from './config/settings.js';
+import {
+  createMinimalSettings,
+  getSettingsWarnings,
+  loadSettings,
+} from './config/settings.js';
 import {
   initializeApp,
   type InitializationResult,
@@ -29,9 +42,9 @@ import { KeypressProvider } from './ui/contexts/KeypressContext.js';
 import { SessionStatsProvider } from './ui/contexts/SessionContext.js';
 import { SettingsContext } from './ui/contexts/SettingsContext.js';
 import { VimModeProvider } from './ui/contexts/VimModeContext.js';
+import { AgentViewProvider } from './ui/contexts/AgentViewContext.js';
 import { useKittyKeyboardProtocol } from './ui/hooks/useKittyKeyboardProtocol.js';
 import { themeManager } from './ui/themes/theme-manager.js';
-import { ConsolePatcher } from './ui/utils/ConsolePatcher.js';
 import { detectAndEnableKittyProtocol } from './ui/utils/kittyProtocolDetector.js';
 import { checkForUpdates } from './ui/utils/updateCheck.js';
 import {
@@ -43,6 +56,10 @@ import { AppEvent, appEvents } from './utils/events.js';
 import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
 import {
+  profileCheckpoint,
+  finalizeStartupProfile,
+} from './utils/startupProfiler.js';
+import {
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -50,10 +67,22 @@ import { start_sandbox } from './utils/sandbox.js';
 import { getStartupWarnings } from './utils/startupWarnings.js';
 import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
+import { writeStderrLine } from './utils/stdioHelpers.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
+import {
+  startEarlyInputCapture,
+  stopAndGetCapturedInput,
+} from './utils/earlyInputCapture.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import { DualOutputBridge } from './dualOutput/DualOutputBridge.js';
+import { DualOutputContext } from './dualOutput/DualOutputContext.js';
+import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
+import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
+import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
+
+const debugLogger = createDebugLogger('STARTUP');
 
 export function validateDnsResolutionOrder(
   order: string | undefined,
@@ -66,7 +95,7 @@ export function validateDnsResolutionOrder(
     return order;
   }
   // We don't want to throw here, just warn and use the default.
-  console.warn(
+  writeStderrLine(
     `Invalid value for dnsResolutionOrder in settings: "${order}". Using default "${defaultValue}".`,
   );
   return defaultValue;
@@ -82,7 +111,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
   // Set target to 50% of total memory
   const targetMaxOldSpaceSizeInMB = Math.floor(totalMemoryMB * 0.5);
   if (isDebugMode) {
-    console.debug(
+    writeStderrLine(
       `Current heap size ${currentMaxOldSpaceSizeMb.toFixed(2)} MB`,
     );
   }
@@ -93,7 +122,7 @@ function getNodeMemoryArgs(isDebugMode: boolean): string[] {
 
   if (targetMaxOldSpaceSizeInMB > currentMaxOldSpaceSizeMb) {
     if (isDebugMode) {
-      console.debug(
+      writeStderrLine(
         `Need to relaunch with more memory: ${targetMaxOldSpaceSizeInMB.toFixed(2)} MB`,
       );
     }
@@ -137,34 +166,95 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
+  const restoreTerminalRedrawOptimizer =
+    process.stdout.isTTY && !config.getScreenReader()
+      ? installTerminalRedrawOptimizer(process.stdout)
+      : () => {};
+
+  // Create dual output bridge if --json-fd or --json-file is specified.
+  // Errors are caught so a bad fd/path degrades gracefully instead of
+  // preventing the TUI from launching.
+  let dualOutputBridge: DualOutputBridge | null = null;
+  const jsonFd = config.getJsonFd?.();
+  const jsonFile = config.getJsonFile?.();
+  try {
+    if (jsonFd != null) {
+      dualOutputBridge = new DualOutputBridge(
+        config,
+        { fd: jsonFd },
+        { version },
+      );
+    } else if (jsonFile != null) {
+      dualOutputBridge = new DualOutputBridge(
+        config,
+        { filePath: jsonFile },
+        { version },
+      );
+    }
+  } catch (err) {
+    debugLogger.error('Failed to initialize dual output bridge:', err);
+    writeStderrLine(
+      `Warning: dual output disabled — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Create remote input watcher if --input-file is specified.
+  // This enables bidirectional sync: an external process writes JSONL
+  // commands to this file, and the TUI processes them as user messages.
+  let remoteInputWatcher: RemoteInputWatcher | null = null;
+  const inputFile = config.getInputFile?.();
+  if (inputFile) {
+    try {
+      remoteInputWatcher = new RemoteInputWatcher(inputFile);
+    } catch (err) {
+      debugLogger.error('Failed to initialize remote input watcher:', err);
+      writeStderrLine(
+        `Warning: remote input disabled — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  // Drain the early-captured input exactly once, before any React rendering.
+  // Must be outside any component/effect so StrictMode's mount/cleanup/remount
+  // always reads from the same stable prop rather than the (now empty) module buffer.
+  const initialCapturedInput = stopAndGetCapturedInput();
 
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
     const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
     return (
-      <SettingsContext.Provider value={settings}>
-        <KeypressProvider
-          kittyProtocolEnabled={kittyProtocolStatus.enabled}
-          config={config}
-          debugKeystrokeLogging={settings.merged.general?.debugKeystrokeLogging}
-          pasteWorkaround={
-            process.platform === 'win32' || nodeMajorVersion < 20
-          }
-        >
-          <SessionStatsProvider sessionId={config.getSessionId()}>
-            <VimModeProvider settings={settings}>
-              <AppContainer
-                config={config}
-                settings={settings}
-                startupWarnings={startupWarnings}
-                version={version}
-                initializationResult={initializationResult}
-              />
-            </VimModeProvider>
-          </SessionStatsProvider>
-        </KeypressProvider>
-      </SettingsContext.Provider>
+      <RemoteInputContext.Provider value={remoteInputWatcher}>
+        <DualOutputContext.Provider value={dualOutputBridge}>
+          <SettingsContext.Provider value={settings}>
+            <KeypressProvider
+              kittyProtocolEnabled={kittyProtocolStatus.enabled}
+              config={config}
+              debugKeystrokeLogging={
+                settings.merged.general?.debugKeystrokeLogging
+              }
+              pasteWorkaround={
+                process.platform === 'win32' || nodeMajorVersion < 20
+              }
+              initialCapturedInput={initialCapturedInput}
+            >
+              <SessionStatsProvider sessionId={config.getSessionId()}>
+                <VimModeProvider settings={settings}>
+                  <AgentViewProvider config={config}>
+                    <AppContainer
+                      config={config}
+                      settings={settings}
+                      startupWarnings={startupWarnings}
+                      version={version}
+                      initializationResult={initializationResult}
+                    />
+                  </AgentViewProvider>
+                </VimModeProvider>
+              </SessionStatsProvider>
+            </KeypressProvider>
+          </SettingsContext.Provider>
+        </DualOutputContext.Provider>
+      </RemoteInputContext.Provider>
     );
   };
 
@@ -182,32 +272,51 @@ export async function startInteractiveUI(
     },
   );
 
-  if (!settings.merged.general?.disableUpdateNag) {
+  // Check for updates only if enableAutoUpdate is not explicitly disabled.
+  // Using !== false ensures updates are enabled by default when undefined.
+  if (settings.merged.general?.enableAutoUpdate !== false) {
     checkForUpdates()
       .then((info) => {
         handleAutoUpdate(info, settings, config.getProjectRoot());
       })
       .catch((err) => {
         // Silently ignore update check errors.
-        if (config.getDebugMode()) {
-          console.error('Update check failed:', err);
-        }
+        debugLogger.warn(`Update check failed: ${err}`);
       });
   }
 
-  registerCleanup(() => instance.unmount());
+  registerCleanup(async () => {
+    remoteInputWatcher?.shutdown();
+    await dualOutputBridge?.shutdown();
+    instance.unmount();
+    restoreTerminalRedrawOptimizer();
+  });
 }
 
 export async function main() {
+  profileCheckpoint('main_entry');
   setupUnhandledRejectionHandler();
-  const settings = loadSettings();
-  await cleanupCheckpoints();
 
-  let argv = await parseArguments(settings.merged);
+  if (process.argv.includes('--bare')) {
+    process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
+  }
+
+  let argv = await parseArguments();
+  profileCheckpoint('after_parse_arguments');
+
+  if (isBareMode(argv.bare)) {
+    process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
+  }
+
+  const settings = isBareMode(argv.bare)
+    ? createMinimalSettings()
+    : loadSettings();
+  await cleanupCheckpoints();
+  profileCheckpoint('after_load_settings');
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
-    console.error(
+    writeStderrLine(
       'Error: The --prompt-interactive flag cannot be used when input is piped from stdin.',
     );
     process.exit(1);
@@ -226,7 +335,9 @@ export async function main() {
     if (!themeManager.setActiveTheme(settings.merged.ui?.theme)) {
       // If the theme is not found during initial load, log a warning and continue.
       // The useThemeCommand hook in AppContainer.tsx will handle opening the dialog.
-      console.warn(`Warning: Theme "${settings.merged.ui?.theme}" not found.`);
+      writeStderrLine(
+        `Warning: Theme "${settings.merged.ui?.theme}" not found.`,
+      );
     }
   }
 
@@ -248,6 +359,11 @@ export async function main() {
         argv,
         undefined,
         [],
+        // Pass separated hooks for proper source attribution
+        {
+          userHooks: settings.getUserHooks(),
+          projectHooks: settings.getProjectHooks(),
+        },
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -265,15 +381,17 @@ export async function main() {
             await partialConfig.refreshAuth(authType);
           }
         } catch (err) {
-          console.error('Error authenticating:', err);
+          writeStderrLine(`Error authenticating: ${err}`);
           process.exit(1);
         }
       }
-      // For stream-json mode, don't read stdin here - it should be forwarded to the sandbox
-      // and consumed by StreamJsonInputReader inside the container
+      // For stream-json and ACP modes, don't read stdin here — stdin carries
+      // protocol data (not a user prompt) and should be forwarded to the sandbox
+      // intact via stdio: 'inherit'.
       const inputFormat = argv.inputFormat as string | undefined;
+      const isAcpMode = argv.acp || argv.experimentalAcp;
       let stdinData = '';
-      if (!process.stdin.isTTY && inputFormat !== 'stream-json') {
+      if (!process.stdin.isTTY && inputFormat !== 'stream-json' && !isAcpMode) {
         stdinData = await readStdin();
       }
 
@@ -313,8 +431,15 @@ export async function main() {
     }
   }
 
-  // Handle --resume without a session ID by showing the session picker
+  // Handle --resume without a session ID by showing the session picker.
+  // Set the runtime output dir early so the picker can find sessions stored
+  // under a custom runtimeOutputDir (setRuntimeBaseDir is idempotent and will
+  // be called again inside loadCliConfig).
   if (argv.resume === '') {
+    Storage.setRuntimeBaseDir(
+      settings.merged.advanced?.runtimeOutputDir,
+      process.cwd(),
+    );
     const selectedSessionId = await showResumeSessionPicker();
     if (!selectedSessionId) {
       // User cancelled or no sessions available
@@ -326,11 +451,14 @@ export async function main() {
   }
 
   // We are now past the logic handling potentially launching a child process
-  // to run Gemini CLI. It is now safe to perform expensive initialization that
+  // to run Qwen Code. It is now safe to perform expensive initialization that
   // may have side effects.
+  profileCheckpoint('after_sandbox_check');
 
   // Initialize output language file before config loads to ensure it's included in context
-  initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  if (!isBareMode(argv.bare)) {
+    initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  }
 
   {
     const config = await loadCliConfig(
@@ -338,7 +466,13 @@ export async function main() {
       argv,
       process.cwd(),
       argv.extensions,
+      // Pass separated hooks for proper source attribution
+      {
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
     );
+    profileCheckpoint('after_load_cli_config');
 
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
@@ -353,21 +487,17 @@ export async function main() {
     //   process.exit(0);
     // }
 
-    // Setup unified ConsolePatcher based on interactive mode
-    const isInteractive = config.isInteractive();
-    const consolePatcher = new ConsolePatcher({
-      stderr: isInteractive,
-      debugMode: isDebugMode,
-    });
-    consolePatcher.patch();
-    registerCleanup(consolePatcher.cleanup);
-
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
       process.stdin.setRawMode(true);
+
+      // Startup optimization: start early input capture
+      startEarlyInputCapture();
+      // Ensure the stdin listener is removed on any exit path (error, signal, etc.)
+      registerCleanup(() => stopAndGetCapturedInput());
 
       // This cleanup isn't strictly needed but may help in certain situations.
       process.on('SIGTERM', () => {
@@ -384,20 +514,23 @@ export async function main() {
     setMaxSizedBoxDebugging(isDebugMode);
 
     // Check input format early to determine initialization flow
-    const inputFormat =
-      typeof config.getInputFormat === 'function'
+    // In TTY mode, ignore stream-json input format to prevent process from hanging
+    const inputFormat = process.stdin.isTTY
+      ? InputFormat.TEXT
+      : typeof config.getInputFormat === 'function'
         ? config.getInputFormat()
         : InputFormat.TEXT;
 
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
-    let initializationResult: InitializationResult | undefined;
-    if (inputFormat !== InputFormat.STREAM_JSON) {
-      initializationResult = await initializeApp(config, settings);
-    }
+    const initializationResult = await initializeApp(config, settings);
+    profileCheckpoint('after_initialize_app');
 
     if (config.getExperimentalZedIntegration()) {
-      return runAcpAgent(config, settings, argv);
+      await runAcpAgent(config, settings, argv);
+      // Clean up child processes and force exit, matching other non-interactive modes
+      await runExitCleanup();
+      process.exit(0);
     }
 
     let input = config.getQuestion();
@@ -410,10 +543,20 @@ export async function main() {
           useBuiltinRipgrep: settings.merged.tools?.useBuiltinRipgrep ?? true,
         })),
         ...getSettingsWarnings(settings),
+        ...config.getWarnings(),
+        ...(config.getModelsConfig().getCurrentAuthType() ===
+        AuthType.QWEN_OAUTH
+          ? [
+              'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan or another provider.',
+            ]
+          : []),
       ]),
     ];
 
     // Render UI, passing necessary config values. Check that there is no command line question.
+    profileCheckpoint('before_render');
+    finalizeStartupProfile(config.getSessionId());
+
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
@@ -425,6 +568,19 @@ export async function main() {
         initializationResult!,
       );
       return;
+    }
+
+    // Print debug mode notice to stderr for non-interactive mode
+    if (config.getDebugMode()) {
+      writeStderrLine('Debug mode enabled');
+      writeStderrLine(
+        `Logging to: ${Storage.getDebugLogPath(config.getSessionId())}`,
+      );
+      if (isDebugLoggingDegraded()) {
+        writeStderrLine(
+          'Warning: Debug logging is degraded (write failures occurred)',
+        );
+      }
     }
 
     // For non-stream-json mode, initialize config here
@@ -462,7 +618,7 @@ export async function main() {
     }
 
     if (!input) {
-      console.error(
+      writeStderrLine(
         `No input provided via stdin. Input can be provided by piping data into gemini or using the --prompt option.`,
       );
       process.exit(1);
@@ -477,9 +633,7 @@ export async function main() {
       prompt_length: input.length,
     });
 
-    if (config.getDebugMode()) {
-      console.log('Session ID: %s', config.getSessionId());
-    }
+    debugLogger.debug(`Session ID: ${config.getSessionId()}`);
 
     await runNonInteractive(nonInteractiveConfig, settings, input, prompt_id);
     // Call cleanup before process.exit, which causes cleanup to not run

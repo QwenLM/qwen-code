@@ -16,6 +16,7 @@ import type {
   ExtensionInstallMetadata,
   MCPServerConfig,
 } from '../config/config.js';
+import type { HookEventName, HookDefinition } from '../hooks/types.js';
 import { cloneFromGit, downloadFromGitHubRelease } from './github.js';
 import { createHash } from 'node:crypto';
 import { copyDirectory } from './gemini-converter.js';
@@ -23,6 +24,11 @@ import {
   parse as parseYaml,
   stringify as stringifyYaml,
 } from '../utils/yaml-parser.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizeContent } from '../utils/textUtils.js';
+import { substituteHookVariables } from './variables.js';
+
+const debugLogger = createDebugLogger('CLAUDE_CONVERTER');
 
 export interface ClaudePluginConfig {
   name: string;
@@ -36,7 +42,7 @@ export interface ClaudePluginConfig {
   commands?: string | string[];
   agents?: string | string[];
   skills?: string | string[];
-  hooks?: string;
+  hooks?: string | { [K in HookEventName]?: HookDefinition[] };
   mcpServers?: string | Record<string, MCPServerConfig>;
   outputStyles?: string | string[];
   lspServers?: string | Record<string, unknown>;
@@ -88,7 +94,7 @@ export interface ClaudeMarketplaceConfig {
 }
 
 const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
-  AskUserQuestion: 'None',
+  AskUserQuestion: 'AskUserQuestion',
   Bash: 'Shell',
   BashOutput: 'None',
   Edit: 'Edit',
@@ -97,7 +103,7 @@ const CLAUDE_TOOLS_MAPPING: Record<string, string | string[]> = {
   Grep: 'Grep',
   KillShell: 'None',
   NotebookEdit: 'None',
-  Read: ['ReadFile', 'ReadManyFiles'],
+  Read: 'ReadFile',
   Skill: 'Skill',
   Task: 'Task',
   TodoWrite: 'TodoWrite',
@@ -176,20 +182,29 @@ export function convertClaudeAgentConfig(
     qwenAgent['tools'] = claudeBuildInToolsTransform(claudeAgent.tools);
   }
 
-  // Convert model to modelConfig
+  // Preserve Claude's top-level model selector.
   if (claudeAgent.model) {
-    // Map Claude model names to Qwen model config
-    // Claude uses: sonnet, opus, haiku, inherit
-    // We preserve the model name for now, the actual mapping will be handled at runtime
-    qwenAgent['modelConfig'] = {
-      model: claudeAgent.model === 'inherit' ? undefined : claudeAgent.model,
-    };
+    qwenAgent['model'] = claudeAgent.model;
   }
 
-  // Preserve unsupported fields as-is for potential future compatibility
-  // These fields are not supported by Qwen Code SubagentConfig but we keep them
+  // Map Claude permission mode aliases to Qwen ApprovalMode values.
+  // Note: Claude's `dontAsk` denies any tool call that would prompt the user,
+  // making it restrictive. We map it to `default` (which also requires approval)
+  // rather than `auto-edit` (which auto-approves), preserving the restrictive
+  // intent. `bypassPermissions` is the Claude mode that auto-approves everything.
   if (claudeAgent.permissionMode) {
-    qwenAgent['permissionMode'] = claudeAgent.permissionMode;
+    const claudeToQwenMode: Record<string, string> = {
+      default: 'default',
+      plan: 'plan',
+      acceptEdits: 'auto-edit',
+      dontAsk: 'default',
+      bypassPermissions: 'yolo',
+      auto: 'auto-edit',
+    };
+    const mapped =
+      claudeToQwenMode[claudeAgent.permissionMode] ??
+      claudeAgent.permissionMode;
+    qwenAgent['approvalMode'] = mapped;
   }
   if (claudeAgent.hooks) {
     qwenAgent['hooks'] = claudeAgent.hooks;
@@ -223,10 +238,11 @@ async function convertAgentFiles(agentsDir: string): Promise<void> {
 
     try {
       const content = await fs.promises.readFile(filePath, 'utf-8');
+      const normalizedContent = normalizeContent(content);
 
       // Parse frontmatter
       const frontmatterRegex = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/;
-      const match = content.match(frontmatterRegex);
+      const match = normalizedContent.match(frontmatterRegex);
 
       if (!match) {
         // No frontmatter, skip this file
@@ -274,7 +290,7 @@ ${systemPrompt}
 
       await fs.promises.writeFile(filePath, newContent, 'utf-8');
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         `[Claude Converter] Failed to convert agent file ${filePath}: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
@@ -299,7 +315,7 @@ export function convertClaudeToQwenConfig(
   if (claudeConfig.mcpServers) {
     if (typeof claudeConfig.mcpServers === 'string') {
       // TODO: Load from file path
-      console.warn(
+      debugLogger.warn(
         `[Claude Converter] MCP servers path not yet supported: ${claudeConfig.mcpServers}`,
       );
     } else {
@@ -307,14 +323,23 @@ export function convertClaudeToQwenConfig(
     }
   }
 
-  // Warn about unsupported fields
+  // Parse hooks
+  let hooks: { [K in HookEventName]?: HookDefinition[] } | undefined;
   if (claudeConfig.hooks) {
-    console.warn(
-      `[Claude Converter] Hooks are not yet supported in ${claudeConfig.name}`,
-    );
+    if (typeof claudeConfig.hooks === 'string') {
+      // If it's a string, it's a file path, we handle it later in the conversion process
+      // hooks will be loaded from file path in the convertClaudePluginPackage function
+    } else {
+      // Assume it's already in the correct format
+      hooks = claudeConfig.hooks as { [K in HookEventName]?: HookDefinition[] };
+    }
+  } else {
+    hooks = undefined;
   }
+
+  // Warn about unsupported fields
   if (claudeConfig.outputStyles) {
-    console.warn(
+    debugLogger.warn(
       `[Claude Converter] Output styles are not yet supported in ${claudeConfig.name}`,
     );
   }
@@ -324,6 +349,7 @@ export function convertClaudeToQwenConfig(
     version: claudeConfig.version,
     mcpServers,
     lspServers: claudeConfig.lspServers,
+    hooks, // Assign the properly typed hooks variable
   };
 }
 
@@ -384,15 +410,15 @@ export async function convertClaudePluginPackage(
   const strict = marketplacePlugin.strict ?? false;
   let mergedConfig: ClaudePluginConfig;
 
-  if (strict) {
-    const pluginJsonPath = path.join(
-      pluginSource,
-      '.claude-plugin',
-      'plugin.json',
-    );
-    if (!fs.existsSync(pluginJsonPath)) {
-      throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
-    }
+  const pluginJsonPath = path.join(
+    pluginSource,
+    '.claude-plugin',
+    'plugin.json',
+  );
+  if (strict && !fs.existsSync(pluginJsonPath)) {
+    throw new Error(`Strict mode requires plugin.json at ${pluginJsonPath}`);
+  }
+  if (fs.existsSync(pluginJsonPath)) {
     const pluginContent = fs.readFileSync(pluginJsonPath, 'utf-8');
     const pluginConfig: ClaudePluginConfig = JSON.parse(pluginContent);
     mergedConfig = mergeClaudeConfigs(marketplacePlugin, pluginConfig);
@@ -414,7 +440,7 @@ export async function convertClaudePluginPackage(
           MCPServerConfig
         >;
       } catch (error) {
-        console.warn(
+        debugLogger.warn(
           `Failed to parse MCP servers file ${mcpServersPath}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
@@ -456,7 +482,42 @@ export async function convertClaudePluginPackage(
       // Otherwise, keep the existing folder from pluginSource (default behavior)
     }
 
-    // Step 9.1: Convert collected agent files from Claude format to Qwen format
+    // Step 7: Handle hooks from file paths if needed
+    if (mergedConfig.hooks && typeof mergedConfig.hooks === 'string') {
+      const hooksPath = path.isAbsolute(mergedConfig.hooks)
+        ? mergedConfig.hooks
+        : path.join(pluginSource, mergedConfig.hooks);
+
+      if (fs.existsSync(hooksPath)) {
+        try {
+          const hooksContent = fs.readFileSync(hooksPath, 'utf-8');
+          const parsedHooks = JSON.parse(hooksContent);
+
+          // Check if the file has a top-level "hooks" property (like Claude plugins use)
+          // or if the entire file content is the hooks object
+          let hooksData;
+          if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
+            hooksData = parsedHooks.hooks as {
+              [K in HookEventName]?: HookDefinition[];
+            };
+          } else {
+            // Assume the entire file content is the hooks object
+            hooksData = parsedHooks as {
+              [K in HookEventName]?: HookDefinition[];
+            };
+          }
+
+          // Process the hooks to substitute variables like ${CLAUDE_PLUGIN_ROOT}
+          mergedConfig.hooks = substituteHookVariables(hooksData, pluginSource);
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to parse hooks file ${hooksPath}: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    }
+
+    // Step 9: Convert collected agent files from Claude format to Qwen format
     const agentsDestDir = path.join(tmpDir, 'agents');
     await convertAgentFiles(agentsDestDir);
 
@@ -514,7 +575,7 @@ async function collectResources(
       : path.join(pluginRoot, resourcePath);
 
     if (!fs.existsSync(resolvedPath)) {
-      console.warn(`Resource path not found: ${resolvedPath}`);
+      debugLogger.warn(`Resource path not found: ${resolvedPath}`);
       continue;
     }
 
@@ -528,7 +589,7 @@ async function collectResources(
       // If the directory is already named as the destination folder (e.g., 'commands')
       // and it's at the plugin root level, skip it
       if (dirName === destFolderName && parentDir === pluginRoot) {
-        console.log(
+        debugLogger.debug(
           `Skipping ${resolvedPath} as it's already in the correct location`,
         );
         continue;
@@ -549,6 +610,18 @@ async function collectResources(
         const srcFile = path.join(resolvedPath, file);
         const destFile = path.join(finalDestDir, file);
 
+        // Check if the source is a regular file (skip sockets, FIFOs, directories behind symlinks, etc.)
+        try {
+          const fileStat = fs.statSync(srcFile);
+          if (!fileStat.isFile()) {
+            debugLogger.debug(`Skipping non-regular file: ${srcFile}`);
+            continue;
+          }
+        } catch {
+          debugLogger.debug(`Failed to stat file, skipping: ${srcFile}`);
+          continue;
+        }
+
         // Ensure parent directory exists
         const destFileDir = path.dirname(destFile);
         if (!fs.existsSync(destFileDir)) {
@@ -565,7 +638,7 @@ async function collectResources(
       // e.g., 'commands/test1.md' or 'commands/me/test.md' should be skipped
       const segments = relativePath.split(path.sep);
       if (segments.length > 0 && segments[0] === destFolderName) {
-        console.log(
+        debugLogger.debug(
           `Skipping ${resolvedPath} as it's already in ${destFolderName}/`,
         );
         continue;
@@ -699,6 +772,7 @@ async function resolvePluginSource(
       const installMetadata: ExtensionInstallMetadata = {
         source,
         type: 'git',
+        originSource: 'Claude',
       };
       try {
         await downloadFromGitHubRelease(installMetadata, pluginDir);

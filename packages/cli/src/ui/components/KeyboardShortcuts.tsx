@@ -18,7 +18,10 @@ interface Shortcut {
 // Platform-specific key mappings
 const getNewlineKey = () =>
   process.platform === 'win32' ? 'ctrl+enter' : 'ctrl+j';
-const getPasteKey = () => (process.platform === 'darwin' ? 'cmd+v' : 'ctrl+v');
+const getPasteKey = () => {
+  if (process.platform === 'win32') return 'alt+v';
+  return process.platform === 'darwin' ? 'cmd+v' : 'ctrl+v';
+};
 const getExternalEditorKey = () =>
   process.platform === 'darwin' ? 'ctrl+x' : 'ctrl+x';
 
@@ -28,13 +31,18 @@ const getShortcuts = (): Shortcut[] => [
   { key: '/', description: t('for commands') },
   { key: '@', description: t('for file paths') },
   { key: 'esc esc', description: t('to clear input') },
-  { key: 'shift+tab', description: t('to cycle approvals') },
+  {
+    key: process.platform === 'win32' ? 'tab' : 'shift+tab',
+    description: t('to cycle approvals'),
+  },
   { key: 'ctrl+c', description: t('to quit') },
   { key: getNewlineKey(), description: t('for newline') + ' ⏎' },
   { key: 'ctrl+l', description: t('to clear screen') },
   { key: 'ctrl+r', description: t('to search history') },
+  { key: 'ctrl+y', description: t('to retry last request') },
   { key: getPasteKey(), description: t('to paste images') },
   { key: getExternalEditorKey(), description: t('for external editor') },
+  { key: 'ctrl+o', description: t('to toggle compact mode') },
 ];
 
 const ShortcutItem: React.FC<{ shortcut: Shortcut }> = ({ shortcut }) => (
@@ -48,11 +56,11 @@ const COLUMN_GAP = 4;
 const MARGIN_LEFT = 2;
 const MARGIN_RIGHT = 2;
 
-// Column distribution for different layouts (3+4+4 for 3 cols, 6+5 for 2 cols)
+// Column distribution for different layouts (5+4+4 for 3 cols, 7+6 for 2 cols)
 const COLUMN_SPLITS: Record<number, number[]> = {
-  3: [3, 4, 4],
-  2: [6, 5],
-  1: [11],
+  3: [5, 4, 4],
+  2: [7, 6],
+  1: [13],
 };
 
 export const KeyboardShortcuts: React.FC = () => {

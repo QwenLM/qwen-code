@@ -5,8 +5,8 @@
  */
 
 import type { Content } from '@google/genai';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import type { Config } from '../config/config.js';
+import { runSideQuery } from './sideQuery.js';
 
 const SYSTEM_PROMPT = `You are an elite AI agent architect specializing in crafting high-performance agent configurations. Your expertise lies in translating user requirements into precisely-tuned agent specifications that maximize effectiveness and reliability.
 
@@ -48,14 +48,14 @@ When a user describes what they want an agent to do, you will:
      assistant: "Here is the relevant function: "
      <function call omitted for brevity only for this example>
      <commentary>
-     Since the user is greeting, use the Task tool to launch the greeting-responder agent to respond with a friendly joke. 
+     Since the user is greeting, use the Agent tool to launch the greeting-responder agent to respond with a friendly joke. 
      </commentary>
      assistant: "Now let me use the code-reviewer agent to review the code"
    </example>
    - <example>
      Context: User is creating an agent to respond to the word "hello" with a friendly jok.
      user: "Hello"
-     assistant: "I'm going to use the Task tool to launch the greeting-responder agent to respond with a friendly joke"
+     assistant: "I'm going to use the Agent tool to launch the greeting-responder agent to respond with a friendly joke"
      <commentary>
      Since the user is greeting, use the greeting-responder agent to respond with a friendly joke. 
      </commentary>
@@ -125,22 +125,26 @@ export async function subagentGenerator(
   const userPrompt = createUserPrompt(userDescription);
   const contents: Content[] = [{ role: 'user', parts: [{ text: userPrompt }] }];
 
-  const parsedResponse = (await config.getBaseLlmClient().generateJson({
-    model: config.getModel() || DEFAULT_QWEN_MODEL,
-    contents,
-    schema: RESPONSE_SCHEMA,
-    abortSignal,
-    systemInstruction: SYSTEM_PROMPT,
-  })) as unknown as SubagentGeneratedContent;
-
-  if (
-    !parsedResponse ||
-    !parsedResponse.name ||
-    !parsedResponse.description ||
-    !parsedResponse.systemPrompt
-  ) {
-    throw new Error('Invalid response from LLM: missing required fields');
+  try {
+    return await runSideQuery<SubagentGeneratedContent>(config, {
+      contents,
+      schema: RESPONSE_SCHEMA,
+      abortSignal,
+      systemInstruction: SYSTEM_PROMPT,
+      purpose: 'subagent-generator',
+      validate: (response) =>
+        !response.name || !response.description || !response.systemPrompt
+          ? 'Invalid response from LLM: missing required fields'
+          : null,
+    });
+  } catch (error) {
+    if (
+      error instanceof Error &&
+      (error.message.startsWith('Invalid side query response:') ||
+        error.message === 'Value of params must be an object')
+    ) {
+      throw new Error('Invalid response from LLM: missing required fields');
+    }
+    throw error;
   }
-
-  return parsedResponse;
 }

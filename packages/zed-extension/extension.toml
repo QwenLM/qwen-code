@@ -11,22 +11,22 @@ name = "Qwen Code"
 icon = "qwen-code.svg"
 
 [agent_servers.qwen-code.targets.darwin-aarch64]
-archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.8.0.tgz"
+archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.10.0.tgz"
 cmd = "node"
-args = ["./package/cli.js", "--acp", "--experimental-skills"]
+args = ["./package/cli.js", "--acp"]
 
 [agent_servers.qwen-code.targets.darwin-x86_64]
-archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.8.0.tgz"
+archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.10.0.tgz"
 cmd = "node"
-args = ["./package/cli.js", "--acp", "--experimental-skills"]
+args = ["./package/cli.js", "--acp"]
 
 [agent_servers.qwen-code.targets.linux-x86_64]
-archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.8.0.tgz"
+archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.10.0.tgz"
 cmd = "node"
-args = ["./package/cli.js", "--acp", "--experimental-skills"]
+args = ["./package/cli.js", "--acp"]
 
 [agent_servers.qwen-code.targets.windows-x86_64]
-archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.8.0.tgz"
+archive = "https://registry.npmjs.org/@qwen-code/qwen-code/-/qwen-code-0.10.0.tgz"
 cmd = "node"
-args = ["./package/cli.js", "--acp", "--experimental-skills"]
+args = ["./package/cli.js", "--acp"]
 

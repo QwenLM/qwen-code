@@ -23,10 +23,13 @@ export const summaryCommand: SlashCommand = {
     );
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context): Promise<SlashCommandActionReturn> => {
     const { config } = context.services;
     const { ui } = context;
     const executionMode = context.executionMode ?? 'interactive';
+    const abortSignal = context.abortSignal;
 
     if (!config) {
       return {
@@ -101,7 +104,7 @@ export const summaryCommand: SlashCommand = {
           },
         ],
         {},
-        new AbortController().signal,
+        abortSignal ?? new AbortController().signal,
         config.getModel(),
       );
 
@@ -197,6 +200,10 @@ export const summaryCommand: SlashCommand = {
       if (executionMode !== 'interactive') {
         return;
       }
+      // If cancelled via ESC, don't show error — cancelSlashCommand already handled UI
+      if (abortSignal?.aborted) {
+        return;
+      }
       ui.setPendingItem(null);
       ui.addItem(
         {
@@ -241,6 +248,9 @@ export const summaryCommand: SlashCommand = {
     }> => {
       emitInteractivePending('generating');
       const markdownSummary = await generateSummaryMarkdown(history);
+      if (abortSignal?.aborted) {
+        throw new DOMException('Summary generation cancelled.', 'AbortError');
+      }
       emitInteractivePending('saving');
       const { filePathForDisplay } = await saveSummaryToDisk(markdownSummary);
       completeInteractive(filePathForDisplay);

@@ -12,6 +12,8 @@ import { DialogManager } from '../components/DialogManager.js';
 import { Composer } from '../components/Composer.js';
 import { Footer } from '../components/Footer.js';
 import { ExitWarning } from '../components/ExitWarning.js';
+import { BtwMessage } from '../components/messages/BtwMessage.js';
+import { AwayRecapMessage } from '../components/messages/StatusMessages.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 
 export const ScreenReaderAppLayout: React.FC = () => {
@@ -24,6 +26,7 @@ export const ScreenReaderAppLayout: React.FC = () => {
       <Box flexGrow={1} overflow="hidden">
         <MainContent />
       </Box>
+
       {uiState.dialogsVisible ? (
         <Box marginX={2} flexDirection="column" width={uiState.mainAreaWidth}>
           <DialogManager
@@ -32,7 +35,22 @@ export const ScreenReaderAppLayout: React.FC = () => {
           />
         </Box>
       ) : (
-        <Composer />
+        <>
+          {uiState.awayRecapItem && (
+            <Box marginX={2} width={uiState.mainAreaWidth}>
+              <AwayRecapMessage text={uiState.awayRecapItem.text} />
+            </Box>
+          )}
+          {uiState.btwItem && (
+            <Box marginX={2} width={uiState.mainAreaWidth}>
+              <BtwMessage
+                btw={uiState.btwItem.btw}
+                containerWidth={uiState.mainAreaWidth}
+              />
+            </Box>
+          )}
+          <Composer />
+        </>
       )}
 
       <ExitWarning />

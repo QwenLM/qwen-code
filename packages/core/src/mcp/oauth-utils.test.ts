@@ -293,18 +293,134 @@ describe('OAuthUtils', () => {
   });
 
   describe('buildResourceParameter', () => {
-    it('should build resource parameter from endpoint URL', () => {
+    it('should return canonical URI with full path', () => {
       const result = OAuthUtils.buildResourceParameter(
         'https://example.com/oauth/token',
       );
-      expect(result).toBe('https://example.com');
+      expect(result).toBe('https://example.com/oauth/token');
     });
 
     it('should handle URLs with ports', () => {
       const result = OAuthUtils.buildResourceParameter(
         'https://example.com:8080/oauth/token',
       );
-      expect(result).toBe('https://example.com:8080');
+      expect(result).toBe('https://example.com:8080/oauth/token');
+    });
+
+    it('should strip query and fragment per RFC 8707', () => {
+      const result = OAuthUtils.buildResourceParameter(
+        'https://example.com/mcp?foo=bar#frag',
+      );
+      expect(result).toBe('https://example.com/mcp');
+    });
+
+    it('should remove trailing slash from paths', () => {
+      expect(
+        OAuthUtils.buildResourceParameter('https://example.com/mcp/'),
+      ).toBe('https://example.com/mcp');
+    });
+
+    it('should handle root URL consistently', () => {
+      // Both "https://example.com" and "https://example.com/" should
+      // produce the same canonical form without trailing slash
+      expect(OAuthUtils.buildResourceParameter('https://example.com')).toBe(
+        'https://example.com',
+      );
+      expect(OAuthUtils.buildResourceParameter('https://example.com/')).toBe(
+        'https://example.com',
+      );
+    });
+
+    // Regression test for https://github.com/QwenLM/qwen-code/issues/1749
+    // Per MCP spec, resource should be the canonical URI including the path,
+    // so multi-tenant servers can distinguish between different MCP servers.
+    it('should preserve full path for multi-tenant MCP servers (issue #1749)', () => {
+      const result = OAuthUtils.buildResourceParameter(
+        'https://mcp.alibaba-inc.com/yuque/mcp',
+      );
+      // Must include the full path, not just the host
+      expect(result).toBe('https://mcp.alibaba-inc.com/yuque/mcp');
+    });
+  });
+
+  describe('discoverOAuthConfig', () => {
+    it('should use scopes from protected resource metadata when available', async () => {
+      // This test verifies the fix for the issue where scopes from
+      // protected resource metadata were not being used
+      const mockResourceMetadata: OAuthProtectedResourceMetadata = {
+        resource: 'https://www.modelscope.cn/mcp-server',
+        authorization_servers: ['https://www.modelscope.cn'],
+        scopes_supported: [
+          'openid',
+          'profile',
+          'list-operational-mcp',
+          'manage-mcp-deployment',
+        ],
+      };
+
+      const mockAuthServerMetadata: OAuthAuthorizationServerMetadata = {
+        issuer: 'https://www.modelscope.cn',
+        authorization_endpoint: 'https://www.modelscope.cn/oauth/authorize',
+        token_endpoint: 'https://www.modelscope.cn/oauth/token',
+        // Note: scopes_supported is NOT present in auth server metadata
+      };
+
+      mockFetch
+        // First call: fetch protected resource metadata
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockResourceMetadata),
+        })
+        // Second call: fetch authorization server metadata
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockAuthServerMetadata),
+        });
+
+      const result = await OAuthUtils.discoverOAuthConfig(
+        'https://www.modelscope.cn/mcp-server',
+      );
+
+      expect(result).not.toBeNull();
+      expect(result!.scopes).toEqual([
+        'openid',
+        'profile',
+        'list-operational-mcp',
+        'manage-mcp-deployment',
+      ]);
+    });
+
+    it('should prefer protected resource scopes over auth server scopes', async () => {
+      const mockResourceMetadata: OAuthProtectedResourceMetadata = {
+        resource: 'https://example.com/mcp',
+        authorization_servers: ['https://auth.example.com'],
+        scopes_supported: ['mcp-read', 'mcp-write'],
+      };
+
+      const mockAuthServerMetadata: OAuthAuthorizationServerMetadata = {
+        issuer: 'https://auth.example.com',
+        authorization_endpoint: 'https://auth.example.com/authorize',
+        token_endpoint: 'https://auth.example.com/token',
+        scopes_supported: ['read', 'write', 'admin'], // Different scopes
+      };
+
+      mockFetch
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockResourceMetadata),
+        })
+        .mockResolvedValueOnce({
+          ok: true,
+          json: () => Promise.resolve(mockAuthServerMetadata),
+        });
+
+      const result = await OAuthUtils.discoverOAuthConfig(
+        'https://example.com/mcp',
+      );
+
+      expect(result).not.toBeNull();
+      // Should use protected resource scopes, not auth server scopes
+      expect(result!.scopes).toEqual(['mcp-read', 'mcp-write']);
     });
   });
 });

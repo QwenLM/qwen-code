@@ -36,6 +36,7 @@ import {
   FileMetricExporter,
   FileSpanExporter,
 } from './file-exporters.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 // For troubleshooting, set the log level to DiagLogLevel.DEBUG
 diag.setLogger(new DiagConsoleLogger(), DiagLogLevel.INFO);
@@ -77,6 +78,7 @@ export function initializeTelemetry(config: Config): void {
     return;
   }
 
+  const debugLogger = createDebugLogger('OTEL');
   const resource = resourceFromAttributes({
     [SemanticResourceAttributes.SERVICE_NAME]: SERVICE_NAME,
     [SemanticResourceAttributes.SERVICE_VERSION]: process.version,
@@ -159,37 +161,34 @@ export function initializeTelemetry(config: Config): void {
 
   try {
     sdk.start();
-    if (config.getDebugMode()) {
-      console.log('OpenTelemetry SDK started successfully.');
-    }
+    debugLogger.debug('OpenTelemetry SDK started successfully.');
     telemetryInitialized = true;
     initializeMetrics(config);
   } catch (error) {
-    console.error('Error starting OpenTelemetry SDK:', error);
+    debugLogger.error('Error starting OpenTelemetry SDK:', error);
   }
 
   process.on('SIGTERM', () => {
-    shutdownTelemetry(config);
+    shutdownTelemetry();
   });
   process.on('SIGINT', () => {
-    shutdownTelemetry(config);
+    shutdownTelemetry();
   });
   process.on('exit', () => {
-    shutdownTelemetry(config);
+    shutdownTelemetry();
   });
 }
 
-export async function shutdownTelemetry(config: Config): Promise<void> {
+export async function shutdownTelemetry(): Promise<void> {
   if (!telemetryInitialized || !sdk) {
     return;
   }
+  const debugLogger = createDebugLogger('OTEL');
   try {
     await sdk.shutdown();
-    if (config.getDebugMode()) {
-      console.log('OpenTelemetry SDK shut down successfully.');
-    }
+    debugLogger.debug('OpenTelemetry SDK shut down successfully.');
   } catch (error) {
-    console.error('Error shutting down SDK:', error);
+    debugLogger.error('Error shutting down SDK:', error);
   } finally {
     telemetryInitialized = false;
   }

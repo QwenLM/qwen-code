@@ -6,6 +6,7 @@
 
 // Node built-ins
 import type { EventEmitter } from 'node:events';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import process from 'node:process';
 
@@ -21,6 +22,8 @@ import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js'
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { AnyToolInvocation } from '../tools/tools.js';
+import type { ArenaManager } from '../agents/arena/ArenaManager.js';
+import { ArenaAgentClient } from '../agents/arena/ArenaAgentClient.js';
 
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
@@ -36,31 +39,17 @@ import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import {
   type FileSystemService,
   StandardFileSystemService,
+  type FileEncodingType,
 } from '../services/fileSystemService.js';
 import { GitService } from '../services/gitService.js';
+import { CronScheduler } from '../services/cronScheduler.js';
 
-// Tools
-import { EditTool } from '../tools/edit.js';
-import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
-import { GlobTool } from '../tools/glob.js';
-import { GrepTool } from '../tools/grep.js';
-import { LSTool } from '../tools/ls.js';
+// Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
 import type { SendSdkMcpMessage } from '../tools/mcp-client.js';
-import { MemoryTool, setGeminiMdFilename } from '../tools/memoryTool.js';
-import { ReadFileTool } from '../tools/read-file.js';
-import { ReadManyFilesTool } from '../tools/read-many-files.js';
+import { setGeminiMdFilename } from '../memory/const.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
-import { RipGrepTool } from '../tools/ripGrep.js';
-import { ShellTool } from '../tools/shell.js';
-import { SmartEditTool } from '../tools/smart-edit.js';
-import { SkillTool } from '../tools/skill.js';
-import { TaskTool } from '../tools/task.js';
-import { TodoWriteTool } from '../tools/todoWrite.js';
-import { ToolRegistry } from '../tools/tool-registry.js';
-import { WebFetchTool } from '../tools/web-fetch.js';
-import { WebSearchTool } from '../tools/web-search/index.js';
-import { WriteFileTool } from '../tools/write-file.js';
-import { LspTool } from '../tools/lsp.js';
+import { ToolRegistry, type ToolFactory } from '../tools/tool-registry.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type { LspClient } from '../lsp/types.js';
 
 // Other modules
@@ -68,8 +57,10 @@ import { ideContextStore } from '../ide/ideContext.js';
 import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
+import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
   DEFAULT_TELEMETRY_TARGET,
@@ -84,13 +75,30 @@ import {
   ExtensionManager,
   type Extension,
 } from '../extension/extensionManager.js';
+import { HookSystem, createHookOutput } from '../hooks/index.js';
+import { MessageBus } from '../confirmation-bus/message-bus.js';
+import {
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from '../confirmation-bus/types.js';
+import {
+  PermissionMode,
+  NotificationType,
+  type PermissionSuggestion,
+  type HookEventName,
+  type HookDefinition,
+} from '../hooks/types.js';
+import { fireNotificationHook } from '../core/toolHookTriggers.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
 import { FileExclusions } from '../utils/ignorePatterns.js';
+import { shouldDefaultToNodePty } from '../utils/shell-utils.js';
 import { WorkspaceContext } from '../utils/workspaceContext.js';
-import { isToolEnabled, type ToolName } from '../utils/tool-utils.js';
+import { type ToolName } from '../utils/tool-utils.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { normalizeProxyUrl } from '../utils/proxyUtils.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -107,11 +115,21 @@ import {
 } from '../services/sessionService.js';
 import { randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
+import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
+import {
+  createDebugLogger,
+  setDebugLogSession,
+  type DebugLogger,
+} from '../utils/debugLogger.js';
+import { getAutoMemoryRoot } from '../memory/paths.js';
+import { readAutoMemoryIndex } from '../memory/store.js';
+import { MemoryManager } from '../memory/manager.js';
 
 import {
   ModelsConfig,
   type ModelProvidersConfig,
   type AvailableModel,
+  type RuntimeModelSnapshot,
 } from '../models/index.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
@@ -168,7 +186,7 @@ export const APPROVAL_MODE_INFO: Record<ApprovalMode, ApprovalModeInfo> = {
 };
 
 export interface AccessibilitySettings {
-  disableLoadingPhrases?: boolean;
+  enableLoadingPhrases?: boolean;
   screenReader?: boolean;
 }
 
@@ -180,8 +198,17 @@ export interface ChatCompressionSettings {
   contextPercentageThreshold?: number;
 }
 
-export interface SummarizeToolOutputSettings {
-  tokenBudget?: number;
+/**
+ * Settings for clearing stale context after idle periods.
+ * Threshold values of -1 mean "never clear" (disabled).
+ */
+export interface ClearContextOnIdleSettings {
+  /** Minutes idle before clearing old thinking blocks. Default 5. Use -1 to disable. */
+  thinkingThresholdMinutes?: number;
+  /** Minutes idle before clearing old tool results. Default 60. Use -1 to disable. */
+  toolResultsThresholdMinutes?: number;
+  /** Number of most-recent tool results to preserve. Default 5. */
+  toolResultsNumToKeep?: number;
 }
 
 export interface TelemetrySettings {
@@ -204,10 +231,14 @@ export interface GitCoAuthorSettings {
   email?: string;
 }
 
+export type ExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+
 export interface ExtensionInstallMetadata {
   source: string;
-  type: 'git' | 'local' | 'link' | 'github-release' | 'marketplace';
-  releaseTag?: string; // Only present for github-release installs.
+  type: 'git' | 'local' | 'link' | 'github-release' | 'npm';
+  originSource?: ExtensionOriginSource;
+  releaseTag?: string; // Only present for github-release and npm installs.
+  registryUrl?: string; // Only present for npm installs.
   ref?: string;
   autoUpdate?: boolean;
   allowPreRelease?: boolean;
@@ -271,6 +302,26 @@ export interface SandboxConfig {
   image: string;
 }
 
+/**
+ * Settings shared across multi-agent collaboration features
+ * (Arena, Team, Swarm).
+ */
+export interface AgentsCollabSettings {
+  /** Display mode for multi-agent sessions ('in-process' | 'tmux' | 'iterm2') */
+  displayMode?: string;
+  /** Arena-specific settings */
+  arena?: {
+    /** Custom base directory for Arena worktrees (default: ~/.qwen/arena) */
+    worktreeBaseDir?: string;
+    /** Preserve worktrees and state files after session ends */
+    preserveArtifacts?: boolean;
+    /** Maximum rounds (turns) per agent. No limit if unset. */
+    maxRoundsPerAgent?: number;
+    /** Total timeout in seconds for the Arena session. No limit if unset. */
+    timeoutSeconds?: number;
+  };
+}
+
 export interface ConfigParameters {
   sessionId?: string;
   sessionData?: ResumedSessionData;
@@ -280,10 +331,25 @@ export interface ConfigParameters {
   debugMode: boolean;
   includePartialMessages?: boolean;
   question?: string;
-  fullContext?: boolean;
+  systemPrompt?: string;
+  appendSystemPrompt?: string;
   coreTools?: string[];
   allowedTools?: string[];
   excludeTools?: string[];
+  /**
+   * Pre-merged list of slash command names that should be hidden from the
+   * CLI surface. Matched case-insensitively on the final (post-rename)
+   * command name. Sourced from settings (`slashCommands.disabled`, UNION
+   * merged across scopes), the `--disabled-slash-commands` CLI flag, and
+   * the `QWEN_DISABLED_SLASH_COMMANDS` environment variable.
+   */
+  disabledSlashCommands?: string[];
+  /** Merged permission rules from all sources (settings + CLI args). */
+  permissions?: {
+    allow?: string[];
+    ask?: string[];
+    deny?: string[];
+  };
   toolDiscoveryCommand?: string;
   toolCallCommand?: string;
   mcpServerCommand?: string;
@@ -304,7 +370,7 @@ export interface ConfigParameters {
     respectGitIgnore?: boolean;
     respectQwenIgnore?: boolean;
     enableRecursiveFileSearch?: boolean;
-    disableFuzzySearch?: boolean;
+    enableFuzzySearch?: boolean;
   };
   checkpointing?: boolean;
   proxy?: string;
@@ -315,15 +381,15 @@ export interface ConfigParameters {
   model?: string;
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
+  clearContextOnIdle?: ClearContextOnIdleSettings;
   sessionTokenLimit?: number;
-  experimentalSkills?: boolean;
   experimentalZedIntegration?: boolean;
+  cronEnabled?: boolean;
   listExtensions?: boolean;
   overrideExtensions?: string[];
   allowedMcpServers?: string[];
   excludedMcpServers?: string[];
   noBrowser?: boolean;
-  summarizeToolOutput?: Record<string, SummarizeToolOutputSettings>;
   folderTrustFeature?: boolean;
   folderTrust?: boolean;
   ideMode?: boolean;
@@ -350,27 +416,99 @@ export interface ConfigParameters {
   chatCompression?: ChatCompressionSettings;
   interactive?: boolean;
   trustedFolder?: boolean;
+  defaultFileEncoding?: FileEncodingType;
   useRipgrep?: boolean;
   useBuiltinRipgrep?: boolean;
   shouldUseNodePtyShell?: boolean;
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   skipLoopDetection?: boolean;
-  vlmSwitchMode?: string;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
-  enableToolOutputTruncation?: boolean;
   eventEmitter?: EventEmitter;
-  useSmartEdit?: boolean;
   output?: OutputSettings;
   inputFormat?: InputFormat;
   outputFormat?: OutputFormat;
   skipStartupContext?: boolean;
+  bareMode?: boolean;
   sdkMode?: boolean;
   sessionSubagents?: SubagentConfig[];
   channel?: string;
+  /**
+   * File descriptor number for structured JSON event output (dual output mode).
+   * When set, Qwen Code outputs structured JSON events to this fd while
+   * continuing to render the TUI on stdout. The caller must provide this fd
+   * via spawn stdio configuration.
+   * Mutually exclusive with jsonFile.
+   */
+  jsonFd?: number;
+  /**
+   * File path for structured JSON event output (dual output mode).
+   * Can be a regular file, FIFO (named pipe), or /dev/fd/N.
+   * Mutually exclusive with jsonFd.
+   */
+  jsonFile?: string;
+  /**
+   * File path for receiving remote input commands (bidirectional sync mode).
+   * An external process writes JSONL commands to this file, and the TUI
+   * watches it to process messages as if the user typed them.
+   */
+  inputFile?: string;
   /** Model providers configuration grouped by authType */
   modelProvidersConfig?: ModelProvidersConfig;
+  /** Multi-agent collaboration settings (Arena, Team, Swarm) */
+  agents?: AgentsCollabSettings;
+  /** Enable managed auto-memory background extraction and dream. Defaults to true. */
+  enableManagedAutoMemory?: boolean;
+  /** Enable managed auto-dream consolidation separately from extraction. Defaults to true. */
+  enableManagedAutoDream?: boolean;
+  /**
+   * Lightweight model for background tasks (memory extraction, dream, /btw side questions).
+   * When set and valid for the current auth type, forked agents use this model instead of
+   * the main session model, reducing latency and cost.
+   * Corresponds to the `fastModel` setting (configurable via `/model --fast`).
+   */
+  fastModel?: string;
+  /**
+   * Disable all hooks (default: false, hooks enabled).
+   * Migration note: This replaces the deprecated hooksConfig.enabled setting.
+   * Users with old settings.json containing hooksConfig.enabled should migrate
+   * to use disableAllHooks instead (note: inverted logic - enabled:true → disableAllHooks:false).
+   */
+  disableAllHooks?: boolean;
+  /**
+   * User-level hooks configuration (from user settings).
+   * These hooks are always loaded regardless of folder trust status.
+   */
+  userHooks?: Record<string, unknown>;
+  /**
+   * Project-level hooks configuration (from workspace settings).
+   * These hooks are only loaded in trusted folders.
+   * When undefined or the folder is untrusted, project hooks are skipped.
+   */
+  projectHooks?: Record<string, unknown>;
+
+  hooks?: Record<string, unknown>;
+  /** Glob patterns to exclude from .qwen/rules/ loading. */
+  contextRuleExcludes?: string[];
+  /** Warnings generated during configuration resolution */
+  warnings?: string[];
+  /** Allowed HTTP hook URLs whitelist (from security.allowedHttpHookUrls) */
+  allowedHttpHookUrls?: string[];
+  /**
+   * Callback for persisting a permission rule to settings.
+   * Injected by the CLI layer; core uses this to write allow/ask/deny rules
+   * to project or user settings when the user clicks "Always Allow".
+   *
+   * @param scope - 'project' for workspace settings, 'user' for user settings.
+   * @param ruleType - 'allow' | 'ask' | 'deny'.
+   * @param rule - The raw rule string, e.g. "Bash(git *)" or "Edit".
+   */
+  onPersistPermissionRule?: (
+    scope: 'project' | 'user',
+    ruleType: 'allow' | 'ask' | 'deny',
+    rule: string,
+  ) => Promise<void>;
 }
 
 function normalizeConfigOutputFormat(
@@ -403,14 +541,23 @@ export interface ConfigInitializeOptions {
   sendSdkMcpMessage?: SendSdkMcpMessage;
 }
 
+const DEFAULT_BARE_CORE_TOOLS = [
+  ToolNames.READ_FILE,
+  ToolNames.EDIT,
+  ToolNames.SHELL,
+];
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
+  private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   private promptRegistry!: PromptRegistry;
   private subagentManager!: SubagentManager;
+  private readonly backgroundTaskRegistry = new BackgroundTaskRegistry();
   private extensionManager!: ExtensionManager;
   private skillManager: SkillManager | null = null;
+  private permissionManager: PermissionManager | null = null;
   private fileSystemService: FileSystemService;
   private contentGeneratorConfig!: ContentGeneratorConfig;
   private contentGeneratorConfigSources: ContentGeneratorConfigSources = {};
@@ -427,10 +574,15 @@ export class Config {
   private readonly outputFormat: OutputFormat;
   private readonly includePartialMessages: boolean;
   private readonly question: string | undefined;
-  private readonly fullContext: boolean;
+  private readonly systemPrompt: string | undefined;
+  private readonly appendSystemPrompt: string | undefined;
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
+  private readonly disabledSlashCommands: readonly string[];
+  private readonly permissionsAllow: string[];
+  private readonly permissionsAsk: string[];
+  private readonly permissionsDeny: string[];
   private readonly toolDiscoveryCommand: string | undefined;
   private readonly toolCallCommand: string | undefined;
   private readonly mcpServerCommand: string | undefined;
@@ -438,23 +590,27 @@ export class Config {
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
   private readonly allowedMcpServers?: string[];
-  private readonly excludedMcpServers?: string[];
+  private excludedMcpServers?: string[];
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
   private sdkMode: boolean;
   private geminiMdFileCount: number;
+  private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
+  private readonly contextRuleExcludes: string[];
   private approvalMode: ApprovalMode;
+  private prePlanMode?: ApprovalMode;
   private readonly accessibility: AccessibilitySettings;
   private readonly telemetrySettings: TelemetrySettings;
   private readonly gitCoAuthor: GitCoAuthorSettings;
   private readonly usageStatisticsEnabled: boolean;
   private geminiClient!: GeminiClient;
   private baseLlmClient!: BaseLlmClient;
+  private cronScheduler: CronScheduler | null = null;
   private readonly fileFiltering: {
     respectGitIgnore: boolean;
     respectQwenIgnore: boolean;
     enableRecursiveFileSearch: boolean;
-    disableFuzzySearch: boolean;
+    enableFuzzySearch: boolean;
   };
   private fileDiscoveryService: FileDiscoveryService | null = null;
   private gitService: GitService | undefined = undefined;
@@ -463,6 +619,7 @@ export class Config {
   private readonly checkpointing: boolean;
   private readonly proxy: string | undefined;
   private readonly cwd: string;
+  private readonly explicitIncludeDirectories: string[];
   private readonly bugCommand: BugCommandSettings | undefined;
   private readonly outputLanguageFilePath?: string;
   private readonly noBrowser: boolean;
@@ -471,16 +628,14 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly clearContextOnIdle: ClearContextOnIdleSettings;
   private readonly sessionTokenLimit: number;
   private readonly listExtensions: boolean;
   private readonly overrideExtensions?: string[];
 
-  private readonly summarizeToolOutput:
-    | Record<string, SummarizeToolOutputSettings>
-    | undefined;
   private readonly cliVersion?: string;
   private readonly experimentalZedIntegration: boolean = false;
-  private readonly experimentalSkills: boolean = false;
+  private readonly cronEnabled: boolean = false;
   private readonly chatRecordingEnabled: boolean;
   private readonly loadMemoryFromIncludeDirectories: boolean = false;
   private readonly importFormat: 'tree' | 'flat';
@@ -500,29 +655,62 @@ export class Config {
   private readonly shouldUseNodePtyShell: boolean;
   private readonly skipNextSpeakerCheck: boolean;
   private shellExecutionConfig: ShellExecutionConfig;
+  private arenaManager: ArenaManager | null = null;
+  private arenaManagerChangeCallback:
+    | ((manager: ArenaManager | null) => void)
+    | null = null;
+  private readonly arenaAgentClient: ArenaAgentClient | null;
+  private readonly agentsSettings: AgentsCollabSettings;
   private readonly skipLoopDetection: boolean;
   private readonly skipStartupContext: boolean;
-  private readonly vlmSwitchMode: string | undefined;
+  private readonly bareMode: boolean;
+  private readonly warnings: string[];
+  private readonly allowedHttpHookUrls: string[];
+  private readonly onPersistPermissionRuleCallback?: (
+    scope: 'project' | 'user',
+    ruleType: 'allow' | 'ask' | 'deny',
+    rule: string,
+  ) => Promise<void>;
   private initialized: boolean = false;
   readonly storage: Storage;
   private readonly fileExclusions: FileExclusions;
   private readonly truncateToolOutputThreshold: number;
   private readonly truncateToolOutputLines: number;
-  private readonly enableToolOutputTruncation: boolean;
   private readonly eventEmitter?: EventEmitter;
-  private readonly useSmartEdit: boolean;
   private readonly channel: string | undefined;
+  private readonly jsonFd: number | undefined;
+  private readonly jsonFile: string | undefined;
+  private readonly inputFile: string | undefined;
+  private readonly defaultFileEncoding: FileEncodingType | undefined;
+  private readonly enableManagedAutoMemory: boolean;
+  private readonly enableManagedAutoDream: boolean;
+  private fastModel?: string;
+  private readonly disableAllHooks: boolean;
+  /** User-level hooks (always loaded regardless of trust) */
+  private readonly userHooks?: Record<string, unknown>;
+  /** Project-level hooks (only loaded in trusted folders) */
+  private readonly projectHooks?: Record<string, unknown>;
+  /** @deprecated Legacy merged hooks field - use userHooks/projectHooks instead */
+  private readonly hooks?: Record<string, unknown>;
+  private hookSystem?: HookSystem;
+  private messageBus?: MessageBus;
+  private readonly memoryManager: MemoryManager;
 
   constructor(params: ConfigParameters) {
     this.sessionId = params.sessionId ?? randomUUID();
     this.sessionData = params.sessionData;
+    setDebugLogSession(this);
+    this.debugLogger = createDebugLogger();
     this.embeddingModel = params.embeddingModel ?? DEFAULT_QWEN_EMBEDDING_MODEL;
     this.fileSystemService = new StandardFileSystemService();
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
+    this.explicitIncludeDirectories = Array.from(
+      new Set(params.includeDirectories ?? []),
+    );
     this.workspaceContext = new WorkspaceContext(
       this.targetDir,
-      params.includeDirectories ?? [],
+      this.explicitIncludeDirectories,
     );
     this.debugMode = params.debugMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
@@ -532,10 +720,17 @@ export class Config {
     this.outputFormat = normalizedOutputFormat ?? OutputFormat.TEXT;
     this.includePartialMessages = params.includePartialMessages ?? false;
     this.question = params.question;
-    this.fullContext = params.fullContext ?? false;
+    this.systemPrompt = params.systemPrompt;
+    this.appendSystemPrompt = params.appendSystemPrompt;
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
+    this.disabledSlashCommands = Object.freeze([
+      ...(params.disabledSlashCommands ?? []),
+    ]);
+    this.permissionsAllow = params.permissions?.allow || [];
+    this.permissionsAsk = params.permissions?.ask || [];
+    this.permissionsDeny = params.permissions?.deny || [];
     this.toolDiscoveryCommand = params.toolDiscoveryCommand;
     this.toolCallCommand = params.toolCallCommand;
     this.mcpServerCommand = params.mcpServerCommand;
@@ -548,6 +743,7 @@ export class Config {
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
+    this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.DEFAULT;
     this.accessibility = params.accessibility ?? {};
     this.telemetrySettings = {
@@ -572,7 +768,7 @@ export class Config {
       respectQwenIgnore: params.fileFiltering?.respectQwenIgnore ?? true,
       enableRecursiveFileSearch:
         params.fileFiltering?.enableRecursiveFileSearch ?? true,
-      disableFuzzySearch: params.fileFiltering?.disableFuzzySearch ?? false,
+      enableFuzzySearch: params.fileFiltering?.enableFuzzySearch ?? true,
     };
     this.checkpointing = params.checkpointing ?? false;
     this.proxy = params.proxy;
@@ -580,14 +776,21 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.clearContextOnIdle = {
+      thinkingThresholdMinutes:
+        params.clearContextOnIdle?.thinkingThresholdMinutes ?? 5,
+      toolResultsThresholdMinutes:
+        params.clearContextOnIdle?.toolResultsThresholdMinutes ?? 60,
+      toolResultsNumToKeep:
+        params.clearContextOnIdle?.toolResultsNumToKeep ?? 5,
+    };
     this.sessionTokenLimit = params.sessionTokenLimit ?? -1;
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
-    this.experimentalSkills = params.experimentalSkills ?? false;
+    this.cronEnabled = params.cronEnabled ?? false;
     this.listExtensions = params.listExtensions ?? false;
     this.overrideExtensions = params.overrideExtensions;
     this.noBrowser = params.noBrowser ?? false;
-    this.summarizeToolOutput = params.summarizeToolOutput;
     this.folderTrustFeature = params.folderTrustFeature ?? false;
     this.folderTrust = params.folderTrust ?? false;
     this.ideMode = params.ideMode ?? false;
@@ -604,12 +807,17 @@ export class Config {
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
     this.skipStartupContext = params.skipStartupContext ?? false;
+    this.bareMode = params.bareMode ?? false;
+    this.warnings = params.warnings ?? [];
+    this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
+    this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
     // Web search
     this.webSearch = params.webSearch;
     this.useRipgrep = params.useRipgrep ?? true;
     this.useBuiltinRipgrep = params.useBuiltinRipgrep ?? true;
-    this.shouldUseNodePtyShell = params.shouldUseNodePtyShell ?? false;
+    this.shouldUseNodePtyShell =
+      params.shouldUseNodePtyShell ?? shouldDefaultToNodePty();
     this.skipNextSpeakerCheck = params.skipNextSpeakerCheck ?? true;
     this.shellExecutionConfig = {
       terminalWidth: params.shellExecutionConfig?.terminalWidth ?? 80,
@@ -622,14 +830,17 @@ export class Config {
       DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD;
     this.truncateToolOutputLines =
       params.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES;
-    this.enableToolOutputTruncation = params.enableToolOutputTruncation ?? true;
-    this.useSmartEdit = params.useSmartEdit ?? false;
     this.channel = params.channel;
+    this.jsonFd = params.jsonFd;
+    this.jsonFile = params.jsonFile;
+    this.inputFile = params.inputFile;
+    this.defaultFileEncoding = params.defaultFileEncoding;
     this.storage = new Storage(this.targetDir);
-    this.vlmSwitchMode = params.vlmSwitchMode;
     this.inputFormat = params.inputFormat ?? InputFormat.TEXT;
     this.fileExclusions = new FileExclusions(this);
     this.eventEmitter = params.eventEmitter;
+    this.arenaAgentClient = ArenaAgentClient.create();
+    this.agentsSettings = params.agents ?? {};
     if (params.contextFileName) {
       setGeminiMdFilename(params.contextFileName);
     }
@@ -654,8 +865,9 @@ export class Config {
       initializeTelemetry(this);
     }
 
-    if (this.getProxy()) {
-      setGlobalDispatcher(new ProxyAgent(this.getProxy() as string));
+    const proxyUrl = this.getProxy();
+    if (proxyUrl) {
+      setGlobalDispatcher(new ProxyAgent(proxyUrl));
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -666,6 +878,16 @@ export class Config {
       enabledExtensionOverrides: this.overrideExtensions,
       isWorkspaceTrusted: this.isTrustedFolder(),
     });
+    this.enableManagedAutoMemory = params.enableManagedAutoMemory ?? true;
+    this.enableManagedAutoDream = params.enableManagedAutoDream ?? false;
+    this.fastModel = params.fastModel || undefined;
+    this.disableAllHooks = params.disableAllHooks ?? false;
+    // Store user and project hooks separately for proper source attribution
+    this.userHooks = params.userHooks;
+    this.projectHooks = params.projectHooks;
+    // Legacy: fall back to merged hooks if new fields are not provided
+    this.hooks = params.hooks;
+    this.memoryManager = new MemoryManager();
   }
 
   /**
@@ -677,6 +899,7 @@ export class Config {
       throw Error('Config was already initialized');
     }
     this.initialized = true;
+    this.debugLogger.info('Config initialization started');
 
     // Initialize centralized FileDiscoveryService
     this.getFileService();
@@ -685,46 +908,292 @@ export class Config {
     }
     this.promptRegistry = new PromptRegistry();
     this.extensionManager.setConfig(this);
-    await this.extensionManager.refreshCache();
+    const explicitExtensionNames = this.getExplicitExtensionNames();
+    if (!this.getBareMode()) {
+      await this.extensionManager.refreshCache();
+    } else if (explicitExtensionNames.length > 0) {
+      await this.extensionManager.refreshCache({
+        names: explicitExtensionNames,
+      });
+    }
+    this.debugLogger.debug('Extension manager initialized');
+
+    // Bare mode skips all hook loading and execution.
+    if (!this.getDisableAllHooks()) {
+      this.hookSystem = new HookSystem(this);
+      await this.hookSystem.initialize();
+      this.debugLogger.debug('Hook system initialized');
+
+      // Initialize MessageBus for hook execution
+      this.messageBus = new MessageBus();
+
+      // Subscribe to HOOK_EXECUTION_REQUEST to execute hooks
+      this.messageBus.subscribe<HookExecutionRequest>(
+        MessageBusType.HOOK_EXECUTION_REQUEST,
+        async (request: HookExecutionRequest) => {
+          try {
+            const hookSystem = this.hookSystem;
+            if (!hookSystem) {
+              this.messageBus?.publish({
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: request.correlationId,
+                success: false,
+                error: new Error('Hook system not initialized'),
+              } as HookExecutionResponse);
+              return;
+            }
+
+            // Check if request was aborted
+            if (request.signal?.aborted) {
+              this.messageBus?.publish({
+                type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+                correlationId: request.correlationId,
+                success: false,
+                error: new Error('Hook execution cancelled (aborted)'),
+              } as HookExecutionResponse);
+              return;
+            }
+
+            // Execute the appropriate hook based on eventName
+            let result;
+            let stopHookCount: number | undefined;
+            const input = request.input || {};
+            const signal = request.signal;
+            switch (request.eventName) {
+              case 'UserPromptSubmit':
+                result = await hookSystem.fireUserPromptSubmitEvent(
+                  (input['prompt'] as string) || '',
+                  signal,
+                );
+                break;
+              case 'Stop': {
+                const stopResult = await hookSystem.fireStopEvent(
+                  (input['stop_hook_active'] as boolean) || false,
+                  (input['last_assistant_message'] as string) || '',
+                  signal,
+                );
+                result = stopResult.finalOutput
+                  ? createHookOutput('Stop', stopResult.finalOutput)
+                  : undefined;
+                stopHookCount = stopResult.allOutputs.length;
+                break;
+              }
+              case 'PreToolUse': {
+                result = await hookSystem.firePreToolUseEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['permission_mode'] as PermissionMode | undefined) ??
+                    PermissionMode.Default,
+                  signal,
+                );
+                break;
+              }
+              case 'PostToolUse':
+                result = await hookSystem.firePostToolUseEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['tool_response'] as Record<string, unknown>) || {},
+                  (input['tool_use_id'] as string) || '',
+                  (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
+                );
+                break;
+              case 'PostToolUseFailure':
+                result = await hookSystem.firePostToolUseFailureEvent(
+                  (input['tool_use_id'] as string) || '',
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['error'] as string) || '',
+                  input['is_interrupt'] as boolean | undefined,
+                  (input['permission_mode'] as PermissionMode) || 'default',
+                  signal,
+                );
+                break;
+              case 'Notification':
+                result = await hookSystem.fireNotificationEvent(
+                  (input['message'] as string) || '',
+                  (input['notification_type'] as NotificationType) ||
+                    'permission_prompt',
+                  (input['title'] as string) || undefined,
+                  signal,
+                );
+                break;
+              case 'PermissionRequest':
+                result = await hookSystem.firePermissionRequestEvent(
+                  (input['tool_name'] as string) || '',
+                  (input['tool_input'] as Record<string, unknown>) || {},
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                  (input['permission_suggestions'] as
+                    | PermissionSuggestion[]
+                    | undefined) || undefined,
+                  signal,
+                );
+                break;
+              case 'SubagentStart':
+                result = await hookSystem.fireSubagentStartEvent(
+                  (input['agent_id'] as string) || '',
+                  (input['agent_type'] as string) || '',
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                  signal,
+                );
+                break;
+              case 'SubagentStop':
+                result = await hookSystem.fireSubagentStopEvent(
+                  (input['agent_id'] as string) || '',
+                  (input['agent_type'] as string) || '',
+                  (input['agent_transcript_path'] as string) || '',
+                  (input['last_assistant_message'] as string) || '',
+                  (input['stop_hook_active'] as boolean) || false,
+                  (input['permission_mode'] as PermissionMode) ||
+                    PermissionMode.Default,
+                  signal,
+                );
+                break;
+              default:
+                this.debugLogger.warn(
+                  `Unknown hook event: ${request.eventName}`,
+                );
+                result = undefined;
+            }
+
+            // Send response
+            this.messageBus?.publish({
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: request.correlationId,
+              success: true,
+              output: result,
+              // Include stop hook count for Stop events
+              stopHookCount,
+            } as HookExecutionResponse);
+          } catch (error) {
+            this.debugLogger.warn(`Hook execution failed: ${error}`);
+            this.messageBus?.publish({
+              type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+              correlationId: request.correlationId,
+              success: false,
+              error: error instanceof Error ? error : new Error(String(error)),
+            } as HookExecutionResponse);
+          }
+        },
+      );
+
+      this.debugLogger.debug('MessageBus initialized with hook subscription');
+    } else {
+      this.debugLogger.debug('Hook system disabled, skipping initialization');
+    }
 
     this.subagentManager = new SubagentManager(this);
-    if (this.getExperimentalSkills()) {
-      this.skillManager = new SkillManager(this);
+    this.skillManager = new SkillManager(this);
+    if (this.getBareMode()) {
+      await this.skillManager.refreshCache();
+    } else {
       await this.skillManager.startWatching();
     }
+    this.debugLogger.debug('Skill manager initialized');
+
+    this.permissionManager = new PermissionManager(this);
+    this.permissionManager.initialize();
+    this.debugLogger.debug('Permission manager initialized');
 
     // Load session subagents if they were provided before initialization
     if (this.sessionSubagents.length > 0) {
       this.subagentManager.loadSessionSubagents(this.sessionSubagents);
     }
 
-    await this.extensionManager.refreshCache();
+    if (!this.getBareMode()) {
+      await this.extensionManager.refreshCache();
+    }
 
     await this.refreshHierarchicalMemory();
+    this.debugLogger.debug('Hierarchical memory loaded');
 
     this.toolRegistry = await this.createToolRegistry(
       options?.sendSdkMcpMessage,
+      this.getBareMode() ? { skipDiscovery: true } : undefined,
+    );
+    this.debugLogger.info(
+      `Tool registry initialized with ${this.toolRegistry.getAllToolNames().length} tools`,
     );
 
     await this.geminiClient.initialize();
+    this.debugLogger.info('Gemini client initialized');
+
+    // Detect and capture runtime model snapshot (from CLI/ENV/credentials)
+    this.modelsConfig.detectAndCaptureRuntimeModel();
+
+    // Warm all lazy tool factories so telemetry can access tool metadata synchronously.
+    // Use strict mode so a broken built-in tool surfaces immediately at startup.
+    await this.toolRegistry.warmAll({ strict: true });
 
     logStartSession(this, new StartSessionEvent(this));
+    this.debugLogger.info('Config initialization completed');
   }
 
   async refreshHierarchicalMemory(): Promise<void> {
-    const { memoryContent, fileCount } = await loadServerHierarchicalMemory(
-      this.getWorkingDir(),
-      this.shouldLoadMemoryFromIncludeDirectories()
-        ? this.getWorkspaceContext().getDirectories()
-        : [],
-      this.getDebugMode(),
-      this.getFileService(),
-      this.getExtensionContextFilePaths(),
-      this.isTrustedFolder(),
-      this.getImportFormat(),
-    );
-    this.setUserMemory(memoryContent);
+    const { memoryContent, fileCount, conditionalRules, projectRoot } =
+      await loadServerHierarchicalMemory(
+        this.getWorkingDir(),
+        this.getMemoryDiscoveryDirectories(),
+        this.getFileService(),
+        this.getExtensionContextFilePaths(),
+        this.isTrustedFolder(),
+        this.getImportFormat(),
+        this.contextRuleExcludes,
+        { explicitOnly: this.getBareMode() },
+      );
+    if (this.getManagedAutoMemoryEnabled()) {
+      const managedAutoMemoryIndex = await readAutoMemoryIndex(
+        this.getProjectRoot(),
+      );
+      this.setUserMemory(
+        this.memoryManager.appendToUserMemory(
+          memoryContent,
+          getAutoMemoryRoot(this.getProjectRoot()),
+          managedAutoMemoryIndex,
+        ),
+      );
+    } else {
+      this.setUserMemory(memoryContent);
+    }
     this.setGeminiMdFileCount(fileCount);
+    this.conditionalRulesRegistry = new ConditionalRulesRegistry(
+      conditionalRules,
+      projectRoot,
+    );
+  }
+
+  private getMemoryDiscoveryDirectories(): string[] {
+    if (!this.shouldLoadMemoryFromIncludeDirectories()) {
+      return [];
+    }
+
+    if (this.getBareMode()) {
+      return this.explicitIncludeDirectories;
+    }
+
+    return [...this.getWorkspaceContext().getDirectories()];
+  }
+
+  getConditionalRulesRegistry(): ConditionalRulesRegistry | undefined {
+    return this.conditionalRulesRegistry;
+  }
+
+  /**
+   * Update the conditional rules registry. Called after external refresh
+   * paths (e.g. /memory refresh or /directory add) that bypass
+   * refreshHierarchicalMemory().
+   */
+  setConditionalRulesRegistry(
+    registry: ConditionalRulesRegistry | undefined,
+  ): void {
+    this.conditionalRulesRegistry = registry;
+  }
+
+  getContextRuleExcludes(): string[] {
+    return this.contextRuleExcludes;
   }
 
   getContentGenerator(): ContentGenerator {
@@ -753,6 +1222,19 @@ export class Config {
     settingsGenerationConfig?: Partial<ContentGeneratorConfig>,
   ): void {
     this.modelsConfig.updateCredentials(credentials, settingsGenerationConfig);
+  }
+
+  /**
+   * Reload model providers configuration at runtime.
+   * This enables hot-reloading of modelProviders settings without restarting the CLI.
+   * Should be called before refreshAuth when settings.json has been updated.
+   *
+   * @param modelProvidersConfig - The updated model providers configuration
+   */
+  reloadModelProvidersConfig(
+    modelProvidersConfig?: ModelProvidersConfig,
+  ): void {
+    this.modelsConfig.reloadModelProvidersConfig(modelProvidersConfig);
   }
 
   /**
@@ -788,6 +1270,21 @@ export class Config {
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
+
+    // Fire auth_success notification hook (supports both interactive & non-interactive)
+    const messageBus = this.getMessageBus();
+    const hooksEnabled = !this.getDisableAllHooks();
+    if (hooksEnabled && messageBus) {
+      fireNotificationHook(
+        messageBus,
+        `Successfully authenticated with ${authMethod}`,
+        NotificationType.AuthSuccess,
+        'Authentication successful',
+      ).catch(() => {
+        // Silently ignore errors - fireNotificationHook has internal error handling
+        // and notification hooks should not block the auth flow
+      });
+    }
   }
 
   /**
@@ -815,6 +1312,19 @@ export class Config {
   }
 
   /**
+   * Returns warnings generated during configuration resolution.
+   * These warnings are collected from model configuration resolution
+   * and should be displayed to the user during startup.
+   */
+  getWarnings(): string[] {
+    return this.warnings;
+  }
+
+  getDebugLogger(): DebugLogger {
+    return this.debugLogger;
+  }
+
+  /**
    * Starts a new session and resets session-scoped services.
    */
   startNewSession(
@@ -823,6 +1333,8 @@ export class Config {
   ): string {
     this.sessionId = sessionId ?? randomUUID();
     this.sessionData = sessionData;
+    setDebugLogSession(this);
+    this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
       ? new ChatRecordingService(this)
       : undefined;
@@ -868,6 +1380,29 @@ export class Config {
   }
 
   /**
+   * Returns the fast model if one is configured and valid for the current auth type,
+   * otherwise returns undefined. Background agents (memory extraction, dream, /btw)
+   * use this as a cheaper alternative to the main session model.
+   */
+  getFastModel(): string | undefined {
+    if (!this.fastModel) return undefined;
+    const authType = this.contentGeneratorConfig?.authType;
+    if (!authType) return undefined;
+    const available = this.getAvailableModelsForAuthType(authType);
+    return available.some((m) => m.id === this.fastModel)
+      ? this.fastModel
+      : undefined;
+  }
+
+  /**
+   * Update the fast model at runtime (e.g., when the user runs `/model --fast <model>`).
+   * Pass undefined or an empty string to clear the fast model override.
+   */
+  setFastModel(model: string | undefined): void {
+    this.fastModel = model || undefined;
+  }
+
+  /**
    * Set model programmatically (e.g., VLM auto-switch, fallback).
    * Delegates to ModelsConfig.
    */
@@ -894,6 +1429,12 @@ export class Config {
       return;
     }
 
+    // Strip thinking blocks from conversation history on model switch.
+    // reasoning_content is a non-standard field that causes strict
+    // OpenAI-compatible providers to reject requests with 422 errors
+    // when thought parts from a previous model leak into the payload (#3304).
+    this.geminiClient.stripThoughtsFromHistory();
+
     // Hot update path: only supported for qwen-oauth.
     // For other auth types we always refresh to recreate the ContentGenerator.
     //
@@ -916,9 +1457,9 @@ export class Config {
       // Hot-update fields (qwen-oauth models share the same auth + client).
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
-      this.contentGeneratorConfig.disableCacheControl =
-        config.disableCacheControl;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
+      this.contentGeneratorConfig.enableCacheControl =
+        config.enableCacheControl;
 
       if ('model' in sources) {
         this.contentGeneratorConfigSources['model'] = sources['model'];
@@ -927,9 +1468,9 @@ export class Config {
         this.contentGeneratorConfigSources['samplingParams'] =
           sources['samplingParams'];
       }
-      if ('disableCacheControl' in sources) {
-        this.contentGeneratorConfigSources['disableCacheControl'] =
-          sources['disableCacheControl'];
+      if ('enableCacheControl' in sources) {
+        this.contentGeneratorConfigSources['enableCacheControl'] =
+          sources['enableCacheControl'];
       }
       if ('contextWindowSize' in sources) {
         this.contentGeneratorConfigSources['contextWindowSize'] =
@@ -959,26 +1500,47 @@ export class Config {
   }
 
   /**
-   * Switch authType+model via registry-backed selection.
+   * Get all configured models across authTypes.
+   * Delegates to ModelsConfig.
+   */
+  getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
+    return this.modelsConfig.getAllConfiguredModels(authTypes);
+  }
+
+  /**
+   * Get the currently active runtime model snapshot.
+   * Delegates to ModelsConfig.
+   */
+  getActiveRuntimeModelSnapshot(): RuntimeModelSnapshot | undefined {
+    return this.modelsConfig.getActiveRuntimeModelSnapshot();
+  }
+
+  /**
+   * Switch authType+model.
+   * Supports both registry-backed models and runtime model snapshots.
+   *
+   * For runtime models, the modelId should be in format `$runtime|${authType}|${modelId}`.
    * This triggers a refresh of the ContentGenerator when required (always on authType changes).
    * For qwen-oauth model switches that are hot-update safe, this may update in place.
    *
    * @param authType - Target authentication type
-   * @param modelId - Target model ID
+   * @param modelId - Target model ID (or `$runtime|${authType}|${modelId}` for runtime models)
    * @param options - Additional options like requireCachedCredentials
-   * @param metadata - Metadata for logging/tracking
    */
   async switchModel(
     authType: AuthType,
     modelId: string,
     options?: { requireCachedCredentials?: boolean },
-    metadata?: { reason?: string; context?: string },
   ): Promise<void> {
-    await this.modelsConfig.switchModel(authType, modelId, options, metadata);
+    await this.modelsConfig.switchModel(authType, modelId, options);
   }
 
   getMaxSessionTurns(): number {
     return this.maxSessionTurns;
+  }
+
+  getClearContextOnIdle(): ClearContextOnIdleSettings {
+    return this.clearContextOnIdle;
   }
 
   getSessionTokenLimit(): number {
@@ -1012,6 +1574,10 @@ export class Config {
     return this.targetDir;
   }
 
+  getCwd(): string {
+    return this.targetDir;
+  }
+
   getWorkspaceContext(): WorkspaceContext {
     return this.workspaceContext;
   }
@@ -1036,9 +1602,13 @@ export class Config {
       if (this.toolRegistry) {
         await this.toolRegistry.stop();
       }
+
+      this.backgroundTaskRegistry.abortAll();
+
+      await this.cleanupArenaRuntime();
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
-      console.error('Error during Config shutdown:', error);
+      this.debugLogger.error('Error during Config shutdown:', error);
     }
   }
 
@@ -1054,20 +1624,83 @@ export class Config {
     return this.question;
   }
 
-  getFullContext(): boolean {
-    return this.fullContext;
+  getSystemPrompt(): string | undefined {
+    return this.systemPrompt;
   }
 
+  getAppendSystemPrompt(): string | undefined {
+    return this.appendSystemPrompt;
+  }
+
+  /** @deprecated Use getPermissionsAllow() instead. */
   getCoreTools(): string[] | undefined {
+    if (this.getBareMode()) {
+      return DEFAULT_BARE_CORE_TOOLS;
+    }
     return this.coreTools;
   }
 
-  getAllowedTools(): string[] | undefined {
-    return this.allowedTools;
+  /**
+   * Returns the merged allow-rules for PermissionManager.
+   *
+   * This merges all sources so that PermissionManager receives a single,
+   * authoritative list:
+   *   - settings.permissions.allow  (persistent rules from all scopes)
+   *   - allowedTools param  (SDK / argv auto-approve list)
+   *
+   * Note: coreTools is intentionally excluded here — it has whitelist semantics
+   * (only listed tools are registered), not auto-approve semantics. It is
+   * handled separately via PermissionManager.coreToolsAllowList.
+   *
+   * CLI callers (loadCliConfig) already pre-merge argv into permissionsAllow
+   * before constructing Config, so those fields will be empty for CLI usage.
+   * SDK callers construct Config directly and rely on allowedTools.
+   */
+  getPermissionsAllow(): string[] {
+    const base = this.permissionsAllow ?? [];
+    const sdkAllow = [...(this.allowedTools ?? [])];
+    if (sdkAllow.length === 0) return base.length > 0 ? base : [];
+    const merged = [...base];
+    for (const t of sdkAllow) {
+      if (t && !merged.includes(t)) merged.push(t);
+    }
+    return merged;
   }
 
-  getExcludeTools(): string[] | undefined {
-    return this.excludeTools;
+  getPermissionsAsk(): string[] {
+    return this.permissionsAsk;
+  }
+
+  /**
+   * Returns the merged deny-rules for PermissionManager.
+   *
+   * Merges:
+   *   - settings.permissions.deny  (persistent rules from all scopes)
+   *   - excludeTools param  (SDK / argv blocklist)
+   *
+   * CLI callers pre-merge argv.excludeTools into permissionsDeny.
+   */
+  getPermissionsDeny(): string[] {
+    const base = this.permissionsDeny ?? [];
+    const sdkDeny = this.excludeTools ?? [];
+    if (sdkDeny.length === 0) return base.length > 0 ? base : [];
+    const merged = [...base];
+    for (const t of sdkDeny) {
+      if (t && !merged.includes(t)) merged.push(t);
+    }
+    return merged;
+  }
+
+  /**
+   * Returns the pre-merged list of slash command names that should be hidden
+   * from the CLI surface. Callers should treat this as a case-insensitive
+   * denylist; `CommandService.create` handles the normalization.
+   *
+   * CLI callers (loadCliConfig) populate this from settings, the
+   * `--disabled-slash-commands` flag, and `QWEN_DISABLED_SLASH_COMMANDS`.
+   */
+  getDisabledSlashCommands(): readonly string[] {
+    return this.disabledSlashCommands;
   }
 
   getToolDiscoveryCommand(): string | undefined {
@@ -1105,15 +1738,23 @@ export class Config {
       );
     }
 
-    if (this.excludedMcpServers) {
-      mcpServers = Object.fromEntries(
-        Object.entries(mcpServers).filter(
-          ([key]) => !this.excludedMcpServers?.includes(key),
-        ),
-      );
-    }
+    // Note: We no longer filter out excluded servers here.
+    // The UI layer should check isMcpServerDisabled() to determine
+    // whether to show a server as disabled.
 
     return mcpServers;
+  }
+
+  getExcludedMcpServers(): string[] | undefined {
+    return this.excludedMcpServers;
+  }
+
+  setExcludedMcpServers(excluded: string[]): void {
+    this.excludedMcpServers = excluded;
+  }
+
+  isMcpServerDisabled(serverName: string): boolean {
+    return this.excludedMcpServers?.includes(serverName) ?? false;
   }
 
   addMcpServers(servers: Record<string, MCPServerConfig>): void {
@@ -1124,7 +1765,7 @@ export class Config {
   }
 
   isLspEnabled(): boolean {
-    return this.lspEnabled;
+    return this.lspEnabled && !this.getBareMode();
   }
 
   getLspClient(): LspClient | undefined {
@@ -1176,8 +1817,60 @@ export class Config {
     this.geminiMdFileCount = count;
   }
 
+  getArenaManager(): ArenaManager | null {
+    return this.arenaManager;
+  }
+
+  setArenaManager(manager: ArenaManager | null): void {
+    this.arenaManager = manager;
+    this.arenaManagerChangeCallback?.(manager);
+  }
+
+  /**
+   * Register a callback invoked whenever the arena manager changes.
+   * Pass `null` to unsubscribe. Only one subscriber is supported.
+   */
+  onArenaManagerChange(
+    cb: ((manager: ArenaManager | null) => void) | null,
+  ): void {
+    this.arenaManagerChangeCallback = cb;
+  }
+
+  getArenaAgentClient(): ArenaAgentClient | null {
+    return this.arenaAgentClient;
+  }
+
+  getAgentsSettings(): AgentsCollabSettings {
+    return this.agentsSettings;
+  }
+
+  /**
+   * Clean up Arena runtime. When `force` is true (e.g., /arena select --discard),
+   * always removes worktrees regardless of preserveArtifacts.
+   */
+  async cleanupArenaRuntime(force?: boolean): Promise<void> {
+    const manager = this.arenaManager;
+    if (!manager) {
+      return;
+    }
+    if (!force && this.agentsSettings.arena?.preserveArtifacts) {
+      await manager.cleanupRuntime();
+    } else {
+      await manager.cleanup();
+    }
+    this.setArenaManager(null);
+  }
+
   getApprovalMode(): ApprovalMode {
     return this.approvalMode;
+  }
+
+  /**
+   * Returns the approval mode that was active before entering plan mode.
+   * Falls back to DEFAULT if no pre-plan mode was recorded.
+   */
+  getPrePlanMode(): ApprovalMode {
+    return this.prePlanMode ?? ApprovalMode.DEFAULT;
   }
 
   setApprovalMode(mode: ApprovalMode): void {
@@ -1190,7 +1883,53 @@ export class Config {
         'Cannot enable privileged approval modes in an untrusted folder.',
       );
     }
+    // Track the mode before entering plan mode so it can be restored later
+    if (mode === ApprovalMode.PLAN && this.approvalMode !== ApprovalMode.PLAN) {
+      this.prePlanMode = this.approvalMode;
+    } else if (
+      mode !== ApprovalMode.PLAN &&
+      this.approvalMode === ApprovalMode.PLAN
+    ) {
+      this.prePlanMode = undefined;
+    }
     this.approvalMode = mode;
+  }
+
+  /**
+   * Returns the file path for this session's plan file.
+   */
+  getPlanFilePath(): string {
+    return Storage.getPlanFilePath(this.sessionId);
+  }
+
+  /**
+   * Saves a plan to disk for the current session.
+   */
+  savePlan(plan: string): void {
+    const filePath = this.getPlanFilePath();
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, plan, 'utf-8');
+  }
+
+  /**
+   * Loads the plan for the current session, or returns undefined if none exists.
+   */
+  loadPlan(): string | undefined {
+    const filePath = this.getPlanFilePath();
+    try {
+      return fs.readFileSync(filePath, 'utf-8');
+    } catch (error: unknown) {
+      if (
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        (error as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        return undefined;
+      }
+      throw error;
+    }
   }
 
   getInputFormat(): 'text' | 'stream-json' {
@@ -1241,12 +1980,25 @@ export class Config {
     return this.geminiClient;
   }
 
+  getCronScheduler(): CronScheduler {
+    if (!this.cronScheduler) {
+      this.cronScheduler = new CronScheduler();
+    }
+    return this.cronScheduler;
+  }
+
+  isCronEnabled(): boolean {
+    // Cron is experimental and opt-in: enabled via settings or env var
+    if (process.env['QWEN_CODE_ENABLE_CRON'] === '1') return true;
+    return this.cronEnabled;
+  }
+
   getEnableRecursiveFileSearch(): boolean {
     return this.fileFiltering.enableRecursiveFileSearch;
   }
 
-  getFileFilteringDisableFuzzySearch(): boolean {
-    return this.fileFiltering.disableFuzzySearch;
+  getFileFilteringEnableFuzzySearch(): boolean {
+    return this.fileFiltering.enableFuzzySearch;
   }
 
   getFileFilteringRespectGitIgnore(): boolean {
@@ -1283,7 +2035,7 @@ export class Config {
   }
 
   getProxy(): string | undefined {
-    return this.proxy;
+    return normalizeProxyUrl(this.proxy);
   }
 
   getWorkingDir(): string {
@@ -1319,10 +2071,6 @@ export class Config {
     return this.experimentalZedIntegration;
   }
 
-  getExperimentalSkills(): boolean {
-    return this.experimentalSkills;
-  }
-
   getListExtensions(): boolean {
     return this.listExtensions;
   }
@@ -1331,15 +2079,114 @@ export class Config {
     return this.extensionManager;
   }
 
+  /**
+   * Get the hook system instance if hooks are enabled.
+   * Returns undefined if hooks are not enabled.
+   */
+  getHookSystem(): HookSystem | undefined {
+    return this.hookSystem;
+  }
+
+  /**
+   * Fast-path check: returns true only when hooks are enabled AND there are
+   * registered hooks for the given event name.  Callers can use this to skip
+   * expensive MessageBus round-trips when no hooks are configured.
+   */
+  hasHooksForEvent(eventName: string): boolean {
+    return this.hookSystem?.hasHooksForEvent(eventName) ?? false;
+  }
+
+  /**
+   * Check if all hooks are disabled.
+   */
+  getDisableAllHooks(): boolean {
+    return this.disableAllHooks || this.getBareMode();
+  }
+
+  getManagedAutoMemoryEnabled(): boolean {
+    return this.enableManagedAutoMemory && !this.getBareMode();
+  }
+
+  getManagedAutoDreamEnabled(): boolean {
+    return this.enableManagedAutoDream && !this.getBareMode();
+  }
+
+  /**
+   * Return the MemoryManager instance created for this Config.
+   * Use this to share background-task state (registry, drainer) with memory
+   * module runtimes (extract, dream) instead of relying on module-level
+   * globals.
+   */
+  getMemoryManager(): MemoryManager {
+    return this.memoryManager;
+  }
+
+  /**
+   * Get the message bus instance.
+   * Returns undefined if not set.
+   */
+  getMessageBus(): MessageBus | undefined {
+    return this.messageBus;
+  }
+
+  /**
+   * Set the message bus instance.
+   * This is called by the CLI layer to inject the MessageBus.
+   */
+  setMessageBus(messageBus: MessageBus): void {
+    this.messageBus = messageBus;
+  }
+
+  /**
+   * Get project-level hooks configuration.
+   * Returns hooks from workspace settings, only in trusted folders.
+   * Used by HookRegistry to load project-specific hooks with proper source attribution.
+   */
+  getProjectHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    if (this.getBareMode()) {
+      return undefined;
+    }
+    // Only return project hooks if workspace is trusted
+    if (!this.isTrustedFolder()) {
+      return undefined;
+    }
+    // Prefer new projectHooks field, fall back to hooks for backward compatibility
+    const hooks = this.projectHooks ?? this.hooks;
+    return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
+  }
+
+  /**
+   * Get user-level hooks configuration.
+   * Returns hooks from user settings, always available regardless of folder trust.
+   * Used by HookRegistry to load user-specific hooks with proper source attribution.
+   */
+  getUserHooks(): { [K in HookEventName]?: HookDefinition[] } | undefined {
+    if (this.getBareMode()) {
+      return undefined;
+    }
+    // Prefer new userHooks field, fall back to hooks for backward compatibility
+    const hooks = this.userHooks ?? this.hooks;
+    return hooks as { [K in HookEventName]?: HookDefinition[] } | undefined;
+  }
+
   getExtensions(): Extension[] {
     const extensions = this.extensionManager.getLoadedExtensions();
     if (this.overrideExtensions) {
+      const overrideExtensionNames = new Set(
+        this.overrideExtensions.map((name) => name.toLowerCase()),
+      );
       return extensions.filter((e) =>
-        this.overrideExtensions?.includes(e.name),
+        overrideExtensionNames.has(e.name.toLowerCase()),
       );
     } else {
       return extensions;
     }
+  }
+
+  private getExplicitExtensionNames(): string[] {
+    return (this.overrideExtensions ?? []).filter(
+      (name) => name.trim() !== '' && name.toLowerCase() !== 'none',
+    );
   }
 
   getActiveExtensions(): Extension[] {
@@ -1385,15 +2232,9 @@ export class Config {
     return this.getNoBrowser() || !shouldAttemptBrowserLaunch();
   }
 
-  getSummarizeToolOutputConfig():
-    | Record<string, SummarizeToolOutputSettings>
-    | undefined {
-    return this.summarizeToolOutput;
-  }
-
   // Web search provider configuration
   getWebSearchConfig() {
-    return this.webSearch;
+    return this.getBareMode() ? undefined : this.webSearch;
   }
 
   getIdeMode(): boolean {
@@ -1410,6 +2251,14 @@ export class Config {
    */
   getFolderTrust(): boolean {
     return this.folderTrust;
+  }
+
+  /**
+   * Returns the whitelist of allowed HTTP hook URL patterns.
+   * If empty, all URLs are allowed (subject to SSRF protection).
+   */
+  getAllowedHttpHookUrls(): string[] {
+    return this.getBareMode() ? [] : this.allowedHttpHookUrls;
   }
 
   isTrustedFolder(): boolean {
@@ -1445,6 +2294,39 @@ export class Config {
 
   getChannel(): string | undefined {
     return this.channel;
+  }
+
+  /**
+   * Get the file descriptor for dual output JSON event stream.
+   * When set, the TUI mode will also emit structured JSON events to this fd.
+   */
+  getJsonFd(): number | undefined {
+    return this.jsonFd;
+  }
+
+  /**
+   * Get the file path for dual output JSON event stream.
+   * When set, the TUI mode will also emit structured JSON events to this file.
+   */
+  getJsonFile(): string | undefined {
+    return this.jsonFile;
+  }
+
+  /**
+   * Get the file path for remote input commands (bidirectional sync).
+   * When set, the TUI mode will watch this file for JSONL commands written
+   * by an external process and submit them as user messages.
+   */
+  getInputFile(): string | undefined {
+    return this.inputFile;
+  }
+
+  /**
+   * Get the default file encoding for new files.
+   * @returns FileEncodingType
+   */
+  getDefaultFileEncoding(): FileEncodingType | undefined {
+    return this.defaultFileEncoding;
   }
 
   /**
@@ -1511,19 +2393,12 @@ export class Config {
     return this.skipStartupContext;
   }
 
-  getVlmSwitchMode(): string | undefined {
-    return this.vlmSwitchMode;
-  }
-
-  getEnableToolOutputTruncation(): boolean {
-    return this.enableToolOutputTruncation;
+  getBareMode(): boolean {
+    return this.bareMode;
   }
 
   getTruncateToolOutputThreshold(): number {
-    if (
-      !this.enableToolOutputTruncation ||
-      this.truncateToolOutputThreshold <= 0
-    ) {
+    if (this.truncateToolOutputThreshold <= 0) {
       return Number.POSITIVE_INFINITY;
     }
 
@@ -1531,15 +2406,11 @@ export class Config {
   }
 
   getTruncateToolOutputLines(): number {
-    if (!this.enableToolOutputTruncation || this.truncateToolOutputLines <= 0) {
+    if (this.truncateToolOutputLines <= 0) {
       return Number.POSITIVE_INFINITY;
     }
 
     return this.truncateToolOutputLines;
-  }
-
-  getUseSmartEdit(): boolean {
-    return this.useSmartEdit;
   }
 
   getOutputFormat(): OutputFormat {
@@ -1568,6 +2439,21 @@ export class Config {
   }
 
   /**
+   * Returns the transcript file path for the current session.
+   * This is the path to the JSONL file where the conversation is recorded.
+   * Returns empty string if chat recording is disabled.
+   */
+  getTranscriptPath(): string {
+    if (!this.chatRecordingEnabled) {
+      return '';
+    }
+    const projectDir = this.storage.getProjectDir();
+    const sessionId = this.getSessionId();
+    const safeFilename = `${sessionId}.jsonl`;
+    return path.join(projectDir, 'chats', safeFilename);
+  }
+
+  /**
    * Gets or creates a SessionService for managing chat sessions.
    */
   getSessionService(): SessionService {
@@ -1585,12 +2471,44 @@ export class Config {
     return this.subagentManager;
   }
 
+  getBackgroundTaskRegistry(): BackgroundTaskRegistry {
+    return this.backgroundTaskRegistry;
+  }
+
+  /**
+   * Whether interactive permission prompts should be auto-denied.
+   * True for background agents that have no UI to show prompts.
+   * PermissionRequest hooks still run and can override the denial.
+   */
+  getShouldAvoidPermissionPrompts(): boolean {
+    return false;
+  }
+
   getSkillManager(): SkillManager | null {
     return this.skillManager;
   }
 
+  getPermissionManager(): PermissionManager | null {
+    return this.permissionManager;
+  }
+
+  /**
+   * Returns the callback for persisting permission rules to settings files.
+   * Returns undefined if no callback was provided (e.g. SDK mode).
+   */
+  getOnPersistPermissionRule():
+    | ((
+        scope: 'project' | 'user',
+        ruleType: 'allow' | 'ask' | 'deny',
+        rule: string,
+      ) => Promise<void>)
+    | undefined {
+    return this.onPersistPermissionRuleCallback;
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
+    options?: { skipDiscovery?: boolean },
   ): Promise<ToolRegistry> {
     const registry = new ToolRegistry(
       this,
@@ -1598,45 +2516,70 @@ export class Config {
       sendSdkMcpMessage,
     );
 
-    const coreToolsConfig = this.getCoreTools();
-    const excludeToolsConfig = this.getExcludeTools();
-
-    // Helper to create & register core tools that are enabled
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const registerCoreTool = (ToolClass: any, ...args: unknown[]) => {
-      const toolName = ToolClass?.Name as ToolName | undefined;
-      const className = ToolClass?.name ?? 'UnknownTool';
-
-      if (!toolName) {
-        // Log warning and skip this tool instead of crashing
-        console.warn(
-          `[Config] Skipping tool registration: ${className} is missing static Name property. ` +
-            `Tools must define a static Name property to be registered. ` +
-            `Location: config.ts:registerCoreTool`,
+    // Helper: check permission then register a lazy factory (no module import
+    // happens here — the dynamic import() only runs when the tool is first used).
+    const registerLazy = async (
+      toolName: ToolName,
+      factory: ToolFactory,
+    ): Promise<void> => {
+      // PermissionManager handles both the coreTools allowlist (registry-level)
+      // and deny rules (runtime-level) in a single check.
+      let pmEnabled = true;
+      try {
+        pmEnabled = this.permissionManager
+          ? await this.permissionManager.isToolEnabled(toolName)
+          : true; // Should never reach here after initialize(), but safe default.
+      } catch (error) {
+        this.debugLogger.warn(
+          `Failed to check permissions for tool "${toolName}", skipping registration:`,
+          error,
         );
         return;
       }
 
-      if (isToolEnabled(toolName, coreToolsConfig, excludeToolsConfig)) {
-        try {
-          registry.registerTool(new ToolClass(...args));
-        } catch (error) {
-          console.error(
-            `[Config] Failed to register tool ${className} (${toolName}):`,
-            error,
-          );
-          throw error; // Re-throw after logging context
-        }
+      if (pmEnabled) {
+        registry.registerFactory(toolName, factory);
       }
     };
 
-    registerCoreTool(TaskTool, this);
-    if (this.getExperimentalSkills()) {
-      registerCoreTool(SkillTool, this);
+    if (this.getBareMode()) {
+      await registerLazy(ToolNames.READ_FILE, async () => {
+        const { ReadFileTool } = await import('../tools/read-file.js');
+        return new ReadFileTool(this);
+      });
+      await registerLazy(ToolNames.EDIT, async () => {
+        const { EditTool } = await import('../tools/edit.js');
+        return new EditTool(this);
+      });
+      await registerLazy(ToolNames.SHELL, async () => {
+        const { ShellTool } = await import('../tools/shell.js');
+        return new ShellTool(this);
+      });
+      this.debugLogger.debug(
+        `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
+      );
+      return registry;
     }
-    registerCoreTool(LSTool, this);
-    registerCoreTool(ReadFileTool, this);
 
+    // --- Core tools (always registered) ---
+    await registerLazy(ToolNames.AGENT, async () => {
+      const { AgentTool } = await import('../tools/agent/agent.js');
+      return new AgentTool(this);
+    });
+    await registerLazy(ToolNames.SKILL, async () => {
+      const { SkillTool } = await import('../tools/skill.js');
+      return new SkillTool(this);
+    });
+    await registerLazy(ToolNames.LS, async () => {
+      const { LSTool } = await import('../tools/ls.js');
+      return new LSTool(this);
+    });
+    await registerLazy(ToolNames.READ_FILE, async () => {
+      const { ReadFileTool } = await import('../tools/read-file.js');
+      return new ReadFileTool(this);
+    });
+
+    // --- Grep / RipGrep (conditional) ---
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
       let errorString: undefined | string = undefined;
@@ -1646,9 +2589,11 @@ export class Config {
         errorString = getErrorMessage(error);
       }
       if (useRipgrep) {
-        registerCoreTool(RipGrepTool, this);
+        await registerLazy(ToolNames.GREP, async () => {
+          const { RipGrepTool } = await import('../tools/ripGrep.js');
+          return new RipGrepTool(this);
+        });
       } else {
-        // Log for telemetry
         logRipgrepFallback(
           this,
           new RipgrepFallbackEvent(
@@ -1657,38 +2602,90 @@ export class Config {
             errorString || 'ripgrep is not available',
           ),
         );
-        registerCoreTool(GrepTool, this);
+        await registerLazy(ToolNames.GREP, async () => {
+          const { GrepTool } = await import('../tools/grep.js');
+          return new GrepTool(this);
+        });
       }
     } else {
-      registerCoreTool(GrepTool, this);
+      await registerLazy(ToolNames.GREP, async () => {
+        const { GrepTool } = await import('../tools/grep.js');
+        return new GrepTool(this);
+      });
     }
 
-    registerCoreTool(GlobTool, this);
-    if (this.getUseSmartEdit()) {
-      registerCoreTool(SmartEditTool, this);
-    } else {
-      registerCoreTool(EditTool, this);
+    await registerLazy(ToolNames.GLOB, async () => {
+      const { GlobTool } = await import('../tools/glob.js');
+      return new GlobTool(this);
+    });
+    await registerLazy(ToolNames.EDIT, async () => {
+      const { EditTool } = await import('../tools/edit.js');
+      return new EditTool(this);
+    });
+    await registerLazy(ToolNames.WRITE_FILE, async () => {
+      const { WriteFileTool } = await import('../tools/write-file.js');
+      return new WriteFileTool(this);
+    });
+    await registerLazy(ToolNames.SHELL, async () => {
+      const { ShellTool } = await import('../tools/shell.js');
+      return new ShellTool(this);
+    });
+    await registerLazy(ToolNames.TODO_WRITE, async () => {
+      const { TodoWriteTool } = await import('../tools/todoWrite.js');
+      return new TodoWriteTool(this);
+    });
+    await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
+      const { AskUserQuestionTool } = await import(
+        '../tools/askUserQuestion.js'
+      );
+      return new AskUserQuestionTool(this);
+    });
+    if (!this.sdkMode) {
+      await registerLazy(ToolNames.EXIT_PLAN_MODE, async () => {
+        const { ExitPlanModeTool } = await import('../tools/exitPlanMode.js');
+        return new ExitPlanModeTool(this);
+      });
     }
-    registerCoreTool(WriteFileTool, this);
-    registerCoreTool(ReadManyFilesTool, this);
-    registerCoreTool(ShellTool, this);
-    registerCoreTool(MemoryTool);
-    registerCoreTool(TodoWriteTool, this);
-    !this.sdkMode && registerCoreTool(ExitPlanModeTool, this);
-    registerCoreTool(WebFetchTool, this);
+    await registerLazy(ToolNames.WEB_FETCH, async () => {
+      const { WebFetchTool } = await import('../tools/web-fetch.js');
+      return new WebFetchTool(this);
+    });
     // Conditionally register web search tool if web search provider is configured
-    // buildWebSearchConfig ensures qwen-oauth users get dashscope provider, so
-    // if tool is registered, config must exist
     if (this.getWebSearchConfig()) {
-      registerCoreTool(WebSearchTool, this);
+      await registerLazy(ToolNames.WEB_SEARCH, async () => {
+        const { WebSearchTool } = await import('../tools/web-search/index.js');
+        return new WebSearchTool(this);
+      });
     }
     if (this.isLspEnabled() && this.getLspClient()) {
-      // Register the unified LSP tool
-      registerCoreTool(LspTool, this);
+      await registerLazy(ToolNames.LSP, async () => {
+        const { LspTool } = await import('../tools/lsp.js');
+        return new LspTool(this);
+      });
     }
 
-    await registry.discoverAllTools();
-    console.debug('ToolRegistry created', registry.getAllToolNames());
+    // Register cron tools unless disabled
+    if (this.isCronEnabled()) {
+      await registerLazy(ToolNames.CRON_CREATE, async () => {
+        const { CronCreateTool } = await import('../tools/cron-create.js');
+        return new CronCreateTool(this);
+      });
+      await registerLazy(ToolNames.CRON_LIST, async () => {
+        const { CronListTool } = await import('../tools/cron-list.js');
+        return new CronListTool(this);
+      });
+      await registerLazy(ToolNames.CRON_DELETE, async () => {
+        const { CronDeleteTool } = await import('../tools/cron-delete.js');
+        return new CronDeleteTool(this);
+      });
+    }
+
+    if (!options?.skipDiscovery) {
+      await registry.discoverAllTools();
+    }
+    this.debugLogger.debug(
+      `ToolRegistry created: ${JSON.stringify(registry.getAllToolNames())} (${registry.getAllToolNames().length} tools)`,
+    );
     return registry;
   }
 }

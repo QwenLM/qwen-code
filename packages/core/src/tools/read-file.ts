@@ -4,23 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs/promises';
 import { makeRelative, shortenPath } from '../utils/paths.js';
 import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
 import type { PartUnion } from '@google/genai';
+import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
   getSpecificMimeType,
 } from '../utils/fileUtils.js';
+import { parsePDFPageRange } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
 import { FileOperation } from '../telemetry/metrics.js';
 import { getProgrammingLanguage } from '../telemetry/telemetry-utils.js';
 import { logFileOperation } from '../telemetry/loggers.js';
 import { FileOperationEvent } from '../telemetry/types.js';
-import { isSubpath } from '../utils/paths.js';
+import { isSubpaths, isSubpath } from '../utils/paths.js';
+import { Storage } from '../config/storage.js';
+import { isAutoMemPath } from '../memory/paths.js';
+import { memoryFreshnessNote } from '../memory/memoryAge.js';
 
 /**
  * Parameters for the ReadFile tool
@@ -29,7 +36,7 @@ export interface ReadFileToolParams {
   /**
    * The absolute path to the file to read
    */
-  absolute_path: string;
+  file_path: string;
 
   /**
    * The line number to start reading from (optional)
@@ -40,6 +47,13 @@ export interface ReadFileToolParams {
    * The number of lines to read (optional)
    */
   limit?: number;
+
+  /**
+   * For PDF files, the page range to extract as text (e.g. "1-5", "3", "10-20").
+   * Pages are 1-indexed. Max 20 pages per request. Open-ended ranges like "3-"
+   * are not supported.
+   */
+  pages?: string;
 }
 
 class ReadFileToolInvocation extends BaseToolInvocation<
@@ -55,10 +69,14 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
   getDescription(): string {
     const relativePath = makeRelative(
-      this.params.absolute_path,
+      this.params.file_path,
       this.config.getTargetDir(),
     );
     const shortPath = shortenPath(relativePath);
+
+    if (this.params.pages) {
+      return `${shortPath} (pages ${this.params.pages})`;
+    }
 
     const { offset, limit } = this.params;
     if (offset !== undefined && limit !== undefined) {
@@ -73,15 +91,47 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   }
 
   override toolLocations(): ToolLocation[] {
-    return [{ path: this.params.absolute_path, line: this.params.offset }];
+    return [{ path: this.params.file_path, line: this.params.offset }];
+  }
+
+  /**
+   * Returns 'ask' for paths outside the workspace/temp/userSkills directories,
+   * so that external file reads require user confirmation.
+   */
+  override async getDefaultPermission(): Promise<PermissionDecision> {
+    const filePath = path.resolve(this.params.file_path);
+    const workspaceContext = this.config.getWorkspaceContext();
+    const globalTempDir = Storage.getGlobalTempDir();
+    const projectTempDir = this.config.storage.getProjectTempDir();
+    const userSkillsDirs = this.config.storage.getUserSkillsDirs();
+    const userExtensionsDir = Storage.getUserExtensionsDir();
+    const osTempDir = os.tmpdir();
+
+    // Auto-allow reads of files within the managed auto-memory root for this
+    // project only — using the narrower isAutoMemPath check instead of the
+    // broad getMemoryBaseDir() to avoid exposing sensitive ~/.qwen files such
+    // as settings.json or OAuth credentials.
+    if (
+      workspaceContext.isPathWithinWorkspace(filePath) ||
+      isSubpath(projectTempDir, filePath) ||
+      isSubpath(globalTempDir, filePath) ||
+      isSubpath(osTempDir, filePath) ||
+      isSubpaths(userSkillsDirs, filePath) ||
+      isSubpath(userExtensionsDir, filePath) ||
+      isAutoMemPath(filePath, this.config.getTargetDir())
+    ) {
+      return 'allow';
+    }
+    return 'ask';
   }
 
   async execute(): Promise<ToolResult> {
     const result = await processSingleFileContent(
-      this.params.absolute_path,
+      this.params.file_path,
       this.config,
       this.params.offset,
       this.params.limit,
+      this.params.pages,
     );
 
     if (result.error) {
@@ -104,13 +154,33 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       llmContent = result.llmContent || '';
     }
 
+    // For memory files, prepend a per-file staleness caveat so the model knows
+    // the content is a point-in-time snapshot and may be stale.
+    const projectRoot = this.config.getTargetDir();
+    if (
+      typeof llmContent === 'string' &&
+      isAutoMemPath(path.resolve(this.params.file_path), projectRoot)
+    ) {
+      // Only compute mtime when we actually need the note (avoids extra stat on
+      // every non-memory file read).
+      try {
+        const stat = await fs.stat(path.resolve(this.params.file_path));
+        const note = memoryFreshnessNote(stat.mtimeMs);
+        if (note) {
+          llmContent = note + llmContent;
+        }
+      } catch {
+        // Best-effort — if stat fails, omit the note silently.
+      }
+    }
+
     const lines =
       typeof result.llmContent === 'string'
         ? result.llmContent.split('\n').length
         : undefined;
-    const mimetype = getSpecificMimeType(this.params.absolute_path);
+    const mimetype = getSpecificMimeType(this.params.file_path);
     const programming_language = getProgrammingLanguage({
-      absolute_path: this.params.absolute_path,
+      file_path: this.params.file_path,
     });
     logFileOperation(
       this.config,
@@ -119,7 +189,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
         FileOperation.READ,
         lines,
         mimetype,
-        path.extname(this.params.absolute_path),
+        path.extname(this.params.file_path),
         programming_language,
       ),
     );
@@ -144,11 +214,11 @@ export class ReadFileTool extends BaseDeclarativeTool<
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), and PDF files. For text files, it can read specific line ranges.`,
+      `Reads and returns the content of a specified file. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max 20 pages per request. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
       Kind.Read,
       {
         properties: {
-          absolute_path: {
+          file_path: {
             description:
               "The absolute path to the file to read (e.g., '/home/user/project/file.txt'). Relative paths are not supported. You must provide an absolute path.",
             type: 'string',
@@ -163,8 +233,13 @@ export class ReadFileTool extends BaseDeclarativeTool<
               "Optional: For text files, maximum number of lines to read. Use with 'offset' to paginate through large files. If omitted, reads the entire file (if feasible, up to a default limit).",
             type: 'number',
           },
+          pages: {
+            description:
+              "Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max 20 pages per request. Open-ended ranges like '3-' are not supported. When provided, PDF content is extracted as text regardless of model capabilities.",
+            type: 'string',
+          },
         },
-        required: ['absolute_path'],
+        required: ['file_path'],
         type: 'object',
       },
     );
@@ -173,32 +248,15 @@ export class ReadFileTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: ReadFileToolParams,
   ): string | null {
-    const filePath = params.absolute_path;
-    if (params.absolute_path.trim() === '') {
-      return "The 'absolute_path' parameter must be non-empty.";
+    const filePath = params.file_path;
+    if (params.file_path.trim() === '') {
+      return "The 'file_path' parameter must be non-empty.";
     }
 
     if (!path.isAbsolute(filePath)) {
       return `File path must be absolute, but was relative: ${filePath}. You must provide an absolute path.`;
     }
 
-    const workspaceContext = this.config.getWorkspaceContext();
-    const projectTempDir = this.config.storage.getProjectTempDir();
-    const userSkillsDir = this.config.storage.getUserSkillsDir();
-    const resolvedFilePath = path.resolve(filePath);
-    const isWithinTempDir = isSubpath(projectTempDir, resolvedFilePath);
-    const isWithinUserSkills = isSubpath(userSkillsDir, resolvedFilePath);
-
-    if (
-      !workspaceContext.isPathWithinWorkspace(filePath) &&
-      !isWithinTempDir &&
-      !isWithinUserSkills
-    ) {
-      const directories = workspaceContext.getDirectories();
-      return `File path must be within one of the workspace directories: ${directories.join(
-        ', ',
-      )} or within the project temp directory: ${projectTempDir}`;
-    }
     if (params.offset !== undefined && params.offset < 0) {
       return 'Offset must be a non-negative number';
     }
@@ -206,8 +264,22 @@ export class ReadFileTool extends BaseDeclarativeTool<
       return 'Limit must be a positive number';
     }
 
+    if (params.pages !== undefined) {
+      const parsed = parsePDFPageRange(params.pages);
+      if (!parsed) {
+        return `Invalid pages parameter: '${params.pages}'. Use formats like '5' or '1-10'.`;
+      }
+      if (parsed.lastPage === Infinity) {
+        return `Open-ended page ranges (e.g. '3-') are not supported; specify an explicit end page within the 20-page limit (e.g. '3-22').`;
+      }
+      const maxPages = 20;
+      if (parsed.lastPage - parsed.firstPage + 1 > maxPages) {
+        return `Pages range exceeds maximum of ${maxPages} pages per request.`;
+      }
+    }
+
     const fileService = this.config.getFileService();
-    if (fileService.shouldQwenIgnoreFile(params.absolute_path)) {
+    if (fileService.shouldQwenIgnoreFile(params.file_path)) {
       return `File path '${filePath}' is ignored by .qwenignore pattern(s).`;
     }
 

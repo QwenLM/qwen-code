@@ -4,15 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  describe,
-  it,
-  expect,
-  vi,
-  beforeEach,
-  afterEach,
-  type MockInstance,
-} from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { handleInstall, installCommand } from './install.js';
 import yargs from 'yargs';
 
@@ -23,6 +15,8 @@ const mockRequestConsentNonInteractive = vi.hoisted(() => vi.fn());
 const mockRequestConsentOrFail = vi.hoisted(() => vi.fn());
 const mockIsWorkspaceTrusted = vi.hoisted(() => vi.fn());
 const mockLoadSettings = vi.hoisted(() => vi.fn());
+const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
   ExtensionManager: vi.fn().mockImplementation(() => ({
@@ -50,6 +44,12 @@ vi.mock('../../utils/errors.js', () => ({
   getErrorMessage: vi.fn((error: Error) => error.message),
 }));
 
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: mockWriteStdoutLine,
+  writeStderrLine: mockWriteStderrLine,
+  clearScreen: vi.fn(),
+}));
+
 describe('extensions install command', () => {
   it('should fail if no source is provided', () => {
     const validationParser = yargs([])
@@ -63,16 +63,7 @@ describe('extensions install command', () => {
 });
 
 describe('handleInstall', () => {
-  let consoleLogSpy: MockInstance;
-  let consoleErrorSpy: MockInstance;
-  let processSpy: MockInstance;
-
   beforeEach(() => {
-    consoleLogSpy = vi.spyOn(console, 'log');
-    consoleErrorSpy = vi.spyOn(console, 'error');
-    processSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation(() => undefined as never);
     mockRefreshCache.mockResolvedValue(undefined);
     mockLoadSettings.mockReturnValue({ merged: {} });
     mockIsWorkspaceTrusted.mockReturnValue(true);
@@ -83,6 +74,10 @@ describe('handleInstall', () => {
   });
 
   it('should install an extension from a http source', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     mockParseInstallSource.mockResolvedValue({
       type: 'http',
       url: 'http://google.com',
@@ -93,12 +88,18 @@ describe('handleInstall', () => {
       source: 'http://google.com',
     });
 
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "http-extension" installed successfully and enabled.',
     );
+
+    processSpy.mockRestore();
   });
 
   it('should install an extension from a https source', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     mockParseInstallSource.mockResolvedValue({
       type: 'https',
       url: 'https://google.com',
@@ -109,12 +110,18 @@ describe('handleInstall', () => {
       source: 'https://google.com',
     });
 
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "https-extension" installed successfully and enabled.',
     );
+
+    processSpy.mockRestore();
   });
 
   it('should install an extension from a git source', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     mockParseInstallSource.mockResolvedValue({
       type: 'git',
       url: 'git@some-url',
@@ -125,12 +132,18 @@ describe('handleInstall', () => {
       source: 'git@some-url',
     });
 
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "git-extension" installed successfully and enabled.',
     );
+
+    processSpy.mockRestore();
   });
 
   it('throws an error from an unknown source', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     mockParseInstallSource.mockRejectedValue(
       new Error('Install source not found.'),
     );
@@ -138,11 +151,19 @@ describe('handleInstall', () => {
       source: 'test://google.com',
     });
 
-    expect(consoleErrorSpy).toHaveBeenCalledWith('Install source not found.');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Install source not found.',
+    );
     expect(processSpy).toHaveBeenCalledWith(1);
+
+    processSpy.mockRestore();
   });
 
   it('should install an extension from a sso source', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     mockParseInstallSource.mockResolvedValue({
       type: 'sso',
       url: 'sso://google.com',
@@ -153,12 +174,18 @@ describe('handleInstall', () => {
       source: 'sso://google.com',
     });
 
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "sso-extension" installed successfully and enabled.',
     );
+
+    processSpy.mockRestore();
   });
 
   it('should install an extension from a local path', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     mockParseInstallSource.mockResolvedValue({
       type: 'local',
       path: '/some/path',
@@ -169,12 +196,18 @@ describe('handleInstall', () => {
       source: '/some/path',
     });
 
-    expect(consoleLogSpy).toHaveBeenCalledWith(
+    expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Extension "local-extension" installed successfully and enabled.',
     );
+
+    processSpy.mockRestore();
   });
 
   it('should throw an error if install extension fails', async () => {
+    const processSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation(() => undefined as never);
+
     mockParseInstallSource.mockResolvedValue({
       type: 'git',
       url: 'git@some-url',
@@ -185,7 +218,11 @@ describe('handleInstall', () => {
 
     await handleInstall({ source: 'git@some-url' });
 
-    expect(consoleErrorSpy).toHaveBeenCalledWith('Install extension failed');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      'Install extension failed',
+    );
     expect(processSpy).toHaveBeenCalledWith(1);
+
+    processSpy.mockRestore();
   });
 });

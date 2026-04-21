@@ -17,12 +17,15 @@ import {
 } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('CHAT_RECORDING');
 import type {
   ChatCompressionInfo,
   ToolCallResponseInfo,
 } from '../core/turn.js';
 import type { Status } from '../core/coreToolScheduler.js';
-import type { TaskResultDisplay } from '../tools/tools.js';
+import type { AgentResultDisplay } from '../tools/tools.js';
 import type { UiEvent } from '../telemetry/uiTelemetry.js';
 
 /**
@@ -50,7 +53,13 @@ export interface ChatRecord {
    */
   type: 'user' | 'assistant' | 'tool_result' | 'system';
   /** Optional system subtype for distinguishing system behaviors */
-  subtype?: 'chat_compression' | 'slash_command' | 'ui_telemetry';
+  subtype?:
+    | 'chat_compression'
+    | 'slash_command'
+    | 'ui_telemetry'
+    | 'at_command'
+    | 'notification'
+    | 'cron';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -74,6 +83,8 @@ export interface ChatRecord {
   usageMetadata?: GenerateContentResponseUsageMetadata;
   /** Model used for this response */
   model?: string;
+  /** Context window size of the model used for this response */
+  contextWindowSize?: number;
   /**
    * Tool call metadata for UI recovery.
    * Contains enriched info (displayName, status, result, etc.) not in API format.
@@ -87,7 +98,13 @@ export interface ChatRecord {
   systemPayload?:
     | ChatCompressionRecordPayload
     | SlashCommandRecordPayload
-    | UiTelemetryRecordPayload;
+    | UiTelemetryRecordPayload
+    | AtCommandRecordPayload
+    | NotificationRecordPayload;
+}
+
+export interface NotificationRecordPayload {
+  displayText: string;
 }
 
 /**
@@ -115,6 +132,20 @@ export interface SlashCommandRecordPayload {
    * the CLI (without IDs). Stored as plain objects for replay on resume.
    */
   outputHistoryItems?: Array<Record<string, unknown>>;
+}
+
+/**
+ * Stored payload for @-command replay.
+ */
+export interface AtCommandRecordPayload {
+  /** Files that were read for this @-command. */
+  filesRead: string[];
+  /** Status for UI reconstruction. */
+  status: 'success' | 'error';
+  /** Optional result message for UI reconstruction. */
+  message?: string;
+  /** Raw user-entered @-command query (optional for legacy records). */
+  userText?: string;
 }
 
 /**
@@ -247,7 +278,7 @@ export class ChatRecordingService {
       jsonl.writeLineSync(conversationFile, record);
       this.lastRecordUuid = record.uuid;
     } catch (error) {
-      console.error('Error appending record:', error);
+      debugLogger.error('Error appending record:', error);
       throw error;
     }
   }
@@ -266,7 +297,45 @@ export class ChatRecordingService {
       };
       this.appendRecord(record);
     } catch (error) {
-      console.error('Error saving user message:', error);
+      debugLogger.error('Error saving user message:', error);
+    }
+  }
+
+  /**
+   * Records a cron-fired prompt.
+   * Stored as a user-role message with subtype 'cron' so the UI
+   * restores it as a notification item instead of a user turn.
+   */
+  recordCronPrompt(message: PartListUnion, displayText?: string): void {
+    this.recordNotificationLike(message, 'cron', displayText);
+  }
+
+  /**
+   * Records a background agent notification.
+   * Stored as a user-role message with subtype 'notification' so the
+   * UI restores it as an info item, not a user turn.
+   */
+  recordNotification(message: PartListUnion, displayText?: string): void {
+    this.recordNotificationLike(message, 'notification', displayText);
+  }
+
+  private recordNotificationLike(
+    message: PartListUnion,
+    subtype: 'notification' | 'cron',
+    displayText?: string,
+  ): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('user'),
+        subtype,
+        message: createUserContent(message),
+        systemPayload: displayText
+          ? ({ displayText } as NotificationRecordPayload)
+          : undefined,
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error(`Error saving ${subtype} record:`, error);
     }
   }
 
@@ -277,12 +346,14 @@ export class ChatRecordingService {
    * @param data.message The raw PartListUnion object from the model response
    * @param data.model The model name
    * @param data.tokens Token usage statistics
+   * @param data.contextWindowSize Context window size of the model
    * @param data.toolCallsMetadata Enriched tool call info for UI recovery
    */
   recordAssistantTurn(data: {
     model: string;
     message?: PartListUnion;
     tokens?: GenerateContentResponseUsageMetadata;
+    contextWindowSize?: number;
   }): void {
     try {
       const record: ChatRecord = {
@@ -298,9 +369,13 @@ export class ChatRecordingService {
         record.usageMetadata = data.tokens;
       }
 
+      if (data.contextWindowSize !== undefined) {
+        record.contextWindowSize = data.contextWindowSize;
+      }
+
       this.appendRecord(record);
     } catch (error) {
-      console.error('Error saving assistant turn:', error);
+      debugLogger.error('Error saving assistant turn:', error);
     }
   }
 
@@ -329,7 +404,7 @@ export class ChatRecordingService {
           'type' in toolCallResult.resultDisplay &&
           toolCallResult.resultDisplay.type === 'task_execution'
         ) {
-          const taskResult = toolCallResult.resultDisplay as TaskResultDisplay;
+          const taskResult = toolCallResult.resultDisplay as AgentResultDisplay;
           record.toolCallResult = {
             ...toolCallResult,
             resultDisplay: {
@@ -344,7 +419,7 @@ export class ChatRecordingService {
 
       this.appendRecord(record);
     } catch (error) {
-      console.error('Error saving tool result:', error);
+      debugLogger.error('Error saving tool result:', error);
     }
   }
 
@@ -364,7 +439,7 @@ export class ChatRecordingService {
 
       this.appendRecord(record);
     } catch (error) {
-      console.error('Error saving slash command record:', error);
+      debugLogger.error('Error saving slash command record:', error);
     }
   }
 
@@ -384,7 +459,7 @@ export class ChatRecordingService {
 
       this.appendRecord(record);
     } catch (error) {
-      console.error('Error saving chat compression record:', error);
+      debugLogger.error('Error saving chat compression record:', error);
     }
   }
 
@@ -402,7 +477,25 @@ export class ChatRecordingService {
 
       this.appendRecord(record);
     } catch (error) {
-      console.error('Error saving ui telemetry record:', error);
+      debugLogger.error('Error saving ui telemetry record:', error);
+    }
+  }
+
+  /**
+   * Records @-command metadata as a system record for UI reconstruction.
+   */
+  recordAtCommand(payload: AtCommandRecordPayload): void {
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'at_command',
+        systemPayload: payload,
+      };
+
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving @-command record:', error);
     }
   }
 }

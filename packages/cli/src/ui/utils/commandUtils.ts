@@ -6,6 +6,7 @@
 
 import type { SpawnOptions } from 'node:child_process';
 import { spawn } from 'node:child_process';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.
@@ -60,6 +61,19 @@ export const isSlashCommand = (query: string): boolean => {
 
   return true;
 };
+
+const BTW_COMMAND_RE = /^[/?]btw(?:\s|$)/;
+
+/**
+ * Checks if a query is a /btw side-question invocation.
+ * Accepts both "/btw" and "?btw" prefixes.
+ */
+export const isBtwCommand = (query: string): boolean => {
+  const trimmed = query.trim();
+  return trimmed.length > 0 && BTW_COMMAND_RE.test(trimmed);
+};
+
+const debugLogger = createDebugLogger('COMMAND_UTILS');
 
 // Copies a string snippet to the clipboard for different platforms
 export const copyToClipboard = async (text: string): Promise<void> => {
@@ -162,7 +176,7 @@ export const getUrlOpenCommand = (): string => {
     default:
       // Default to xdg-open, which appears to be supported for the less popular operating systems.
       openCmd = 'xdg-open';
-      console.warn(
+      debugLogger.warn(
         `Unknown platform: ${process.platform}. Attempting to open URLs with: ${openCmd}.`,
       );
       break;

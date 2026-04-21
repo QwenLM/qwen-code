@@ -4,14 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  Part,
-  PartListUnion,
-  GenerateContentResponse,
-  FunctionCall,
-  FunctionDeclaration,
+import {
   FinishReason,
-  GenerateContentResponseUsageMetadata,
+  type Part,
+  type PartListUnion,
+  type GenerateContentResponse,
+  type FunctionCall,
+  type FunctionDeclaration,
+  type GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import type {
   ToolCallConfirmationDetails,
@@ -27,11 +27,13 @@ import {
   toFriendlyError,
 } from '../utils/errors.js';
 import type { GeminiChat } from './geminiChat.js';
+import type { RetryInfo } from '../utils/rateLimit.js';
 import {
   getThoughtText,
   parseThought,
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
+import type { LoopType } from '../telemetry/types.js';
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -42,10 +44,6 @@ export interface ServerTool {
     params: Record<string, unknown>,
     signal?: AbortSignal,
   ): Promise<ToolResult>;
-  shouldConfirmExecute(
-    params: Record<string, unknown>,
-    abortSignal: AbortSignal,
-  ): Promise<ToolCallConfirmationDetails | false>;
 }
 
 export enum GeminiEventType {
@@ -63,10 +61,14 @@ export enum GeminiEventType {
   LoopDetected = 'loop_detected',
   Citation = 'citation',
   Retry = 'retry',
+  HookSystemMessage = 'hook_system_message',
+  UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
+  StopHookLoop = 'stop_hook_loop',
 }
 
 export type ServerGeminiRetryEvent = {
   type: GeminiEventType.Retry;
+  retryInfo?: RetryInfo;
 };
 
 export interface StructuredError {
@@ -96,6 +98,8 @@ export interface ToolCallRequestInfo {
   isClientInitiated: boolean;
   prompt_id: string;
   response_id?: string;
+  /** Set to true when the LLM response was truncated due to max_tokens. */
+  wasOutputTruncated?: boolean;
 }
 
 export interface ToolCallResponseInfo {
@@ -104,8 +108,8 @@ export interface ToolCallResponseInfo {
   resultDisplay: ToolResultDisplay | undefined;
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
-  outputFile?: string | undefined;
   contentLength?: number;
+  modelOverride?: string;
 }
 
 export interface ServerToolCallConfirmationDetails {
@@ -191,11 +195,39 @@ export type ServerGeminiFinishedEvent = {
 
 export type ServerGeminiLoopDetectedEvent = {
   type: GeminiEventType.LoopDetected;
+  // The loop type is optional so historical call sites that don't produce one
+  // (tests, fixtures) stay valid. Real emissions in client.ts always populate
+  // it so downstream consumers can surface a concrete reason to the user.
+  value?: {
+    loopType: LoopType;
+  };
 };
 
 export type ServerGeminiCitationEvent = {
   type: GeminiEventType.Citation;
   value: string;
+};
+
+export type ServerGeminiHookSystemMessageEvent = {
+  type: GeminiEventType.HookSystemMessage;
+  value: string;
+};
+
+export type ServerGeminiUserPromptSubmitBlockedEvent = {
+  type: GeminiEventType.UserPromptSubmitBlocked;
+  value: {
+    reason: string;
+    originalPrompt: string;
+  };
+};
+
+export type ServerGeminiStopHookLoopEvent = {
+  type: GeminiEventType.StopHookLoop;
+  value: {
+    iterationCount: number;
+    reasons: string[];
+    stopHookCount: number;
+  };
 };
 
 // The original union type, now composed of the individual types
@@ -205,6 +237,9 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiContentEvent
   | ServerGeminiErrorEvent
   | ServerGeminiFinishedEvent
+  | ServerGeminiHookSystemMessageEvent
+  | ServerGeminiUserPromptSubmitBlockedEvent
+  | ServerGeminiStopHookLoopEvent
   | ServerGeminiLoopDetectedEvent
   | ServerGeminiMaxSessionTurnsEvent
   | ServerGeminiThoughtEvent
@@ -253,9 +288,17 @@ export class Turn {
           return;
         }
 
-        // Handle the new RETRY event
+        // Handle the new RETRY event: clear accumulated state from the
+        // previous attempt to avoid duplicate tool calls and stale metadata.
         if (streamEvent.type === 'retry') {
-          yield { type: GeminiEventType.Retry };
+          this.pendingToolCalls.length = 0;
+          this.pendingCitations.clear();
+          this.debugResponses = [];
+          this.finishReason = undefined;
+          yield {
+            type: GeminiEventType.Retry,
+            retryInfo: streamEvent.retryInfo,
+          };
           continue; // Skip to the next event in the stream
         }
 
@@ -301,6 +344,14 @@ export class Turn {
 
         // This is the key change: Only yield 'Finished' if there is a finishReason.
         if (finishReason) {
+          // Mark pending tool calls so downstream can distinguish
+          // truncation from real parameter errors.
+          if (finishReason === FinishReason.MAX_TOKENS) {
+            for (const tc of this.pendingToolCalls) {
+              tc.wasOutputTruncated = true;
+            }
+          }
+
           if (this.pendingCitations.size > 0) {
             yield {
               type: GeminiEventType.Citation,

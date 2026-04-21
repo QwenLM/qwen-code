@@ -46,7 +46,6 @@ ${folderStructure}`;
 /**
  * Retrieves environment-related information to be included in the chat context.
  * This includes the current working directory, date, operating system, and folder structure.
- * Optionally, it can also include the full file context if enabled.
  * @param {Config} config - The runtime configuration and services.
  * @returns A promise that resolves to an array of `Part` objects containing environment information.
  */
@@ -67,46 +66,10 @@ My operating system is: ${platform}
 ${directoryContext}
         `.trim();
 
-  const initialParts: Part[] = [{ text: context }];
-  const toolRegistry = config.getToolRegistry();
-
-  // Add full file context if the flag is set
-  if (config.getFullContext()) {
-    try {
-      const readManyFilesTool = toolRegistry.getTool('read_many_files');
-      if (readManyFilesTool) {
-        const invocation = readManyFilesTool.build({
-          paths: ['**/*'], // Read everything recursively
-          useDefaultExcludes: true, // Use default excludes
-        });
-
-        // Read all files in the target directory
-        const result = await invocation.execute(AbortSignal.timeout(30000));
-        if (result.llmContent) {
-          initialParts.push({
-            text: `\n--- Full File Context ---\n${result.llmContent}`,
-          });
-        } else {
-          console.warn(
-            'Full context requested, but read_many_files returned no content.',
-          );
-        }
-      } else {
-        console.warn(
-          'Full context requested, but read_many_files tool not found.',
-        );
-      }
-    } catch (error) {
-      // Not using reportError here as it's a startup/config phase, not a chat/generation phase error.
-      console.error('Error reading full file context:', error);
-      initialParts.push({
-        text: '\n--- Error reading full file context ---',
-      });
-    }
-  }
-
-  return initialParts;
+  return [{ text: context }];
 }
+
+const STARTUP_CONTEXT_MODEL_ACK = 'Got it. Thanks for the context!';
 
 export async function getInitialChatHistory(
   config: Config,
@@ -126,8 +89,26 @@ export async function getInitialChatHistory(
     },
     {
       role: 'model',
-      parts: [{ text: 'Got it. Thanks for the context!' }],
+      parts: [{ text: STARTUP_CONTEXT_MODEL_ACK }],
     },
     ...(extraHistory ?? []),
   ];
+}
+
+/**
+ * Strip the leading startup context (env-info user message + model ack)
+ * from a chat history. Used when forwarding a parent session's history
+ * to a child agent that will generate its own startup context for its
+ * own working directory.
+ */
+export function stripStartupContext(history: Content[]): Content[] {
+  if (history.length < 2) return history;
+
+  const secondEntry = history[1];
+  const ackText = secondEntry?.parts?.[0]?.text;
+  if (secondEntry?.role === 'model' && ackText === STARTUP_CONTEXT_MODEL_ACK) {
+    return history.slice(2);
+  }
+
+  return history;
 }

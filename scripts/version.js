@@ -106,7 +106,7 @@ if (cliPackageJson.config?.sandboxImageUri) {
 
 // 7. Run `npm install` to update package-lock.json.
 run(
-  'npm install --workspace packages/cli --workspace packages/core --package-lock-only',
+  'npm install --workspace packages/cli --workspace packages/core --workspace packages/channels/base --workspace packages/channels/plugin-example --package-lock-only',
 );
 
 console.log(`Successfully bumped versions to v${newVersion}.`);

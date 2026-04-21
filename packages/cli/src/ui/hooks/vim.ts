@@ -5,6 +5,7 @@
  */
 
 import { useCallback, useReducer, useEffect } from 'react';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Key } from './useKeypress.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { useVimMode } from '../contexts/VimModeContext.js';
@@ -15,6 +16,8 @@ export type VimMode = 'NORMAL' | 'INSERT';
 const DIGIT_MULTIPLIER = 10;
 const DEFAULT_COUNT = 1;
 const DIGIT_1_TO_9 = /^[1-9]$/;
+
+const debugLogger = createDebugLogger('VIM_MODE');
 
 // Command types
 const CMD_TYPES = {
@@ -266,8 +269,11 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         return false; // Let InputPrompt handle completion
       }
 
-      // Let InputPrompt handle Ctrl+V for clipboard image pasting
-      if (normalizedKey.ctrl && normalizedKey.name === 'v') {
+      // Let InputPrompt handle Ctrl+V or Cmd+V for clipboard image pasting
+      if (
+        (normalizedKey.ctrl || normalizedKey.meta) &&
+        normalizedKey.name === 'v'
+      ) {
         return false; // Let InputPrompt handle clipboard functionality
       }
 
@@ -394,7 +400,7 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
         normalizedKey = normalizeKey(key);
       } catch (error) {
         // Handle malformed key inputs gracefully
-        console.warn('Malformed key input in vim mode:', key, error);
+        debugLogger.warn('Malformed key input in vim mode:', key, error);
         return false;
       }
 
@@ -405,6 +411,17 @@ export function useVim(buffer: TextBuffer, onSubmit?: (value: string) => void) {
 
       // Handle NORMAL mode
       if (state.mode === 'NORMAL') {
+        // Let the documented shortcuts panel toggle handle plain `?` when the
+        // prompt is empty and vim is otherwise idle.
+        if (
+          normalizedKey.sequence === '?' &&
+          buffer.text.length === 0 &&
+          state.pendingOperator === null &&
+          state.count === 0
+        ) {
+          return false;
+        }
+
         // If in NORMAL mode, allow escape to pass through to other handlers
         // if there's no pending operation.
         if (normalizedKey.name === 'escape') {

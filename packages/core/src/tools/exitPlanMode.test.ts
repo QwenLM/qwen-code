@@ -18,9 +18,11 @@ describe('ExitPlanModeTool', () => {
     approvalMode = ApprovalMode.PLAN;
     mockConfig = {
       getApprovalMode: vi.fn(() => approvalMode),
+      getPrePlanMode: vi.fn(() => ApprovalMode.DEFAULT),
       setApprovalMode: vi.fn((mode: ApprovalMode) => {
         approvalMode = mode;
       }),
+      savePlan: vi.fn(),
     } as unknown as Config;
 
     tool = new ExitPlanModeTool(mockConfig);
@@ -119,7 +121,9 @@ describe('ExitPlanModeTool', () => {
       expect(invocation).toBeDefined();
       expect(invocation.params).toEqual(params);
 
-      const confirmation = await invocation.shouldConfirmExecute(signal);
+      expect(await invocation.getDefaultPermission()).toBe('ask');
+
+      const confirmation = await invocation.getConfirmationDetails(signal);
       expect(confirmation).toMatchObject({
         type: 'plan',
         title: 'Would you like to proceed?',
@@ -145,6 +149,9 @@ describe('ExitPlanModeTool', () => {
         ApprovalMode.DEFAULT,
       );
       expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+
+      // Plan should be saved to disk
+      expect(mockConfig.savePlan).toHaveBeenCalledWith(params.plan);
     });
 
     it('should request confirmation with plan details', async () => {
@@ -154,7 +161,7 @@ describe('ExitPlanModeTool', () => {
       const signal = new AbortController().signal;
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(signal);
+      const confirmation = await invocation.getConfirmationDetails(signal);
 
       if (confirmation) {
         expect(confirmation.type).toBe('plan');
@@ -171,6 +178,89 @@ describe('ExitPlanModeTool', () => {
       expect(approvalMode).toBe(ApprovalMode.AUTO_EDIT);
     });
 
+    it('should set DEFAULT mode on ProceedOnce regardless of pre-plan mode', async () => {
+      // Even if pre-plan mode was AUTO_EDIT, ProceedOnce ("manually approve
+      // edits") should always set DEFAULT to match the option label semantics.
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const params: ExitPlanModeParams = { plan: 'Restore test' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(signal);
+
+      if (confirmation) {
+        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
+      }
+
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.DEFAULT,
+      );
+      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+    });
+
+    it('should restore pre-plan mode on RestorePrevious', async () => {
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.YOLO,
+      );
+
+      const params: ExitPlanModeParams = { plan: 'Restore previous test' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(signal);
+
+      if (confirmation) {
+        await confirmation.onConfirm(ToolConfirmationOutcome.RestorePrevious);
+      }
+
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.YOLO,
+      );
+      expect(approvalMode).toBe(ApprovalMode.YOLO);
+    });
+
+    it('should include prePlanMode in confirmation details', async () => {
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const params: ExitPlanModeParams = { plan: 'Test plan' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(signal);
+
+      expect(confirmation).toMatchObject({
+        type: 'plan',
+        prePlanMode: ApprovalMode.AUTO_EDIT,
+      });
+    });
+
+    it('should fall back to DEFAULT on RestorePrevious when no prePlanMode recorded', async () => {
+      // getPrePlanMode() defaults to DEFAULT when prePlanMode is undefined
+      (mockConfig.getPrePlanMode as ReturnType<typeof vi.fn>).mockReturnValue(
+        ApprovalMode.DEFAULT,
+      );
+
+      const params: ExitPlanModeParams = { plan: 'Fallback test' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(signal);
+
+      if (confirmation) {
+        await confirmation.onConfirm(ToolConfirmationOutcome.RestorePrevious);
+      }
+
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.DEFAULT,
+      );
+      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+    });
+
     it('should remain in plan mode when confirmation is rejected', async () => {
       const params: ExitPlanModeParams = {
         plan: 'Remain in planning',
@@ -178,7 +268,7 @@ describe('ExitPlanModeTool', () => {
       const signal = new AbortController().signal;
 
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(signal);
+      const confirmation = await invocation.getConfirmationDetails(signal);
 
       if (confirmation) {
         await confirmation.onConfirm(ToolConfirmationOutcome.Cancel);
@@ -197,6 +287,9 @@ describe('ExitPlanModeTool', () => {
         ApprovalMode.PLAN,
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
+
+      // Plan should NOT be saved when rejected
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
     });
 
     it('should have correct description', () => {
@@ -236,6 +329,37 @@ describe('ExitPlanModeTool', () => {
         'Search for and understand the implementation of vim mode',
       );
       expect(tool.description).toContain('Help me implement yank mode for vim');
+    });
+  });
+
+  describe('YOLO mode', () => {
+    it('should exit plan mode without onConfirm being called when approval mode is YOLO', async () => {
+      // Simulate YOLO: scheduler sets approvalMode=YOLO but never calls onConfirm
+      approvalMode = ApprovalMode.YOLO;
+      const params: ExitPlanModeParams = { plan: 'YOLO test plan' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      // Do NOT call onConfirm — this mirrors what the YOLO scheduler does
+      const result = await invocation.execute(signal);
+
+      expect(result.llmContent).toContain(
+        'User has approved your plan. You can now start coding',
+      );
+      expect(result.llmContent).not.toContain('not approved');
+    });
+
+    it('should not downgrade approval mode to AUTO_EDIT when YOLO', async () => {
+      approvalMode = ApprovalMode.YOLO;
+      const params: ExitPlanModeParams = { plan: 'YOLO test plan' };
+      const signal = new AbortController().signal;
+
+      const invocation = tool.build(params);
+      await invocation.execute(signal);
+
+      // Approval mode must remain YOLO — do not downgrade to AUTO_EDIT
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.YOLO);
     });
   });
 });

@@ -65,14 +65,25 @@ Runtime: Node.js v20.0.0 / npm 10.0.0
 IDE Client: VSCode
 OS: test-platform x64 (22.0.0)
 Model: qwen3-coder-plus
+Fast Model: qwen3-coder-plus
 Session ID: test-session-id
 Sandbox: test
 Proxy: no proxy
 Memory Usage: 100 MB`;
     const expectedUrl =
-      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=A%20test%20bug&info=' +
-      encodeURIComponent(`\n${expectedInfo}\n`);
+      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=A%20test%20bug&info=%0A' +
+      encodeURIComponent(expectedInfo) +
+      '%0A';
 
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
     expect(open).toHaveBeenCalledWith(expectedUrl);
   });
 
@@ -99,6 +110,7 @@ Runtime: Node.js v20.0.0 / npm 10.0.0
 IDE Client: VSCode
 OS: test-platform x64 (22.0.0)
 Model: qwen3-coder-plus
+Fast Model: qwen3-coder-plus
 Session ID: test-session-id
 Sandbox: test
 Proxy: no proxy
@@ -107,6 +119,15 @@ Memory Usage: 100 MB`;
       .replace('{title}', encodeURIComponent('A custom bug'))
       .replace('{info}', encodeURIComponent(`\n${expectedInfo}\n`));
 
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
     expect(open).toHaveBeenCalledWith(expectedUrl);
   });
 
@@ -150,16 +171,28 @@ Memory Usage: 100 MB`;
 Runtime: Node.js v20.0.0 / npm 10.0.0
 IDE Client: VSCode
 OS: test-platform x64 (22.0.0)
-Auth: ${AuthType.USE_OPENAI} (https://api.openai.com/v1)
+Auth: API Key - ${AuthType.USE_OPENAI}
+Base URL: https://api.openai.com/v1
 Model: qwen3-coder-plus
+Fast Model: qwen3-coder-plus
 Session ID: test-session-id
 Sandbox: test
 Proxy: no proxy
 Memory Usage: 100 MB`;
     const expectedUrl =
-      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=OpenAI%20bug&info=' +
-      encodeURIComponent(`\n${expectedInfo}\n`);
+      'https://github.com/QwenLM/qwen-code/issues/new?template=bug_report.yml&title=OpenAI%20bug&info=%0A' +
+      encodeURIComponent(expectedInfo) +
+      '%0A';
 
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      {
+        type: 'info',
+        text: 'To submit your bug report, please open the following URL in your browser:',
+        linkUrl: expectedUrl,
+        linkText: 'Open GitHub bug report form',
+      },
+      expect.any(Number),
+    );
     expect(open).toHaveBeenCalledWith(expectedUrl);
   });
 });

@@ -28,6 +28,7 @@ export default tseslint.config(
       'dist/**',
       'docs-site/.next/**',
       'docs-site/out/**',
+      '.qwen/**',
     ],
   },
   eslint.configs.recommended,
@@ -59,11 +60,12 @@ export default tseslint.config(
       ...importPlugin.configs.typescript.rules,
       'import/no-default-export': 'warn',
       'import/no-unresolved': 'off', // Disable for now, can be noisy with monorepos/paths
+      'import/namespace': 'off', // Disabled due to https://github.com/import-js/eslint-plugin-import/issues/2866
     },
   },
   {
     // General overrides and rules for the project (TS/TSX files)
-    files: ['packages/*/src/**/*.{ts,tsx}'], // Target only TS/TSX in the cli package
+    files: ['packages/**/src/**/*.{ts,tsx}'], // Target TS/TSX in all packages (including nested)
     plugins: {
       import: importPlugin,
     },
@@ -145,6 +147,7 @@ export default tseslint.config(
         },
       ],
       'no-unsafe-finally': 'error',
+      'no-console': 'error',
       'no-unused-expressions': 'off', // Disable base rule
       '@typescript-eslint/no-unused-expressions': [
         // Enable TS version
@@ -169,6 +172,7 @@ export default tseslint.config(
       ...vitest.configs.recommended.rules,
       'vitest/expect-expect': 'off',
       'vitest/no-commented-out-tests': 'off',
+      'no-console': 'off', // Allow console in tests
       '@typescript-eslint/no-unused-vars': [
         'error',
         {
@@ -190,6 +194,7 @@ export default tseslint.config(
       },
     },
     rules: {
+      'no-console': 'off', // Allow console in scripts
       '@typescript-eslint/no-unused-vars': [
         'error',
         {
@@ -214,6 +219,28 @@ export default tseslint.config(
       'no-undef': 'off',
     },
   },
+  // ==================== no-console allowlist ====================
+  // The following files/packages are allowed to use console.*
+
+  // VS Code IDE companion - out of scope for no-console rule
+  {
+    files: ['packages/vscode-ide-companion/**/*.ts', 'packages/vscode-ide-companion/**/*.tsx', 'packages/vscode-ide-companion/**/*.js'],
+    rules: { 'no-console': 'off' },
+  },
+  // WebUI package - UI component library with Storybook
+  {
+    files: ['packages/webui/**/*.ts', 'packages/webui/**/*.tsx', 'packages/webui/**/*.js'],
+    rules: { 'no-console': 'off' },
+  },
+  // Specific CLI files that intentionally wrap console usage
+  {
+    files: [
+      'packages/cli/src/acp-integration/acpAgent.ts',      // console infrastructure for ACP mode
+      'packages/cli/src/utils/stdioHelpers.ts',            // wraps console.clear()
+    ],
+    rules: { 'no-console': 'off' },
+  },
+  // Specific esbuild configs not covered by scripts pattern
   {
     files: ['packages/vscode-ide-companion/esbuild.js'],
     languageOptions: {
@@ -226,36 +253,31 @@ export default tseslint.config(
     rules: {
       'no-restricted-syntax': 'off',
       '@typescript-eslint/no-require-imports': 'off',
+      'no-console': 'off',
     },
   },
-  // extra settings for scripts that we run directly with node
+  // Settings for web-templates assets
   {
-    files: ['packages/vscode-ide-companion/scripts/**/*.js'],
+    files: [
+      'packages/web-templates/src/**/*.{js,jsx,ts,tsx}',
+      'packages/web-templates/*.mjs',
+    ],
     languageOptions: {
       globals: {
+        ...globals.browser,
         ...globals.node,
-        process: 'readonly',
-        console: 'readonly',
+      },
+      parserOptions: {
+        ecmaFeatures: {
+          jsx: true,
+        },
       },
     },
     rules: {
-      'no-restricted-syntax': 'off',
-      '@typescript-eslint/no-require-imports': 'off',
-    },
-  },
-  // extra settings for core package scripts
-  {
-    files: ['packages/core/scripts/**/*.js'],
-    languageOptions: {
-      globals: {
-        ...globals.node,
-        process: 'readonly',
-        console: 'readonly',
-      },
-    },
-    rules: {
-      'no-restricted-syntax': 'off',
-      '@typescript-eslint/no-require-imports': 'off',
+      'react/react-in-jsx-scope': 'off',
+      'react/prop-types': 'off',
+      'no-console': 'off',
+      'no-undef': 'off',
     },
   },
   // Prettier config must be last
@@ -271,6 +293,7 @@ export default tseslint.config(
       },
     },
     rules: {
+      'no-console': 'off', // Allow console in integration tests
       '@typescript-eslint/no-unused-vars': [
         'error',
         {

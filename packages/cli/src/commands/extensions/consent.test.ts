@@ -35,6 +35,7 @@ describe('extensionConsentString', () => {
     const config: ExtensionConfig = {
       name: 'test-extension',
       version: '1.0.0',
+      commands: [],
     };
 
     const result = extensionConsentString(config);
@@ -209,6 +210,7 @@ describe('requestConsentOrFail', () => {
 
     await requestConsentOrFail(mockRequestConsent, {
       extensionConfig: { name: 'test-extension', version: '1.0.0' },
+      originSource: 'QwenCode',
     });
 
     expect(mockRequestConsent).toHaveBeenCalled();
@@ -220,6 +222,7 @@ describe('requestConsentOrFail', () => {
     await expect(
       requestConsentOrFail(mockRequestConsent, {
         extensionConfig: { name: 'test-extension', version: '1.0.0' },
+        originSource: 'QwenCode',
       }),
     ).rejects.toThrow('Installation cancelled for "test-extension".');
   });
@@ -233,6 +236,7 @@ describe('requestConsentOrFail', () => {
     await requestConsentOrFail(mockRequestConsent, {
       extensionConfig,
       previousExtensionConfig: extensionConfig,
+      originSource: 'QwenCode',
     });
 
     expect(mockRequestConsent).not.toHaveBeenCalled();
@@ -246,6 +250,7 @@ describe('requestConsentOrFail', () => {
       commands: ['command1'],
       previousExtensionConfig: { name: 'test-extension', version: '1.0.0' },
       previousCommands: [],
+      originSource: 'QwenCode',
     });
 
     expect(mockRequestConsent).toHaveBeenCalled();

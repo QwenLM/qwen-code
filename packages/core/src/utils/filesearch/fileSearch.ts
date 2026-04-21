@@ -14,6 +14,15 @@ import type { FzfResultItem } from 'fzf';
 import { AsyncFzf } from 'fzf';
 import { unescapePath } from '../paths.js';
 
+/**
+ * Safety cap on the number of file entries the recursive crawler will
+ * materialise in memory. Without this, workspaces with millions of files
+ * (e.g. missing .gitignore, huge node_modules trees) can push Node.js past
+ * its heap limit and crash with an OOM.  100 000 entries is generous enough
+ * for virtually all real projects while keeping peak memory well under 100 MB.
+ */
+const MAX_CRAWL_FILES = 100_000;
+
 export interface FileSearchOptions {
   projectRoot: string;
   ignoreDirs: string[];
@@ -22,7 +31,7 @@ export interface FileSearchOptions {
   cache: boolean;
   cacheTtl: number;
   enableRecursiveFileSearch: boolean;
-  disableFuzzySearch: boolean;
+  enableFuzzySearch: boolean;
   maxDepth?: number;
 }
 
@@ -108,6 +117,7 @@ class RecursiveFileSearch implements FileSearch {
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
       maxDepth: this.options.maxDepth,
+      maxFiles: MAX_CRAWL_FILES,
     });
     this.buildResultCache();
   }
@@ -116,9 +126,11 @@ class RecursiveFileSearch implements FileSearch {
     pattern: string,
     options: SearchOptions = {},
   ): Promise<string[]> {
+    // Check if engine is properly initialized.
+    // If fuzzy search is enabled (or undefined, default true), fzf must be initialized.
     if (
       !this.resultCache ||
-      (!this.fzf && !this.options.disableFuzzySearch) ||
+      (!this.fzf && this.options.enableFuzzySearch !== false) ||
       !this.ignore
     ) {
       throw new Error('Engine not initialized. Call initialize() first.');
@@ -179,7 +191,8 @@ class RecursiveFileSearch implements FileSearch {
 
   private buildResultCache(): void {
     this.resultCache = new ResultCache(this.allFiles);
-    if (!this.options.disableFuzzySearch) {
+    // Initialize fuzzy search if enabled (or undefined, default true).
+    if (this.options.enableFuzzySearch !== false) {
       // The v1 algorithm is much faster since it only looks at the first
       // occurence of the pattern. We use it for search spaces that have >20k
       // files, because the v2 algorithm is just too slow in those cases.

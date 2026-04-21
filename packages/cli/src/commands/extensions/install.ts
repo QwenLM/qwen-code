@@ -11,6 +11,7 @@ import {
   parseInstallSource,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { loadSettings } from '../../config/settings.js';
 import {
@@ -26,6 +27,7 @@ interface InstallArgs {
   autoUpdate?: boolean;
   allowPreRelease?: boolean;
   consent?: boolean;
+  registry?: string;
 }
 
 export async function handleInstall(args: InstallArgs) {
@@ -34,7 +36,8 @@ export async function handleInstall(args: InstallArgs) {
 
     if (
       installMetadata.type !== 'git' &&
-      installMetadata.type !== 'github-release'
+      installMetadata.type !== 'github-release' &&
+      installMetadata.type !== 'npm'
     ) {
       if (args.ref || args.autoUpdate) {
         throw new Error(
@@ -43,6 +46,22 @@ export async function handleInstall(args: InstallArgs) {
           ),
         );
       }
+    }
+
+    if (installMetadata.type === 'npm' && args.ref) {
+      throw new Error(
+        t(
+          '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).',
+        ),
+      );
+    }
+
+    if (installMetadata.type !== 'npm' && args.registry) {
+      throw new Error(t('--registry is only applicable for npm extensions.'));
+    }
+
+    if (installMetadata.type === 'npm' && args.registry) {
+      installMetadata.registryUrl = args.registry;
     }
 
     const requestConsent = args.consent
@@ -68,13 +87,13 @@ export async function handleInstall(args: InstallArgs) {
       },
       requestConsent,
     );
-    console.log(
+    writeStdoutLine(
       t('Extension "{{name}}" installed successfully and enabled.', {
         name: extension.name,
       }),
     );
   } catch (error) {
-    console.error(getErrorMessage(error));
+    writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }
 }
@@ -82,7 +101,7 @@ export async function handleInstall(args: InstallArgs) {
 export const installCommand: CommandModule = {
   command: 'install <source>',
   describe: t(
-    'Installs an extension from a git repository URL, local path, or claude marketplace (marketplace-url:plugin-name).',
+    'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).',
   ),
   builder: (yargs) =>
     yargs
@@ -105,6 +124,10 @@ export const installCommand: CommandModule = {
         describe: t('Enable pre-release versions for this extension.'),
         type: 'boolean',
       })
+      .option('registry', {
+        describe: t('Custom npm registry URL (only for npm extensions).'),
+        type: 'string',
+      })
       .option('consent', {
         describe: t(
           'Acknowledge the security risks of installing an extension and skip the confirmation prompt.',
@@ -125,6 +148,7 @@ export const installCommand: CommandModule = {
       autoUpdate: argv['auto-update'] as boolean | undefined,
       allowPreRelease: argv['pre-release'] as boolean | undefined,
       consent: argv['consent'] as boolean | undefined,
+      registry: argv['registry'] as string | undefined,
     });
   },
 };

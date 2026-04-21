@@ -20,13 +20,20 @@ import type {
   Status as CoreStatus,
   EditorType,
 } from '@qwen-code/qwen-code-core';
-import { CoreToolScheduler } from '@qwen-code/qwen-code-core';
+import {
+  CoreToolScheduler,
+  createDebugLogger,
+  isAutoMemPath,
+} from '@qwen-code/qwen-code-core';
+import * as path from 'node:path';
 import { useCallback, useState, useMemo } from 'react';
 import type {
   HistoryItemToolGroup,
   IndividualToolCallDisplay,
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
+
+const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
 export type ScheduleFn = (
   request: ToolCallRequestInfo | ToolCallRequestInfo[],
@@ -198,10 +205,30 @@ function mapCoreStatusToDisplayStatus(coreStatus: CoreStatus): ToolCallStatus {
       return ToolCallStatus.Pending;
     default: {
       const exhaustiveCheck: never = coreStatus;
-      console.warn(`Unknown core status encountered: ${exhaustiveCheck}`);
+      debugLogger.warn(`Unknown core status encountered: ${exhaustiveCheck}`);
       return ToolCallStatus.Error;
     }
   }
+}
+
+/**
+ * Returns 'read' or 'write' if the tool call operates on a managed-auto-memory
+ * file; returns undefined otherwise.
+ */
+function detectMemoryOp(
+  toolName: string,
+  args: Record<string, unknown>,
+  projectRoot: string,
+): 'read' | 'write' | undefined {
+  const WRITE_TOOLS = new Set(['write_file', 'edit']);
+  const READ_TOOLS = new Set(['read_file']);
+  const filePath = args?.['file_path'] as string | undefined;
+  if (!filePath) return undefined;
+  const resolved = path.resolve(filePath);
+  if (!isAutoMemPath(resolved, projectRoot)) return undefined;
+  if (WRITE_TOOLS.has(toolName)) return 'write';
+  if (READ_TOOLS.has(toolName)) return 'read';
+  return undefined;
 }
 
 /**
@@ -209,6 +236,7 @@ function mapCoreStatusToDisplayStatus(coreStatus: CoreStatus): ToolCallStatus {
  */
 export function mapToDisplay(
   toolOrTools: TrackedToolCall[] | TrackedToolCall,
+  projectRoot?: string,
 ): HistoryItemToolGroup {
   const toolCalls = Array.isArray(toolOrTools) ? toolOrTools : [toolOrTools];
 
@@ -238,6 +266,14 @@ export function mapToDisplay(
         name: displayName,
         description,
         renderOutputAsMarkdown,
+        isMemoryOp:
+          projectRoot && trackedCall.status !== 'error'
+            ? detectMemoryOp(
+                trackedCall.request.name,
+                trackedCall.request.args as Record<string, unknown>,
+                projectRoot,
+              )
+            : undefined,
       };
 
       switch (trackedCall.status) {
@@ -247,7 +283,6 @@ export function mapToDisplay(
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
             resultDisplay: trackedCall.response.resultDisplay,
             confirmationDetails: undefined,
-            outputFile: trackedCall.response.outputFile,
           };
         case 'error':
           return {
@@ -278,6 +313,8 @@ export function mapToDisplay(
               (trackedCall as TrackedExecutingToolCall).liveOutput ?? undefined,
             confirmationDetails: undefined,
             ptyId: (trackedCall as TrackedExecutingToolCall).pid,
+            executionStartTime: (trackedCall as TrackedExecutingToolCall)
+              .executionStartTime,
           };
         case 'validating': // Fallthrough
         case 'scheduled':
@@ -306,5 +343,9 @@ export function mapToDisplay(
   return {
     type: 'tool_group',
     tools: toolDisplays,
+    memoryWriteCount:
+      toolDisplays.filter((t) => t.isMemoryOp === 'write').length || undefined,
+    memoryReadCount:
+      toolDisplays.filter((t) => t.isMemoryOp === 'read').length || undefined,
   };
 }

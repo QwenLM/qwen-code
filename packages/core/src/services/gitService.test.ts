@@ -162,11 +162,35 @@ describe('GitService', () => {
       expect(actualConfigContent).toBe(expectedConfigContent);
     });
 
+    it('should use the shadow git config during repository setup', async () => {
+      const service = new GitService(projectRoot, storage);
+      await service.setupShadowGitRepository();
+
+      expect(hoistedMockEnv).toHaveBeenCalledWith({
+        HOME: repoDir,
+        XDG_CONFIG_HOME: repoDir,
+      });
+    });
+
     it('should initialize git repo in historyDir if not already initialized', async () => {
       hoistedMockCheckIsRepo.mockResolvedValue(false);
       const service = new GitService(projectRoot, storage);
       await service.setupShadowGitRepository();
       expect(hoistedMockSimpleGit).toHaveBeenCalledWith(repoDir);
+      expect(hoistedMockInit).toHaveBeenCalledWith(false);
+      expect(hoistedMockRaw).toHaveBeenCalledWith([
+        'symbolic-ref',
+        'HEAD',
+        'refs/heads/main',
+      ]);
+    });
+
+    it('should initialize git repo when root repo check throws', async () => {
+      hoistedMockCheckIsRepo.mockRejectedValueOnce(
+        new Error('fatal: not a git repository'),
+      );
+      const service = new GitService(projectRoot, storage);
+      await expect(service.setupShadowGitRepository()).resolves.toBeUndefined();
       expect(hoistedMockInit).toHaveBeenCalled();
     });
 
@@ -175,6 +199,7 @@ describe('GitService', () => {
       const service = new GitService(projectRoot, storage);
       await service.setupShadowGitRepository();
       expect(hoistedMockInit).not.toHaveBeenCalled();
+      expect(hoistedMockRaw).not.toHaveBeenCalled();
     });
 
     it('should copy .gitignore from projectRoot if it exists', async () => {

@@ -7,18 +7,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 const mockGenerateJson = vi.hoisted(() => vi.fn());
-const mockOpenDiff = vi.hoisted(() => vi.fn());
-
-import { IdeClient } from '../ide/ide-client.js';
-
-vi.mock('../ide/ide-client.js', () => ({
-  IdeClient: {
-    getInstance: vi.fn(),
-  },
-}));
 
 vi.mock('../utils/editor.js', () => ({
-  openDiff: mockOpenDiff,
+  openDiff: vi.fn(),
 }));
 
 vi.mock('../telemetry/loggers.js', () => ({
@@ -30,7 +21,6 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import type { EditToolParams } from './edit.js';
 import { applyReplacement, EditTool } from './edit.js';
 import type { FileDiff } from './tools.js';
-import { ToolConfirmationOutcome } from './tools.js';
 import { ToolErrorType } from './tool-error.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -87,6 +77,7 @@ describe('EditTool', () => {
       getGeminiMdFileCount: () => 0,
       setGeminiMdFileCount: vi.fn(),
       getToolRegistry: () => ({}) as any, // Minimal mock for ToolRegistry
+      getDefaultFileEncoding: vi.fn().mockReturnValue('utf-8'),
     } as unknown as Config;
 
     // Reset mocks before each test
@@ -229,20 +220,18 @@ describe('EditTool', () => {
       );
     });
 
-    it('should return error for path outside root', () => {
+    it('should allow path outside root (external path support)', () => {
       const params: EditToolParams = {
         file_path: path.join(tempDir, 'outside-root.txt'),
         old_string: 'old',
         new_string: 'new',
       };
       const error = tool.validateToolParams(params);
-      expect(error).toContain(
-        'File path must be within one of the workspace directories',
-      );
+      expect(error).toBeNull();
     });
   });
 
-  describe('shouldConfirmExecute', () => {
+  describe('getConfirmationDetails', () => {
     const testFile = 'edit_me.txt';
     let filePath: string;
 
@@ -267,7 +256,7 @@ describe('EditTool', () => {
         new_string: 'new',
       };
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
       expect(confirmation).toEqual(
@@ -279,7 +268,7 @@ describe('EditTool', () => {
       );
     });
 
-    it('should return false if old_string is not found', async () => {
+    it('should throw if old_string is not found', async () => {
       fs.writeFileSync(filePath, 'some content here');
       const params: EditToolParams = {
         file_path: filePath,
@@ -287,13 +276,12 @@ describe('EditTool', () => {
         new_string: 'new',
       };
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(confirmation).toBe(false);
+      await expect(
+        invocation.getConfirmationDetails(new AbortController().signal),
+      ).rejects.toThrow();
     });
 
-    it('should return false if multiple occurrences of old_string are found', async () => {
+    it('should throw if multiple occurrences of old_string are found', async () => {
       fs.writeFileSync(filePath, 'old old content here');
       const params: EditToolParams = {
         file_path: filePath,
@@ -301,10 +289,9 @@ describe('EditTool', () => {
         new_string: 'new',
       };
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-      expect(confirmation).toBe(false);
+      await expect(
+        invocation.getConfirmationDetails(new AbortController().signal),
+      ).rejects.toThrow();
     });
 
     it('should request confirmation for creating a new file (empty old_string)', async () => {
@@ -316,7 +303,7 @@ describe('EditTool', () => {
         new_string: 'new file content',
       };
       const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
+      const confirmation = await invocation.getConfirmationDetails(
         new AbortController().signal,
       );
       expect(confirmation).toEqual(
@@ -350,7 +337,7 @@ describe('EditTool', () => {
         });
 
       await expect(
-        invocation.shouldConfirmExecute(abortController.signal),
+        invocation.getConfirmationDetails(abortController.signal),
       ).rejects.toBe(abortError);
 
       calculateSpy.mockRestore();
@@ -471,6 +458,80 @@ describe('EditTool', () => {
         user_added_chars: 0,
         user_removed_chars: 0,
       });
+    });
+
+    it('should create new file with BOM when defaultFileEncoding is utf-8-bom', async () => {
+      // Change config to use utf-8-bom
+      (mockConfig.getDefaultFileEncoding as Mock).mockReturnValue('utf-8-bom');
+
+      const newFileName = 'bom_new_file.txt';
+      const newFilePath = path.join(rootDir, newFileName);
+      const fileContent = 'Content for BOM file.';
+      const params: EditToolParams = {
+        file_path: newFilePath,
+        old_string: '',
+        new_string: fileContent,
+      };
+
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      // Verify file has BOM
+      const fileBuffer = fs.readFileSync(newFilePath);
+      expect(fileBuffer[0]).toBe(0xef);
+      expect(fileBuffer[1]).toBe(0xbb);
+      expect(fileBuffer[2]).toBe(0xbf);
+      expect(fileBuffer.toString('utf8')).toContain(fileContent);
+    });
+
+    it('should create new file without BOM when defaultFileEncoding is utf-8', async () => {
+      // Config defaults to utf-8
+      const newFileName = 'no_bom_new_file.txt';
+      const newFilePath = path.join(rootDir, newFileName);
+      const fileContent = 'Content without BOM.';
+      const params: EditToolParams = {
+        file_path: newFilePath,
+        old_string: '',
+        new_string: fileContent,
+      };
+
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      // Verify file does not have BOM
+      const fileBuffer = fs.readFileSync(newFilePath);
+      expect(fileBuffer[0]).not.toBe(0xef);
+      expect(fileBuffer.toString('utf8')).toBe(fileContent);
+    });
+
+    it('should preserve BOM character in content when editing existing file', async () => {
+      const bomFilePath = path.join(rootDir, 'existing_bom.txt');
+      // Create file with BOM (BOM is \ufeff character in string)
+      const originalContent = '\ufeff// Original line\nconst x = 1;';
+      fs.writeFileSync(bomFilePath, originalContent, 'utf8');
+
+      const params: EditToolParams = {
+        file_path: bomFilePath,
+        old_string: 'const x = 1;',
+        new_string: 'const x = 2;',
+      };
+
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      // Verify file still has BOM and new content
+      const resultContent = fs.readFileSync(bomFilePath, 'utf8');
+      expect(resultContent.charCodeAt(0)).toBe(0xfeff); // BOM preserved
+      expect(resultContent).toContain('const x = 2;');
     });
 
     it('should return error if old_string is not found in file', async () => {
@@ -713,20 +774,23 @@ describe('EditTool', () => {
       expect(() => tool.build(params)).toThrow();
     });
 
-    it('should return FILE_WRITE_FAILURE on write error', async () => {
-      fs.writeFileSync(filePath, 'content', 'utf8');
-      // Make file readonly to trigger a write error
-      fs.chmodSync(filePath, '444');
+    it.skipIf(process.getuid && process.getuid() === 0)(
+      'should return FILE_WRITE_FAILURE on write error',
+      async () => {
+        fs.writeFileSync(filePath, 'content', 'utf8');
+        // Make file readonly to trigger a write error
+        fs.chmodSync(filePath, '444');
 
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'content',
-        new_string: 'new content',
-      };
-      const invocation = tool.build(params);
-      const result = await invocation.execute(new AbortController().signal);
-      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
-    });
+        const params: EditToolParams = {
+          file_path: filePath,
+          old_string: 'content',
+          new_string: 'new content',
+        };
+        const invocation = tool.build(params);
+        const result = await invocation.execute(new AbortController().signal);
+        expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+      },
+    );
   });
 
   describe('getDescription', () => {
@@ -796,63 +860,14 @@ describe('EditTool', () => {
       expect(tool.validateToolParams(validPath)).toBeNull();
     });
 
-    it('should reject paths outside workspace root', () => {
-      const invalidPath = {
+    it('should allow paths outside workspace root (external path support)', () => {
+      const externalPath = {
         file_path: '/etc/passwd',
         old_string: 'root',
         new_string: 'hacked',
       };
-      const error = tool.validateToolParams(invalidPath);
-      expect(error).toContain(
-        'File path must be within one of the workspace directories',
-      );
-      expect(error).toContain(rootDir);
-    });
-  });
-
-  describe('IDE mode', () => {
-    const testFile = 'edit_me.txt';
-    let filePath: string;
-    let ideClient: any;
-
-    beforeEach(() => {
-      filePath = path.join(rootDir, testFile);
-      ideClient = {
-        openDiff: vi.fn(),
-        isDiffingEnabled: vi.fn().mockReturnValue(true),
-      };
-      vi.mocked(IdeClient.getInstance).mockResolvedValue(ideClient);
-      (mockConfig as any).getIdeMode = () => true;
-    });
-
-    it('should call ideClient.openDiff and update params on confirmation', async () => {
-      const initialContent = 'some old content here';
-      const newContent = 'some new content here';
-      const modifiedContent = 'some modified content here';
-      fs.writeFileSync(filePath, initialContent);
-      const params: EditToolParams = {
-        file_path: filePath,
-        old_string: 'old',
-        new_string: 'new',
-      };
-      ideClient.openDiff.mockResolvedValueOnce({
-        status: 'accepted',
-        content: modifiedContent,
-      });
-
-      const invocation = tool.build(params);
-      const confirmation = await invocation.shouldConfirmExecute(
-        new AbortController().signal,
-      );
-
-      expect(ideClient.openDiff).toHaveBeenCalledWith(filePath, newContent);
-
-      if (confirmation && 'onConfirm' in confirmation) {
-        await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce);
-      }
-
-      expect(params.old_string).toBe(initialContent);
-      expect(params.new_string).toBe(modifiedContent);
+      const error = tool.validateToolParams(externalPath);
+      expect(error).toBeNull();
     });
   });
 });

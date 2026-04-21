@@ -1,4 +1,4 @@
-import { spawn, type ChildProcess } from 'node:child_process';
+import { spawn, fork, type ChildProcess } from 'node:child_process';
 import * as readline from 'node:readline';
 import type { Writable, Readable } from 'node:stream';
 import type { TransportOptions } from '../types/types.js';
@@ -11,6 +11,14 @@ import { SdkLogger } from '../utils/logger.js';
 const logger = SdkLogger.createLogger('ProcessTransport');
 
 export class ProcessTransport implements Transport {
+  private static activeTransports = new Set<ProcessTransport>();
+  private static hasProcessExitHandler = false;
+  private static readonly globalProcessExitHandler = (): void => {
+    for (const transport of ProcessTransport.activeTransports) {
+      transport.killChildProcessOnProcessExit();
+    }
+  };
+
   private childProcess: ChildProcess | null = null;
   private childStdin: Writable | null = null;
   private childStdout: Readable | null = null;
@@ -20,7 +28,6 @@ export class ProcessTransport implements Transport {
   private closed = false;
   private inputClosed = false;
   private abortController: AbortController;
-  private processExitHandler: (() => void) | null = null;
   private abortHandler: (() => void) | null = null;
 
   constructor(options: TransportOptions) {
@@ -52,20 +59,103 @@ export class ProcessTransport implements Transport {
       const stderrMode =
         this.options.debug || this.options.stderr ? 'pipe' : 'ignore';
 
-      logger.debug(
-        `Spawning CLI (${spawnInfo.type}): ${spawnInfo.command} ${[...spawnInfo.args, ...cliArgs].join(' ')}`,
-      );
+      // Check if we should use fork for Electron integration
+      const useFork = env.FORK_MODE === '1';
 
-      this.childProcess = spawn(
-        spawnInfo.command,
-        [...spawnInfo.args, ...cliArgs],
-        {
-          cwd,
-          env,
-          stdio: ['pipe', 'pipe', stderrMode],
-          signal: this.abortController.signal,
-        },
-      );
+      if (useFork) {
+        // Detect Electron environment
+        const isElectron =
+          typeof process !== 'undefined' &&
+          process.versions &&
+          !!process.versions.electron;
+
+        // In Electron, process.execPath points to Electron, not Node.js
+        // When spawnInfo uses process.execPath to run a JS file, we need to handle it specially
+        const isUsingExecPathForJs =
+          spawnInfo.args.length > 0 &&
+          (spawnInfo.args[0]?.endsWith('.js') ||
+            spawnInfo.args[0]?.endsWith('.mjs') ||
+            spawnInfo.args[0]?.endsWith('.cjs'));
+
+        let forkModulePath: string;
+        let forkArgs: string[];
+        let forkExecPath: string | undefined;
+
+        if (isElectron && isUsingExecPathForJs) {
+          // In Electron with JS file: use the JS file as module path, rest as args
+          forkModulePath = spawnInfo.args[0] ?? '';
+          forkArgs = [...spawnInfo.args.slice(1), ...cliArgs];
+        } else if (
+          (spawnInfo.type === 'node' || spawnInfo.type === 'bun') &&
+          spawnInfo.args.length > 0
+        ) {
+          // For node/bun type: command is the runtime, args[0] is the JS module
+          forkModulePath = spawnInfo.args[0] ?? '';
+          forkArgs = [...spawnInfo.args.slice(1), ...cliArgs];
+          forkExecPath = spawnInfo.command;
+        } else {
+          // Native or other types: cannot use fork, fall back to spawn
+          logger.debug(
+            `FORK_MODE enabled but CLI type '${spawnInfo.type}' does not support fork. Falling back to spawn.`,
+          );
+          forkModulePath = '';
+          forkArgs = [];
+        }
+
+        // Only use fork if we have a valid module path
+        if (forkModulePath) {
+          logger.debug(
+            `Forking CLI (${spawnInfo.type}): ${forkModulePath} ${forkArgs.join(' ')}`,
+          );
+
+          const forkOptions: Parameters<typeof fork>[2] = {
+            cwd,
+            env,
+            stdio:
+              stderrMode === 'pipe'
+                ? ['pipe', 'pipe', 'pipe', 'ipc']
+                : ['pipe', 'pipe', 'ignore', 'ipc'],
+            signal: this.abortController.signal,
+          };
+
+          if (forkExecPath) {
+            forkOptions.execPath = forkExecPath;
+          }
+
+          this.childProcess = fork(forkModulePath, forkArgs, forkOptions);
+        } else {
+          // Fallback to spawn for native/unsupported types
+          logger.debug(
+            `Spawning CLI (${spawnInfo.type}): ${spawnInfo.command} ${[...spawnInfo.args, ...cliArgs].join(' ')}`,
+          );
+
+          this.childProcess = spawn(
+            spawnInfo.command,
+            [...spawnInfo.args, ...cliArgs],
+            {
+              cwd,
+              env,
+              stdio: ['pipe', 'pipe', stderrMode],
+              signal: this.abortController.signal,
+            },
+          );
+        }
+      } else {
+        logger.debug(
+          `Spawning CLI (${spawnInfo.type}): ${spawnInfo.command} ${[...spawnInfo.args, ...cliArgs].join(' ')}`,
+        );
+
+        this.childProcess = spawn(
+          spawnInfo.command,
+          [...spawnInfo.args, ...cliArgs],
+          {
+            cwd,
+            env,
+            stdio: ['pipe', 'pipe', stderrMode],
+            signal: this.abortController.signal,
+          },
+        );
+      }
 
       this.childStdin = this.childProcess.stdin;
       this.childStdout = this.childProcess.stdout;
@@ -76,25 +166,73 @@ export class ProcessTransport implements Transport {
         });
       }
 
-      const cleanup = (): void => {
-        if (this.childProcess && !this.childProcess.killed) {
-          this.childProcess.kill('SIGTERM');
-        }
+      this.abortHandler = () => {
+        this.killChildProcess();
       };
-
-      this.processExitHandler = cleanup;
-      this.abortHandler = cleanup;
-      process.on('exit', this.processExitHandler);
       this.abortController.signal.addEventListener('abort', this.abortHandler);
+      this.registerForProcessExit();
 
       this.setupEventHandlers();
 
       this.ready = true;
       logger.info('CLI process started successfully');
     } catch (error) {
+      this.unregisterForProcessExit();
+      if (this.abortHandler) {
+        this.abortController.signal.removeEventListener(
+          'abort',
+          this.abortHandler,
+        );
+        this.abortHandler = null;
+      }
       this.ready = false;
       logger.error('Failed to initialize CLI process:', error);
       throw error;
+    }
+  }
+
+  private registerForProcessExit(): void {
+    ProcessTransport.activeTransports.add(this);
+    if (!ProcessTransport.hasProcessExitHandler) {
+      process.on('exit', ProcessTransport.globalProcessExitHandler);
+      ProcessTransport.hasProcessExitHandler = true;
+    }
+  }
+
+  private unregisterForProcessExit(): void {
+    ProcessTransport.activeTransports.delete(this);
+    if (
+      ProcessTransport.hasProcessExitHandler &&
+      ProcessTransport.activeTransports.size === 0
+    ) {
+      process.off('exit', ProcessTransport.globalProcessExitHandler);
+      ProcessTransport.hasProcessExitHandler = false;
+    }
+  }
+
+  private killChildProcess(): void {
+    if (this.childProcess && !this.childProcess.killed) {
+      this.childProcess.kill('SIGTERM');
+    }
+  }
+
+  private killChildProcessOnProcessExit(): void {
+    if (!this.childProcess || this.childProcess.exitCode !== null) {
+      return;
+    }
+
+    try {
+      this.childProcess.kill('SIGTERM');
+    } catch {
+      return;
+    }
+
+    // Timers do not reliably run during process exit, so use a best-effort
+    // synchronous escalation to avoid leaving child processes behind.
+    try {
+      this.childProcess.kill('SIGKILL');
+    } catch {
+      // Ignore failures during process teardown.
     }
   }
 
@@ -102,6 +240,7 @@ export class ProcessTransport implements Transport {
     if (!this.childProcess) return;
 
     this.childProcess.on('error', (error) => {
+      this.unregisterForProcessExit();
       this.ready = false;
       if (this.abortController.signal.aborted) {
         this._exitError = new AbortError('CLI process aborted by user');
@@ -112,6 +251,7 @@ export class ProcessTransport implements Transport {
     });
 
     this.childProcess.on('close', (code, signal) => {
+      this.unregisterForProcessExit();
       this.ready = false;
       if (this.abortController.signal.aborted) {
         this._exitError = new AbortError('CLI process aborted by user');
@@ -143,11 +283,18 @@ export class ProcessTransport implements Transport {
       '--output-format',
       'stream-json',
       '--channel=SDK',
-      '--experimental-skills',
     ];
 
     if (this.options.model) {
       args.push('--model', this.options.model);
+    }
+
+    if (this.options.systemPrompt) {
+      args.push('--system-prompt', this.options.systemPrompt);
+    }
+
+    if (this.options.appendSystemPrompt) {
+      args.push('--append-system-prompt', this.options.appendSystemPrompt);
     }
 
     if (this.options.permissionMode) {
@@ -178,6 +325,16 @@ export class ProcessTransport implements Transport {
       args.push('--include-partial-messages');
     }
 
+    if (this.options.resume) {
+      // Resume existing session
+      args.push('--resume', this.options.resume);
+    } else if (this.options.continue) {
+      args.push('--continue');
+    } else if (this.options.sessionId) {
+      // Start new session with specific session ID (for SDK-CLI alignment)
+      args.push('--session-id', this.options.sessionId);
+    }
+
     return args;
   }
 
@@ -187,10 +344,7 @@ export class ProcessTransport implements Transport {
       this.childStdin = null;
     }
 
-    if (this.processExitHandler) {
-      process.off('exit', this.processExitHandler);
-      this.processExitHandler = null;
-    }
+    this.unregisterForProcessExit();
 
     if (this.abortHandler) {
       this.abortController.signal.removeEventListener(

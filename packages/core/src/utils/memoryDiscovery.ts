@@ -8,23 +8,14 @@ import * as fs from 'node:fs/promises';
 import * as fsSync from 'node:fs';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
-import { getAllGeminiMdFilenames } from '../tools/memoryTool.js';
+import { getAllGeminiMdFilenames } from '../memory/const.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { processImports } from './memoryImportProcessor.js';
 import { QWEN_DIR } from './paths.js';
+import { createDebugLogger } from './debugLogger.js';
+import { loadRules, type RuleFile } from './rulesDiscovery.js';
 
-// Simple console logger, similar to the one previously in CLI's config.ts
-// TODO: Integrate with a more robust server-side logger if available/appropriate.
-const logger = {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  debug: (...args: any[]) =>
-    console.debug('[DEBUG] [MemoryDiscovery]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  warn: (...args: any[]) => console.warn('[WARN] [MemoryDiscovery]', ...args),
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  error: (...args: any[]) =>
-    console.error('[ERROR] [MemoryDiscovery]', ...args),
-};
+const logger = createDebugLogger('MEMORY_DISCOVERY');
 
 interface GeminiFileContent {
   filePath: string;
@@ -79,15 +70,16 @@ async function getGeminiMdFilePathsInternal(
   currentWorkingDirectory: string,
   includeDirectoriesToReadGemini: readonly string[],
   userHomePath: string,
-  debugMode: boolean,
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
+  implicitDiscoveryEnabled: boolean = true,
 ): Promise<string[]> {
-  const dirs = new Set<string>([
-    ...includeDirectoriesToReadGemini,
-    currentWorkingDirectory,
-  ]);
+  const dirs = new Set<string>(
+    implicitDiscoveryEnabled
+      ? [...includeDirectoriesToReadGemini, currentWorkingDirectory]
+      : [...includeDirectoriesToReadGemini],
+  );
 
   // Process directories in parallel with concurrency limit to prevent EMFILE errors
   const CONCURRENT_LIMIT = 10;
@@ -100,10 +92,10 @@ async function getGeminiMdFilePathsInternal(
       getGeminiMdFilePathsInternalForEachDir(
         dir,
         userHomePath,
-        debugMode,
         fileService,
         extensionContextFilePaths,
         folderTrust,
+        implicitDiscoveryEnabled,
       ),
     );
 
@@ -128,10 +120,10 @@ async function getGeminiMdFilePathsInternal(
 async function getGeminiMdFilePathsInternalForEachDir(
   dir: string,
   userHomePath: string,
-  debugMode: boolean,
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
+  implicitDiscoveryEnabled: boolean = true,
 ): Promise<string[]> {
   const allPaths = new Set<string>();
   const geminiMdFilenames = getAllGeminiMdFilenames();
@@ -144,21 +136,37 @@ async function getGeminiMdFilePathsInternalForEachDir(
       geminiMdFilename,
     );
 
-    // This part that finds the global file always runs.
-    try {
-      await fs.access(globalMemoryPath, fsSync.constants.R_OK);
-      allPaths.add(globalMemoryPath);
-      if (debugMode)
-        logger.debug(
-          `Found readable global ${geminiMdFilename}: ${globalMemoryPath}`,
-        );
-    } catch {
-      // It's okay if it's not found.
-    }
-
     // Handle the case where we're in the home directory (dir is empty string or home path)
     const resolvedDir = dir ? path.resolve(dir) : resolvedHome;
     const isHomeDirectory = resolvedDir === resolvedHome;
+
+    if (!implicitDiscoveryEnabled) {
+      const explicitContextPath = path.join(resolvedDir, geminiMdFilename);
+      try {
+        await fs.access(explicitContextPath, fsSync.constants.R_OK);
+        allPaths.add(explicitContextPath);
+        logger.debug(
+          `Found readable explicit ${geminiMdFilename}: ${explicitContextPath}`,
+        );
+      } catch {
+        // Not found, which is okay for explicit-only discovery.
+      }
+    } else {
+      // This part that finds the global file always runs.
+      try {
+        await fs.access(globalMemoryPath, fsSync.constants.R_OK);
+        allPaths.add(globalMemoryPath);
+        logger.debug(
+          `Found readable global ${geminiMdFilename}: ${globalMemoryPath}`,
+        );
+      } catch {
+        // It's okay if it's not found.
+      }
+    }
+
+    if (!implicitDiscoveryEnabled) {
+      continue;
+    }
 
     if (isHomeDirectory) {
       // For home directory, only check for QWEN.md directly in the home directory
@@ -167,10 +175,9 @@ async function getGeminiMdFilePathsInternalForEachDir(
         await fs.access(homeContextPath, fsSync.constants.R_OK);
         if (homeContextPath !== globalMemoryPath) {
           allPaths.add(homeContextPath);
-          if (debugMode)
-            logger.debug(
-              `Found readable home ${geminiMdFilename}: ${homeContextPath}`,
-            );
+          logger.debug(
+            `Found readable home ${geminiMdFilename}: ${homeContextPath}`,
+          );
         }
       } catch {
         // Not found, which is okay
@@ -179,14 +186,12 @@ async function getGeminiMdFilePathsInternalForEachDir(
       // FIX: Only perform the workspace search (upward scan from CWD to project root)
       // if a valid currentWorkingDirectory is provided and it's not the home directory.
       const resolvedCwd = path.resolve(dir);
-      if (debugMode)
-        logger.debug(
-          `Searching for ${geminiMdFilename} starting from CWD: ${resolvedCwd}`,
-        );
+      logger.debug(
+        `Searching for ${geminiMdFilename} starting from CWD: ${resolvedCwd}`,
+      );
 
       const projectRoot = await findProjectRoot(resolvedCwd);
-      if (debugMode)
-        logger.debug(`Determined project root: ${projectRoot ?? 'None'}`);
+      logger.debug(`Determined project root: ${projectRoot ?? 'None'}`);
 
       const upwardPaths: string[] = [];
       let currentDir = resolvedCwd;
@@ -226,18 +231,16 @@ async function getGeminiMdFilePathsInternalForEachDir(
 
   const finalPaths = Array.from(allPaths);
 
-  if (debugMode)
-    logger.debug(
-      `Final ordered ${getAllGeminiMdFilenames()} paths to read: ${JSON.stringify(
-        finalPaths,
-      )}`,
-    );
+  logger.debug(
+    `Final ordered ${getAllGeminiMdFilenames()} paths to read: ${JSON.stringify(
+      finalPaths,
+    )}`,
+  );
   return finalPaths;
 }
 
 async function readGeminiMdFiles(
   filePaths: string[],
-  debugMode: boolean,
   importFormat: 'flat' | 'tree' = 'tree',
 ): Promise<GeminiFileContent[]> {
   // Process files in parallel with concurrency limit to prevent EMFILE errors
@@ -255,15 +258,13 @@ async function readGeminiMdFiles(
           const processedResult = await processImports(
             content,
             path.dirname(filePath),
-            debugMode,
             undefined,
             undefined,
             importFormat,
           );
-          if (debugMode)
-            logger.debug(
-              `Successfully read and processed imports: ${filePath} (Length: ${processedResult.content.length})`,
-            );
+          logger.debug(
+            `Successfully read and processed imports: ${filePath} (Length: ${processedResult.content.length})`,
+          );
 
           return { filePath, content: processedResult.content };
         } catch (error: unknown) {
@@ -276,7 +277,7 @@ async function readGeminiMdFiles(
               `Warning: Could not read ${getAllGeminiMdFilenames()} file at ${filePath}. Error: ${message}`,
             );
           }
-          if (debugMode) logger.debug(`Failed to read: ${filePath}`);
+          logger.debug(`Failed to read: ${filePath}`);
           return { filePath, content: null }; // Still include it with null content
         }
       },
@@ -324,25 +325,39 @@ function concatenateInstructions(
 export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: string;
   fileCount: number;
+  /** Number of baseline rules injected at session start. */
+  ruleCount: number;
+  /** Conditional rules (with `paths:`) for turn-level lazy injection. */
+  conditionalRules: RuleFile[];
+  /** Effective project root used for glob matching. */
+  projectRoot: string;
+}
+
+export interface LoadServerHierarchicalMemoryOptions {
+  explicitOnly?: boolean;
 }
 
 /**
  * Loads hierarchical QWEN.md files and concatenates their content.
+ * Also loads path-based context rules from `.qwen/rules/` directories.
  * This function is intended for use by the server.
+ *
+ * @param contextRuleExcludes - Glob patterns to skip when loading rules.
  */
 export async function loadServerHierarchicalMemory(
   currentWorkingDirectory: string,
   includeDirectoriesToReadGemini: readonly string[],
-  debugMode: boolean,
   fileService: FileDiscoveryService,
   extensionContextFilePaths: string[] = [],
   folderTrust: boolean,
   importFormat: 'flat' | 'tree' = 'tree',
+  contextRuleExcludes: string[] = [],
+  options: LoadServerHierarchicalMemoryOptions = {},
 ): Promise<LoadServerHierarchicalMemoryResponse> {
-  if (debugMode)
-    logger.debug(
-      `Loading server hierarchical memory for CWD: ${currentWorkingDirectory} (importFormat: ${importFormat})`,
-    );
+  logger.debug(
+    `Loading server hierarchical memory for CWD: ${currentWorkingDirectory} (importFormat: ${importFormat})`,
+  );
+  const implicitDiscoveryEnabled = !options.explicitOnly;
 
   // For the server, homedir() refers to the server process's home.
   // This is consistent with how MemoryTool already finds the global path.
@@ -351,43 +366,61 @@ export async function loadServerHierarchicalMemory(
     currentWorkingDirectory,
     includeDirectoriesToReadGemini,
     userHomePath,
-    debugMode,
     fileService,
     extensionContextFilePaths,
     folderTrust,
+    implicitDiscoveryEnabled,
   );
-  if (filePaths.length === 0) {
-    if (debugMode) logger.debug('No QWEN.md files found in hierarchy.');
-    return { memoryContent: '', fileCount: 0 };
+
+  let combinedInstructions = '';
+  let fileCount = 0;
+
+  if (filePaths.length > 0) {
+    const contentsWithPaths = await readGeminiMdFiles(filePaths, importFormat);
+    // Pass CWD for relative path display in concatenated content
+    combinedInstructions = concatenateInstructions(
+      contentsWithPaths,
+      currentWorkingDirectory,
+    );
+
+    // Only count files that match configured memory filenames (e.g., QWEN.md),
+    // excluding system context files like output-language.md
+    const memoryFilenames = new Set(getAllGeminiMdFilenames());
+    fileCount = contentsWithPaths.filter((item) =>
+      memoryFilenames.has(path.basename(item.filePath)),
+    ).length;
   }
-  const contentsWithPaths = await readGeminiMdFiles(
-    filePaths,
-    debugMode,
-    importFormat,
-  );
-  // Pass CWD for relative path display in concatenated content
-  const combinedInstructions = concatenateInstructions(
-    contentsWithPaths,
-    currentWorkingDirectory,
-  );
 
-  // Only count files that match configured memory filenames (e.g., QWEN.md),
-  // excluding system context files like output-language.md
-  const memoryFilenames = new Set(getAllGeminiMdFilenames());
-  const fileCount = contentsWithPaths.filter((item) =>
-    memoryFilenames.has(path.basename(item.filePath)),
-  ).length;
+  // Load path-based context rules from .qwen/rules/ directories
+  const resolvedCwd = path.resolve(currentWorkingDirectory);
+  const foundRoot = await findProjectRoot(resolvedCwd);
+  const effectiveRoot = foundRoot ?? resolvedCwd;
 
-  if (debugMode)
-    logger.debug(
-      `Combined instructions length: ${combinedInstructions.length}`,
-    );
-  if (debugMode && combinedInstructions.length > 0)
-    logger.debug(
-      `Combined instructions (snippet): ${combinedInstructions.substring(0, 500)}...`,
-    );
+  const {
+    content: rulesContent,
+    ruleCount,
+    conditionalRules,
+  } = options.explicitOnly
+    ? { content: '', ruleCount: 0, conditionalRules: [] }
+    : await loadRules(effectiveRoot, folderTrust, contextRuleExcludes);
+
+  // Baseline rules go into the system prompt
+  let memoryContent = combinedInstructions;
+  if (rulesContent) {
+    memoryContent = memoryContent
+      ? `${memoryContent}\n\n${rulesContent}`
+      : rulesContent;
+  }
+
+  if (!memoryContent && filePaths.length === 0 && ruleCount === 0) {
+    logger.debug('No QWEN.md files or rules found.');
+  }
+
   return {
-    memoryContent: combinedInstructions,
-    fileCount, // Only count the context files
+    memoryContent,
+    fileCount,
+    ruleCount,
+    conditionalRules,
+    projectRoot: effectiveRoot,
   };
 }

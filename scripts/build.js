@@ -30,9 +30,47 @@ if (!existsSync(join(root, 'node_modules'))) {
   execSync('npm install', { stdio: 'inherit', cwd: root });
 }
 
-// build all workspaces/packages
+// build all workspaces/packages in dependency order
 execSync('npm run generate', { stdio: 'inherit', cwd: root });
-execSync('npm run build --workspaces', { stdio: 'inherit', cwd: root });
+
+// Build in dependency order:
+// 1. core (foundation package, includes test-utils)
+// 2. web-templates (embeddable web templates - used by cli)
+// 3. channel-base (base channel infrastructure - used by channel adapters and cli)
+// 4. channel adapters (depend on channel-base)
+// 5. cli (depends on core, web-templates, channel packages)
+// 6. webui (shared UI components - used by vscode companion)
+// 7. sdk (no internal dependencies)
+// 8. vscode-ide-companion (depends on webui)
+const buildOrder = [
+  'packages/core',
+  'packages/web-templates',
+  'packages/channels/base',
+  'packages/channels/telegram',
+  'packages/channels/weixin',
+  'packages/channels/dingtalk',
+  'packages/channels/plugin-example',
+  'packages/cli',
+  'packages/webui',
+  'packages/sdk-typescript',
+  'packages/vscode-ide-companion',
+];
+
+for (const workspace of buildOrder) {
+  execSync(`npm run build --workspace=${workspace}`, {
+    stdio: 'inherit',
+    cwd: root,
+  });
+
+  // After cli is built, generate the JSON Schema for settings
+  // so the vscode-ide-companion extension can provide IntelliSense
+  if (workspace === 'packages/cli') {
+    execSync('node --import tsx/esm scripts/generate-settings-schema.ts', {
+      stdio: 'inherit',
+      cwd: root,
+    });
+  }
+}
 
 // also build container image if sandboxing is enabled
 // skip (-s) npm install + build since we did that above

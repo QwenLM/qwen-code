@@ -5,7 +5,7 @@
  */
 
 import type { SessionContext } from '../types.js';
-import type * as acp from '../../acp.js';
+import type { SessionUpdate } from '@agentclientprotocol/sdk';
 
 /**
  * Abstract base class for all session event emitters.
@@ -15,9 +15,29 @@ export abstract class BaseEmitter {
   constructor(protected readonly ctx: SessionContext) {}
 
   /**
-   * Sends a session update to the ACP client.
+   * Converts an ISO timestamp string or epoch ms to epoch ms number.
+   * Returns undefined if the input is not a valid timestamp.
    */
-  protected async sendUpdate(update: acp.SessionUpdate): Promise<void> {
+  protected static toEpochMs(ts?: string | number): number | undefined {
+    if (typeof ts === 'number') {
+      return Number.isFinite(ts) ? ts : undefined;
+    }
+    if (typeof ts === 'string') {
+      const ms = new Date(ts).getTime();
+      return Number.isFinite(ms) ? ms : undefined;
+    }
+    return undefined;
+  }
+
+  /**
+   * Sends a session update to the ACP client.
+   * If a message rewriter is configured, updates pass through it first
+   * (original messages are sent as-is, rewritten versions are appended).
+   */
+  protected async sendUpdate(update: SessionUpdate): Promise<void> {
+    if (this.ctx.messageRewriter) {
+      return this.ctx.messageRewriter.interceptUpdate(update);
+    }
     return this.ctx.sendUpdate(update);
   }
 

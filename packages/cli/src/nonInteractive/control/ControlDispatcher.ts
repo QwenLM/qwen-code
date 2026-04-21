@@ -14,7 +14,7 @@
  * which wraps these controllers with a stable programmatic API.
  *
  * Controllers:
- * - SystemController: initialize, interrupt, set_model, supported_commands
+ * - SystemController: initialize, interrupt, set_model, supported_commands, get_context_usage
  * - PermissionController: can_use_tool, set_permission_mode
  * - SdkMcpController: mcp_server_status (mcp_message handled via callback)
  * - HookController: hook_callback
@@ -38,6 +38,9 @@ import type {
   ControlResponse,
   ControlRequestPayload,
 } from '../types.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('CONTROL_DISPATCHER');
 
 /**
  * Tracks an incoming request from SDK awaiting CLI response
@@ -77,6 +80,8 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   private pendingOutgoingRequests: Map<string, PendingOutgoingRequest> =
     new Map();
 
+  private abortHandler: (() => void) | null = null;
+
   constructor(context: IControlContext) {
     this.context = context;
 
@@ -99,9 +104,10 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     // this.hookController = new HookController(context, this, 'HookController');
 
     // Listen for main abort signal
-    this.context.abortSignal.addEventListener('abort', () => {
+    this.abortHandler = () => {
       this.shutdown();
-    });
+    };
+    this.context.abortSignal.addEventListener('abort', this.abortHandler);
   }
 
   /**
@@ -135,11 +141,9 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     const pending = this.pendingOutgoingRequests.get(requestId);
     if (!pending) {
       // No pending request found - may have timed out or been cancelled
-      if (this.context.debugMode) {
-        console.error(
-          `[ControlDispatcher] No pending outgoing request for: ${requestId}`,
-        );
-      }
+      debugLogger.debug(
+        `[ControlDispatcher] No pending outgoing request for: ${requestId}`,
+      );
       return;
     }
 
@@ -181,11 +185,9 @@ export class ControlDispatcher implements IPendingRequestRegistry {
         this.deregisterIncomingRequest(requestId);
         this.sendErrorResponse(requestId, 'Request cancelled');
 
-        if (this.context.debugMode) {
-          console.error(
-            `[ControlDispatcher] Cancelled incoming request: ${requestId}`,
-          );
-        }
+        debugLogger.debug(
+          `[ControlDispatcher] Cancelled incoming request: ${requestId}`,
+        );
       }
     } else {
       // Cancel ALL pending incoming requests
@@ -199,11 +201,9 @@ export class ControlDispatcher implements IPendingRequestRegistry {
         }
       }
 
-      if (this.context.debugMode) {
-        console.error(
-          `[ControlDispatcher] Cancelled all ${requestIds.length} pending incoming requests`,
-        );
-      }
+      debugLogger.debug(
+        `[ControlDispatcher] Cancelled all ${requestIds.length} pending incoming requests`,
+      );
     }
   }
 
@@ -222,7 +222,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     const requestIds = Array.from(this.pendingOutgoingRequests.keys());
 
     if (this.context.debugMode) {
-      console.error(
+      debugLogger.debug(
         `[ControlDispatcher] Input closed, rejecting ${requestIds.length} pending outgoing requests`,
       );
     }
@@ -241,8 +241,12 @@ export class ControlDispatcher implements IPendingRequestRegistry {
    * Stops all pending requests and cleans up all controllers
    */
   shutdown(): void {
-    if (this.context.debugMode) {
-      console.error('[ControlDispatcher] Shutting down');
+    debugLogger.debug('[ControlDispatcher] Shutting down');
+
+    // Remove abort listener to prevent memory leak
+    if (this.abortHandler) {
+      this.context.abortSignal.removeEventListener('abort', this.abortHandler);
+      this.abortHandler = null;
     }
 
     // Cancel all incoming requests
@@ -354,18 +358,16 @@ export class ControlDispatcher implements IPendingRequestRegistry {
 
     while (this.pendingIncomingRequests.size > 0) {
       if (Date.now() - startTime > timeoutMs) {
-        if (this.context.debugMode) {
-          console.error(
-            `[ControlDispatcher] Timeout waiting for ${this.pendingIncomingRequests.size} pending incoming requests`,
-          );
-        }
+        debugLogger.warn(
+          `[ControlDispatcher] Timeout waiting for ${this.pendingIncomingRequests.size} pending incoming requests`,
+        );
         break;
       }
       await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
     }
 
-    if (this.context.debugMode && this.pendingIncomingRequests.size === 0) {
-      console.error('[ControlDispatcher] All incoming requests completed');
+    if (this.pendingIncomingRequests.size === 0) {
+      debugLogger.debug('[ControlDispatcher] All incoming requests completed');
     }
   }
 
@@ -378,6 +380,7 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       case 'interrupt':
       case 'set_model':
       case 'supported_commands':
+      case 'get_context_usage':
         return this.systemController;
 
       case 'can_use_tool':

@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { ReactNode } from 'react';
+import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type { Config, GitService, Logger } from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemWithoutId,
   HistoryItem,
+  HistoryItemBtw,
+  HistoryItemAwayRecap,
   ConfirmationRequest,
 } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -66,6 +68,20 @@ export interface CommandContext {
      * @param item The history item to display as pending, or `null` to clear.
      */
     setPendingItem: (item: HistoryItemWithoutId | null) => void;
+    /** The current btw side-question item rendered in the fixed bottom area. */
+    btwItem: HistoryItemBtw | null;
+    /** Sets the btw item independently of the main pendingItem. */
+    setBtwItem: (item: HistoryItemBtw | null) => void;
+    /** Cancels a pending btw (aborts the in-flight API call and clears the btw area). */
+    cancelBtw: () => void;
+    /** Ref to the btw AbortController, set by btwCommand so cancelBtw can abort it. */
+    btwAbortControllerRef: MutableRefObject<AbortController | null>;
+    /** The current away-recap item rendered as a sticky banner above the input box. */
+    awayRecapItem: HistoryItemAwayRecap | null;
+    /** Sets the away-recap item independently of the main history. */
+    setAwayRecapItem: (item: HistoryItemAwayRecap | null) => void;
+    /** Ref to whether the agent stream is currently idle (no model turn in flight). */
+    isIdleRef: MutableRefObject<boolean>;
     /**
      * Loads a new set of history items, replacing the current history.
      *
@@ -89,6 +105,8 @@ export interface CommandContext {
   };
   // Flag to indicate if an overwrite has been confirmed
   overwriteConfirmed?: boolean;
+  /** Abort signal for cancelling long-running slash command operations via ESC. */
+  abortSignal?: AbortSignal;
 }
 
 /**
@@ -137,16 +155,26 @@ export interface OpenDialogActionReturn {
 
   dialog:
     | 'help'
+    | 'arena_start'
+    | 'arena_select'
+    | 'arena_stop'
+    | 'arena_status'
     | 'auth'
     | 'theme'
     | 'editor'
     | 'settings'
+    | 'memory'
     | 'model'
+    | 'fast-model'
     | 'subagent_create'
     | 'subagent_list'
+    | 'trust'
     | 'permissions'
     | 'approval-mode'
-    | 'resume';
+    | 'resume'
+    | 'extensions_manage'
+    | 'hooks'
+    | 'mcp';
 }
 
 /**
@@ -166,6 +194,8 @@ export interface LoadHistoryActionReturn {
 export interface SubmitPromptActionReturn {
   type: 'submit_prompt';
   content: PartListUnion;
+  /** Optional callback invoked after the agent turn completes successfully. */
+  onComplete?: () => Promise<void>;
 }
 
 /**
@@ -207,7 +237,51 @@ export enum CommandKind {
   BUILT_IN = 'built-in',
   FILE = 'file',
   MCP_PROMPT = 'mcp-prompt',
+  SKILL = 'skill',
 }
+
+/**
+ * Execution mode for a slash command invocation.
+ * - interactive: React/Ink UI mode (terminal)
+ * - non_interactive: headless CLI mode (text/JSON output)
+ * - acp: ACP/Zed editor integration mode
+ */
+export type ExecutionMode = 'interactive' | 'non_interactive' | 'acp';
+
+/**
+ * The source of a slash command, used for Help grouping, completion badges,
+ * and ACP available-command metadata.
+ *
+ * Distinct from CommandKind: CommandKind drives loader logic (4 values);
+ * CommandSource drives display and user mental model (5+ values).
+ */
+export type CommandSource =
+  | 'builtin-command' // BuiltinCommandLoader
+  | 'bundled-skill' // BundledSkillLoader
+  | 'skill-dir-command' // FileCommandLoader (user/project, no extensionName)
+  | 'plugin-command' // FileCommandLoader (extension, extensionName set)
+  | 'mcp-prompt'; // McpPromptLoader
+// Reserved for future loaders (not implemented in Phase 1):
+// | 'workflow-command'
+// | 'plugin-skill'
+// | 'dynamic-skill'
+
+/**
+ * The execution type of a slash command, describing *how* it runs.
+ *
+ * - prompt: Produces a submit_prompt — content is sent to the model.
+ *   Default supportedModes: all. Default modelInvocable: true.
+ *
+ * - local: Runs local logic with no React/Ink UI dependency.
+ *   Can return message, stream_messages, submit_prompt, tool, etc.
+ *   Default supportedModes: ['interactive'] — must explicitly declare
+ *   supportedModes to unlock other modes (mirrors Claude Code's
+ *   supportsNonInteractive: true pattern).
+ *
+ * - local-jsx: Depends on React/Ink UI (dialogs, JSX components, etc.).
+ *   Default supportedModes: ['interactive'] only.
+ */
+export type CommandType = 'prompt' | 'local' | 'local-jsx';
 
 export interface CommandCompletionItem {
   value: string;
@@ -221,11 +295,76 @@ export interface SlashCommand {
   altNames?: string[];
   description: string;
   hidden?: boolean;
+  /** Higher values win when slash completion candidates have comparable match quality. */
+  completionPriority?: number;
 
   kind: CommandKind;
 
   // Optional metadata for extension commands
   extensionName?: string;
+
+  // ── Phase 1: source & execution type ──────────────────────────────────
+  /**
+   * The source of this command. Set by the Loader, not by the command itself.
+   * Will replace CommandKind as the canonical source identifier in a future phase.
+   */
+  source?: CommandSource;
+
+  /**
+   * Human-readable source label for display in Help, completion badges, etc.
+   * - builtin-command → "Built-in"
+   * - bundled-skill   → "Skill"
+   * - skill-dir-command → "Custom"
+   * - plugin-command  → "Plugin: <extensionName>"
+   * - mcp-prompt      → "MCP: <serverName>"
+   * Set by the Loader; may be overridden by the command itself.
+   */
+  sourceLabel?: string;
+
+  /**
+   * How this command executes. Set by built-in command files (local/local-jsx)
+   * or by Loaders (prompt). Used by getEffectiveSupportedModes() to infer
+   * which execution modes are supported.
+   */
+  commandType?: CommandType;
+
+  // ── Phase 1: mode capability ───────────────────────────────────────────
+  /**
+   * Which execution modes this command is available in.
+   * Explicit declaration takes priority over commandType inference.
+   * See getEffectiveSupportedModes() in commandUtils.ts for the full logic.
+   */
+  supportedModes?: ExecutionMode[];
+
+  // ── Phase 1: visibility ────────────────────────────────────────────────
+  /**
+   * Whether users can invoke this command via a slash command.
+   * Defaults to true for all commands.
+   */
+  userInvocable?: boolean;
+
+  /**
+   * Whether the model can invoke this command via a tool call.
+   * Defaults to false. prompt-type commands (skills, file commands, MCP prompts)
+   * should be true. Built-in commands must always be false.
+   */
+  modelInvocable?: boolean;
+
+  // ── Phase 3 reserved: UX metadata (defined now, unused until Phase 3) ─
+  /**
+   * Argument hint shown after the command name in the completion menu.
+   * Example: "<model-id>" / "show|list|set <id>"
+   */
+  argumentHint?: string;
+
+  /**
+   * Describes when to use this command — injected into the model-visible
+   * description for modelInvocable commands.
+   */
+  whenToUse?: string;
+
+  /** Usage examples shown in Help and completion. */
+  examples?: string[];
 
   // The action to run. Optional for parent commands that only group sub-commands.
   action?: (

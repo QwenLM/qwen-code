@@ -4,16 +4,16 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## General
 
-| Shortcut    | Description                                                                                                           |
-| ----------- | --------------------------------------------------------------------------------------------------------------------- |
-| `Esc`       | Close dialogs and suggestions.                                                                                        |
-| `Ctrl+C`    | Cancel the ongoing request and clear the input. Press twice to exit the application.                                  |
-| `Ctrl+D`    | Exit the application if the input is empty. Press twice to confirm.                                                   |
-| `Ctrl+L`    | Clear the screen.                                                                                                     |
-| `Ctrl+O`    | Toggle the display of the debug console.                                                                              |
-| `Ctrl+S`    | Allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output. |
-| `Ctrl+T`    | Toggle the display of tool descriptions.                                                                              |
-| `Shift+Tab` | Cycle approval modes (`plan` → `default` → `auto-edit` → `yolo`).                                                     |
+| Shortcut                       | Description                                                                                                           |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `Esc`                          | Close dialogs and suggestions.                                                                                        |
+| `Ctrl+C`                       | Cancel the ongoing request and clear the input. Press twice to exit the application.                                  |
+| `Ctrl+D`                       | Exit the application if the input is empty. Press twice to confirm.                                                   |
+| `Ctrl+L`                       | Clear the screen.                                                                                                     |
+| `Ctrl+O`                       | Toggle compact mode (hide/show tool output and thinking).                                                             |
+| `Ctrl+S`                       | Allows long responses to print fully, disabling truncation. Use your terminal's scrollback to view the entire output. |
+| `Ctrl+T`                       | Toggle the display of tool descriptions.                                                                              |
+| `Shift+Tab` (`Tab` on Windows) | Cycle approval modes (`plan` → `default` → `auto-edit` → `yolo`)                                                      |
 
 ## Input Prompt
 
@@ -40,9 +40,10 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+N`                                           | Navigate down through the input history.                                                                                            |
 | `Ctrl+P`                                           | Navigate up through the input history.                                                                                              |
 | `Ctrl+R`                                           | Reverse search through input/shell history.                                                                                         |
+| `Ctrl+Y`                                           | Retry the last failed request.                                                                                                      |
 | `Ctrl+Right Arrow` / `Meta+Right Arrow` / `Meta+F` | Move the cursor one word to the right.                                                                                              |
 | `Ctrl+U`                                           | Delete from the cursor to the beginning of the line.                                                                                |
-| `Ctrl+V`                                           | Paste clipboard content. If the clipboard contains an image, it will be saved and a reference to it will be inserted in the prompt. |
+| `Ctrl+V` (Windows: `Alt+V`)                        | Paste clipboard content. If the clipboard contains an image, it will be saved and a reference to it will be inserted in the prompt. |
 | `Ctrl+W` / `Meta+Backspace` / `Ctrl+Backspace`     | Delete the word to the left of the cursor.                                                                                          |
 | `Ctrl+X` / `Meta+Enter`                            | Open the current input in an external editor.                                                                                       |
 

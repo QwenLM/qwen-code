@@ -90,14 +90,10 @@ describe('InstallationManager', () => {
       readSpy.mockImplementationOnce(() => {
         throw new Error('Read error');
       });
-      const consoleErrorSpy = vi
-        .spyOn(console, 'error')
-        .mockImplementation(() => {});
 
       const id = installationManager.getInstallationId();
 
       expect(id).toBe('123456789');
-      expect(consoleErrorSpy).toHaveBeenCalled();
     });
   });
 });

@@ -5,7 +5,7 @@
  */
 
 /**
- * Converter for Gemini CLI extensions to Qwen Code format.
+ * Converter for Gemini extensions to Qwen Code format.
  */
 
 import * as fs from 'node:fs';
@@ -15,6 +15,9 @@ import type { ExtensionConfig } from './extensionManager.js';
 import type { ExtensionSetting } from './extensionSettings.js';
 import { ExtensionStorage } from './storage.js';
 import { convertTomlToMarkdown } from '../utils/toml-to-markdown-converter.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('GEMINI_CONVERTER');
 
 export interface GeminiExtensionConfig {
   name: string;
@@ -25,7 +28,7 @@ export interface GeminiExtensionConfig {
 }
 
 /**
- * Converts a Gemini CLI extension config to Qwen Code format.
+ * Converts a Gemini extension config to Qwen Code format.
  * @param extensionDir Path to the Gemini extension directory
  * @returns Qwen ExtensionConfig
  */
@@ -127,9 +130,24 @@ export async function copyDirectory(
 
     if (entry.isDirectory()) {
       await copyDirectory(sourcePath, destPath);
-    } else {
+    } else if (entry.isSymbolicLink()) {
+      // Resolve symlink and copy the target content
+      try {
+        const realPath = fs.realpathSync(sourcePath);
+        const targetStat = fs.statSync(realPath);
+        if (targetStat.isDirectory()) {
+          await copyDirectory(realPath, destPath);
+        } else if (targetStat.isFile()) {
+          fs.copyFileSync(realPath, destPath);
+        }
+        // Skip sockets, FIFOs, etc.
+      } catch {
+        // Skip broken symlinks
+      }
+    } else if (entry.isFile()) {
       fs.copyFileSync(sourcePath, destPath);
     }
+    // Skip sockets, FIFOs, block devices, and character devices
   }
 }
 
@@ -165,7 +183,7 @@ async function convertCommandsDirectory(commandsDir: string): Promise<void> {
       // Delete original TOML file
       fs.unlinkSync(tomlPath);
     } catch (error) {
-      console.warn(
+      debugLogger.warn(
         `Warning: Failed to convert command file ${relativeFile}: ${error instanceof Error ? error.message : String(error)}`,
       );
       // Continue with other files even if one fails

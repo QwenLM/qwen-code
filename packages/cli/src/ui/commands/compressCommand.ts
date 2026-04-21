@@ -17,9 +17,12 @@ export const compressCommand: SlashCommand = {
     return t('Compresses the context by replacing it with a summary.');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context) => {
     const { ui } = context;
     const executionMode = context.executionMode ?? 'interactive';
+    const abortSignal = context.abortSignal;
 
     if (executionMode === 'interactive' && ui.pendingItem) {
       ui.addItem(
@@ -96,6 +99,10 @@ export const compressCommand: SlashCommand = {
 
       const compressed = await doCompress();
 
+      if (abortSignal?.aborted) {
+        return;
+      }
+
       if (!compressed) {
         if (executionMode === 'interactive') {
           ui.addItem(
@@ -137,6 +144,10 @@ export const compressCommand: SlashCommand = {
         content: `Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).`,
       };
     } catch (e) {
+      // If cancelled via ESC, don't show error — cancelSlashCommand already handled UI
+      if (abortSignal?.aborted) {
+        return;
+      }
       if (executionMode === 'interactive') {
         ui.addItem(
           {

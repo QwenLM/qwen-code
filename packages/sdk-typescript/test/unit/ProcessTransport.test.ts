@@ -20,6 +20,7 @@ vi.mock('../../src/utils/cliPath.js');
 vi.mock('../../src/utils/jsonLines.js');
 
 const mockSpawn = vi.mocked(childProcess.spawn);
+const mockFork = vi.mocked(childProcess.fork);
 const mockPrepareSpawnInfo = vi.mocked(cliPath.prepareSpawnInfo);
 const mockParseJsonLinesStream = vi.mocked(jsonLines.parseJsonLinesStream);
 
@@ -75,6 +76,10 @@ describe('ProcessTransport', () => {
   beforeEach(() => {
     vi.clearAllMocks();
 
+    // Clean up environment variables for FORK_MODE tests
+    delete process.env.FORK_MODE;
+    delete (process.versions as { electron?: string }).electron;
+
     const mockWriteFn = vi.fn((chunk, encoding, callback) => {
       if (typeof callback === 'function') callback();
       return true;
@@ -115,6 +120,32 @@ describe('ProcessTransport', () => {
   });
 
   describe('Construction and Initialization', () => {
+    it('should not add one process exit listener per transport instance', async () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+
+      const transports: ProcessTransport[] = [];
+      const initialExitListeners = process.listeners('exit').length;
+
+      for (let i = 0; i < 12; i++) {
+        mockSpawn.mockReturnValue(createMockChildProcess());
+        transports.push(
+          new ProcessTransport({
+            pathToQwenExecutable: 'qwen',
+          }),
+        );
+      }
+
+      const finalExitListeners = process.listeners('exit').length;
+      expect(finalExitListeners - initialExitListeners).toBeLessThanOrEqual(1);
+
+      await Promise.all(transports.map((transport) => transport.close()));
+    });
+
     it('should create transport with required options', () => {
       mockPrepareSpawnInfo.mockReturnValue({
         command: 'qwen',
@@ -186,6 +217,136 @@ describe('ProcessTransport', () => {
           'web_search',
           '--auth-type',
           'api-key',
+        ]),
+        expect.any(Object),
+      );
+    });
+
+    it('should pass systemPrompt through --system-prompt', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        systemPrompt: 'You are a test system prompt.',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining([
+          '--system-prompt',
+          'You are a test system prompt.',
+        ]),
+        expect.any(Object),
+      );
+    });
+
+    it('should pass appendSystemPrompt through --append-system-prompt', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        appendSystemPrompt: 'Be extra concise.',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining(['--append-system-prompt', 'Be extra concise.']),
+        expect.any(Object),
+      );
+    });
+
+    it('should pass both systemPrompt and appendSystemPrompt when provided', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        systemPrompt: 'Override prompt',
+        appendSystemPrompt: 'Append prompt',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining([
+          '--system-prompt',
+          'Override prompt',
+          '--append-system-prompt',
+          'Append prompt',
+        ]),
+        expect.any(Object),
+      );
+    });
+
+    it('should include --resume argument when provided', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        resume: '123e4567-e89b-12d3-a456-426614174000',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining([
+          '--resume',
+          '123e4567-e89b-12d3-a456-426614174000',
+        ]),
+        expect.any(Object),
+      );
+    });
+
+    it('should include --session-id argument when sessionId is provided without resume', () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        sessionId: '123e4567-e89b-12d3-a456-426614174000',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.arrayContaining([
+          '--session-id',
+          '123e4567-e89b-12d3-a456-426614174000',
         ]),
         expect.any(Object),
       );
@@ -837,17 +998,19 @@ describe('ProcessTransport', () => {
       });
       mockSpawn.mockReturnValue(mockChildProcess);
 
-      const processOnSpy = vi.spyOn(process, 'on');
+      const initialExitListeners = process.listeners('exit').length;
 
       const options: TransportOptions = {
         pathToQwenExecutable: 'qwen',
       };
 
-      new ProcessTransport(options);
+      const transport = new ProcessTransport(options);
 
-      expect(processOnSpy).toHaveBeenCalledWith('exit', expect.any(Function));
+      const finalExitListeners = process.listeners('exit').length;
+      expect(finalExitListeners).toBeGreaterThanOrEqual(initialExitListeners);
+      expect(finalExitListeners).toBeLessThanOrEqual(initialExitListeners + 1);
 
-      processOnSpy.mockRestore();
+      void transport.close();
     });
 
     it('should remove event listeners on close', async () => {
@@ -859,7 +1022,7 @@ describe('ProcessTransport', () => {
       });
       mockSpawn.mockReturnValue(mockChildProcess);
 
-      const processOffSpy = vi.spyOn(process, 'off');
+      const initialExitListeners = process.listeners('exit').length;
 
       const options: TransportOptions = {
         pathToQwenExecutable: 'qwen',
@@ -869,9 +1032,41 @@ describe('ProcessTransport', () => {
 
       await transport.close();
 
-      expect(processOffSpy).toHaveBeenCalledWith('exit', expect.any(Function));
+      expect(process.listeners('exit').length).toBe(initialExitListeners);
+    });
 
-      processOffSpy.mockRestore();
+    it('should terminate all active child processes from the global exit handler', async () => {
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+
+      const childA = createMockChildProcess();
+      const childB = createMockChildProcess();
+      mockSpawn.mockReturnValueOnce(childA).mockReturnValueOnce(childB);
+
+      const transportA = new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+      });
+      const transportB = new ProcessTransport({
+        pathToQwenExecutable: 'qwen',
+      });
+
+      (
+        ProcessTransport as unknown as {
+          globalProcessExitHandler: () => void;
+        }
+      ).globalProcessExitHandler();
+
+      expect(childA.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(childA.kill).toHaveBeenCalledWith('SIGKILL');
+      expect(childB.kill).toHaveBeenCalledWith('SIGTERM');
+      expect(childB.kill).toHaveBeenCalledWith('SIGKILL');
+
+      await transportA.close();
+      await transportB.close();
     });
 
     it('should register abort listener', () => {
@@ -1381,6 +1576,317 @@ describe('ProcessTransport', () => {
       const transport = new ProcessTransport(options);
 
       expect(transport.getOutputStream()).toBeUndefined();
+    });
+  });
+
+  describe('Fork Mode', () => {
+    it('should use fork when FORK_MODE=1', () => {
+      process.env.FORK_MODE = '1';
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'node',
+        args: ['/path/to/cli.js'],
+        type: 'node',
+        originalInput: 'node /path/to/cli.js',
+      });
+      mockFork.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockFork).toHaveBeenCalledTimes(1);
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('should use spawn when FORK_MODE is not set', () => {
+      // process.env.FORK_MODE is not set
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockSpawn).toHaveBeenCalledTimes(1);
+      expect(mockFork).not.toHaveBeenCalled();
+    });
+
+    it('should pass correct modulePath to fork', () => {
+      process.env.FORK_MODE = '1';
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'node',
+        args: ['/path/to/cli.js'],
+        type: 'node',
+        originalInput: 'node /path/to/cli.js',
+      });
+      mockFork.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+      };
+
+      new ProcessTransport(options);
+
+      // In non-Electron environment, JS file is used as modulePath
+      // and execPath is set to the runtime (node)
+      expect(mockFork).toHaveBeenCalledWith(
+        '/path/to/cli.js', // modulePath is the JS file
+        expect.arrayContaining([]),
+        expect.objectContaining({
+          execPath: 'node',
+        }),
+      );
+    });
+
+    it('should configure stdio with ipc channel for fork', () => {
+      process.env.FORK_MODE = '1';
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'node',
+        args: ['/path/to/cli.js'],
+        type: 'node',
+        originalInput: 'node /path/to/cli.js',
+      });
+      mockFork.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockFork).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          stdio: ['pipe', 'pipe', 'ignore', 'ipc'], // 4th element is ipc
+        }),
+      );
+    });
+
+    it('should configure stdio with pipe for stderr when debug mode is on', () => {
+      process.env.FORK_MODE = '1';
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'node',
+        args: ['/path/to/cli.js'],
+        type: 'node',
+        originalInput: 'node /path/to/cli.js',
+      });
+      mockFork.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        debug: true,
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockFork).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          stdio: ['pipe', 'pipe', 'pipe', 'ipc'], // stderr is also pipe
+        }),
+      );
+    });
+
+    it('should handle Electron environment with JS file execution', () => {
+      process.env.FORK_MODE = '1';
+      (process.versions as { electron?: string }).electron = '28.0.0';
+
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: '/path/to/Electron.app/Contents/MacOS/Electron',
+        args: ['/path/to/cli.js', '--some-arg'],
+        type: 'node',
+        originalInput: 'electron /path/to/cli.js',
+      });
+      mockFork.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+      };
+
+      new ProcessTransport(options);
+
+      // In Electron environment, should extract cli.js as modulePath
+      expect(mockFork).toHaveBeenCalledWith(
+        '/path/to/cli.js',
+        expect.arrayContaining(['--some-arg']),
+        expect.any(Object),
+      );
+    });
+
+    it('should handle normal JS execution in non-Electron environment', () => {
+      process.env.FORK_MODE = '1';
+      // process.versions.electron is not set
+
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'node',
+        args: ['/path/to/cli.js', '--some-arg'],
+        type: 'node',
+        originalInput: 'node /path/to/cli.js',
+      });
+      mockFork.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+      };
+
+      new ProcessTransport(options);
+
+      // In normal Node.js, JS file is used as modulePath
+      // and execPath is set to the runtime (node)
+      expect(mockFork).toHaveBeenCalledWith(
+        '/path/to/cli.js',
+        expect.arrayContaining(['--some-arg']),
+        expect.objectContaining({
+          execPath: 'node',
+        }),
+      );
+    });
+
+    it('should pass env to fork', () => {
+      process.env.FORK_MODE = '1';
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'node',
+        args: ['/path/to/cli.js'],
+        type: 'node',
+        originalInput: 'node /path/to/cli.js',
+      });
+      mockFork.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        env: { CUSTOM_VAR: 'value' },
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockFork).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          env: expect.objectContaining({
+            CUSTOM_VAR: 'value',
+            FORK_MODE: '1',
+          }),
+        }),
+      );
+    });
+
+    it('should pass cwd to fork', () => {
+      process.env.FORK_MODE = '1';
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'node',
+        args: ['/path/to/cli.js'],
+        type: 'node',
+        originalInput: 'node /path/to/cli.js',
+      });
+      mockFork.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        cwd: '/custom/workdir',
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockFork).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          cwd: '/custom/workdir',
+        }),
+      );
+    });
+
+    it('should pass abort signal to fork', () => {
+      process.env.FORK_MODE = '1';
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'node',
+        args: ['/path/to/cli.js'],
+        type: 'node',
+        originalInput: 'node /path/to/cli.js',
+      });
+      mockFork.mockReturnValue(mockChildProcess);
+
+      const abortController = new AbortController();
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+        abortController,
+      };
+
+      new ProcessTransport(options);
+
+      expect(mockFork).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          signal: abortController.signal,
+        }),
+      );
+    });
+
+    it('should fallback to spawn for native type when FORK_MODE=1', () => {
+      process.env.FORK_MODE = '1';
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'qwen',
+        args: [],
+        type: 'native',
+        originalInput: 'qwen',
+      });
+      mockSpawn.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+      };
+
+      new ProcessTransport(options);
+
+      // Native type should fallback to spawn, not fork
+      expect(mockFork).not.toHaveBeenCalled();
+      expect(mockSpawn).toHaveBeenCalledWith(
+        'qwen',
+        expect.any(Array),
+        expect.objectContaining({
+          stdio: ['pipe', 'pipe', 'ignore'],
+        }),
+      );
+    });
+
+    it('should use fork for bun type with correct execPath when FORK_MODE=1', () => {
+      process.env.FORK_MODE = '1';
+      mockPrepareSpawnInfo.mockReturnValue({
+        command: 'bun',
+        args: ['/path/to/cli.js'],
+        type: 'bun',
+        originalInput: 'bun /path/to/cli.js',
+      });
+      mockFork.mockReturnValue(mockChildProcess);
+
+      const options: TransportOptions = {
+        pathToQwenExecutable: 'qwen',
+      };
+
+      new ProcessTransport(options);
+
+      // Bun type should use fork with execPath set to bun
+      expect(mockSpawn).not.toHaveBeenCalled();
+      expect(mockFork).toHaveBeenCalledWith(
+        '/path/to/cli.js',
+        expect.any(Array),
+        expect.objectContaining({
+          execPath: 'bun',
+        }),
+      );
     });
   });
 });

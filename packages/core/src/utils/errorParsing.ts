@@ -31,6 +31,14 @@ export function parseAndFormatApiError(
   authType?: AuthType,
 ): string {
   if (isStructuredError(error)) {
+    // Qwen OAuth quota errors have their own user-friendly message; don't wrap them
+    if (
+      error.message.startsWith('Qwen OAuth quota exceeded:') ||
+      error.message.startsWith('Qwen OAuth free tier has been discontinued')
+    ) {
+      return error.message;
+    }
+
     let text = `[API Error: ${error.message}]`;
     if (error.status === 429) {
       text += getRateLimitMessage(authType);
@@ -60,7 +68,10 @@ export function parseAndFormatApiError(
         } catch (_e) {
           // It's not a nested JSON error, so we just use the message as is.
         }
-        let text = `[API Error: ${finalMessage} (Status: ${parsedError.error.status})]`;
+        const statusText = parsedError.error.status
+          ? ` (Status: ${parsedError.error.status})`
+          : '';
+        let text = `[API Error: ${finalMessage}${statusText}]`;
         if (parsedError.error.code === 429) {
           text += getRateLimitMessage(authType);
         }

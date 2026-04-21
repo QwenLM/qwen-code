@@ -17,6 +17,9 @@ import type {
   ApiResponseEvent,
   ToolCallEvent,
 } from './types.js';
+import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
+
+export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
 export type UiEvent =
   | (ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE })
@@ -42,7 +45,12 @@ export interface ToolCallStats {
   };
 }
 
-export interface ModelMetrics {
+/**
+ * Per-model counters without the nested source breakdown. Used both as the
+ * aggregate `ModelMetrics` shape (via extension) and as the value type of the
+ * `bySource` map — keeping the type non-recursive.
+ */
+export interface ModelMetricsCore {
   api: {
     totalRequests: number;
     totalErrors: number;
@@ -56,6 +64,16 @@ export interface ModelMetrics {
     thoughts: number;
     tool: number;
   };
+}
+
+export interface ModelMetrics extends ModelMetricsCore {
+  /**
+   * Per-source breakdown. Keys are subagent names, or `MAIN_SOURCE` ("main")
+   * for calls originating from the main conversation. Every API call that
+   * increments an aggregate counter also increments the matching per-source
+   * record so the two views stay consistent.
+   */
+  bySource: Record<string, ModelMetricsCore>;
 }
 
 export interface SessionMetrics {
@@ -79,7 +97,7 @@ export interface SessionMetrics {
   };
 }
 
-const createInitialModelMetrics = (): ModelMetrics => ({
+const createInitialModelMetricsCore = (): ModelMetricsCore => ({
   api: {
     totalRequests: 0,
     totalErrors: 0,
@@ -93,6 +111,16 @@ const createInitialModelMetrics = (): ModelMetrics => ({
     thoughts: 0,
     tool: 0,
   },
+});
+
+// `bySource` keys are user-controlled subagent names. Using a prototype-free
+// map avoids crashes when a subagent is named after an inherited Object
+// member (e.g. `constructor`, `toString`, `hasOwnProperty`), which would
+// otherwise short-circuit `!bySource[name]` checks and return the inherited
+// prototype member as the "bucket".
+const createInitialModelMetrics = (): ModelMetrics => ({
+  ...createInitialModelMetricsCore(),
+  bySource: Object.create(null) as Record<string, ModelMetricsCore>,
 });
 
 const createInitialMetrics = (): SessionMetrics => ({
@@ -119,6 +147,7 @@ const createInitialMetrics = (): SessionMetrics => ({
 export class UiTelemetryService extends EventEmitter {
   #metrics: SessionMetrics = createInitialMetrics();
   #lastPromptTokenCount = 0;
+  #lastCachedContentTokenCount = 0;
 
   addEvent(event: UiEvent) {
     switch (event['event.name']) {
@@ -158,12 +187,21 @@ export class UiTelemetryService extends EventEmitter {
     });
   }
 
+  getLastCachedContentTokenCount(): number {
+    return this.#lastCachedContentTokenCount;
+  }
+
+  setLastCachedContentTokenCount(count: number): void {
+    this.#lastCachedContentTokenCount = count;
+  }
+
   /**
    * Resets metrics to the initial state (used when resuming a session).
    */
   reset(): void {
     this.#metrics = createInitialMetrics();
     this.#lastPromptTokenCount = 0;
+    this.#lastCachedContentTokenCount = 0;
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
@@ -177,25 +215,48 @@ export class UiTelemetryService extends EventEmitter {
     return this.#metrics.models[modelName];
   }
 
+  private getOrCreateSourceMetrics(
+    modelMetrics: ModelMetrics,
+    source: string,
+  ): ModelMetricsCore {
+    if (!modelMetrics.bySource[source]) {
+      modelMetrics.bySource[source] = createInitialModelMetricsCore();
+    }
+    return modelMetrics.bySource[source];
+  }
+
   private processApiResponse(event: ApiResponseEvent) {
     const modelMetrics = this.getOrCreateModelMetrics(event.model);
+    const sourceMetrics = this.getOrCreateSourceMetrics(
+      modelMetrics,
+      event.subagent_name ?? MAIN_SOURCE,
+    );
 
-    modelMetrics.api.totalRequests++;
-    modelMetrics.api.totalLatencyMs += event.duration_ms;
+    for (const bucket of [modelMetrics, sourceMetrics]) {
+      bucket.api.totalRequests++;
+      bucket.api.totalLatencyMs += event.duration_ms;
 
-    modelMetrics.tokens.prompt += event.input_token_count;
-    modelMetrics.tokens.candidates += event.output_token_count;
-    modelMetrics.tokens.total += event.total_token_count;
-    modelMetrics.tokens.cached += event.cached_content_token_count;
-    modelMetrics.tokens.thoughts += event.thoughts_token_count;
-    modelMetrics.tokens.tool += event.tool_token_count;
+      bucket.tokens.prompt += event.input_token_count;
+      bucket.tokens.candidates += event.output_token_count;
+      bucket.tokens.total += event.total_token_count;
+      bucket.tokens.cached += event.cached_content_token_count;
+      bucket.tokens.thoughts += event.thoughts_token_count;
+      bucket.tokens.tool += event.tool_token_count;
+    }
   }
 
   private processApiError(event: ApiErrorEvent) {
     const modelMetrics = this.getOrCreateModelMetrics(event.model);
-    modelMetrics.api.totalRequests++;
-    modelMetrics.api.totalErrors++;
-    modelMetrics.api.totalLatencyMs += event.duration_ms;
+    const sourceMetrics = this.getOrCreateSourceMetrics(
+      modelMetrics,
+      event.subagent_name ?? MAIN_SOURCE,
+    );
+
+    for (const bucket of [modelMetrics, sourceMetrics]) {
+      bucket.api.totalRequests++;
+      bucket.api.totalErrors++;
+      bucket.api.totalLatencyMs += event.duration_ms;
+    }
   }
 
   private processToolCall(event: ToolCallEvent) {

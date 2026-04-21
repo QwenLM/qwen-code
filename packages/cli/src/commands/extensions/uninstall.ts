@@ -6,6 +6,7 @@
 
 import type { CommandModule } from 'yargs';
 import { getErrorMessage } from '../../utils/errors.js';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ExtensionManager } from '@qwen-code/qwen-code-core';
 import {
   requestConsentNonInteractive,
@@ -34,11 +35,11 @@ export async function handleUninstall(args: UninstallArgs) {
     });
     await extensionManager.refreshCache();
     await extensionManager.uninstallExtension(args.name, false);
-    console.log(
+    writeStdoutLine(
       t('Extension "{{name}}" successfully uninstalled.', { name: args.name }),
     );
   } catch (error) {
-    console.error(getErrorMessage(error));
+    writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }
 }

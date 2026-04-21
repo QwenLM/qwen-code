@@ -10,6 +10,10 @@ export interface TextMessage {
   role: 'user' | 'assistant' | 'thinking';
   content: string;
   timestamp: number;
+  kind?: 'image';
+  imagePath?: string;
+  imageSrc?: string;
+  imageMissing?: boolean;
   fileContext?: {
     fileName: string;
     filePath: string;
@@ -31,6 +35,8 @@ export const useMessageHandling = () => {
   const streamingMessageIndexRef = useRef<number | null>(null);
   // Track the index of the current aggregated thinking message
   const thinkingMessageIndexRef = useRef<number | null>(null);
+  // Preserve one stable timestamp for all message segments in the same turn.
+  const currentStreamTimestampRef = useRef<number | null>(null);
 
   /**
    * Add message
@@ -50,6 +56,9 @@ export const useMessageHandling = () => {
    * Start streaming response
    */
   const startStreaming = useCallback((timestamp?: number) => {
+    const resolvedTimestamp =
+      typeof timestamp === 'number' ? timestamp : Date.now();
+    currentStreamTimestampRef.current = resolvedTimestamp;
     // Create an assistant placeholder message immediately so tool calls won't jump before it
     setMessages((prev) => {
       // Record index of the placeholder to update on chunks
@@ -59,8 +68,8 @@ export const useMessageHandling = () => {
         {
           role: 'assistant',
           content: '',
-          // Use provided timestamp (from extension) to keep ordering stable
-          timestamp: typeof timestamp === 'number' ? timestamp : Date.now(),
+          // Use one stable turn timestamp so later split segments sort correctly.
+          timestamp: resolvedTimestamp,
         },
       ];
     });
@@ -85,7 +94,11 @@ export const useMessageHandling = () => {
         if (idx === null) {
           idx = next.length;
           streamingMessageIndexRef.current = idx;
-          next.push({ role: 'assistant', content: '', timestamp: Date.now() });
+          next.push({
+            role: 'assistant',
+            content: '',
+            timestamp: currentStreamTimestampRef.current ?? Date.now(),
+          });
         }
 
         if (idx < 0 || idx >= next.length) {
@@ -107,24 +120,18 @@ export const useMessageHandling = () => {
     streamingMessageIndexRef.current = null;
   }, []);
 
+  const breakThinkingSegment = useCallback(() => {
+    thinkingMessageIndexRef.current = null;
+  }, []);
+
   /**
    * End streaming response
    */
   const endStreaming = useCallback(() => {
-    // Finalize streaming; content already lives in the placeholder message
     setIsStreaming(false);
     streamingMessageIndexRef.current = null;
-    // Remove the thinking message if it exists (collapse thoughts)
-    setMessages((prev) => {
-      const idx = thinkingMessageIndexRef.current;
-      thinkingMessageIndexRef.current = null;
-      if (idx === null || idx < 0 || idx >= prev.length) {
-        return prev;
-      }
-      const next = prev.slice();
-      next.splice(idx, 1);
-      return next;
-    });
+    thinkingMessageIndexRef.current = null;
+    currentStreamTimestampRef.current = null;
   }, []);
 
   /**
@@ -168,7 +175,20 @@ export const useMessageHandling = () => {
         if (idx === null) {
           idx = next.length;
           thinkingMessageIndexRef.current = idx;
-          next.push({ role: 'thinking', content: '', timestamp: Date.now() });
+          // Use a timestamp just before the assistant placeholder so thinking
+          // sorts above the response text when messages are ordered by time.
+          const assistantIdx = streamingMessageIndexRef.current;
+          const assistantTs =
+            assistantIdx !== null &&
+            assistantIdx >= 0 &&
+            assistantIdx < next.length
+              ? next[assistantIdx].timestamp
+              : (currentStreamTimestampRef.current ?? Date.now());
+          next.push({
+            role: 'thinking',
+            content: '',
+            timestamp: assistantTs - 1,
+          });
         }
         if (idx >= 0 && idx < next.length) {
           const target = next[idx];
@@ -178,18 +198,10 @@ export const useMessageHandling = () => {
       });
     },
     clearThinking: () => {
-      setMessages((prev) => {
-        const idx = thinkingMessageIndexRef.current;
-        thinkingMessageIndexRef.current = null;
-        if (idx === null || idx < 0 || idx >= prev.length) {
-          return prev;
-        }
-        const next = prev.slice();
-        next.splice(idx, 1);
-        return next;
-      });
+      thinkingMessageIndexRef.current = null;
     },
     breakAssistantSegment,
+    breakThinkingSegment,
     setWaitingForResponse,
     clearWaitingForResponse,
     setMessages,
