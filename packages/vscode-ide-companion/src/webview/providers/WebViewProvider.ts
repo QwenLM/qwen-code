@@ -159,9 +159,15 @@ export class WebViewProvider {
                 e,
               );
             }
-          } else if (!synced && this.agentInitialized) {
-            // apiKey was cleared — treat as explicit de-auth signal.
-            // Clear persisted credentials so runtime state matches Settings.
+          } else if (
+            !synced &&
+            this.agentInitialized &&
+            e.affectsConfiguration('qwen-code.apiKey')
+          ) {
+            // Only de-auth when qwen-code.apiKey itself was cleared.
+            // Other auth-related settings (provider, codingPlanRegion) returning
+            // synced=false is normal for api-key providers — those are managed by
+            // the interactive auth flow, not VS Code Settings sync.
             const apiKey = vscode.workspace
               .getConfiguration('qwen-code')
               .get<string>('apiKey', '');

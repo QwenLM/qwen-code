@@ -900,6 +900,54 @@ describe('WebViewProvider settings sync', () => {
       (provider as unknown as { agentInitialized: boolean }).agentInitialized,
     ).toBe(false);
   });
+
+  it('does not de-auth when non-apiKey auth settings change on an api-key provider', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    // Simulate an already-initialized agent with api-key provider
+    (provider as unknown as { agentInitialized: boolean }).agentInitialized =
+      true;
+
+    // syncVSCodeSettingsToQwenConfig returns false — normal for api-key providers
+    vi.spyOn(
+      provider as unknown as {
+        syncVSCodeSettingsToQwenConfig: () => Promise<boolean>;
+      },
+      'syncVSCodeSettingsToQwenConfig',
+    ).mockResolvedValue(false);
+
+    // apiKey is empty because api-key providers don't use this VS Code setting
+    mockConfigGet.mockImplementation((key: string, defaultValue: unknown) => {
+      if (key === 'apiKey') {
+        return '';
+      }
+      if (key === 'provider') {
+        return 'api-key';
+      }
+      return defaultValue;
+    });
+
+    const configChangeHandler = mockConfigChangeHandlers.at(-1);
+    expect(configChangeHandler).toBeDefined();
+
+    // Changing codingPlanRegion should NOT trigger de-auth
+    await configChangeHandler?.(
+      createConfigChangeEvent('qwen-code', 'qwen-code.codingPlanRegion'),
+    );
+
+    expect(mockClearPersistedAuth).not.toHaveBeenCalled();
+
+    const agentManager = mockQwenAgentManagerInstances.at(-1);
+    expect(agentManager?.disconnect).not.toHaveBeenCalled();
+
+    // agentInitialized should remain true
+    expect(
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized,
+    ).toBe(true);
+  });
 });
 
 describe('WebViewProvider.createNewSession', () => {
