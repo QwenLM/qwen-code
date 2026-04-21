@@ -86,8 +86,8 @@ function renderExportContent(
 }
 
 /**
- * Export session to file with a native Save dialog.
- * Falls back to writing directly into cwd if the user cancels the dialog.
+ * Export session to file via a native Save dialog.
+ * Returns null if the user cancels the dialog.
  *
  * @param options.sessionId - The session to export
  * @param options.cwd - Working directory used as default save location

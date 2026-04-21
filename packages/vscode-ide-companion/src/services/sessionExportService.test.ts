@@ -17,6 +17,7 @@ const {
   mockToJsonl,
   mockGenerateExportFilename,
   mockWriteFile,
+  mockShowSaveDialog,
 } = vi.hoisted(() => ({
   mockLoadSession: vi.fn(),
   mockCollectSessionData: vi.fn(),
@@ -27,6 +28,7 @@ const {
   mockToJsonl: vi.fn(),
   mockGenerateExportFilename: vi.fn(),
   mockWriteFile: vi.fn(),
+  mockShowSaveDialog: vi.fn(),
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => {
@@ -60,6 +62,9 @@ vi.mock('node:fs/promises', () => ({
 vi.mock('vscode', () => ({
   Uri: {
     file: (fsPath: string) => ({ fsPath }),
+  },
+  window: {
+    showSaveDialog: mockShowSaveDialog,
   },
 }));
 
@@ -126,8 +131,9 @@ describe('sessionExportService', () => {
   });
 
   describe('exportSessionToFile', () => {
-    it('writes the exported session to the default CLI export path', async () => {
-      const expectedFilePath = path.join('/workspace', 'qwen-export.html');
+    it('writes the exported session to the user-chosen path', async () => {
+      const chosenPath = path.join('/workspace', 'qwen-export.html');
+      mockShowSaveDialog.mockResolvedValue({ fsPath: chosenPath });
 
       const result = await exportSessionToFile({
         sessionId: 'session-1',
@@ -141,15 +147,33 @@ describe('sessionExportService', () => {
       );
       expect(mockNormalizeSessionData).toHaveBeenCalled();
       expect(mockToHtml).toHaveBeenCalled();
+      expect(mockShowSaveDialog).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Export Session as HTML',
+        }),
+      );
       expect(mockWriteFile).toHaveBeenCalledWith(
-        expectedFilePath,
+        chosenPath,
         '<html>export</html>',
         'utf-8',
       );
       expect(result).toEqual({
         filename: 'qwen-export.html',
-        uri: { fsPath: expectedFilePath },
+        uri: { fsPath: chosenPath },
       });
+    });
+
+    it('returns null when the user cancels the save dialog', async () => {
+      mockShowSaveDialog.mockResolvedValue(undefined);
+
+      const result = await exportSessionToFile({
+        sessionId: 'session-1',
+        cwd: '/workspace',
+        format: 'html',
+      });
+
+      expect(result).toBeNull();
+      expect(mockWriteFile).not.toHaveBeenCalled();
     });
 
     it('throws when the target session cannot be loaded', async () => {
