@@ -140,6 +140,20 @@ describe('apiPreconnect', () => {
       expect(mockFetch).toHaveBeenCalledTimes(1);
     });
 
+    it('should retry when targetUrl was unavailable on first call', () => {
+      // First call: unknown authType, no resolvedBaseUrl → no targetUrl
+      preconnectApi('unknown-auth');
+      expect(mockFetch).not.toHaveBeenCalled();
+
+      // Second call: valid authType → should fire
+      preconnectApi('qwen-oauth');
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      expect(mockFetch).toHaveBeenCalledWith(
+        'https://coding.dashscope.aliyuncs.com',
+        expect.objectContaining({ method: 'HEAD' }),
+      );
+    });
+
     it('should handle fetch errors gracefully', async () => {
       mockFetch.mockRejectedValue(new Error('Network error'));
       // Should not throw

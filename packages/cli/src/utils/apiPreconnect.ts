@@ -125,22 +125,24 @@ export function preconnectApi(
   if (preconnectFired) {
     return;
   }
-  preconnectFired = true;
 
   // Check if disabled
   if (process.env['QWEN_CODE_DISABLE_PRECONNECT'] === '1') {
     debugLogger.debug('Preconnect disabled by environment variable');
+    preconnectFired = true;
     return;
   }
 
   // Check if in sandbox mode (process will restart, preconnect is ineffective)
   if (isInSandboxMode()) {
     debugLogger.debug('Skipping preconnect: sandbox mode detected');
+    preconnectFired = true;
     return;
   }
 
   // Check environment skip conditions (custom CA)
   if (shouldSkipPreconnect()) {
+    preconnectFired = true;
     return;
   }
 
@@ -148,6 +150,7 @@ export function preconnectApi(
   // pools, so warming undici's pool provides no benefit.
   if (detectRuntime() !== 'node') {
     debugLogger.debug('Skipping preconnect: unsupported runtime');
+    preconnectFired = true;
     return;
   }
 
@@ -158,6 +161,7 @@ export function preconnectApi(
     return;
   }
 
+  preconnectFired = true;
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
 
   // Use the same shared undici dispatcher that SDK clients will use,
