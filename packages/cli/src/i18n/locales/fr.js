@@ -1002,8 +1002,8 @@ export default {
   'Authentication complete. Returning to server details...':
     'Authentification terminée. Retour aux détails du serveur...',
   'Authentication successful.': 'Authentification réussie.',
-  'If the browser does not open, copy and paste this URL into your browser:':
-    "Si le navigateur ne s'ouvre pas, copiez et collez cette URL dans votre navigateur :",
+  'If the browser does not open, copy and paste this URL into your browser.':
+    "Si le navigateur ne s'ouvre pas, copiez et collez l'URL ci-dessus dans votre navigateur.",
   'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
     "Assurez-vous de copier l'URL COMPLÈTE - elle peut s'étendre sur plusieurs lignes.",
 

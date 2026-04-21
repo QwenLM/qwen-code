@@ -813,7 +813,10 @@ export class MCPOAuthProvider {
     );
 
     displayMessage({
-      key: 'If the browser does not open, copy and paste this URL into your browser:',
+      key: 'If the browser does not open, copy and paste this URL into your browser.',
+    });
+    displayMessage({
+      key: 'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.',
     });
     if (events) {
       // UI consumers render the URL from this event (as a clickable OSC 8
