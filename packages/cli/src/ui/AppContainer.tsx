@@ -761,6 +761,8 @@ export const AppContainer = (props: AppContainerProps) => {
     activePtyId,
     loopDetectionConfirmationRequest,
     pendingToolCalls,
+    streamingResponseLengthRef,
+    isReceivingContent,
   } = useGeminiStream(
     config.getGeminiClient(),
     historyManager.history,
@@ -2117,6 +2119,9 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Real-time token display
+      streamingResponseLengthRef,
+      isReceivingContent,
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,
@@ -2225,6 +2230,9 @@ export const AppContainer = (props: AppContainerProps) => {
       isFeedbackDialogOpen,
       // Per-task token tracking
       taskStartTokens,
+      // Real-time token display
+      streamingResponseLengthRef,
+      isReceivingContent,
       // Prompt suggestion
       promptSuggestion,
       dismissPromptSuggestion,

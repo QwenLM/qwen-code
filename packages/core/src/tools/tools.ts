@@ -499,6 +499,8 @@ export interface AgentResultDisplay {
   terminateReason?: string;
   result?: string;
   executionSummary?: AgentStatsSummary;
+  /** Real-time output-token count during execution, accumulated across subagent rounds. */
+  tokenCount?: number;
 
   // If the subagent is awaiting approval for a tool call,
   // this contains the confirmation details for inline UI rendering.

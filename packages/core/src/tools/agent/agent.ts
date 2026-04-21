@@ -49,6 +49,7 @@ import type {
   AgentFinishEvent,
   AgentErrorEvent,
   AgentApprovalRequestEvent,
+  AgentUsageEvent,
 } from '../../agents/runtime/agent-events.js';
 import { BuiltinAgentRegistry } from '../../subagents/builtin-agents.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -513,6 +514,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput,
       );
     });
+
+    // Track real-time token consumption from subagent API calls.
+    // Each USAGE_METADATA event carries per-round usage, so we accumulate
+    // output tokens across rounds.  We use candidatesTokenCount (output-only)
+    // to stay consistent with the main stream's chars/4 output-token estimate.
+    let accumulatedOutputTokens = 0;
+    this.eventEmitter.on(
+      AgentEventType.USAGE_METADATA,
+      (...args: unknown[]) => {
+        const event = args[0] as AgentUsageEvent;
+        const outputTokens = event.usage?.candidatesTokenCount ?? 0;
+        if (outputTokens > 0) {
+          accumulatedOutputTokens += outputTokens;
+          this.updateDisplay(
+            { tokenCount: accumulatedOutputTokens },
+            updateOutput,
+          );
+        }
+      },
+    );
 
     // Indicate when a tool call is waiting for approval
     this.eventEmitter.on(
