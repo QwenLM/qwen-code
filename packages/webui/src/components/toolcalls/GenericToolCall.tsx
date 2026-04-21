@@ -40,7 +40,7 @@ const CollapsibleOutput: FC<{ content: string }> = ({ content }) => {
             : undefined
         }
       >
-        <MarkdownRenderer content={content} />
+        <MarkdownRenderer content={content} enableFileLinks={false} />
       </div>
       {isLongContent && (
         <div className="flex justify-center border-t border-[var(--app-input-border)] pt-1">
