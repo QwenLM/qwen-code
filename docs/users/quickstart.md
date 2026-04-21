@@ -225,6 +225,7 @@ Here are the most important commands for daily use:
 | `qwen auth`           | Configure authentication from the terminal       | `qwen auth`                   |
 | `qwen auth status`    | Check current authentication status              | `qwen auth status`            |
 | `/help`               | Display help information for available commands  | `/help` or `/?`               |
+| `/self-evolve`        | Attempt one small safe repo improvement          | `/self-evolve`                |
 | `/compress`           | Replace chat history with summary to save Tokens | `/compress`                   |
 | `/clear`              | Clear terminal screen content                    | `/clear` (shortcut: `Ctrl+L`) |
 | `/theme`              | Change Qwen Code visual theme                    | `/theme`                      |

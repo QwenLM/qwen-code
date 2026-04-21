@@ -87,6 +87,13 @@ vi.mock('../ui/commands/extensionsCommand.js', () => ({
   extensionsCommand: {},
 }));
 vi.mock('../ui/commands/helpCommand.js', () => ({ helpCommand: {} }));
+vi.mock('../ui/commands/selfEvolveCommand.js', () => ({
+  selfEvolveCommand: {
+    name: 'self-evolve',
+    description: 'Self evolve command',
+    kind: 'BUILT_IN',
+  },
+}));
 vi.mock('../ui/commands/memoryCommand.js', () => ({ memoryCommand: {} }));
 vi.mock('../ui/commands/insightCommand.js', () => ({ insightCommand: {} }));
 vi.mock('../ui/commands/modelCommand.js', () => ({
@@ -185,6 +192,9 @@ describe('BuiltinCommandLoader', () => {
 
     const modelCmd = commands.find((c) => c.name === 'model');
     expect(modelCmd).toBeDefined();
+
+    const selfEvolveCmd = commands.find((c) => c.name === 'self-evolve');
+    expect(selfEvolveCmd).toBeDefined();
   });
 
   it('should include trust command when folder trust is enabled', async () => {

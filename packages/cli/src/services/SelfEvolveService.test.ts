@@ -1,0 +1,284 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Config, GitWorktreeService } from '@qwen-code/qwen-code-core';
+import { SelfEvolveService } from './SelfEvolveService.js';
+
+function ok(command: string, cwd: string, stdout = '') {
+  return {
+    command,
+    cwd,
+    exitCode: 0,
+    stdout,
+    stderr: '',
+    timedOut: false,
+  };
+}
+
+describe('SelfEvolveService', () => {
+  let tempDir: string;
+  let projectDir: string;
+  let projectRuntimeDir: string;
+  let attemptWorktreePath: string;
+  let reviewWorktreePath: string;
+  let mockConfig: Config;
+
+  beforeEach(async () => {
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'self-evolve-'));
+    projectDir = path.join(tempDir, 'repo');
+    projectRuntimeDir = path.join(tempDir, 'runtime-project');
+    attemptWorktreePath = path.join(tempDir, 'attempt-worktree');
+    reviewWorktreePath = path.join(tempDir, 'review-worktree');
+    await fs.mkdir(projectDir, { recursive: true });
+    await fs.mkdir(projectRuntimeDir, { recursive: true });
+    await fs.mkdir(path.join(projectDir, 'src'), { recursive: true });
+    await fs.writeFile(
+      path.join(projectDir, 'package.json'),
+      JSON.stringify({ name: 'test-repo' }, null, 2),
+    );
+    await fs.writeFile(
+      path.join(projectDir, 'src', 'feature.ts'),
+      '// TODO: tighten the helper\nexport const answer = 42;\n',
+    );
+
+    mockConfig = {
+      getProjectRoot: () => projectDir,
+      storage: {
+        getProjectDir: () => projectRuntimeDir,
+      },
+    } as unknown as Config;
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('promotes a validated attempt into a clean review branch', async () => {
+    await fs.mkdir(path.join(attemptWorktreePath, '.qwen'), { recursive: true });
+    await fs.mkdir(reviewWorktreePath, { recursive: true });
+
+    const setupWorktrees = vi.fn().mockResolvedValue({
+      success: true,
+      worktreesByName: {
+        attempt: {
+          path: attemptWorktreePath,
+          branch: 'main-attempt',
+        },
+      },
+    });
+    const createWorktree = vi.fn().mockResolvedValue({
+      success: true,
+      worktree: {
+        path: reviewWorktreePath,
+        branch: 'self-evolve/review',
+      },
+    });
+    const removeWorktree = vi.fn().mockResolvedValue({ success: true });
+    const cleanupSession = vi.fn().mockResolvedValue({ success: true });
+
+    const runCommand = vi.fn(
+      async (cwd: string, command: string, args: string[]) => {
+        const joined = `${command} ${args.join(' ')}`;
+        if (joined === 'git rev-parse --abbrev-ref HEAD') {
+          return ok(joined, cwd, 'main\n');
+        }
+        if (joined === 'git ls-files') {
+          return ok(joined, cwd, 'package.json\nsrc/feature.ts\n');
+        }
+        if (joined === 'git ls-files --others --exclude-standard') {
+          return ok(joined, cwd, '');
+        }
+        if (joined === 'git status --short') {
+          return ok(joined, cwd, 'M src/feature.ts\n');
+        }
+        if (joined === 'git add --all') {
+          return ok(joined, cwd);
+        }
+        if (joined.startsWith('git commit --no-verify -m ')) {
+          return ok(joined, cwd, '[branch] commit\n');
+        }
+        if (joined === 'git rev-parse HEAD' && cwd === attemptWorktreePath) {
+          return ok(joined, cwd, 'attempt-sha\n');
+        }
+        if (joined === 'git cherry-pick attempt-sha') {
+          return ok(joined, cwd, '');
+        }
+        if (joined === 'git rev-parse HEAD' && cwd === reviewWorktreePath) {
+          return ok(joined, cwd, 'review-sha\n');
+        }
+        if (joined === 'git diff-tree --no-commit-id --name-only -r HEAD') {
+          return ok(joined, cwd, 'src/feature.ts\n');
+        }
+        throw new Error(`Unexpected command: ${joined} @ ${cwd}`);
+      },
+    );
+
+    const runShellCommand = vi.fn(
+      async (cwd: string, command: string) => ok(command, cwd, ''),
+    );
+
+    const runQwenAttempt = vi.fn(
+      async ({ cwd }: { cwd: string }) => {
+        await fs.writeFile(
+          path.join(cwd, '.qwen', 'self-evolve-report.json'),
+          JSON.stringify(
+            {
+              status: 'success',
+              selectedTask: {
+                title: 'Address TODO in src/feature.ts:1',
+                source: 'todo-comment',
+                location: 'src/feature.ts:1',
+              },
+              summary: 'Tightened the helper around the TODO note.',
+              learnings: ['Kept the edit small and local.'],
+              validation: [{ command: 'npm run lint', summary: 'passed' }],
+              suggestedCommitMessage:
+                'fix(cli): tighten self-evolve TODO helper',
+              changedFiles: ['src/feature.ts'],
+            },
+            null,
+            2,
+          ),
+        );
+        return ok('qwen', cwd, 'done');
+      },
+    );
+
+    const service = new SelfEvolveService({
+      createWorktreeService: () =>
+        ({
+          setupWorktrees,
+          createWorktree,
+          removeWorktree,
+          cleanupSession,
+        }) as unknown as GitWorktreeService,
+      runCommand,
+      runShellCommand,
+      runQwenAttempt,
+    });
+
+    const result = await service.run(mockConfig);
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error('Expected success result');
+    }
+    expect(result.branch).toBe('self-evolve/review');
+    expect(result.commitSha).toBe('review-sha');
+    expect(result.changedFiles).toEqual(['src/feature.ts']);
+    expect(createWorktree).toHaveBeenCalledWith(
+      expect.stringContaining('-review'),
+      'review',
+      'main',
+    );
+    expect(removeWorktree).toHaveBeenCalledWith(reviewWorktreePath);
+    expect(cleanupSession).toHaveBeenCalledWith(
+      expect.stringContaining('-attempt'),
+    );
+  });
+
+  it('discards the isolated attempt and records learnings when validation fails', async () => {
+    await fs.mkdir(path.join(attemptWorktreePath, '.qwen'), { recursive: true });
+
+    const cleanupSession = vi.fn().mockResolvedValue({ success: true });
+    const runCommand = vi.fn(
+      async (cwd: string, command: string, args: string[]) => {
+        const joined = `${command} ${args.join(' ')}`;
+        if (joined === 'git rev-parse --abbrev-ref HEAD') {
+          return ok(joined, cwd, 'main\n');
+        }
+        if (joined === 'git ls-files') {
+          return ok(joined, cwd, 'package.json\nsrc/feature.ts\n');
+        }
+        if (joined === 'git ls-files --others --exclude-standard') {
+          return ok(joined, cwd, '');
+        }
+        throw new Error(`Unexpected command: ${joined}`);
+      },
+    );
+    const runShellCommand = vi.fn(
+      async (cwd: string, command: string) => {
+        if (cwd === projectDir) {
+          return ok(command, cwd, '');
+        }
+        return {
+          command,
+          cwd,
+          exitCode: 1,
+          stdout: '',
+          stderr: 'lint failed',
+          timedOut: false,
+        };
+      },
+    );
+
+    const runQwenAttempt = vi.fn(
+      async ({ cwd }: { cwd: string }) => {
+        await fs.writeFile(
+          path.join(cwd, '.qwen', 'self-evolve-report.json'),
+          JSON.stringify(
+            {
+              status: 'success',
+              selectedTask: {
+                title: 'Address TODO in src/feature.ts:1',
+                source: 'todo-comment',
+                location: 'src/feature.ts:1',
+              },
+              summary: 'Attempted the TODO fix.',
+              learnings: ['Validation matters.'],
+              validation: [{ command: 'npm run lint', summary: 'failed' }],
+            },
+            null,
+            2,
+          ),
+        );
+        return ok('qwen', cwd, 'done');
+      },
+    );
+
+    const service = new SelfEvolveService({
+      createWorktreeService: () =>
+        ({
+          setupWorktrees: vi.fn().mockResolvedValue({
+            success: true,
+            worktreesByName: {
+              attempt: {
+                path: attemptWorktreePath,
+                branch: 'main-attempt',
+              },
+            },
+          }),
+          createWorktree: vi.fn(),
+          removeWorktree: vi.fn(),
+          cleanupSession,
+        }) as unknown as GitWorktreeService,
+      runCommand,
+      runShellCommand,
+      runQwenAttempt,
+    });
+
+    const result = await service.run(mockConfig);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error('Expected failure result');
+    }
+    expect(result.summary).toBe(
+      'The isolated self-evolve change failed validation.',
+    );
+    expect(result.learnings).toContain('Validation failed: npm run lint');
+    expect(cleanupSession).toHaveBeenCalledWith(
+      expect.stringContaining('-attempt'),
+    );
+    const record = JSON.parse(await fs.readFile(result.recordPath, 'utf8'));
+    expect(record.summary).toBe(result.summary);
+  });
+});
