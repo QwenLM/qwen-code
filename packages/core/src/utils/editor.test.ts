@@ -462,7 +462,9 @@ describe('editor utils', () => {
           throw new Error(); // CLI not found
         });
         // Accept any path containing Zed.app
-        (existsSync as Mock).mockImplementation((path: string) => path.includes('Zed.app'));
+        (existsSync as Mock).mockImplementation((path: string) =>
+          path.includes('Zed.app'),
+        );
 
         const mockSpawnOn = vi.fn((event, cb) => {
           if (event === 'close') {
@@ -716,7 +718,9 @@ describe('editor utils', () => {
           throw new Error(); // CLI not found
         });
         // Accept any path containing Zed.app (the CLI check will be for Contents/MacOS/cli)
-        (existsSync as Mock).mockImplementation((path: string) => path.includes('Zed.app'));
+        (existsSync as Mock).mockImplementation((path: string) =>
+          path.includes('Zed.app'),
+        );
 
         const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
         expect(diffCommand).not.toBeNull();
@@ -759,7 +763,9 @@ describe('editor utils', () => {
           throw new Error(); // CLI not found
         });
         // Accept any path containing Zed.app
-        (existsSync as Mock).mockImplementation((path: string) => path.includes('Zed.app'));
+        (existsSync as Mock).mockImplementation((path: string) =>
+          path.includes('Zed.app'),
+        );
 
         const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
         expect(diffCommand).not.toBeNull();

@@ -5,9 +5,21 @@
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeEach,
+  afterEach,
+  afterAll,
+} from 'vitest';
 import type { HttpError } from './retry.js';
-import { retryWithBackoff } from './retry.js';
+import {
+  retryWithBackoff,
+  isTransientCapacityError,
+  isUnattendedMode,
+} from './retry.js';
 import { getErrorStatus } from './errors.js';
 import { setSimulate429 } from './testUtils.js';
 import { AuthType } from '../core/contentGenerator.js';
@@ -459,6 +471,447 @@ describe('retryWithBackoff', () => {
       // Should be called 3 times (2 failures + 1 success)
       expect(fn).toHaveBeenCalledTimes(3);
     });
+  });
+});
+
+describe('isTransientCapacityError', () => {
+  it('should return true for 429 errors', () => {
+    const error = { status: 429 };
+    expect(isTransientCapacityError(error)).toBe(true);
+  });
+
+  it('should return true for 529 errors', () => {
+    const error = { status: 529 };
+    expect(isTransientCapacityError(error)).toBe(true);
+  });
+
+  it('should return false for 500 errors', () => {
+    const error = { status: 500 };
+    expect(isTransientCapacityError(error)).toBe(false);
+  });
+
+  it('should return false for 400 errors', () => {
+    const error = { status: 400 };
+    expect(isTransientCapacityError(error)).toBe(false);
+  });
+
+  it('should return false for errors without status', () => {
+    expect(isTransientCapacityError(new Error('generic'))).toBe(false);
+    expect(isTransientCapacityError(null)).toBe(false);
+  });
+});
+
+describe('isUnattendedMode', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    delete process.env['QWEN_CODE_UNATTENDED_RETRY'];
+  });
+
+  afterAll(() => {
+    process.env = originalEnv;
+  });
+
+  it('should return true when QWEN_CODE_UNATTENDED_RETRY=1', () => {
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = '1';
+    expect(isUnattendedMode()).toBe(true);
+  });
+
+  it('should return true when QWEN_CODE_UNATTENDED_RETRY=true', () => {
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'true';
+    expect(isUnattendedMode()).toBe(true);
+  });
+
+  it('should return false when no env vars are set', () => {
+    expect(isUnattendedMode()).toBe(false);
+  });
+
+  it('should NOT activate on CI=true alone', () => {
+    process.env['CI'] = 'true';
+    expect(isUnattendedMode()).toBe(false);
+  });
+
+  it('should return false for non-matching values', () => {
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = '0';
+    expect(isUnattendedMode()).toBe(false);
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'false';
+    expect(isUnattendedMode()).toBe(false);
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = '';
+    expect(isUnattendedMode()).toBe(false);
+  });
+
+  it('should use strict matching consistent with parseBooleanEnvFlag', () => {
+    // Only 'true' and '1' are accepted — matches project convention
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'TRUE';
+    expect(isUnattendedMode()).toBe(false); // strict: not 'true'
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = ' 1 ';
+    expect(isUnattendedMode()).toBe(false); // strict: not '1'
+    process.env['QWEN_CODE_UNATTENDED_RETRY'] = 'yes';
+    expect(isUnattendedMode()).toBe(false);
+  });
+});
+
+describe('retryWithBackoff - persistent mode', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setSimulate429(false);
+    console.warn = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  it('should retry indefinitely for 429 errors in persistent mode', async () => {
+    // Fail 10 times with 429, then succeed
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 10) {
+        const error: HttpError = new Error('Rate limited');
+        error.status = 429;
+        throw error;
+      }
+      return 'success';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3, // Would normally fail after 3
+      initialDelayMs: 10,
+      persistentMode: true,
+    });
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toBe('success');
+    expect(fn).toHaveBeenCalledTimes(11); // 10 failures + 1 success
+  });
+
+  it('should retry indefinitely for 529 errors in persistent mode', async () => {
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 8) {
+        const error: HttpError = new Error('Overloaded');
+        error.status = 529;
+        throw error;
+      }
+      return 'success';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      persistentMode: true,
+    });
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toBe('success');
+    expect(fn).toHaveBeenCalledTimes(9);
+  });
+
+  it('should NOT retry indefinitely for 500 errors in persistent mode', async () => {
+    const fn = vi.fn(async () => {
+      const error: HttpError = new Error('Internal Server Error');
+      error.status = 500;
+      throw error;
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      persistentMode: true,
+    });
+
+    // eslint-disable-next-line vitest/valid-expect
+    const assertionPromise = expect(promise).rejects.toThrow(
+      'Internal Server Error',
+    );
+    await vi.runAllTimersAsync();
+    await assertionPromise;
+
+    // Should stop at maxAttempts for non-transient errors
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it('should cap single retry backoff at persistentMaxBackoffMs', async () => {
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 20) {
+        const error: HttpError = new Error('Rate limited');
+        error.status = 429;
+        throw error;
+      }
+      return 'success';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 100,
+      persistentMode: true,
+      persistentMaxBackoffMs: 5000, // 5 seconds cap for test
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // Jitter is re-capped, so no delay should exceed the cap itself
+    const delays = setTimeoutSpy.mock.calls.map((call) => call[1] as number);
+    for (const d of delays) {
+      expect(d).toBeLessThanOrEqual(5000 + 1); // cap + rounding tolerance
+    }
+  });
+
+  it('should call heartbeatFn during persistent retry waits', async () => {
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 2) {
+        const error: HttpError = new Error('Rate limited');
+        error.status = 429;
+        throw error;
+      }
+      return 'success';
+    });
+
+    const heartbeatFn = vi.fn();
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 100,
+      persistentMode: true,
+      heartbeatIntervalMs: 30, // Short interval for test
+      heartbeatFn,
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // Heartbeat should have been called at least once during waits > heartbeatInterval
+    expect(heartbeatFn).toHaveBeenCalled();
+    // Verify heartbeat info structure
+    const call = heartbeatFn.mock.calls[0][0];
+    expect(call).toHaveProperty('attempt');
+    expect(call).toHaveProperty('remainingMs');
+    expect(call).toHaveProperty('error');
+  });
+
+  it('should abort persistent retry when signal is aborted', async () => {
+    const controller = new AbortController();
+    const fn = vi.fn(async () => {
+      const error: HttpError = new Error('Rate limited');
+      error.status = 429;
+      throw error;
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 10000, // Long delay so abort happens during sleep
+      persistentMode: true,
+      heartbeatIntervalMs: 50,
+      signal: controller.signal,
+    });
+
+    // Abort after the first retry starts waiting
+    setTimeout(() => controller.abort(), 100);
+
+    // eslint-disable-next-line vitest/valid-expect
+    const assertionPromise = expect(promise).rejects.toThrow(
+      'Retry aborted by signal',
+    );
+    await vi.runAllTimersAsync();
+    await assertionPromise;
+  });
+
+  it('should respect shouldRetryOnError even in persistent mode', async () => {
+    // Caller explicitly says "don't retry 429" — persistent mode must obey
+    const fn = vi.fn(async () => {
+      const error: HttpError = new Error('Rate limited');
+      error.status = 429;
+      throw error;
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      persistentMode: true,
+      shouldRetryOnError: () => false, // force fast-fail
+    });
+
+    // eslint-disable-next-line vitest/valid-expect
+    const assertionPromise = expect(promise).rejects.toThrow('Rate limited');
+    await vi.runAllTimersAsync();
+    await assertionPromise;
+
+    // Should fail on first attempt — shouldRetryOnError trumps persistent mode
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it('should not infinite-loop when heartbeatIntervalMs is 0', async () => {
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 2) {
+        const error: HttpError = new Error('Rate limited');
+        error.status = 429;
+        throw error;
+      }
+      return 'success';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      persistentMode: true,
+      heartbeatIntervalMs: 0, // Would cause infinite loop without Math.max(1, ...)
+    });
+
+    await vi.runAllTimersAsync();
+    const result = await promise;
+
+    expect(result).toBe('success');
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it('should not affect normal mode behavior when persistentMode is false', async () => {
+    const fn = vi.fn(async () => {
+      const error: HttpError = new Error('Rate limited');
+      error.status = 429;
+      throw error;
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 10,
+      persistentMode: false,
+    });
+
+    // eslint-disable-next-line vitest/valid-expect
+    const assertionPromise = expect(promise).rejects.toThrow('Rate limited');
+    await vi.runAllTimersAsync();
+    await assertionPromise;
+
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe('retryWithBackoff - Retry-After handling in persistent mode', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+    setSimulate429(false);
+    console.warn = vi.fn();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  // Helper: create a 429 error with Retry-After header
+  function make429WithRetryAfter(seconds: number): HttpError {
+    const error: HttpError & { response: { headers: Record<string, string> } } =
+      Object.assign(new Error('Rate limited'), {
+        status: 429,
+        response: { headers: { 'retry-after': String(seconds) } },
+      });
+    return error;
+  }
+
+  it('should respect Retry-After and NOT cap at maxBackoff', async () => {
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 1) {
+        throw make429WithRetryAfter(600); // server says wait 10 minutes
+      }
+      return 'success';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 100,
+      persistentMode: true,
+      persistentMaxBackoffMs: 5000, // 5 seconds — Retry-After must NOT be capped to this
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // The first retry delay should be ~600s (600000ms), not 5s (5000ms)
+    const delays = setTimeoutSpy.mock.calls.map((call) => call[1] as number);
+    const firstRetryDelay = delays[0];
+    expect(firstRetryDelay).toBeGreaterThan(5000); // NOT capped at maxBackoff
+    expect(firstRetryDelay).toBeLessThanOrEqual(600 * 1000); // respects server value
+  });
+
+  it('should cap Retry-After at persistentCapMs', async () => {
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    let attempts = 0;
+    const fn = vi.fn(async () => {
+      attempts++;
+      if (attempts <= 1) {
+        throw make429WithRetryAfter(100); // server says wait 100s
+      }
+      return 'success';
+    });
+
+    const promise = retryWithBackoff(fn, {
+      maxAttempts: 3,
+      initialDelayMs: 100,
+      persistentMode: true,
+      persistentCapMs: 50_000, // absolute cap 50s — less than Retry-After
+    });
+
+    await vi.runAllTimersAsync();
+    await promise;
+
+    // Delay should be capped at persistentCapMs (50s), not the full 100s
+    const delays = setTimeoutSpy.mock.calls.map((call) => call[1] as number);
+    const firstRetryDelay = delays[0];
+    expect(firstRetryDelay).toBeLessThanOrEqual(50_000 + 1);
+  });
+
+  it('should NOT add jitter to Retry-After delays', async () => {
+    const setTimeoutSpy = vi.spyOn(global, 'setTimeout');
+    // Run multiple times to check for jitter variance
+    const observedDelays: number[] = [];
+
+    for (let run = 0; run < 5; run++) {
+      setTimeoutSpy.mockClear();
+      let attempts = 0;
+      const fn = vi.fn(async () => {
+        attempts++;
+        if (attempts <= 1) {
+          throw make429WithRetryAfter(10); // 10 seconds
+        }
+        return 'success';
+      });
+
+      const promise = retryWithBackoff(fn, {
+        maxAttempts: 3,
+        initialDelayMs: 100,
+        persistentMode: true,
+      });
+
+      await vi.runAllTimersAsync();
+      await promise;
+
+      const delays = setTimeoutSpy.mock.calls.map((call) => call[1] as number);
+      observedDelays.push(delays[0]);
+    }
+
+    // All delays should be exactly 10000ms — no jitter
+    for (const d of observedDelays) {
+      expect(d).toBe(10_000);
+    }
   });
 });
 
