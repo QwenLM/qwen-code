@@ -14,6 +14,7 @@ export interface WebSearchCliArgs {
   tavilyApiKey?: string;
   googleApiKey?: string;
   googleSearchEngineId?: string;
+  glmApiKey?: string;
   webSearchDefault?: string;
 }
 
@@ -72,6 +73,14 @@ export function buildWebSearchConfig(
         searchEngineId: googleEngineId,
       } as WebSearchProviderConfig);
     }
+
+    const glmKey = argv.glmApiKey || process.env['GLM_API_KEY'];
+    if (glmKey) {
+      providers.push({
+        type: 'glm',
+        apiKey: glmKey,
+      } as WebSearchProviderConfig);
+    }
   }
 
   // Step 2: DashScope auto-injection for qwen-oauth was removed when the
@@ -85,9 +94,10 @@ export function buildWebSearchConfig(
 
   // Step 4: Determine default provider
   // Priority: user explicit config > CLI arg > first available provider (tavily > google > dashscope)
-  const providerPriority: Array<'tavily' | 'google' | 'dashscope'> = [
+  const providerPriority: Array<'tavily' | 'google' | 'dashscope' | 'glm'> = [
     'tavily',
     'google',
+    'glm',
     'dashscope',
   ];
 

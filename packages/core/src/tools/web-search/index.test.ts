@@ -308,5 +308,82 @@ describe('WebSearchTool', () => {
 
       expect(description).toBe(' (Searching the web via tavily)');
     });
+
+    it('should return "glm" in getDescription when GLM is the default provider', () => {
+      const webSearchConfig: WebSearchConfig = {
+        provider: [{ type: 'glm', apiKey: 'test-key' }],
+        default: 'glm',
+      };
+
+      (
+        mockConfig.getWebSearchConfig as ReturnType<typeof vi.fn>
+      ).mockReturnValue(webSearchConfig);
+
+      const tool = new WebSearchTool(mockConfig);
+      const invocation = tool.build({ query: 'test query' });
+      expect(invocation.getDescription()).toBe(' (Searching the web via glm)');
+    });
+  });
+
+  describe('GLM provider execution', () => {
+    it('should execute search via GLM provider and return results', async () => {
+      const webSearchConfig: WebSearchConfig = {
+        provider: [{ type: 'glm', apiKey: 'test-key' }],
+        default: 'glm',
+      };
+
+      (
+        mockConfig.getWebSearchConfig as ReturnType<typeof vi.fn>
+      ).mockReturnValue(webSearchConfig);
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: async () => ({
+          id: 'id',
+          created: 0,
+          request_id: 'r',
+          search_result: [
+            {
+              title: 'GLM Result',
+              content: 'Some content from GLM.',
+              link: 'https://example.com/glm',
+              publish_date: '2026-04-01',
+            },
+          ],
+        }),
+      });
+
+      const tool = new WebSearchTool(mockConfig);
+      const invocation = tool.build({ query: 'test query' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toContain('GLM Result');
+      expect(result.llmContent).toContain('https://example.com/glm');
+      expect(result.error).toBeUndefined();
+    });
+
+    it('should fail gracefully when GLM API returns error', async () => {
+      const webSearchConfig: WebSearchConfig = {
+        provider: [{ type: 'glm', apiKey: 'bad-key' }],
+        default: 'glm',
+      };
+
+      (
+        mockConfig.getWebSearchConfig as ReturnType<typeof vi.fn>
+      ).mockReturnValue(webSearchConfig);
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: false,
+        status: 401,
+        text: async () => 'Unauthorized',
+      });
+
+      const tool = new WebSearchTool(mockConfig);
+      const invocation = tool.build({ query: 'test query' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error).toBeDefined();
+      expect(result.llmContent).toContain('Error during web search');
+    });
   });
 });

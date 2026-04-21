@@ -18,14 +18,13 @@ describe('web_search', () => {
     const hasGoogleKey =
       !!process.env['GOOGLE_API_KEY'] &&
       !!process.env['GOOGLE_SEARCH_ENGINE_ID'];
+    const hasGlmKey = !!process.env['GLM_API_KEY'];
 
     // Skip if no provider is configured
-    // Note: DashScope provider is automatically available for Qwen OAuth users,
-    // but we can't easily detect that in tests without actual OAuth credentials
-    if (!hasTavilyKey && !hasGoogleKey) {
+    if (!hasTavilyKey && !hasGoogleKey && !hasGlmKey) {
       console.warn(
         'Skipping web search test: No web search provider configured. ' +
-          'Set TAVILY_API_KEY or GOOGLE_API_KEY+GOOGLE_SEARCH_ENGINE_ID environment variables.',
+          'Set TAVILY_API_KEY, GOOGLE_API_KEY+GOOGLE_SEARCH_ENGINE_ID, or GLM_API_KEY environment variables.',
       );
       return;
     }
@@ -48,6 +47,9 @@ describe('web_search', () => {
         apiKey: process.env['GOOGLE_API_KEY'],
         searchEngineId: process.env['GOOGLE_SEARCH_ENGINE_ID'],
       });
+    }
+    if (hasGlmKey) {
+      providers.push({ type: 'glm', apiKey: process.env['GLM_API_KEY'] });
     }
 
     if (providers.length > 0) {

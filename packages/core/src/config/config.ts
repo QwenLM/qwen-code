@@ -407,7 +407,7 @@ export interface ConfigParameters {
   // Web search providers
   webSearch?: {
     provider: Array<{
-      type: 'tavily' | 'google' | 'dashscope';
+      type: 'tavily' | 'google' | 'dashscope' | 'glm';
       apiKey?: string;
       searchEngineId?: string;
     }>;
@@ -641,7 +641,7 @@ export class Config {
   private readonly importFormat: 'tree' | 'flat';
   private readonly webSearch?: {
     provider: Array<{
-      type: 'tavily' | 'google' | 'dashscope';
+      type: 'tavily' | 'google' | 'dashscope' | 'glm';
       apiKey?: string;
       searchEngineId?: string;
     }>;

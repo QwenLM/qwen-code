@@ -8,16 +8,17 @@ Use `web_search` to perform a web search and get information from the internet. 
 
 ### Supported Providers
 
-1. **DashScope** (Official) - Available when explicitly configured in settings (Qwen OAuth free tier auto-injection discontinued 2026-04-15)
+1. **DashScope** (Official) - Available when explicitly configured in settings
 2. **Tavily** - High-quality search API with built-in answer generation
 3. **Google Custom Search** - Google's Custom Search JSON API
+4. **GLM (ZhipuAI)** - ZhipuAI Web Search API with multiple engine options
 
 ### Arguments
 
 `web_search` takes two arguments:
 
 - `query` (string, required): The search query
-- `provider` (string, optional): Specific provider to use ("dashscope", "tavily", "google")
+- `provider` (string, optional): Specific provider to use ("dashscope", "tavily", "google", "glm")
   - If not specified, uses the default provider from configuration
 
 ## Configuration
@@ -36,6 +37,11 @@ Add to your `settings.json`:
         "type": "google",
         "apiKey": "your-google-api-key",
         "searchEngineId": "your-search-engine-id"
+      },
+      {
+        "type": "glm",
+        "apiKey": "your-zhipuai-api-key",
+        "searchEngine": "search_std"
       }
     ],
     "default": "dashscope"
@@ -45,10 +51,9 @@ Add to your `settings.json`:
 
 **Notes:**
 
-- DashScope doesn't require an API key (official, free service)
-- **Qwen OAuth users:** DashScope is automatically added to your provider list, even if not explicitly configured
-- Configure additional providers (Tavily, Google) if you want to use them alongside DashScope
-- Set `default` to specify which provider to use by default (if not set, priority order: Tavily > Google > DashScope)
+- DashScope requires an Aliyun API key configured via `DASHSCOPE_API_KEY` or explicitly in the provider config
+- Configure additional providers (Tavily, Google, GLM) if you want alternatives
+- Set `default` to specify which provider to use by default (if not set, priority order: Tavily > Google > GLM > DashScope)
 
 ### Method 2: Environment Variables
 
@@ -61,6 +66,9 @@ export TAVILY_API_KEY="tvly-xxxxx"
 # Google
 export GOOGLE_API_KEY="your-api-key"
 export GOOGLE_SEARCH_ENGINE_ID="your-engine-id"
+
+# GLM (ZhipuAI)
+export GLM_API_KEY="your-zhipuai-api-key"
 ```
 
 ### Method 3: Command Line Arguments
@@ -74,8 +82,11 @@ qwen --tavily-api-key tvly-xxxxx
 # Google
 qwen --google-api-key your-key --google-search-engine-id your-id
 
+# GLM (ZhipuAI)
+qwen --glm-api-key your-zhipuai-api-key
+
 # Specify default provider
-qwen --web-search-default tavily
+qwen --web-search-default glm
 ```
 
 ### Backward Compatibility (Deprecated)
@@ -132,11 +143,10 @@ web_search(query="best practices for React 19", provider="dashscope")
 
 ### DashScope (Official)
 
-- **Cost:** Free (requires Qwen OAuth credentials)
-- **Authentication:** Requires Qwen OAuth credentials
-- **Configuration:** Must be explicitly configured in `settings.json` web search providers (auto-injection for Qwen OAuth users was removed when the free tier was discontinued on 2026-04-15)
-- **Quota:** 200 requests/minute, 100 requests/day
-- **Best for:** General queries when you have Qwen OAuth credentials
+- **Cost:** Paid
+- **Configuration:** Must be explicitly configured in `settings.json` web search providers
+- **Rate limit:** 15 RPS (shared across all API keys under the same Aliyun account)
+- **Best for:** General queries
 
 ### Tavily
 
@@ -154,24 +164,41 @@ web_search(query="best practices for React 19", provider="dashscope")
 - **Features:** Google's search quality
 - **Best for:** Specific, factual queries
 
+### GLM (ZhipuAI)
+
+- **Cost:** Paid (see https://bigmodel.cn for pricing)
+- **Sign up:** https://bigmodel.cn
+- **Configuration:**
+  ```json
+  {
+    "type": "glm",
+    "apiKey": "your-zhipuai-api-key",
+    "searchEngine": "search_std",
+    "maxResults": 10,
+    "searchRecencyFilter": "noLimit",
+    "contentSize": "medium"
+  }
+  ```
+- **Search engines:** `search_std` (standard), `search_pro` (advanced), `search_pro_sogou` (Sogou), `search_pro_quark` (Quark)
+- **Features:** Intent recognition, multi-engine support, recency filter, domain whitelist
+- **Best for:** Chinese-language queries, access to Chinese web content
+
 ## Important Notes
 
 - **Response format:** Returns a concise answer with numbered source citations
 - **Citations:** Source links are appended as a numbered list: [1], [2], etc.
 - **Multiple providers:** If one provider fails, manually specify another using the `provider` parameter
-- **DashScope availability:** Automatically available for Qwen OAuth users, no configuration needed
 - **Default provider selection:** The system automatically selects a default provider based on availability:
   1. Your explicit `default` configuration (highest priority)
   2. CLI argument `--web-search-default`
-  3. First available provider by priority: Tavily > Google > DashScope
+  3. First available provider by priority: Tavily > Google > GLM > DashScope
 
 ## Troubleshooting
 
 **Tool not available?**
 
-- **For Qwen OAuth users:** The tool is automatically registered with DashScope provider, no configuration needed
-- **For other authentication types:** Ensure at least one provider (Tavily or Google) is configured
-- For Tavily/Google: Verify your API keys are correct
+- Ensure at least one provider (DashScope, Tavily, Google, or GLM) is configured in `settings.json`
+- For Tavily/Google/GLM: Verify your API keys are correct
 
 **Provider-specific errors?**
 

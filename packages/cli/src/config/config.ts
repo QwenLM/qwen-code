@@ -443,10 +443,14 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'string',
           description: 'Google Custom Search Engine ID',
         })
+        .option('glm-api-key', {
+          type: 'string',
+          description: 'ZhipuAI (GLM) API key for web search',
+        })
         .option('web-search-default', {
           type: 'string',
           description:
-            'Default web search provider (dashscope, tavily, google)',
+            'Default web search provider (dashscope, tavily, google, glm)',
         })
         .option('screen-reader', {
           type: 'boolean',

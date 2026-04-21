@@ -1601,7 +1601,7 @@ const SETTINGS_SCHEMA = {
     default: undefined as
       | {
           provider: Array<{
-            type: 'tavily' | 'google' | 'dashscope';
+            type: 'tavily' | 'google' | 'dashscope' | 'glm';
             apiKey?: string;
             searchEngineId?: string;
           }>;

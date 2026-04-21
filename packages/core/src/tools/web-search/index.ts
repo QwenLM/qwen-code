@@ -24,6 +24,7 @@ import { buildContentWithSources } from './utils.js';
 import { TavilyProvider } from './providers/tavily-provider.js';
 import { GoogleProvider } from './providers/google-provider.js';
 import { DashScopeProvider } from './providers/dashscope-provider.js';
+import { GlmProvider } from './providers/glm-provider.js';
 import type {
   WebSearchToolParams,
   WebSearchToolResult,
@@ -105,6 +106,8 @@ class WebSearchToolInvocation extends BaseToolInvocation<
         };
         return new DashScopeProvider(dashscopeConfig);
       }
+      case 'glm':
+        return new GlmProvider(config);
       default:
         throw new Error('Unknown provider type');
     }

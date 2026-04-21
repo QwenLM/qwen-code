@@ -147,10 +147,46 @@ export interface DashScopeProviderConfig {
 }
 
 /**
+ * Base configuration for GLM (ZhipuAI) web search provider.
+ */
+export interface GlmProviderConfig {
+  type: 'glm';
+  apiKey?: string;
+  /**
+   * Search engine to use. Defaults to 'search_std'.
+   * - search_std: 智谱基础版
+   * - search_pro: 智谱高阶版
+   * - search_pro_sogou: 搜狗
+   * - search_pro_quark: 夸克搜索
+   */
+  searchEngine?:
+    | 'search_std'
+    | 'search_pro'
+    | 'search_pro_sogou'
+    | 'search_pro_quark';
+  /** Number of results to return (1-50). Defaults to 10. */
+  maxResults?: number;
+  /** Whether to perform search intent recognition. Defaults to false. */
+  searchIntent?: boolean;
+  /** Filter results by recency. Defaults to 'noLimit'. */
+  searchRecencyFilter?:
+    | 'oneDay'
+    | 'oneWeek'
+    | 'oneMonth'
+    | 'oneYear'
+    | 'noLimit';
+  /** Control content length of returned results. */
+  contentSize?: 'medium' | 'high';
+  /** Restrict results to specific domains (whitelist). */
+  searchDomainFilter?: string;
+}
+
+/**
  * Discriminated union type for web search provider configurations.
  * This ensures type safety when working with different provider configs.
  */
 export type WebSearchProviderConfig =
   | TavilyProviderConfig
   | GoogleProviderConfig
-  | DashScopeProviderConfig;
+  | DashScopeProviderConfig
+  | GlmProviderConfig;
