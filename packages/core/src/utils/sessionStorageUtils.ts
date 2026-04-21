@@ -120,53 +120,108 @@ export function extractLastJsonStringField(
 }
 
 // ---------------------------------------------------------------------------
-// File I/O — read head and tail of a file
+// File I/O — tail-first scan with full-file fallback
 // ---------------------------------------------------------------------------
 
 /**
- * Reads the first and last LITE_READ_BUF_SIZE bytes of a file synchronously.
+ * Reads a JSON string field value from a JSONL file, returning the latest
+ * occurrence (last in file order).
  *
- * For small files where head covers the entire file, `tail === head`.
- * Returns `{ head: '', tail: '' }` on any error.
+ * Two-phase strategy:
+ *   1. Scan the last LITE_READ_BUF_SIZE bytes of the file; if the field is
+ *      present, return it immediately. This is the common path because
+ *      ChatRecordingService.finalize() re-appends metadata records to EOF
+ *      on every session lifecycle event, keeping the latest title near the
+ *      end of the file.
+ *   2. If the tail window has no match, stream the entire file in chunks
+ *      and return the last hit. This guarantees we never miss a record that
+ *      landed between the head and tail windows in a large file — a blind
+ *      spot the previous head+tail approach had.
+ *
+ * Phase 2 is a full-file scan and is intentionally slower; it is only paid
+ * when Phase 1 misses.
+ *
+ * Returns `undefined` on any I/O error or when the field is not found.
+ *
+ * @param lineContains Optional substring that must appear on the same line
+ *   as the matched field. See {@link extractLastJsonStringField}.
  */
-export function readHeadAndTailSync(filePath: string): {
-  head: string;
-  tail: string;
-} {
+export function readLastJsonStringFieldSync(
+  filePath: string,
+  key: string,
+  lineContains?: string,
+): string | undefined {
+  let fd: number | undefined;
   try {
     const stats = fs.statSync(filePath);
     const fileSize = stats.size;
-    if (fileSize === 0) return { head: '', tail: '' };
+    if (fileSize === 0) return undefined;
 
-    const fd = fs.openSync(filePath, 'r');
-    try {
-      const headLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
-      const headBuffer = Buffer.alloc(headLength);
-      const headBytesRead = fs.readSync(fd, headBuffer, 0, headLength, 0);
-      if (headBytesRead === 0) return { head: '', tail: '' };
+    fd = fs.openSync(filePath, 'r');
 
-      const head = headBuffer.toString('utf-8', 0, headBytesRead);
+    // Phase 1: tail window — fast path.
+    const tailLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
+    const tailOffset = fileSize - tailLength;
+    const tailBuffer = Buffer.alloc(tailLength);
+    const tailBytes = fs.readSync(fd, tailBuffer, 0, tailLength, tailOffset);
+    if (tailBytes > 0) {
+      const tailText = tailBuffer.toString('utf-8', 0, tailBytes);
+      const tailHit = extractLastJsonStringField(tailText, key, lineContains);
+      if (tailHit !== undefined) {
+        return tailHit;
+      }
+    }
 
-      const tailOffset = Math.max(0, fileSize - LITE_READ_BUF_SIZE);
-      let tail = head;
-      if (tailOffset > 0) {
-        const tailLength = Math.min(fileSize, LITE_READ_BUF_SIZE);
-        const tailBuffer = Buffer.alloc(tailLength);
-        const tailBytesRead = fs.readSync(
-          fd,
-          tailBuffer,
-          0,
-          tailLength,
-          tailOffset,
-        );
-        tail = tailBuffer.toString('utf-8', 0, tailBytesRead);
+    // If the whole file already fit in the tail window, there is nothing left
+    // to scan.
+    if (tailOffset === 0) return undefined;
+
+    // Phase 2: stream the whole file and return the last hit. Scanning from
+    // offset 0 (rather than [0, tailOffset)) avoids the edge case where a
+    // single record straddles the Phase 1/Phase 2 boundary — duplicate work
+    // on the tail bytes is harmless because we only care about the final
+    // match.
+    let lastHit: string | undefined;
+    let readOffset = 0;
+    let carry = '';
+    while (readOffset < fileSize) {
+      const toRead = Math.min(LITE_READ_BUF_SIZE, fileSize - readOffset);
+      const buf = Buffer.alloc(toRead);
+      const bytesRead = fs.readSync(fd, buf, 0, toRead, readOffset);
+      if (bytesRead === 0) break;
+      readOffset += bytesRead;
+
+      const chunk = carry + buf.toString('utf-8', 0, bytesRead);
+      const lastNewline = chunk.lastIndexOf('\n');
+      if (lastNewline < 0) {
+        // No newline yet — the entire chunk is a partial line; keep carrying.
+        carry = chunk;
+        continue;
       }
 
-      return { head, tail };
-    } finally {
-      fs.closeSync(fd);
+      const complete = chunk.slice(0, lastNewline + 1);
+      carry = chunk.slice(lastNewline + 1);
+
+      const hit = extractLastJsonStringField(complete, key, lineContains);
+      if (hit !== undefined) lastHit = hit;
     }
+
+    // Final trailing line without a newline terminator.
+    if (carry) {
+      const hit = extractLastJsonStringField(carry, key, lineContains);
+      if (hit !== undefined) lastHit = hit;
+    }
+
+    return lastHit;
   } catch {
-    return { head: '', tail: '' };
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // best-effort: we already have our result (or decided there is none)
+      }
+    }
   }
 }

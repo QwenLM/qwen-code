@@ -19,10 +19,7 @@ import type {
 } from './chatRecordingService.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import {
-  extractLastJsonStringField,
-  readHeadAndTailSync,
-} from '../utils/sessionStorageUtils.js';
+import { readLastJsonStringFieldSync } from '../utils/sessionStorageUtils.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -157,27 +154,17 @@ export class SessionService {
   }
 
   /**
-   * Reads the session title from a JSONL file using head+tail dual-read.
+   * Reads the session title from a JSONL file.
    *
-   * Uses string-level field extraction (no full JSON parse) for performance.
-   * Reads both the first and last 64KB of the file, then resolves title with
-   * priority: tail customTitle > head customTitle.
-   *
-   * This ensures:
-   * - The most recent title in the tail takes precedence
-   * - Titles near the start of the file are still found via head scan
+   * Delegates to {@link readLastJsonStringFieldSync}, which scans the tail
+   * window first (fast path; almost always hits because finalize() re-appends
+   * the title on every lifecycle event) and falls back to a full-file scan
+   * when the tail has no match. The `custom_title` line-marker guards against
+   * false matches from user content that happens to include a `customTitle`
+   * field.
    */
   private readSessionTitleFromFile(filePath: string): string | undefined {
-    const { head, tail } = readHeadAndTailSync(filePath);
-    if (!head) return undefined;
-
-    // Tail (most recent) wins over head (oldest).
-    // Only match on lines containing "custom_title" subtype to avoid false
-    // matches from user content that happens to include a "customTitle" field.
-    return (
-      extractLastJsonStringField(tail, 'customTitle', 'custom_title') ??
-      extractLastJsonStringField(head, 'customTitle', 'custom_title')
-    );
+    return readLastJsonStringFieldSync(filePath, 'customTitle', 'custom_title');
   }
 
   /**
