@@ -29,10 +29,6 @@ const FILE_PATH_REGEX =
 const FILE_PATH_WITH_LINES_REGEX =
   /(?:[a-zA-Z]:)?[/\\](?:[\w\-. ]+[/\\])+[\w\-. ]+\.(tsx?|jsx?|css|scss|json|md|py|java|go|rs|c|cpp|h|hpp|sh|yaml|yml|toml|xml|html|vue|svelte)#(\d+)(?:-(\d+))?/gi;
 
-// Known file extensions for validation
-const KNOWN_FILE_EXTENSIONS =
-  /\.(tsx?|jsx?|css|scss|json|md|py|java|go|rs|c|cpp|h|hpp|sh|ya?ml|toml|xml|html|vue|svelte)$/i;
-
 const safeDecodePath = (value: string): string => {
   try {
     return decodeURIComponent(value);
@@ -42,19 +38,20 @@ const safeDecodePath = (value: string): string => {
 };
 
 const normalizeExplicitFileLink = (raw: string): string => {
-  let decoded = safeDecodePath(raw).replace(/\\/g, '/');
+  const decoded = safeDecodePath(raw).replace(/\\/g, '/');
 
-  // Strip file:// scheme to extract the local filesystem path.
-  // vscode.Uri.file().toString() produces "file:///path" (Unix) or
-  // "file:///C:/path" (Windows). Without stripping, isAbsolutePath
-  // fails and the click handler never fires.
+  // file:// URIs (e.g. from vscode.Uri.file().toString()) encode special
+  // characters like # as %23 in the path component. After decoding the
+  // full URI we can strip the scheme and return the filesystem path
+  // directly — no fragment splitting needed, because any # in the
+  // decoded result is a literal filename character, not an anchor.
   if (/^file:\/\//i.test(decoded)) {
-    // "file:///home/..." → "/home/...", "file:///C:/..." → "C:/..."
-    decoded = decoded.replace(/^file:\/\/\//i, '');
+    let filePath = decoded.replace(/^file:\/\/\//i, '');
     // On Unix the path should start with /
-    if (!/^[a-zA-Z]:/.test(decoded) && !decoded.startsWith('/')) {
-      decoded = '/' + decoded;
+    if (!/^[a-zA-Z]:/.test(filePath) && !filePath.startsWith('/')) {
+      filePath = '/' + filePath;
     }
+    return filePath;
   }
 
   const hashIndex = decoded.indexOf('#');
@@ -350,8 +347,10 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
         return;
       }
 
-      // Check for explicit markdown links (e.g. [filename](path)) even when enableFileLinks=false
-      // This allows intentional links like Export Session output to be clickable
+      // Handle file:// URI links (e.g. from /export success messages).
+      // Only trusted system-generated links use file:// URIs — this avoids
+      // opening arbitrary file paths from model-generated markdown when
+      // enableFileLinks is false.
       const anyAnchor = (target.closest &&
         target.closest('a')) as HTMLAnchorElement | null;
       if (!anyAnchor) {
@@ -359,23 +358,11 @@ export const MarkdownRenderer: FC<MarkdownRendererProps> = ({
       }
 
       const href = anyAnchor.getAttribute('href') || '';
-      // Skip external links - let browser handle them normally
-      if (/^(https?|mailto|ftp|data):/i.test(href)) {
-        return;
-      }
-
-      const text = (anyAnchor.textContent || '').trim();
-      const candidate = normalizeExplicitFileLink(href || text);
-
-      const isAbsolutePath = /^(?:[a-zA-Z]:[/\\]|[/\\])/i.test(candidate);
-      const isRelativeFile =
-        !isAbsolutePath &&
-        KNOWN_FILE_EXTENSIONS.test(candidate.replace(/:\d+(?::\d+)?$/, ''));
-
-      if ((isAbsolutePath || isRelativeFile) && onFileClick) {
+      if (/^file:\/\//i.test(href) && onFileClick) {
+        const candidate = normalizeExplicitFileLink(href);
         e.preventDefault();
         e.stopPropagation();
-        onFileClick?.(candidate);
+        onFileClick(candidate);
       }
     },
     [onFileClick],
