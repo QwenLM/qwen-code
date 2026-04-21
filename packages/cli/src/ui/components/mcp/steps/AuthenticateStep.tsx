@@ -46,9 +46,13 @@ function wrapForMultiplexer(osc: string): string {
  * render it as a clickable link; terminals without OSC 8 support ignore
  * the escapes and print the raw text. BEL (\x07) terminates the OSC
  * sequence — more broadly supported than ST (ESC \\).
+ *
+ * Inside tmux / screen the OSC sequence is wrapped in a DCS passthrough
+ * envelope (see `wrapForMultiplexer`) so the multiplexer forwards it to
+ * the host terminal instead of eating it.
  */
 function osc8Hyperlink(url: string, label = url): string {
-  return `\x1b]8;;${url}\x07${label}\x1b]8;;\x07`;
+  return wrapForMultiplexer(`\x1b]8;;${url}\x07${label}\x1b]8;;\x07`);
 }
 
 /**
@@ -205,6 +209,11 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
   // the URL doesn't stay in the scrollback.
   useEffect(() => {
     if (!authUrl) return;
+    // `columns` is captured at effect-run time; a terminal resize
+    // between write and unmount will leave the erase count stale. An
+    // OAuth flow typically finishes in well under a minute, and
+    // authorization URLs are always ASCII (so `.length` matches display
+    // width), so this is acceptable.
     const columns = Math.max(1, stdout.columns ?? 80);
     const urlVisualLines = Math.max(1, Math.ceil(authUrl.length / columns));
     // When the URL length is an exact multiple of the terminal width,
