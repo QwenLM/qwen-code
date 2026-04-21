@@ -502,7 +502,12 @@ export class OpenAIContentConverter {
         .join('');
       const assistantMessage: ExtendedChatCompletionAssistantMessageParam = {
         role: 'assistant',
-        content: assistantTextContent || null,
+        // When there is reasoning content but no text, use "" instead of null.
+        // Some OpenAI-compatible providers (e.g. Ollama) reject content: null
+        // when reasoning_content is present, returning HTTP 400.
+        // For tool-call-only messages we keep null to stay spec-compliant.
+        content:
+          assistantTextContent || (reasoningParts.length > 0 ? '' : null),
       };
 
       if (toolCalls.length > 0) {
