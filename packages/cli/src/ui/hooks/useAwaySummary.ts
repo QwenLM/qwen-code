@@ -153,6 +153,20 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
           text: recap.text,
         };
         addItem(item, Date.now());
+
+        // Mirror the recording the slash-command processor does for
+        // manual `/recap`, so the auto-fired recap also survives `/resume`.
+        // Only record the `result` phase — recording an `invocation`
+        // would replay a fake `> /recap` user line on resume.
+        try {
+          config.getChatRecordingService?.()?.recordSlashCommand({
+            phase: 'result',
+            rawCommand: '/recap',
+            outputHistoryItems: [item as Record<string, unknown>],
+          });
+        } catch {
+          // Recap is best-effort — never let a recording failure surface.
+        }
       })
       .finally(() => {
         if (inFlightRef.current === controller) {
