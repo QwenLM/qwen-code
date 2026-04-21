@@ -65,7 +65,7 @@ export const recapCommand: SlashCommand = {
         type: 'away_recap',
         text: recap.text,
       };
-      context.ui.setAwayRecapItem(item);
+      context.ui.addItem(item, Date.now());
       return;
     }
 

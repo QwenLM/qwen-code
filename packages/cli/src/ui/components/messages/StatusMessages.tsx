@@ -125,11 +125,22 @@ export const RetryCountdownMessage: React.FC<StatusTextProps> = ({ text }) => (
   />
 );
 
+// Mirrors Claude Code's away-summary rendering: a `※` prefix in a fixed
+// 2-column gutter, then bold "recap: " label and italic content, all
+// dim-colored. Rendered as a regular history item so it scrolls with
+// the conversation instead of pinning above the input.
 export const AwayRecapMessage: React.FC<StatusTextProps> = ({ text }) => (
-  <StatusMessage
-    text={text}
-    prefix="※ recap:"
-    prefixColor={theme.text.secondary}
-    textColor={theme.text.secondary}
-  />
+  <Box flexDirection="row">
+    <Box width={2} flexShrink={0}>
+      <Text color={theme.text.secondary}>※</Text>
+    </Box>
+    <Text wrap="wrap">
+      <Text color={theme.text.secondary} bold>
+        recap:{' '}
+      </Text>
+      <Text color={theme.text.secondary} italic>
+        {text}
+      </Text>
+    </Text>
+  </Box>
 );

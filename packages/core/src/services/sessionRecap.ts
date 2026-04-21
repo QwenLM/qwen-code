@@ -14,22 +14,16 @@ const RECENT_MESSAGE_WINDOW = 30;
 
 const RECAP_SYSTEM_PROMPT = `You generate session recaps for a programming assistant CLI.
 
-You receive the most recent turns of a conversation between a user and an
-assistant. The user has stepped away and is now returning. Your sole job is
-to remind them where they left off so they can resume quickly.
+The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents.
 
-Content rules:
-- Exactly ONE sentence. Hard cap: 80 characters. Plain prose, no bullets, no headings, no markdown.
-- Combine the high-level task and the concrete next step into a single sentence.
-- Do NOT list what was done, recite tool calls, or include status reports.
-- Match the dominant language of the conversation (English or Chinese).
+Match the dominant language of the conversation (English or Chinese). For Chinese, treat the budget as roughly 80 characters total.
 
 Output format — strict:
 - Wrap your recap in <recap>...</recap> tags.
 - Put NOTHING outside the tags. No preamble, no reasoning, no closing remarks.
 
 Example:
-<recap>Debugging the auth retry race condition; next, add deterministic timing to the test.</recap>`;
+<recap>Debugging the auth retry race condition. Next: add deterministic timing to the integration test.</recap>`;
 
 const RECAP_USER_PROMPT =
   'Generate the recap now. Wrap it in <recap>...</recap>. Nothing outside the tags.';
@@ -43,9 +37,10 @@ export interface SessionRecapResult {
 }
 
 /**
- * Generate a one-sentence "where did I leave off" summary of the current
+ * Generate a 1-2 sentence "where did I leave off" summary of the current
  * session. Uses the configured fast model (falls back to main model) with
- * tools disabled and a very small generation budget.
+ * tools disabled and a very small generation budget. Prompt mirrors
+ * Claude Code's away-summary prompt for behavioral parity.
  *
  * Returns null on any failure — recap is best-effort and must never break
  * the main flow or surface errors to the user.
