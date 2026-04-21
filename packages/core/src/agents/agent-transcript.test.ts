@@ -23,19 +23,19 @@ describe('agent-transcript', () => {
   describe('path helpers', () => {
     it('places the session dir under projectDir/subagents/<sessionId>', () => {
       expect(getSubagentSessionDir('/proj', 'sess-1')).toBe(
-        '/proj/subagents/sess-1',
+        path.join('/proj', 'subagents', 'sess-1'),
       );
     });
 
     it('returns .jsonl path for the canonical transcript', () => {
       expect(getAgentJsonlPath('/proj', 'sess-1', 'agent-1')).toBe(
-        '/proj/subagents/sess-1/agent-agent-1.jsonl',
+        path.join('/proj', 'subagents', 'sess-1', 'agent-agent-1.jsonl'),
       );
     });
 
     it('returns .meta.json path for the sidecar', () => {
       expect(getAgentMetaPath('/proj', 'sess-1', 'agent-1')).toBe(
-        '/proj/subagents/sess-1/agent-agent-1.meta.json',
+        path.join('/proj', 'subagents', 'sess-1', 'agent-agent-1.meta.json'),
       );
     });
 
@@ -46,19 +46,23 @@ describe('agent-transcript', () => {
         '../../../etc/passwd',
       );
       expect(result).not.toContain('..');
-      expect(result).toContain('/proj/subagents/sess-1/');
+      expect(result).toContain(
+        path.join('/proj', 'subagents', 'sess-1') + path.sep,
+      );
       expect(result.endsWith('.jsonl')).toBe(true);
     });
 
     it('sanitizes sessionId to prevent path traversal', () => {
       const result = getAgentJsonlPath('/proj', '../escape', 'agent-1');
       expect(result).not.toContain('..');
-      expect(result.startsWith('/proj/subagents/')).toBe(true);
+      expect(
+        result.startsWith(path.join('/proj', 'subagents') + path.sep),
+      ).toBe(true);
     });
 
     it('preserves alphanumerics, underscores, and hyphens in agentId', () => {
       expect(getAgentJsonlPath('/proj', 'sess', 'agent_1-abc')).toBe(
-        '/proj/subagents/sess/agent-agent_1-abc.jsonl',
+        path.join('/proj', 'subagents', 'sess', 'agent-agent_1-abc.jsonl'),
       );
     });
   });
