@@ -143,12 +143,12 @@
 
 **B 类：action 内部使用 `context.ui.addItem()` 渲染 React 组件，需增加模式分支返回纯文本**
 
-| 命令       | interactive 行为          | non_interactive/acp 返回内容           |
-| ---------- | ------------------------- | -------------------------------------- |
-| `/about`   | 渲染版本/配置 React 组件  | 版本号、当前模型、关键配置的纯文本摘要 |
-| `/stats`   | 渲染 token/费用统计组件   | session 统计数据的纯文本格式           |
-| `/insight` | 渲染分析组件 + 打开浏览器 | 分析结果文本，不打开浏览器             |
-| `/docs`    | 渲染文档入口 + 打开浏览器 | 返回文档 URL，不打开浏览器             |
+| 命令       | interactive 行为          | non_interactive/acp 返回内容                                                        |
+| ---------- | ------------------------- | ----------------------------------------------------------------------------------- |
+| `/about`   | 渲染版本/配置 React 组件  | 版本号、当前模型、关键配置的纯文本摘要                                              |
+| `/stats`   | 渲染 token/费用统计组件   | session 统计数据的纯文本格式                                                        |
+| `/insight` | 渲染分析组件 + 打开浏览器 | `non_interactive` 同步生成返回文件路径；`acp` 通过 `stream_messages` 推送进度和结果 |
+| `/docs`    | 渲染文档入口 + 打开浏览器 | 返回文档 URL，不打开浏览器                                                          |
 
 **C 类：特殊处理**
 
@@ -159,16 +159,17 @@
 #### 2.2 prompt command 模型调用打通
 
 - 在 `CommandService`（或 `CommandRegistry`）中实现 `getModelInvocableCommands()`，返回所有 `modelInvocable: true` 的命令
-- 将 `BundledSkillLoader`、`FileCommandLoader`（用户/项目命令）、`McpPromptLoader` 加载的命令标记为 `modelInvocable: true`
+- 将 `BundledSkillLoader`、`FileCommandLoader`（用户/项目命令）加载的命令标记为 `modelInvocable: true`
+- **MCP prompt 不标记为 `modelInvocable`**：MCP prompt 通过独立的 MCP tool call 机制由模型调用，无需经过 `SkillTool` 中转
 - 改造 `SkillTool`：从只消费 `SkillManager.listSkills()` 改为同时消费 `CommandService.getModelInvocableCommands()`
 - 构建统一的模型可调用命令描述，注入 `SkillTool` 的 description
 
 #### 2.3 mid-input slash command 检测（基础版）
 
 - 在 `InputPrompt` 中检测光标附近的 slash token（不限于行首）
-- 检测到 slash token 后触发补全菜单（展示命令名 + description）
-- 补全菜单弹出位置跟随光标
-- **不**包含 argument hints、source badge 等（Phase 3 做）
+- 检测到 slash token 后通过 inline ghost text 提示最佳匹配命令名（Tab 接受）
+- **不**包含 dropdown 补全菜单、argument hints、source badge 等（Phase 3 做）
+- ghost text 候选集仅限 `modelInvocable: true` 的命令（skill / file command）
 
 ### 验收标准
 
@@ -176,19 +177,20 @@
 
 - [ ] A 类：`/copy`、`/export`、`/plan`、`/restore`、`/language`、`/statusline` 在 non-interactive 和 acp 模式下可正常执行并返回有意义的文本输出
 - [ ] A' 类：`/model`、`/approval-mode` 无参数时在 non-interactive/acp 下返回当前状态文本（不触发 dialog）；有参数时执行变更并返回确认文本
-- [ ] B 类：`/about`、`/stats`、`/insight`、`/docs` 在 non-interactive/acp 下返回纯文本（不调用 `context.ui.addItem()`），且 `/insight`、`/docs` 不打开浏览器
+- [ ] B 类：`/about`、`/stats`、`/docs` 在 non-interactive/acp 下返回纯文本，`/docs` 不打开浏览器；`/insight` 在 `non_interactive` 下同步生成并返回文件路径 message，在 `acp` 下通过 `stream_messages` 推送进度
 - [ ] C 类：`/clear` 在 non-interactive/acp 下返回上下文边界标记 message，不调用 `context.ui.clear()`
 - [ ] 所有扩展命令在 interactive 模式下行为与重构前完全一致（无退化）
 
 **2.2 模型调用**
 
-- [ ] 模型在对话中可以通过 `SkillTool` 调用 bundled skill、file command（用户/项目）、MCP prompt
+- [ ] 模型在对话中可以通过 `SkillTool` 调用 bundled skill、file command（用户/项目）
+- [ ] MCP prompt 不经过 `SkillTool`，通过 MCP tool call 机制由模型原生调用
 - [ ] 模型不可以调用 built-in commands（`userInvocable: true`，`modelInvocable: false`）
 - [ ] `SkillTool` 的 description 包含所有 `modelInvocable` 命令的描述
 
 **2.3 mid-input slash**
 
-- [ ] mid-input slash：在正文中输入 `/` 后触发命令补全菜单
+- [ ] mid-input slash：在正文中输入 `/` 后通过 inline ghost text 提示最佳匹配命令（Tab 接受）
 
 ---
 

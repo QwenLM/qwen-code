@@ -49,7 +49,34 @@ export const insightCommand: SlashCommand = {
         context.services.config,
       );
 
-      if (context.executionMode !== 'interactive') {
+      if (context.executionMode === 'non_interactive') {
+        // non_interactive: run synchronously and return a single message
+        try {
+          const outputPath = await insightGenerator.generateStaticInsight(
+            projectsDir,
+            () => {
+              // progress callback is no-op in non_interactive mode
+            },
+          );
+          return {
+            type: 'message' as const,
+            messageType: 'info' as const,
+            content: t('Insight report generated at: {{path}}', {
+              path: outputPath,
+            }),
+          };
+        } catch (error) {
+          return {
+            type: 'message' as const,
+            messageType: 'error' as const,
+            content: t('Failed to generate insights: {{error}}', {
+              error: (error as Error).message,
+            }),
+          };
+        }
+      }
+
+      if (context.executionMode === 'acp') {
         const pendingMessages: Array<{
           messageType: 'info' | 'error';
           content: string;
