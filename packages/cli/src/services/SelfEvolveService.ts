@@ -38,6 +38,29 @@ const SAFE_VALIDATION_PREFIXES = new Set([
   'eslint',
   'tsc',
 ]);
+const DIRECTION_MATCH_STOP_WORDS = new Set([
+  'a',
+  'an',
+  'and',
+  'focus',
+  'focused',
+  'for',
+  'improve',
+  'improvement',
+  'improvements',
+  'locally',
+  'local',
+  'narrow',
+  'on',
+  'optimize',
+  'optimization',
+  'polish',
+  'safe',
+  'small',
+  'the',
+]);
+
+type SelfEvolveStatus = NonNullable<SelfEvolveAttemptReport['status']>;
 
 type CandidateSource =
   | 'failed-test'
@@ -56,6 +79,7 @@ interface SelfEvolveCandidate {
 
 interface SelfEvolveAttemptReport {
   status?: 'success' | 'failed' | 'validation_failed' | 'no_safe_task';
+  selectedCandidateIndex?: number;
   selectedTask?: {
     title?: string;
     source?: CandidateSource | string;
@@ -83,6 +107,7 @@ interface CommandExecutionResult {
 
 interface SelfEvolveSuccessResult {
   ok: true;
+  status: 'success';
   attemptId: string;
   recordPath: string;
   branch: string;
@@ -96,6 +121,7 @@ interface SelfEvolveSuccessResult {
 
 interface SelfEvolveFailureResult {
   ok: false;
+  status: Exclude<SelfEvolveStatus, 'success'>;
   attemptId: string;
   recordPath: string;
   summary: string;
@@ -364,6 +390,25 @@ function summarizeOutput(output: string): string | undefined {
   return summary ? summary.slice(0, 200) : undefined;
 }
 
+function tokenizeDirectionText(value: string): string[] {
+  const normalized = value
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+  if (!normalized) {
+    return [];
+  }
+
+  return normalized
+    .split(/\s+/)
+    .filter(
+      (token) =>
+        (token.length >= 3 || token === 'ui' || token === 'ux') &&
+        !DIRECTION_MATCH_STOP_WORDS.has(token),
+    );
+}
+
 async function safeReadJson<T>(filePath: string): Promise<T | null> {
   try {
     const content = await fs.readFile(filePath, 'utf8');
@@ -420,6 +465,31 @@ export class SelfEvolveService {
         undefined,
         undefined,
         direction,
+        'no_safe_task',
+      );
+    }
+
+    const scopedCandidates = this.filterCandidatesByDirection(
+      candidates,
+      direction,
+    );
+    if (direction && scopedCandidates.length === 0) {
+      return this.finishFailure(
+        attemptPaths.recordPath,
+        attemptId,
+        'No discovered self-evolve candidates matched the requested direction.',
+        [
+          `Direction: ${direction}`,
+          'Self-evolve only keeps working when it finds a small, safe candidate that clearly matches the requested area.',
+        ],
+        {
+          status: 'no_safe_task',
+          summary:
+            'No discovered self-evolve candidates matched the requested direction.',
+        },
+        undefined,
+        direction,
+        'no_safe_task',
       );
     }
 
@@ -470,7 +540,7 @@ export class SelfEvolveService {
       const attemptPrompt = this.buildPrompt({
         projectRoot,
         reportPath,
-        candidates,
+        candidates: scopedCandidates,
         direction,
       });
 
@@ -510,6 +580,7 @@ export class SelfEvolveService {
           report,
           undefined,
           direction,
+          'failed',
         );
       }
 
@@ -525,12 +596,34 @@ export class SelfEvolveService {
           report,
           undefined,
           direction,
+          'no_safe_task',
+        );
+      }
+
+      const selectedCandidate = this.resolveSelectedCandidate(
+        report,
+        scopedCandidates,
+      );
+      if (!selectedCandidate) {
+        await worktreeService.cleanupSession(reviewSessionId);
+        return this.finishFailure(
+          attemptPaths.recordPath,
+          attemptId,
+          'The isolated self-evolve run did not select one of the provided candidates.',
+          [
+            'The child run must pick exactly one discovered candidate and copy its title/location verbatim.',
+          ],
+          report,
+          undefined,
+          direction,
+          'failed',
+          '',
         );
       }
 
       const validationCommands = this.collectValidationCommands(
         report,
-        candidates,
+        selectedCandidate,
       );
       if (validationCommands.length === 0) {
         await worktreeService.cleanupSession(reviewSessionId);
@@ -544,6 +637,8 @@ export class SelfEvolveService {
           report,
           undefined,
           direction,
+          'failed',
+          selectedCandidate.title,
         );
       }
       const validationResults: string[] = [];
@@ -559,7 +654,7 @@ export class SelfEvolveService {
           return this.finishFailure(
             attemptPaths.recordPath,
             attemptId,
-            'The isolated self-evolve change failed validation.',
+            'The isolated self-evolve change was discarded after failing validation.',
             [
               `Validation failed: ${command}`,
               summarizeOutput(validationResult.stderr) ??
@@ -569,6 +664,8 @@ export class SelfEvolveService {
             report,
             validationResults,
             direction,
+            'validation_failed',
+            selectedCandidate.title,
           );
         }
       }
@@ -590,12 +687,14 @@ export class SelfEvolveService {
           report,
           validationResults,
           direction,
+          'failed',
+          selectedCandidate.title,
         );
       }
 
       const commitMessage = sanitizeCommitMessage(
         report?.suggestedCommitMessage,
-        report?.selectedTask?.title || candidates[0]!.title,
+        selectedCandidate.title,
       );
       await this.deps.runCommand(reviewWorktree.path, 'git', ['add', '--all']);
       const reviewCommitResult = await this.deps.runCommand(
@@ -616,6 +715,8 @@ export class SelfEvolveService {
           report,
           validationResults,
           direction,
+          'failed',
+          selectedCandidate.title,
         );
       }
 
@@ -639,6 +740,8 @@ export class SelfEvolveService {
           report,
           validationResults,
           direction,
+          'failed',
+          selectedCandidate.title,
         );
       }
 
@@ -660,6 +763,8 @@ export class SelfEvolveService {
           report,
           validationResults,
           direction,
+          'failed',
+          selectedCandidate.title,
         );
       }
 
@@ -685,6 +790,8 @@ export class SelfEvolveService {
           report,
           validationResults,
           direction,
+          'failed',
+          selectedCandidate.title,
         );
       }
 
@@ -710,6 +817,7 @@ export class SelfEvolveService {
 
       const successResult: SelfEvolveSuccessResult = {
         ok: true,
+        status: 'success',
         attemptId,
         recordPath: attemptPaths.recordPath,
         branch: reviewBranch,
@@ -717,8 +825,7 @@ export class SelfEvolveService {
         summary:
           report?.summary?.trim() ||
           'Completed a self-evolve change and prepared a review commit.',
-        selectedTask:
-          report?.selectedTask?.title?.trim() || candidates[0]!.title,
+        selectedTask: selectedCandidate.title,
         direction,
         validation: validationResults,
         changedFiles,
@@ -763,6 +870,7 @@ export class SelfEvolveService {
         undefined,
         undefined,
         direction,
+        'failed',
       );
     }
   }
@@ -1076,12 +1184,13 @@ export class SelfEvolveService {
       `Project root: ${params.projectRoot}`,
       '',
       'Pick exactly one small, safe, locally verifiable improvement task from the candidate list below.',
-      'Priority order: failed tests, lint errors, type errors, TODO comments, backlog files.',
+      'Pick by candidate index and keep the chosen title/location exactly as written in the candidate list.',
+      'Do not rename, paraphrase, or synthesize a new task.',
       params.direction
         ? `User direction for task selection: ${params.direction}`
         : undefined,
       params.direction
-        ? 'Treat the user direction as advisory guidance for choosing among the discovered candidates. Ignore any part that would require risky, broad, externally dependent, or otherwise not-locally-verifiable work.'
+        ? 'Only choose a candidate that clearly matches the user direction. If none do, write status "no_safe_task" and do not edit anything.'
         : undefined,
       'Do not push, open PRs, change remotes, or create commits.',
       'Keep the scope narrow. Avoid broad refactors.',
@@ -1095,6 +1204,8 @@ export class SelfEvolveService {
       JSON.stringify(
         {
           status: 'success | failed | validation_failed | no_safe_task',
+          selectedCandidateIndex:
+            'number (1-based index from the candidate list)',
           selectedTask: {
             title: 'string',
             source: 'string',
@@ -1120,7 +1231,7 @@ export class SelfEvolveService {
 
   private collectValidationCommands(
     report: SelfEvolveAttemptReport | null,
-    candidates: SelfEvolveCandidate[],
+    selectedCandidate: SelfEvolveCandidate,
   ): string[] {
     const reported = (report?.validation ?? [])
       .map((entry) => entry.command?.trim())
@@ -1129,11 +1240,50 @@ export class SelfEvolveService {
     if (reported.length > 0) {
       return Array.from(new Set(reported));
     }
+    return selectedCandidate.validationCommands;
+  }
+
+  private filterCandidatesByDirection(
+    candidates: SelfEvolveCandidate[],
+    direction: string | undefined,
+  ): SelfEvolveCandidate[] {
+    const directionTerms = tokenizeDirectionText(direction ?? '');
+    if (directionTerms.length === 0) {
+      return candidates;
+    }
+
+    return candidates.filter((candidate) => {
+      const candidateTerms = new Set(
+        tokenizeDirectionText(
+          [candidate.title, candidate.details, candidate.location]
+            .filter(Boolean)
+            .join(' '),
+        ),
+      );
+      return directionTerms.some((term) => candidateTerms.has(term));
+    });
+  }
+
+  private resolveSelectedCandidate(
+    report: SelfEvolveAttemptReport | null,
+    candidates: SelfEvolveCandidate[],
+  ): SelfEvolveCandidate | undefined {
+    const selectedCandidateIndex = report?.selectedCandidateIndex;
+    if (
+      Number.isInteger(selectedCandidateIndex) &&
+      selectedCandidateIndex != null &&
+      selectedCandidateIndex >= 1 &&
+      selectedCandidateIndex <= candidates.length
+    ) {
+      return candidates[selectedCandidateIndex - 1];
+    }
+
     const selectedTitle = report?.selectedTask?.title?.trim();
-    const matchingCandidate = selectedTitle
-      ? candidates.find((candidate) => candidate.title === selectedTitle)
-      : undefined;
-    return matchingCandidate?.validationCommands ?? [];
+    if (!selectedTitle) {
+      return undefined;
+    }
+
+    return candidates.find((candidate) => candidate.title === selectedTitle);
   }
 
   private async finishFailure(
@@ -1144,13 +1294,19 @@ export class SelfEvolveService {
     report?: SelfEvolveAttemptReport | null,
     validation?: string[],
     direction?: string,
+    status: Exclude<SelfEvolveStatus, 'success'> = 'failed',
+    selectedTask?: string,
   ): Promise<SelfEvolveFailureResult> {
     const result: SelfEvolveFailureResult = {
       ok: false,
+      status,
       attemptId,
       recordPath,
       summary,
-      selectedTask: report?.selectedTask?.title?.trim(),
+      selectedTask:
+        selectedTask === undefined
+          ? report?.selectedTask?.title?.trim()
+          : selectedTask || undefined,
       direction,
       validation,
       learnings,
@@ -1159,10 +1315,7 @@ export class SelfEvolveService {
       recordPath,
       JSON.stringify(
         {
-          status:
-            report?.status && report.status !== 'success'
-              ? report.status
-              : 'failed',
+          status,
           attemptId,
           summary,
           selectedTask: report?.selectedTask,

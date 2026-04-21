@@ -109,6 +109,7 @@ describe('selfEvolveCommand', () => {
   it('runs one-shot self-evolve with free-form direction text', async () => {
     mockRun.mockResolvedValue({
       ok: true,
+      status: 'success',
       attemptId: 'attempt-1',
       recordPath: '/tmp/result.json',
       branch: 'self-evolve/review',
@@ -154,6 +155,7 @@ describe('selfEvolveCommand', () => {
     });
     mockRun.mockResolvedValue({
       ok: true,
+      status: 'success',
       attemptId: 'attempt-2',
       recordPath: '/tmp/result.json',
       branch: 'self-evolve/review',
@@ -239,6 +241,7 @@ describe('selfEvolveCommand', () => {
 
     resolveRun?.({
       ok: true,
+      status: 'success',
       attemptId: 'attempt-bg',
       recordPath: '/tmp/result.json',
       branch: 'self-evolve/review',
@@ -256,6 +259,53 @@ describe('selfEvolveCommand', () => {
           type: 'info',
           text: expect.stringContaining(
             'Background self-evolve attempt finished.',
+          ),
+        }),
+        expect.any(Number),
+      );
+    });
+  });
+
+  it('surfaces discarded background attempts as info instead of errors', async () => {
+    cronCreate.mockReturnValue({
+      id: 'job12345',
+      cronExpr: '0 */2 * * *',
+      prompt: '/self-evolve --once --direction focus lint cleanup',
+    });
+
+    let resolveRun:
+      | ((value: Awaited<ReturnType<SelfEvolveService['run']>>) => void)
+      | undefined;
+    mockRun.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRun = resolve;
+        }),
+    );
+
+    await expect(
+      selfEvolveCommand.action!(mockContext, '--every 2h focus lint cleanup'),
+    ).resolves.toBeUndefined();
+
+    resolveRun?.({
+      ok: false,
+      status: 'validation_failed',
+      attemptId: 'attempt-bg-failed',
+      recordPath: '/tmp/result.json',
+      summary:
+        'The isolated self-evolve change was discarded after failing validation.',
+      selectedTask: 'Fix lint error in src/file.ts:10:2',
+      direction: 'focus lint cleanup',
+      validation: ['fail: npm run lint'],
+      learnings: ['Validation failed: npm run lint'],
+    });
+
+    await vi.waitFor(() => {
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringContaining(
+            'Background self-evolve attempt finished without retaining a change.',
           ),
         }),
         expect.any(Number),

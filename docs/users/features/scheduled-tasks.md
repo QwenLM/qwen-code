@@ -25,9 +25,10 @@ When you schedule recurring `/self-evolve`, Qwen Code:
 - immediately runs the first self-evolve attempt now
 - reuses the same one-shot `/self-evolve` safety path on every later fire
 
-The optional direction text guides candidate selection, but it does not expand
-scope: `/self-evolve` still only acts on small, safe, locally verifiable
-changes discovered in the repository.
+The optional direction text is a hard constraint on candidate selection:
+`/self-evolve` still only acts on small, safe, locally verifiable changes
+discovered in the repository, and it skips the run with `no_safe_task` if none
+of those candidates clearly match the requested direction.
 
 ## Schedule a recurring prompt with /loop
 

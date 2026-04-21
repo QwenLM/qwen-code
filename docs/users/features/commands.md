@@ -52,9 +52,10 @@ interval":
 ```
 
 Recurring `/self-evolve` schedules a session-scoped job and then immediately
-runs the first attempt now. The custom direction text is advisory only: it is
-used to bias task selection among discovered candidates, but it does not relax
-the safety guardrails around small, safe, locally verifiable changes.
+runs the first attempt now. The custom direction text is treated as a hard
+constraint for task selection: Qwen Code only acts when it finds a discovered
+candidate that clearly matches the requested direction, and otherwise records
+`no_safe_task` without keeping any repo changes.
 
 ### 1.2 Interface and Workspace Control
 

@@ -153,8 +153,9 @@ describe('SelfEvolveService', () => {
         JSON.stringify(
           {
             status: 'success',
+            selectedCandidateIndex: 1,
             selectedTask: {
-              title: 'Address TODO in src/feature.ts:1',
+              title: 'Retune the self-evolve TODO helper',
               source: 'todo-comment',
               location: 'src/feature.ts:1',
             },
@@ -195,6 +196,7 @@ describe('SelfEvolveService', () => {
     expect(result.commitSha).toBe('review-sha');
     expect(result.changedFiles).toEqual(['src/feature.ts']);
     expect(result.direction).toBe('focus the CLI TODO path');
+    expect(result.selectedTask).toBe('Address TODO in src/feature.ts:1');
     expect(setupWorktrees).toHaveBeenCalledWith(
       expect.objectContaining({
         worktreeNames: ['review'],
@@ -207,6 +209,13 @@ describe('SelfEvolveService', () => {
       expect.objectContaining({
         prompt: expect.stringContaining(
           'User direction for task selection: focus the CLI TODO path',
+        ),
+      }),
+    );
+    expect(runQwenAttempt).toHaveBeenCalledWith(
+      expect.objectContaining({
+        prompt: expect.stringContaining(
+          'Do not rename, paraphrase, or synthesize a new task.',
         ),
       }),
     );
@@ -300,7 +309,7 @@ describe('SelfEvolveService', () => {
       throw new Error('Expected failure result');
     }
     expect(result.summary).toBe(
-      'The isolated self-evolve change failed validation.',
+      'The isolated self-evolve change was discarded after failing validation.',
     );
     expect(result.direction).toBe('prefer TODO cleanup');
     expect(result.learnings).toContain('Validation failed: npm run lint');
@@ -310,5 +319,162 @@ describe('SelfEvolveService', () => {
     const record = JSON.parse(await fs.readFile(result.recordPath, 'utf8'));
     expect(record.summary).toBe(result.summary);
     expect(record.direction).toBe('prefer TODO cleanup');
+    expect(record.status).toBe('validation_failed');
+  });
+
+  it('returns no_safe_task when no discovered candidates match the requested direction', async () => {
+    await fs.writeFile(
+      path.join(projectDir, 'package.json'),
+      JSON.stringify(
+        {
+          name: 'test-repo',
+          scripts: {
+            typecheck: 'tsc --noEmit',
+          },
+        },
+        null,
+        2,
+      ),
+    );
+    await fs.writeFile(
+      path.join(projectDir, 'src', 'unrelated.ts'),
+      'export const broken = missing.value;\n',
+    );
+
+    const setupWorktrees = vi.fn();
+    const runCommand = vi.fn(
+      async (cwd: string, command: string, args: string[]) => {
+        const joined = `${command} ${args.join(' ')}`;
+        if (joined === 'git rev-parse --abbrev-ref HEAD') {
+          return ok(joined, cwd, 'main\n');
+        }
+        if (joined === 'git ls-files') {
+          return ok(joined, cwd, 'package.json\nsrc/unrelated.ts\n');
+        }
+        if (joined === 'git ls-files --others --exclude-standard') {
+          return ok(joined, cwd, '');
+        }
+        throw new Error(`Unexpected command: ${joined}`);
+      },
+    );
+    const runShellCommand = vi.fn(async (cwd: string, command: string) => {
+      if (cwd !== projectDir || command !== 'npm run typecheck') {
+        return ok(command, cwd, '');
+      }
+      return {
+        command,
+        cwd,
+        exitCode: 1,
+        stdout:
+          "src/unrelated.ts(1,23): error TS2304: Cannot find name 'missing'.\n",
+        stderr: '',
+        timedOut: false,
+      };
+    });
+
+    const service = new SelfEvolveService({
+      createWorktreeService: () =>
+        ({
+          setupWorktrees,
+        }) as unknown as GitWorktreeService,
+      runCommand,
+      runShellCommand,
+      runQwenAttempt: vi.fn(),
+    });
+
+    const result = await service.run(mockConfig, {
+      direction: '专注于self-evolve这个功能的ui和ux的优化',
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error('Expected failure result');
+    }
+    expect(result.status).toBe('no_safe_task');
+    expect(result.summary).toBe(
+      'No discovered self-evolve candidates matched the requested direction.',
+    );
+    expect(setupWorktrees).not.toHaveBeenCalled();
+  });
+
+  it('rejects a child report that does not select one of the provided candidates', async () => {
+    await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
+      recursive: true,
+    });
+
+    const cleanupSession = vi.fn().mockResolvedValue({ success: true });
+    const runCommand = vi.fn(
+      async (cwd: string, command: string, args: string[]) => {
+        const joined = `${command} ${args.join(' ')}`;
+        if (joined === 'git rev-parse --abbrev-ref HEAD') {
+          return ok(joined, cwd, 'main\n');
+        }
+        if (joined === 'git ls-files') {
+          return ok(joined, cwd, 'package.json\nsrc/feature.ts\n');
+        }
+        if (joined === 'git ls-files --others --exclude-standard') {
+          return ok(joined, cwd, '');
+        }
+        throw new Error(`Unexpected command: ${joined}`);
+      },
+    );
+
+    const runQwenAttempt = vi.fn(async ({ cwd }: { cwd: string }) => {
+      await fs.writeFile(
+        path.join(cwd, '.qwen', 'self-evolve-report.json'),
+        JSON.stringify(
+          {
+            status: 'success',
+            selectedTask: {
+              title: 'Rename helper flow inside the CLI',
+              source: 'todo-comment',
+              location: 'src/feature.ts:1',
+            },
+            summary: 'Changed the helper.',
+            learnings: ['The task looked small enough.'],
+            validation: [{ command: 'npm run lint', summary: 'passed' }],
+          },
+          null,
+          2,
+        ),
+      );
+      return ok('qwen', cwd, 'done');
+    });
+
+    const service = new SelfEvolveService({
+      createWorktreeService: () =>
+        ({
+          setupWorktrees: vi.fn().mockResolvedValue({
+            success: true,
+            worktreesByName: {
+              review: {
+                path: reviewWorktreePath,
+                branch: 'self-evolve/review',
+              },
+            },
+          }),
+          removeWorktree: vi.fn(),
+          cleanupSession,
+        }) as unknown as GitWorktreeService,
+      runCommand,
+      runShellCommand: vi.fn(async (cwd: string, command: string) =>
+        ok(command, cwd, ''),
+      ),
+      runQwenAttempt,
+    });
+
+    const result = await service.run(mockConfig);
+
+    expect(result.ok).toBe(false);
+    if (result.ok) {
+      throw new Error('Expected failure result');
+    }
+    expect(result.summary).toBe(
+      'The isolated self-evolve run did not select one of the provided candidates.',
+    );
+    expect(result.selectedTask).toBeUndefined();
+    expect(cleanupSession).toHaveBeenCalledWith(
+      expect.stringContaining('-review'),
+    );
   });
 });

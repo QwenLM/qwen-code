@@ -378,6 +378,29 @@ function formatBackgroundFailure(error: unknown): string {
   ].join('\n');
 }
 
+function shouldRenderBackgroundResultAsError(
+  result: Awaited<ReturnType<SelfEvolveService['run']>>,
+): boolean {
+  return !result.ok && result.status === 'failed';
+}
+
+function formatBackgroundResultHeading(
+  result: Awaited<ReturnType<SelfEvolveService['run']>>,
+): string {
+  if (result.ok) {
+    return 'Background self-evolve attempt finished.';
+  }
+
+  if (
+    result.status === 'validation_failed' ||
+    result.status === 'no_safe_task'
+  ) {
+    return 'Background self-evolve attempt finished without retaining a change.';
+  }
+
+  return 'Background self-evolve attempt finished.';
+}
+
 function completeSelfEvolveArgs(partialArg: string): CommandCompletionItem[] {
   const normalized = partialArg.replace(/^\s+/, '');
   if (!normalized) {
@@ -503,8 +526,10 @@ export const selfEvolveCommand: SlashCommand = {
           .then((result) => {
             context.ui.addItem(
               {
-                type: result.ok ? 'info' : 'error',
-                text: `Background self-evolve attempt finished.\n${formatResult(result)}`,
+                type: shouldRenderBackgroundResultAsError(result)
+                  ? 'error'
+                  : 'info',
+                text: `${formatBackgroundResultHeading(result)}\n${formatResult(result)}`,
               },
               Date.now(),
             );
