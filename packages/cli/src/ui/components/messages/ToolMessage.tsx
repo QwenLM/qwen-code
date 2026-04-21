@@ -41,6 +41,7 @@ import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
 const MIN_LINES_SHOWN = 2; // show at least this many lines
+const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 
 // Large threshold to ensure we don't cause performance issues for very large
 // outputs that will get truncated further MaxSizedBox anyway.
@@ -345,6 +346,13 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         MIN_LINES_SHOWN + 1, // enforce minimum lines shown
       )
     : undefined;
+  // Cap inline shell output; ShellStatsBar surfaces hidden lines via `+N lines`.
+  const shellOutputMaxLines =
+    settings.merged.ui?.shellOutputMaxLines ?? DEFAULT_SHELL_OUTPUT_MAX_LINES;
+  const ansiAvailableHeight =
+    shellOutputMaxLines > 0 && !forceShowResult && !isThisShellFocused
+      ? Math.min(availableHeight ?? shellOutputMaxLines, shellOutputMaxLines)
+      : availableHeight;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
   // Long tool call response in MarkdownDisplay doesn't respect availableTerminalHeight properly,
@@ -420,13 +428,13 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               <>
                 <AnsiOutputText
                   data={effectiveDisplayRenderer.data}
-                  availableTerminalHeight={availableHeight}
+                  availableTerminalHeight={ansiAvailableHeight}
                   maxWidth={innerWidth}
                 />
                 {effectiveDisplayRenderer.stats && (
                   <ShellStatsBar
                     {...effectiveDisplayRenderer.stats}
-                    displayHeight={availableHeight}
+                    displayHeight={ansiAvailableHeight}
                   />
                 )}
               </>

@@ -38,9 +38,11 @@ vi.mock('../AnsiOutput.js', () => ({
   AnsiOutputText: function MockAnsiOutputText({
     data,
     maxWidth,
+    availableTerminalHeight,
   }: {
     data: AnsiOutput;
     maxWidth: number;
+    availableTerminalHeight?: number;
   }) {
     // Simple serialization for snapshot stability
     const serialized = data
@@ -48,12 +50,19 @@ vi.mock('../AnsiOutput.js', () => ({
       .join('\n');
     return (
       <Text>
-        MockAnsiOutput:{serialized}:width={maxWidth}
+        MockAnsiOutput:{serialized}:width={maxWidth}:height=
+        {availableTerminalHeight ?? 'undef'}
       </Text>
     );
   },
-  ShellStatsBar: function MockShellStatsBar() {
-    return null;
+  ShellStatsBar: function MockShellStatsBar({
+    displayHeight,
+  }: {
+    displayHeight?: number;
+  }) {
+    return (
+      <Text>MockShellStatsBar:displayHeight={displayHeight ?? 'undef'}</Text>
+    );
   },
 }));
 
@@ -329,6 +338,145 @@ describe('<ToolMessage />', () => {
     );
     expect(lastFrame()).toContain('MockAnsiOutput:hello');
     expect(lastFrame()).toContain('width=');
+  });
+
+  it('caps shell ANSI output to default 5 lines when not forced', () => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        resultDisplay={ansiOutputDisplay}
+        availableTerminalHeight={100}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('height=5');
+    expect(output).toContain('MockShellStatsBar:displayHeight=5');
+  });
+
+  it('bypasses cap when forceShowResult is true', () => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        resultDisplay={ansiOutputDisplay}
+        availableTerminalHeight={100}
+        forceShowResult={true}
+      />,
+      StreamingState.Idle,
+    );
+    const output = lastFrame()!;
+    // availableHeight = 100 - STATIC_HEIGHT(1) - RESERVED_LINE_COUNT(5) = 94
+    expect(output).toContain('height=94');
+  });
+
+  it('disables cap when ui.shellOutputMaxLines is 0', () => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const settingsWithDisabledCap = {
+      merged: { ui: { shellOutputMaxLines: 0 } },
+    } as unknown as LoadedSettings;
+    const { lastFrame } = render(
+      <CompactModeProvider value={{ compactMode: false }}>
+        <SettingsContext.Provider value={settingsWithDisabledCap}>
+          <StreamingContext.Provider value={StreamingState.Idle}>
+            <ToolMessage
+              {...baseProps}
+              resultDisplay={ansiOutputDisplay}
+              availableTerminalHeight={100}
+            />
+          </StreamingContext.Provider>
+        </SettingsContext.Provider>
+      </CompactModeProvider>,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('height=94');
+  });
+
+  it('respects user-configured cap value', () => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const settingsWithCustomCap = {
+      merged: { ui: { shellOutputMaxLines: 12 } },
+    } as unknown as LoadedSettings;
+    const { lastFrame } = render(
+      <CompactModeProvider value={{ compactMode: false }}>
+        <SettingsContext.Provider value={settingsWithCustomCap}>
+          <StreamingContext.Provider value={StreamingState.Idle}>
+            <ToolMessage
+              {...baseProps}
+              resultDisplay={ansiOutputDisplay}
+              availableTerminalHeight={100}
+            />
+          </StreamingContext.Provider>
+        </SettingsContext.Provider>
+      </CompactModeProvider>,
+    );
+    const output = lastFrame()!;
+    expect(output).toContain('height=12');
   });
 
   it('renders rejected plan content with plan text still visible', () => {
