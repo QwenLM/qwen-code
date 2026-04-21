@@ -59,8 +59,6 @@ export const createMockCommandContext = (
       setBtwItem: vi.fn(),
       cancelBtw: vi.fn(),
       btwAbortControllerRef: { current: null },
-      awayRecapItem: null,
-      setAwayRecapItem: vi.fn(),
       isIdleRef: { current: true },
       loadHistory: vi.fn(),
       toggleVimEnabled: vi.fn(),

@@ -170,9 +170,7 @@ describe('useResumeCommand', () => {
     act(() => {
       // Start resume but do not await it yet — we want to assert the dialog
       // closes immediately before the async session load completes.
-      resumePromise = result.current.handleResume('session-2') as unknown as
-        | Promise<void>
-        | undefined;
+      resumePromise = result.current.handleResume('session-2');
     });
     expect(result.current.isResumeDialogOpen).toBe(false);
 

@@ -583,7 +583,7 @@ export const AppContainer = (props: AppContainerProps) => {
     resumeMatchedSessions,
     openResumeDialog,
     closeResumeDialog,
-    handleResume: handleResumeInner,
+    handleResume,
   } = useResumeCommand({
     config,
     historyManager,
@@ -622,22 +622,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isMcpDialogOpen, openMcpDialog, closeMcpDialog } = useMcpDialog();
   const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
     useHooksDialog();
-
-  // handleResume must be declared before slashCommandActions (which depends on
-  // it) but also needs to clear awayRecapItem, whose setter comes from
-  // useSlashCommandProcessor below. Read the setter through a ref to break the
-  // cycle.
-  const clearAwayRecapRef = useRef<() => void>(() => {});
-  const handleResume = useCallback(
-    async (sessionId: string): Promise<boolean> => {
-      const switched = await handleResumeInner(sessionId);
-      if (switched) {
-        clearAwayRecapRef.current();
-      }
-      return switched;
-    },
-    [handleResumeInner],
-  );
 
   const slashCommandActions = useMemo(
     () => ({
@@ -702,8 +686,6 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     setBtwItem,
     cancelBtw,
-    awayRecapItem,
-    setAwayRecapItem,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
@@ -725,13 +707,6 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     setSessionName,
   );
-
-  // Keep clearAwayRecapRef pointed at the latest setAwayRecapItem so the
-  // handleResume declared above (before useSlashCommandProcessor) can clear
-  // the sticky recap without depending on the setter directly.
-  useEffect(() => {
-    clearAwayRecapRef.current = () => setAwayRecapItem(null);
-  }, [setAwayRecapItem]);
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
   const onDebugMessage = useCallback(
@@ -1284,7 +1259,7 @@ export const AppContainer = (props: AppContainerProps) => {
         setControlsHeight(fullFooterMeasurement.height);
       }
     }
-  }, [buffer, terminalWidth, terminalHeight, awayRecapItem, btwItem]);
+  }, [buffer, terminalWidth, terminalHeight, btwItem]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
@@ -1317,7 +1292,10 @@ export const AppContainer = (props: AppContainerProps) => {
     config,
     isFocused,
     isIdle: streamingState === StreamingState.Idle,
-    setAwayRecapItem,
+    addItem: historyManager.addItem,
+    history: historyManager.history,
+    awayThresholdMinutes:
+      settings.merged.general?.sessionRecapAwayThresholdMinutes,
   });
 
   // Context file names computation
@@ -2140,8 +2118,6 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      awayRecapItem,
-      setAwayRecapItem,
       nightly,
       branchName,
       sessionStats,
@@ -2253,8 +2229,6 @@ export const AppContainer = (props: AppContainerProps) => {
       btwItem,
       setBtwItem,
       cancelBtw,
-      awayRecapItem,
-      setAwayRecapItem,
       nightly,
       branchName,
       sessionStats,

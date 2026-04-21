@@ -1,6 +1,6 @@
 # Session Recap Design
 
-> A one-line "where did I leave off" summary surfaced when the user
+> A brief (1-2 sentence) "where did I leave off" summary surfaced when the user
 > returns to an idle session, either on demand (`/recap`) or after the
 > terminal has been blurred for 5+ minutes.
 
@@ -11,7 +11,7 @@ pages of history to remember **what they were doing and what came next**
 is a real friction point. Just reloading messages does not solve this
 UX problem.
 
-The goal is to proactively surface a one-line recap when the user
+The goal is to proactively surface a brief 1-2 sentence recap when the user
 returns:
 
 - **High-level task** (what they are doing) → **next step** (what to do next).
@@ -41,7 +41,7 @@ command ignores that setting.
 │   isIdle = streamingState === Idle                                     │
 │       │                                                                │
 │       ├─→ useAwaySummary({enabled, config, isFocused, isIdle,          │
-│       │       │             setAwayRecapItem})                         │
+│       │       │             addItem})                                  │
 │       │       └─→ 5 min blur timer + idle/dedupe gates                 │
 │       │              │                                                 │
 │       │              ↓                                                 │
@@ -57,25 +57,25 @@ command ignores that setting.
 │                              GeminiClient.generateContent              │
 │                              (fastModel + tools:[])                    │
 │                                                                        │
-│   setAwayRecapItem({type: 'away_recap', text})                         │
-│       └─→ DefaultAppLayout renders AwayRecapMessage                    │
-│           as a sticky banner above the Composer                        │
-│           (dim color + "※ recap:" prefix)                              │
+│   addItem({type: 'away_recap', text}) ─→ HistoryItemDisplay            │
+│       └─ AwayRecapMessage rendered inline like any other history       │
+│         item (※ + bold "recap: " + italic content, all dim);           │
+│         scrolls naturally with the conversation. Mirrors Claude        │
+│         Code's away_summary system message.                            │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Files
 
-| File                                                         | Responsibility                                      |
-| ------------------------------------------------------------ | --------------------------------------------------- |
-| `packages/core/src/services/sessionRecap.ts`                 | One-shot LLM call + history filter + tag extraction |
-| `packages/cli/src/ui/hooks/useAwaySummary.ts`                | Auto-trigger React hook                             |
-| `packages/cli/src/ui/commands/recapCommand.ts`               | `/recap` manual entry point                         |
-| `packages/cli/src/ui/components/messages/StatusMessages.tsx` | `AwayRecapMessage` dim renderer (`※ recap:` prefix) |
-| `packages/cli/src/ui/types.ts`                               | `HistoryItemAwayRecap` type                         |
-| `packages/cli/src/ui/layouts/DefaultAppLayout.tsx`           | Sticky-banner placement above the Composer          |
-| `packages/cli/src/ui/layouts/ScreenReaderAppLayout.tsx`      | Same placement under screen-reader mode             |
-| `packages/cli/src/config/settingsSchema.ts`                  | `general.showSessionRecap` setting                  |
+| File                                                         | Responsibility                                                                   |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `packages/core/src/services/sessionRecap.ts`                 | One-shot LLM call + history filter + tag extraction                              |
+| `packages/cli/src/ui/hooks/useAwaySummary.ts`                | Auto-trigger React hook                                                          |
+| `packages/cli/src/ui/commands/recapCommand.ts`               | `/recap` manual entry point                                                      |
+| `packages/cli/src/ui/components/messages/StatusMessages.tsx` | `AwayRecapMessage` renderer (`※` + bold `recap:` + italic content, all dim)      |
+| `packages/cli/src/ui/types.ts`                               | `HistoryItemAwayRecap` type                                                      |
+| `packages/cli/src/ui/components/HistoryItemDisplay.tsx`      | Dispatches `away_recap` history items to the renderer                            |
+| `packages/cli/src/config/settingsSchema.ts`                  | `general.showSessionRecap` + `general.sessionRecapAwayThresholdMinutes` settings |
 
 ## Prompt Design
 
@@ -93,7 +93,7 @@ recap, not a leak.
 
 Bullets below correspond 1:1 with `RECAP_SYSTEM_PROMPT`:
 
-- Exactly one short sentence (≤ 80 chars), plain prose (no markdown / lists / headings).
+- Under 40 words, 1-2 plain sentences (no markdown / lists / headings). For Chinese, treat the budget as roughly 80 characters total.
 - First sentence: the high-level task. Then: the concrete next step.
 - Explicitly forbid: listing what was done, reciting tool calls, status reports.
 - Match the dominant language of the conversation (English or Chinese).
@@ -128,7 +128,7 @@ the model's reasoning preamble is worse than showing no recap at all.
 | ------------------- | ------------------------------ | ----------------------------------------------------- |
 | `model`             | `getFastModel() ?? getModel()` | Recap doesn't need a frontier model                   |
 | `tools`             | `[]`                           | One-shot query, no tool use                           |
-| `maxOutputTokens`   | `300`                          | Headroom for one short sentence + tags                |
+| `maxOutputTokens`   | `300`                          | Headroom for 1-2 short sentences + tags               |
 | `temperature`       | `0.3`                          | Mostly deterministic, with a bit of natural variation |
 | `systemInstruction` | The recap-only prompt above    | Replaces the main agent's role definition             |
 
@@ -170,17 +170,18 @@ response.
 | `recapPendingRef` | Whether an LLM call is in flight                  |
 | `inFlightRef`     | The current in-flight `AbortController`           |
 
-`useEffect` deps: `[enabled, config, isFocused, isIdle, setAwayRecapItem]`.
+`useEffect` deps: `[enabled, config, isFocused, isIdle, addItem, thresholdMs]`.
 
-| Event                                              | Action                                                                                                                                 |
-| -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `!enabled \|\| !config`                            | Abort in-flight call + clear `inFlightRef` + clear `blurredAtRef`                                                                      |
-| `!isFocused` and `blurredAtRef === null`           | Set `blurredAtRef = Date.now()`                                                                                                        |
-| `isFocused` and `blurredAtRef === null`            | Return early (no blur cycle to handle — first render or right after a brief-blur reset)                                                |
-| `isFocused` and blur duration < 5 min              | Clear `blurredAtRef`, wait for next blur cycle                                                                                         |
-| `isFocused` and blur ≥ 5 min and `recapPendingRef` | Return (dedupe)                                                                                                                        |
-| `isFocused` and blur ≥ 5 min and `!isIdle`         | **Preserve** `blurredAtRef` and wait for the turn to finish (`isIdle` is in the deps, so the effect re-fires when streaming completes) |
-| `isFocused` and all conditions met                 | Clear `blurredAtRef`, set `recapPendingRef = true`, create `AbortController`, send the LLM request                                     |
+| Event                                                            | Action                                                                                                                                 |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `!enabled \|\| !config`                                          | Abort in-flight call + clear `inFlightRef` + clear `blurredAtRef`                                                                      |
+| `!isFocused` and `blurredAtRef === null`                         | Set `blurredAtRef = Date.now()`                                                                                                        |
+| `isFocused` and `blurredAtRef === null`                          | Return early (no blur cycle to handle — first render or right after a brief-blur reset)                                                |
+| `isFocused` and blur duration < 5 min                            | Clear `blurredAtRef`, wait for next blur cycle                                                                                         |
+| `isFocused` and blur ≥ 5 min and `recapPendingRef`               | Return (dedupe)                                                                                                                        |
+| `isFocused` and blur ≥ 5 min and `!isIdle`                       | **Preserve** `blurredAtRef` and wait for the turn to finish (`isIdle` is in the deps, so the effect re-fires when streaming completes) |
+| `isFocused` and blur ≥ 5 min and `shouldFireRecap` returns false | Clear `blurredAtRef` and return — conversation hasn't moved enough since the last recap (≥ 2 user turns required, mirrors Claude Code) |
+| `isFocused` and all conditions met                               | Clear `blurredAtRef`, set `recapPendingRef = true`, create `AbortController`, send the LLM request                                     |
 
 The `.then` callback **re-checks** `isIdleRef.current`: if the user has
 started a new turn while the LLM was running, the late-arriving recap
@@ -205,10 +206,11 @@ and a null `pendingItem`.
 
 ### User-facing knobs
 
-| Setting                    | Default | Notes                                                             |
-| -------------------------- | ------- | ----------------------------------------------------------------- |
-| `general.showSessionRecap` | `false` | Auto-trigger only. Manual `/recap` ignores this.                  |
-| `fastModel`                | unset   | Recommended (e.g. `qwen3-coder-flash`) for fast and cheap recaps. |
+| Setting                                    | Default | Notes                                                                               |
+| ------------------------------------------ | ------- | ----------------------------------------------------------------------------------- |
+| `general.showSessionRecap`                 | `false` | Auto-trigger only. Manual `/recap` ignores this.                                    |
+| `general.sessionRecapAwayThresholdMinutes` | `5`     | Minutes blurred before auto-recap fires on focus-in. Matches Claude Code's default. |
+| `fastModel`                                | unset   | Recommended (e.g. `qwen3-coder-flash`) for fast and cheap recaps.                   |
 
 ### Model fallback
 
