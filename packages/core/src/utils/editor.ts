@@ -125,7 +125,7 @@ export function getEditorExecutable(editorType: EditorType): string | null {
     return found;
   }
 
-    // Special handling for Zed on macOS: check app bundle CLI as fallback
+  // Special handling for Zed on macOS: check app bundle CLI as fallback
   if (editorType === 'zed' && process.platform === 'darwin') {
     for (const appPath of getZedAppPaths()) {
       const cliPath = join(appPath, 'Contents/MacOS/cli');
