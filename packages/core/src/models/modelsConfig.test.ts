@@ -597,6 +597,256 @@ describe('ModelsConfig', () => {
     expect(gc.samplingParams?.temperature).toBe(0.9); // Preserved from initial config
   });
 
+  it('should fall back to settings-sourced apiKey when registry model envKey is not in process.env (restart scenario)', () => {
+    // Simulate the restart scenario from issue #3417:
+    // 1. User has settings.security.auth.apiKey = 'settings-api-key'
+    // 2. modelProviders.openai has a model with envKey = 'CODING_PLAN_KEY'
+    // 3. process.env['CODING_PLAN_KEY'] is NOT set
+    // 4. resolveCliGenerationConfig correctly resolved apiKey from settings (layer 4)
+    // 5. syncAfterAuthRefresh should NOT discard the settings-sourced key
+
+    const envKey = 'CODING_PLAN_KEY_TEST_3417';
+    // Ensure the env var is NOT set
+    delete process.env[envKey];
+
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'qwen3.5-plus',
+          name: 'Test Model',
+          baseUrl: 'https://api.example.com/v1',
+          envKey,
+          generationConfig: {
+            samplingParams: { temperature: 0.3 },
+          },
+        },
+      ],
+    };
+
+    // ModelsConfig initialized with settings-sourced apiKey (as would happen at startup)
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'qwen3.5-plus',
+        apiKey: 'settings-api-key',
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      },
+      generationConfigSources: {
+        model: { kind: 'settings', detail: 'settings.model.name' },
+        apiKey: { kind: 'settings', detail: 'security.auth.apiKey' },
+        baseUrl: { kind: 'settings', detail: 'security.auth.baseUrl' },
+      },
+    });
+
+    // Verify initial state
+    expect(currentGenerationConfig(modelsConfig).apiKey).toBe(
+      'settings-api-key',
+    );
+
+    // Simulate what refreshAuth does on startup
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'qwen3.5-plus');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // The settings-sourced apiKey should be preserved as fallback
+    expect(gc.apiKey).toBe('settings-api-key');
+    // envKey metadata should still be set for diagnostics
+    expect(gc.apiKeyEnvKey).toBe(envKey);
+    // Model and other provider config should be applied
+    expect(gc.model).toBe('qwen3.5-plus');
+    expect(gc.samplingParams?.temperature).toBe(0.3);
+
+    // Source should still reflect settings origin
+    const sources = modelsConfig.getGenerationConfigSources();
+    expect(sources['apiKey']?.kind).toBe('settings');
+  });
+
+  it('should prefer env var over settings apiKey when both exist (restart scenario)', () => {
+    const envKey = 'CODING_PLAN_KEY_TEST_3417_PREFER';
+    // Set the env var
+    process.env[envKey] = 'env-api-key';
+
+    try {
+      const modelProvidersConfig: ModelProvidersConfig = {
+        openai: [
+          {
+            id: 'test-model',
+            name: 'Test Model',
+            baseUrl: 'https://api.example.com/v1',
+            envKey,
+          },
+        ],
+      };
+
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig,
+        generationConfig: {
+          model: 'test-model',
+          apiKey: 'settings-api-key',
+        },
+        generationConfigSources: {
+          model: { kind: 'settings', detail: 'settings.model.name' },
+          apiKey: { kind: 'settings', detail: 'security.auth.apiKey' },
+        },
+      });
+
+      modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'test-model');
+
+      const gc = currentGenerationConfig(modelsConfig);
+      // Env var should take priority over settings apiKey
+      expect(gc.apiKey).toBe('env-api-key');
+      expect(gc.apiKeyEnvKey).toBe(envKey);
+
+      const sources = modelsConfig.getGenerationConfigSources();
+      expect(sources['apiKey']?.kind).toBe('env');
+    } finally {
+      delete process.env[envKey];
+    }
+  });
+
+  it('should NOT preserve programmatic apiKey when registry model envKey is absent', () => {
+    // When apiKey was set via updateCredentials (programmatic source),
+    // applyResolvedModelDefaults should NOT preserve it — provider atomicity.
+    const envKey = 'CODING_PLAN_KEY_TEST_3417_PROG';
+    delete process.env[envKey];
+
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'provider-model',
+          name: 'Provider Model',
+          baseUrl: 'https://api.example.com/v1',
+          envKey,
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'provider-model',
+        apiKey: 'programmatic-key',
+      },
+      generationConfigSources: {
+        model: { kind: 'programmatic', detail: 'updateCredentials' },
+        apiKey: { kind: 'programmatic', detail: 'updateCredentials' },
+      },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'provider-model');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // Programmatic apiKey should NOT be preserved
+    expect(gc.apiKey).toBeUndefined();
+  });
+
+  it('should NOT preserve env apiKey with via.modelProviders during model switch', () => {
+    // When switching from model-a to model-b, model-a's provider-specific
+    // envKey value should NOT be reused for model-b — they may target
+    // different services with different credentials.
+    const envKeyA = 'PROVIDER_KEY_A_TEST_3417';
+    const envKeyB = 'PROVIDER_KEY_B_TEST_3417';
+    delete process.env[envKeyA];
+    delete process.env[envKeyB];
+
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'model-a',
+          name: 'Model A',
+          baseUrl: 'https://api-a.example.com/v1',
+          envKey: envKeyA,
+        },
+        {
+          id: 'model-b',
+          name: 'Model B',
+          baseUrl: 'https://api-b.example.com/v1',
+          envKey: envKeyB,
+        },
+      ],
+    };
+
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'model-a',
+        apiKey: 'key-for-model-a',
+      },
+      generationConfigSources: {
+        model: {
+          kind: 'modelProviders',
+          authType: 'openai',
+          modelId: 'model-a',
+          detail: 'model.id',
+        },
+        apiKey: {
+          kind: 'env',
+          envKey: envKeyA,
+          via: {
+            kind: 'modelProviders',
+            authType: 'openai',
+            modelId: 'model-a',
+            detail: 'envKey',
+          },
+        },
+      },
+    });
+
+    // Switch to model-b whose envKey is also not set
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'model-b');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // model-a's key should NOT be reused for model-b
+    expect(gc.apiKey).toBeUndefined();
+    expect(gc.model).toBe('model-b');
+  });
+
+  it('should preserve general env var apiKey (e.g. OPENAI_API_KEY) when provider envKey is absent', () => {
+    // If the user has OPENAI_API_KEY set but NOT the provider-specific envKey,
+    // the general env var should be preserved as a fallback.
+    const providerEnvKey = 'SPECIFIC_PROVIDER_KEY_TEST_3417';
+    delete process.env[providerEnvKey];
+
+    const modelProvidersConfig: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'test-model',
+          name: 'Test Model',
+          baseUrl: 'https://api.example.com/v1',
+          envKey: providerEnvKey,
+        },
+      ],
+    };
+
+    // resolveCliGenerationConfig resolved apiKey from OPENAI_API_KEY (layer 3)
+    // — source has kind:'env' but no 'via' (general env var, not provider-specific)
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig,
+      generationConfig: {
+        model: 'test-model',
+        apiKey: 'openai-api-key-value',
+      },
+      generationConfigSources: {
+        model: { kind: 'settings', detail: 'settings.model.name' },
+        apiKey: { kind: 'env', envKey: 'OPENAI_API_KEY' },
+      },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'test-model');
+
+    const gc = currentGenerationConfig(modelsConfig);
+    // General env var key should be preserved
+    expect(gc.apiKey).toBe('openai-api-key-value');
+
+    const sources = modelsConfig.getGenerationConfigSources();
+    expect(sources['apiKey']?.kind).toBe('env');
+    expect(sources['apiKey']?.envKey).toBe('OPENAI_API_KEY');
+  });
+
   it('should maintain consistency between currentModelId and _generationConfig.model after initialization', () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [

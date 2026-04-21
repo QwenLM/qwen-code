@@ -708,6 +708,13 @@ export class ModelsConfig {
 
     // Clear credentials to avoid reusing previous model's API key
 
+    // Capture the previously-resolved apiKey before clearing.
+    // On restart, resolveCliGenerationConfig may have resolved the key from
+    // settings.security.auth.apiKey (layer 4 fallback). We preserve it here
+    // so it can serve as a fallback when process.env[model.envKey] is absent.
+    const previousApiKey = this._generationConfig.apiKey;
+    const previousApiKeySource = this.generationConfigSources['apiKey'];
+
     // For Qwen OAuth, apiKey must always be a placeholder. It will be dynamically
     // replaced when building requests. Do not preserve any previous key or read
     // from envKey.
@@ -742,6 +749,23 @@ export class ModelsConfig {
             detail: 'envKey',
           },
         };
+      } else if (
+        previousApiKey &&
+        this.currentAuthType !== AuthType.QWEN_OAUTH &&
+        (previousApiKeySource?.kind === 'settings' ||
+          (previousApiKeySource?.kind === 'env' && !previousApiKeySource.via))
+      ) {
+        // Fall back to the previously-resolved key from settings or a general
+        // environment variable (e.g., settings.security.auth.apiKey or
+        // OPENAI_API_KEY).
+        //
+        // Sources that are NOT preserved:
+        //  - 'programmatic' (from updateCredentials) — provider atomicity
+        //  - 'env' with via.modelProviders — key from a different provider's
+        //    envKey; reusing it for another model may send wrong credentials
+        //    to the wrong service.
+        this._generationConfig.apiKey = previousApiKey;
+        this.generationConfigSources['apiKey'] = previousApiKeySource!;
       }
       this._generationConfig.apiKeyEnvKey = model.envKey;
       this.generationConfigSources['apiKeyEnvKey'] = {
