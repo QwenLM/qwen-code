@@ -20,11 +20,22 @@ import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
+import { extractPDFText, parsePDFPageRange } from './pdf.js';
+import { readNotebook } from './notebook.js';
 
 const debugLogger = createDebugLogger('FILE_UTILS');
 
 // Default values for encoding and separator format
 export const DEFAULT_ENCODING: BufferEncoding = 'utf-8';
+
+// Upper bound on the on-disk size of a PDF we will hand to the
+// pdftotext text-extraction path. The 10MB inline-data cap is bypassed
+// for this branch (pdftotext streams the file rather than base64-
+// encoding it), so a separate ceiling prevents handing pdftotext an
+// arbitrarily large file it would spend the full 30s timeout chewing
+// on. 100MB is large enough for typical scanned documents and reports
+// while keeping wall-clock and RSS bounded.
+const PDF_EXTRACTION_MAX_MB = 100;
 
 // --- Unicode BOM detection & decoding helpers --------------------------------
 
@@ -446,14 +457,22 @@ export async function isBinaryFile(filePath: string): Promise<boolean> {
   }
 }
 
+export type FileType =
+  | 'text'
+  | 'image'
+  | 'pdf'
+  | 'audio'
+  | 'video'
+  | 'binary'
+  | 'svg'
+  | 'notebook';
+
 /**
  * Detects the type of file based on extension and content.
  * @param filePath Path to the file.
- * @returns Promise that resolves to 'text', 'image', 'pdf', 'audio', 'video', 'binary' or 'svg'.
+ * @returns Promise that resolves to a FileType string.
  */
-export async function detectFileType(
-  filePath: string,
-): Promise<'text' | 'image' | 'pdf' | 'audio' | 'video' | 'binary' | 'svg'> {
+export async function detectFileType(filePath: string): Promise<FileType> {
   const ext = path.extname(filePath).toLowerCase();
 
   // The mimetype for various TypeScript extensions (ts, mts, cts, tsx) can be
@@ -465,6 +484,10 @@ export async function detectFileType(
 
   if (ext === '.svg') {
     return 'svg';
+  }
+
+  if (ext === '.ipynb') {
+    return 'notebook';
   }
 
   const lookedUpMimeType = mime.getType(filePath); // Returns null if not found, or the mime type string
@@ -510,10 +533,10 @@ export interface ProcessedFileReadResult {
 
 /**
  * For media file types, returns the corresponding modality key.
- * Returns undefined for non-media types (text, binary, svg) which are always supported.
+ * Returns undefined for non-media types (text, binary, svg, notebook) which are always supported.
  */
 function mediaModalityKey(
-  fileType: 'image' | 'pdf' | 'audio' | 'video' | 'text' | 'binary' | 'svg',
+  fileType: FileType,
 ): keyof InputModalities | undefined {
   if (
     fileType === 'image' ||
@@ -529,27 +552,24 @@ function mediaModalityKey(
 /**
  * Build the same unsupported-modality message used by the converter,
  * so the LLM sees a consistent hint regardless of where the check fires.
+ * Note: PDF is handled separately in the switch (pdftotext fallback) and
+ * never reaches this function.
  */
 function unsupportedModalityMessage(
   modality: string,
   displayName: string,
 ): string {
-  let hint: string;
-  if (modality === 'pdf') {
-    hint =
-      'This model does not support PDF input directly. The read_file tool cannot extract PDF content either. To extract text from the PDF file, try using skills if applicable, or guide user to install pdf skill by running this slash command:\n/extensions install https://github.com/anthropics/skills:document-skills';
-  } else {
-    hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
-  }
+  const hint = `This model does not support ${modality} input. The read_file tool cannot process this type of file either. To handle this file, try using skills if applicable, or any tools installed at system wide, or let the user know you cannot process this type of file.`;
   return `[Unsupported ${modality} file: "${displayName}". ${hint}]`;
 }
 
 /**
- * Reads and processes a single file, handling text, images, and PDFs.
+ * Reads and processes a single file, handling text, images, PDFs, and notebooks.
  * @param filePath Absolute path to the file.
  * @param config Config instance for truncation settings.
  * @param offset Optional offset for text files (0-based line number).
  * @param limit Optional limit for text files (number of lines to read).
+ * @param pages Optional page range for PDF files (e.g. "1-5", "3", "10-20").
  * @returns ProcessedFileReadResult object.
  */
 export async function processSingleFileContent(
@@ -557,6 +577,7 @@ export async function processSingleFileContent(
   config: Config,
   offset?: number,
   limit?: number,
+  pages?: string,
 ): Promise<ProcessedFileReadResult> {
   const rootDirectory = config.getTargetDir();
   try {
@@ -581,14 +602,17 @@ export async function processSingleFileContent(
       };
     }
 
-    const fileSizeInMB = stats.size / (1024 * 1024);
-    // Use 9.9MB instead of 10MB to leave margin for encoding overhead (#1880)
-    if (fileSizeInMB > 9.9) {
+    // Reject FIFOs, sockets, /dev/* devices — stats.size is 0 or
+    // meaningless for these, so the size gate below would wave them
+    // through, and handing `/dev/zero` to pdftotext would make it stream
+    // until the timeout fires. Symlinks to regular files are fine:
+    // fs.stat follows them, so `isFile()` here is true.
+    if (!stats.isFile()) {
       return {
-        llmContent: 'File size exceeds the 10MB limit.',
-        returnDisplay: 'File size exceeds the 10MB limit.',
-        error: `File size exceeds the 10MB limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
-        errorType: ToolErrorType.FILE_TOO_LARGE,
+        llmContent: `Cannot read file: ${path.basename(filePath)} is not a regular file (e.g. device, socket, or pipe).`,
+        returnDisplay: 'Not a regular file.',
+        error: `Not a regular file: ${filePath}`,
+        errorType: ToolErrorType.READ_CONTENT_FAILURE,
       };
     }
 
@@ -598,13 +622,45 @@ export async function processSingleFileContent(
       .replace(/\\/g, '/');
 
     const displayName = path.basename(filePath);
+    // Use optional call (`?.()`) so mock Configs that don't implement
+    // getContentGeneratorConfig still work for non-media file types.
+    const modalities: InputModalities =
+      config.getContentGeneratorConfig?.()?.modalities ?? {};
+
+    const fileSizeInMB = stats.size / (1024 * 1024);
+    // The 10MB cap exists for inline-data paths (base64 images / audio /
+    // video / PDFs), where the encoded payload must fit in the model's
+    // data-URI budget. PDF text extraction streams through pdftotext and
+    // truncates to MAX_PDF_TEXT_OUTPUT_CHARS, so oversized PDFs should go
+    // through it instead of being rejected up front. Use 9.9MB to leave
+    // margin for base64 encoding overhead (#1880). A separate upper
+    // bound applies to the extraction path so a multi-GB file can't hang
+    // pdftotext until the 30s timeout.
+    const willExtractPdfText =
+      fileType === 'pdf' && (pages !== undefined || !modalities.pdf);
+    if (willExtractPdfText && fileSizeInMB > PDF_EXTRACTION_MAX_MB) {
+      return {
+        llmContent: `PDF file is too large for text extraction: ${fileSizeInMB.toFixed(2)}MB exceeds the ${PDF_EXTRACTION_MAX_MB}MB limit. Use the 'pages' parameter to read a narrower range, or split the document.`,
+        returnDisplay: `PDF file too large (${fileSizeInMB.toFixed(2)}MB > ${PDF_EXTRACTION_MAX_MB}MB).`,
+        error: `PDF exceeds extraction size limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        errorType: ToolErrorType.FILE_TOO_LARGE,
+      };
+    }
+    if (fileSizeInMB > 9.9 && !willExtractPdfText) {
+      return {
+        llmContent: 'File size exceeds the 10MB limit.',
+        returnDisplay: 'File size exceeds the 10MB limit.',
+        error: `File size exceeds the 10MB limit: ${filePath} (${fileSizeInMB.toFixed(2)}MB)`,
+        errorType: ToolErrorType.FILE_TOO_LARGE,
+      };
+    }
 
     // Check modality support for media files using the resolved config
     // (same source of truth the converter uses at API-call time).
+    // PDF is handled specially below (fallback to pdftotext), so skip the
+    // early rejection for it here.
     const modality = mediaModalityKey(fileType);
-    if (modality) {
-      const modalities: InputModalities =
-        config.getContentGeneratorConfig()?.modalities ?? {};
+    if (modality && modality !== 'pdf') {
       if (!modalities[modality]) {
         const message = unsupportedModalityMessage(modality, displayName);
         debugLogger.warn(
@@ -718,8 +774,7 @@ export async function processSingleFileContent(
       }
       case 'image':
       case 'audio':
-      case 'video':
-      case 'pdf': {
+      case 'video': {
         const contentBuffer = await fs.promises.readFile(filePath);
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);
@@ -742,6 +797,74 @@ export async function processSingleFileContent(
           },
           returnDisplay: `Read ${fileType} file: ${relativePathForDisplay}`,
         };
+      }
+      case 'pdf': {
+        // When `pages` is provided, always extract text (even if model supports PDF natively).
+        // When model supports PDF modality and no pages requested, send as base64.
+        // Otherwise, fall back to pdftotext for text extraction.
+        if (!pages && modalities.pdf) {
+          // Model supports PDF natively — send as base64
+          const contentBuffer = await fs.promises.readFile(filePath);
+          const base64Data = contentBuffer.toString('base64');
+          const base64SizeInMB = base64Data.length / (1024 * 1024);
+          if (base64SizeInMB > 9.9) {
+            return {
+              llmContent: `File exceeds the 10MB data URI limit after base64 encoding (${base64SizeInMB.toFixed(2)}MB encoded).`,
+              returnDisplay: `File exceeds the 10MB data URI limit after base64 encoding.`,
+              error: `File exceeds the 10MB data URI limit after base64 encoding: ${filePath} (${base64SizeInMB.toFixed(2)}MB encoded)`,
+              errorType: ToolErrorType.FILE_TOO_LARGE,
+            };
+          }
+          return {
+            llmContent: {
+              inlineData: {
+                data: base64Data,
+                mimeType: 'application/pdf',
+                displayName,
+              },
+            },
+            returnDisplay: `Read pdf file: ${relativePathForDisplay}`,
+          };
+        }
+
+        // Extract text via pdftotext (for pages parameter, or models without PDF support)
+        const pageRange = pages ? parsePDFPageRange(pages) : undefined;
+        const pdfResult = await extractPDFText(
+          filePath,
+          pageRange ?? undefined,
+        );
+        if (pdfResult.success) {
+          const pagesLabel = pages ? ` (pages ${pages})` : '';
+          return {
+            llmContent: pdfResult.text,
+            returnDisplay: `Read pdf as text${pagesLabel}: ${relativePathForDisplay}`,
+          };
+        }
+
+        // pdftotext failed or not available — return helpful error
+        return {
+          llmContent: `[Cannot extract text from PDF: "${displayName}". ${pdfResult.error}]`,
+          returnDisplay: `Failed to read pdf: ${relativePathForDisplay}`,
+          error: pdfResult.error,
+          errorType: ToolErrorType.READ_CONTENT_FAILURE,
+        };
+      }
+      case 'notebook': {
+        try {
+          const content = await readNotebook(filePath);
+          return {
+            llmContent: content,
+            returnDisplay: `Read notebook: ${relativePathForDisplay}`,
+          };
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          return {
+            llmContent: `Error parsing notebook ${relativePathForDisplay}: ${msg}`,
+            returnDisplay: `Error reading notebook: ${relativePathForDisplay}`,
+            error: `Error parsing notebook ${filePath}: ${msg}`,
+            errorType: ToolErrorType.READ_CONTENT_FAILURE,
+          };
+        }
       }
       default: {
         // Should not happen with current detectFileType logic

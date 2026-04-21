@@ -43,6 +43,10 @@ export interface DialogCloseOptions {
   isSettingsDialogOpen: boolean;
   closeSettingsDialog: () => void;
 
+  // Memory dialog
+  isMemoryDialogOpen: boolean;
+  closeMemoryDialog: () => void;
+
   // Arena dialogs
   activeArenaDialog: ArenaDialogType;
   closeArenaDialog: () => void;
@@ -85,6 +89,11 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.isSettingsDialogOpen) {
       // Mimic ESC behavior: onSelect(undefined, selectedScope)
       options.closeSettingsDialog();
+      return true;
+    }
+
+    if (options.isMemoryDialogOpen) {
+      options.closeMemoryDialog();
       return true;
     }
 

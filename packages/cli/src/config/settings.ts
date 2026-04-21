@@ -437,6 +437,26 @@ export class LoadedSettings {
     this._merged = this.computeMergedSettings();
     saveSettings(settingsFile, createSettingsUpdate(key, value));
   }
+
+  /**
+   * Get user-level hooks from user settings (not merged with workspace).
+   * These hooks should always be loaded regardless of folder trust.
+   */
+  getUserHooks(): Record<string, unknown> | undefined {
+    return this.user.settings.hooks;
+  }
+
+  /**
+   * Get project-level hooks from workspace settings (not merged).
+   * Returns undefined if workspace is not trusted (hooks filtered out).
+   */
+  getProjectHooks(): Record<string, unknown> | undefined {
+    // Only return project hooks if workspace is trusted
+    if (!this.isTrusted) {
+      return undefined;
+    }
+    return this.workspace.settings.hooks;
+  }
 }
 
 /**

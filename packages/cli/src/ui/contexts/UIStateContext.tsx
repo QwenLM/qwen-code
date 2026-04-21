@@ -8,6 +8,7 @@ import { createContext, useContext } from 'react';
 import type {
   HistoryItem,
   HistoryItemBtw,
+  HistoryItemAwayRecap,
   ThoughtSummary,
   ShellConfirmationRequest,
   ConfirmationRequest,
@@ -53,6 +54,7 @@ export interface UIState {
   debugMessage: string;
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
+  isMemoryDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
   isTrustDialogOpen: boolean;
@@ -109,6 +111,8 @@ export interface UIState {
   btwItem: HistoryItemBtw | null;
   setBtwItem: (item: HistoryItemBtw | null) => void;
   cancelBtw: () => void;
+  awayRecapItem: HistoryItemAwayRecap | null;
+  setAwayRecapItem: (item: HistoryItemAwayRecap | null) => void;
   nightly: boolean;
   branchName: string | undefined;
   sessionStats: SessionStatsState;

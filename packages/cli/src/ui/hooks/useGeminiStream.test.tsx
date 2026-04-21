@@ -50,6 +50,7 @@ const MockedGeminiClientClass = vi.hoisted(() =>
     this.startChat = mockStartChat;
     this.sendMessageStream = mockSendMessageStream;
     this.addHistory = vi.fn();
+    this.consumePendingMemoryTaskPromises = vi.fn().mockReturnValue([]);
     this.getChatRecordingService = vi.fn().mockReturnValue({
       recordThought: vi.fn(),
       initialize: vi.fn(),
@@ -206,6 +207,9 @@ describe('useGeminiStream', () => {
       getArenaAgentClient: vi.fn(() => null),
       isCronEnabled: vi.fn(() => false),
       getCronScheduler: vi.fn(() => null),
+      getBackgroundTaskRegistry: vi.fn(() => ({
+        setNotificationCallback: vi.fn(),
+      })),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
@@ -1060,7 +1064,7 @@ describe('useGeminiStream', () => {
       const { result } = renderTestHook();
 
       await act(async () => {
-        await result.current.submitQuery('/memory add "test fact"');
+        await result.current.submitQuery('/save-test-fact "test fact"');
       });
 
       await waitFor(() => {

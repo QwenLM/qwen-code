@@ -16,12 +16,12 @@ import type {
 } from '../index.js';
 import {
   AuthType,
-  EditTool,
   GeminiClient,
   ToolConfirmationOutcome,
   ToolErrorType,
   ToolRegistry,
 } from '../index.js';
+import { EditTool } from '../tools/edit.js';
 import { OutputFormat } from '../output/types.js';
 import {
   EVENT_API_REQUEST,
