@@ -17,6 +17,9 @@ vi.mock('../../services/SelfEvolveService.js', () => ({
 describe('selfEvolveCommand', () => {
   let mockContext: CommandContext;
   const mockRun = vi.fn();
+  const cronCreate = vi.fn();
+  const cronList = vi.fn();
+  const cronDelete = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -26,11 +29,18 @@ describe('selfEvolveCommand', () => {
           run: mockRun,
         }) as unknown as SelfEvolveService,
     );
+
     mockContext = createMockCommandContext({
       executionMode: 'interactive',
       services: {
         config: {
           getProjectRoot: () => '/repo',
+          isCronEnabled: () => true,
+          getCronScheduler: () => ({
+            create: cronCreate,
+            list: cronList,
+            delete: cronDelete,
+          }),
         },
       },
       ui: {
@@ -40,18 +50,7 @@ describe('selfEvolveCommand', () => {
     } as unknown as CommandContext);
   });
 
-  it('returns usage error when called with arguments', async () => {
-    const result = await selfEvolveCommand.action!(mockContext, 'extra');
-
-    expect(result).toEqual({
-      type: 'message',
-      messageType: 'error',
-      content: 'Usage: /self-evolve',
-    });
-    expect(mockRun).not.toHaveBeenCalled();
-  });
-
-  it('runs the service and emits an interactive success message', async () => {
+  it('runs one-shot self-evolve with free-form direction text', async () => {
     mockRun.mockResolvedValue({
       ok: true,
       attemptId: 'attempt-1',
@@ -60,53 +59,184 @@ describe('selfEvolveCommand', () => {
       commitSha: 'abc123',
       summary: 'Prepared a small improvement.',
       selectedTask: 'Fix lint error in src/file.ts:10:2',
+      direction: 'focus lint and tests around the CLI',
       validation: ['pass: npm run lint'],
       changedFiles: ['src/file.ts'],
     });
 
-    await selfEvolveCommand.action!(mockContext, '');
-
-    expect(mockContext.ui.setPendingItem).toHaveBeenCalledWith(
-      expect.objectContaining({
-        text: 'Running self-evolve in an isolated worktree...',
-      }),
+    await selfEvolveCommand.action!(
+      mockContext,
+      'focus lint and tests around the CLI',
     );
+
+    expect(mockRun).toHaveBeenCalledWith(expect.anything(), {
+      direction: 'focus lint and tests around the CLI',
+    });
+    expect(cronCreate).not.toHaveBeenCalled();
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'info',
-        text: expect.stringContaining('Commit: abc123'),
+        text: expect.stringContaining(
+          'Direction: focus lint and tests around the CLI',
+        ),
       }),
       expect.any(Number),
     );
-    expect(mockContext.ui.setPendingItem).toHaveBeenLastCalledWith(null);
   });
 
-  it('returns a message in non-interactive mode', async () => {
+  it('schedules recurring self-evolve and runs the first attempt immediately', async () => {
+    cronCreate.mockReturnValue({
+      id: 'job12345',
+      cronExpr: '0 */2 * * *',
+      prompt: '/self-evolve --once --direction focus lint cleanup',
+    });
+    mockRun.mockResolvedValue({
+      ok: true,
+      attemptId: 'attempt-2',
+      recordPath: '/tmp/result.json',
+      branch: 'self-evolve/review',
+      commitSha: 'def456',
+      summary: 'Prepared a small improvement.',
+      selectedTask: 'Fix lint error in src/file.ts:10:2',
+      direction: 'focus lint cleanup',
+      validation: ['pass: npm run lint'],
+      changedFiles: ['src/file.ts'],
+    });
+
+    const result = await selfEvolveCommand.action!(
+      {
+        ...mockContext,
+        executionMode: 'non_interactive',
+      },
+      '--every 90m focus lint cleanup',
+    );
+
+    expect(cronCreate).toHaveBeenCalledWith(
+      '0 */2 * * *',
+      '/self-evolve --once --direction focus lint cleanup',
+      true,
+    );
+    expect(mockRun).toHaveBeenCalledWith(expect.anything(), {
+      direction: 'focus lint cleanup',
+    });
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining(
+        'Scheduled recurring self-evolve job job12345.',
+      ),
+    });
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('Rounded from 90m to every 2 hours.'),
+    });
+  });
+
+  it('returns usage error for invalid flag combinations', async () => {
+    const result = await selfEvolveCommand.action!(
+      mockContext,
+      '--once --every 1h',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('Usage: /self-evolve'),
+    });
+    expect(mockRun).not.toHaveBeenCalled();
+  });
+
+  it('lists only scheduled self-evolve jobs', async () => {
+    cronList.mockReturnValue([
+      {
+        id: 'job1',
+        cronExpr: '*/5 * * * *',
+        prompt: '/self-evolve --once',
+      },
+      {
+        id: 'job2',
+        cronExpr: '*/5 * * * *',
+        prompt: '/loop 5m check the build',
+      },
+    ]);
+
+    const result = await selfEvolveCommand.action!(
+      {
+        ...mockContext,
+        executionMode: 'non_interactive',
+      },
+      'list',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Scheduled self-evolve jobs:\n\njob1  */5 * * * *\nPrompt: /self-evolve --once',
+    });
+  });
+
+  it('clears scheduled self-evolve jobs only', async () => {
+    cronList.mockReturnValue([
+      {
+        id: 'job1',
+        cronExpr: '*/5 * * * *',
+        prompt: '/self-evolve --once',
+      },
+      {
+        id: 'job2',
+        cronExpr: '0 */2 * * *',
+        prompt: '/self-evolve --once --direction focus docs',
+      },
+      {
+        id: 'job3',
+        cronExpr: '*/5 * * * *',
+        prompt: '/loop 5m check the build',
+      },
+    ]);
+
+    const result = await selfEvolveCommand.action!(
+      {
+        ...mockContext,
+        executionMode: 'non_interactive',
+      },
+      'clear',
+    );
+
+    expect(cronDelete).toHaveBeenCalledTimes(2);
+    expect(cronDelete).toHaveBeenNthCalledWith(1, 'job1');
+    expect(cronDelete).toHaveBeenNthCalledWith(2, 'job2');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Cleared 2 scheduled self-evolve jobs.',
+    });
+  });
+
+  it('errors when recurring mode is requested without cron support', async () => {
     mockContext = createMockCommandContext({
       executionMode: 'non_interactive',
       services: {
         config: {
           getProjectRoot: () => '/repo',
+          isCronEnabled: () => false,
         },
       },
     } as unknown as CommandContext);
 
-    mockRun.mockResolvedValue({
-      ok: false,
-      attemptId: 'attempt-2',
-      recordPath: '/tmp/result.json',
-      summary: 'No safe task was selected.',
-      selectedTask: 'Address TODO in src/file.ts:10',
-      validation: [],
-      learnings: ['Candidate list was too risky.'],
-    });
-
-    const result = await selfEvolveCommand.action!(mockContext, '');
+    const result = await selfEvolveCommand.action!(
+      mockContext,
+      '--every 2h focus docs',
+    );
 
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content: expect.stringContaining('Learnings: Candidate list was too risky.'),
+      content: expect.stringContaining(
+        'Recurring /self-evolve requires cron support.',
+      ),
     });
+    expect(mockRun).not.toHaveBeenCalled();
   });
 });

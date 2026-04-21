@@ -18,21 +18,40 @@ Slash commands are used to manage Qwen Code sessions, interface, and basic behav
 
 These commands help you save, restore, and summarize work progress.
 
-| Command         | Description                                                    | Usage Examples                       |
-| --------------- | -------------------------------------------------------------- | ------------------------------------ |
-| `/init`         | Analyze current directory and create initial context file      | `/init`                              |
-| `/summary`      | Generate project summary based on conversation history         | `/summary`                           |
-| `/self-evolve`  | Attempt one small safe repo improvement in an isolated worktree | `/self-evolve`                      |
-| `/compress`     | Replace chat history with summary to save Tokens               | `/compress`                          |
-| `/resume`       | Resume a previous conversation session                         | `/resume`                            |
-| `/recap`        | Generate a one-line session recap now                          | `/recap`                             |
-| `/restore`      | Restore files to state before tool execution                   | `/restore` (list) or `/restore <ID>` |
+| Command        | Description                                                         | Usage Examples                                               |
+| -------------- | ------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `/init`        | Analyze current directory and create initial context file           | `/init`                                                      |
+| `/summary`     | Generate project summary based on conversation history              | `/summary`                                                   |
+| `/self-evolve` | Run one small safe repo improvement once or on a recurring schedule | `/self-evolve`, `/self-evolve --every 2h focus lint cleanup` |
+| `/compress`    | Replace chat history with summary to save Tokens                    | `/compress`                                                  |
+| `/resume`      | Resume a previous conversation session                              | `/resume`                                                    |
+| `/recap`       | Generate a one-line session recap now                               | `/recap`                                                     |
+| `/restore`     | Restore files to state before tool execution                        | `/restore` (list) or `/restore <ID>`                         |
 
 `/self-evolve` inspects the current repository for a short list of small,
 safe improvement candidates, launches one isolated attempt in a git worktree,
 reruns validation, and keeps only a clean review commit if validation passes.
 Failed attempts are discarded and an attempt record is written under the
 runtime project directory for later inspection.
+
+By default it runs once:
+
+```text
+/self-evolve
+/self-evolve focus on small CLI lint and test follow-ups
+```
+
+It also supports first-class recurring mode when session cron is enabled:
+
+```text
+/self-evolve --every 2h focus on safe docs and lint cleanups
+/self-evolve focus on TODOs in the CLI every 4h
+```
+
+Recurring `/self-evolve` schedules a session-scoped job and then immediately
+runs the first attempt now. The custom direction text is advisory only: it is
+used to bias task selection among discovered candidates, but it does not relax
+the safety guardrails around small, safe, locally verifiable changes.
 
 ### 1.2 Interface and Workspace Control
 

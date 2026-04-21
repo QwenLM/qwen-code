@@ -8,6 +8,27 @@ Tasks are session-scoped: they live in the current Qwen Code process and are gon
 
 > **Note:** Scheduled tasks are an experimental feature. Enable them with `experimental.cron: true` in your [settings](../configuration/settings.md), or set `QWEN_CODE_ENABLE_CRON=1` in your environment.
 
+## Schedule recurring self-improvement
+
+`/self-evolve` now has a first-class recurring mode for small, safe, locally
+verifiable repository maintenance. It uses the same in-session cron scheduler
+as `/loop`, but keeps `/self-evolve`'s isolated worktree and validation flow.
+
+```text
+/self-evolve --every 2h focus on safe CLI lint and test cleanups
+/self-evolve focus on TODO follow-ups in docs every 6h
+```
+
+When you schedule recurring `/self-evolve`, Qwen Code:
+
+- creates a session-scoped recurring job
+- immediately runs the first self-evolve attempt now
+- reuses the same one-shot `/self-evolve` safety path on every later fire
+
+The optional direction text guides candidate selection, but it does not expand
+scope: `/self-evolve` still only acts on small, safe, locally verifiable
+changes discovered in the repository.
+
 ## Schedule a recurring prompt with /loop
 
 The `/loop` [bundled skill](skills.md) is the quickest way to schedule a recurring prompt. Pass an optional interval and a prompt, and Qwen Code sets up a cron job that fires in the background while the session stays open.

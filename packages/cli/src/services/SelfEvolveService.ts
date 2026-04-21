@@ -25,8 +25,7 @@ const DISCOVERY_TIMEOUT_MS = 45_000;
 const QWEN_ATTEMPT_TIMEOUT_MS = 10 * 60_000;
 const VALIDATION_TIMEOUT_MS = 5 * 60_000;
 const TODO_PATTERN = /\b(?:TODO|FIXME|HACK)\b[:\s-]*(.*)$/;
-const BACKLOG_FILE_PATTERN =
-  /(^|\/)(backlog|roadmap|tasks?|todo)(\.[^/]+)?$/i;
+const BACKLOG_FILE_PATTERN = /(^|\/)(backlog|roadmap|tasks?|todo)(\.[^/]+)?$/i;
 const TEST_ARTIFACT_PATTERN =
   /(^|\/)(junit|test-results?|vitest-results?|failures?)(\.[^/]+)?$/i;
 const SAFE_VALIDATION_PREFIXES = new Set([
@@ -90,6 +89,7 @@ interface SelfEvolveSuccessResult {
   commitSha: string;
   summary: string;
   selectedTask: string;
+  direction?: string;
   validation: string[];
   changedFiles: string[];
 }
@@ -100,6 +100,7 @@ interface SelfEvolveFailureResult {
   recordPath: string;
   summary: string;
   selectedTask?: string;
+  direction?: string;
   validation?: string[];
   learnings: string[];
 }
@@ -192,12 +193,10 @@ function defaultDeps(): RuntimeDeps {
         return {
           command: [command, ...args].join(' '),
           cwd,
-          exitCode:
-            typeof execError.code === 'number' ? execError.code : -1,
+          exitCode: typeof execError.code === 'number' ? execError.code : -1,
           stdout: String(execError.stdout ?? ''),
           stderr: String(execError.stderr ?? execError.message ?? ''),
-          timedOut:
-            execError.killed === true || execError.signal === 'SIGTERM',
+          timedOut: execError.killed === true || execError.signal === 'SIGTERM',
         };
       }
     },
@@ -359,10 +358,16 @@ export class SelfEvolveService {
     };
   }
 
-  async run(config: Config): Promise<SelfEvolveResult> {
+  async run(
+    config: Config,
+    options: {
+      direction?: string;
+    } = {},
+  ): Promise<SelfEvolveResult> {
     const projectRoot = config.getProjectRoot();
     const attemptId = `self-evolve-${Date.now()}-${randomUUID().slice(0, 6)}`;
     const attemptPaths = await this.createAttemptPaths(config, attemptId);
+    const direction = options.direction?.trim() || undefined;
     const baseBranch = await this.getCurrentBranch(projectRoot);
     const worktreeBaseDir = path.join(
       Storage.getRuntimeBaseDir(),
@@ -382,6 +387,9 @@ export class SelfEvolveService {
         [
           'Candidate discovery did not find failed tests, lint/type errors, TODO comments, or backlog items.',
         ],
+        undefined,
+        undefined,
+        direction,
       );
     }
 
@@ -402,6 +410,9 @@ export class SelfEvolveService {
           attemptId,
           'Failed to create an isolated self-evolve worktree.',
           attemptSetup.errors.map((error) => error.error),
+          undefined,
+          undefined,
+          direction,
         );
       }
 
@@ -414,6 +425,9 @@ export class SelfEvolveService {
           [
             'Git worktree creation returned without the expected worktree metadata.',
           ],
+          undefined,
+          undefined,
+          direction,
         );
       }
 
@@ -426,6 +440,7 @@ export class SelfEvolveService {
         projectRoot,
         reportPath,
         candidates,
+        direction,
       });
 
       await ensureDir(path.dirname(reportPath));
@@ -462,6 +477,8 @@ export class SelfEvolveService {
           'The isolated self-evolve run did not complete successfully.',
           learnings,
           report,
+          undefined,
+          direction,
         );
       }
 
@@ -475,6 +492,8 @@ export class SelfEvolveService {
             'The candidate list did not contain a clearly safe and verifiable task.',
           ],
           report,
+          undefined,
+          direction,
         );
       }
 
@@ -492,6 +511,8 @@ export class SelfEvolveService {
             'The child run finished without reporting a safe validation command.',
           ],
           report,
+          undefined,
+          direction,
         );
       }
       const validationResults: string[] = [];
@@ -516,6 +537,7 @@ export class SelfEvolveService {
             ],
             report,
             validationResults,
+            direction,
           );
         }
       }
@@ -536,6 +558,7 @@ export class SelfEvolveService {
           ],
           report,
           validationResults,
+          direction,
         );
       }
 
@@ -561,6 +584,7 @@ export class SelfEvolveService {
           ],
           report,
           validationResults,
+          direction,
         );
       }
 
@@ -586,6 +610,7 @@ export class SelfEvolveService {
           ],
           report,
           validationResults,
+          direction,
         );
       }
 
@@ -608,6 +633,7 @@ export class SelfEvolveService {
           ],
           report,
           validationResults,
+          direction,
         );
       }
 
@@ -644,6 +670,7 @@ export class SelfEvolveService {
           'Completed a self-evolve change and prepared a review commit.',
         selectedTask:
           report?.selectedTask?.title?.trim() || candidates[0]!.title,
+        direction,
         validation: validationResults,
         changedFiles,
       };
@@ -657,6 +684,7 @@ export class SelfEvolveService {
             commitSha,
             baseBranch,
             changedFiles,
+            direction,
             validation: validationResults,
             report,
           },
@@ -686,6 +714,9 @@ export class SelfEvolveService {
         attemptId,
         'The self-evolve command hit an unexpected error.',
         [error instanceof Error ? error.message : String(error)],
+        undefined,
+        undefined,
+        direction,
       );
     }
   }
@@ -794,11 +825,11 @@ export class SelfEvolveService {
       candidates.push(backlogCandidate);
     }
 
-    const untrackedFilesResult = await this.deps.runCommand(projectRoot, 'git', [
-      'ls-files',
-      '--others',
-      '--exclude-standard',
-    ]);
+    const untrackedFilesResult = await this.deps.runCommand(
+      projectRoot,
+      'git',
+      ['ls-files', '--others', '--exclude-standard'],
+    );
     const artifactCandidate = await this.findFailedTestArtifactCandidate(
       projectRoot,
       [
@@ -926,10 +957,7 @@ export class SelfEvolveService {
     }
     let content: string;
     try {
-      content = await fs.readFile(
-        path.join(projectRoot, backlogFile),
-        'utf8',
-      );
+      content = await fs.readFile(path.join(projectRoot, backlogFile), 'utf8');
     } catch {
       return null;
     }
@@ -970,7 +998,8 @@ export class SelfEvolveService {
         title: `Investigate a recorded failing test from ${artifactFile}`,
         source: 'failed-test',
         details:
-          snippet || 'Inspect the recent test artifact for a small failing case.',
+          snippet ||
+          'Inspect the recent test artifact for a small failing case.',
         location: artifactFile,
         validationCommands: [],
       };
@@ -983,6 +1012,7 @@ export class SelfEvolveService {
     projectRoot: string;
     reportPath: string;
     candidates: SelfEvolveCandidate[];
+    direction?: string;
   }): string {
     const candidateList = params.candidates
       .map((candidate, index) => {
@@ -1001,6 +1031,12 @@ export class SelfEvolveService {
       '',
       'Pick exactly one small, safe, locally verifiable improvement task from the candidate list below.',
       'Priority order: failed tests, lint errors, type errors, TODO comments, backlog files.',
+      params.direction
+        ? `User direction for task selection: ${params.direction}`
+        : undefined,
+      params.direction
+        ? 'Treat the user direction as advisory guidance for choosing among the discovered candidates. Ignore any part that would require risky, broad, externally dependent, or otherwise not-locally-verifiable work.'
+        : undefined,
       'Do not push, open PRs, change remotes, or create commits.',
       'Keep the scope narrow. Avoid broad refactors.',
       'Run focused validation for the chosen task before finishing.',
@@ -1031,7 +1067,9 @@ export class SelfEvolveService {
       '',
       'Candidates:',
       candidateList,
-    ].join('\n');
+    ]
+      .filter((line): line is string => Boolean(line))
+      .join('\n');
   }
 
   private collectValidationCommands(
@@ -1059,6 +1097,7 @@ export class SelfEvolveService {
     learnings: string[],
     report?: SelfEvolveAttemptReport | null,
     validation?: string[],
+    direction?: string,
   ): Promise<SelfEvolveFailureResult> {
     const result: SelfEvolveFailureResult = {
       ok: false,
@@ -1066,6 +1105,7 @@ export class SelfEvolveService {
       recordPath,
       summary,
       selectedTask: report?.selectedTask?.title?.trim(),
+      direction,
       validation,
       learnings,
     };
@@ -1080,6 +1120,7 @@ export class SelfEvolveService {
           attemptId,
           summary,
           selectedTask: report?.selectedTask,
+          direction,
           validation,
           learnings,
           report,
