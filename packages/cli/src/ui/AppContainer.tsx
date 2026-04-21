@@ -623,6 +623,22 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isHooksDialogOpen, openHooksDialog, closeHooksDialog } =
     useHooksDialog();
 
+  // handleResume must be declared before slashCommandActions (which depends on
+  // it) but also needs to clear awayRecapItem, whose setter comes from
+  // useSlashCommandProcessor below. Read the setter through a ref to break the
+  // cycle.
+  const clearAwayRecapRef = useRef<() => void>(() => {});
+  const handleResume = useCallback(
+    async (sessionId: string): Promise<boolean> => {
+      const switched = await handleResumeInner(sessionId);
+      if (switched) {
+        clearAwayRecapRef.current();
+      }
+      return switched;
+    },
+    [handleResumeInner],
+  );
+
   const slashCommandActions = useMemo(
     () => ({
       openAuthDialog,
@@ -710,21 +726,12 @@ export const AppContainer = (props: AppContainerProps) => {
     setSessionName,
   );
 
-  // Wrap handleResume so the sticky recap from the previous session
-  // doesn't carry over into the new one. Only clear after the inner
-  // handler confirms a session was actually loaded — otherwise (no
-  // session data, missing deps) we'd drop the current session's recap
-  // for no reason.
-  const handleResume = useCallback(
-    async (sessionId: string): Promise<boolean> => {
-      const switched = await handleResumeInner(sessionId);
-      if (switched) {
-        setAwayRecapItem(null);
-      }
-      return switched;
-    },
-    [handleResumeInner, setAwayRecapItem],
-  );
+  // Keep clearAwayRecapRef pointed at the latest setAwayRecapItem so the
+  // handleResume declared above (before useSlashCommandProcessor) can clear
+  // the sticky recap without depending on the setter directly.
+  useEffect(() => {
+    clearAwayRecapRef.current = () => setAwayRecapItem(null);
+  }, [setAwayRecapItem]);
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
   const onDebugMessage = useCallback(
