@@ -488,8 +488,16 @@ export class AgentCore {
           };
         }
 
-        // Handle retry events
+        // Handle retry events — reset all per-attempt state so a successful
+        // retry does not inherit stale data (e.g. wasOutputTruncated) from a
+        // previous attempt that may have hit MAX_TOKENS.
         if (streamEvent.type === 'retry') {
+          functionCalls.length = 0;
+          roundText = '';
+          roundThoughtText = '';
+          lastUsage = undefined;
+          currentResponseId = undefined;
+          wasOutputTruncated = false;
           continue;
         }
 
