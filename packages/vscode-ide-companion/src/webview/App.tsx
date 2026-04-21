@@ -26,7 +26,7 @@ import type { PermissionOption, PermissionToolCall } from '@qwen-code/webui';
 import type { TextMessage } from './hooks/message/useMessageHandling.js';
 import type { ToolCallData } from './components/messages/toolcalls/ToolCall.js';
 import { ToolCall } from './components/messages/toolcalls/ToolCall.js';
-import { hasToolCallOutput } from './utils/utils.js';
+import { hasToolCallOutput, shouldShowToolCall } from './utils/utils.js';
 import { Onboarding } from './components/layout/Onboarding.js';
 import { type CompletionItem } from '../types/completionItemTypes.js';
 import { useCompletionTrigger } from './hooks/useCompletionTrigger.js';
@@ -73,96 +73,147 @@ interface MessageListItem {
 interface MessageListProps {
   allMessages: MessageListItem[];
   onFileClick: (path: string) => void;
+  /**
+   * After each render, this ref is updated with an array that maps
+   * DOM child position → allMessages index, only for items that
+   * actually render a DOM element (skipping nulls).
+   */
+  childIndexMap: React.MutableRefObject<number[]>;
 }
 
 const MessageList = React.memo<MessageListProps>(
-  ({ allMessages, onFileClick }) => {
+  ({ allMessages, onFileClick, childIndexMap }) => {
     let imageIndex = 0;
-    return (
-      <>
-        {allMessages.map((item, index) => {
-          switch (item.type) {
-            case 'message': {
-              const msg = item.data as TextMessage;
 
-              if (msg.kind === 'image' && msg.imagePath) {
-                imageIndex += 1;
-                return (
-                  <ImageMessageRenderer
-                    key={`message-${index}`}
-                    msg={msg as WebViewImageMessage}
-                    imageIndex={imageIndex}
-                  />
-                );
-              }
+    // Build child→allMessages index mapping: for each item that renders
+    // a non-null element, record its allMessages index. This array's
+    // position corresponds to the DOM child position in the container.
+    const mapping: number[] = [];
 
-              if (msg.role === 'thinking') {
-                return (
-                  <ThinkingMessage
-                    key={`message-${index}`}
-                    content={msg.content || ''}
-                    timestamp={msg.timestamp || 0}
-                    onFileClick={onFileClick}
-                  />
-                );
-              }
+    const elements = allMessages.map((item, index) => {
+      let child: React.ReactNode;
+      switch (item.type) {
+        case 'message': {
+          const msg = item.data as TextMessage;
 
-              if (msg.role === 'user') {
-                return (
-                  <UserMessage
-                    key={`message-${index}`}
-                    content={msg.content || ''}
-                    timestamp={msg.timestamp || 0}
-                    onFileClick={onFileClick}
-                    fileContext={msg.fileContext}
-                  />
-                );
-              }
-
-              {
-                const content = (msg.content || '').trim();
-                if (
-                  content === 'Interrupted' ||
-                  content === 'Tool interrupted'
-                ) {
-                  return (
-                    <InterruptedMessage
-                      key={`message-${index}`}
-                      text={content}
-                    />
-                  );
-                }
-                return (
-                  <AssistantMessage
-                    key={`message-${index}`}
-                    content={content}
-                    timestamp={msg.timestamp || 0}
-                    onFileClick={onFileClick}
-                  />
-                );
-              }
-            }
-
-            case 'in-progress-tool-call':
-            case 'completed-tool-call': {
-              return (
-                <ToolCall
-                  key={`toolcall-${(item.data as ToolCallData).toolCallId}-${item.type}`}
-                  toolCall={item.data as ToolCallData}
-                />
-              );
-            }
-
-            default:
-              return null;
+          if (msg.kind === 'image' && msg.imagePath) {
+            imageIndex += 1;
+            child = (
+              <ImageMessageRenderer
+                msg={msg as WebViewImageMessage}
+                imageIndex={imageIndex}
+              />
+            );
+            break;
           }
-        })}
-      </>
-    );
+
+          if (msg.role === 'thinking') {
+            child = (
+              <ThinkingMessage
+                content={msg.content || ''}
+                timestamp={msg.timestamp || 0}
+                onFileClick={onFileClick}
+              />
+            );
+            break;
+          }
+
+          if (msg.role === 'user') {
+            child = (
+              <UserMessage
+                content={msg.content || ''}
+                timestamp={msg.timestamp || 0}
+                onFileClick={onFileClick}
+                fileContext={msg.fileContext}
+              />
+            );
+            break;
+          }
+
+          {
+            const content = (msg.content || '').trim();
+            if (!content) {
+              child = null;
+              break;
+            }
+            if (content === 'Interrupted' || content === 'Tool interrupted') {
+              child = <InterruptedMessage text={content} />;
+              break;
+            }
+            child = (
+              <AssistantMessage
+                content={content}
+                timestamp={msg.timestamp || 0}
+                onFileClick={onFileClick}
+              />
+            );
+          }
+          break;
+        }
+
+        case 'in-progress-tool-call':
+        case 'completed-tool-call': {
+          const tc = item.data as ToolCallData;
+          if (!shouldShowToolCall(tc.kind)) {
+            child = null;
+            break;
+          }
+          child = <ToolCall toolCall={tc} />;
+          break;
+        }
+
+        default:
+          child = null;
+      }
+      // No wrapper div — message components render directly as children
+      // of the scroll container, preserving the original CSS layout.
+      if (child == null) return null;
+      mapping.push(index);
+      return <React.Fragment key={`msg-${index}`}>{child}</React.Fragment>;
+    });
+
+    // Update the mapping ref so the copy handler can use it
+    childIndexMap.current = mapping;
+
+    return <>{elements}</>;
   },
 );
 
 MessageList.displayName = 'MessageList';
+
+/**
+ * Given a click target inside the messages container, find which
+ * allMessages index it belongs to by walking up from the target to
+ * the container's direct child, then mapping through childIndexMap.
+ *
+ * NOTE: childIndexMap indices correspond to MessageList's DOM children
+ * which must be the first N children of the container. Elements rendered
+ * after MessageList (InsightProgressCard, WaitingMessage, etc.) are
+ * excluded from the map and will correctly return -1.
+ */
+function findMessageIndex(
+  target: Element,
+  container: Element,
+  childIndexMap: number[],
+): number {
+  // Walk up from the click target to find the direct child of the container.
+  // This works for all message types regardless of whether they have
+  // .qwen-message class (e.g. InterruptedMessage does not).
+  let directChild: Element | null = target;
+  while (directChild && directChild.parentElement !== container) {
+    directChild = directChild.parentElement;
+  }
+  if (!directChild) return -1;
+
+  // Find DOM child position among container's children
+  const children = container.children;
+  for (let i = 0; i < children.length; i++) {
+    if (children[i] === directChild) {
+      return i < childIndexMap.length ? childIndexMap[i] : -1;
+    }
+  }
+  return -1;
+}
 
 export const App: React.FC = () => {
   const vscode = useVSCode();
@@ -211,6 +262,9 @@ export const App: React.FC = () => {
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [accountInfo, setAccountInfo] = useState<AccountInfo | null>(null);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  // Maps DOM child position → allMessages index. Built during render by
+  // MessageList, only includes items that actually produce DOM elements.
+  const childIndexMapRef = useRef<number[]>([]);
   // Scroll container for message list; used to keep the view anchored to the latest content
   const messagesContainerRef = useRef<HTMLDivElement | null>(null);
   const inputFieldRef = useRef<HTMLDivElement | null>(null);
@@ -1028,18 +1082,6 @@ export const App: React.FC = () => {
     return () => document.removeEventListener('contextmenu', trackTarget, true);
   }, [vscode]);
 
-  // Stamp data-msg-idx on each rendered message element after render.
-  // renderMessages() returns exactly allMessages.length elements as the first N children of the container.
-  useLayoutEffect(() => {
-    const container = messagesContainerRef.current;
-    if (!container) return;
-    const children = container.children;
-    const count = Math.min(children.length, allMessages.length);
-    for (let i = 0; i < count; i++) {
-      (children[i] as HTMLElement).setAttribute('data-msg-idx', String(i));
-    }
-  }, [allMessages]);
-
   // Copy text via the extension host's clipboard API (more reliable than navigator.clipboard in webview)
   const copyToClipboard = useCallback(
     (text: string) => {
@@ -1059,25 +1101,23 @@ export const App: React.FC = () => {
       if (action === 'copyMessage') {
         const target = contextMenuTargetRef.current;
         if (target) {
-          const msgEl = target.closest('[data-msg-idx]') as HTMLElement | null;
-          if (msgEl) {
-            const idx = parseInt(
-              msgEl.getAttribute('data-msg-idx') || '-1',
-              10,
-            );
-            if (idx >= 0 && idx < allMessages.length) {
-              const item = allMessages[idx];
-              if (item.type === 'message') {
-                const msg = item.data as TextMessage;
-                copyToClipboard(msg.content || '');
-              } else if (
-                item.type === 'completed-tool-call' ||
-                item.type === 'in-progress-tool-call'
-              ) {
-                copyToClipboard(
-                  formatToolCallForCopy(item.data as ToolCallData),
-                );
-              }
+          const container = messagesContainerRef.current;
+          if (!container) return;
+          const idx = findMessageIndex(
+            target,
+            container,
+            childIndexMapRef.current,
+          );
+          if (idx >= 0 && idx < allMessages.length) {
+            const item = allMessages[idx];
+            if (item.type === 'message') {
+              const msg = item.data as TextMessage;
+              copyToClipboard(msg.content || '');
+            } else if (
+              item.type === 'completed-tool-call' ||
+              item.type === 'in-progress-tool-call'
+            ) {
+              copyToClipboard(formatToolCallForCopy(item.data as ToolCallData));
             }
           }
         }
@@ -1086,22 +1126,24 @@ export const App: React.FC = () => {
         for (const item of allMessages) {
           if (item.type === 'message') {
             const msg = item.data as TextMessage;
+            const content = (msg.content || '').trim();
+            if (!content) continue;
             if (msg.role === 'user') {
-              parts.push(`**User:** ${msg.content || ''}`);
+              parts.push(`**User:** ${content}`);
             } else if (msg.role === 'thinking') {
-              parts.push(`**Thinking:** ${msg.content || ''}`);
+              parts.push(`**Thinking:** ${content}`);
             } else {
-              parts.push(`**Qwen Code:** ${msg.content || ''}`);
+              parts.push(`**Qwen Code:** ${content}`);
             }
           } else if (
             item.type === 'completed-tool-call' ||
             item.type === 'in-progress-tool-call'
           ) {
-            const text = formatToolCallForCopy(item.data as ToolCallData, true);
+            const tc = item.data as ToolCallData;
+            if (!shouldShowToolCall(tc.kind)) continue;
+            const text = formatToolCallForCopy(tc, true);
             if (text) {
-              parts.push(
-                `**[Tool: ${(item.data as ToolCallData).kind}]**\n\n${text}`,
-              );
+              parts.push(`**[Tool: ${tc.kind}]**\n\n${text}`);
             }
           }
         }
@@ -1209,6 +1251,7 @@ export const App: React.FC = () => {
             <MessageList
               allMessages={allMessages}
               onFileClick={handleFileClick}
+              childIndexMap={childIndexMapRef}
             />
 
             {insightProgress && (
