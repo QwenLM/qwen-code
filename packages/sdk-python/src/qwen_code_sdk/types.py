@@ -56,6 +56,8 @@ CanUseTool: TypeAlias = Callable[
 
 
 class TimeoutOptionsDict(TypedDict, total=False):
+    """Timeout configuration. All values are in seconds."""
+
     can_use_tool: float
     control_request: float
     stream_close: float

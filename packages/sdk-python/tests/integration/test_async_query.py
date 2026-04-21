@@ -259,3 +259,18 @@ async def test_non_zero_process_exit_is_propagated(fake_qwen_path: str) -> None:
         await _collect_messages(result)
 
     await result.close()
+
+
+@pytest.mark.asyncio
+async def test_async_context_manager(fake_qwen_path: str) -> None:
+    async with query(
+        "hello context",
+        {
+            "path_to_qwen_executable": fake_qwen_path,
+        },
+    ) as result:
+        messages = await _collect_messages(result)
+
+    assert result.is_closed()
+    final = next(m for m in messages if is_sdk_result_message(m))
+    assert final["result"] == "done: hello context"

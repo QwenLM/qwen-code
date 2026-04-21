@@ -313,3 +313,37 @@ async def test_finish_with_error_closes_transport_and_fails_pending_requests() -
 
     assert query.is_closed() is True
     assert transport.closed is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_started_raises_after_close() -> None:
+    transport = FakeTransport()
+    query = await _start_query(transport)
+
+    await query.close()
+
+    with pytest.raises(RuntimeError, match="Query is closed"):
+        await query.supported_commands()
+
+
+@pytest.mark.asyncio
+async def test_async_context_manager_closes_on_exit() -> None:
+    transport = FakeTransport()
+    query = Query(
+        transport=transport,  # type: ignore[arg-type]
+        options=QueryOptions(
+            timeout=TimeoutOptions(
+                can_use_tool=0.05,
+                control_request=0.05,
+                stream_close=0.05,
+            )
+        ),
+        prompt="hello",
+        session_id=VALID_UUID,
+    )
+
+    async with query as q:
+        assert q is query
+        assert not q.is_closed()
+
+    assert query.is_closed() is True

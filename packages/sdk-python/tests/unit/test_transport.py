@@ -92,6 +92,16 @@ def test_prepare_spawn_info_uses_runtime_for_python_scripts(tmp_path: Path) -> N
     assert spawn_info.args == [str(script_path.resolve())]
 
 
+def test_prepare_spawn_info_uses_node_for_javascript_files(tmp_path: Path) -> None:
+    script_path = tmp_path / "fake-qwen.js"
+    script_path.write_text("console.log('ok');\n", encoding="utf-8")
+
+    spawn_info = prepare_spawn_info(str(script_path))
+
+    assert spawn_info.command == "node"
+    assert spawn_info.args == [str(script_path.resolve())]
+
+
 def test_prepare_spawn_info_keeps_plain_command_names() -> None:
     spawn_info = prepare_spawn_info("qwen-custom")
 
@@ -127,3 +137,101 @@ async def test_transport_discards_stderr_when_debug_is_disabled(
     await transport.start()
 
     assert captured["kwargs"]["stderr"] is subprocess.DEVNULL
+
+
+def test_prepare_spawn_info_defaults_to_qwen_when_none() -> None:
+    spawn_info = prepare_spawn_info(None)
+
+    assert spawn_info.command == "qwen"
+    assert spawn_info.args == []
+
+
+def test_prepare_spawn_info_uses_node_for_mjs_files(tmp_path: Path) -> None:
+    script_path = tmp_path / "cli.mjs"
+    script_path.write_text("export default {};\n", encoding="utf-8")
+
+    spawn_info = prepare_spawn_info(str(script_path))
+
+    assert spawn_info.command == "node"
+    assert spawn_info.args == [str(script_path.resolve())]
+
+
+def test_prepare_spawn_info_uses_node_for_cjs_files(tmp_path: Path) -> None:
+    script_path = tmp_path / "cli.cjs"
+    script_path.write_text("module.exports = {};\n", encoding="utf-8")
+
+    spawn_info = prepare_spawn_info(str(script_path))
+
+    assert spawn_info.command == "node"
+    assert spawn_info.args == [str(script_path.resolve())]
+
+
+@pytest.mark.asyncio
+async def test_transport_start_raises_after_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_create_subprocess_exec(*args: Any, **kwargs: Any) -> DummyProcess:
+        return DummyProcess()
+
+    monkeypatch.setattr(
+        asyncio,
+        "create_subprocess_exec",
+        fake_create_subprocess_exec,
+    )
+
+    transport_module = __import__(
+        "qwen_code_sdk.transport",
+        fromlist=["ProcessTransport"],
+    )
+    transport = transport_module.ProcessTransport(
+        QueryOptions(timeout=TimeoutOptions())
+    )
+    transport._closed = True
+
+    with pytest.raises(RuntimeError, match="Transport is closed"):
+        await transport.start()
+
+
+@pytest.mark.asyncio
+async def test_read_messages_skips_malformed_json_lines() -> None:
+    """Malformed JSON lines should be skipped, not crash the stream."""
+
+    class FakeStdout:
+        def __init__(self, lines: list[bytes]) -> None:
+            self._lines = iter(lines)
+
+        async def readline(self) -> bytes:
+            return next(self._lines, b"")
+
+    transport_module = __import__(
+        "qwen_code_sdk.transport",
+        fromlist=["ProcessTransport"],
+    )
+    transport = transport_module.ProcessTransport(
+        QueryOptions(timeout=TimeoutOptions())
+    )
+
+    class FakeProcess:
+        returncode = 0
+        stdin = None
+        stderr = None
+
+        def __init__(self) -> None:
+            self.stdout = FakeStdout([
+                b'not valid json\n',
+                b'{"type":"system","subtype":"init","uuid":"u","session_id":"s"}\n',
+                b'also bad\n',
+                b'',
+            ])
+
+        async def wait(self) -> int:
+            return 0
+
+    transport._process = FakeProcess()
+
+    messages: list[Any] = []
+    async for msg in transport.read_messages():
+        messages.append(msg)
+
+    assert len(messages) == 1
+    assert messages[0]["type"] == "system"

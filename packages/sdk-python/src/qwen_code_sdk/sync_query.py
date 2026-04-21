@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import AsyncIterable, Iterable, Mapping
+from collections.abc import AsyncIterable, AsyncIterator, Iterable, Mapping
 from queue import Queue
 from typing import Any, cast
 
@@ -13,6 +13,8 @@ from .query import Query, query
 from .types import QueryOptions, QueryOptionsDict
 
 _STOP = object()
+
+_DEFAULT_CONTROL_TIMEOUT = 30.0
 
 
 class SyncQuery:
@@ -24,7 +26,6 @@ class SyncQuery:
         self._queue: Queue[SDKMessage | Exception | object] = Queue()
         self._ready = threading.Event()
         self._shutdown = threading.Event()
-        self._thread_error: Exception | None = None
         self._query: Query | None = None
         self._consumer_task: asyncio.Task[None] | None = None
 
@@ -70,7 +71,6 @@ class SyncQuery:
             async for message in self._query:
                 self._queue.put(message)
         except Exception as exc:
-            self._thread_error = exc
             self._queue.put(exc)
         finally:
             self._queue.put(_STOP)
@@ -95,34 +95,44 @@ class SyncQuery:
 
         return cast(SDKMessage, item)
 
+    def __enter__(self) -> SyncQuery:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        self.close()
+
     def interrupt(self) -> None:
         q = self._require_query()
-        asyncio.run_coroutine_threadsafe(q.interrupt(), self._loop).result()
+        asyncio.run_coroutine_threadsafe(q.interrupt(), self._loop).result(
+            timeout=_DEFAULT_CONTROL_TIMEOUT
+        )
 
     def set_model(self, model: str) -> None:
         q = self._require_query()
-        asyncio.run_coroutine_threadsafe(q.set_model(model), self._loop).result()
+        asyncio.run_coroutine_threadsafe(q.set_model(model), self._loop).result(
+            timeout=_DEFAULT_CONTROL_TIMEOUT
+        )
 
     def set_permission_mode(self, mode: str) -> None:
         q = self._require_query()
         asyncio.run_coroutine_threadsafe(
             q.set_permission_mode(mode),
             self._loop,
-        ).result()
+        ).result(timeout=_DEFAULT_CONTROL_TIMEOUT)
 
     def supported_commands(self) -> Any:
         q = self._require_query()
         return asyncio.run_coroutine_threadsafe(
             q.supported_commands(),
             self._loop,
-        ).result()
+        ).result(timeout=_DEFAULT_CONTROL_TIMEOUT)
 
     def mcp_server_status(self) -> Any:
         q = self._require_query()
         return asyncio.run_coroutine_threadsafe(
             q.mcp_server_status(),
             self._loop,
-        ).result()
+        ).result(timeout=_DEFAULT_CONTROL_TIMEOUT)
 
     def get_session_id(self) -> str:
         q = self._require_query()
@@ -147,7 +157,25 @@ class SyncQuery:
             except Exception:
                 pass
 
+        # Wait for _consume() to put _STOP before stopping the loop,
+        # otherwise consumers blocked on queue.get() will deadlock.
+        if self._consumer_task is not None:
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._await_consumer(), self._loop
+                ).result(timeout=5)
+            except Exception:
+                pass
+
+        self._queue.put(_STOP)
         self._stop_loop()
+
+    async def _await_consumer(self) -> None:
+        if self._consumer_task is not None:
+            try:
+                await asyncio.wait_for(self._consumer_task, timeout=5.0)
+            except Exception:
+                pass
 
     def _stop_loop(self) -> None:
         if self._loop.is_running():
@@ -159,6 +187,6 @@ class SyncQuery:
 
 async def _iterable_to_async(
     messages: Iterable[SDKUserMessage],
-) -> AsyncIterable[SDKUserMessage]:
+) -> AsyncIterator[SDKUserMessage]:
     for message in messages:
         yield message

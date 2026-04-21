@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -11,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from .errors import AbortError, ProcessExitError
+from .errors import ProcessExitError
 from .json_lines import parse_json_line
 from .types import QueryOptions
 
@@ -35,8 +36,10 @@ def prepare_spawn_info(path_to_qwen_executable: str | None) -> SpawnInfo:
     path = Path(spec).expanduser().resolve()
 
     suffix = path.suffix.lower()
-    if suffix in {".js", ".mjs", ".cjs", ".py"}:
+    if suffix == ".py":
         return SpawnInfo(command=sys.executable, args=[str(path)])
+    if suffix in {".js", ".mjs", ".cjs"}:
+        return SpawnInfo(command="node", args=[str(path)])
 
     return SpawnInfo(command=str(path), args=[])
 
@@ -59,6 +62,8 @@ class ProcessTransport:
         return self._closed
 
     async def start(self) -> None:
+        if self._closed:
+            raise RuntimeError("Transport is closed")
         if self._process is not None:
             return
 
@@ -130,7 +135,10 @@ class ProcessTransport:
             raw = line.decode("utf-8", errors="replace").strip()
             if not raw:
                 continue
-            yield parse_json_line(raw)
+            try:
+                yield parse_json_line(raw)
+            except json.JSONDecodeError:
+                continue
 
         await self._finalize_exit()
 
@@ -227,15 +235,3 @@ def build_cli_arguments(options: QueryOptions) -> list[str]:
         args.extend(["--session-id", options.session_id])
 
     return args
-
-
-async def write_json_line(transport: ProcessTransport, payload: Any) -> None:
-    from .json_lines import serialize_json_line
-
-    transport.write(serialize_json_line(payload))
-    await transport.drain()
-
-
-def ensure_not_aborted(cancel_event: asyncio.Event) -> None:
-    if cancel_event.is_set():
-        raise AbortError("Operation aborted")

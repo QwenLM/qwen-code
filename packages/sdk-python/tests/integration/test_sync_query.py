@@ -64,3 +64,19 @@ def test_sync_query_bootstrap_failure_cleans_up_loop_thread(
         if thread.name == "qwen-sdk-sync-loop"
     }
     assert active_threads == baseline_threads
+
+
+def test_sync_query_context_manager(fake_qwen_path: str) -> None:
+    with query_sync(
+        "hello context",
+        {
+            "path_to_qwen_executable": fake_qwen_path,
+        },
+    ) as result:
+        messages = list(result)
+        assert any(
+            is_sdk_result_message(m) and m["result"] == "done: hello context"
+            for m in messages
+        )
+
+    assert result.is_closed()

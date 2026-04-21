@@ -14,12 +14,12 @@ class Annotation(TypedDict):
     value: str
 
 
-class Usage(TypedDict, total=False):
+class Usage(TypedDict):
     input_tokens: int
     output_tokens: int
-    cache_creation_input_tokens: int
-    cache_read_input_tokens: int
-    total_tokens: int
+    cache_creation_input_tokens: NotRequired[int]
+    cache_read_input_tokens: NotRequired[int]
+    total_tokens: NotRequired[int]
 
 
 class ExtendedUsage(Usage, total=False):
@@ -55,12 +55,12 @@ class ToolUseBlock(TypedDict):
     annotations: NotRequired[list[Annotation]]
 
 
-class ToolResultBlock(TypedDict, total=False):
+class ToolResultBlock(TypedDict):
     type: Literal["tool_result"]
     tool_use_id: str
-    content: str | list[ContentBlock]
-    is_error: bool
-    annotations: list[Annotation]
+    content: NotRequired[str | list[ContentBlock]]
+    is_error: NotRequired[bool]
+    annotations: NotRequired[list[Annotation]]
 
 
 ContentBlock: TypeAlias = TextBlock | ThinkingBlock | ToolUseBlock | ToolResultBlock
@@ -71,14 +71,14 @@ class APIUserMessage(TypedDict):
     content: str | list[ContentBlock]
 
 
-class APIAssistantMessage(TypedDict, total=False):
-    id: str
-    type: Literal["message"]
+class APIAssistantMessage(TypedDict):
     role: Literal["assistant"]
-    model: str
     content: list[ContentBlock]
-    stop_reason: str | None
-    usage: Usage
+    id: NotRequired[str]
+    type: NotRequired[Literal["message"]]
+    model: NotRequired[str]
+    stop_reason: NotRequired[str | None]
+    usage: NotRequired[Usage]
 
 
 class SDKUserMessage(TypedDict):
@@ -103,23 +103,23 @@ class MCPServerState(TypedDict):
     status: str
 
 
-class SDKSystemMessage(TypedDict, total=False):
+class SDKSystemMessage(TypedDict):
     type: Literal["system"]
     subtype: str
     uuid: str
     session_id: str
-    data: Any
-    cwd: str
-    tools: list[str]
-    mcp_servers: list[MCPServerState]
-    model: str
-    permission_mode: str
-    slash_commands: list[str]
-    qwen_code_version: str
-    output_style: str
-    agents: list[str]
-    skills: list[str]
-    capabilities: dict[str, Any]
+    data: NotRequired[Any]
+    cwd: NotRequired[str]
+    tools: NotRequired[list[str]]
+    mcp_servers: NotRequired[list[MCPServerState]]
+    model: NotRequired[str]
+    permission_mode: NotRequired[str]
+    slash_commands: NotRequired[list[str]]
+    qwen_code_version: NotRequired[str]
+    output_style: NotRequired[str]
+    agents: NotRequired[list[str]]
+    skills: NotRequired[list[str]]
+    capabilities: NotRequired[dict[str, Any]]
 
 
 class SDKResultMessageSuccess(TypedDict):
@@ -136,12 +136,12 @@ class SDKResultMessageSuccess(TypedDict):
     permission_denials: list[CLIPermissionDenial]
 
 
-class ResultErrorObject(TypedDict, total=False):
-    type: str
+class ResultErrorObject(TypedDict):
     message: str
+    type: NotRequired[str]
 
 
-class SDKResultMessageError(TypedDict, total=False):
+class SDKResultMessageError(TypedDict):
     type: Literal["result"]
     subtype: Literal["error_max_turns", "error_during_execution"]
     uuid: str
@@ -152,7 +152,7 @@ class SDKResultMessageError(TypedDict, total=False):
     num_turns: int
     usage: ExtendedUsage
     permission_denials: list[CLIPermissionDenial]
-    error: ResultErrorObject
+    error: NotRequired[ResultErrorObject]
 
 
 SDKResultMessage: TypeAlias = SDKResultMessageSuccess | SDKResultMessageError
@@ -214,10 +214,10 @@ class CLIControlPermissionRequest(TypedDict):
     blocked_path: str | None
 
 
-class CLIControlInitializeRequest(TypedDict, total=False):
+class CLIControlInitializeRequest(TypedDict):
     subtype: Literal["initialize"]
-    hooks: Any
-    mcpServers: dict[str, dict[str, Any]]
+    hooks: NotRequired[Any]
+    mcpServers: NotRequired[dict[str, dict[str, Any]]]
 
 
 class CLIControlSetPermissionModeRequest(TypedDict):
@@ -273,9 +273,9 @@ class CLIControlResponse(TypedDict):
     response: ControlResponseSuccess | ControlResponseError
 
 
-class ControlCancelRequest(TypedDict, total=False):
+class ControlCancelRequest(TypedDict):
     type: Literal["control_cancel_request"]
-    request_id: str
+    request_id: NotRequired[str]
 
 
 SDKMessage: TypeAlias = (

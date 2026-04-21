@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from uuid import UUID
+from uuid import RFC_4122, UUID
 
 from .errors import ValidationError
 from .types import QueryOptions
@@ -70,7 +70,7 @@ def validate_session_id(value: str, param_name: str) -> None:
             f"Invalid {param_name}: {value!r}. UUID version must be between 1 and 5."
         )
 
-    if parsed.variant != UUID("00000000-0000-0000-8000-000000000000").variant:
+    if parsed.variant != RFC_4122:
         raise ValidationError(
             f"Invalid {param_name}: {value!r}. UUID variant must be RFC 4122."
         )

@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 from collections.abc import AsyncIterable, Mapping, MutableMapping
 from dataclasses import dataclass, replace
+from types import TracebackType
 from typing import Any, cast
 from uuid import uuid4
 
@@ -83,10 +84,14 @@ class Query:
         self._incoming_control_requests: dict[str, _IncomingControlRequest] = {}
 
     async def _ensure_started(self) -> None:
+        if self._closed:
+            raise RuntimeError("Query is closed")
         if self._started:
             return
 
         async with self._start_lock:
+            if self._closed:
+                raise RuntimeError("Query is closed")
             if self._started:
                 return
             await self._transport.start()
@@ -516,11 +521,12 @@ class Query:
 
         if self._input_task is not None:
             self._input_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, Exception):
                 await self._input_task
 
         if self._router_task is not None:
-            await self._router_task
+            with contextlib.suppress(Exception):
+                await self._router_task
 
         await self._finish()
 
@@ -556,6 +562,17 @@ class Query:
             raise item
 
         return cast(SDKMessage, item)
+
+    async def __aenter__(self) -> Query:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        await self.close()
 
 
 def query(

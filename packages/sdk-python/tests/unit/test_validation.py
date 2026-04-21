@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from qwen_code_sdk.errors import ValidationError
-from qwen_code_sdk.types import QueryOptions
+from qwen_code_sdk.types import QueryOptions, TimeoutOptions
 from qwen_code_sdk.validation import validate_query_options
 
 VALID_UUID = "123e4567-e89b-12d3-a456-426614174000"
@@ -60,3 +60,19 @@ def test_rejects_empty_qwen_executable_path() -> None:
         ValidationError, match="path_to_qwen_executable cannot be empty"
     ):
         validate_query_options(QueryOptions(path_to_qwen_executable="   "))
+
+
+def test_timeout_rejects_non_numeric_value() -> None:
+    with pytest.raises(TypeError, match=r"timeout\.can_use_tool must be a positive"):
+        TimeoutOptions.from_mapping({"can_use_tool": "fast"})
+
+
+def test_timeout_rejects_negative_value() -> None:
+    pattern = r"timeout\.control_request must be a positive"
+    with pytest.raises(ValueError, match=pattern):
+        TimeoutOptions.from_mapping({"control_request": -1})
+
+
+def test_timeout_rejects_boolean_value() -> None:
+    with pytest.raises(TypeError, match=r"timeout\.stream_close must be a positive"):
+        TimeoutOptions.from_mapping({"stream_close": True})

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterable
+from collections.abc import AsyncIterable, Iterable, Mapping
+from typing import Any
 
 from .errors import (
     AbortError,
@@ -21,6 +22,7 @@ from .protocol import (
     SDKResultMessage,
     SDKSystemMessage,
     SDKUserMessage,
+    TextBlock,
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
@@ -53,8 +55,8 @@ from .types import (
 
 
 def query_sync(
-    prompt: str | list[SDKUserMessage] | AsyncIterable[SDKUserMessage],
-    options: QueryOptions | QueryOptionsDict | None = None,
+    prompt: str | Iterable[SDKUserMessage] | AsyncIterable[SDKUserMessage],
+    options: QueryOptions | QueryOptionsDict | Mapping[str, Any] | None = None,
 ) -> SyncQuery:
     return SyncQuery(prompt=prompt, options=options)
 
@@ -85,6 +87,7 @@ __all__ = [
     "SDKSystemMessage",
     "SDKUserMessage",
     "SyncQuery",
+    "TextBlock",
     "ThinkingBlock",
     "TimeoutOptions",
     "TimeoutOptionsDict",
