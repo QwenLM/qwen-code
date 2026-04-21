@@ -460,6 +460,57 @@ describe('agentMessagesToHistoryItems — shellPids', () => {
   });
 });
 
+// ─── executionStartTimes overlay ─────────────────────────────
+
+describe('agentMessagesToHistoryItems — executionStartTimes', () => {
+  it('sets executionStartTime for Executing tools with a known start time', () => {
+    const starts = new Map([['c1', 1_700_000_000_000]]);
+    const items = agentMessagesToHistoryItems(
+      [toolCallMsg('c1', 'shell')],
+      noApprovals,
+      undefined,
+      undefined,
+      starts,
+    );
+    const group = items[0] as Extract<
+      (typeof items)[0],
+      { type: 'tool_group' }
+    >;
+    expect(group.tools[0]!.executionStartTime).toBe(1_700_000_000_000);
+  });
+
+  it('does not set executionStartTime for completed tools', () => {
+    const starts = new Map([['c1', 1_700_000_000_000]]);
+    const items = agentMessagesToHistoryItems(
+      [
+        toolCallMsg('c1', 'shell'),
+        toolResultMsg('c1', 'shell', { success: true }),
+      ],
+      noApprovals,
+      undefined,
+      undefined,
+      starts,
+    );
+    const group = items[0] as Extract<
+      (typeof items)[0],
+      { type: 'tool_group' }
+    >;
+    expect(group.tools[0]!.executionStartTime).toBeUndefined();
+  });
+
+  it('does not set executionStartTime when map is not provided', () => {
+    const items = agentMessagesToHistoryItems(
+      [toolCallMsg('c1', 'shell')],
+      noApprovals,
+    );
+    const group = items[0] as Extract<
+      (typeof items)[0],
+      { type: 'tool_group' }
+    >;
+    expect(group.tools[0]!.executionStartTime).toBeUndefined();
+  });
+});
+
 // ─── ID stability ────────────────────────────────────────────
 
 describe('agentMessagesToHistoryItems — ID stability', () => {

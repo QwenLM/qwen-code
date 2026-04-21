@@ -266,6 +266,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
       let cumulativeOutput: string | AnsiOutput = '';
       let lastUpdateTime = Date.now();
       let isBinaryStream = false;
+      let totalLines = 0;
+      let totalBytes = 0;
 
       const { result: resultPromise, pid } =
         await ShellExecutionService.execute(
@@ -278,6 +280,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
               case 'data':
                 if (isBinaryStream) break;
                 cumulativeOutput = event.chunk;
+                // Stats are only consumed by the ANSI-output branch below,
+                // so skip the per-chunk accounting for plain string chunks.
+                if (Array.isArray(event.chunk)) {
+                  totalLines = event.chunk.length;
+                  totalBytes = event.chunk.reduce(
+                    (sum, line) =>
+                      sum +
+                      line.reduce(
+                        (ls, token) =>
+                          ls + Buffer.byteLength(token.text, 'utf-8'),
+                        0,
+                      ),
+                    0,
+                  );
+                }
                 shouldUpdate = true;
                 break;
               case 'binary_detected':
@@ -301,11 +318,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
             }
 
             if (shouldUpdate && updateOutput) {
-              updateOutput(
-                typeof cumulativeOutput === 'string'
-                  ? cumulativeOutput
-                  : { ansiOutput: cumulativeOutput },
-              );
+              if (typeof cumulativeOutput === 'string') {
+                updateOutput(cumulativeOutput);
+              } else {
+                updateOutput({
+                  ansiOutput: cumulativeOutput,
+                  totalLines,
+                  totalBytes,
+                  // Only include timeout when user explicitly set it
+                  ...(this.params.timeout != null && {
+                    timeoutMs: this.params.timeout,
+                  }),
+                });
+              }
               lastUpdateTime = Date.now();
             }
           },
@@ -559,6 +584,18 @@ IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO N
   - Edit files: Use ${ToolNames.EDIT} (NOT sed/awk)
   - Write files: Use ${ToolNames.WRITE_FILE} (NOT echo >/cat <<EOF)
   - Communication: Output text directly (NOT echo/printf)
+- **Shell argument quoting and special characters**: When passing arguments that contain special characters (parentheses \`()\`, backticks \`\`\`\`, dollar signs \`$\`, backslashes \`\\\`, semicolons \`;\`, pipes \`|\`, angle brackets \`<>\`, ampersands \`&\`, exclamation marks \`!\`, etc.), you MUST ensure they are properly quoted to prevent the shell from misinterpreting them as shell syntax:
+  - **Single quotes** \`'...'\` pass everything literally, but cannot contain a literal single quote.
+  - **ANSI-C quoting** \`$'...'\` supports escape sequences (e.g. \`\\n\` for newline, \`\\'\` for single quote) and is the safest approach for multi-line strings or strings with single quotes.
+  - **Heredoc** is the most robust approach for large, multi-line text with mixed quotes:
+    \`\`\`bash
+    gh pr create --title "My Title" --body "$(cat <<'HEREDOC'
+    Multi-line body with (parentheses), \`backticks\`, and 'single-quotes'.
+    HEREDOC
+    )"
+    \`\`\`
+  - NEVER use unescaped single quotes inside single-quoted strings (e.g. \`'it\\'s'\` is wrong; use \`$'it\\'s'\` or \`"it's"\` instead).
+  - If unsure, prefer double-quoting arguments and escape inner double-quotes as \`\\"\`.
 - When issuing multiple commands:
   - If the commands are independent and can run in parallel, make multiple run_shell_command tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two run_shell_command tool calls in parallel.
   - If the commands depend on each other and must run sequentially, use a single run_shell_command call with '&&' to chain them together (e.g., \`git add . && git commit -m "message" && git push\`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before run_shell_command for git operations, or git add before git commit), run these operations sequentially instead.

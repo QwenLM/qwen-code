@@ -496,6 +496,100 @@ describe('Settings Loading and Merging', () => {
       expect(getSettingsWarnings(settings)).toEqual([]);
     });
 
+    it('should warn when trusted workspace empty modelProviders overrides user modelProviders', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        modelProviders: {
+          openai: [{ id: 'gpt-4o', envKey: 'OPENAI_API_KEY' }],
+        },
+      };
+      const workspaceSettingsContent = {
+        modelProviders: {},
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual(
+        expect.arrayContaining([
+          expect.stringContaining("defines an empty 'modelProviders' object"),
+          expect.stringContaining('has no effect with current merge behavior'),
+          expect.stringContaining('may indicate a configuration error'),
+        ]),
+      );
+    });
+
+    it('should not warn when workspace does not define modelProviders', () => {
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        modelProviders: {
+          openai: [{ id: 'gpt-4o', envKey: 'OPENAI_API_KEY' }],
+        },
+      };
+      const workspaceSettingsContent = {
+        model: { name: 'workspace-model' },
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([]);
+    });
+
+    it('should not warn when workspace is untrusted', () => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) =>
+          p === USER_SETTINGS_PATH || p === MOCK_WORKSPACE_SETTINGS_PATH,
+      );
+      const userSettingsContent = {
+        modelProviders: {
+          openai: [{ id: 'gpt-4o', envKey: 'OPENAI_API_KEY' }],
+        },
+      };
+      const workspaceSettingsContent = {
+        modelProviders: {},
+      };
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify(userSettingsContent);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettingsContent);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+
+      expect(getSettingsWarnings(settings)).toEqual([]);
+    });
+
     it('should rewrite allowedTools to tools.allowed during migration', () => {
       (mockFsExistsSync as Mock).mockImplementation(
         (p: fs.PathLike) => p === USER_SETTINGS_PATH,
@@ -858,6 +952,34 @@ describe('Settings Loading and Merging', () => {
         expect.arrayContaining(['USER_VAR', 'WORKSPACE_VAR']),
       );
       expect(settings.merged.advanced?.excludedEnvVars).toHaveLength(2);
+    });
+
+    it('should UNION-merge slashCommands.disabled across user and workspace scopes', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      const userSettings = {
+        slashCommands: { disabled: ['auth', 'quit'] },
+      };
+      const workspaceSettings = {
+        // Workspace overlaps with user and adds one entry. UNION de-dupes the
+        // overlap and merges the new entry; it cannot remove user entries.
+        slashCommands: { disabled: ['quit', 'clear'] },
+      };
+
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) return JSON.stringify(userSettings);
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify(workspaceSettings);
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      const disabled = settings.merged.slashCommands?.disabled ?? [];
+      expect(disabled).toEqual(
+        expect.arrayContaining(['auth', 'quit', 'clear']),
+      );
+      expect(disabled).toHaveLength(3);
     });
 
     it('should merge all settings files with the correct precedence', () => {

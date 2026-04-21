@@ -13,6 +13,7 @@ import type { SkillConfig } from '../skills/types.js';
 import { logSkillLaunch, SkillLaunchEvent } from '../telemetry/index.js';
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
 
 const debugLogger = createDebugLogger('SKILL');
 
@@ -20,14 +21,9 @@ export interface SkillParams {
   skill: string;
 }
 
-/**
- * Builds the LLM-facing content string when a skill body is injected.
- * Shared between SkillToolInvocation (runtime) and /context (estimation)
- * so that token estimates stay in sync with actual usage.
- */
-export function buildSkillLlmContent(baseDir: string, body: string): string {
-  return `Base directory for this skill: ${baseDir}\nImportant: ALWAYS resolve absolute paths from this base directory when working with skills.\n\n${body}\n`;
-}
+// Re-export for backward compatibility
+export { buildSkillLlmContent } from './skill-utils.js';
+import { buildSkillLlmContent } from './skill-utils.js';
 
 /**
  * Skill tool that enables the model to access skill definitions.
@@ -275,12 +271,49 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       );
       this.onSkillLoaded(this.params.skill);
 
+      // Register skill hooks if present
+      debugLogger.debug('Skill hooks check:', {
+        hasHooks: !!skill.hooks,
+        hooksKeys: skill.hooks ? Object.keys(skill.hooks) : [],
+        skillName: skill.name,
+      });
+      if (skill.hooks) {
+        const hookSystem = this.config.getHookSystem();
+        const sessionId = this.config.getSessionId();
+        debugLogger.debug('Hook system and session:', {
+          hasHookSystem: !!hookSystem,
+          sessionId,
+        });
+        if (hookSystem && sessionId) {
+          const sessionHooksManager = hookSystem.getSessionHooksManager();
+          const hookCount = registerSkillHooks(
+            sessionHooksManager,
+            sessionId,
+            skill,
+          );
+          if (hookCount > 0) {
+            debugLogger.info(
+              `Registered ${hookCount} hooks from skill "${this.params.skill}"`,
+            );
+          } else {
+            debugLogger.warn(
+              `No hooks registered from skill "${this.params.skill}"`,
+            );
+          }
+        }
+      } else {
+        debugLogger.warn(
+          `Skill "${this.params.skill}" has no hooks to register`,
+        );
+      }
+
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
 
       return {
         llmContent: [{ text: llmContent }],
         returnDisplay: skill.description,
+        modelOverride: skill.model,
       };
     } catch (error) {
       const errorMessage =

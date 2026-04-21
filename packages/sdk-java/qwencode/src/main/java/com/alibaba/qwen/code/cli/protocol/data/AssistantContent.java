@@ -46,7 +46,7 @@ public interface AssistantContent<C> {
     /**
      * Represents thinking content from the assistant.
      */
-    interface ThingkingAssistantContent extends AssistantContent<String> {
+    interface ThinkingAssistantContent extends AssistantContent<String> {
         /**
          * Gets the thinking content.
          *

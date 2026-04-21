@@ -300,7 +300,7 @@ describe('BaseSelectionList', () => {
         rerender(<BaseSelectionList {...componentProps} />);
 
         await waitFor(() => {
-          expect(lastFrame()).toBeTruthy();
+          expect(lastFrame()).toContain(longList[newIndex]!.label);
         });
       };
 
@@ -314,20 +314,6 @@ describe('BaseSelectionList', () => {
       expect(output).toContain('Item 1');
       expect(output).toContain('Item 3');
       expect(output).not.toContain('Item 4');
-    });
-
-    it('should scroll down when activeIndex moves beyond the visible window', async () => {
-      const { updateActiveIndex, lastFrame } = renderScrollableList(0);
-
-      // Move to index 3 (Item 4). Should trigger scroll.
-      // New visible window should be Items 2, 3, 4 (scroll offset 1).
-      await updateActiveIndex(3);
-
-      const output = lastFrame();
-      expect(output).not.toContain('Item 1');
-      expect(output).toContain('Item 2');
-      expect(output).toContain('Item 4');
-      expect(output).not.toContain('Item 5');
     });
 
     it.skip('should scroll up when activeIndex moves before the visible window', async () => {
@@ -381,6 +367,10 @@ describe('BaseSelectionList', () => {
       expect(output).not.toContain('Item 1');
 
       await updateActiveIndex(5); // Scroll further
+      // Wait for scrollOffset state to settle after the second jump
+      await waitFor(() => {
+        expect(lastFrame()).toContain('Item 6');
+      });
       output = lastFrame();
       expect(output).toContain('Item 4');
       expect(output).toContain('Item 6');

@@ -34,6 +34,7 @@ import { SdkControlClientTransport } from './sdk-control-client-transport.js';
 
 import type { FunctionDeclaration } from '@google/genai';
 import { mcpToTool } from '@google/genai';
+import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
@@ -42,6 +43,7 @@ import { OAuthUtils } from '../mcp/oauth-utils.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type {
   Unsubscribe,
   WorkspaceContext,
@@ -1402,13 +1404,25 @@ export async function createTransport(
   }
 
   if (mcpServerConfig.command) {
+    if (mcpServerConfig.cwd && !existsSync(mcpServerConfig.cwd)) {
+      throw new Error(
+        `MCP server '${mcpServerName}': configured cwd does not exist: ${mcpServerConfig.cwd}`,
+      );
+    }
+
+    // Normalize process.env PATH first (merge PATH+Path → single PATH on
+    // Windows), then apply server-specific overrides on top so that a server
+    // config providing its own PATH fully replaces the parent value instead of
+    // being merged with a stale case-variant.
+    const env = {
+      ...normalizePathEnvForWindows({ ...process.env }),
+      ...(mcpServerConfig.env || {}),
+    };
+
     const transport = new StdioClientTransport({
       command: mcpServerConfig.command,
       args: mcpServerConfig.args || [],
-      env: {
-        ...process.env,
-        ...(mcpServerConfig.env || {}),
-      } as Record<string, string>,
+      env: env as Record<string, string>,
       cwd: mcpServerConfig.cwd,
       stderr: 'pipe',
     });

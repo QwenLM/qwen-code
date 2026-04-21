@@ -339,7 +339,9 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen OAuth quota exceeded/);
+      await expect(promise).rejects.toThrow(
+        /Qwen OAuth free tier has been discontinued/,
+      );
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
@@ -360,7 +362,9 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen OAuth quota exceeded/);
+      await expect(promise).rejects.toThrow(
+        /Qwen OAuth free tier has been discontinued/,
+      );
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
@@ -434,7 +438,9 @@ describe('retryWithBackoff', () => {
         authType: AuthType.QWEN_OAUTH,
       });
 
-      await expect(promise).rejects.toThrow(/Qwen OAuth quota exceeded/);
+      await expect(promise).rejects.toThrow(
+        /Qwen OAuth free tier has been discontinued/,
+      );
 
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
@@ -991,5 +997,30 @@ describe('getErrorStatus', () => {
     expect(getErrorStatus({})).toBeUndefined();
     expect(getErrorStatus({ response: {} })).toBeUndefined();
     expect(getErrorStatus({ error: {} })).toBeUndefined();
+  });
+
+  it('should parse HTTP_STATUS/NNN from streamed SSE error messages', () => {
+    // DashScope throttling: error opens with 200 OK, then surfaces as an SSE
+    // error frame. The SDK preserves the raw SSE text in error.message.
+    const dashscopeThrottle = new Error(
+      'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"x","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
+    );
+    expect(getErrorStatus(dashscopeThrottle)).toBe(429);
+
+    expect(getErrorStatus(new Error('upstream :HTTP_STATUS/503'))).toBe(503);
+  });
+
+  it('should prefer numeric status fields over HTTP_STATUS/NNN in message', () => {
+    const error: HttpError = new Error(':HTTP_STATUS/500');
+    error.status = 429;
+    expect(getErrorStatus(error)).toBe(429);
+  });
+
+  it('should ignore HTTP_STATUS/NNN outside the valid range', () => {
+    expect(getErrorStatus(new Error('HTTP_STATUS/999'))).toBeUndefined();
+  });
+
+  it('should not match HTTP_STATUS/NNN when adjacent to more digits', () => {
+    expect(getErrorStatus(new Error('HTTP_STATUS/4291'))).toBeUndefined();
   });
 });

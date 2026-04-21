@@ -5,9 +5,12 @@
  */
 
 import {
+  AuthType,
   InputFormat,
   isDebugLoggingDegraded,
+  isBareMode,
   logUserPrompt,
+  QWEN_CODE_SIMPLE_ENV_VAR,
   Storage,
   type Config,
   createDebugLogger,
@@ -22,7 +25,11 @@ import { validateAuthMethod } from './config/auth.js';
 import * as cliConfig from './config/config.js';
 import { loadCliConfig, parseArguments } from './config/config.js';
 import type { DnsResolutionOrder, LoadedSettings } from './config/settings.js';
-import { getSettingsWarnings, loadSettings } from './config/settings.js';
+import {
+  createMinimalSettings,
+  getSettingsWarnings,
+  loadSettings,
+} from './config/settings.js';
 import {
   initializeApp,
   type InitializationResult,
@@ -49,6 +56,10 @@ import { AppEvent, appEvents } from './utils/events.js';
 import { handleAutoUpdate } from './utils/handleAutoUpdate.js';
 import { readStdin } from './utils/readStdin.js';
 import {
+  profileCheckpoint,
+  finalizeStartupProfile,
+} from './utils/startupProfiler.js';
+import {
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -58,9 +69,18 @@ import { getUserStartupWarnings } from './utils/userStartupWarnings.js';
 import { getCliVersion } from './utils/version.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { computeWindowTitle } from './utils/windowTitle.js';
+import {
+  startEarlyInputCapture,
+  stopAndGetCapturedInput,
+} from './utils/earlyInputCapture.js';
 import { validateNonInteractiveAuth } from './validateNonInterActiveAuth.js';
 import { showResumeSessionPicker } from './ui/components/StandaloneSessionPicker.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import { DualOutputBridge } from './dualOutput/DualOutputBridge.js';
+import { DualOutputContext } from './dualOutput/DualOutputContext.js';
+import { RemoteInputWatcher } from './remoteInput/RemoteInputWatcher.js';
+import { RemoteInputContext } from './remoteInput/RemoteInputContext.js';
+import { installTerminalRedrawOptimizer } from './ui/utils/terminalRedrawOptimizer.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -146,36 +166,95 @@ export async function startInteractiveUI(
 ) {
   const version = await getCliVersion();
   setWindowTitle(basename(workspaceRoot), settings);
+  const restoreTerminalRedrawOptimizer =
+    process.stdout.isTTY && !config.getScreenReader()
+      ? installTerminalRedrawOptimizer(process.stdout)
+      : () => {};
+
+  // Create dual output bridge if --json-fd or --json-file is specified.
+  // Errors are caught so a bad fd/path degrades gracefully instead of
+  // preventing the TUI from launching.
+  let dualOutputBridge: DualOutputBridge | null = null;
+  const jsonFd = config.getJsonFd?.();
+  const jsonFile = config.getJsonFile?.();
+  try {
+    if (jsonFd != null) {
+      dualOutputBridge = new DualOutputBridge(
+        config,
+        { fd: jsonFd },
+        { version },
+      );
+    } else if (jsonFile != null) {
+      dualOutputBridge = new DualOutputBridge(
+        config,
+        { filePath: jsonFile },
+        { version },
+      );
+    }
+  } catch (err) {
+    debugLogger.error('Failed to initialize dual output bridge:', err);
+    writeStderrLine(
+      `Warning: dual output disabled — ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
+  // Create remote input watcher if --input-file is specified.
+  // This enables bidirectional sync: an external process writes JSONL
+  // commands to this file, and the TUI processes them as user messages.
+  let remoteInputWatcher: RemoteInputWatcher | null = null;
+  const inputFile = config.getInputFile?.();
+  if (inputFile) {
+    try {
+      remoteInputWatcher = new RemoteInputWatcher(inputFile);
+    } catch (err) {
+      debugLogger.error('Failed to initialize remote input watcher:', err);
+      writeStderrLine(
+        `Warning: remote input disabled — ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  // Drain the early-captured input exactly once, before any React rendering.
+  // Must be outside any component/effect so StrictMode's mount/cleanup/remount
+  // always reads from the same stable prop rather than the (now empty) module buffer.
+  const initialCapturedInput = stopAndGetCapturedInput();
 
   // Create wrapper component to use hooks inside render
   const AppWrapper = () => {
     const kittyProtocolStatus = useKittyKeyboardProtocol();
     const nodeMajorVersion = parseInt(process.versions.node.split('.')[0], 10);
     return (
-      <SettingsContext.Provider value={settings}>
-        <KeypressProvider
-          kittyProtocolEnabled={kittyProtocolStatus.enabled}
-          config={config}
-          debugKeystrokeLogging={settings.merged.general?.debugKeystrokeLogging}
-          pasteWorkaround={
-            process.platform === 'win32' || nodeMajorVersion < 20
-          }
-        >
-          <SessionStatsProvider sessionId={config.getSessionId()}>
-            <VimModeProvider settings={settings}>
-              <AgentViewProvider config={config}>
-                <AppContainer
-                  config={config}
-                  settings={settings}
-                  startupWarnings={startupWarnings}
-                  version={version}
-                  initializationResult={initializationResult}
-                />
-              </AgentViewProvider>
-            </VimModeProvider>
-          </SessionStatsProvider>
-        </KeypressProvider>
-      </SettingsContext.Provider>
+      <RemoteInputContext.Provider value={remoteInputWatcher}>
+        <DualOutputContext.Provider value={dualOutputBridge}>
+          <SettingsContext.Provider value={settings}>
+            <KeypressProvider
+              kittyProtocolEnabled={kittyProtocolStatus.enabled}
+              config={config}
+              debugKeystrokeLogging={
+                settings.merged.general?.debugKeystrokeLogging
+              }
+              pasteWorkaround={
+                process.platform === 'win32' || nodeMajorVersion < 20
+              }
+              initialCapturedInput={initialCapturedInput}
+            >
+              <SessionStatsProvider sessionId={config.getSessionId()}>
+                <VimModeProvider settings={settings}>
+                  <AgentViewProvider config={config}>
+                    <AppContainer
+                      config={config}
+                      settings={settings}
+                      startupWarnings={startupWarnings}
+                      version={version}
+                      initializationResult={initializationResult}
+                    />
+                  </AgentViewProvider>
+                </VimModeProvider>
+              </SessionStatsProvider>
+            </KeypressProvider>
+          </SettingsContext.Provider>
+        </DualOutputContext.Provider>
+      </RemoteInputContext.Provider>
     );
   };
 
@@ -206,15 +285,34 @@ export async function startInteractiveUI(
       });
   }
 
-  registerCleanup(() => instance.unmount());
+  registerCleanup(async () => {
+    remoteInputWatcher?.shutdown();
+    await dualOutputBridge?.shutdown();
+    instance.unmount();
+    restoreTerminalRedrawOptimizer();
+  });
 }
 
 export async function main() {
+  profileCheckpoint('main_entry');
   setupUnhandledRejectionHandler();
-  const settings = loadSettings();
-  await cleanupCheckpoints();
+
+  if (process.argv.includes('--bare')) {
+    process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
+  }
 
   let argv = await parseArguments();
+  profileCheckpoint('after_parse_arguments');
+
+  if (isBareMode(argv.bare)) {
+    process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
+  }
+
+  const settings = isBareMode(argv.bare)
+    ? createMinimalSettings()
+    : loadSettings();
+  await cleanupCheckpoints();
+  profileCheckpoint('after_load_settings');
 
   // Check for invalid input combinations early to prevent crashes
   if (argv.promptInteractive && !process.stdin.isTTY) {
@@ -261,6 +359,11 @@ export async function main() {
         argv,
         undefined,
         [],
+        // Pass separated hooks for proper source attribution
+        {
+          userHooks: settings.getUserHooks(),
+          projectHooks: settings.getProjectHooks(),
+        },
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -350,9 +453,12 @@ export async function main() {
   // We are now past the logic handling potentially launching a child process
   // to run Qwen Code. It is now safe to perform expensive initialization that
   // may have side effects.
+  profileCheckpoint('after_sandbox_check');
 
   // Initialize output language file before config loads to ensure it's included in context
-  initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  if (!isBareMode(argv.bare)) {
+    initializeLlmOutputLanguage(settings.merged.general?.outputLanguage);
+  }
 
   {
     const config = await loadCliConfig(
@@ -360,7 +466,13 @@ export async function main() {
       argv,
       process.cwd(),
       argv.extensions,
+      // Pass separated hooks for proper source attribution
+      {
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
     );
+    profileCheckpoint('after_load_cli_config');
 
     // Register cleanup for MCP clients as early as possible
     // This ensures MCP server subprocesses are properly terminated on exit
@@ -381,6 +493,11 @@ export async function main() {
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
       process.stdin.setRawMode(true);
+
+      // Startup optimization: start early input capture
+      startEarlyInputCapture();
+      // Ensure the stdin listener is removed on any exit path (error, signal, etc.)
+      registerCleanup(() => stopAndGetCapturedInput());
 
       // This cleanup isn't strictly needed but may help in certain situations.
       process.on('SIGTERM', () => {
@@ -407,6 +524,7 @@ export async function main() {
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
     const initializationResult = await initializeApp(config, settings);
+    profileCheckpoint('after_initialize_app');
 
     if (config.getExperimentalZedIntegration()) {
       await runAcpAgent(config, settings, argv);
@@ -426,10 +544,19 @@ export async function main() {
         })),
         ...getSettingsWarnings(settings),
         ...config.getWarnings(),
+        ...(config.getModelsConfig().getCurrentAuthType() ===
+        AuthType.QWEN_OAUTH
+          ? [
+              'Qwen OAuth free tier was discontinued on 2026-04-15. Run /auth to switch to Coding Plan or another provider.',
+            ]
+          : []),
       ]),
     ];
 
     // Render UI, passing necessary config values. Check that there is no command line question.
+    profileCheckpoint('before_render');
+    finalizeStartupProfile(config.getSessionId());
+
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;

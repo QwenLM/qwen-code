@@ -268,9 +268,30 @@ describe('Gemini Client (client.ts)', () => {
   let mockConfig: Config;
   let client: GeminiClient;
   let mockGenerateContentFn: Mock;
+  let mockMemoryManager: {
+    scheduleExtract: ReturnType<typeof vi.fn>;
+    scheduleDream: ReturnType<typeof vi.fn>;
+    recall: ReturnType<typeof vi.fn>;
+  };
   beforeEach(async () => {
     vi.resetAllMocks();
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
+
+    mockMemoryManager = {
+      scheduleExtract: vi.fn().mockResolvedValue({
+        touchedTopics: [],
+        cursor: { updatedAt: new Date(0).toISOString() },
+      }),
+      scheduleDream: vi.fn().mockResolvedValue({
+        status: 'skipped',
+        skippedReason: 'min_sessions',
+      }),
+      recall: vi.fn().mockResolvedValue({
+        prompt: '',
+        selectedDocs: [],
+        strategy: 'none',
+      }),
+    };
 
     mockGenerateContentFn = vi.fn().mockResolvedValue({
       candidates: [{ content: { parts: [{ text: '{"key": "value"}' }] } }],
@@ -290,6 +311,8 @@ describe('Gemini Client (client.ts)', () => {
     // that depends on a fully-formed Config object, we need to mock the
     // entire implementation of Config for these tests.
     const mockToolRegistry = {
+      warmAll: vi.fn().mockResolvedValue(undefined),
+      ensureTool: vi.fn().mockResolvedValue(null),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
       getTool: vi.fn().mockReturnValue(null),
     };
@@ -323,7 +346,11 @@ describe('Gemini Client (client.ts)', () => {
       getWorkingDir: vi.fn().mockReturnValue('/test/dir'),
       getFileService: vi.fn().mockReturnValue(fileService),
       getMaxSessionTurns: vi.fn().mockReturnValue(0),
-      getThinkingIdleThresholdMs: vi.fn().mockReturnValue(5 * 60 * 1000),
+      getClearContextOnIdle: vi.fn().mockReturnValue({
+        thinkingThresholdMinutes: 5,
+        toolResultsThresholdMinutes: 60,
+        toolResultsNumToKeep: 5,
+      }),
       getSessionTokenLimit: vi.fn().mockReturnValue(32000),
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
@@ -361,6 +388,8 @@ describe('Gemini Client (client.ts)', () => {
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
       getArenaAgentClient: vi.fn().mockReturnValue(null),
+      getManagedAutoMemoryEnabled: vi.fn().mockReturnValue(true),
+      getMemoryManager: vi.fn().mockReturnValue(mockMemoryManager),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       getArenaManager: vi.fn().mockReturnValue(null),
       getMessageBus: vi.fn().mockReturnValue(undefined),
@@ -1408,6 +1437,182 @@ hello
       expect(mockChat.addHistory).toHaveBeenCalledWith({
         role: 'user',
         parts: expectedRequest,
+      });
+    });
+
+    it('should prepend relevant managed auto-memory prompt when recall returns content', async () => {
+      mockMemoryManager.recall.mockResolvedValue({
+        prompt: '## Relevant memory\n\nUser prefers terse responses.',
+        selectedDocs: [
+          {
+            type: 'user',
+            filePath: '/test/project/root/.qwen/memory/user.md',
+            relativePath: 'user.md',
+            filename: 'user.md',
+            title: 'User Memory',
+            description: 'User preferences',
+            body: '- User prefers terse responses.',
+            mtimeMs: 1,
+          },
+        ],
+        strategy: 'model',
+      });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Please answer tersely' }],
+        new AbortController().signal,
+        'prompt-id-memory',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(mockMemoryManager.recall).toHaveBeenCalledWith(
+        '/test/project/root',
+        'Please answer tersely',
+        expect.objectContaining({
+          config: mockConfig,
+          excludedFilePaths: expect.any(Set),
+        }),
+      );
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          '## Relevant memory\n\nUser prefers terse responses.',
+          'Please answer tersely',
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('should track surfaced managed memory paths across user queries', async () => {
+      mockMemoryManager.recall
+        .mockResolvedValueOnce({
+          prompt: '## Relevant memory\n\nUser prefers terse responses.',
+          selectedDocs: [
+            {
+              type: 'user',
+              filePath: '/test/project/root/.qwen/memory/user.md',
+              relativePath: 'user.md',
+              filename: 'user.md',
+              title: 'User Memory',
+              description: 'User preferences',
+              body: '- User prefers terse responses.',
+              mtimeMs: 1,
+            },
+          ],
+          strategy: 'model',
+        })
+        .mockResolvedValueOnce({
+          prompt: '',
+          selectedDocs: [],
+          strategy: 'none',
+        });
+
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Hello' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        stripThoughtsFromHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const first = client.sendMessageStream(
+        [{ text: 'Please answer tersely' }],
+        new AbortController().signal,
+        'prompt-id-memory-1',
+      );
+      for await (const _ of first) {
+        // consume stream
+      }
+
+      const second = client.sendMessageStream(
+        [{ text: 'Keep it short again' }],
+        new AbortController().signal,
+        'prompt-id-memory-2',
+      );
+      for await (const _ of second) {
+        // consume stream
+      }
+
+      expect(mockMemoryManager.recall).toHaveBeenNthCalledWith(
+        2,
+        '/test/project/root',
+        'Keep it short again',
+        expect.objectContaining({
+          excludedFilePaths: new Set([
+            '/test/project/root/.qwen/memory/user.md',
+          ]),
+        }),
+      );
+    });
+
+    it('should run managed auto-memory extraction after a completed user query', async () => {
+      mockMemoryManager.scheduleExtract.mockResolvedValue({
+        touchedTopics: ['user'],
+        cursor: {
+          sessionId: 'test-session-id',
+          processedOffset: 2,
+          updatedAt: new Date(0).toISOString(),
+        },
+        systemMessage: 'Managed auto-memory updated: user.md',
+      });
+
+      const mockStream = (async function* () {
+        yield { type: GeminiEventType.Content, value: 'Done' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([
+          { role: 'user', parts: [{ text: 'I prefer terse responses.' }] },
+          { role: 'model', parts: [{ text: 'Done' }] },
+        ]),
+        stripThoughtsFromHistory: vi.fn(),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'Please answer tersely' }],
+          new AbortController().signal,
+          'prompt-id-extract',
+        ),
+      );
+
+      const recordedHistory = mockChat.getHistory?.();
+
+      expect(mockMemoryManager.scheduleExtract).toHaveBeenCalledWith({
+        projectRoot: '/test/project/root',
+        sessionId: 'test-session-id',
+        history: recordedHistory,
+        config: mockConfig,
+      });
+      expect(mockMemoryManager.scheduleDream).toHaveBeenCalledWith({
+        projectRoot: '/test/project/root',
+        sessionId: 'test-session-id',
+        config: mockConfig,
+      });
+      expect(events).not.toContainEqual({
+        type: GeminiEventType.HookSystemMessage,
+        value: 'Managed auto-memory updated: user.md',
       });
     });
 
