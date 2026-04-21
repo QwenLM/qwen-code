@@ -11,9 +11,10 @@ import type { FC } from 'react';
 import {
   shouldShowToolCall,
   // All ToolCall components from webui
+  AgentToolCall,
+  isAgentExecutionToolCall,
   GenericToolCall,
   ThinkToolCall,
-  SaveMemoryToolCall,
   EditToolCall,
   WriteToolCall,
   SearchToolCall,
@@ -22,13 +23,19 @@ import {
   ReadToolCall,
   WebFetchToolCall,
 } from '@qwen-code/webui';
-import type { BaseToolCallProps } from '@qwen-code/webui';
+import type { BaseToolCallProps, ToolCallData } from '@qwen-code/webui';
 
 /**
  * Factory function that returns the appropriate tool call component based on kind
  */
-export const getToolCallComponent = (kind: string): FC<BaseToolCallProps> => {
-  const normalizedKind = kind.toLowerCase();
+export const getToolCallComponent = (
+  toolCall: ToolCallData,
+): FC<BaseToolCallProps> => {
+  if (isAgentExecutionToolCall(toolCall)) {
+    return AgentToolCall;
+  }
+
+  const normalizedKind = toolCall.kind.toLowerCase();
 
   // Route to specialized components
   switch (normalizedKind) {
@@ -68,11 +75,6 @@ export const getToolCallComponent = (kind: string): FC<BaseToolCallProps> => {
     case 'thinking':
       return ThinkToolCall;
 
-    case 'save_memory':
-    case 'savememory':
-    case 'memory':
-      return SaveMemoryToolCall;
-
     case 'fetch':
     case 'web_fetch':
     case 'webfetch':
@@ -96,7 +98,7 @@ export const ToolCallRouter: React.FC<BaseToolCallProps> = ({ toolCall }) => {
   }
 
   // Get the appropriate component for this kind
-  const Component = getToolCallComponent(toolCall.kind);
+  const Component = getToolCallComponent(toolCall);
 
   // Render the specialized component
   return <Component toolCall={toolCall} />;

@@ -25,7 +25,13 @@ export interface UseResumeCommandResult {
   isResumeDialogOpen: boolean;
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
-  handleResume: (sessionId: string) => void;
+  /**
+   * Async — the implementation awaits SessionService and SessionStart hooks.
+   * Callers that need to chain post-resume work should `await` it; pure
+   * fire-and-forget callers (the resume dialog's `onSelect`) can ignore the
+   * promise.
+   */
+  handleResume: (sessionId: string) => Promise<void>;
 }
 
 export function useResumeCommand(

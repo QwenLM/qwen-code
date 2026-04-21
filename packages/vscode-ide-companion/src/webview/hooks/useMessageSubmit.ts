@@ -89,6 +89,17 @@ export const useMessageSubmit = ({
         return;
       }
 
+      // Handle /account command - show account info dialog
+      if (textToSend.trim() === '/account') {
+        setInputText('');
+        if (inputFieldRef.current) {
+          inputFieldRef.current.textContent = '\u200B';
+          inputFieldRef.current.setAttribute('data-empty', 'true');
+        }
+        vscode.postMessage({ type: 'getAccountInfo', data: {} });
+        return;
+      }
+
       // Handle /login command - show inline loading while extension authenticates
       if (textToSend.trim() === '/login') {
         setInputText('');
@@ -99,12 +110,12 @@ export const useMessageSubmit = ({
           inputFieldRef.current.setAttribute('data-empty', 'true');
         }
         vscode.postMessage({
-          type: 'login',
+          type: 'auth',
           data: {},
         });
-        // Show a friendly loading message in the chat while logging in
+        // Show a friendly loading message in the chat while authenticating
         try {
-          messageHandling.setWaitingForResponse('Logging in to Qwen Code...');
+          messageHandling.setWaitingForResponse('Authenticating Qwen Code...');
         } catch (_err) {
           // Best-effort UI hint; ignore if hook not available
         }

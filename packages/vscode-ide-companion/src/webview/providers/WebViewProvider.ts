@@ -9,6 +9,7 @@ import { QwenAgentManager } from '../../services/qwenAgentManager.js';
 import { ConversationStore } from '../../services/conversationStore.js';
 import type {
   RequestPermissionRequest,
+  AvailableCommand,
   ModelInfo,
 } from '@agentclientprotocol/sdk';
 import type { AskUserQuestionRequest } from '../../types/acpTypes.js';
@@ -20,10 +21,29 @@ import { PanelManager, getLocalResourceRoots } from './PanelManager.js';
 import { MessageHandler } from './MessageHandler.js';
 import { WebViewContent } from './WebViewContent.js';
 import { getFileName } from '../utils/webviewUtils.js';
+import { truncatePanelTitle } from '../utils/panelTitleUtils.js';
 import { createImagePathResolver } from '../utils/imageHandler.js';
 import { type ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import { isAuthenticationRequiredError } from '../../utils/authErrors.js';
 import { getErrorMessage } from '../../utils/errorMessage.js';
+import {
+  writeCodingPlanConfig,
+  writeModelProvidersConfig,
+  readQwenSettingsForVSCode,
+  clearPersistedAuth,
+} from '../../services/settingsWriter.js';
+import { parseInsightMessage } from '@qwen-code/qwen-code-core';
+
+const AUTH_RELATED_QWEN_SETTINGS = [
+  'qwen-code.provider',
+  'qwen-code.apiKey',
+  'qwen-code.codingPlanRegion',
+] as const;
+
+function isInsightCommand(command: string): boolean {
+  const [firstToken = ''] = command.trim().split(/\s+/, 1);
+  return firstToken.replace(/^\/+/, '') === 'insight';
+}
 
 export class WebViewProvider {
   private panelManager: PanelManager;
@@ -32,6 +52,7 @@ export class WebViewProvider {
   private conversationStore: ConversationStore;
   private disposables: vscode.Disposable[] = [];
   private agentInitialized = false; // Track if agent has been initialized
+  private isSyncingToVSCode = false; // Guard to prevent config change loop
   // Track a pending permission request and its resolver so extension commands
   // can "simulate" user choice from the command palette (e.g. after accepting
   // a diff, auto-allow read/execute, or auto-reject on cancel).
@@ -45,6 +66,8 @@ export class WebViewProvider {
   // Track current ACP mode id to influence permission/diff behavior
   private currentModeId: ApprovalModeValue | null = null;
   private authState: boolean | null = null;
+  /** Cached available commands for re-sending on webview ready */
+  private cachedAvailableCommands: AvailableCommand[] | null = null;
   /** Cached available models for re-sending on webview ready */
   private cachedAvailableModels: ModelInfo[] | null = null;
   /** Model to apply once a new editor-tab session is initialized */
@@ -60,6 +83,10 @@ export class WebViewProvider {
   /** Guards against concurrent auth-restore / connection init */
   private initializationPromise: Promise<void> | null = null;
   private isReconnecting = false;
+  /** Timer for the deferred auto-auth launch inside doInitializeAgentConnection */
+  private autoAuthTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Whether an explicit interactive auth flow is currently active */
+  private authFlowActive = false;
 
   constructor(
     private context: vscode.ExtensionContext,
@@ -90,10 +117,78 @@ export class WebViewProvider {
       (message) => this.sendMessageToWebView(message),
     );
 
-    // Set login handler for /login command - direct force re-login
-    this.messageHandler.setLoginHandler(async () => {
-      await this.forceReLogin();
-    });
+    // Set auth interactive handler — interactive auth flow (QuickPick → InputBox → write settings → reconnect)
+    this.messageHandler.setAuthInteractiveHandler(
+      async (provider, region, apiKey, baseUrl, model, modelIds) => {
+        await this.handleAuthInteractive(
+          provider,
+          region,
+          apiKey,
+          baseUrl,
+          model,
+          modelIds,
+        );
+      },
+    );
+
+    // Watch for auth-related VSCode settings changes — auto-sync and reconnect.
+    // The isSyncingToVSCode guard prevents a loop when we programmatically populate VSCode settings.
+    const configChangeDisposable = vscode.workspace.onDidChangeConfiguration(
+      async (e) => {
+        const authSettingsChanged = AUTH_RELATED_QWEN_SETTINGS.some((setting) =>
+          e.affectsConfiguration(setting),
+        );
+
+        if (authSettingsChanged && !this.isSyncingToVSCode) {
+          console.log(
+            '[WebViewProvider] Auth-related qwen-code settings changed by user, syncing...',
+          );
+          const synced = await this.syncVSCodeSettingsToQwenConfig();
+          if (synced && this.agentInitialized) {
+            // Settings changed and we have an active connection — reconnect
+            try {
+              this.agentManager.disconnect();
+              this.agentInitialized = false;
+              await new Promise((resolve) => setTimeout(resolve, 300));
+              await this.doInitializeAgentConnection({
+                autoAuthenticate: false,
+              });
+            } catch (e) {
+              console.error(
+                '[WebViewProvider] Reconnect after settings change failed:',
+                e,
+              );
+            }
+          } else if (
+            !synced &&
+            this.agentInitialized &&
+            e.affectsConfiguration('qwen-code.apiKey')
+          ) {
+            // Only de-auth when qwen-code.apiKey itself was cleared.
+            // Other auth-related settings (provider, codingPlanRegion) returning
+            // synced=false is normal for api-key providers — those are managed by
+            // the interactive auth flow, not VS Code Settings sync.
+            const apiKey = vscode.workspace
+              .getConfiguration('qwen-code')
+              .get<string>('apiKey', '');
+            if (!apiKey) {
+              console.log(
+                '[WebViewProvider] apiKey cleared — de-authenticating and clearing persisted credentials',
+              );
+              clearPersistedAuth();
+              this.agentManager.disconnect();
+              this.agentInitialized = false;
+              this.authState = false;
+              this.sendMessageToWebView({
+                type: 'authState',
+                data: { authenticated: false },
+              });
+            }
+          }
+        }
+      },
+    );
+    this.disposables.push(configChangeDisposable);
 
     // Setup file watchers for cache invalidation
     const fileWatcherDisposable = this.messageHandler.setupFileWatchers();
@@ -129,6 +224,50 @@ export class WebViewProvider {
       this.messageHandler.appendStreamContent(chunk);
       this.sendMessageToWebView({
         type: 'thoughtChunk',
+        data: { chunk },
+      });
+    });
+
+    this.agentManager.onSlashCommandNotification((event) => {
+      if (isInsightCommand(event.command) && event.messageType === 'error') {
+        this.sendMessageToWebView({
+          type: 'insightProgressCleared',
+          data: {},
+        });
+      }
+
+      // Try to parse as structured insight message
+      if (isInsightCommand(event.command) && event.messageType === 'info') {
+        const parsed = parseInsightMessage(event.message);
+        if (parsed?.type === 'insight_progress') {
+          this.sendMessageToWebView({
+            type: 'insightProgress',
+            data: {
+              stage: parsed.stage,
+              progress: parsed.progress,
+              detail: parsed.detail,
+            },
+          });
+          return;
+        }
+
+        if (parsed?.type === 'insight_ready') {
+          this.sendMessageToWebView({
+            type: 'insightReportReady',
+            data: {
+              path: parsed.path,
+            },
+          });
+          return;
+        }
+      }
+
+      const chunk = event.message.endsWith('\n')
+        ? event.message
+        : `${event.message}\n`;
+      this.messageHandler.appendStreamContent(chunk);
+      this.sendMessageToWebView({
+        type: 'streamChunk',
         data: { chunk },
       });
     });
@@ -189,6 +328,7 @@ export class WebViewProvider {
 
     // Surface available commands (from ACP available_commands_update)
     this.agentManager.onAvailableCommands((commands) => {
+      this.cachedAvailableCommands = commands;
       this.sendMessageToWebView({
         type: 'availableCommands',
         data: { commands },
@@ -307,25 +447,35 @@ export class WebViewProvider {
               optionId === 'cancel' ||
               optionId.toLowerCase().includes('reject');
 
+            // For switch_mode (exit_plan_mode), cancel means "reject
+            // the plan and stay in plan mode" — the agent keeps running.
+            const isSwitchMode =
+              (request.toolCall as { kind?: string } | undefined)?.kind ===
+              'switch_mode';
+
             // Always close open qwen-diff editors after any permission decision
             void vscode.commands.executeCommand('qwen.diff.closeAll');
 
             if (isCancel) {
-              // Fire and forget — cancel generation and update UI
+              // Fire and forget — for normal tool calls, cancel generation and
+              // end the stream; for switch_mode, keep the session alive but
+              // still mark the permission tool call as failed in the UI.
               void (async () => {
-                try {
-                  await this.agentManager.cancelCurrentPrompt();
-                } catch (err) {
-                  console.warn(
-                    '[WebViewProvider] cancelCurrentPrompt error:',
-                    err,
-                  );
-                }
+                if (!isSwitchMode) {
+                  try {
+                    await this.agentManager.cancelCurrentPrompt();
+                  } catch (err) {
+                    console.warn(
+                      '[WebViewProvider] cancelCurrentPrompt error:',
+                      err,
+                    );
+                  }
 
-                this.sendMessageToWebView({
-                  type: 'streamEnd',
-                  data: { timestamp: Date.now(), reason: 'user_cancelled' },
-                });
+                  this.sendMessageToWebView({
+                    type: 'streamEnd',
+                    data: { timestamp: Date.now(), reason: 'user_cancelled' },
+                  });
+                }
 
                 // Synthesize a failed tool_call_update to match CLI UX
                 try {
@@ -452,6 +602,25 @@ export class WebViewProvider {
     });
   }
 
+  private async openInsightReport(path: string): Promise<void> {
+    await vscode.env.openExternal(vscode.Uri.file(path));
+  }
+
+  private async handleOpenInsightReportMessage(message: {
+    type: string;
+    data?: unknown;
+  }): Promise<boolean> {
+    if (message.type !== 'openInsightReport') {
+      return false;
+    }
+
+    const path = (message.data as { path?: unknown } | undefined)?.path;
+    if (typeof path === 'string' && path.length > 0) {
+      await this.openInsightReport(path);
+    }
+    return true;
+  }
+
   /**
    * Attach the provider to a WebviewView (sidebar / panel / secondary sidebar).
    * Called from ChatWebviewViewProvider.resolveWebviewView when VS Code opens
@@ -499,6 +668,9 @@ export class WebViewProvider {
         }
         if (message.type === 'resolveImagePaths') {
           this.handleResolveImagePaths(message.data, webview);
+          return;
+        }
+        if (await this.handleOpenInsightReportMessage(message)) {
           return;
         }
         if (this.handleNewChatByContext(message)) {
@@ -660,6 +832,9 @@ export class WebViewProvider {
           this.handleResolveImagePaths(message.data, newPanel.webview);
           return;
         }
+        if (await this.handleOpenInsightReportMessage(message)) {
+          return;
+        }
         // Allow webview to request updating the VS Code tab title
         if (message.type === 'updatePanelTitle') {
           const title = String(
@@ -667,7 +842,7 @@ export class WebViewProvider {
           ).trim();
           const panelRef = this.panelManager.getPanel();
           if (panelRef) {
-            panelRef.title = title || 'Qwen Code';
+            panelRef.title = title ? truncatePanelTitle(title) : 'Qwen Code';
           }
           return;
         }
@@ -776,6 +951,29 @@ export class WebViewProvider {
     await this.attemptAuthStateRestoration();
   }
 
+  /**
+   * Launch the interactive auth flow (QuickPick → InputBox → write settings → reconnect).
+   * Guards against concurrent launches: if auto-auth was scheduled by
+   * doInitializeAgentConnection's deferred timeout, it is cancelled first.
+   */
+  async startInteractiveAuth(): Promise<void> {
+    // Cancel any pending auto-auth from doInitializeAgentConnection so we
+    // don't end up with two overlapping auth flows.
+    if (this.autoAuthTimer) {
+      clearTimeout(this.autoAuthTimer);
+      this.autoAuthTimer = null;
+    }
+    if (this.authFlowActive) {
+      return;
+    }
+    this.authFlowActive = true;
+    try {
+      await this.messageHandler.route({ type: 'auth' });
+    } finally {
+      this.authFlowActive = false;
+    }
+  }
+
   setInitialModelId(modelId: string | null | undefined): void {
     this.initialModelId =
       typeof modelId === 'string' && modelId.trim().length > 0
@@ -784,8 +982,113 @@ export class WebViewProvider {
   }
 
   /**
-   * Attempt to restore authentication state and initialize connection
-   * This is called when the webview is first shown
+   * Sync VSCode extension settings (qwen-code.*) to ~/.qwen/settings.json
+   * if an API key is configured. This enables auto-connect on startup
+   * without requiring the user to click "Connect" each time.
+   *
+   * @returns true if settings were synced (apiKey is configured), false otherwise
+   */
+  private async syncVSCodeSettingsToQwenConfig(): Promise<boolean> {
+    const config = vscode.workspace.getConfiguration('qwen-code');
+    const apiKey = config.get<string>('apiKey', '');
+
+    if (!apiKey) {
+      return false;
+    }
+
+    try {
+      const provider = config.get<string>('provider', 'coding-plan');
+
+      if (provider !== 'coding-plan') {
+        console.log(
+          '[WebViewProvider] Skipping VSCode settings sync for api-key provider; interactive auth owns provider details',
+        );
+        return false;
+      }
+
+      const region = config.get<'china' | 'global'>(
+        'codingPlanRegion',
+        'china',
+      );
+      writeCodingPlanConfig(region, apiKey);
+
+      console.log(
+        `[WebViewProvider] Synced VSCode settings → ~/.qwen/settings.json (provider=${provider})`,
+      );
+      return true;
+    } catch (error) {
+      console.error('[WebViewProvider] Failed to sync VSCode settings:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Sync ~/.qwen/settings.json values back to VSCode Settings UI.
+   * This makes existing CLI-configured non-secret metadata visible in the
+   * VSCode Settings page without mirroring credentials into settings.json.
+   */
+  private async syncQwenConfigToVSCodeSettings(): Promise<void> {
+    try {
+      const qwenSettings = readQwenSettingsForVSCode();
+      if (!qwenSettings) {
+        return;
+      }
+
+      console.log(
+        '[WebViewProvider] Syncing ~/.qwen/settings.json → VSCode settings',
+      );
+
+      // Set guard to prevent onDidChangeConfiguration from triggering a write-back
+      const config = vscode.workspace.getConfiguration('qwen-code');
+      const target = vscode.ConfigurationTarget.Global;
+      const updates: Array<Thenable<void>> = [];
+
+      if (
+        config.get<string>('provider', 'coding-plan') !== qwenSettings.provider
+      ) {
+        updates.push(config.update('provider', qwenSettings.provider, target));
+      }
+      if (
+        config.get<'china' | 'global'>('codingPlanRegion', 'china') !==
+        qwenSettings.codingPlanRegion
+      ) {
+        updates.push(
+          config.update(
+            'codingPlanRegion',
+            qwenSettings.codingPlanRegion,
+            target,
+          ),
+        );
+      }
+
+      if (updates.length === 0) {
+        console.log(
+          '[WebViewProvider] VSCode settings already match ~/.qwen/settings.json',
+        );
+        return;
+      }
+
+      this.isSyncingToVSCode = true;
+
+      try {
+        await Promise.all(updates);
+      } finally {
+        this.isSyncingToVSCode = false;
+      }
+    } catch (error) {
+      console.error(
+        '[WebViewProvider] Failed to sync qwen config to VSCode settings:',
+        error,
+      );
+    }
+  }
+
+  /**
+   * Attempt to restore authentication state and initialize connection.
+   * On startup, sync ~/.qwen/settings.json → VSCode settings so the Settings UI
+   * reflects existing non-secret CLI config, then attempt a connection.
+   * Writing back to ~/.qwen/settings.json happens through the auth flow and
+   * auth-related VSCode setting changes.
    */
   private async attemptAuthStateRestoration(): Promise<void> {
     // Prevent concurrent initialization attempts (e.g. visibility toggle + webviewReady race)
@@ -795,6 +1098,8 @@ export class WebViewProvider {
 
     this.initializationPromise = (async () => {
       try {
+        await this.syncQwenConfigToVSCodeSettings();
+
         console.log('[WebViewProvider] Attempting connection...');
         // Attempt a connection to detect prior auth without forcing login
         await this.initializeAgentConnection({ autoAuthenticate: false });
@@ -864,7 +1169,7 @@ export class WebViewProvider {
         // send authState message and return without creating session
         if (connectResult.requiresAuth && !autoAuthenticate) {
           console.log(
-            '[WebViewProvider] Authentication required but auto-auth disabled, sending authState and returning',
+            '[WebViewProvider] Authentication required, launching auth flow...',
           );
           this.sendMessageToWebView({
             type: 'authState',
@@ -872,6 +1177,22 @@ export class WebViewProvider {
           });
           // Initialize empty conversation to allow browsing history
           await this.initializeEmptyConversation();
+
+          // Auto-launch the interactive auth flow (QuickPick → InputBox)
+          // so the user is immediately guided to configure their provider,
+          // mirroring CLI's behavior of showing AuthDialog on first run.
+          // Deferred to avoid conflicting with the current connection init.
+          // The timer is stored so startInteractiveAuth() can cancel it
+          // to prevent two overlapping auth flows.
+          this.autoAuthTimer = setTimeout(() => {
+            this.autoAuthTimer = null;
+            if (!this.authFlowActive) {
+              this.authFlowActive = true;
+              void this.messageHandler.route({ type: 'auth' }).finally(() => {
+                this.authFlowActive = false;
+              });
+            }
+          }, 100);
           return;
         }
 
@@ -919,70 +1240,100 @@ export class WebViewProvider {
   }
 
   /**
-   * Force re-login by clearing auth cache and reconnecting
-   * Called when user explicitly uses /login command
+   * Handle auth interactive — interactive auth flow result.
+   * Writes provider config to ~/.qwen/settings.json and reconnects.
+   * Mirrors the CLI's `qwen auth coding-plan` / `qwen auth` flow.
    */
-  async forceReLogin(): Promise<void> {
-    console.log('[WebViewProvider] Force re-login requested');
+  private async handleAuthInteractive(
+    provider: string,
+    region?: string,
+    apiKey?: string,
+    baseUrl?: string,
+    model?: string,
+    modelIds?: string,
+  ): Promise<void> {
+    if (!apiKey) {
+      this.sendMessageToWebView({
+        type: 'authError',
+        data: { message: 'API key is required.' },
+      });
+      return;
+    }
 
-    return vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        cancellable: false,
-      },
-      async (progress) => {
-        try {
-          progress.report({ message: 'Preparing sign-in...' });
-
-          // Disconnect existing connection if any
-          if (this.agentInitialized) {
-            try {
-              this.agentManager.disconnect();
-              console.log('[WebViewProvider] Existing connection disconnected');
-            } catch (_error) {
-              console.log('[WebViewProvider] Error disconnecting:', _error);
-            }
-            this.agentInitialized = false;
-          }
-
-          // Wait a moment for cleanup to complete
-          await new Promise((resolve) => setTimeout(resolve, 300));
-
-          progress.report({
-            message: 'Connecting to CLI and starting sign-in...',
-          });
-
-          // Reinitialize connection (will trigger fresh authentication)
-          await this.doInitializeAgentConnection({ autoAuthenticate: true });
-          console.log(
-            '[WebViewProvider] Force re-login completed successfully',
-          );
-
-          // Send success notification to WebView
-          this.sendMessageToWebView({
-            type: 'loginSuccess',
-            data: { message: 'Successfully logged in!' },
-          });
-        } catch (_error) {
-          const errorMsg = getErrorMessage(_error);
-          console.error('[WebViewProvider] Force re-login failed:', _error);
-          console.error(
-            '[WebViewProvider] Error stack:',
-            _error instanceof Error ? _error.stack : 'N/A',
-          );
-
-          // Send error notification to WebView
-          this.sendMessageToWebView({
-            type: 'loginError',
-            data: {
-              message: `Login failed: ${errorMsg}`,
-            },
-          });
-
-          throw _error;
-        }
-      },
+    console.log(
+      `[WebViewProvider] authInteractive: provider=${provider}, region=${region}, model=${model}`,
     );
+
+    try {
+      if (provider === 'coding-plan') {
+        writeCodingPlanConfig(region === 'global' ? 'global' : 'china', apiKey);
+      } else if (provider === 'alibaba-standard') {
+        // Alibaba Standard — multiple models sharing the same base URL
+        const modelBaseUrl =
+          baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1';
+        const ids = (modelIds || model || 'qwen3.5-plus')
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        const providers: Record<string, string> = {};
+        for (const id of ids) {
+          providers[id] = modelBaseUrl;
+        }
+        writeModelProvidersConfig({
+          apiKey,
+          modelProviders: providers,
+          activeModel: ids[0] || 'qwen3.5-plus',
+        });
+      } else {
+        // Custom API Key — single model entry
+        const modelId = model || 'default';
+        const modelBaseUrl = baseUrl || 'https://api.openai.com/v1';
+        writeModelProvidersConfig({
+          apiKey,
+          modelProviders: { [modelId]: modelBaseUrl },
+          activeModel: modelId,
+        });
+      }
+
+      // Disconnect + reconnect
+      if (this.agentInitialized) {
+        try {
+          this.agentManager.disconnect();
+        } catch (e) {
+          console.log('[WebViewProvider] Error disconnecting:', e);
+        }
+        this.agentInitialized = false;
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      await this.doInitializeAgentConnection({ autoAuthenticate: false });
+
+      // Only emit authSuccess when the reconnection actually authenticated.
+      // doInitializeAgentConnection updates this.authState via sendMessageToWebView;
+      // if credentials were rejected, authState will be false and we should not
+      // claim success (which would briefly show a success toast then re-open auth).
+      if (this.authState === true) {
+        this.sendMessageToWebView({
+          type: 'authSuccess',
+          data: { message: 'Provider configured successfully!' },
+        });
+      } else {
+        this.sendMessageToWebView({
+          type: 'authError',
+          data: {
+            message:
+              'Connection established but authentication failed. Please check your credentials.',
+          },
+        });
+      }
+    } catch (error) {
+      const errorMsg = getErrorMessage(error);
+      console.error('[WebViewProvider] authInteractive failed:', error);
+      this.sendMessageToWebView({
+        type: 'authError',
+        data: { message: `Configuration failed: ${errorMsg}` },
+      });
+    }
   }
 
   /**
@@ -1234,11 +1585,11 @@ export class WebViewProvider {
         }
         break;
       case 'agentConnected':
-      case 'loginSuccess':
+      case 'authSuccess':
         this.authState = true;
         break;
       case 'agentConnectionError':
-      case 'loginError':
+      case 'authError':
         this.authState = false;
         break;
       default:
@@ -1254,6 +1605,13 @@ export class WebViewProvider {
       this.sendMessageToWebView({
         type: 'modeChanged',
         data: { modeId: this.currentModeId },
+      });
+    }
+
+    if (this.cachedAvailableCommands) {
+      this.sendMessageToWebView({
+        type: 'availableCommands',
+        data: { commands: this.cachedAvailableCommands },
       });
     }
 
@@ -1497,13 +1855,16 @@ export class WebViewProvider {
           this.handleResolveImagePaths(message.data, panel.webview);
           return;
         }
+        if (await this.handleOpenInsightReportMessage(message)) {
+          return;
+        }
         if (message.type === 'updatePanelTitle') {
           const title = String(
             (message.data as { title?: unknown } | undefined)?.title ?? '',
           ).trim();
           const panelRef = this.panelManager.getPanel();
           if (panelRef) {
-            panelRef.title = title || 'Qwen Code';
+            panelRef.title = title ? truncatePanelTitle(title) : 'Qwen Code';
           }
           return;
         }

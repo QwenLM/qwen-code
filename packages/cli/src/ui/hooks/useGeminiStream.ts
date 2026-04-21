@@ -76,6 +76,7 @@ import path from 'node:path';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
+import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -219,6 +220,7 @@ export const useGeminiStream = (
   const isSubmittingQueryRef = useRef(false);
   const lastPromptRef = useRef<PartListUnion | null>(null);
   const lastPromptErroredRef = useRef(false);
+  const dualOutput = useDualOutput();
   const [isResponding, setIsResponding] = useState<boolean>(false);
   const [thought, setThought] = useState<ThoughtSummary | null>(null);
   const [pendingHistoryItem, pendingHistoryItemRef, setPendingHistoryItem] =
@@ -237,7 +239,14 @@ export const useGeminiStream = (
     null,
   );
   const processedMemoryToolsRef = useRef<Set<string>>(new Set());
+  const submitPromptOnCompleteRef = useRef<(() => Promise<void>) | null>(null);
   const modelOverrideRef = useRef<string | undefined>(undefined);
+  // --- Real-time token display ---
+  // Accumulates output character count across the whole turn (not per API call).
+  // Uses a ref to avoid re-renders on every text_delta.
+  const streamingResponseLengthRef = useRef(0);
+  // Tracks whether we are receiving content (↓) or waiting for API (↑).
+  const [isReceivingContent, setIsReceivingContent] = useState(false);
   const {
     startNewPrompt,
     getPromptCount,
@@ -257,13 +266,13 @@ export const useGeminiStream = (
       async (completedToolCallsFromScheduler) => {
         // This onComplete is called when ALL scheduled tools for a given batch are done.
         if (completedToolCallsFromScheduler.length > 0) {
+          const projectRoot = config.getProjectRoot();
           // Add the final state of these tools to the history for display.
-          addItem(
-            mapTrackedToolCallsToDisplay(
-              completedToolCallsFromScheduler as TrackedToolCall[],
-            ),
-            Date.now(),
+          const toolGroupDisplay = mapTrackedToolCallsToDisplay(
+            completedToolCallsFromScheduler as TrackedToolCall[],
+            projectRoot,
           );
+          addItem(toolGroupDisplay, Date.now());
 
           // Handle tool response submission immediately when tools complete
           await handleCompletedTools(
@@ -278,8 +287,10 @@ export const useGeminiStream = (
 
   const pendingToolCallGroupDisplay = useMemo(
     () =>
-      toolCalls.length ? mapTrackedToolCallsToDisplay(toolCalls) : undefined,
-    [toolCalls],
+      toolCalls.length
+        ? mapTrackedToolCallsToDisplay(toolCalls, config.getProjectRoot())
+        : undefined,
+    [toolCalls, config],
   );
 
   const activeToolPtyId = useMemo(() => {
@@ -524,6 +535,7 @@ export const useGeminiStream = (
       userMessageTimestamp: number,
       abortSignal: AbortSignal,
       prompt_id: string,
+      submitType: SendMessageType,
     ): Promise<{
       queryToSend: PartListUnion | null;
       shouldProceed: boolean;
@@ -539,6 +551,19 @@ export const useGeminiStream = (
 
       if (typeof query === 'string') {
         const trimmedQuery = query.trim();
+
+        // Notification messages (e.g. background agent completions) are
+        // pre-processed by the notification drain loop which already
+        // added the display item to history. Just pass the model text
+        // through to the API. Cron prompts still go through the normal
+        // slash/@-command/shell preprocessing path below.
+        if (submitType === SendMessageType.Notification) {
+          onDebugMessage(
+            `Received notification (${trimmedQuery.length} chars)`,
+          );
+          return { queryToSend: trimmedQuery, shouldProceed: true };
+        }
+
         onDebugMessage(`Received user query (${trimmedQuery.length} chars)`);
         await logger?.logMessage(MessageSenderType.USER, trimmedQuery);
 
@@ -563,6 +588,8 @@ export const useGeminiStream = (
             }
             case 'submit_prompt': {
               localQueryToSendToGemini = slashCommandResult.content;
+              submitPromptOnCompleteRef.current =
+                slashCommandResult.onComplete ?? null;
 
               return {
                 queryToSend: localQueryToSendToGemini,
@@ -587,10 +614,15 @@ export const useGeminiStream = (
 
         localQueryToSendToGemini = trimmedQuery;
 
-        addItem(
-          { type: MessageType.USER, text: trimmedQuery },
-          userMessageTimestamp,
-        );
+        // Cron prompts are already rendered as a `● Cron: …` notification by
+        // the queue drain, so skip the user-message history item to avoid
+        // a duplicate `> …` line. Preprocessing (@/slash/shell) still runs.
+        if (submitType !== SendMessageType.Cron) {
+          addItem(
+            { type: MessageType.USER, text: trimmedQuery },
+            userMessageTimestamp,
+          );
+        }
 
         // Handle @-commands (which might involve tool calls)
         if (isAtCommand(trimmedQuery)) {
@@ -645,6 +677,9 @@ export const useGeminiStream = (
         // Prevents additional output after a user initiated cancel.
         return '';
       }
+      // Track output chars for real-time token estimation & mark as receiving.
+      streamingResponseLengthRef.current += eventValue.length;
+      setIsReceivingContent(true);
       let newGeminiMessageBuffer = currentGeminiMessageBuffer + eventValue;
       if (
         pendingHistoryItemRef.current?.type !== 'gemini' &&
@@ -1086,7 +1121,9 @@ export const useGeminiStream = (
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
       const toolCallRequests: ToolCallRequestInfo[] = [];
+      dualOutput?.startAssistantMessage();
       for await (const event of stream) {
+        dualOutput?.processEvent(event);
         switch (event.type) {
           case ServerGeminiEventType.Thought:
             // If the thought has a subject, it's a discrete status update rather than
@@ -1110,6 +1147,14 @@ export const useGeminiStream = (
             break;
           case ServerGeminiEventType.ToolCallRequest:
             toolCallRequests.push(event.value);
+            // Count tool call args JSON toward token estimation (matches
+            // Claude Code's input_json_delta handling).
+            try {
+              const argsJson = JSON.stringify(event.value.args);
+              streamingResponseLengthRef.current += argsJson.length;
+            } catch {
+              // Best-effort — don't block on serialization errors
+            }
             break;
           case ServerGeminiEventType.UserCancelled:
             handleUserCancelledEvent(userMessageTimestamp);
@@ -1145,10 +1190,26 @@ export const useGeminiStream = (
             loopDetectedRef.current = true;
             break;
           case ServerGeminiEventType.Retry:
-            // Clear any pending partial content from the failed attempt
-            if (pendingHistoryItemRef.current) {
-              setPendingHistoryItem(null);
+            // On fresh restart (escalation / rate-limit / invalid stream),
+            // clear pending content and buffers to discard the failed attempt.
+            // On continuation (recovery), keep the pending gemini item AND
+            // buffers so the model's continuation text appends to them —
+            // otherwise handleContentEvent would see a null pending item,
+            // create a fresh one, and reset the buffer to just the new chunk,
+            // losing the partial text we meant to preserve.
+            if (!event.isContinuation) {
+              if (pendingHistoryItemRef.current) {
+                setPendingHistoryItem(null);
+              }
+              geminiMessageBuffer = '';
+              thoughtBuffer = '';
             }
+            // Always discard tool call requests from the truncated/failed
+            // attempt to prevent duplicate execution after escalation or
+            // recovery. The recovery path now skips turns that already
+            // contain a functionCall (see geminiChat.ts), so this only
+            // clears stale requests from pre-RETRY accumulation.
+            toolCallRequests.length = 0;
             // Show retry info if available (rate-limit / throttling errors)
             if (event.retryInfo) {
               startRetryCountdown(event.retryInfo);
@@ -1188,6 +1249,7 @@ export const useGeminiStream = (
           }
         }
       }
+      dualOutput?.finalizeAssistantMessage();
       if (toolCallRequests.length > 0) {
         scheduleToolCalls(toolCallRequests, signal);
       }
@@ -1212,6 +1274,7 @@ export const useGeminiStream = (
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
       addItem,
+      dualOutput,
     ],
   );
 
@@ -1220,6 +1283,7 @@ export const useGeminiStream = (
       query: PartListUnion,
       submitType: SendMessageType = SendMessageType.UserQuery,
       prompt_id?: string,
+      metadata?: { notificationDisplayText?: string },
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
@@ -1296,6 +1360,7 @@ export const useGeminiStream = (
                 userMessageTimestamp,
                 abortSignal,
                 prompt_id!,
+                submitType,
               );
 
         if (!shouldProceed || queryToSend === null) {
@@ -1354,13 +1419,40 @@ export const useGeminiStream = (
 
         setIsResponding(true);
         setInitError(null);
+        // Entering "requesting" phase — no content yet for this API call.
+        setIsReceivingContent(false);
+        // Reset char counter only on new user queries; tool-result continuations
+        // keep accumulating so the token count only goes up within a turn.
+        if (submitType !== SendMessageType.ToolResult) {
+          streamingResponseLengthRef.current = 0;
+        }
 
         try {
+          // Emit user message to dual output sidecar (if enabled).
+          // Skip for tool-result submissions — those are emitted separately
+          // when the tool completes.
+          if (dualOutput && submitType !== SendMessageType.ToolResult) {
+            const rawParts =
+              typeof finalQueryToSend === 'string'
+                ? [finalQueryToSend]
+                : Array.isArray(finalQueryToSend)
+                  ? finalQueryToSend
+                  : [finalQueryToSend];
+            const userParts: Part[] = rawParts.map((p) =>
+              typeof p === 'string' ? { text: p } : p,
+            );
+            dualOutput.emitUserMessage(userParts);
+          }
+
           const stream = geminiClient.sendMessageStream(
             finalQueryToSend,
             abortSignal,
             prompt_id!,
-            { type: submitType, modelOverride: modelOverrideRef.current },
+            {
+              type: submitType,
+              notificationDisplayText: metadata?.notificationDisplayText,
+              modelOverride: modelOverrideRef.current,
+            },
           );
 
           const processingStatus = await processGeminiStreamEvents(
@@ -1388,6 +1480,35 @@ export const useGeminiStream = (
           if (loopDetectedRef.current) {
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
+          }
+
+          // If the turn was initiated by a submit_prompt with an onComplete
+          // callback (e.g. /dream recording lastDreamAt), fire it now.
+          const onComplete = submitPromptOnCompleteRef.current;
+          if (onComplete) {
+            submitPromptOnCompleteRef.current = null;
+            void onComplete();
+          }
+
+          // After the turn completes, wire up notifications for any background
+          // dream / extraction tasks that were kicked off by the client.
+          if (geminiClient) {
+            const memoryTaskPromises =
+              geminiClient.consumePendingMemoryTaskPromises();
+            for (const p of memoryTaskPromises) {
+              void p.then((count) => {
+                if (count > 0) {
+                  addItem(
+                    {
+                      type: 'memory_saved',
+                      writtenCount: count,
+                      verb: 'Updated',
+                    } as HistoryItemWithoutId,
+                    Date.now(),
+                  );
+                }
+              });
+            }
           }
         } catch (error: unknown) {
           if (error instanceof UnauthorizedError) {
@@ -1430,6 +1551,7 @@ export const useGeminiStream = (
       pendingRetryCountdownItemRef,
       pendingRetryErrorItemRef,
       setPendingRetryErrorItem,
+      dualOutput,
     ],
   );
 
@@ -1635,6 +1757,13 @@ export const useGeminiStream = (
         }
       }
 
+      // Emit tool results to dual output sidecar (if enabled)
+      if (dualOutput) {
+        for (const toolCall of geminiTools) {
+          dualOutput.emitToolResult(toolCall.request, toolCall.response);
+        }
+      }
+
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
       // Don't continue if model was switched due to quota error
@@ -1671,6 +1800,7 @@ export const useGeminiStream = (
       config,
       midTurnDrainRef,
       addItem,
+      dualOutput,
     ],
   );
 
@@ -1809,17 +1939,29 @@ export const useGeminiStream = (
     storage,
   ]);
 
-  // ─── Cron scheduler integration ─────────────────────────
-  const cronQueueRef = useRef<string[]>([]);
-  const [cronTrigger, setCronTrigger] = useState(0);
+  // ─── Unified notification queue (cron + background agents) ──────
+  const notificationQueueRef = useRef<
+    Array<{
+      displayText: string;
+      modelText: string;
+      sendMessageType: SendMessageType;
+    }>
+  >([]);
+  const [notificationTrigger, setNotificationTrigger] = useState(0);
 
-  // Start the scheduler on mount, stop on unmount
+  // Start the cron scheduler on mount, stop on unmount.
+  // Cron fires enqueue onto the shared notification queue.
   useEffect(() => {
     if (!config.isCronEnabled()) return;
     const scheduler = config.getCronScheduler();
     scheduler.start((job: { prompt: string }) => {
-      cronQueueRef.current.push(job.prompt);
-      setCronTrigger((n) => n + 1);
+      const label = job.prompt.slice(0, 40);
+      notificationQueueRef.current.push({
+        displayText: `Cron: ${label}`,
+        modelText: job.prompt,
+        sendMessageType: SendMessageType.Cron,
+      });
+      setNotificationTrigger((n) => n + 1);
     });
     return () => {
       const summary = scheduler.getExitSummary();
@@ -1830,16 +1972,38 @@ export const useGeminiStream = (
     };
   }, [config]);
 
-  // When idle, drain the cron queue one prompt at a time
+  // Register background agent notification callback onto the shared queue.
+  useEffect(() => {
+    const registry = config.getBackgroundTaskRegistry();
+    registry.setNotificationCallback((displayText, modelText) => {
+      notificationQueueRef.current.push({
+        displayText,
+        modelText,
+        sendMessageType: SendMessageType.Notification,
+      });
+      setNotificationTrigger((n) => n + 1);
+    });
+    return () => {
+      registry.setNotificationCallback(undefined);
+    };
+  }, [config]);
+
+  // When idle, drain the unified queue one item at a time.
   useEffect(() => {
     if (
       streamingState === StreamingState.Idle &&
-      cronQueueRef.current.length > 0
+      notificationQueueRef.current.length > 0
     ) {
-      const prompt = cronQueueRef.current.shift()!;
-      submitQuery(prompt, SendMessageType.Cron);
+      const item = notificationQueueRef.current.shift()!;
+      addItem(
+        { type: 'notification' as const, text: item.displayText },
+        Date.now(),
+      );
+      submitQuery(item.modelText, item.sendMessageType, undefined, {
+        notificationDisplayText: item.displayText,
+      });
     }
-  }, [streamingState, submitQuery, cronTrigger]);
+  }, [streamingState, submitQuery, notificationTrigger, addItem]);
 
   return {
     streamingState,
@@ -1853,5 +2017,7 @@ export const useGeminiStream = (
     handleApprovalModeChange,
     activePtyId,
     loopDetectionConfirmationRequest,
+    streamingResponseLengthRef,
+    isReceivingContent,
   };
 };

@@ -12,8 +12,19 @@ import { getErrorStatus } from './errors.js';
 
 const debugLogger = createDebugLogger('RETRY');
 
+// Persistent retry mode constants
+const PERSISTENT_MAX_BACKOFF_MS = 5 * 60 * 1000; // 5 minutes — single retry backoff cap
+const PERSISTENT_CAP_MS = 6 * 60 * 60 * 1000; // 6 hours — absolute single wait cap
+const HEARTBEAT_INTERVAL_MS = 30_000; // 30 seconds
+
 export interface HttpError extends Error {
   status?: number;
+}
+
+export interface HeartbeatInfo {
+  attempt: number;
+  remainingMs: number;
+  error: unknown;
 }
 
 export interface RetryOptions {
@@ -23,6 +34,13 @@ export interface RetryOptions {
   shouldRetryOnError: (error: Error) => boolean;
   shouldRetryOnContent?: (content: GenerateContentResponse) => boolean;
   authType?: string;
+  // Persistent retry mode options
+  persistentMode?: boolean;
+  persistentMaxBackoffMs?: number;
+  persistentCapMs?: number;
+  heartbeatIntervalMs?: number;
+  heartbeatFn?: (info: HeartbeatInfo) => void;
+  signal?: AbortSignal;
 }
 
 const DEFAULT_RETRY_OPTIONS: RetryOptions = {
@@ -46,6 +64,27 @@ function defaultShouldRetry(error: Error | unknown): boolean {
 }
 
 /**
+ * Determines if an error is a transient capacity error eligible for persistent retry.
+ * Only 429 (Rate Limit) and 529 (Overloaded) qualify — HTTP 500 is excluded
+ * because it may indicate a permanent server bug.
+ */
+export function isTransientCapacityError(error: unknown): boolean {
+  const status = getErrorStatus(error);
+  return status === 429 || status === 529;
+}
+
+/**
+ * Detects whether persistent retry mode is explicitly enabled.
+ * Requires the user to opt in via QWEN_CODE_UNATTENDED_RETRY — we intentionally
+ * do NOT auto-activate on CI=true, because silently turning a fast-fail CI job
+ * into an infinite-wait job would be surprising and dangerous.
+ */
+export function isUnattendedMode(): boolean {
+  const val = process.env['QWEN_CODE_UNATTENDED_RETRY'];
+  return val === 'true' || val === '1';
+}
+
+/**
  * Delays execution for a specified number of milliseconds.
  * @param ms The number of milliseconds to delay.
  * @returns A promise that resolves after the delay.
@@ -55,7 +94,44 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * Sleeps in chunks, emitting heartbeat callbacks at regular intervals.
+ * Supports AbortSignal for graceful cancellation.
+ */
+async function sleepWithHeartbeat(
+  totalMs: number,
+  ctx: {
+    attempt: number;
+    error: unknown;
+    heartbeatInterval: number;
+    heartbeatFn?: (info: HeartbeatInfo) => void;
+    signal?: AbortSignal;
+  },
+): Promise<void> {
+  let remaining = totalMs;
+
+  while (remaining > 0) {
+    if (ctx.signal?.aborted) {
+      throw new Error('Retry aborted by signal');
+    }
+
+    const chunk = Math.max(1, Math.min(remaining, ctx.heartbeatInterval));
+    await delay(chunk);
+    remaining -= chunk;
+
+    if (remaining > 0 && ctx.heartbeatFn) {
+      ctx.heartbeatFn({
+        attempt: ctx.attempt,
+        remainingMs: remaining,
+        error: ctx.error,
+      });
+    }
+  }
+}
+
+/**
  * Retries a function with exponential backoff and jitter.
+ * Supports persistent retry mode for unattended/CI environments where transient
+ * capacity errors (429/529) should be retried indefinitely rather than failing.
  * @param fn The asynchronous function to retry.
  * @param options Optional retry configuration.
  * @returns A promise that resolves with the result of the function if successful.
@@ -80,12 +156,24 @@ export async function retryWithBackoff<T>(
     authType,
     shouldRetryOnError,
     shouldRetryOnContent,
+    persistentMode,
+    persistentMaxBackoffMs,
+    persistentCapMs,
+    heartbeatIntervalMs,
+    heartbeatFn,
+    signal,
   } = {
     ...DEFAULT_RETRY_OPTIONS,
     ...cleanOptions,
   };
 
+  const persistent = persistentMode ?? false;
+  const maxBackoff = persistentMaxBackoffMs ?? PERSISTENT_MAX_BACKOFF_MS;
+  const capMs = persistentCapMs ?? PERSISTENT_CAP_MS;
+  const heartbeatInterval = heartbeatIntervalMs ?? HEARTBEAT_INTERVAL_MS;
+
   let attempt = 0;
+  let persistentAttempt = 0;
   let currentDelay = initialDelayMs;
 
   while (attempt < maxAttempts) {
@@ -111,7 +199,7 @@ export async function retryWithBackoff<T>(
       // Check for Qwen OAuth quota exceeded error - throw immediately without retry
       if (authType === AuthType.QWEN_OAUTH && isQwenQuotaExceededError(error)) {
         throw new Error(
-          `Qwen OAuth free tier quota exceeded. Note: Qwen OAuth free tier will be discontinued on 2026-04-15.\n\n` +
+          `Qwen OAuth free tier has been discontinued as of 2026-04-15.\n\n` +
             `To continue using Qwen Code, try one of these alternatives:\n` +
             `  - OpenRouter:    https://openrouter.ai/docs/quickstart\n` +
             `  - Fireworks AI:  https://docs.fireworks.ai/api-reference/introduction\n` +
@@ -120,31 +208,86 @@ export async function retryWithBackoff<T>(
         );
       }
 
+      // Determine if this error qualifies for persistent retry.
+      // Persistent mode still respects shouldRetryOnError — callers can force
+      // fast-fail even for transient errors if they explicitly return false.
+      const isTransient = isTransientCapacityError(error);
+      const callerAllowsRetry = shouldRetryOnError(error as Error);
+      const shouldPersist = persistent && isTransient && callerAllowsRetry;
+
       // Check if we've exhausted retries or shouldn't retry
-      if (attempt >= maxAttempts || !shouldRetryOnError(error as Error)) {
-        throw error;
+      if (!shouldPersist) {
+        if (attempt >= maxAttempts || !callerAllowsRetry) {
+          throw error;
+        }
       }
 
-      const retryAfterMs =
-        errorStatus === 429 ? getRetryAfterDelayMs(error) : 0;
+      // === Calculate delay ===
+      let delayMs: number;
 
-      if (retryAfterMs > 0) {
-        // Respect Retry-After header if present and parsed
+      if (shouldPersist) {
+        persistentAttempt++;
+
+        // Prefer Retry-After header for 429 errors
+        const retryAfterMs =
+          errorStatus === 429 ? getRetryAfterDelayMs(error) : 0;
+
+        if (retryAfterMs > 0) {
+          // Retry-After is a server-specified wait — respect it, only cap at
+          // the absolute limit (capMs/6h), NOT at maxBackoff (5min).
+          delayMs = Math.min(retryAfterMs, capMs);
+        } else {
+          // Exponential backoff — cap at maxBackoff (5min) then absolute cap
+          delayMs = Math.min(
+            initialDelayMs * Math.pow(2, persistentAttempt - 1),
+            maxBackoff,
+          );
+          delayMs = Math.min(delayMs, capMs);
+
+          // Add jitter (±25%), then re-apply caps so delay never exceeds limits
+          delayMs += delayMs * 0.25 * (Math.random() * 2 - 1);
+          delayMs = Math.min(Math.max(0, delayMs), maxBackoff, capMs);
+        }
+
+        const reportedAttempt = persistentAttempt;
         debugLogger.warn(
-          `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
+          `[Persistent] Attempt ${reportedAttempt} failed with status ${errorStatus ?? 'unknown'}. ` +
+            `Retrying in ${Math.ceil(delayMs / 1000)}s...`,
           error,
         );
-        await delay(retryAfterMs);
-        // Reset currentDelay for next potential non-429 error, or if Retry-After is not present next time
-        currentDelay = initialDelayMs;
+
+        // Heartbeat sleep — chunked to keep CI alive
+        await sleepWithHeartbeat(delayMs, {
+          attempt: reportedAttempt,
+          error,
+          heartbeatInterval,
+          heartbeatFn,
+          signal,
+        });
+
+        // Clamp attempt so the while-loop never exits
+        if (attempt >= maxAttempts) {
+          attempt = maxAttempts - 1;
+        }
       } else {
-        // Fallback to exponential backoff with jitter
-        logRetryAttempt(attempt, error, errorStatus);
-        // Add jitter: +/- 30% of currentDelay
-        const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
-        const delayWithJitter = Math.max(0, currentDelay + jitter);
-        await delay(delayWithJitter);
-        currentDelay = Math.min(maxDelayMs, currentDelay * 2);
+        // Normal retry path (unchanged behavior)
+        const retryAfterMs =
+          errorStatus === 429 ? getRetryAfterDelayMs(error) : 0;
+
+        if (retryAfterMs > 0) {
+          debugLogger.warn(
+            `Attempt ${attempt} failed with status ${errorStatus ?? 'unknown'}. Retrying after explicit delay of ${retryAfterMs}ms...`,
+            error,
+          );
+          await delay(retryAfterMs);
+          currentDelay = initialDelayMs;
+        } else {
+          logRetryAttempt(attempt, error, errorStatus);
+          const jitter = currentDelay * 0.3 * (Math.random() * 2 - 1);
+          const delayWithJitter = Math.max(0, currentDelay + jitter);
+          await delay(delayWithJitter);
+          currentDelay = Math.min(maxDelayMs, currentDelay * 2);
+        }
       }
     }
   }

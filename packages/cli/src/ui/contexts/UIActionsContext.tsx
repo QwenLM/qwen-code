@@ -13,9 +13,9 @@ import {
   type AuthType,
   type EditorType,
   type ApprovalMode,
+  type CodingPlanRegion,
 } from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
-import { type CodingPlanRegion } from '../../constants/codingPlan.js';
 import { type AlibabaStandardRegion } from '../../constants/alibabaStandardApiKey.js';
 import type { AuthState } from '../types.js';
 import { type ArenaDialogType } from '../hooks/useArenaCommand.js';
@@ -29,6 +29,7 @@ export interface OpenAICredentials {
 export interface UIActions {
   openThemeDialog: () => void;
   openEditorDialog: () => void;
+  openMemoryDialog: () => void;
   handleThemeSelect: (
     themeName: string | undefined,
     scope: SettingScope,
@@ -60,6 +61,7 @@ export interface UIActions {
   ) => void;
   exitEditorDialog: () => void;
   closeSettingsDialog: () => void;
+  closeMemoryDialog: () => void;
   closeModelDialog: () => void;
   openModelDialog: (options?: { fastModelMode?: boolean }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;

@@ -606,6 +606,10 @@ export class SubagentManager {
       frontmatter['approvalMode'] = config.approvalMode;
     }
 
+    if (config.background) {
+      frontmatter['background'] = true;
+    }
+
     // Serialize to YAML
     const yamlContent = stringifyYaml(frontmatter, {
       lineWidth: 0, // Disable line wrapping
@@ -632,7 +636,7 @@ export class SubagentManager {
     },
   ): Promise<AgentHeadless> {
     try {
-      const runtimeConfig = this.convertToRuntimeConfig(config);
+      const runtimeConfig = await this.convertToRuntimeConfig(config);
 
       // When the model selector specifies a different provider, build a
       // per-agent Config with a dedicated ContentGenerator so the subagent
@@ -719,7 +723,9 @@ export class SubagentManager {
    * @param config - File-based subagent configuration
    * @returns Runtime configuration for AgentHeadless
    */
-  convertToRuntimeConfig(config: SubagentConfig): SubagentRuntimeConfig {
+  async convertToRuntimeConfig(
+    config: SubagentConfig,
+  ): Promise<SubagentRuntimeConfig> {
     const promptConfig: PromptConfig = {
       systemPrompt: config.systemPrompt,
     };
@@ -739,13 +745,13 @@ export class SubagentManager {
       (config.disallowedTools && config.disallowedTools.length > 0)
     ) {
       const toolNames = config.tools
-        ? this.transformToToolNames(config.tools)
+        ? await this.transformToToolNames(config.tools)
         : ['*'];
       toolConfig = {
         tools: toolNames,
         ...(config.disallowedTools && config.disallowedTools.length > 0
           ? {
-              disallowedTools: this.transformToToolNames(
+              disallowedTools: await this.transformToToolNames(
                 config.disallowedTools,
               ),
             }
@@ -769,12 +775,13 @@ export class SubagentManager {
    * @returns Array of tool names
    * @private
    */
-  private transformToToolNames(tools: string[]): string[] {
+  private async transformToToolNames(tools: string[]): Promise<string[]> {
     const toolRegistry = this.config.getToolRegistry();
     if (!toolRegistry) {
       return tools;
     }
 
+    await toolRegistry.warmAll();
     const allTools = toolRegistry.getAllTools();
 
     const result: string[] = [];
@@ -907,8 +914,12 @@ export class SubagentManager {
         try {
           const config = await this.parseSubagentFile(filePath, level);
           subagents.push(config);
-        } catch (_error) {
-          // Ignore invalid files
+        } catch (error) {
+          // Skip invalid files but surface the reason. Before this warning
+          // was added, invalid subagent files failed silently — a user who
+          // mistyped frontmatter or used a reserved name had no way to see
+          // why their agent wasn't loading.
+          warnInvalidSubagentFile(filePath, error);
           continue;
         }
       }
@@ -987,8 +998,8 @@ export async function loadSubagentFromDir(
           new SubagentValidator(),
         );
         subagents.push(config);
-      } catch (_error) {
-        // Ignore invalid files
+      } catch (error) {
+        warnInvalidSubagentFile(filePath, error);
         continue;
       }
     }
@@ -1087,6 +1098,21 @@ function parseSubagentContent(
           ? legacyModelConfig['model']
           : undefined;
 
+    const backgroundRaw = frontmatter['background'];
+    if (
+      backgroundRaw !== undefined &&
+      backgroundRaw !== 'true' &&
+      backgroundRaw !== 'false' &&
+      backgroundRaw !== true &&
+      backgroundRaw !== false
+    ) {
+      debugLogger.warn(
+        `Agent file ${filePath} has invalid background value '${backgroundRaw}'. Must be 'true', 'false', or omitted.`,
+      );
+    }
+    const background =
+      backgroundRaw === 'true' || backgroundRaw === true ? true : undefined;
+
     const config: SubagentConfig = {
       name,
       description,
@@ -1099,6 +1125,7 @@ function parseSubagentContent(
       runConfig: runConfig as Partial<RunConfig>,
       color,
       level,
+      ...(background ? { background } : {}),
     };
 
     // Validate the parsed configuration
@@ -1114,4 +1141,15 @@ function parseSubagentContent(
       SubagentErrorCode.INVALID_CONFIG,
     );
   }
+}
+
+/**
+ * Log an invalid-subagent-file error via the debug logger. Before this was
+ * added, the loader swallowed these errors entirely — users running with
+ * debug logging enabled had no way to tell why their subagent wasn't loading.
+ * Kept on the debug channel so the TUI stays quiet during normal startup.
+ */
+function warnInvalidSubagentFile(filePath: string, error: unknown): void {
+  const message = error instanceof Error ? error.message : String(error);
+  debugLogger.debug(`Skipped invalid file ${filePath}: ${message}`);
 }

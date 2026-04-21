@@ -17,7 +17,7 @@ import {
   isCodingPlanConfig,
   CodingPlanRegion,
   CODING_PLAN_ENV_KEY,
-} from '../../constants/codingPlan.js';
+} from '@qwen-code/qwen-code-core';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { backupSettingsFile } from '../../utils/settingsUtils.js';
 import { loadSettings, type LoadedSettings } from '../../config/settings.js';
@@ -69,6 +69,7 @@ export async function handleQwenAuth(
       prompt: undefined,
       promptInteractive: undefined,
       yolo: undefined,
+      bare: undefined,
       approvalMode: undefined,
       telemetry: undefined,
       checkpointing: undefined,
@@ -105,6 +106,7 @@ export async function handleQwenAuth(
       maxSessionTurns: undefined,
       coreTools: undefined,
       excludeTools: undefined,
+      disabledSlashCommands: undefined,
       authType: undefined,
       channel: undefined,
       systemPrompt: undefined,
@@ -117,6 +119,11 @@ export async function handleQwenAuth(
       minimalArgv,
       process.cwd(),
       [], // No extensions for auth command
+      // Pass separated hooks for proper source attribution
+      {
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
+      },
     );
 
     if (command === 'qwen-oauth') {
@@ -368,27 +375,35 @@ export async function runInteractiveAuth() {
   const selector = new InteractiveSelector(
     [
       {
-        value: 'qwen-oauth' as const,
-        label: t('Qwen OAuth'),
-        description: t('Free · 100 requests/day · Ending 2026-04-15'),
-      },
-      {
         value: 'coding-plan' as const,
         label: t('Alibaba Cloud Coding Plan'),
         description: t(
           'Paid · Up to 6,000 requests/5 hrs · All Alibaba Cloud Coding Plan Models',
         ),
       },
+      {
+        value: 'qwen-oauth' as const,
+        label: t('Qwen OAuth'),
+        description: t('Discontinued — switch to Coding Plan or API Key'),
+      },
     ],
     t('Select authentication method:'),
   );
 
-  const choice = await selector.select();
+  let choice = await selector.select();
+
+  // If user selects discontinued Qwen OAuth, warn and re-prompt
+  while (choice === 'qwen-oauth') {
+    writeStdoutLine(
+      t(
+        '\n⚠ Qwen OAuth free tier was discontinued on 2026-04-15. Please select another option.\n',
+      ),
+    );
+    choice = await selector.select();
+  }
 
   if (choice === 'coding-plan') {
     await handleQwenAuth('coding-plan', {});
-  } else {
-    await handleQwenAuth('qwen-oauth', {});
   }
 }
 
@@ -428,9 +443,12 @@ export async function showAuthStatus(): Promise<void> {
     // Display status based on auth type
     if (selectedType === AuthType.QWEN_OAUTH) {
       writeStdoutLine(t('✓ Authentication Method: Qwen OAuth'));
-      writeStdoutLine(t('  Type: Free tier (ending 2026-04-15)'));
-      writeStdoutLine(t('  Limit: 100 requests/day'));
-      writeStdoutLine(t('  Models: Qwen latest models\n'));
+      writeStdoutLine(t('  Type: Free tier (discontinued 2026-04-15)'));
+      writeStdoutLine(t('  Limit: No longer available'));
+      writeStdoutLine(t('  Models: Qwen latest models'));
+      writeStdoutLine(
+        t('\n  ⚠ Run /auth to switch to Coding Plan or another provider.\n'),
+      );
     } else if (selectedType === AuthType.USE_OPENAI) {
       // Check for Coding Plan configuration
       const codingPlanRegion = mergedSettings.codingPlan?.region;

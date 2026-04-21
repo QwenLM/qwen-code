@@ -53,6 +53,7 @@ export interface UIState {
   debugMessage: string;
   quittingMessages: HistoryItem[] | null;
   isSettingsDialogOpen: boolean;
+  isMemoryDialogOpen: boolean;
   isModelDialogOpen: boolean;
   isFastModelMode: boolean;
   isTrustDialogOpen: boolean;
@@ -143,6 +144,10 @@ export interface UIState {
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+  // Real-time token display: ref to streaming output char length (polled, not state)
+  streamingResponseLengthRef: React.RefObject<number>;
+  // True = receiving content (↓), false = waiting for API response (↑)
+  isReceivingContent: boolean;
   // Prompt suggestion
   promptSuggestion: string | null;
   /** Dismiss prompt suggestion (clears state, aborts speculation) */

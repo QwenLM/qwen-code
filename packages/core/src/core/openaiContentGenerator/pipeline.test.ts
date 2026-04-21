@@ -1475,6 +1475,80 @@ describe('ContentGenerationPipeline', () => {
         }),
       );
     });
+
+    it('should pass arbitrary samplingParams keys through verbatim (e.g. max_completion_tokens for GPT-5)', async () => {
+      // Arrange: user sets a GPT-5 / o-series shape in samplingParams.
+      // None of these are typed fields; all must appear on the wire because
+      // samplingParams is the source of truth.
+      mockContentGeneratorConfig.samplingParams = {
+        max_completion_tokens: 4096,
+        reasoning_effort: 'medium',
+        verbosity: 'low',
+      } as ContentGeneratorConfig['samplingParams'];
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { maxOutputTokens: 999 },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'r' } }],
+      });
+
+      // Act
+      await pipeline.execute(request, 'prompt-id');
+
+      // Assert: the exact samplingParams keys reach the wire; max_tokens is NOT
+      // synthesized from request.config.maxOutputTokens.
+      const call = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(call).toMatchObject({
+        max_completion_tokens: 4096,
+        reasoning_effort: 'medium',
+        verbosity: 'low',
+      });
+      expect(call).not.toHaveProperty('max_tokens');
+    });
+
+    it('should preserve historical default behavior when samplingParams is absent', async () => {
+      // Arrange: no samplingParams — request.config.maxOutputTokens must still
+      // fall through to max_tokens on the wire (original behavior unchanged).
+      mockContentGeneratorConfig.samplingParams = undefined;
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'test-model',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: { temperature: 0.5, topP: 0.6, maxOutputTokens: 2048 },
+      };
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'test',
+        choices: [{ message: { content: 'r' } }],
+      });
+
+      // Act
+      await pipeline.execute(request, 'prompt-id');
+
+      // Assert: identical to upstream behavior for existing users
+      expect(mockClient.chat.completions.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          temperature: 0.5,
+          top_p: 0.6,
+          max_tokens: 2048,
+        }),
+        expect.objectContaining({ signal: undefined }),
+      );
+    });
   });
 
   describe('createRequestContext', () => {

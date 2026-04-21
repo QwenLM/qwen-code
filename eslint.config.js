@@ -168,6 +168,11 @@ export default tseslint.config(
     plugins: {
       vitest,
     },
+    languageOptions: {
+      globals: {
+        ...globals.vitest,
+      },
+    },
     rules: {
       ...vitest.configs.recommended.rules,
       'vitest/expect-expect': 'off',
