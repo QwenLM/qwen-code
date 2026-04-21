@@ -8,8 +8,18 @@ import { render } from 'ink-testing-library';
 import { describe, it, expect, vi } from 'vitest';
 import { SessionSummaryDisplay } from './SessionSummaryDisplay.js';
 import * as SessionContext from '../contexts/SessionContext.js';
-import type { SessionMetrics } from '../contexts/SessionContext.js';
+import type {
+  ModelMetrics,
+  ModelMetricsCore,
+  SessionMetrics,
+} from '../contexts/SessionContext.js';
+import { MAIN_SOURCE } from '@qwen-code/qwen-code-core';
 import { ConfigContext } from '../contexts/ConfigContext.js';
+
+const mainOnly = (core: ModelMetricsCore): ModelMetrics => ({
+  ...core,
+  bySource: { [MAIN_SOURCE]: core },
+});
 
 vi.mock('../contexts/SessionContext.js', async (importOriginal) => {
   const actual = await importOriginal<typeof SessionContext>();
@@ -57,7 +67,7 @@ describe('<SessionSummaryDisplay />', () => {
   it('renders the summary display with a title', () => {
     const metrics: SessionMetrics = {
       models: {
-        'gemini-2.5-pro': {
+        'gemini-2.5-pro': mainOnly({
           api: { totalRequests: 10, totalErrors: 1, totalLatencyMs: 50234 },
           tokens: {
             prompt: 1000,
@@ -67,7 +77,7 @@ describe('<SessionSummaryDisplay />', () => {
             thoughts: 300,
             tool: 200,
           },
-        },
+        }),
       },
       tools: {
         totalCalls: 0,
