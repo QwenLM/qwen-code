@@ -240,13 +240,24 @@ export class ApiRequestEvent implements BaseTelemetryEvent {
   model: string;
   prompt_id: string;
   request_text?: string;
+  /**
+   * Name of the subagent that issued this request, or undefined when the
+   * request originates from the main conversation.
+   */
+  subagent_name?: string;
 
-  constructor(model: string, prompt_id: string, request_text?: string) {
+  constructor(
+    model: string,
+    prompt_id: string,
+    request_text?: string,
+    subagent_name?: string,
+  ) {
     this['event.name'] = 'api_request';
     this['event.timestamp'] = new Date().toISOString();
     this.model = model;
     this.prompt_id = prompt_id;
     this.request_text = request_text;
+    this.subagent_name = subagent_name;
   }
 }
 
@@ -264,6 +275,11 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
   error_type?: string;
   // HTTP status code from the API response (e.g. 429, 500)
   status_code?: number | string;
+  /**
+   * Name of the subagent that issued this request, or undefined when the
+   * request originates from the main conversation.
+   */
+  subagent_name?: string;
 
   constructor(opts: {
     responseId?: string;
@@ -274,6 +290,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
     errorMessage: string;
     errorType?: string;
     statusCode?: number | string;
+    subagentName?: string;
   }) {
     this['event.name'] = 'api_error';
     this['event.timestamp'] = new Date().toISOString();
@@ -285,6 +302,7 @@ export class ApiErrorEvent implements BaseTelemetryEvent {
     this.error_message = opts.errorMessage;
     this.error_type = opts.errorType;
     this.status_code = opts.statusCode;
+    this.subagent_name = opts.subagentName;
   }
 }
 
@@ -320,6 +338,11 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   response_text?: string;
   prompt_id: string;
   auth_type?: string;
+  /**
+   * Name of the subagent that issued this request, or undefined when the
+   * request originates from the main conversation.
+   */
+  subagent_name?: string;
 
   constructor(
     response_id: string,
@@ -329,6 +352,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     auth_type?: string,
     usage_data?: GenerateContentResponseUsageMetadata,
     response_text?: string,
+    subagent_name?: string,
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
@@ -345,6 +369,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.response_text = response_text;
     this.prompt_id = prompt_id;
     this.auth_type = auth_type;
+    this.subagent_name = subagent_name;
   }
 }
 

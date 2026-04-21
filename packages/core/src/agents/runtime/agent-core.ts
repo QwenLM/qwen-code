@@ -17,6 +17,7 @@
  */
 
 import { reportError } from '../../utils/errorReporting.js';
+import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
 import { type ToolCallRequestInfo } from '../../core/turn.js';
 import {
@@ -380,6 +381,28 @@ export class AgentCore {
    * @returns ReasoningLoopResult with the final text, terminate mode, and turns used.
    */
   async runReasoningLoop(
+    chat: GeminiChat,
+    initialMessages: Content[],
+    toolsList: FunctionDeclaration[],
+    abortController: AbortController,
+    options?: ReasoningLoopOptions,
+  ): Promise<ReasoningLoopResult> {
+    // Tag every API call emitted from this loop with the owning subagent's
+    // name so the `/stats` panel can attribute tokens/requests to the
+    // originating subagent. The store is read inside
+    // `LoggingContentGenerator` via `subagentNameContext.getStore()`.
+    return subagentNameContext.run(this.name, () =>
+      this._runReasoningLoopInner(
+        chat,
+        initialMessages,
+        toolsList,
+        abortController,
+        options,
+      ),
+    );
+  }
+
+  private async _runReasoningLoopInner(
     chat: GeminiChat,
     initialMessages: Content[],
     toolsList: FunctionDeclaration[],
