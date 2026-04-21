@@ -226,8 +226,9 @@ export function findMidInputSlashCommand(
   const commandMatch = textAfterSlash.match(/^[a-zA-Z0-9_:-]*/);
   const fullCommand = commandMatch ? commandMatch[0] : '';
 
-  // If cursor moved past the end of this command (into a space or next word), bail
-  if (cursorOffset > slashPos + 1 + fullCommand.length) return null;
+  // Only show ghost text when cursor is exactly at the end of the token.
+  // If the cursor is inside the token or past it, return null.
+  if (cursorOffset !== slashPos + 1 + fullCommand.length) return null;
 
   return {
     token: '/' + fullCommand,
