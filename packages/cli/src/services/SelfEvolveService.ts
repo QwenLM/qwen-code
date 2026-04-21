@@ -423,32 +423,31 @@ export class SelfEvolveService {
       );
     }
 
-    const attemptSessionId = `${attemptId}-attempt`;
     const reviewSessionId = `${attemptId}-review`;
     let reviewBranch: string | undefined;
 
     try {
-      const attemptSetup = await worktreeService.setupWorktrees({
-        sessionId: attemptSessionId,
+      const reviewSetup = await worktreeService.setupWorktrees({
+        sessionId: reviewSessionId,
         sourceRepoPath: projectRoot,
-        worktreeNames: ['attempt'],
+        worktreeNames: ['review'],
         baseBranch,
         branchToken,
       });
-      if (!attemptSetup.success) {
+      if (!reviewSetup.success) {
         return this.finishFailure(
           attemptPaths.recordPath,
           attemptId,
           'Failed to create an isolated self-evolve worktree.',
-          attemptSetup.errors.map((error) => error.error),
+          reviewSetup.errors.map((error) => error.error),
           undefined,
           undefined,
           direction,
         );
       }
 
-      const attemptWorktree = attemptSetup.worktreesByName['attempt'];
-      if (!attemptWorktree) {
+      const reviewWorktree = reviewSetup.worktreesByName['review'];
+      if (!reviewWorktree) {
         return this.finishFailure(
           attemptPaths.recordPath,
           attemptId,
@@ -461,9 +460,10 @@ export class SelfEvolveService {
           direction,
         );
       }
+      reviewBranch = reviewWorktree.branch;
 
       const reportPath = path.join(
-        attemptWorktree.path,
+        reviewWorktree.path,
         '.qwen',
         'self-evolve-report.json',
       );
@@ -476,7 +476,7 @@ export class SelfEvolveService {
 
       await ensureDir(path.dirname(reportPath));
       const qwenResult = await this.deps.runQwenAttempt({
-        cwd: attemptWorktree.path,
+        cwd: reviewWorktree.path,
         prompt: attemptPrompt,
         logPath: attemptPaths.attemptLogPath,
         env: {
@@ -501,7 +501,7 @@ export class SelfEvolveService {
         if (qwenResult.stderr.trim()) {
           learnings.push(qwenResult.stderr.trim().split('\n')[0] ?? '');
         }
-        await worktreeService.cleanupSession(attemptSessionId);
+        await worktreeService.cleanupSession(reviewSessionId);
         return this.finishFailure(
           attemptPaths.recordPath,
           attemptId,
@@ -514,7 +514,7 @@ export class SelfEvolveService {
       }
 
       if (report?.status === 'no_safe_task') {
-        await worktreeService.cleanupSession(attemptSessionId);
+        await worktreeService.cleanupSession(reviewSessionId);
         return this.finishFailure(
           attemptPaths.recordPath,
           attemptId,
@@ -533,7 +533,7 @@ export class SelfEvolveService {
         candidates,
       );
       if (validationCommands.length === 0) {
-        await worktreeService.cleanupSession(attemptSessionId);
+        await worktreeService.cleanupSession(reviewSessionId);
         return this.finishFailure(
           attemptPaths.recordPath,
           attemptId,
@@ -549,13 +549,13 @@ export class SelfEvolveService {
       const validationResults: string[] = [];
       for (const command of validationCommands) {
         const validationResult = await this.deps.runShellCommand(
-          attemptWorktree.path,
+          reviewWorktree.path,
           command,
           { timeoutMs: VALIDATION_TIMEOUT_MS },
         );
         validationResults.push(formatCommandResult(validationResult));
         if (validationResult.exitCode !== 0) {
-          await worktreeService.cleanupSession(attemptSessionId);
+          await worktreeService.cleanupSession(reviewSessionId);
           return this.finishFailure(
             attemptPaths.recordPath,
             attemptId,
@@ -574,12 +574,12 @@ export class SelfEvolveService {
       }
 
       const statusResult = await this.deps.runCommand(
-        attemptWorktree.path,
+        reviewWorktree.path,
         'git',
         ['status', '--short'],
       );
       if (!statusResult.stdout.trim()) {
-        await worktreeService.cleanupSession(attemptSessionId);
+        await worktreeService.cleanupSession(reviewSessionId);
         return this.finishFailure(
           attemptPaths.recordPath,
           attemptId,
@@ -597,20 +597,20 @@ export class SelfEvolveService {
         report?.suggestedCommitMessage,
         report?.selectedTask?.title || candidates[0]!.title,
       );
-      await this.deps.runCommand(attemptWorktree.path, 'git', ['add', '--all']);
-      const attemptCommitResult = await this.deps.runCommand(
-        attemptWorktree.path,
+      await this.deps.runCommand(reviewWorktree.path, 'git', ['add', '--all']);
+      const reviewCommitResult = await this.deps.runCommand(
+        reviewWorktree.path,
         'git',
         ['commit', '--no-verify', '-m', commitMessage],
       );
-      if (attemptCommitResult.exitCode !== 0) {
-        await worktreeService.cleanupSession(attemptSessionId);
+      if (reviewCommitResult.exitCode !== 0) {
+        await worktreeService.cleanupSession(reviewSessionId);
         return this.finishFailure(
           attemptPaths.recordPath,
           attemptId,
           'The isolated self-evolve change could not be committed.',
           [
-            summarizeOutput(attemptCommitResult.stderr) ??
+            summarizeOutput(reviewCommitResult.stderr) ??
               'git commit exited with a non-zero status.',
           ],
           report,
@@ -619,49 +619,22 @@ export class SelfEvolveService {
         );
       }
 
-      const attemptCommitSha = await this.readSingleLine(
-        attemptWorktree.path,
+      // Collapse the review worktree to the final commit so no transient
+      // validation artifacts remain in the filesystem presented to users.
+      const resetResult = await this.deps.runCommand(
+        reviewWorktree.path,
         'git',
-        ['rev-parse', 'HEAD'],
+        ['reset', '--hard', 'HEAD'],
       );
-      const reviewWorktreeResult = await worktreeService.createWorktree(
-        reviewSessionId,
-        'review',
-        baseBranch,
-        branchToken,
-      );
-      if (!reviewWorktreeResult.success || !reviewWorktreeResult.worktree) {
-        await worktreeService.cleanupSession(attemptSessionId);
-        return this.finishFailure(
-          attemptPaths.recordPath,
-          attemptId,
-          'Failed to create the clean review branch for the validated change.',
-          [
-            reviewWorktreeResult.error ??
-              'Git worktree creation returned no review worktree.',
-          ],
-          report,
-          validationResults,
-          direction,
-        );
-      }
-
-      reviewBranch = reviewWorktreeResult.worktree.branch;
-      const cherryPickResult = await this.deps.runCommand(
-        reviewWorktreeResult.worktree.path,
-        'git',
-        ['cherry-pick', attemptCommitSha],
-      );
-      if (cherryPickResult.exitCode !== 0) {
+      if (resetResult.exitCode !== 0) {
         await worktreeService.cleanupSession(reviewSessionId);
-        await worktreeService.cleanupSession(attemptSessionId);
         return this.finishFailure(
           attemptPaths.recordPath,
           attemptId,
-          'The validated change could not be promoted into a clean review branch.',
+          'The isolated self-evolve change could not be finalized into a clean review state.',
           [
-            summarizeOutput(cherryPickResult.stderr) ??
-              'git cherry-pick exited with a non-zero status.',
+            summarizeOutput(resetResult.stderr) ??
+              'git reset --hard HEAD exited with a non-zero status.',
           ],
           report,
           validationResults,
@@ -669,13 +642,58 @@ export class SelfEvolveService {
         );
       }
 
-      const commitSha = await this.readSingleLine(
-        reviewWorktreeResult.worktree.path,
+      const cleanResult = await this.deps.runCommand(
+        reviewWorktree.path,
         'git',
-        ['rev-parse', 'HEAD'],
+        ['clean', '-fd'],
       );
+      if (cleanResult.exitCode !== 0) {
+        await worktreeService.cleanupSession(reviewSessionId);
+        return this.finishFailure(
+          attemptPaths.recordPath,
+          attemptId,
+          'The isolated self-evolve change could not remove temporary files after validation.',
+          [
+            summarizeOutput(cleanResult.stderr) ??
+              'git clean -fd exited with a non-zero status.',
+          ],
+          report,
+          validationResults,
+          direction,
+        );
+      }
+
+      const finalizedStatusResult = await this.deps.runCommand(
+        reviewWorktree.path,
+        'git',
+        ['status', '--short'],
+      );
+      if (
+        finalizedStatusResult.exitCode !== 0 ||
+        finalizedStatusResult.stdout.trim()
+      ) {
+        await worktreeService.cleanupSession(reviewSessionId);
+        return this.finishFailure(
+          attemptPaths.recordPath,
+          attemptId,
+          'The isolated self-evolve change could not be finalized into a clean review state.',
+          [
+            summarizeOutput(finalizedStatusResult.stderr) ??
+              summarizeOutput(finalizedStatusResult.stdout) ??
+              'The review worktree still had uncommitted changes after cleanup.',
+          ],
+          report,
+          validationResults,
+          direction,
+        );
+      }
+
+      const commitSha = await this.readSingleLine(reviewWorktree.path, 'git', [
+        'rev-parse',
+        'HEAD',
+      ]);
       const changedFilesOutput = await this.deps.runCommand(
-        reviewWorktreeResult.worktree.path,
+        reviewWorktree.path,
         'git',
         ['diff-tree', '--no-commit-id', '--name-only', '-r', 'HEAD'],
       );
@@ -684,12 +702,11 @@ export class SelfEvolveService {
         .map((line) => line.trim())
         .filter(Boolean);
 
-      await worktreeService.removeWorktree(reviewWorktreeResult.worktree.path);
+      await worktreeService.removeWorktree(reviewWorktree.path);
       await fs.rm(
         GitWorktreeService.getSessionDir(reviewSessionId, worktreeBaseDir),
         { recursive: true, force: true },
       );
-      await worktreeService.cleanupSession(attemptSessionId);
 
       const successResult: SelfEvolveSuccessResult = {
         ok: true,
@@ -729,9 +746,6 @@ export class SelfEvolveService {
       debugLogger.error('Self evolve failed:', error);
       await worktreeService
         .cleanupSession(reviewSessionId)
-        .catch(() => undefined);
-      await worktreeService
-        .cleanupSession(attemptSessionId)
         .catch(() => undefined);
       if (reviewBranch) {
         await this.deps

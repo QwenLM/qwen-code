@@ -29,7 +29,6 @@ describe('SelfEvolveService', () => {
   let tempDir: string;
   let projectDir: string;
   let projectRuntimeDir: string;
-  let attemptWorktreePath: string;
   let reviewWorktreePath: string;
   let mockConfig: Config;
   const originalExecArgv = [...process.execArgv];
@@ -39,7 +38,6 @@ describe('SelfEvolveService', () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'self-evolve-'));
     projectDir = path.join(tempDir, 'repo');
     projectRuntimeDir = path.join(tempDir, 'runtime-project');
-    attemptWorktreePath = path.join(tempDir, 'attempt-worktree');
     reviewWorktreePath = path.join(tempDir, 'review-worktree');
     await fs.mkdir(projectDir, { recursive: true });
     await fs.mkdir(projectRuntimeDir, { recursive: true });
@@ -86,29 +84,22 @@ describe('SelfEvolveService', () => {
   });
 
   it('promotes a validated attempt into a clean review branch', async () => {
-    await fs.mkdir(path.join(attemptWorktreePath, '.qwen'), {
+    await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
       recursive: true,
     });
-    await fs.mkdir(reviewWorktreePath, { recursive: true });
 
     const setupWorktrees = vi.fn().mockResolvedValue({
       success: true,
       worktreesByName: {
-        attempt: {
-          path: attemptWorktreePath,
-          branch: 'main-attempt',
+        review: {
+          path: reviewWorktreePath,
+          branch: 'self-evolve/review',
         },
-      },
-    });
-    const createWorktree = vi.fn().mockResolvedValue({
-      success: true,
-      worktree: {
-        path: reviewWorktreePath,
-        branch: 'self-evolve/review',
       },
     });
     const removeWorktree = vi.fn().mockResolvedValue({ success: true });
     const cleanupSession = vi.fn().mockResolvedValue({ success: true });
+    let reviewStatusChecks = 0;
 
     const runCommand = vi.fn(
       async (cwd: string, command: string, args: string[]) => {
@@ -123,7 +114,12 @@ describe('SelfEvolveService', () => {
           return ok(joined, cwd, '');
         }
         if (joined === 'git status --short') {
-          return ok(joined, cwd, 'M src/feature.ts\n');
+          reviewStatusChecks += 1;
+          return ok(
+            joined,
+            cwd,
+            reviewStatusChecks === 1 ? 'M src/feature.ts\n' : '',
+          );
         }
         if (joined === 'git add --all') {
           return ok(joined, cwd);
@@ -131,10 +127,10 @@ describe('SelfEvolveService', () => {
         if (joined.startsWith('git commit --no-verify -m ')) {
           return ok(joined, cwd, '[branch] commit\n');
         }
-        if (joined === 'git rev-parse HEAD' && cwd === attemptWorktreePath) {
-          return ok(joined, cwd, 'attempt-sha\n');
+        if (joined === 'git reset --hard HEAD') {
+          return ok(joined, cwd, 'HEAD is now at review-sha\n');
         }
-        if (joined === 'git cherry-pick attempt-sha') {
+        if (joined === 'git clean -fd') {
           return ok(joined, cwd, '');
         }
         if (joined === 'git rev-parse HEAD' && cwd === reviewWorktreePath) {
@@ -179,7 +175,6 @@ describe('SelfEvolveService', () => {
       createWorktreeService: () =>
         ({
           setupWorktrees,
-          createWorktree,
           removeWorktree,
           cleanupSession,
         }) as unknown as GitWorktreeService,
@@ -202,16 +197,11 @@ describe('SelfEvolveService', () => {
     expect(result.direction).toBe('focus the CLI TODO path');
     expect(setupWorktrees).toHaveBeenCalledWith(
       expect.objectContaining({
+        worktreeNames: ['review'],
         branchToken: expect.stringMatching(
           /^focus-the-cli-todo-path-[a-f0-9]{6}$/,
         ),
       }),
-    );
-    expect(createWorktree).toHaveBeenCalledWith(
-      expect.stringContaining('-review'),
-      'review',
-      'main',
-      expect.stringMatching(/^focus-the-cli-todo-path-[a-f0-9]{6}$/),
     );
     expect(runQwenAttempt).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -221,13 +211,11 @@ describe('SelfEvolveService', () => {
       }),
     );
     expect(removeWorktree).toHaveBeenCalledWith(reviewWorktreePath);
-    expect(cleanupSession).toHaveBeenCalledWith(
-      expect.stringContaining('-attempt'),
-    );
+    expect(cleanupSession).not.toHaveBeenCalled();
   });
 
   it('discards the isolated attempt and records learnings when validation fails', async () => {
-    await fs.mkdir(path.join(attemptWorktreePath, '.qwen'), {
+    await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
       recursive: true,
     });
 
@@ -289,13 +277,12 @@ describe('SelfEvolveService', () => {
           setupWorktrees: vi.fn().mockResolvedValue({
             success: true,
             worktreesByName: {
-              attempt: {
-                path: attemptWorktreePath,
-                branch: 'main-attempt',
+              review: {
+                path: reviewWorktreePath,
+                branch: 'self-evolve/review',
               },
             },
           }),
-          createWorktree: vi.fn(),
           removeWorktree: vi.fn(),
           cleanupSession,
         }) as unknown as GitWorktreeService,
@@ -318,7 +305,7 @@ describe('SelfEvolveService', () => {
     expect(result.direction).toBe('prefer TODO cleanup');
     expect(result.learnings).toContain('Validation failed: npm run lint');
     expect(cleanupSession).toHaveBeenCalledWith(
-      expect.stringContaining('-attempt'),
+      expect.stringContaining('-review'),
     );
     const record = JSON.parse(await fs.readFile(result.recordPath, 'utf8'));
     expect(record.summary).toBe(result.summary);
