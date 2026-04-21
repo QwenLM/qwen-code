@@ -149,9 +149,7 @@ describe('Session', () => {
     mockConfig = undefined as unknown as Config;
     mockClient = undefined as unknown as AgentSideConnection;
     mockSettings = undefined as unknown as LoadedSettings;
-    mockToolRegistry = undefined as unknown as {
-      getTool: ReturnType<typeof vi.fn>;
-    };
+    mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
   });
