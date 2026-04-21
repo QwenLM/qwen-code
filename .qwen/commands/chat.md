@@ -64,15 +64,15 @@ Extract the name (everything after the flag).
 
 ## Common Rules
 
-| Rule                  | Value                                                                                                                                                                                                |
-| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                                                                                                  |
-| **Max length**        | 128 characters                                                                                                                                                                                       |
-| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                                                                                                   |
-| **Index path**        | `.qwen/chat-index.json` (project root)                                                                                                                                                               |
-| **Index format**      | `{"name": "sessionId", ...}`                                                                                                                                                                         |
-| **Session ID source** | Filename (no extension) of `.jsonl` in `~/.qwen/projects/<hash>/chats/`                                                                                                                              |
-| **Hash calculation**  | Full cwd path, replace all non-alphanumeric characters with `-`. On Windows only, convert to lowercase. E.g., `D:\code\qwen-code` → `d--code-qwen-code` (Windows), `D--code-qwen-code` (Linux/macOS) |
+| Rule                  | Value                                                                                                                                                                |
+| --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Valid name regex**  | `^[a-zA-Z0-9_.-]+$`                                                                                                                                                  |
+| **Max length**        | 128 characters                                                                                                                                                       |
+| **Reserved names**    | `.`, `..`, `__proto__`, `constructor`, `prototype`                                                                                                                   |
+| **Index path**        | `.qwen/chat-index.json` (project root)                                                                                                                               |
+| **Index format**      | `{"name": "sessionId", ...}`                                                                                                                                         |
+| **Session ID source** | Filename (no extension) of `.jsonl` in `~/.qwen/projects/<hash>/chats/`                                                                                              |
+| **Hash calculation**  | SHA-256 of the full project root path. On Windows only, normalize the path to lowercase before hashing. Session files live under `~/.qwen/projects/<sha256>/chats/`. |
 
 ---
 

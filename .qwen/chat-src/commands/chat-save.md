@@ -40,8 +40,7 @@ meaningful names. This command creates the mapping so users can later resume wit
 ### 4. Find the Current Session ID
 
 - Directory: `~/.qwen/projects/<hash>/chats/`
-  - `<hash>` = current working directory's full path, with all `\` and `/` replaced by `-`, converted to lowercase.
-  - Example: `D:\code\qwen-code` → `d--code-qwen-code`
+  - `<hash>` = SHA-256 of the full project root path (normalized to lowercase on Windows).
 - Look for the most recently modified `.jsonl` file.
 - The filename (without `.jsonl` extension) IS the session UUID.
 - If no `.jsonl` file is found: output `"No active session found. Please start a conversation first."` and stop.

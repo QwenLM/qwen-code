@@ -348,8 +348,8 @@ for (const [f, content] of [
 // [12e] Hash calculation specification
 assert(chatMdSrc.includes('hash') || chatMdSrc.includes('Hash') || chatMdSrc.includes('cwd'), 'chat.md src specifies hash calculation');
 assert(chatMdProd.includes('hash') || chatMdProd.includes('Hash') || chatMdProd.includes('cwd'), 'chat.md prod specifies hash calculation');
-assert((chatMdSrc.includes('\\') || chatMdSrc.includes('replace')) && chatMdSrc.includes('lowercase'), 'chat.md src explains path→hash transformation');
-assert((chatMdProd.includes('\\') || chatMdProd.includes('replace')) && chatMdProd.includes('lowercase'), 'chat.md prod explains path→hash transformation');
+assert(chatMdSrc.includes('SHA-256') || (chatMdSrc.includes('sha256') && chatMdSrc.includes('lowercase')), 'chat.md src explains SHA-256 hash with Windows normalization');
+assert(chatMdProd.includes('SHA-256') || (chatMdProd.includes('sha256') && chatMdProd.includes('lowercase')), 'chat.md prod explains SHA-256 hash with Windows normalization');
 
 // ── Summary ──────────────────────────────────────────────────────────
 console.log(`\n${'='.repeat(50)}`);
