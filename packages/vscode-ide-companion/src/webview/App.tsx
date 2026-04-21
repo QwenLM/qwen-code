@@ -959,6 +959,13 @@ export const App: React.FC = () => {
     [vscode],
   );
 
+  // Build a markdown code fence that won't collide with content containing backticks
+  const buildFence = useCallback((content: string): string => {
+    const matches = (content ?? '').match(/`+/g);
+    const maxRun = matches ? Math.max(...matches.map((m) => m.length)) : 0;
+    return '`'.repeat(Math.max(3, maxRun + 1));
+  }, []);
+
   // Format a tool call's content for clipboard copy
   // wrapCodeBlock: true for Copy All (markdown), false for single Copy Message (plain text)
   const formatToolCallForCopy = useCallback(
@@ -967,11 +974,12 @@ export const App: React.FC = () => {
       if (tc.content) {
         for (const c of tc.content) {
           if (c.type === 'content' && c.content?.text) {
-            parts.push(
-              wrapCodeBlock
-                ? `\`\`\`\n${c.content.text}\n\`\`\``
-                : c.content.text,
-            );
+            if (wrapCodeBlock) {
+              const fence = buildFence(c.content.text);
+              parts.push(`${fence}\n${c.content.text}\n${fence}`);
+            } else {
+              parts.push(c.content.text);
+            }
           } else if (c.type === 'diff') {
             const filePath = c.path || '';
             if (c.oldText) {
@@ -983,24 +991,29 @@ export const App: React.FC = () => {
                 .split('\n')
                 .map((l) => `+${l}`)
                 .join('\n');
-              parts.push(
-                wrapCodeBlock
-                  ? `\`\`\`diff\n--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}\n\`\`\``
-                  : `--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}`,
-              );
+              const diffContent = `--- ${filePath}\n+++ ${filePath}\n${oldLines}\n${newLines}`;
+              if (wrapCodeBlock) {
+                const fence = buildFence(diffContent);
+                parts.push(`${fence}diff\n${diffContent}\n${fence}`);
+              } else {
+                parts.push(diffContent);
+              }
             } else {
-              parts.push(
-                wrapCodeBlock
-                  ? `${filePath}:\n\`\`\`\n${c.newText || ''}\n\`\`\``
-                  : `${filePath}:\n${c.newText || ''}`,
-              );
+              if (wrapCodeBlock) {
+                const fence = buildFence(c.newText || '');
+                parts.push(
+                  `${filePath}:\n${fence}\n${c.newText || ''}\n${fence}`,
+                );
+              } else {
+                parts.push(`${filePath}:\n${c.newText || ''}`);
+              }
             }
           }
         }
       }
       return parts.join('\n\n');
     },
-    [],
+    [buildFence],
   );
 
   // Track the right-click target so we can identify which message was clicked
@@ -1008,10 +1021,12 @@ export const App: React.FC = () => {
   useEffect(() => {
     const trackTarget = (e: MouseEvent) => {
       contextMenuTargetRef.current = e.target as HTMLElement;
+      // Notify extension that this webview was right-clicked, so copy commands route here
+      vscode.postMessage({ type: 'contextMenuTriggered', data: {} });
     };
     document.addEventListener('contextmenu', trackTarget, true);
     return () => document.removeEventListener('contextmenu', trackTarget, true);
-  }, []);
+  }, [vscode]);
 
   // Stamp data-msg-idx on each rendered message element after render.
   // renderMessages() returns exactly allMessages.length elements as the first N children of the container.

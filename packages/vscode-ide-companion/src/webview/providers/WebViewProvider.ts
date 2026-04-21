@@ -66,6 +66,8 @@ export class WebViewProvider {
   // Track current ACP mode id to influence permission/diff behavior
   private currentModeId: ApprovalModeValue | null = null;
   private authState: boolean | null = null;
+  /** Global tracker: the provider whose webview most recently received a contextmenu event */
+  private static lastContextMenuProvider: WebViewProvider | null = null;
   /** Cached available commands for re-sending on webview ready */
   private cachedAvailableCommands: AvailableCommand[] | null = null;
   /** Cached available models for re-sending on webview ready */
@@ -666,6 +668,10 @@ export class WebViewProvider {
           this.handleWebviewReady();
           return;
         }
+        if (message.type === 'contextMenuTriggered') {
+          WebViewProvider.lastContextMenuProvider = this;
+          return;
+        }
         if (message.type === 'copyToClipboard') {
           const { text } = message.data as { text: string };
           await vscode.env.clipboard.writeText(text);
@@ -831,6 +837,10 @@ export class WebViewProvider {
         }
         if (message.type === 'webviewReady') {
           this.handleWebviewReady();
+          return;
+        }
+        if (message.type === 'contextMenuTriggered') {
+          WebViewProvider.lastContextMenuProvider = this;
           return;
         }
         if (message.type === 'copyToClipboard') {
@@ -1680,6 +1690,7 @@ export class WebViewProvider {
    * The webview resolves the content and posts back a 'copyToClipboard' message.
    */
   sendCopyCommand(action: string): boolean {
+    if (WebViewProvider.lastContextMenuProvider !== this) return false;
     const webview = this.getActiveWebview();
     if (!webview) return false;
     webview.postMessage({ type: 'copyCommand', data: { action } });
@@ -1870,6 +1881,10 @@ export class WebViewProvider {
         }
         if (message.type === 'webviewReady') {
           this.handleWebviewReady();
+          return;
+        }
+        if (message.type === 'contextMenuTriggered') {
+          WebViewProvider.lastContextMenuProvider = this;
           return;
         }
         if (message.type === 'copyToClipboard') {
