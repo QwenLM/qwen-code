@@ -291,28 +291,24 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
           </Text>
         )}
         {authState === 'authenticating' && authUrl && (
-          <>
-            <Text
-              bold={copyState.status === 'idle'}
-              color={
-                copyState.status === 'copied'
-                  ? theme.status.success
-                  : copyState.status === 'unsupported'
-                    ? theme.status.warning
-                    : theme.text.accent
-              }
-            >
-              {copyState.status === 'copied'
-                ? t(
-                    'Copy request sent to your terminal. If paste is empty, copy the URL above manually.',
-                  )
+          <Text
+            bold={copyState.status === 'idle'}
+            color={
+              copyState.status === 'copied'
+                ? theme.status.success
                 : copyState.status === 'unsupported'
-                  ? t('Cannot write to terminal — copy the URL above manually.')
-                  : t(
-                      'Press c to copy the authorization URL to your clipboard.',
-                    )}
-            </Text>
-          </>
+                  ? theme.status.warning
+                  : theme.text.accent
+            }
+          >
+            {copyState.status === 'copied'
+              ? t(
+                  'Copy request sent to your terminal. If paste is empty, copy the URL above manually.',
+                )
+              : copyState.status === 'unsupported'
+                ? t('Cannot write to terminal — copy the URL above manually.')
+                : t('Press c to copy the authorization URL to your clipboard.')}
+          </Text>
         )}
         {authState === 'success' && (
           <Text color={theme.status.success}>
