@@ -187,4 +187,29 @@ describe('FileIndexService', () => {
     // accidentally hide this caller-misuse signal.
     await expect(a.search('a')).rejects.toThrow(/disposed/i);
   });
+
+  it('evicts the oldest instance when the LRU cap is exceeded', async () => {
+    const dirs: string[] = [];
+    try {
+      // The cap is 8; create 9 distinct project roots and confirm the first
+      // one gets disposed (LRU) while the rest remain live. Dispose happens
+      // asynchronously inside `.for()`, so we give the event loop a tick.
+      const services: FileIndexService[] = [];
+      for (let i = 0; i < 9; i++) {
+        const d = await createTmpDir({ [`f${i}.txt`]: '' });
+        dirs.push(d);
+        services.push(FileIndexService.for(baseOptions(d)));
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+
+      // First one (LRU victim) should now be disposed — searching against it
+      // throws the "disposed" error.
+      await expect(services[0].search('f')).rejects.toThrow(/disposed/i);
+      // The tail of the list should remain live.
+      await services[8].whenReady();
+      expect(services[8].state).toBe('ready');
+    } finally {
+      for (const d of dirs) await cleanupTmpDir(d);
+    }
+  });
 });

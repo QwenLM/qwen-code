@@ -7,24 +7,7 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import { FileIndexCore } from './fileIndexCore.js';
 import type { FileSearchOptions } from './fileSearch.js';
-
-type WorkerRequest =
-  | { type: 'start' }
-  | {
-      type: 'search';
-      reqId: string;
-      pattern: string;
-      maxResults?: number;
-    }
-  | { type: 'abort'; reqId: string }
-  | { type: 'dispose' };
-
-type WorkerResponse =
-  | { type: 'partial'; chunk: string[] }
-  | { type: 'ready'; total: number }
-  | { type: 'crawlError'; error: string }
-  | { type: 'searchResult'; reqId: string; results: string[] }
-  | { type: 'searchError'; reqId: string; error: string; name: string };
+import type { WorkerRequest, WorkerResponse } from './fileIndexProtocol.js';
 
 if (!parentPort) {
   throw new Error('fileIndexWorker must be launched as a Worker thread.');

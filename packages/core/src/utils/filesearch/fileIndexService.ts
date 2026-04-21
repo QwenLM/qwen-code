@@ -10,24 +10,7 @@ import { FileIndexCore } from './fileIndexCore.js';
 import type { FileSearchOptions, SearchOptions } from './fileSearch.js';
 import { AbortError } from './fileSearch.js';
 import { loadIgnoreRules } from './ignore.js';
-
-type WorkerRequest =
-  | { type: 'start' }
-  | {
-      type: 'search';
-      reqId: string;
-      pattern: string;
-      maxResults?: number;
-    }
-  | { type: 'abort'; reqId: string }
-  | { type: 'dispose' };
-
-type WorkerResponse =
-  | { type: 'partial'; chunk: string[] }
-  | { type: 'ready'; total: number }
-  | { type: 'crawlError'; error: string }
-  | { type: 'searchResult'; reqId: string; results: string[] }
-  | { type: 'searchError'; reqId: string; error: string; name: string };
+import type { WorkerRequest, WorkerResponse } from './fileIndexProtocol.js';
 
 type ServiceState = 'crawling' | 'ready' | 'error';
 
@@ -195,10 +178,8 @@ function createInProcessTransport(options: FileSearchOptions): IndexTransport {
   };
 }
 
-let transportFactory: (options: FileSearchOptions) => IndexTransport = process
-  .env['VITEST']
-  ? createInProcessTransport
-  : createWorkerTransport;
+let transportFactory: (options: FileSearchOptions) => IndexTransport =
+  createWorkerTransport;
 
 /**
  * Override the transport factory. Intended for tests that need to exercise
@@ -214,11 +195,33 @@ export function __setIndexTransportFactory(
   };
 }
 
+/**
+ * Installs the in-process backend as the default transport. Useful for
+ * embedders that can't spawn worker threads (e.g. certain test runners
+ * executing TypeScript sources directly, or hardened sandboxes). Prefer
+ * this over the process.env-sniffing we used to do — it makes the decision
+ * explicit at the call site and survives bundling.
+ */
+export function installInProcessIndexTransport(): () => void {
+  return __setIndexTransportFactory(createInProcessTransport);
+}
+
 export interface FileIndexServiceState {
   state: ServiceState;
   snapshotSize: number;
 }
 
+/**
+ * Upper bound on cached `FileIndexService` singletons. Each instance owns a
+ * worker thread (~10–30 MB of JS heap plus the fzf index), so multi-root
+ * workspaces or rapid `cd` across many projects could accumulate them
+ * unboundedly. We evict the least-recently-used (by insertion order: `Map`
+ * preserves it, and `.for()` re-inserts on hit — see below) once we exceed
+ * this cap. Picked conservatively: nobody has more than a handful of active
+ * project roots at once, but the cap is high enough that normal tabbed
+ * workflows never hit it.
+ */
+const MAX_INSTANCES = 8;
 const INSTANCES = new Map<string, FileIndexService>();
 
 function optionsKey(options: FileSearchOptions): string {
@@ -263,7 +266,13 @@ export class FileIndexService {
   static for(options: FileSearchOptions): FileIndexService {
     const key = optionsKey(options);
     const existing = INSTANCES.get(key);
-    if (existing && !existing.disposed) return existing;
+    if (existing && !existing.disposed) {
+      // Touch: re-insert to make this the most-recently-used entry for LRU
+      // eviction purposes.
+      INSTANCES.delete(key);
+      INSTANCES.set(key, existing);
+      return existing;
+    }
     // Before minting a fresh singleton, evict any previous instance keyed
     // under a *different* hash for the same `projectRoot`. This happens
     // when .gitignore/.qwenignore is edited: the content changes the
@@ -285,6 +294,19 @@ export class FileIndexService {
     // instance isn't memoised for every future `.for()` caller.
     if (!instance.disposed) {
       INSTANCES.set(key, instance);
+      // LRU cap: insertion order in a `Map` matches access order because
+      // the early-return branch above re-inserts on hit. When we overflow,
+      // `keys().next()` is the oldest untouched instance.
+      while (INSTANCES.size > MAX_INSTANCES) {
+        const oldestKey = INSTANCES.keys().next().value;
+        if (oldestKey === undefined || oldestKey === key) break;
+        const victim = INSTANCES.get(oldestKey);
+        if (!victim) {
+          INSTANCES.delete(oldestKey);
+          continue;
+        }
+        void victim.dispose(); // also deletes its own entry synchronously
+      }
     }
     return instance;
   }
@@ -439,11 +461,30 @@ export class FileIndexService {
     this.transport.post({ type: 'dispose' });
     // Race terminate against a short timeout so a faulted worker can't hang
     // dispose() indefinitely. `terminate()` normally resolves in well under
-    // 100ms; 2s is generous enough that healthy workers always win.
+    // 100ms; 2s is generous enough that healthy workers always win. On
+    // timeout we surface a warning and re-issue `terminate()` as a
+    // best-effort force-kill — worker_threads' `terminate()` is idempotent,
+    // so calling it twice just queues another tear-down attempt.
+    let timedOut = false;
     await Promise.race([
       this.transport.terminate(),
-      new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+      new Promise<void>((resolve) =>
+        setTimeout(() => {
+          timedOut = true;
+          resolve();
+        }, 2000),
+      ),
     ]);
+    if (timedOut) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        '[FileIndexService] worker terminate() timed out after 2s; retrying force-kill',
+      );
+      // Fire-and-forget retry. The returned promise is intentionally not
+      // awaited — we don't want dispose() to keep the caller blocked on a
+      // hung worker, and the pending-rejection cleanup below still runs.
+      void this.transport.terminate().catch(() => {});
+    }
     const err = new AbortError('FileIndexService disposed');
     this.pending.forEach(({ reject }) => reject(err));
     this.pending.clear();

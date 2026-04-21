@@ -55,8 +55,8 @@ export class FileIndexCore {
    * of paths as they are discovered.
    */
   async startCrawl(onChunk?: (chunk: string[]) => void): Promise<void> {
-    const chunks: string[][] = [];
-    await crawl({
+    let streamed = false;
+    const full = await crawl({
       crawlDirectory: this.options.projectRoot,
       cwd: this.options.projectRoot,
       ignore: this.ignore,
@@ -68,7 +68,7 @@ export class FileIndexCore {
         // Append to the live snapshot first so concurrent `search()` calls
         // see the growing list immediately.
         for (const p of chunk) this.allFiles.push(p);
-        chunks.push(chunk);
+        streamed = true;
         try {
           onChunk?.(chunk);
         } catch {
@@ -76,25 +76,12 @@ export class FileIndexCore {
         }
       },
     });
-    // If onProgress never fired (e.g. tiny tree or cache hit), the crawl
-    // result comes through the fulfilled promise only. In that case we need
-    // to reconcile: the above push loop may have populated allFiles from
-    // streaming chunks, or it may still be empty. crawl() itself returns
-    // the full list on cache hits — fall back to it if the stream produced
-    // nothing. Push into the existing array rather than replacing the
-    // reference so any `search()` already iterating `this.allFiles` keeps
-    // observing a stable list.
-    if (this.allFiles.length === 0 && chunks.length === 0) {
-      const cached = await crawl({
-        crawlDirectory: this.options.projectRoot,
-        cwd: this.options.projectRoot,
-        ignore: this.ignore,
-        cache: this.options.cache,
-        cacheTtl: this.options.cacheTtl,
-        maxDepth: this.options.maxDepth,
-        maxFiles: MAX_CRAWL_FILES,
-      });
-      for (const p of cached) this.allFiles.push(p);
+    // On cache hits (or small trees) `onProgress` never fires; fall back to
+    // the fulfilled crawl() return value. Push into the existing array rather
+    // than replacing the reference so any `search()` already iterating
+    // `this.allFiles` keeps observing a stable list.
+    if (!streamed) {
+      for (const p of full) this.allFiles.push(p);
     }
     this.crawlDone = true;
   }

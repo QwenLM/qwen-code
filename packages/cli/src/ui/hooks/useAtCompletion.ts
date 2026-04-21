@@ -4,13 +4,42 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useEffect, useReducer, useRef } from 'react';
-import type { Config, FileSearch } from '@qwen-code/qwen-code-core';
+import { useEffect, useMemo, useReducer, useRef } from 'react';
+import type {
+  Config,
+  FileSearch,
+  FileSearchOptions,
+} from '@qwen-code/qwen-code-core';
 import {
   FileIndexService,
   FileSearchFactory,
   escapePath,
 } from '@qwen-code/qwen-code-core';
+
+/**
+ * Builds the `FileSearchOptions` object used to key the `FileIndexService`
+ * singleton. Shared between `useAtCompletion` (the hot search path) and
+ * `AppContainer` (the startup pre-warm). Both sites MUST produce identical
+ * option shapes — the key is a sha256 of the JSON of these fields, so a
+ * field mismatch silently spawns a second worker that never gets a hit.
+ * Keeping the derivation in one place is the guardrail against that drift.
+ */
+export function buildFileSearchOptions(
+  config: Config | undefined,
+  projectRoot: string,
+): FileSearchOptions {
+  return {
+    projectRoot,
+    ignoreDirs: [],
+    useGitignore: config?.getFileFilteringOptions()?.respectGitIgnore ?? true,
+    useQwenignore: config?.getFileFilteringOptions()?.respectQwenIgnore ?? true,
+    cache: true,
+    cacheTtl: 30,
+    enableRecursiveFileSearch: config?.getEnableRecursiveFileSearch() ?? true,
+    // `!== false` defaults to true when the getter returns undefined.
+    enableFuzzySearch: config?.getFileFilteringEnableFuzzySearch() !== false,
+  };
+}
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 
@@ -196,20 +225,13 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
   }, [enabled, pattern, state.status, state.pattern]);
 
   // Stable snapshot of the FileSearch options derived from config. The worker
-  // effect and the partial-subscription effect below both use this; keeping
-  // the derivation in one place avoids accidental key drift when looking up
-  // the singleton FileIndexService.
-  const fileSearchOptions = {
-    projectRoot: cwd,
-    ignoreDirs: [] as string[],
-    useGitignore: config?.getFileFilteringOptions()?.respectGitIgnore ?? true,
-    useQwenignore: config?.getFileFilteringOptions()?.respectQwenIgnore ?? true,
-    cache: true,
-    cacheTtl: 30, // 30 seconds
-    enableRecursiveFileSearch: config?.getEnableRecursiveFileSearch() ?? true,
-    // Use enableFuzzySearch with !== false to default to true when undefined.
-    enableFuzzySearch: config?.getFileFilteringEnableFuzzySearch() !== false,
-  };
+  // effect and the partial-subscription effect below both depend on this;
+  // memoising on `[config, cwd]` keeps the object reference stable across
+  // renders so it can safely go in effect dependency arrays.
+  const fileSearchOptions = useMemo(
+    () => buildFileSearchOptions(config, cwd),
+    [config, cwd],
+  );
 
   // While the FileIndexService is still crawling, every new chunk expands the
   // searchable snapshot. Subscribing here lets us replay the active pattern
@@ -235,8 +257,7 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       if (refreshTimer) clearTimeout(refreshTimer);
       unsubscribe();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [cwd, config]);
+  }, [fileSearchOptions]);
 
   // The "Worker" that performs async operations based on status.
   useEffect(() => {
@@ -325,11 +346,7 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
         clearTimeout(slowSearchTimer.current);
       }
     };
-    // `fileSearchOptions` is recomputed each render but hashes to the same
-    // FileIndexService singleton when inputs are equal; adding it to deps
-    // would cause spurious effect re-runs on every render.
     // `state.refreshToken` is included so REFRESH re-triggers a search
     // even when `state.status` was already SEARCHING from a previous call.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [state.status, state.pattern, state.refreshToken, config, cwd]);
+  }, [state.status, state.pattern, state.refreshToken, fileSearchOptions]);
 }

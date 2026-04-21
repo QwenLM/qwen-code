@@ -16,3 +16,12 @@ if (process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
 }
 
 import './src/test-utils/customMatchers.js';
+
+// Vitest runs TypeScript sources directly with no prior bundling, so the
+// default `FileIndexService` transport — which spawns a Node worker thread
+// loading the compiled `fileIndexWorker.js` — can't start under the test
+// harness. Route the filesearch service through the in-process transport
+// (same message protocol, executed on the main event loop) so
+// `useAtCompletion` / `AppContainer` tests exercise the real code path.
+import { installInProcessIndexTransport } from '@qwen-code/qwen-code-core';
+installInProcessIndexTransport();

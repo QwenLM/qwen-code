@@ -46,15 +46,28 @@ function toPosixPath(p: string) {
 }
 
 /**
- * Once-per-process flag that disables the ripgrep fast path after a runtime
- * failure (binary missing, unexpected exit). We retry fdir for subsequent
- * crawls without paying the spawn-and-fail cost every time.
+ * Timestamp (ms) at which the ripgrep fast path was last disabled, or `0`
+ * if rg is currently eligible. A single spawn failure (missing binary,
+ * sandbox race, transient resource exhaustion) shouldn't downgrade the
+ * process forever — long-lived hosts like the VSCode extension would pay
+ * the fdir penalty for the rest of the session. We cool down for
+ * `RIPGREP_DISABLED_COOLDOWN_MS` and then re-try on the next crawl.
  */
-let ripgrepDisabled = false;
+const RIPGREP_DISABLED_COOLDOWN_MS = 5 * 60 * 1000;
+let ripgrepDisabledAt = 0;
+
+function isRipgrepDisabled(): boolean {
+  if (ripgrepDisabledAt === 0) return false;
+  if (Date.now() - ripgrepDisabledAt >= RIPGREP_DISABLED_COOLDOWN_MS) {
+    ripgrepDisabledAt = 0;
+    return false;
+  }
+  return true;
+}
 
 /** For tests: let a suite re-enable the ripgrep fast path after forcing failures. */
 export function __resetRipgrepDisabledForTests(): void {
-  ripgrepDisabled = false;
+  ripgrepDisabledAt = 0;
 }
 
 async function fdirCrawl(options: CrawlOptions): Promise<string[]> {
@@ -132,22 +145,52 @@ async function fdirCrawl(options: CrawlOptions): Promise<string[]> {
 }
 
 /**
- * Extracts the directory portion of the ignore fingerprint-relevant info.
- * Currently we just pass the patterns straight through; the ripgrep walker
- * already consults `.gitignore` / `.ignore` from disk via its own parser,
- * so our `extraExcludeDirs` set is limited to directory-style patterns that
- * rg wouldn't otherwise know about (e.g. user-supplied ignoreDirs, or
- * `.qwenignore` directory rules). This is a superset; the post-filter
- * below enforces the exact semantics.
+ * Directory-only hints we hand to rg as `--glob '!dir'` args so its walker
+ * can skip the subtree entirely instead of streaming every path under it
+ * for the Node post-filter to reject. rg already understands `.gitignore`
+ * / `.ignore` natively, so those rules don't need forwarding; the
+ * additions here are:
+ *
+ *   - user-supplied `ignoreDirs` (from the `FileSearchOptions` contract),
+ *   - directory-style patterns from `.qwenignore` (which rg doesn't read),
+ *     extracted from the shared Ignore's fingerprint.
+ *
+ * The post-filter in `ripgrepCrawler` is still the source of truth — this
+ * is a speed optimisation only. Patterns that contain glob metacharacters
+ * (`*`, `?`, `[`, `!`, `/`) or newlines are skipped: rg would interpret
+ * them, and getting the semantics wrong risks silently hiding files.
+ * Plain directory names pass through unchanged.
  */
-function collectRipgrepExcludeDirs(_options: CrawlOptions): string[] {
-  // We rely on the Ignore object's directory filter for correctness; the
-  // rg --glob hints are only a speed optimisation so rg's walker can prune
-  // without actually listing matching files. The post-filter drops
-  // anything that slips through. Left as a hook for a later perf pass
-  // (see the TODO below); currently we let rg enumerate and filter
-  // ourselves, which is still fast enough in practice.
-  return [];
+function collectRipgrepExcludeDirs(options: CrawlOptions): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const push = (raw: string) => {
+    const p = raw.replace(/^\/+|\/+$/g, '');
+    if (!p || /[*?[\]]/.test(p) || p.includes('/') || p.includes('\n')) {
+      return;
+    }
+    if (seen.has(p)) return;
+    seen.add(p);
+    out.push(p);
+  };
+  // Pull plain directory patterns (e.g. `build/`, `dist/`, `.git/`, or
+  // anything the caller passed as `ignoreDirs` which `loadIgnoreRules`
+  // normalised into a trailing-slash pattern) out of the ignore
+  // fingerprint. gitignore-family syntax is line-oriented; we only accept
+  // patterns that are unambiguously a bare directory name so we don't
+  // confuse rg with `foo/**` or `!foo/`. The post-filter in ripgrepCrawler
+  // is still the source of truth — this is a speed optimisation only so rg
+  // can prune whole subtrees at its walker rather than streaming every
+  // path under them for the Node filter to discard.
+  const fingerprint = options.ignore.getFingerprint?.() ?? '';
+  for (const line of fingerprint.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!'))
+      continue;
+    if (!trimmed.endsWith('/')) continue;
+    push(trimmed);
+  }
+  return out;
 }
 
 export async function crawl(options: CrawlOptions): Promise<string[]> {
@@ -185,7 +228,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
   const canUseRipgrep =
     ripgrepEnabled &&
     !options.preferFdir &&
-    !ripgrepDisabled &&
+    !isRipgrepDisabled() &&
     options.maxDepth === undefined;
 
   let results: string[] | undefined;
@@ -204,7 +247,7 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
       });
       results = ripResult.files;
     } catch (_e) {
-      ripgrepDisabled = true;
+      ripgrepDisabledAt = Date.now();
       results = undefined;
     }
   }

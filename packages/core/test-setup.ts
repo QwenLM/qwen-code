@@ -30,3 +30,11 @@ if (process.env['QWEN_CODE_MEMORY_LOCAL'] === undefined) {
 if (typeof (globalThis as unknown as { File?: unknown }).File === 'undefined') {
   (globalThis as unknown as { File: unknown }).File = class {} as unknown;
 }
+
+// The default `FileIndexService` transport spawns a real Node worker thread
+// that imports the compiled `fileIndexWorker.js`. Vitest executes sources
+// directly (no build step), so the worker URL resolves to a TS file the
+// thread can't parse. Route through the in-process transport instead —
+// same message protocol, executed on the main event loop.
+import { installInProcessIndexTransport } from './src/utils/filesearch/fileIndexService.js';
+installInProcessIndexTransport();
