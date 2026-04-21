@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { t } from '../../../../i18n/index.js';
 import type { AuthenticateStepProps } from '../types.js';
 import { useConfig } from '../../../contexts/ConfigContext.js';
@@ -54,6 +55,23 @@ function osc8Hyperlink(url: string, label = url): string {
 }
 
 /**
+ * Slice `text` into chunks of up to `width` characters. We pre-split the
+ * URL into chunks sized to the dialog's content area so that every
+ * chunk is a self-contained Ink row with its own OSC 8 wrap. This keeps
+ * log-update's erase correct on unmount (Ink's log-update does not run
+ * wrap-ansi, so it can only erase whole Ink rows — any row that
+ * soft-wraps in the terminal would leave residue behind).
+ */
+function sliceIntoLines(text: string, width: number): string[] {
+  if (width <= 0) return [text];
+  const lines: string[] = [];
+  for (let i = 0; i < text.length; i += width) {
+    lines.push(text.slice(i, i + width));
+  }
+  return lines.length > 0 ? lines : [''];
+}
+
+/**
  * Copy a string to the user's clipboard using the OSC 52 terminal escape
  * sequence. Works through SSH and most web terminals (iTerm2, Windows
  * Terminal, xterm.js-based emulators) without spawning a subprocess.
@@ -83,6 +101,7 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
   onBack,
 }) => {
   const config = useConfig();
+  const { columns } = useTerminalSize();
   const [authState, setAuthState] = useState<AuthState>('idle');
   const [messages, setMessages] = useState<string[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -91,6 +110,15 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
     { status: 'idle' } | { status: 'copied' | 'unsupported'; nonce: number }
   >({ status: 'idle' });
   const isRunning = useRef(false);
+
+  // MCPManagementDialog wraps us in a Box of `columns - 4` with a
+  // single-line border and padding of 1 on each side, so the usable
+  // content width is `columns - 8`.
+  const urlLineWidth = Math.max(20, columns - 8);
+  const authUrlLines = useMemo(
+    () => (authUrl ? sliceIntoLines(authUrl, urlLineWidth) : []),
+    [authUrl, urlLineWidth],
+  );
 
   const runAuthentication = useCallback(async () => {
     if (!server || !config || isRunning.current) return;
@@ -284,17 +312,21 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
         {authState === 'authenticating' && authUrl && (
           <>
             {/*
-              Render the URL in a Box whose width matches the URL so Ink
-              does not wrap it. The line overflows the dialog's border
-              horizontally; Ink hands one long row to log-update, whose
-              wrap-ansi pass wraps it at terminal width and re-emits the
-              OSC 8 escape at every wrap boundary, so each visible line
-              stays clickable in terminals that support OSC 8. Because
-              the row is a normal (non-Static) Ink child, log-update
-              correctly erases it when the component unmounts.
+              Pre-split the URL into terminal-width slices and render
+              each as its own Ink row with its own OSC 8 hyperlink
+              wrap. Each slice stays within the dialog so Ink's
+              log-update tracks heights correctly and erases the block
+              cleanly when the step unmounts. Terminals that support
+              OSC 8 will at least recognize the first slice as a
+              clickable link; the "press c to copy" affordance below is
+              the reliable fallback for wrapped remainders.
             */}
-            <Box marginTop={1} width={authUrl.length}>
-              <Text color={theme.text.accent}>{osc8Hyperlink(authUrl)}</Text>
+            <Box flexDirection="column" marginTop={1}>
+              {authUrlLines.map((line, i) => (
+                <Text key={i} color={theme.text.accent} wrap="truncate">
+                  {osc8Hyperlink(authUrl, line)}
+                </Text>
+              ))}
             </Box>
             <Text
               bold={copyState.status === 'idle'}
