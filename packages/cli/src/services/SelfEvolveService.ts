@@ -331,6 +331,30 @@ function sanitizeCommitMessage(
   return `chore(self-evolve): ${selectedTask}`.slice(0, 120);
 }
 
+function buildSelfEvolveBranchToken(
+  direction: string | undefined,
+  attemptId: string,
+): string | undefined {
+  const trimmedDirection = direction?.trim();
+  if (!trimmedDirection) {
+    return undefined;
+  }
+
+  const slug = trimmedDirection
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 36)
+    .replace(/-$/g, '');
+  if (!slug) {
+    return undefined;
+  }
+
+  const uniqueSuffix = attemptId.split('-').at(-1) ?? randomUUID().slice(0, 6);
+  return `${slug}-${uniqueSuffix}`;
+}
+
 function summarizeOutput(output: string): string | undefined {
   const summary = output
     .trim()
@@ -373,6 +397,7 @@ export class SelfEvolveService {
     const attemptId = `self-evolve-${Date.now()}-${randomUUID().slice(0, 6)}`;
     const attemptPaths = await this.createAttemptPaths(config, attemptId);
     const direction = options.direction?.trim() || undefined;
+    const branchToken = buildSelfEvolveBranchToken(direction, attemptId);
     const baseBranch = await this.getCurrentBranch(projectRoot);
     const worktreeBaseDir = path.join(
       Storage.getRuntimeBaseDir(),
@@ -408,6 +433,7 @@ export class SelfEvolveService {
         sourceRepoPath: projectRoot,
         worktreeNames: ['attempt'],
         baseBranch,
+        branchToken,
       });
       if (!attemptSetup.success) {
         return this.finishFailure(
@@ -602,6 +628,7 @@ export class SelfEvolveService {
         reviewSessionId,
         'review',
         baseBranch,
+        branchToken,
       );
       if (!reviewWorktreeResult.success || !reviewWorktreeResult.worktree) {
         await worktreeService.cleanupSession(attemptSessionId);

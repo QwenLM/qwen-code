@@ -197,6 +197,65 @@ describe('GitWorktreeService', () => {
     ]);
   });
 
+  it('createWorktree should use the full sanitized session id in branch names', async () => {
+    const service = new GitWorktreeService('/repo');
+
+    const result = await service.createWorktree(
+      'self-evolve-1776756982060-0c58e6',
+      'attempt',
+      'zth/feat/self-evolve-self-e',
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.worktree?.branch).toBe(
+      'zth/feat/self-evolve-self-e-self-evolve-1776756982060-0c58e6-attempt',
+    );
+    expect(hoistedMockRaw).toHaveBeenCalledWith([
+      'worktree',
+      'add',
+      '-b',
+      'zth/feat/self-evolve-self-e-self-evolve-1776756982060-0c58e6-attempt',
+      path.join(
+        '/mock-qwen',
+        'worktrees',
+        'self-evolve-1776756982060-0c58e6',
+        'worktrees',
+        'attempt',
+      ),
+      'zth/feat/self-evolve-self-e',
+    ]);
+  });
+
+  it('createWorktree should prefer an explicit branch token for semantic names', async () => {
+    const service = new GitWorktreeService('/repo');
+
+    const result = await service.createWorktree(
+      'self-evolve-1776756982060-0c58e6',
+      'attempt',
+      'zth/feat/self-evolve',
+      'ui-ux-fa19c7',
+    );
+
+    expect(result.success).toBe(true);
+    expect(result.worktree?.branch).toBe(
+      'zth/feat/self-evolve-ui-ux-fa19c7-attempt',
+    );
+    expect(hoistedMockRaw).toHaveBeenCalledWith([
+      'worktree',
+      'add',
+      '-b',
+      'zth/feat/self-evolve-ui-ux-fa19c7-attempt',
+      path.join(
+        '/mock-qwen',
+        'worktrees',
+        'self-evolve-1776756982060-0c58e6',
+        'worktrees',
+        'attempt',
+      ),
+      'zth/feat/self-evolve',
+    ]);
+  });
+
   it('setupWorktrees should fail early for colliding sanitized names', async () => {
     const service = new GitWorktreeService('/repo');
 

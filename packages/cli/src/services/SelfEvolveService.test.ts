@@ -200,10 +200,18 @@ describe('SelfEvolveService', () => {
     expect(result.commitSha).toBe('review-sha');
     expect(result.changedFiles).toEqual(['src/feature.ts']);
     expect(result.direction).toBe('focus the CLI TODO path');
+    expect(setupWorktrees).toHaveBeenCalledWith(
+      expect.objectContaining({
+        branchToken: expect.stringMatching(
+          /^focus-the-cli-todo-path-[a-f0-9]{6}$/,
+        ),
+      }),
+    );
     expect(createWorktree).toHaveBeenCalledWith(
       expect.stringContaining('-review'),
       'review',
       'main',
+      expect.stringMatching(/^focus-the-cli-todo-path-[a-f0-9]{6}$/),
     );
     expect(runQwenAttempt).toHaveBeenCalledWith(
       expect.objectContaining({

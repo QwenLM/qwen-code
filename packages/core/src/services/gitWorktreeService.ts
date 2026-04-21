@@ -53,6 +53,8 @@ export interface WorktreeSetupConfig {
   worktreeNames: string[];
   /** Base branch to create worktrees from (defaults to current branch) */
   baseBranch?: string;
+  /** Optional token to use in generated branch names */
+  branchToken?: string;
   /** Extra metadata to persist alongside the session config */
   metadata?: Record<string, unknown>;
 }
@@ -226,6 +228,7 @@ export class GitWorktreeService {
     sessionId: string,
     name: string,
     baseBranch?: string,
+    branchToken?: string,
   ): Promise<CreateWorktreeResult> {
     try {
       const worktreesDir = GitWorktreeService.getWorktreesDir(
@@ -249,8 +252,10 @@ export class GitWorktreeService {
 
       // Determine base branch
       const base = baseBranch || (await this.getCurrentBranch());
-      const shortSession = sessionId.slice(0, 6);
-      const branchName = `${base}-${shortSession}-${sanitizedName}`;
+      const sessionToken =
+        this.sanitizeName(branchToken ?? '') ||
+        this.getSessionBranchToken(sessionId);
+      const branchName = `${base}-${sessionToken}-${sanitizedName}`;
 
       // Create the worktree with a new branch
       await this.git.raw([
@@ -387,6 +392,7 @@ export class GitWorktreeService {
         config.sessionId,
         name,
         config.baseBranch,
+        config.branchToken,
       );
 
       if (createResult.success && createResult.worktree) {
@@ -814,6 +820,10 @@ export class GitWorktreeService {
       .replace(/[^a-z0-9-]/g, '-')
       .replace(/-+/g, '-')
       .replace(/^-|-$/g, '');
+  }
+
+  private getSessionBranchToken(sessionId: string): string {
+    return this.sanitizeName(sessionId) || 'session';
   }
 
   private async pathExists(p: string): Promise<boolean> {
