@@ -9,7 +9,10 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config, GitWorktreeService } from '@qwen-code/qwen-code-core';
-import { SelfEvolveService } from './SelfEvolveService.js';
+import {
+  SelfEvolveService,
+  getSelfEvolveAttemptNodeArgs,
+} from './SelfEvolveService.js';
 
 function ok(command: string, cwd: string, stdout = '') {
   return {
@@ -29,6 +32,8 @@ describe('SelfEvolveService', () => {
   let attemptWorktreePath: string;
   let reviewWorktreePath: string;
   let mockConfig: Config;
+  const originalExecArgv = [...process.execArgv];
+  const originalArgv = [...process.argv];
 
   beforeEach(async () => {
     tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'self-evolve-'));
@@ -58,7 +63,26 @@ describe('SelfEvolveService', () => {
 
   afterEach(async () => {
     await fs.rm(tempDir, { recursive: true, force: true });
+    process.execArgv = [...originalExecArgv];
+    process.argv = [...originalArgv];
     vi.restoreAllMocks();
+  });
+
+  it('preserves the current Node launch arguments for child attempts', () => {
+    process.execArgv = ['--import', 'tsx/esm'];
+    process.argv = ['node', 'packages/cli/index.ts'];
+
+    expect(getSelfEvolveAttemptNodeArgs('fix TODO')).toEqual([
+      '--import',
+      'tsx/esm',
+      path.resolve('packages/cli/index.ts'),
+      '--prompt',
+      'fix TODO',
+      '--approval-mode',
+      'yolo',
+      '--output-format',
+      'text',
+    ]);
   });
 
   it('promotes a validated attempt into a clean review branch', async () => {

@@ -162,6 +162,19 @@ function getShellInvocation(command: string): {
   };
 }
 
+export function getSelfEvolveAttemptNodeArgs(prompt: string): string[] {
+  return [
+    ...process.execArgv,
+    path.resolve(process.argv[1] ?? ''),
+    '--prompt',
+    prompt,
+    '--approval-mode',
+    'yolo',
+    '--output-format',
+    'text',
+  ];
+}
+
 function defaultDeps(): RuntimeDeps {
   return {
     createWorktreeService: (sourceRepoPath, customBaseDir) =>
@@ -253,15 +266,7 @@ function defaultDeps(): RuntimeDeps {
       }),
     runQwenAttempt: async ({ cwd, prompt, logPath, env, timeoutMs }) =>
       new Promise((resolve) => {
-        const args = [
-          path.resolve(process.argv[1] ?? ''),
-          '--prompt',
-          prompt,
-          '--approval-mode',
-          'yolo',
-          '--output-format',
-          'text',
-        ];
+        const args = getSelfEvolveAttemptNodeArgs(prompt);
         const child = spawn(process.execPath, args, {
           cwd,
           env,
