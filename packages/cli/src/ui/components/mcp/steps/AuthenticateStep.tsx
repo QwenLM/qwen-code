@@ -42,6 +42,17 @@ function wrapForMultiplexer(osc: string): string {
 }
 
 /**
+ * Strip C0 control characters and DEL so an untrusted string can be safely
+ * embedded inside an OSC escape. Without this a `\x07` (BEL) or `\x1b` (ESC)
+ * in the input would prematurely terminate the OSC sequence and leak the
+ * tail bytes to the terminal as interpretable escape codes.
+ */
+function sanitizeForOsc(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\x00-\x1f\x7f]/g, '');
+}
+
+/**
  * Wrap a URL in an OSC 8 hyperlink escape sequence. Supported terminals
  * (iTerm2, WezTerm, Kitty, Windows Terminal, VS Code, GNOME Terminal, …)
  * render it as a clickable link; terminals without OSC 8 support ignore
@@ -53,7 +64,9 @@ function wrapForMultiplexer(osc: string): string {
  * the host terminal instead of eating it.
  */
 function osc8Hyperlink(url: string, label = url): string {
-  return wrapForMultiplexer(`\x1b]8;;${url}\x07${label}\x1b]8;;\x07`);
+  const safeUrl = sanitizeForOsc(url);
+  const safeLabel = sanitizeForOsc(label);
+  return wrapForMultiplexer(`\x1b]8;;${safeUrl}\x07${safeLabel}\x1b]8;;\x07`);
 }
 
 /**
