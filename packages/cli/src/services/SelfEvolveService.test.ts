@@ -11,7 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config, GitWorktreeService } from '@qwen-code/qwen-code-core';
 import {
   SelfEvolveService,
-  getSelfEvolveAttemptNodeArgs,
+  getSelfEvolveSessionNodeArgs,
 } from './SelfEvolveService.js';
 
 function ok(command: string, cwd: string, stdout = '') {
@@ -22,6 +22,31 @@ function ok(command: string, cwd: string, stdout = '') {
     stdout,
     stderr: '',
     timedOut: false,
+  };
+}
+
+function successTurn() {
+  return {
+    stdout: '',
+    stderr: '',
+    timedOut: false,
+    childExited: false,
+    result: {
+      type: 'result',
+      subtype: 'success',
+      uuid: 'turn',
+      session_id: 'session',
+      is_error: false,
+      duration_ms: 1,
+      duration_api_ms: 1,
+      num_turns: 1,
+      result: 'done',
+      usage: {
+        input_tokens: 1,
+        output_tokens: 1,
+      },
+      permission_denials: [],
+    } as const,
   };
 }
 
@@ -66,24 +91,28 @@ describe('SelfEvolveService', () => {
     vi.restoreAllMocks();
   });
 
-  it('preserves the current Node launch arguments for child attempts', () => {
+  it('preserves the current Node launch arguments for child sessions', () => {
     process.execArgv = ['--import', 'tsx/esm'];
     process.argv = ['node', 'packages/cli/index.ts'];
 
-    expect(getSelfEvolveAttemptNodeArgs('fix TODO')).toEqual([
+    expect(
+      getSelfEvolveSessionNodeArgs('123e4567-e89b-12d3-a456-426614174000'),
+    ).toEqual([
       '--import',
       'tsx/esm',
       path.resolve('packages/cli/index.ts'),
-      '--prompt',
-      'fix TODO',
       '--approval-mode',
       'yolo',
       '--output-format',
-      'text',
+      'stream-json',
+      '--input-format',
+      'stream-json',
+      '--session-id',
+      '123e4567-e89b-12d3-a456-426614174000',
     ]);
   });
 
-  it('promotes a validated attempt into a clean review branch', async () => {
+  it('retries failed validation in the same child session and promotes a clean review branch', async () => {
     await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
       recursive: true,
     });
@@ -100,6 +129,7 @@ describe('SelfEvolveService', () => {
     const removeWorktree = vi.fn().mockResolvedValue({ success: true });
     const cleanupSession = vi.fn().mockResolvedValue({ success: true });
     let reviewStatusChecks = 0;
+    let validationChecks = 0;
 
     const runCommand = vi.fn(
       async (cwd: string, command: string, args: string[]) => {
@@ -143,34 +173,72 @@ describe('SelfEvolveService', () => {
       },
     );
 
-    const runShellCommand = vi.fn(async (cwd: string, command: string) =>
-      ok(command, cwd, ''),
-    );
-
-    const runQwenAttempt = vi.fn(async ({ cwd }: { cwd: string }) => {
-      await fs.writeFile(
-        path.join(cwd, '.qwen', 'self-evolve-report.json'),
-        JSON.stringify(
-          {
-            status: 'success',
-            selectedCandidateIndex: 1,
-            selectedTask: {
-              title: 'Retune the self-evolve TODO helper',
-              source: 'todo-comment',
-              location: 'src/feature.ts:1',
-            },
-            summary: 'Tightened the helper around the TODO note.',
-            learnings: ['Kept the edit small and local.'],
-            validation: [{ command: 'npm run lint', summary: 'passed' }],
-            suggestedCommitMessage: 'fix(cli): tighten self-evolve TODO helper',
-            changedFiles: ['src/feature.ts'],
-          },
-          null,
-          2,
-        ),
-      );
-      return ok('qwen', cwd, 'done');
+    const runShellCommand = vi.fn(async (cwd: string, command: string) => {
+      if (cwd === projectDir) {
+        return ok(command, cwd, '');
+      }
+      validationChecks += 1;
+      if (validationChecks === 1) {
+        return {
+          command,
+          cwd,
+          exitCode: 1,
+          stdout: '',
+          stderr: 'lint failed',
+          timedOut: false,
+        };
+      }
+      return ok(command, cwd, '');
     });
+
+    const sendPrompt = vi.fn(async (_prompt: string) => {
+      const report =
+        sendPrompt.mock.calls.length === 1
+          ? {
+              round: 1,
+              status: 'validation_failed',
+              selectedCandidateIndex: 1,
+              selectedTask: {
+                title: 'Address TODO in src/feature.ts:1',
+                source: 'todo-comment',
+                location: 'src/feature.ts:1',
+              },
+              summary: 'First round tightened the helper but lint still fails.',
+              learnings: ['The first pass left a lint issue behind.'],
+              validation: [{ command: 'npm run lint', summary: 'failed' }],
+              suggestedCommitMessage:
+                'fix(cli): tighten self-evolve TODO helper',
+              changedFiles: ['src/feature.ts'],
+            }
+          : {
+              round: 2,
+              status: 'success',
+              selectedCandidateIndex: 1,
+              selectedTask: {
+                title: 'Address TODO in src/feature.ts:1',
+                source: 'todo-comment',
+                location: 'src/feature.ts:1',
+              },
+              summary: 'Second round fixed the remaining lint issue.',
+              learnings: ['Kept the task locked and fixed the lint failure.'],
+              validation: [{ command: 'npm run lint', summary: 'passed' }],
+              suggestedCommitMessage:
+                'fix(cli): tighten self-evolve TODO helper',
+              changedFiles: ['src/feature.ts'],
+            };
+      await fs.writeFile(
+        path.join(reviewWorktreePath, '.qwen', 'self-evolve-report.json'),
+        JSON.stringify(report, null, 2),
+      );
+      return successTurn();
+    });
+    const shutdown = vi
+      .fn()
+      .mockResolvedValue(ok('node qwen', reviewWorktreePath));
+    const createQwenSession = vi.fn(() => ({
+      sendPrompt,
+      shutdown,
+    }));
 
     const service = new SelfEvolveService({
       createWorktreeService: () =>
@@ -181,7 +249,7 @@ describe('SelfEvolveService', () => {
         }) as unknown as GitWorktreeService,
       runCommand,
       runShellCommand,
-      runQwenAttempt,
+      createQwenSession: createQwenSession as never,
     });
 
     const result = await service.run(mockConfig, {
@@ -192,38 +260,27 @@ describe('SelfEvolveService', () => {
     if (!result.ok) {
       throw new Error('Expected success result');
     }
+    expect(result.roundsAttempted).toBe(2);
     expect(result.branch).toBe('self-evolve/review');
     expect(result.commitSha).toBe('review-sha');
     expect(result.changedFiles).toEqual(['src/feature.ts']);
-    expect(result.direction).toBe('focus the CLI TODO path');
     expect(result.selectedTask).toBe('Address TODO in src/feature.ts:1');
-    expect(setupWorktrees).toHaveBeenCalledWith(
-      expect.objectContaining({
-        worktreeNames: ['review'],
-        branchToken: expect.stringMatching(
-          /^focus-the-cli-todo-path-[a-f0-9]{6}$/,
-        ),
-      }),
+    expect(sendPrompt).toHaveBeenCalledTimes(2);
+    expect(sendPrompt.mock.calls[0]?.[0]).toContain(
+      'User direction for task selection: focus the CLI TODO path',
     );
-    expect(runQwenAttempt).toHaveBeenCalledWith(
-      expect.objectContaining({
-        prompt: expect.stringContaining(
-          'User direction for task selection: focus the CLI TODO path',
-        ),
-      }),
+    expect(sendPrompt.mock.calls[1]?.[0]).toContain(
+      'This is repair round 2 of 5.',
     );
-    expect(runQwenAttempt).toHaveBeenCalledWith(
-      expect.objectContaining({
-        prompt: expect.stringContaining(
-          'Do not rename, paraphrase, or synthesize a new task.',
-        ),
-      }),
+    expect(sendPrompt.mock.calls[1]?.[0]).toContain(
+      'Locked candidate title: Address TODO in src/feature.ts:1',
     );
+    expect(shutdown).toHaveBeenCalledTimes(1);
     expect(removeWorktree).toHaveBeenCalledWith(reviewWorktreePath);
     expect(cleanupSession).not.toHaveBeenCalled();
   });
 
-  it('discards the isolated attempt and records learnings when validation fails', async () => {
+  it('discards the isolated change only after exhausting validation retries in the same child session', async () => {
     await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
       recursive: true,
     });
@@ -258,27 +315,34 @@ describe('SelfEvolveService', () => {
       };
     });
 
-    const runQwenAttempt = vi.fn(async ({ cwd }: { cwd: string }) => {
+    const sendPrompt = vi.fn(async () => {
+      const round = sendPrompt.mock.calls.length;
       await fs.writeFile(
-        path.join(cwd, '.qwen', 'self-evolve-report.json'),
+        path.join(reviewWorktreePath, '.qwen', 'self-evolve-report.json'),
         JSON.stringify(
           {
-            status: 'success',
+            round,
+            status: 'validation_failed',
+            selectedCandidateIndex: 1,
             selectedTask: {
               title: 'Address TODO in src/feature.ts:1',
               source: 'todo-comment',
               location: 'src/feature.ts:1',
             },
-            summary: 'Attempted the TODO fix.',
-            learnings: ['Validation matters.'],
+            summary: `Round ${round} still fails lint.`,
+            learnings: ['Still narrowing down the lint issue.'],
             validation: [{ command: 'npm run lint', summary: 'failed' }],
+            changedFiles: ['src/feature.ts'],
           },
           null,
           2,
         ),
       );
-      return ok('qwen', cwd, 'done');
+      return successTurn();
     });
+    const shutdown = vi
+      .fn()
+      .mockResolvedValue(ok('node qwen', reviewWorktreePath));
 
     const service = new SelfEvolveService({
       createWorktreeService: () =>
@@ -297,7 +361,10 @@ describe('SelfEvolveService', () => {
         }) as unknown as GitWorktreeService,
       runCommand,
       runShellCommand,
-      runQwenAttempt,
+      createQwenSession: vi.fn(() => ({
+        sendPrompt,
+        shutdown,
+      })) as never,
     });
 
     const result = await service.run(mockConfig, {
@@ -308,18 +375,14 @@ describe('SelfEvolveService', () => {
     if (result.ok) {
       throw new Error('Expected failure result');
     }
-    expect(result.summary).toBe(
-      'The isolated self-evolve change was discarded after failing validation.',
-    );
-    expect(result.direction).toBe('prefer TODO cleanup');
-    expect(result.learnings).toContain('Validation failed: npm run lint');
+    expect(result.status).toBe('max_retries_exhausted');
+    expect(result.roundsAttempted).toBe(5);
+    expect(result.summary).toContain('5 unsuccessful validation rounds');
+    expect(sendPrompt).toHaveBeenCalledTimes(5);
+    expect(shutdown).toHaveBeenCalledTimes(1);
     expect(cleanupSession).toHaveBeenCalledWith(
       expect.stringContaining('-review'),
     );
-    const record = JSON.parse(await fs.readFile(result.recordPath, 'utf8'));
-    expect(record.summary).toBe(result.summary);
-    expect(record.direction).toBe('prefer TODO cleanup');
-    expect(record.status).toBe('validation_failed');
   });
 
   it('returns no_safe_task when no discovered candidates match the requested direction', async () => {
@@ -371,6 +434,7 @@ describe('SelfEvolveService', () => {
         timedOut: false,
       };
     });
+    const createQwenSession = vi.fn();
 
     const service = new SelfEvolveService({
       createWorktreeService: () =>
@@ -379,7 +443,7 @@ describe('SelfEvolveService', () => {
         }) as unknown as GitWorktreeService,
       runCommand,
       runShellCommand,
-      runQwenAttempt: vi.fn(),
+      createQwenSession: createQwenSession as never,
     });
 
     const result = await service.run(mockConfig, {
@@ -395,12 +459,17 @@ describe('SelfEvolveService', () => {
       'No discovered self-evolve candidates matched the requested direction.',
     );
     expect(setupWorktrees).not.toHaveBeenCalled();
+    expect(createQwenSession).not.toHaveBeenCalled();
   });
 
-  it('rejects a child report that does not select one of the provided candidates', async () => {
+  it('rejects retry rounds that drift to a different selected task', async () => {
     await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
       recursive: true,
     });
+    await fs.writeFile(
+      path.join(projectDir, 'src', 'other.ts'),
+      '// TODO: adjust a different helper\nexport const other = 1;\n',
+    );
 
     const cleanupSession = vi.fn().mockResolvedValue({ success: true });
     const runCommand = vi.fn(
@@ -410,7 +479,11 @@ describe('SelfEvolveService', () => {
           return ok(joined, cwd, 'main\n');
         }
         if (joined === 'git ls-files') {
-          return ok(joined, cwd, 'package.json\nsrc/feature.ts\n');
+          return ok(
+            joined,
+            cwd,
+            'package.json\nsrc/feature.ts\nsrc/other.ts\n',
+          );
         }
         if (joined === 'git ls-files --others --exclude-standard') {
           return ok(joined, cwd, '');
@@ -418,27 +491,51 @@ describe('SelfEvolveService', () => {
         throw new Error(`Unexpected command: ${joined}`);
       },
     );
-
-    const runQwenAttempt = vi.fn(async ({ cwd }: { cwd: string }) => {
+    const runShellCommand = vi.fn(async (cwd: string, command: string) => {
+      if (cwd === projectDir) {
+        return ok(command, cwd, '');
+      }
+      return {
+        command,
+        cwd,
+        exitCode: 1,
+        stdout: '',
+        stderr: 'lint failed',
+        timedOut: false,
+      };
+    });
+    const sendPrompt = vi.fn(async () => {
+      const report =
+        sendPrompt.mock.calls.length === 1
+          ? {
+              round: 1,
+              status: 'validation_failed',
+              selectedCandidateIndex: 1,
+              selectedTask: {
+                title: 'Address TODO in src/feature.ts:1',
+                source: 'todo-comment',
+                location: 'src/feature.ts:1',
+              },
+              summary: 'Round 1 picked the feature TODO.',
+              validation: [{ command: 'npm run lint', summary: 'failed' }],
+            }
+          : {
+              round: 2,
+              status: 'success',
+              selectedCandidateIndex: 2,
+              selectedTask: {
+                title: 'Address TODO in src/other.ts:1',
+                source: 'todo-comment',
+                location: 'src/other.ts:1',
+              },
+              summary: 'Round 2 drifted to a different TODO.',
+              validation: [{ command: 'npm run lint', summary: 'passed' }],
+            };
       await fs.writeFile(
-        path.join(cwd, '.qwen', 'self-evolve-report.json'),
-        JSON.stringify(
-          {
-            status: 'success',
-            selectedTask: {
-              title: 'Rename helper flow inside the CLI',
-              source: 'todo-comment',
-              location: 'src/feature.ts:1',
-            },
-            summary: 'Changed the helper.',
-            learnings: ['The task looked small enough.'],
-            validation: [{ command: 'npm run lint', summary: 'passed' }],
-          },
-          null,
-          2,
-        ),
+        path.join(reviewWorktreePath, '.qwen', 'self-evolve-report.json'),
+        JSON.stringify(report, null, 2),
       );
-      return ok('qwen', cwd, 'done');
+      return successTurn();
     });
 
     const service = new SelfEvolveService({
@@ -457,10 +554,13 @@ describe('SelfEvolveService', () => {
           cleanupSession,
         }) as unknown as GitWorktreeService,
       runCommand,
-      runShellCommand: vi.fn(async (cwd: string, command: string) =>
-        ok(command, cwd, ''),
-      ),
-      runQwenAttempt,
+      runShellCommand,
+      createQwenSession: vi.fn(() => ({
+        sendPrompt,
+        shutdown: vi
+          .fn()
+          .mockResolvedValue(ok('node qwen', reviewWorktreePath)),
+      })) as never,
     });
 
     const result = await service.run(mockConfig);
@@ -470,9 +570,9 @@ describe('SelfEvolveService', () => {
       throw new Error('Expected failure result');
     }
     expect(result.summary).toBe(
-      'The isolated self-evolve run did not select one of the provided candidates.',
+      'The isolated self-evolve session drifted away from the originally selected task.',
     );
-    expect(result.selectedTask).toBeUndefined();
+    expect(result.selectedTask).toBe('Address TODO in src/feature.ts:1');
     expect(cleanupSession).toHaveBeenCalledWith(
       expect.stringContaining('-review'),
     );

@@ -30,6 +30,11 @@ The optional direction text is a hard constraint on candidate selection:
 discovered in the repository, and it skips the run with `no_safe_task` if none
 of those candidates clearly match the requested direction.
 
+Once a run selects a candidate, it stays locked on that task. Validation
+failures are fed back into the same child session so Qwen Code can keep
+repairing the selected task in context for up to 5 rounds before it rolls the
+attempt back.
+
 ## Schedule a recurring prompt with /loop
 
 The `/loop` [bundled skill](skills.md) is the quickest way to schedule a recurring prompt. Pass an optional interval and a prompt, and Qwen Code sets up a cron job that fires in the background while the session stays open.

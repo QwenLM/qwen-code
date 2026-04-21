@@ -57,6 +57,12 @@ constraint for task selection: Qwen Code only acts when it finds a discovered
 candidate that clearly matches the requested direction, and otherwise records
 `no_safe_task` without keeping any repo changes.
 
+When `/self-evolve` does pick a task, it locks onto that single discovered
+candidate and keeps the work inside one isolated child session. If external
+validation fails, Qwen Code feeds the failure back into that same child session
+and lets it keep repairing the same task for up to 5 rounds before discarding
+the change.
+
 ### 1.2 Interface and Workspace Control
 
 Commands for adjusting interface appearance and work environment.

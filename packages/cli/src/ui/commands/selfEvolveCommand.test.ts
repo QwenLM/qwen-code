@@ -110,6 +110,7 @@ describe('selfEvolveCommand', () => {
     mockRun.mockResolvedValue({
       ok: true,
       status: 'success',
+      roundsAttempted: 1,
       attemptId: 'attempt-1',
       recordPath: '/tmp/result.json',
       branch: 'self-evolve/review',
@@ -156,6 +157,7 @@ describe('selfEvolveCommand', () => {
     mockRun.mockResolvedValue({
       ok: true,
       status: 'success',
+      roundsAttempted: 2,
       attemptId: 'attempt-2',
       recordPath: '/tmp/result.json',
       branch: 'self-evolve/review',
@@ -242,6 +244,7 @@ describe('selfEvolveCommand', () => {
     resolveRun?.({
       ok: true,
       status: 'success',
+      roundsAttempted: 3,
       attemptId: 'attempt-bg',
       recordPath: '/tmp/result.json',
       branch: 'self-evolve/review',
@@ -289,11 +292,12 @@ describe('selfEvolveCommand', () => {
 
     resolveRun?.({
       ok: false,
-      status: 'validation_failed',
+      status: 'max_retries_exhausted',
+      roundsAttempted: 5,
       attemptId: 'attempt-bg-failed',
       recordPath: '/tmp/result.json',
       summary:
-        'The isolated self-evolve change was discarded after failing validation.',
+        'The isolated self-evolve change was discarded after 5 unsuccessful validation rounds.',
       selectedTask: 'Fix lint error in src/file.ts:10:2',
       direction: 'focus lint cleanup',
       validation: ['fail: npm run lint'],

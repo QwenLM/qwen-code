@@ -85,6 +85,9 @@ function formatResult(
   result: Awaited<ReturnType<SelfEvolveService['run']>>,
 ): string {
   const lines: string[] = [result.summary];
+  if (result.roundsAttempted > 0) {
+    lines.push(`Rounds: ${result.roundsAttempted}`);
+  }
   if (result.direction) {
     lines.push(`Direction: ${result.direction}`);
   }
@@ -393,7 +396,8 @@ function formatBackgroundResultHeading(
 
   if (
     result.status === 'validation_failed' ||
-    result.status === 'no_safe_task'
+    result.status === 'no_safe_task' ||
+    result.status === 'max_retries_exhausted'
   ) {
     return 'Background self-evolve attempt finished without retaining a change.';
   }
