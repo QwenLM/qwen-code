@@ -134,7 +134,10 @@ export function detectOsc11Theme(): Promise<DetectedTheme | undefined> {
 
 /**
  * Detects the macOS system appearance using `defaults read -g AppleInterfaceStyle`.
- * Returns 'dark' if Dark Mode is active, 'light' if it's not (command fails means light mode).
+ * Returns 'dark' if Dark Mode is active, 'light' when `defaults` reports the key
+ * is missing (the canonical macOS Light Mode signal), and undefined for any
+ * other failure (timeout, `defaults` not on PATH, killed by signal, …) so the
+ * caller can continue its fallback chain instead of pinning to Light.
  * Returns undefined on non-macOS platforms.
  */
 export function detectMacOSTheme(): DetectedTheme | undefined {
@@ -150,9 +153,20 @@ export function detectMacOSTheme(): DetectedTheme | undefined {
     }).trim();
 
     return result.toLowerCase() === 'dark' ? 'dark' : 'light';
-  } catch {
-    // On macOS, if the key doesn't exist, the command fails — this means Light Mode.
-    return 'light';
+  } catch (error) {
+    const err = error as { stderr?: string | Buffer; message?: string };
+    const stderr =
+      typeof err.stderr === 'string'
+        ? err.stderr
+        : (err.stderr?.toString?.() ?? '');
+    const message = err.message ?? '';
+    // Only the explicit "… does not exist" error confirms Light Mode. Any
+    // other failure is inconclusive — returning undefined lets the caller
+    // fall through to the next detection layer (or the default-dark).
+    if (/does not exist/i.test(stderr) || /does not exist/i.test(message)) {
+      return 'light';
+    }
+    return undefined;
   }
 }
 

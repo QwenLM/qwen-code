@@ -130,6 +130,45 @@ describe('detectTerminalTheme', () => {
       expect(detectMacOSTheme()).toBe('light');
     });
 
+    it('should return "light" when the "does not exist" message is on stderr only', async () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      vi.mocked(childProcess.execSync).mockImplementation(() => {
+        const err = new Error('Command failed') as Error & {
+          stderr?: string;
+        };
+        err.stderr =
+          'The domain/default pair of (kCFPreferencesAnyApplication, AppleInterfaceStyle) does not exist\n';
+        throw err;
+      });
+
+      const { detectMacOSTheme } = await import('./detect-terminal-theme.js');
+      expect(detectMacOSTheme()).toBe('light');
+    });
+
+    it('should return undefined on timeout (do not assume Light Mode)', async () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      vi.mocked(childProcess.execSync).mockImplementation(() => {
+        throw new Error('Command failed: defaults read -g AppleInterfaceStyle');
+      });
+
+      const { detectMacOSTheme } = await import('./detect-terminal-theme.js');
+      expect(detectMacOSTheme()).toBeUndefined();
+    });
+
+    it('should return undefined when `defaults` is not on PATH', async () => {
+      Object.defineProperty(process, 'platform', { value: 'darwin' });
+      vi.mocked(childProcess.execSync).mockImplementation(() => {
+        const err = new Error('spawnSync defaults ENOENT') as Error & {
+          code?: string;
+        };
+        err.code = 'ENOENT';
+        throw err;
+      });
+
+      const { detectMacOSTheme } = await import('./detect-terminal-theme.js');
+      expect(detectMacOSTheme()).toBeUndefined();
+    });
+
     it('should return undefined on non-macOS platforms', async () => {
       Object.defineProperty(process, 'platform', { value: 'linux' });
 
