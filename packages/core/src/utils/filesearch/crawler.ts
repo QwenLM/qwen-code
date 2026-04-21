@@ -710,6 +710,10 @@ export async function crawl(options: CrawlOptions): Promise<string[]> {
     if (!needReCrawl) {
       const state = changeStateMap.get(stateKey);
       if (state) {
+        if (isThrottled(stateKey)) {
+          return applyMaxFilesLimit(state.fileList, options.maxFiles);
+        }
+
         const untrackedChanged = await hasUntrackedFilesChanged(
           state,
           options.crawlDirectory,

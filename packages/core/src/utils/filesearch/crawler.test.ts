@@ -1026,11 +1026,32 @@ describe('crawler', () => {
       expect(results2).toContain('file1.js');
     });
 
-    it('should refresh untracked files before reusing throttled git results', async () => {
+    it('should skip untracked refresh while reusing throttled git results', async () => {
       tmpDir = await createTmpDir({
         'tracked.js': '',
       });
-      await initGitRepo(tmpDir);
+
+      let listOthersCalls = 0;
+      __setCommandRunnerForTests(async (command, args) => {
+        if (command !== 'git') {
+          return { success: false, lines: [] };
+        }
+
+        if (args[0] === 'rev-parse' && args.includes('--show-toplevel')) {
+          return { success: true, lines: [tmpDir] };
+        }
+
+        if (args[0] === 'ls-files' && args.includes('--cached')) {
+          return { success: true, lines: ['tracked.js'] };
+        }
+
+        if (args[0] === 'ls-files' && args.includes('--others')) {
+          listOthersCalls += 1;
+          return { success: true, lines: [] };
+        }
+
+        return { success: false, lines: [] };
+      });
 
       const ignore = loadIgnoreRules({
         projectRoot: tmpDir,
@@ -1054,7 +1075,8 @@ describe('crawler', () => {
 
       const second = await crawl(options);
       expect(second).toContain('tracked.js');
-      expect(second).toContain('new-untracked.js');
+      expect(second).not.toContain('new-untracked.js');
+      expect(listOthersCalls).toBe(1);
     });
 
     it('should not reuse throttled snapshot when untracked listing fails transiently', async () => {
