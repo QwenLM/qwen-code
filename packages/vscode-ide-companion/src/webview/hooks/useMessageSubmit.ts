@@ -110,12 +110,12 @@ export const useMessageSubmit = ({
           inputFieldRef.current.setAttribute('data-empty', 'true');
         }
         vscode.postMessage({
-          type: 'login',
+          type: 'auth',
           data: {},
         });
-        // Show a friendly loading message in the chat while logging in
+        // Show a friendly loading message in the chat while authenticating
         try {
-          messageHandling.setWaitingForResponse('Logging in to Qwen Code...');
+          messageHandling.setWaitingForResponse('Authenticating Qwen Code...');
         } catch (_err) {
           // Best-effort UI hint; ignore if hook not available
         }

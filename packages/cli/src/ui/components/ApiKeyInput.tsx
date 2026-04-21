@@ -11,7 +11,7 @@ import { TextInput } from './shared/TextInput.js';
 import { theme } from '../semantic-colors.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { t } from '../../i18n/index.js';
-import { CodingPlanRegion } from '../../constants/codingPlan.js';
+import { CodingPlanRegion } from '@qwen-code/qwen-code-core';
 import Link from 'ink-link';
 
 interface ApiKeyInputProps {

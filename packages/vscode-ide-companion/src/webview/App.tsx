@@ -281,9 +281,9 @@ export const App: React.FC = () => {
         // Account group
         const accountGroupItems: CompletionItem[] = [
           {
-            id: 'login',
-            label: 'Login',
-            description: 'Login to Qwen Code',
+            id: 'auth',
+            label: '/auth',
+            description: 'Configure Coding Plan or API Key',
             type: 'command',
             group: 'Account',
           },
@@ -697,9 +697,9 @@ export const App: React.FC = () => {
           }
         };
 
-        if (itemId === 'login') {
+        if (itemId === 'auth') {
           clearTriggerText();
-          vscode.postMessage({ type: 'login', data: {} });
+          vscode.postMessage({ type: 'auth', data: {} });
           completion.closeCompletion();
           return;
         }
@@ -1011,16 +1011,23 @@ export const App: React.FC = () => {
       >
         {!hasContent && !isLoading ? (
           isAuthenticated === false ? (
-            <Onboarding
-              onLogin={() => {
-                vscode.postMessage({ type: 'login', data: {} });
-                messageHandling.setWaitingForResponse(
-                  'Logging in to Qwen Code...',
-                );
-              }}
-            />
+            <Onboarding />
           ) : isAuthenticated === null ? (
-            <EmptyState loadingMessage="Checking login status…" />
+            <div className="flex flex-col items-center justify-center h-full gap-3">
+              <span
+                className="inline-block w-6 h-6 animate-spin rounded-full border-2"
+                style={{
+                  borderColor: 'var(--app-secondary-foreground)',
+                  borderTopColor: 'transparent',
+                }}
+              />
+              <span
+                className="text-sm"
+                style={{ color: 'var(--app-secondary-foreground)' }}
+              >
+                Preparing Qwen Code...
+              </span>
+            </div>
           ) : (
             <EmptyState isAuthenticated />
           )
