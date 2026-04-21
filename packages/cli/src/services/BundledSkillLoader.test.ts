@@ -25,21 +25,14 @@ describe('BundledSkillLoader', () => {
   let mockSkillManager: {
     listSkills: ReturnType<typeof vi.fn>;
   };
-  let mockGeminiClient: {
-    generateJson: ReturnType<typeof vi.fn>;
-  };
 
   beforeEach(() => {
     vi.clearAllMocks();
     mockSkillManager = {
       listSkills: vi.fn().mockResolvedValue([]),
     };
-    mockGeminiClient = {
-      generateJson: vi.fn().mockResolvedValue({ ok: true }),
-    };
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
-      getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       isCronEnabled: vi.fn().mockReturnValue(false),
       getModel: vi.fn().mockReturnValue(undefined),
     } as unknown as Config;

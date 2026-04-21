@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
 import {
   createDebugLogger,
   appendToLastTextPart,
@@ -24,40 +24,6 @@ const debugLogger = createDebugLogger('BUNDLED_SKILL_LOADER');
  */
 export class BundledSkillLoader implements ICommandLoader {
   constructor(private readonly config: Config | null) {}
-
-  private buildOnComplete(skill: SkillConfig, rawInvocation: string) {
-    if (skill.name !== 'loop') {
-      return undefined;
-    }
-
-    return async () => {
-      const prompt = rawInvocation.trim();
-      if (!prompt || prompt === '/loop') {
-        return;
-      }
-
-      const basePrompt = skill.body.trimEnd();
-      const followUpPrompt = `${basePrompt}\n\nImmediately execute the parsed prompt now instead of only scheduling it. The original user invocation was:\n${prompt}`;
-      const geminiClient = this.config?.getGeminiClient?.();
-      if (!geminiClient) {
-        debugLogger.debug(
-          'GeminiClient not available, skipping immediate /loop execution',
-        );
-        return;
-      }
-
-      await geminiClient.generateJson(followUpPrompt, {
-        schema: {
-          type: 'object',
-          properties: {
-            ok: { type: 'boolean' },
-          },
-          required: ['ok'],
-          additionalProperties: false,
-        },
-      });
-    };
-  }
 
   async loadCommands(_signal: AbortSignal): Promise<SlashCommand[]> {
     if (this.config?.getBareMode?.()) {
@@ -122,10 +88,6 @@ export class BundledSkillLoader implements ICommandLoader {
           return {
             type: 'submit_prompt',
             content,
-            onComplete: this.buildOnComplete(
-              skill,
-              context.invocation?.raw ?? '',
-            ),
           };
         },
       }));
