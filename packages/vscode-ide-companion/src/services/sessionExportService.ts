@@ -85,11 +85,20 @@ function renderExportContent(
   }
 }
 
+/**
+ * Export session to file with a native Save dialog.
+ * Falls back to writing directly into cwd if the user cancels the dialog.
+ *
+ * @param options.sessionId - The session to export
+ * @param options.cwd - Working directory used as default save location
+ * @param options.format - Target format (html, md, json, jsonl)
+ * @returns Export result with filename and URI, or null if cancelled
+ */
 export async function exportSessionToFile(options: {
   sessionId: string;
   cwd: string;
   format: SessionExportFormat;
-}): Promise<SessionExportResult> {
+}): Promise<SessionExportResult | null> {
   const { cwd, format, sessionId } = options;
   const sessionService = new SessionService(cwd);
   const sessionData = await sessionService.loadSession(sessionId);
@@ -108,13 +117,31 @@ export async function exportSessionToFile(options: {
     EXPORT_CONFIG,
   );
   const content = renderExportContent(format, normalizedData);
-  const filename = generateExportFilename(format);
-  const uri = vscode.Uri.file(path.join(cwd, filename));
+  const defaultFilename = generateExportFilename(format);
 
-  await fs.writeFile(uri.fsPath, content, 'utf-8');
+  // Show native Save dialog so users can choose destination and filename
+  const filterMap: Record<SessionExportFormat, Record<string, string[]>> = {
+    html: { HTML: ['html'] },
+    md: { Markdown: ['md'] },
+    json: { JSON: ['json'] },
+    jsonl: { 'JSON Lines': ['jsonl'] },
+  };
+
+  const saveUri = await vscode.window.showSaveDialog({
+    defaultUri: vscode.Uri.file(path.join(cwd, defaultFilename)),
+    filters: filterMap[format],
+    title: `Export Session as ${format.toUpperCase()}`,
+  });
+
+  if (!saveUri) {
+    // User cancelled the save dialog
+    return null;
+  }
+
+  await fs.writeFile(saveUri.fsPath, content, 'utf-8');
 
   return {
-    filename,
-    uri,
+    filename: path.basename(saveUri.fsPath),
+    uri: saveUri,
   };
 }

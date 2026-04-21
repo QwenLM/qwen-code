@@ -328,6 +328,10 @@ export class SessionMessageHandler extends BaseMessageHandler {
     try {
       const cwd = await this.resolveSessionWorkingDir(sessionId);
       const result = await exportSessionToFile({ sessionId, cwd, format });
+      if (!result) {
+        // User cancelled the save dialog
+        return;
+      }
       const formatLabel = format.toUpperCase();
       this.sendToWebView({
         type: 'message',

@@ -42,7 +42,21 @@ const safeDecodePath = (value: string): string => {
 };
 
 const normalizeExplicitFileLink = (raw: string): string => {
-  const decoded = safeDecodePath(raw).replace(/\\/g, '/');
+  let decoded = safeDecodePath(raw).replace(/\\/g, '/');
+
+  // Strip file:// scheme to extract the local filesystem path.
+  // vscode.Uri.file().toString() produces "file:///path" (Unix) or
+  // "file:///C:/path" (Windows). Without stripping, isAbsolutePath
+  // fails and the click handler never fires.
+  if (/^file:\/\//i.test(decoded)) {
+    // "file:///home/..." → "/home/...", "file:///C:/..." → "C:/..."
+    decoded = decoded.replace(/^file:\/\/\//i, '');
+    // On Unix the path should start with /
+    if (!/^[a-zA-Z]:/.test(decoded) && !decoded.startsWith('/')) {
+      decoded = '/' + decoded;
+    }
+  }
+
   const hashIndex = decoded.indexOf('#');
   if (hashIndex < 0) {
     return decoded;
