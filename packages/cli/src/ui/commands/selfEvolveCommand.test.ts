@@ -54,16 +54,49 @@ describe('selfEvolveCommand', () => {
     it('suggests common self-evolve argument forms for an empty query', async () => {
       await expect(
         selfEvolveCommand.completion?.(mockContext, ''),
-      ).resolves.toEqual(['list', 'clear', '--once', '--every']);
+      ).resolves.toEqual([
+        {
+          value: '--once',
+          description:
+            'Run once now. This is the default if you omit schedule flags.',
+        },
+        {
+          value: '--every',
+          description:
+            'Run now and then repeat on a schedule, for example `--every 2h`.',
+        },
+        {
+          value: 'list',
+          description:
+            'Show scheduled recurring self-evolve jobs for this session.',
+        },
+        {
+          value: 'clear',
+          description:
+            'Delete all scheduled recurring self-evolve jobs for this session.',
+        },
+      ]);
     });
 
     it('filters suggestions by prefix', async () => {
       await expect(
         selfEvolveCommand.completion?.(mockContext, '--e'),
-      ).resolves.toEqual(['--every']);
+      ).resolves.toEqual([
+        {
+          value: '--every',
+          description:
+            'Run now and then repeat on a schedule, for example `--every 2h`.',
+        },
+      ]);
       await expect(
         selfEvolveCommand.completion?.(mockContext, 'cl'),
-      ).resolves.toEqual(['clear']);
+      ).resolves.toEqual([
+        {
+          value: 'clear',
+          description:
+            'Delete all scheduled recurring self-evolve jobs for this session.',
+        },
+      ]);
     });
 
     it('stops suggesting subcommands after free-form direction text starts', async () => {
@@ -105,6 +138,12 @@ describe('selfEvolveCommand', () => {
       }),
       expect.any(Number),
     );
+  });
+
+  it('describes the default run-once behavior in the command metadata', () => {
+    expect(selfEvolveCommand.description).toContain('once by default');
+    expect(selfEvolveCommand.argumentHint).toContain('--every <interval>');
+    expect(selfEvolveCommand.examples).toContain('/self-evolve');
   });
 
   it('schedules recurring self-evolve and runs the first attempt immediately', async () => {

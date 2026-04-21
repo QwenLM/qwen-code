@@ -34,14 +34,17 @@ reruns validation, and keeps only a clean review commit if validation passes.
 Failed attempts are discarded and an attempt record is written under the
 runtime project directory for later inspection.
 
-By default it runs once:
+By default it runs once immediately. If you do not pass `every` or `--every`,
+`/self-evolve` is a one-shot run:
 
 ```text
 /self-evolve
 /self-evolve focus on small CLI lint and test follow-ups
 ```
 
-It also supports first-class recurring mode when session cron is enabled:
+It also supports first-class recurring mode when session cron is enabled.
+`every` / `--every` means "run one attempt now, then keep repeating on this
+interval":
 
 ```text
 /self-evolve --every 2h focus on safe docs and lint cleanups

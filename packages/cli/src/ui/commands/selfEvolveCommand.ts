@@ -5,7 +5,11 @@
  */
 
 import type { CronJob } from '@qwen-code/qwen-code-core';
-import type { MessageActionReturn, SlashCommand } from './types.js';
+import type {
+  CommandCompletionItem,
+  MessageActionReturn,
+  SlashCommand,
+} from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
 import { SelfEvolveService } from '../../services/SelfEvolveService.js';
@@ -51,7 +55,27 @@ const TRAILING_EVERY_PATTERN =
   /^(?<prompt>.+?)\s+every\s+(?<value>\d+)(?:\s*(?<short>[smhd])|(?:\s+)(?<word>seconds?|minutes?|hours?|days?))\s*$/i;
 const CLEAN_MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
 const CLEAN_HOUR_INTERVALS = [1, 2, 3, 4, 6, 8, 12];
-const SELF_EVOLVE_COMPLETIONS = ['list', 'clear', '--once', '--every'];
+const SELF_EVOLVE_COMPLETIONS: CommandCompletionItem[] = [
+  {
+    value: '--once',
+    description:
+      'Run once now. This is the default if you omit schedule flags.',
+  },
+  {
+    value: '--every',
+    description:
+      'Run now and then repeat on a schedule, for example `--every 2h`.',
+  },
+  {
+    value: 'list',
+    description: 'Show scheduled recurring self-evolve jobs for this session.',
+  },
+  {
+    value: 'clear',
+    description:
+      'Delete all scheduled recurring self-evolve jobs for this session.',
+  },
+];
 
 function quoteDirection(direction: string): string {
   return direction.split(/\s+/).filter(Boolean).join(' ');
@@ -83,9 +107,9 @@ function formatResult(
 
 function usage(): string {
   return [
-    'Usage: /self-evolve [direction]',
-    '       /self-evolve --every <interval> [direction]',
-    '       /self-evolve [direction] every <interval>',
+    'Usage: /self-evolve [direction]                  # run once now (default)',
+    '       /self-evolve --every <interval> [direction]  # run now, then repeat on a schedule',
+    '       /self-evolve [direction] every <interval>    # same as --every, with trailing syntax',
     '       /self-evolve --once [direction]',
     '       /self-evolve list',
     '       /self-evolve clear',
@@ -347,7 +371,7 @@ function toMessage(
   };
 }
 
-function completeSelfEvolveArgs(partialArg: string): string[] {
+function completeSelfEvolveArgs(partialArg: string): CommandCompletionItem[] {
   const normalized = partialArg.replace(/^\s+/, '');
   if (!normalized) {
     return SELF_EVOLVE_COMPLETIONS;
@@ -358,17 +382,24 @@ function completeSelfEvolveArgs(partialArg: string): string[] {
   }
 
   return SELF_EVOLVE_COMPLETIONS.filter((candidate) =>
-    candidate.startsWith(normalized),
+    candidate.value.startsWith(normalized),
   );
 }
 
 export const selfEvolveCommand: SlashCommand = {
   name: 'self-evolve',
   description:
-    'Run a small safe repo improvement once or on a recurring schedule',
+    'Run a small safe repo improvement once by default, or repeat it on a schedule with every/--every',
   kind: CommandKind.BUILT_IN,
   commandType: 'local',
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  argumentHint: '[direction] | --every <interval> [direction] | list | clear',
+  examples: [
+    '/self-evolve',
+    '/self-evolve focus on small CLI lint follow-ups',
+    '/self-evolve --every 2h focus lint cleanup',
+    '/self-evolve focus TODO cleanup every 4h',
+  ],
   completion: async (_context, partialArg) =>
     completeSelfEvolveArgs(partialArg),
   action: async (context, args): Promise<void | MessageActionReturn> => {
