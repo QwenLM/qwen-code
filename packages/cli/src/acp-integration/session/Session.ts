@@ -1250,14 +1250,19 @@ export class Session implements SessionContext {
     try {
       const invocation = tool.build(args);
 
-      if (isAgentTool && 'eventEmitter' in invocation) {
-        // Access eventEmitter from AgentTool invocation
-        const taskEventEmitter = (
-          invocation as {
-            eventEmitter: AgentEventEmitter;
-          }
-        ).eventEmitter;
-
+      // Production AgentTool always initializes `eventEmitter` on its
+      // invocation (`agent.ts:392`). Be defensive about the `undefined`
+      // case too so an incomplete/custom AgentTool invocation degrades
+      // gracefully (no sub-agent event forwarding) instead of throwing
+      // inside SubAgentTracker.setup — the `'eventEmitter' in invocation`
+      // key-presence check passed for `{ eventEmitter: undefined }` and
+      // the ensuing `eventEmitter.on(...)` blew up.
+      const taskEventEmitter = (
+        invocation as {
+          eventEmitter?: AgentEventEmitter;
+        }
+      ).eventEmitter;
+      if (isAgentTool && taskEventEmitter) {
         // Extract subagent metadata from AgentTool call
         const parentToolCallId = callId;
         const subagentType = (args['subagent_type'] as string) ?? '';
