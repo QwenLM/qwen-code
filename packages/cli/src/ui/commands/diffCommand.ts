@@ -34,7 +34,19 @@ async function diffAction(
     };
   }
 
-  const result = await fetchGitDiff(cwd);
+  let result: Awaited<ReturnType<typeof fetchGitDiff>>;
+  try {
+    result = await fetchGitDiff(cwd);
+  } catch (error) {
+    return {
+      type: 'message',
+      messageType: 'error',
+      content: `${t('Failed to compute git diff stats')}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    };
+  }
+
   if (!result) {
     return {
       type: 'message',
@@ -54,13 +66,26 @@ async function diffAction(
     };
   }
 
-  const fileWord = stats.filesCount === 1 ? 'file' : 'files';
-  const header = `${stats.filesCount} ${fileWord} changed, +${stats.linesAdded} / -${stats.linesRemoved}`;
+  const header =
+    stats.filesCount === 1
+      ? t('{{count}} file changed, +{{added}} / -{{removed}}', {
+          count: String(stats.filesCount),
+          added: String(stats.linesAdded),
+          removed: String(stats.linesRemoved),
+        })
+      : t('{{count}} files changed, +{{added}} / -{{removed}}', {
+          count: String(stats.filesCount),
+          added: String(stats.linesAdded),
+          removed: String(stats.linesRemoved),
+        });
   const rows = formatPerFile(perFileStats);
   const hidden = stats.filesCount - perFileStats.size;
   const capNote =
-    hidden > 0
-      ? `\n  …and ${hidden} more (showing first ${perFileStats.size})`
+    hidden > 0 && perFileStats.size > 0
+      ? `\n  ${t('…and {{hidden}} more (showing first {{shown}})', {
+          hidden: String(hidden),
+          shown: String(perFileStats.size),
+        })}`
       : '';
 
   return {
@@ -72,23 +97,28 @@ async function diffAction(
 }
 
 function formatPerFile(perFileStats: Map<string, PerFileStats>): string[] {
-  const rows: string[] = [];
-  const maxAdded = Math.max(
-    0,
-    ...[...perFileStats.values()].map((s) => s.added),
-  );
-  const maxRemoved = Math.max(
-    0,
-    ...[...perFileStats.values()].map((s) => s.removed),
-  );
+  if (perFileStats.size === 0) return [];
+
+  let maxAdded = 0;
+  let maxRemoved = 0;
+  for (const s of perFileStats.values()) {
+    if (s.isBinary || s.isUntracked) continue;
+    if (s.added > maxAdded) maxAdded = s.added;
+    if (s.removed > maxRemoved) maxRemoved = s.removed;
+  }
   const addWidth = String(maxAdded).length;
   const remWidth = String(maxRemoved).length;
+  // Width of the `+X -Y` stat column so `?` / `~` rows line up with it.
+  const statColumnWidth = 1 + addWidth + 1 + 1 + remWidth;
 
+  const rows: string[] = [];
   for (const [filename, s] of perFileStats) {
     if (s.isUntracked) {
-      rows.push(`  ?  ${filename}`);
+      rows.push(`  ${padMarker('?', statColumnWidth)}  ${filename}`);
     } else if (s.isBinary) {
-      rows.push(`  ~  ${filename} (binary)`);
+      rows.push(
+        `  ${padMarker('~', statColumnWidth)}  ${filename} ${t('(binary)')}`,
+      );
     } else {
       const added = `+${String(s.added).padStart(addWidth)}`;
       const removed = `-${String(s.removed).padStart(remWidth)}`;
@@ -98,6 +128,12 @@ function formatPerFile(perFileStats: Map<string, PerFileStats>): string[] {
   return rows;
 }
 
+function padMarker(marker: string, width: number): string {
+  if (marker.length >= width) return marker;
+  const pad = ' '.repeat(width - marker.length);
+  return `${marker}${pad}`;
+}
+
 export const diffCommand: SlashCommand = {
   name: 'diff',
   get description() {
@@ -105,5 +141,6 @@ export const diffCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   commandType: 'local',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: diffAction,
 };
