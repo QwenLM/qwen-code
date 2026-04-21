@@ -44,6 +44,11 @@ observability framework — Qwen Code's observability system provides:
   instrumentation
 
 [OpenTelemetry]: https://opentelemetry.io/
+[aliyun-opentelemetry-overview]: https://www.alibabacloud.com/help/en/arms/tracing-analysis/product-overview/what-is-tracing-analysis
+[aliyun-opentelemetry-get-started]: https://www.alibabacloud.com/help/en/arms/tracing-analysis/before-you-begin
+[aliyun-opentelemetry-console-cn]: https://trace.console.aliyun.com
+[aliyun-opentelemetry-console-cn-legacy]: https://tracing.console.aliyun.com
+[aliyun-opentelemetry-console-intl]: https://tracing-sgnew.console.alibabacloud.com
 
 ## Configuration
 
@@ -75,7 +80,9 @@ For detailed information about all configuration options, see the
 
 ### Direct Export (Recommended)
 
-Sends telemetry directly to Aliyun services. No collector needed.
+Sends telemetry directly to Alibaba Cloud Managed Service for
+OpenTelemetry, Alibaba Cloud's distributed tracing product in ARMS. No
+collector is needed.
 
 1. Enable telemetry in your `.qwen/settings.json`:
    ```json
@@ -87,7 +94,21 @@ Sends telemetry directly to Aliyun services. No collector needed.
    }
    ```
 2. Run Qwen Code and send prompts.
-3. View logs and metrics in the Aliyun Console.
+3. View telemetry in Managed Service for OpenTelemetry:
+   - Product overview:
+     [What is Managed Service for OpenTelemetry?][aliyun-opentelemetry-overview]
+   - Getting started:
+     [Get started with Managed Service for OpenTelemetry][aliyun-opentelemetry-get-started]
+   - Console entry points:
+     - China mainland:
+       [trace.console.aliyun.com][aliyun-opentelemetry-console-cn]
+       (legacy console:
+       [tracing.console.aliyun.com][aliyun-opentelemetry-console-cn-legacy])
+     - International:
+       [tracing-sgnew.console.alibabacloud.com][aliyun-opentelemetry-console-intl]
+   - In the console, use `Applications` to inspect traces and service
+     topology, and `Integration Center` to retrieve OTLP endpoints or
+     tokens when you need manual setup details.
 
 ## Local Telemetry
 
