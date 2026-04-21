@@ -51,7 +51,7 @@ async function loadWasmBinary(
 
   // Skip dynamic import in Bun build - Bun doesn't support ?binary syntax
   const isBunBuild =
-    typeof Bun !== 'undefined' && process.env.BUILD_TARGET === 'native';
+    typeof Bun !== 'undefined' && process.env['BUILD_TARGET'] === 'native';
 
   if (!isBunBuild) {
     try {

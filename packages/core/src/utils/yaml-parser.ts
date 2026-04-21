@@ -37,12 +37,12 @@ async function getYamlModule(): Promise<typeof import('yaml')> {
  * For sync parsing in Node.js, use parseYamlSync or the base parser.
  */
 export async function parseYaml(input: string): Promise<unknown> {
-  // Bun 内置 YAML 解析器 - 零成本
+  // Bun built-in YAML parser - zero overhead
   if (isRunningWithBun()) {
     return Bun.YAML.parse(input);
   }
 
-  // Node.js fallback - dynamic import yaml 包
+  // Node.js fallback - dynamic import yaml package
   const yaml = await getYamlModule();
   return yaml.parse(input);
 }

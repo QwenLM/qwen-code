@@ -55,7 +55,7 @@ export async function fastSpawn(
     return new Promise((resolve, reject) => {
       const proc = spawn(command[0], command.slice(1), {
         cwd: options?.cwd,
-        env: options?.env ?? process.env,
+        env: options?.env ?? (process.env as Record<string, string>),
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
@@ -76,7 +76,7 @@ export async function fastSpawn(
   const proc = Bun.spawn({
     cmd: command,
     cwd: options?.cwd,
-    env: options?.env ?? process.env,
+    env: options?.env ?? (process.env as Record<string, string>),
     stdout: 'pipe',
     stderr: 'pipe',
   });
@@ -87,7 +87,7 @@ export async function fastSpawn(
   return {
     stdout,
     stderr,
-    exitCode: proc.exitCode,
+    exitCode: proc.exitCode ?? 0,
   };
 }
 

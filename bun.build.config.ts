@@ -11,19 +11,19 @@
 
 // Feature flags for compile-time conditional compilation
 const FEATURES = {
-  // 核心功能 - 默认启用
+  // Core features - enabled by default
   CORE: true,
   SKILLS: true,
   MCP: true,
 
-  // 可选功能 - 通过环境变量控制
+  // Optional features - controlled via environment variables
   VOICE_MODE: process.env.ENABLE_VOICE === 'true',
   TEAMMEM: process.env.ENABLE_TEAMMEM === 'true',
   KAIROS: process.env.ENABLE_KAIROS === 'true',
   COORDINATOR_MODE: process.env.ENABLE_COORDINATOR === 'true',
   FAST_MODE: process.env.ENABLE_FAST_MODE === 'true',
 
-  // 实验性功能
+  // Experimental features
   AGENT_TRIGGERS: process.env.ENABLE_AGENT_TRIGGERS === 'true',
   TRANSCRIPT_CLASSIFIER: process.env.ENABLE_TRANSCRIPT_CLASSIFIER === 'true',
   BASH_CLASSIFIER: process.env.ENABLE_BASH_CLASSIFIER === 'true',
@@ -71,13 +71,13 @@ const config = {
   naming: 'qwen',
   target: 'bun',
 
-  // 编译为独立可执行文件
+  // Compile to standalone executable
   compile: true,
 
-  // 启用 bytecode 编译（更快启动）
+  // Enable bytecode compilation (faster startup)
   bytecode: true,
 
-  // 定义编译时常量
+  // Define compile-time constants
   define: {
     ...define,
     'process.env.CLI_VERSION': JSON.stringify(version),
@@ -85,20 +85,20 @@ const config = {
     global: 'globalThis',
   },
 
-  // 外部模块（不打包）
+  // External modules (not bundled)
   external,
 
-  // Minify 生产版本
+  // Minify production build
   minify: {
     whitespace: true,
-    identifiers: false, // 保持可调试性
+    identifiers: false, // Keep for debuggability
     syntax: true,
   },
 
-  // Source map 用于调试
+  // Source map for debugging
   sourcemap: 'external',
 
-  // 添加 banner
+  // Add banner
   banner: `// Qwen Code ${version} - Native Build`,
 };
 

@@ -60,12 +60,13 @@ export class BundledSkillManager {
     if (isInBundledMode() && typeof Bun !== 'undefined') {
       // From embedded files
       for (const file of Bun.embeddedFiles) {
-        if (file.name.startsWith(`bundled/skills/${skillName}/`)) {
-          const relativePath = file.name.replace(
+        const embeddedFile = file as { name: string; text(): Promise<string> };
+        if (embeddedFile.name.startsWith(`bundled/skills/${skillName}/`)) {
+          const relativePath = embeddedFile.name.replace(
             `bundled/skills/${skillName}/`,
             '',
           );
-          files.set(relativePath, await file.text());
+          files.set(relativePath, await embeddedFile.text());
         }
       }
     } else {
@@ -123,13 +124,17 @@ export class BundledSkillManager {
     try {
       // Find all embedded files for this skill
       if (typeof Bun !== 'undefined') {
-        const skillFiles = Bun.embeddedFiles.filter((f) =>
+        const skillFiles = Bun.embeddedFiles.filter((f: { name: string }) =>
           f.name.startsWith(`bundled/skills/${skillName}/`),
         );
 
         // Write each file to disk
         for (const file of skillFiles) {
-          const relativePath = file.name.replace(
+          const embeddedFile = file as {
+            name: string;
+            text(): Promise<string>;
+          };
+          const relativePath = embeddedFile.name.replace(
             `bundled/skills/${skillName}/`,
             '',
           );
@@ -142,7 +147,7 @@ export class BundledSkillManager {
           });
 
           // Write file with secure permissions
-          await this.safeWriteFile(targetPath, await file.text());
+          await this.safeWriteFile(targetPath, await embeddedFile.text());
         }
       }
 
@@ -156,8 +161,8 @@ export class BundledSkillManager {
     // Use process-specific nonce for security
     const nonce = process.pid.toString(36);
     const cacheDir =
-      process.env.XDG_CACHE_HOME ||
-      (process.env.HOME ? path.join(process.env.HOME, '.cache') : '/tmp');
+      process.env['XDG_CACHE_HOME'] ||
+      (process.env['HOME'] ? path.join(process.env['HOME'], '.cache') : '/tmp');
     return path.join(cacheDir, 'qwen-code', 'skills', nonce, skillName);
   }
 

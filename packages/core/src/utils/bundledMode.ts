@@ -23,7 +23,7 @@
  */
 export function isRunningWithBun(): boolean {
   // https://bun.sh/guides/util/detect-bun
-  return process.versions.bun !== undefined;
+  return process.versions['bun'] !== undefined;
 }
 
 /**
@@ -42,7 +42,7 @@ export function isInBundledMode(): boolean {
  * Check if running in development/source mode.
  */
 export function isDevelopmentMode(): boolean {
-  return !isInBundledMode() && process.env.NODE_ENV !== 'production';
+  return !isInBundledMode() && process.env['NODE_ENV'] !== 'production';
 }
 
 /**
@@ -59,7 +59,7 @@ export function getRuntimeMode(): 'native' | 'bun' | 'node' | 'unknown' {
  * Get build target for conditional behavior.
  */
 export function getBuildTarget(): 'native' | 'node' | 'browser' | 'unknown' {
-  const target = process.env.BUILD_TARGET;
+  const target = process.env['BUILD_TARGET'];
   if (target === 'native' || isInBundledMode()) return 'native';
   if (target === 'browser') return 'browser';
   if (target === 'node') return 'node';
@@ -83,7 +83,7 @@ export async function getEmbeddedFile(path: string): Promise<string | null> {
   }
 
   // Access embedded file
-  const file = Bun.embeddedFiles.find((f) => f.name === path);
+  const file = Bun.embeddedFiles.find((f: { name: string }) => f.name === path);
   if (!file) return null;
 
   return await file.text();
@@ -94,5 +94,5 @@ export async function getEmbeddedFile(path: string): Promise<string | null> {
  */
 export function listEmbeddedFiles(): string[] {
   if (!isInBundledMode()) return [];
-  return Bun.embeddedFiles.map((f) => f.name);
+  return Bun.embeddedFiles.map((f: { name: string }) => f.name);
 }
