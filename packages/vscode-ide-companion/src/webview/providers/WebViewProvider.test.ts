@@ -83,6 +83,7 @@ const {
   mockQwenAgentManagerInstances: [] as Array<{
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt: ReturnType<typeof vi.fn>;
+    disconnect: ReturnType<typeof vi.fn>;
   }>,
 }));
 
