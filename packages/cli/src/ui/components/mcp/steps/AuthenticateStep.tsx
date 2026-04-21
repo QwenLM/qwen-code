@@ -28,7 +28,9 @@ const COPY_FEEDBACK_MS = 2000;
 /**
  * Wrap an OSC sequence for terminal multiplexers so the host terminal
  * receives it. tmux requires a DCS passthrough with inner ESCs doubled;
- * GNU screen uses a plain DCS envelope.
+ * GNU screen uses a plain DCS envelope. Note: tmux 3.3+ defaults
+ * `allow-passthrough` to off — users on default configs will not see
+ * the hyperlink until they set `set -g allow-passthrough on`.
  */
 function wrapForMultiplexer(osc: string): string {
   if (process.env['TMUX']) {
