@@ -419,6 +419,14 @@ export class ContentGenerationPipeline {
       return value !== undefined ? { [key]: value } : {};
     };
 
+    // When samplingParams is set, its keys pass through to the wire verbatim.
+    // This lets users target provider-specific parameter names
+    // (e.g. `max_completion_tokens` for GPT-5 / o-series) without a client release.
+    // When absent, the historical default behavior applies.
+    if (configSamplingParams !== undefined) {
+      return { ...configSamplingParams };
+    }
+
     const params: Record<string, unknown> = {
       // Parameters with request fallback but no defaults
       ...addParameterIfDefined('temperature', 'temperature', 'temperature'),
