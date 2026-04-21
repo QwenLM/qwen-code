@@ -22,6 +22,7 @@ const {
   mockReadQwenSettingsForVSCode,
   mockWriteCodingPlanConfig,
   mockWriteModelProvidersConfig,
+  mockClearPersistedAuth,
   slashCommandNotificationCallbackRef,
   mockQwenAgentManagerInstances,
 } = vi.hoisted(() => ({
@@ -68,6 +69,7 @@ const {
   >(() => null),
   mockWriteCodingPlanConfig: vi.fn(() => ({})),
   mockWriteModelProvidersConfig: vi.fn(),
+  mockClearPersistedAuth: vi.fn(),
   slashCommandNotificationCallbackRef: {
     current: undefined as
       | ((event: {
@@ -131,6 +133,7 @@ vi.mock('../../services/settingsWriter.js', () => ({
   writeCodingPlanConfig: mockWriteCodingPlanConfig,
   writeModelProvidersConfig: mockWriteModelProvidersConfig,
   readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,
+  clearPersistedAuth: mockClearPersistedAuth,
 }));
 
 vi.mock('../../services/qwenAgentManager.js', () => ({
@@ -850,6 +853,52 @@ describe('WebViewProvider settings sync', () => {
     );
 
     expect(syncSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears persisted credentials and disconnects when apiKey is emptied', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    // Simulate an already-initialized agent connection
+    (provider as unknown as { agentInitialized: boolean }).agentInitialized =
+      true;
+
+    // syncVSCodeSettingsToQwenConfig returns false because apiKey is empty
+    vi.spyOn(
+      provider as unknown as {
+        syncVSCodeSettingsToQwenConfig: () => Promise<boolean>;
+      },
+      'syncVSCodeSettingsToQwenConfig',
+    ).mockResolvedValue(false);
+
+    // apiKey is empty (user cleared it in Settings)
+    mockConfigGet.mockImplementation((key: string, defaultValue: unknown) => {
+      if (key === 'apiKey') {
+        return '';
+      }
+      return defaultValue;
+    });
+
+    const configChangeHandler = mockConfigChangeHandlers.at(-1);
+    expect(configChangeHandler).toBeDefined();
+
+    await configChangeHandler?.(
+      createConfigChangeEvent('qwen-code', 'qwen-code.apiKey'),
+    );
+
+    // Should clear persisted auth
+    expect(mockClearPersistedAuth).toHaveBeenCalledTimes(1);
+
+    // Should disconnect the agent
+    const agentManager = mockQwenAgentManagerInstances.at(-1);
+    expect(agentManager?.disconnect).toHaveBeenCalledTimes(1);
+
+    // agentInitialized should be reset
+    expect(
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized,
+    ).toBe(false);
   });
 });
 

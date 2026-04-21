@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { showAuthStatus } from './handler.js';
-import { AuthType , CODING_PLAN_ENV_KEY } from '@qwen-code/qwen-code-core';
+import { AuthType, CODING_PLAN_ENV_KEY } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
 
 vi.mock('../../config/settings.js', () => ({

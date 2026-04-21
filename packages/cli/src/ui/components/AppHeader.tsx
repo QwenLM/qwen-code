@@ -5,7 +5,7 @@
  */
 
 import { Box } from 'ink';
-import { AuthType , isCodingPlanConfig } from '@qwen-code/qwen-code-core';
+import { AuthType, isCodingPlanConfig } from '@qwen-code/qwen-code-core';
 import { Header, AuthDisplayType } from './Header.js';
 import { Tips } from './Tips.js';
 import { useSettings } from '../contexts/SettingsContext.js';

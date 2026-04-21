@@ -30,6 +30,7 @@ import {
   writeCodingPlanConfig,
   writeModelProvidersConfig,
   readQwenSettingsForVSCode,
+  clearPersistedAuth,
 } from '../../services/settingsWriter.js';
 import { parseInsightMessage } from '@qwen-code/qwen-code-core';
 
@@ -157,6 +158,25 @@ export class WebViewProvider {
                 '[WebViewProvider] Reconnect after settings change failed:',
                 e,
               );
+            }
+          } else if (!synced && this.agentInitialized) {
+            // apiKey was cleared — treat as explicit de-auth signal.
+            // Clear persisted credentials so runtime state matches Settings.
+            const apiKey = vscode.workspace
+              .getConfiguration('qwen-code')
+              .get<string>('apiKey', '');
+            if (!apiKey) {
+              console.log(
+                '[WebViewProvider] apiKey cleared — de-authenticating and clearing persisted credentials',
+              );
+              clearPersistedAuth();
+              this.agentManager.disconnect();
+              this.agentInitialized = false;
+              this.authState = false;
+              this.sendMessageToWebView({
+                type: 'authState',
+                data: { authenticated: false },
+              });
             }
           }
         }
@@ -1072,11 +1092,6 @@ export class WebViewProvider {
 
     this.initializationPromise = (async () => {
       try {
-        // On startup, sync ~/.qwen/settings.json → VSCode settings so the
-        // Settings UI reflects existing non-secret CLI config, then attempt a
-        // connection.
-        // Writing back to ~/.qwen/settings.json happens through the auth flow
-        // and auth-related VSCode setting changes.
         await this.syncQwenConfigToVSCodeSettings();
 
         console.log('[WebViewProvider] Attempting connection...');
@@ -1166,7 +1181,10 @@ export class WebViewProvider {
           this.autoAuthTimer = setTimeout(() => {
             this.autoAuthTimer = null;
             if (!this.authFlowActive) {
-              void this.messageHandler.route({ type: 'auth' });
+              this.authFlowActive = true;
+              void this.messageHandler.route({ type: 'auth' }).finally(() => {
+                this.authFlowActive = false;
+              });
             }
           }, 100);
           return;

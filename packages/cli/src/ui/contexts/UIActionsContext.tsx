@@ -13,7 +13,8 @@ import {
   type AuthType,
   type EditorType,
   type ApprovalMode,
- type CodingPlanRegion } from '@qwen-code/qwen-code-core';
+  type CodingPlanRegion,
+} from '@qwen-code/qwen-code-core';
 import { type SettingScope } from '../../config/settings.js';
 import { type AlibabaStandardRegion } from '../../constants/alibabaStandardApiKey.js';
 import type { AuthState } from '../types.js';

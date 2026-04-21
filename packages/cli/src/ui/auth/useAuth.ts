@@ -15,11 +15,11 @@ import {
   AuthType,
   getErrorMessage,
   logAuth,
-
   getCodingPlanConfig,
   isCodingPlanConfig,
   CodingPlanRegion,
-  CODING_PLAN_ENV_KEY} from '@qwen-code/qwen-code-core';
+  CODING_PLAN_ENV_KEY,
+} from '@qwen-code/qwen-code-core';
 import { useCallback, useEffect, useState } from 'react';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';

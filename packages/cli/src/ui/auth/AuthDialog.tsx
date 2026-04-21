@@ -6,7 +6,8 @@
 
 import type React from 'react';
 import { useState } from 'react';
-import { AuthType ,
+import {
+  AuthType,
   CodingPlanRegion,
   isCodingPlanConfig,
 } from '@qwen-code/qwen-code-core';

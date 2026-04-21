@@ -258,3 +258,37 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
     codingPlanRegion: 'china',
   };
 }
+
+/**
+ * Clear persisted auth credentials from ~/.qwen/settings.json.
+ * Removes API keys, auth type selection, and coding plan metadata
+ * so runtime state matches the cleared VS Code settings.
+ */
+export function clearPersistedAuth(): void {
+  try {
+    const settings = readSettings();
+
+    // Remove auth type selection
+    const security = settings.security as Record<string, unknown> | undefined;
+    if (security?.auth) {
+      delete (security.auth as Record<string, unknown>).selectedType;
+    }
+
+    // Remove API keys
+    const env = settings.env as Record<string, unknown> | undefined;
+    if (env) {
+      delete env[CODING_PLAN_ENV_KEY];
+      delete env['OPENAI_API_KEY'];
+    }
+
+    // Remove coding plan metadata
+    delete settings.codingPlan;
+
+    writeSettings(settings);
+  } catch (error) {
+    console.error(
+      '[settingsWriter] Failed to clear persisted auth credentials:',
+      error,
+    );
+  }
+}

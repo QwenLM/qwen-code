@@ -6,7 +6,8 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import type { Config, ModelProvidersConfig } from '@qwen-code/qwen-code-core';
-import { AuthType ,
+import {
+  AuthType,
   isCodingPlanConfig,
   getCodingPlanConfig,
   CodingPlanRegion,
