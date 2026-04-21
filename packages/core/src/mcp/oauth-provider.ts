@@ -813,7 +813,7 @@ export class MCPOAuthProvider {
     );
 
     displayMessage({
-      key: 'If the browser does not open, copy and paste this URL into your browser.',
+      key: 'If the browser does not open, copy and paste this URL into your browser:',
     });
     displayMessage({
       key: 'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.',

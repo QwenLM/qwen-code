@@ -713,8 +713,8 @@ export default {
   'Authentication complete. Returning to server details...':
     '認証完了。サーバー詳細に戻ります...',
   'Authentication successful.': '認証成功。',
-  'If the browser does not open, copy and paste this URL into your browser.':
-    'ブラウザが開かない場合は、上のURLをコピーしてブラウザに貼り付けてください。',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'ブラウザが開かない場合は、このURLをコピーしてブラウザに貼り付けてください：',
   'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
     '⚠️  URL全体をコピーしてください——複数行にまたがる場合があります。',
   'Configured MCP servers:': '設定済みMCPサーバー:',

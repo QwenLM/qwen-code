@@ -961,8 +961,8 @@ export default {
   'Authentication complete. Returning to server details...':
     '认证完成，正在返回服务器详情...',
   'Authentication successful.': '认证成功。',
-  'If the browser does not open, copy and paste this URL into your browser.':
-    '如果浏览器未自动打开，请复制上面的 URL 并粘贴到浏览器中。',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    '如果浏览器未自动打开，请复制以下 URL 并粘贴到浏览器中：',
   'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
     '⚠️  请确保复制完整的 URL —— 它可能跨越多行。',
 

@@ -962,8 +962,8 @@ export default {
   'Authentication complete. Returning to server details...':
     'Аутентификация завершена. Возврат к деталям сервера...',
   'Authentication successful.': 'Аутентификация успешна.',
-  'If the browser does not open, copy and paste this URL into your browser.':
-    'Если браузер не открылся, скопируйте приведённый выше URL и вставьте его в браузер.',
+  'If the browser does not open, copy and paste this URL into your browser:':
+    'Если браузер не открылся, скопируйте этот URL и вставьте его в браузер:',
   'Make sure to copy the COMPLETE URL - it may wrap across multiple lines.':
     '⚠️  Убедитесь, что скопировали ПОЛНЫЙ URL — он может занимать несколько строк.',
 
