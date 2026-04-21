@@ -266,6 +266,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
       let cumulativeOutput: string | AnsiOutput = '';
       let lastUpdateTime = Date.now();
       let isBinaryStream = false;
+      let totalLines = 0;
+      let totalBytes = 0;
 
       const { result: resultPromise, pid } =
         await ShellExecutionService.execute(
@@ -278,6 +280,21 @@ export class ShellToolInvocation extends BaseToolInvocation<
               case 'data':
                 if (isBinaryStream) break;
                 cumulativeOutput = event.chunk;
+                // Stats are only consumed by the ANSI-output branch below,
+                // so skip the per-chunk accounting for plain string chunks.
+                if (Array.isArray(event.chunk)) {
+                  totalLines = event.chunk.length;
+                  totalBytes = event.chunk.reduce(
+                    (sum, line) =>
+                      sum +
+                      line.reduce(
+                        (ls, token) =>
+                          ls + Buffer.byteLength(token.text, 'utf-8'),
+                        0,
+                      ),
+                    0,
+                  );
+                }
                 shouldUpdate = true;
                 break;
               case 'binary_detected':
@@ -301,11 +318,19 @@ export class ShellToolInvocation extends BaseToolInvocation<
             }
 
             if (shouldUpdate && updateOutput) {
-              updateOutput(
-                typeof cumulativeOutput === 'string'
-                  ? cumulativeOutput
-                  : { ansiOutput: cumulativeOutput },
-              );
+              if (typeof cumulativeOutput === 'string') {
+                updateOutput(cumulativeOutput);
+              } else {
+                updateOutput({
+                  ansiOutput: cumulativeOutput,
+                  totalLines,
+                  totalBytes,
+                  // Only include timeout when user explicitly set it
+                  ...(this.params.timeout != null && {
+                    timeoutMs: this.params.timeout,
+                  }),
+                });
+              }
               lastUpdateTime = Date.now();
             }
           },

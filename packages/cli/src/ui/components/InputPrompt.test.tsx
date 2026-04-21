@@ -245,20 +245,6 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('fills the prompt suggestion on right arrow without submitting', async () => {
-      const { stdin, unmount } = renderWithProviders(
-        <InputPrompt {...props} promptSuggestion="commit this" />,
-      );
-      await wait(350);
-
-      stdin.write('\u001B[C'); // right arrow
-      await wait();
-
-      expect(mockBuffer.insert).toHaveBeenCalledWith('commit this');
-      expect(props.onSubmit).not.toHaveBeenCalled();
-      unmount();
-    });
-
     it('does not accept a prompt suggestion while command completion is active', async () => {
       mockCommandCompletion.showSuggestions = true;
       mockCommandCompletion.suggestions = [

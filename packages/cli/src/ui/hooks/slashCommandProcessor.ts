@@ -353,13 +353,15 @@ export const useSlashCommandProcessor = (
           new BundledSkillLoader(config),
           new FileCommandLoader(config),
         ];
+        const disabled = config?.getDisabledSlashCommands() ?? [];
         const commandService = await CommandService.create(
           loaders,
           controller.signal,
+          disabled.length > 0 ? new Set(disabled) : undefined,
         );
         // Avoid overwriting newer results from a subsequent effect run
         if (!controller.signal.aborted) {
-          setCommands(commandService.getCommands());
+          setCommands(commandService.getCommandsForMode('interactive'));
         }
       } catch (error) {
         debugLogger.error('Failed to load slash commands:', error);

@@ -20,6 +20,7 @@ export const planCommand: SlashCommand = {
     return t('Switch to plan mode or exit plan mode');
   },
   kind: CommandKind.BUILT_IN,
+  commandType: 'local',
   action: async (
     context: CommandContext,
     args: string,

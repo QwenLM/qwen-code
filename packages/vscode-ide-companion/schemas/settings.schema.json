@@ -52,9 +52,14 @@
           "default": true
         },
         "showSessionRecap": {
-          "description": "Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. Use /recap to trigger manually.",
+          "description": "Auto-show a one-line \"where you left off\" recap when returning to the terminal after being away. Off by default. Use /recap to trigger manually regardless of this setting.",
           "type": "boolean",
-          "default": true
+          "default": false
+        },
+        "sessionRecapAwayThresholdMinutes": {
+          "description": "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
+          "type": "number",
+          "default": 5
         },
         "gitCoAuthor": {
           "description": "Automatically add a Co-authored-by trailer to git commit messages when commits are made through Qwen Code.",
@@ -473,6 +478,19 @@
         },
         "deny": {
           "description": "Tools or commands that are always blocked. Highest priority rule. Examples: \"ShellTool\", \"Bash(rm -rf *)\".",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "slashCommands": {
+      "description": "Configuration for slash commands exposed by the CLI. Useful for locking down the command surface in multi-tenant or enterprise deployments.",
+      "type": "object",
+      "properties": {
+        "disabled": {
+          "description": "Slash command names to hide and refuse to execute. Matched case-insensitively against the final command name (for extension commands this is the disambiguated form, e.g. \"myext.deploy\"). Merged as a union across settings scopes, so workspace settings can add to but not remove entries defined in system/user settings.",
           "type": "array",
           "items": {
             "type": "string"

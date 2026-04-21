@@ -36,34 +36,50 @@ import {
 } from './nonInteractiveHelpers.js';
 
 // Mock dependencies
-vi.mock('../nonInteractiveCliCommands.js', () => ({
-  getAvailableCommands: vi
-    .fn()
-    .mockImplementation(
-      async (
-        _config: unknown,
-        _signal: AbortSignal,
-        allowedBuiltinCommandNames?: string[],
-      ) => {
-        const allowedSet = new Set(allowedBuiltinCommandNames ?? []);
-        const allCommands = [
-          { name: 'help', kind: 'built-in' },
-          { name: 'commit', kind: 'file' },
-          { name: 'memory', kind: 'built-in' },
-          { name: 'init', kind: 'built-in' },
-          { name: 'summary', kind: 'built-in' },
-          { name: 'compress', kind: 'built-in' },
-        ];
+vi.mock('../nonInteractiveCliCommands.js', async () => {
+  const { filterCommandsForMode } = await import('../services/commandUtils.js');
+  return {
+    getAvailableCommands: vi
+      .fn()
+      .mockImplementation(
+        async (
+          _config: unknown,
+          _signal: AbortSignal,
+          mode: string = 'acp',
+        ) => {
+          // Simulate capability-based filtering with commandType / supportedModes
+          // Delegate to production filterCommandsForMode to avoid logic divergence
+          const allCommands = [
+            { name: 'help', commandType: 'local-jsx' },
+            { name: 'commit', commandType: 'prompt' },
+            { name: 'memory', commandType: 'local' },
+            {
+              name: 'init',
+              commandType: 'local',
+              supportedModes: ['interactive', 'non_interactive', 'acp'],
+            },
+            {
+              name: 'summary',
+              commandType: 'local',
+              supportedModes: ['interactive', 'non_interactive', 'acp'],
+            },
+            {
+              name: 'compress',
+              commandType: 'local',
+              supportedModes: ['interactive', 'non_interactive', 'acp'],
+            },
+          ];
 
-        // Filter commands: always include file commands, only include allowed built-in commands
-        return allCommands.filter(
-          (cmd) =>
-            cmd.kind === 'file' ||
-            (cmd.kind === 'built-in' && allowedSet.has(cmd.name)),
-        );
-      },
-    ),
-}));
+          return filterCommandsForMode(
+            allCommands as unknown as Parameters<
+              typeof filterCommandsForMode
+            >[0],
+            mode as Parameters<typeof filterCommandsForMode>[1],
+          );
+        },
+      ),
+  };
+});
 
 vi.mock('../ui/utils/computeStats.js', () => ({
   computeSessionStats: vi.fn().mockReturnValue({
@@ -342,6 +358,7 @@ describe('computeUsageFromMetrics', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -384,6 +401,7 @@ describe('computeUsageFromMetrics', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
         'model-2': {
           api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
@@ -395,6 +413,7 @@ describe('computeUsageFromMetrics', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -437,6 +456,7 @@ describe('computeUsageFromMetrics', () => {
             thoughts: 0,
             tool: 0,
           },
+          bySource: {},
         },
       },
       tools: {
@@ -520,12 +540,10 @@ describe('buildSystemMessage', () => {
   });
 
   it('should build system message with all fields', async () => {
-    const allowedBuiltinCommands = ['init', 'summary', 'compress'];
     const result = await buildSystemMessage(
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
-      allowedBuiltinCommands,
     );
 
     expect(result).toEqual({
@@ -557,7 +575,6 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
-      ['init', 'summary'],
     );
 
     expect(result.tools).toEqual([]);
@@ -573,7 +590,6 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
-      ['init', 'summary'],
     );
 
     expect(result.mcp_servers).toEqual([]);
@@ -589,36 +605,38 @@ describe('buildSystemMessage', () => {
       config,
       'test-session-id',
       'auto' as PermissionMode,
-      ['init', 'summary'],
     );
 
     expect(result.qwen_code_version).toBe('unknown');
   });
 
-  it('should only include allowed built-in commands and all file commands', async () => {
-    const allowedBuiltinCommands = ['init', 'summary'];
+  it('should include local commands with ACP supportedModes and prompt commands', async () => {
     const result = await buildSystemMessage(
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
-      allowedBuiltinCommands,
     );
 
-    // Should include: 'commit' (FILE), 'init' (BUILT_IN, allowed), 'summary' (BUILT_IN, allowed)
-    // Should NOT include: 'help', 'memory', 'compress' (BUILT_IN but not in allowed set)
-    expect(result.slash_commands).toEqual(['commit', 'init', 'summary']);
+    // Should include: 'commit' (prompt), 'compress', 'init', 'summary' (local+ACP)
+    // Should NOT include: 'help' (local-jsx), 'memory' (local without ACP supportedModes)
+    expect(result.slash_commands).toEqual([
+      'commit',
+      'compress',
+      'init',
+      'summary',
+    ]);
   });
 
-  it('should include only file commands when no built-in commands are allowed', async () => {
+  it('should exclude interactive-only commands from system message', async () => {
     const result = await buildSystemMessage(
       mockConfig,
       'test-session-id',
       'auto' as PermissionMode,
-      [], // Empty array - no built-in commands allowed
     );
 
-    // Should only include 'commit' (FILE command)
-    expect(result.slash_commands).toEqual(['commit']);
+    // 'help' (local-jsx) and 'memory' (local without ACP) should be excluded
+    expect(result.slash_commands).not.toContain('help');
+    expect(result.slash_commands).not.toContain('memory');
   });
 });
 

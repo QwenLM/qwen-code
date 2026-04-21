@@ -16,6 +16,7 @@ import { extractShellOperations } from './shell-semantics.js';
 import type { ShellOperation } from './shell-semantics.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { detectCommandSubstitution } from '../utils/shell-utils.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
   PermissionCheckContext,
   PermissionDecision,
@@ -25,6 +26,8 @@ import type {
   RuleWithSource,
   RuleScope,
 } from './types.js';
+
+const debugLogger = createDebugLogger('PERMISSIONS');
 
 /**
  * Numeric priority for each PermissionDecision.
@@ -682,7 +685,14 @@ export class PermissionManager {
    */
   addSessionAllowRule(raw: string): void {
     if (raw && raw.trim()) {
-      this.sessionRules.allow.push(parseRule(raw));
+      const rule = parseRule(raw);
+      if (rule.invalid) {
+        debugLogger.warn(
+          `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
+        );
+        return;
+      }
+      this.sessionRules.allow.push(rule);
     }
   }
 
@@ -691,7 +701,14 @@ export class PermissionManager {
    */
   addSessionDenyRule(raw: string): void {
     if (raw && raw.trim()) {
-      this.sessionRules.deny.push(parseRule(raw));
+      const rule = parseRule(raw);
+      if (rule.invalid) {
+        debugLogger.warn(
+          `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
+        );
+        return;
+      }
+      this.sessionRules.deny.push(rule);
     }
   }
 
@@ -700,7 +717,14 @@ export class PermissionManager {
    */
   addSessionAskRule(raw: string): void {
     if (raw && raw.trim()) {
-      this.sessionRules.ask.push(parseRule(raw));
+      const rule = parseRule(raw);
+      if (rule.invalid) {
+        debugLogger.warn(
+          `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
+        );
+        return;
+      }
+      this.sessionRules.ask.push(rule);
     }
   }
 
@@ -719,6 +743,12 @@ export class PermissionManager {
    */
   addPersistentRule(raw: string, type: RuleType): PermissionRule {
     const rule = parseRule(raw);
+    if (rule.invalid) {
+      debugLogger.warn(
+        `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
+      );
+      return rule;
+    }
     // Deduplicate: skip if a rule with the same raw string already exists
     const exists = this.persistentRules[type].some((r) => r.raw === rule.raw);
     if (!exists) {
@@ -789,7 +819,9 @@ export class PermissionManager {
       scope: RuleScope,
     ) => {
       for (const rule of rules) {
-        result.push({ rule, type, scope });
+        if (!rule.invalid) {
+          result.push({ rule, type, scope });
+        }
       }
     };
 

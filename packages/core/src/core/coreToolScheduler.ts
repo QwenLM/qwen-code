@@ -71,20 +71,22 @@ import { IdeClient } from '../ide/ide-client.js';
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
-  'which likely caused incomplete tool call parameters. ' +
+  'which caused incomplete tool call parameters. ' +
   'Please retry the tool call with complete parameters. ' +
   'If the content is too large for a single response, ' +
-  'consider splitting it into smaller parts.';
+  'you MUST split it into smaller parts: ' +
+  'first write_file with a skeleton/partial content, ' +
+  'then use edit to add the remaining sections incrementally.';
 
 const TRUNCATION_EDIT_REJECTION =
   'Your previous response was truncated due to max_tokens limit, ' +
-  'which likely produced incomplete file content. ' +
+  'which produced incomplete file content. ' +
   'The tool call has been rejected to prevent writing ' +
   'truncated content to the file. ' +
-  'Please retry the tool call with complete content. ' +
-  'If the content is too large for a single response, ' +
-  'consider splitting it into smaller parts ' +
-  '(e.g., write_file for initial content, then edit for additions).';
+  'You MUST split the content into smaller parts: ' +
+  'first write_file with a skeleton/partial content, ' +
+  'then use edit to add the remaining sections incrementally. ' +
+  'Do NOT retry with the same large content.';
 
 export type ValidatingToolCall = {
   status: 'validating';
@@ -129,7 +131,14 @@ export type ExecutingToolCall = {
   tool: AnyDeclarativeTool;
   invocation: AnyToolInvocation;
   liveOutput?: ToolResultDisplay;
+  /** Timestamp when the tool was first scheduled (validating). */
   startTime?: number;
+  /**
+   * Timestamp when the tool actually began executing (after any
+   * approval/scheduling wait). Use this for "how long has this been
+   * running" displays; prefer it over startTime to exclude approval time.
+   */
+  executionStartTime?: number;
   outcome?: ToolConfirmationOutcome;
   pid?: number;
 };
@@ -597,6 +606,7 @@ export class CoreToolScheduler {
             tool: toolInstance,
             status: 'executing',
             startTime: existingStartTime,
+            executionStartTime: Date.now(),
             outcome,
             invocation,
           } as ExecutingToolCall;

@@ -52,6 +52,9 @@ vi.mock('../AnsiOutput.js', () => ({
       </Text>
     );
   },
+  ShellStatsBar: function MockShellStatsBar() {
+    return null;
+  },
 }));
 
 // Mock child components or utilities if they are complex or have side effects
