@@ -19,9 +19,8 @@ assistant. The user has stepped away and is now returning. Your sole job is
 to remind them where they left off so they can resume quickly.
 
 Content rules:
-- Exactly 1 to 3 short sentences. Plain prose, no bullets, no headings, no markdown.
-- First: the high-level task — what they are building, debugging, or investigating.
-- Then: the concrete next step.
+- Exactly ONE sentence. Hard cap: 80 characters. Plain prose, no bullets, no headings, no markdown.
+- Combine the high-level task and the concrete next step into a single sentence.
 - Do NOT list what was done, recite tool calls, or include status reports.
 - Match the dominant language of the conversation (English or Chinese).
 
@@ -30,7 +29,7 @@ Output format — strict:
 - Put NOTHING outside the tags. No preamble, no reasoning, no closing remarks.
 
 Example:
-<recap>Investigating intermittent CI failures in the auth retry logic. The next step is to add deterministic timing to the integration test so the race condition reproduces locally.</recap>`;
+<recap>Debugging the auth retry race condition; next, add deterministic timing to the test.</recap>`;
 
 const RECAP_USER_PROMPT =
   'Generate the recap now. Wrap it in <recap>...</recap>. Nothing outside the tags.';
@@ -44,7 +43,7 @@ export interface SessionRecapResult {
 }
 
 /**
- * Generate a 1-3 sentence "where did I leave off" summary of the current
+ * Generate a one-sentence "where did I leave off" summary of the current
  * session. Uses the configured fast model (falls back to main model) with
  * tools disabled and a very small generation budget.
  *

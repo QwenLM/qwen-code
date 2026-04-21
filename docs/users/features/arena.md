@@ -199,9 +199,9 @@ Agent Arena is experimental. Current limitations:
 
 ## Comparison with other multi-agent modes
 
-Agent Arena is one of several multi-agent modes in Qwen Code. **Agent Team** is not yet implemented. **Agent Swarm** is available as a lightweight tool for batch-style parallel worker execution.
+Agent Arena is one of several planned multi-agent modes in Qwen Code. **Agent Team** and **Agent Swarm** are not yet implemented — the table below describes their intended design for reference.
 
-|                   | **Agent Arena**                                        | **Agent Team** (planned)                           | **Agent Swarm**                                          |
+|                   | **Agent Arena**                                        | **Agent Team** (planned)                           | **Agent Swarm** (planned)                                |
 | :---------------- | :----------------------------------------------------- | :------------------------------------------------- | :------------------------------------------------------- |
 | **Goal**          | Competitive: Find the best solution to the _same_ task | Collaborative: Tackle _different_ aspects together | Batch parallel: Dynamically spawn workers for bulk tasks |
 | **Agents**        | Pre-configured models compete independently            | Teammates collaborate with assigned roles          | Workers spawned on-the-fly, destroyed on completion      |

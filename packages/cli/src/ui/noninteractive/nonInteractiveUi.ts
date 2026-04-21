@@ -24,6 +24,8 @@ export function createNonInteractiveUI(): CommandContext['ui'] {
     setBtwItem: (_item) => {},
     cancelBtw: () => {},
     btwAbortControllerRef: { current: null },
+    awayRecapItem: null,
+    setAwayRecapItem: (_item) => {},
     isIdleRef: { current: true },
     toggleVimEnabled: async () => false,
     setGeminiMdFileCount: (_count) => {},

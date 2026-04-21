@@ -8,6 +8,9 @@ import path from 'node:path';
 import os from 'node:os';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('PERMISSIONS');
 
 /**
  * Normalize a filesystem path to use POSIX-style forward slashes.
@@ -247,10 +250,13 @@ export function parseRule(raw: string): PermissionRule {
   }
 
   const toolPart = normalized.substring(0, openParen).trim();
-  const specifier = normalized.endsWith(')')
-    ? normalized.substring(openParen + 1, normalized.length - 1)
-    : undefined;
 
+  if (!normalized.endsWith(')')) {
+    // Malformed: unbalanced parentheses — mark as invalid so it never matches.
+    return { raw: trimmed, toolName: resolveToolName(toolPart), invalid: true };
+  }
+
+  const specifier = normalized.substring(openParen + 1, normalized.length - 1);
   const canonicalName = resolveToolName(toolPart);
   const specifierKind = specifier ? getSpecifierKind(canonicalName) : undefined;
 
@@ -267,7 +273,17 @@ export function parseRule(raw: string): PermissionRule {
  * silently skipping any empty entries.
  */
 export function parseRules(raws: string[]): PermissionRule[] {
-  return raws.filter((r) => r && r.trim()).map(parseRule);
+  return raws
+    .filter((r) => r && r.trim())
+    .map(parseRule)
+    .map((r) => {
+      if (r.invalid) {
+        debugLogger.warn(
+          `Ignoring malformed rule (unbalanced parentheses): ${r.raw}`,
+        );
+      }
+      return r;
+    });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -938,6 +954,11 @@ export function matchesRule(
   specifier?: string,
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
+
+  // ── Invalid (malformed) rules never match anything ──────────────────
+  if (rule.invalid) {
+    return false;
+  }
 
   // ── MCP tool matching ────────────────────────────────────────────────
   if (

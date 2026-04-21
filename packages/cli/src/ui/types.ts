@@ -69,6 +69,7 @@ export interface IndividualToolCallDisplay {
   confirmationDetails: ToolCallConfirmationDetails | undefined;
   renderOutputAsMarkdown?: boolean;
   ptyId?: number;
+  executionStartTime?: number;
   /** If this tool call operated on a managed-auto-memory file, indicates whether it was a read or write. */
   isMemoryOp?: 'read' | 'write';
 }
@@ -389,8 +390,9 @@ export type HistoryItemBtw = HistoryItemBase & {
 
 /**
  * Away-summary recap shown when the user returns to the session after a
- * period of inactivity (or via /recap). Rendered in dim color so it is
- * visually distinct from real assistant replies.
+ * period of inactivity (or via /recap). Rendered as a sticky banner above
+ * the input box (NOT part of the scrolling history), so it is intentionally
+ * excluded from the HistoryItemWithoutId union.
  */
 export type HistoryItemAwayRecap = HistoryItemBase & {
   type: 'away_recap';
@@ -482,7 +484,6 @@ export type HistoryItemWithoutId =
   | HistoryItemInsightProgress
   | HistoryItemBtw
   | HistoryItemMemorySaved
-  | HistoryItemAwayRecap
   | HistoryItemUserPromptSubmitBlocked
   | HistoryItemStopHookLoop
   | HistoryItemStopHookSystemMessage

@@ -329,9 +329,13 @@ const SETTINGS_SCHEMA = {
         label: 'Show Session Recap',
         category: 'General',
         requiresRestart: false,
-        default: true,
+        // Off by default — an ambient background LLM call isn't something
+        // users should be opted into silently, especially when `fastModel`
+        // is unset and the call would land on the main coding model.
+        // Manual `/recap` works regardless.
+        default: false,
         description:
-          'Show a 1-3 sentence summary of where you left off when returning to the terminal after being away for 5+ minutes. Use /recap to trigger manually.',
+          'Auto-show a one-line "where you left off" recap when returning to the terminal after being away for 5+ minutes. Off by default. Use /recap to trigger manually regardless of this setting.',
         showInDialog: true,
       },
       gitCoAuthor: {
@@ -1145,6 +1149,36 @@ const SETTINGS_SCHEMA = {
         description:
           'Tools or commands that are always blocked. Highest priority rule. ' +
           'Examples: "ShellTool", "Bash(rm -rf *)".',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.UNION,
+      },
+    },
+  },
+
+  slashCommands: {
+    type: 'object',
+    label: 'Slash Commands',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {},
+    description:
+      'Configuration for slash commands exposed by the CLI. Useful for ' +
+      'locking down the command surface in multi-tenant or enterprise ' +
+      'deployments.',
+    showInDialog: false,
+    properties: {
+      disabled: {
+        type: 'array',
+        label: 'Disabled Slash Commands',
+        category: 'Advanced',
+        requiresRestart: true,
+        default: undefined as string[] | undefined,
+        description:
+          'Slash command names to hide and refuse to execute. Matched ' +
+          'case-insensitively against the final command name (for extension ' +
+          'commands this is the disambiguated form, e.g. "myext.deploy"). ' +
+          'Merged as a union across settings scopes, so workspace settings ' +
+          'can add to but not remove entries defined in system/user settings.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

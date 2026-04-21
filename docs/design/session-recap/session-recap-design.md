@@ -1,6 +1,6 @@
 # Session Recap Design
 
-> A 1-3 sentence "where did I leave off" summary surfaced when the user
+> A one-line "where did I leave off" summary surfaced when the user
 > returns to an idle session, either on demand (`/recap`) or after the
 > terminal has been blurred for 5+ minutes.
 
@@ -11,7 +11,7 @@ pages of history to remember **what they were doing and what came next**
 is a real friction point. Just reloading messages does not solve this
 UX problem.
 
-The goal is to proactively surface a 1-3 sentence recap when the user
+The goal is to proactively surface a one-line recap when the user
 returns:
 
 - **High-level task** (what they are doing) → **next step** (what to do next).
@@ -28,8 +28,9 @@ returns:
 
 Both paths funnel into a single function — `generateSessionRecap()` — to
 guarantee identical behavior. The auto-trigger is gated by
-`general.showSessionRecap` (default: on); the manual command ignores
-that setting.
+`general.showSessionRecap` (default: off — explicit opt-in, so ambient
+LLM calls are never silently added to a user's bill); the manual
+command ignores that setting.
 
 ## Architecture
 
@@ -39,8 +40,8 @@ that setting.
 │   isFocused = useFocus()                                               │
 │   isIdle = streamingState === Idle                                     │
 │       │                                                                │
-│       ├─→ useAwaySummary({enabled, config, isFocused, isIdle, addItem})│
-│       │       │                                                        │
+│       ├─→ useAwaySummary({enabled, config, isFocused, isIdle,          │
+│       │       │             setAwayRecapItem})                         │
 │       │       └─→ 5 min blur timer + idle/dedupe gates                 │
 │       │              │                                                 │
 │       │              ↓                                                 │
@@ -56,9 +57,10 @@ that setting.
 │                              GeminiClient.generateContent              │
 │                              (fastModel + tools:[])                    │
 │                                                                        │
-│   addItem({type: 'away_recap', text}) ─→ HistoryItemDisplay            │
-│                                            └─ AwayRecapMessage         │
-│                                               (dim color + ❯ prefix)   │
+│   setAwayRecapItem({type: 'away_recap', text})                         │
+│       └─→ DefaultAppLayout renders AwayRecapMessage                    │
+│           as a sticky banner above the Composer                        │
+│           (dim color + "※ recap:" prefix)                              │
 └────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -69,9 +71,10 @@ that setting.
 | `packages/core/src/services/sessionRecap.ts`                 | One-shot LLM call + history filter + tag extraction |
 | `packages/cli/src/ui/hooks/useAwaySummary.ts`                | Auto-trigger React hook                             |
 | `packages/cli/src/ui/commands/recapCommand.ts`               | `/recap` manual entry point                         |
-| `packages/cli/src/ui/components/messages/StatusMessages.tsx` | `AwayRecapMessage` dim renderer                     |
+| `packages/cli/src/ui/components/messages/StatusMessages.tsx` | `AwayRecapMessage` dim renderer (`※ recap:` prefix) |
 | `packages/cli/src/ui/types.ts`                               | `HistoryItemAwayRecap` type                         |
-| `packages/cli/src/ui/components/HistoryItemDisplay.tsx`      | Renderer dispatch                                   |
+| `packages/cli/src/ui/layouts/DefaultAppLayout.tsx`           | Sticky-banner placement above the Composer          |
+| `packages/cli/src/ui/layouts/ScreenReaderAppLayout.tsx`      | Same placement under screen-reader mode             |
 | `packages/cli/src/config/settingsSchema.ts`                  | `general.showSessionRecap` setting                  |
 
 ## Prompt Design
@@ -90,7 +93,7 @@ recap, not a leak.
 
 Bullets below correspond 1:1 with `RECAP_SYSTEM_PROMPT`:
 
-- 1 to 3 short sentences, plain prose (no markdown / lists / headings).
+- Exactly one short sentence (≤ 80 chars), plain prose (no markdown / lists / headings).
 - First sentence: the high-level task. Then: the concrete next step.
 - Explicitly forbid: listing what was done, reciting tool calls, status reports.
 - Match the dominant language of the conversation (English or Chinese).
@@ -121,13 +124,13 @@ the model's reasoning preamble is worse than showing no recap at all.
 
 ### Call Parameters
 
-| Parameter           | Value                          | Reason                                                           |
-| ------------------- | ------------------------------ | ---------------------------------------------------------------- |
-| `model`             | `getFastModel() ?? getModel()` | Recap doesn't need a frontier model                              |
-| `tools`             | `[]`                           | One-shot query, no tool use                                      |
-| `maxOutputTokens`   | `300`                          | Enough for 1-3 sentences + tags; larger would encourage rambling |
-| `temperature`       | `0.3`                          | Mostly deterministic, with a bit of natural variation            |
-| `systemInstruction` | The recap-only prompt above    | Replaces the main agent's role definition                        |
+| Parameter           | Value                          | Reason                                                |
+| ------------------- | ------------------------------ | ----------------------------------------------------- |
+| `model`             | `getFastModel() ?? getModel()` | Recap doesn't need a frontier model                   |
+| `tools`             | `[]`                           | One-shot query, no tool use                           |
+| `maxOutputTokens`   | `300`                          | Headroom for one short sentence + tags                |
+| `temperature`       | `0.3`                          | Mostly deterministic, with a bit of natural variation |
+| `systemInstruction` | The recap-only prompt above    | Replaces the main agent's role definition             |
 
 ## History Filtering
 
@@ -167,7 +170,7 @@ response.
 | `recapPendingRef` | Whether an LLM call is in flight                  |
 | `inFlightRef`     | The current in-flight `AbortController`           |
 
-`useEffect` deps: `[enabled, config, isFocused, isIdle, addItem]`.
+`useEffect` deps: `[enabled, config, isFocused, isIdle, setAwayRecapItem]`.
 
 | Event                                              | Action                                                                                                                                 |
 | -------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
@@ -204,7 +207,7 @@ and a null `pendingItem`.
 
 | Setting                    | Default | Notes                                                             |
 | -------------------------- | ------- | ----------------------------------------------------------------- |
-| `general.showSessionRecap` | `true`  | Auto-trigger only. Manual `/recap` ignores this.                  |
+| `general.showSessionRecap` | `false` | Auto-trigger only. Manual `/recap` ignores this.                  |
 | `fastModel`                | unset   | Recommended (e.g. `qwen3-coder-flash`) for fast and cheap recaps. |
 
 ### Model fallback

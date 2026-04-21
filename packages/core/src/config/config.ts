@@ -336,6 +336,14 @@ export interface ConfigParameters {
   coreTools?: string[];
   allowedTools?: string[];
   excludeTools?: string[];
+  /**
+   * Pre-merged list of slash command names that should be hidden from the
+   * CLI surface. Matched case-insensitively on the final (post-rename)
+   * command name. Sourced from settings (`slashCommands.disabled`, UNION
+   * merged across scopes), the `--disabled-slash-commands` CLI flag, and
+   * the `QWEN_DISABLED_SLASH_COMMANDS` environment variable.
+   */
+  disabledSlashCommands?: string[];
   /** Merged permission rules from all sources (settings + CLI args). */
   permissions?: {
     allow?: string[];
@@ -571,6 +579,7 @@ export class Config {
   private readonly coreTools: string[] | undefined;
   private readonly allowedTools: string[] | undefined;
   private readonly excludeTools: string[] | undefined;
+  private readonly disabledSlashCommands: readonly string[];
   private readonly permissionsAllow: string[];
   private readonly permissionsAsk: string[];
   private readonly permissionsDeny: string[];
@@ -716,6 +725,9 @@ export class Config {
     this.coreTools = params.coreTools;
     this.allowedTools = params.allowedTools;
     this.excludeTools = params.excludeTools;
+    this.disabledSlashCommands = Object.freeze([
+      ...(params.disabledSlashCommands ?? []),
+    ]);
     this.permissionsAllow = params.permissions?.allow || [];
     this.permissionsAsk = params.permissions?.ask || [];
     this.permissionsDeny = params.permissions?.deny || [];
@@ -1693,6 +1705,18 @@ export class Config {
     return merged;
   }
 
+  /**
+   * Returns the pre-merged list of slash command names that should be hidden
+   * from the CLI surface. Callers should treat this as a case-insensitive
+   * denylist; `CommandService.create` handles the normalization.
+   *
+   * CLI callers (loadCliConfig) populate this from settings, the
+   * `--disabled-slash-commands` flag, and `QWEN_DISABLED_SLASH_COMMANDS`.
+   */
+  getDisabledSlashCommands(): readonly string[] {
+    return this.disabledSlashCommands;
+  }
+
   getToolDiscoveryCommand(): string | undefined {
     return this.toolDiscoveryCommand;
   }
@@ -2555,10 +2579,6 @@ export class Config {
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
-    });
-    await registerLazy(ToolNames.SWARM, async () => {
-      const { SwarmTool } = await import('../tools/swarm.js');
-      return new SwarmTool(this);
     });
     await registerLazy(ToolNames.SKILL, async () => {
       const { SkillTool } = await import('../tools/skill.js');

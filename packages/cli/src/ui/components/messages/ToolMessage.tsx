@@ -10,7 +10,8 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import { DiffRenderer } from './DiffRenderer.js';
 import { MarkdownDisplay } from '../../utils/MarkdownDisplay.js';
-import { AnsiOutputText } from '../AnsiOutput.js';
+import { AnsiOutputText, ShellStatsBar } from '../AnsiOutput.js';
+import type { ShellStatsBarProps } from '../AnsiOutput.js';
 import { MaxSizedBox } from '../shared/MaxSizedBox.js';
 import { TodoDisplay } from '../TodoDisplay.js';
 import type {
@@ -18,6 +19,7 @@ import type {
   AgentResultDisplay,
   PlanResultDisplay,
   AnsiOutput,
+  AnsiOutputDisplay,
   Config,
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
@@ -34,6 +36,7 @@ import {
   ToolStatusIndicator,
   STATUS_INDICATOR_WIDTH,
 } from '../shared/ToolStatusIndicator.js';
+import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
@@ -51,7 +54,7 @@ type DisplayRendererResult =
   | { type: 'string'; data: string }
   | { type: 'diff'; data: { fileDiff: string; fileName: string } }
   | { type: 'task'; data: AgentResultDisplay }
-  | { type: 'ansi'; data: AnsiOutput };
+  | { type: 'ansi'; data: AnsiOutput; stats?: ShellStatsBarProps };
 
 /**
  * Custom hook to determine the type of result display and return appropriate rendering info
@@ -136,7 +139,16 @@ const useResultDisplayRenderer = (
       resultDisplay !== null &&
       'ansiOutput' in resultDisplay
     ) {
-      return { type: 'ansi', data: resultDisplay.ansiOutput as AnsiOutput };
+      const display = resultDisplay as AnsiOutputDisplay;
+      return {
+        type: 'ansi',
+        data: display.ansiOutput,
+        stats: {
+          totalLines: display.totalLines,
+          totalBytes: display.totalBytes,
+          timeoutMs: display.timeoutMs,
+        },
+      };
     }
 
     // Default to string
@@ -282,6 +294,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   forceShowResult,
   isFocused,
   isWaitingForOtherApproval,
+  executionStartTime,
 }) => {
   const settings = useSettings();
   const isThisShellFocused =
@@ -366,6 +379,10 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
             </Text>
           </Box>
         )}
+        <ToolElapsedTime
+          status={status}
+          executionStartTime={executionStartTime}
+        />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
       {effectiveDisplayRenderer.type !== 'none' && (
@@ -400,11 +417,19 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               />
             )}
             {effectiveDisplayRenderer.type === 'ansi' && (
-              <AnsiOutputText
-                data={effectiveDisplayRenderer.data}
-                availableTerminalHeight={availableHeight}
-                maxWidth={innerWidth}
-              />
+              <>
+                <AnsiOutputText
+                  data={effectiveDisplayRenderer.data}
+                  availableTerminalHeight={availableHeight}
+                  maxWidth={innerWidth}
+                />
+                {effectiveDisplayRenderer.stats && (
+                  <ShellStatsBar
+                    {...effectiveDisplayRenderer.stats}
+                    displayHeight={availableHeight}
+                  />
+                )}
+              </>
             )}
             {effectiveDisplayRenderer.type === 'string' && (
               <StringResultRenderer
@@ -456,7 +481,7 @@ const ToolInfo: React.FC<ToolInfo> = ({
     }
   }, [emphasis]);
   return (
-    <Box>
+    <Box flexGrow={1}>
       <Text
         wrap="truncate-end"
         strikethrough={status === ToolCallStatus.Canceled}
