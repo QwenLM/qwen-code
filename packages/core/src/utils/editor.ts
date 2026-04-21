@@ -5,6 +5,9 @@
  */
 
 import { execSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('EDITOR');
@@ -52,6 +55,15 @@ export function commandExists(cmd: string): boolean {
 }
 
 /**
+ * Get possible paths for Zed.app on macOS.
+ * Returns paths lazily to avoid calling os.homedir() at module initialization time,
+ * which would break tests that mock node:os without providing a homedir mock.
+ */
+function getZedAppPaths(): string[] {
+  return ['/Applications/Zed.app', join(homedir(), 'Applications/Zed.app')];
+}
+
+/**
  * Editor command configurations for different platforms.
  * Each editor can have multiple possible command names, listed in order of preference.
  */
@@ -70,11 +82,67 @@ export const editorCommands: Record<
   trae: { win32: ['trae'], default: ['trae'] },
 };
 
-export function checkHasEditorType(editor: EditorType): boolean {
-  const commandConfig = editorCommands[editor];
+/**
+ * Get the Zed command to use for opening files/diffs.
+ * On macOS, if the CLI is not in PATH, fall back to using the app bundle's CLI.
+ */
+function getZedCommand(): string | null {
+  // Check CLI commands first
+  const commands = editorCommands.zed.default;
+  for (const cmd of commands) {
+    if (commandExists(cmd)) {
+      return cmd;
+    }
+  }
+
+  // On macOS, check for app bundle CLI
+  if (process.platform === 'darwin') {
+    for (const appPath of getZedAppPaths()) {
+      const cliPath = join(appPath, 'Contents/MacOS/cli');
+      if (existsSync(cliPath)) {
+        return cliPath;
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Get the executable command for a given editor type.
+ * Resolves both CLI commands and platform-specific fallbacks (e.g., macOS app bundles).
+ * This is the shared function used by both getDiffCommand and useLaunchEditor.
+ * Returns null if no editor command is found.
+ */
+export function getEditorExecutable(editorType: EditorType): string | null {
+  const commandConfig = editorCommands[editorType];
   const commands =
     process.platform === 'win32' ? commandConfig.win32 : commandConfig.default;
-  return commands.some((cmd) => commandExists(cmd));
+
+  // Check if any of the CLI commands exist
+  const found = commands.find((cmd) => commandExists(cmd));
+  if (found) {
+    return found;
+  }
+
+    // Special handling for Zed on macOS: check app bundle CLI as fallback
+  if (editorType === 'zed' && process.platform === 'darwin') {
+    for (const appPath of getZedAppPaths()) {
+      const cliPath = join(appPath, 'Contents/MacOS/cli');
+      if (existsSync(cliPath)) {
+        return cliPath;
+      }
+    }
+  }
+
+  // No command found
+  return null;
+}
+
+export function checkHasEditorType(editor: EditorType): boolean {
+  // Use the same resolution logic as getEditorExecutable to keep
+  // availability detection and execution in sync.
+  return getEditorExecutable(editor) !== null;
 }
 
 export function allowEditorTypeInSandbox(editor: EditorType): boolean {
@@ -110,6 +178,16 @@ export function getDiffCommand(
   if (!isValidEditorType(editor)) {
     return null;
   }
+
+  // Special handling for Zed on macOS
+  if (editor === 'zed') {
+    const zedCmd = getZedCommand();
+    if (!zedCmd) {
+      return null;
+    }
+    return { command: zedCmd, args: ['--wait', '--diff', oldPath, newPath] };
+  }
+
   const commandConfig = editorCommands[editor];
   const commands =
     process.platform === 'win32' ? commandConfig.win32 : commandConfig.default;
@@ -122,7 +200,6 @@ export function getDiffCommand(
     case 'vscodium':
     case 'windsurf':
     case 'cursor':
-    case 'zed':
     case 'trae':
       return { command, args: ['--wait', '--diff', oldPath, newPath] };
     case 'vim':

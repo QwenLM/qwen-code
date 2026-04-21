@@ -22,11 +22,16 @@ import {
   type EditorType,
 } from './editor.js';
 import { execSync, spawn, spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 
 vi.mock('child_process', () => ({
   execSync: vi.fn(),
   spawn: vi.fn(),
   spawnSync: vi.fn(() => ({ error: null, status: 0 })),
+}));
+
+vi.mock('fs', () => ({
+  existsSync: vi.fn(),
 }));
 
 const originalPlatform = process.platform;
@@ -171,7 +176,6 @@ describe('editor utils', () => {
         win32Commands: ['windsurf'],
       },
       { editor: 'cursor', commands: ['cursor'], win32Commands: ['cursor'] },
-      { editor: 'zed', commands: ['zed', 'zeditor'], win32Commands: ['zed'] },
       { editor: 'trae', commands: ['trae'], win32Commands: ['trae'] },
     ];
 
@@ -314,6 +318,57 @@ describe('editor utils', () => {
       const command = getDiffCommand('old.txt', 'new.txt', 'foobar');
       expect(command).toBeNull();
     });
+
+    // Zed-specific tests (Zed is handled specially for macOS app detection)
+    describe('Zed', () => {
+      it('should use CLI command "zed" when it exists on Linux', () => {
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/zed'));
+        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
+        expect(diffCommand).toEqual({
+          command: 'zed',
+          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
+        });
+      });
+
+      it('should use CLI command "zeditor" when "zed" does not exist on Linux', () => {
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        (execSync as Mock)
+          .mockImplementationOnce(() => {
+            throw new Error(); // zed not found
+          })
+          .mockReturnValueOnce(Buffer.from('/usr/bin/zeditor')); // zeditor found
+
+        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
+        expect(diffCommand).toEqual({
+          command: 'zeditor',
+          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
+        });
+      });
+
+      it('should return null on Linux when no CLI commands exist', () => {
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        (execSync as Mock).mockImplementation(() => {
+          throw new Error(); // all commands not found
+        });
+        (existsSync as Mock).mockReturnValue(false);
+
+        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
+        expect(diffCommand).toBeNull();
+      });
+
+      it('should use CLI command "zed" on Windows when it exists', () => {
+        Object.defineProperty(process, 'platform', { value: 'win32' });
+        (execSync as Mock).mockReturnValue(
+          Buffer.from('C:\\Program Files\\Zed\\zed.exe'),
+        );
+        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
+        expect(diffCommand).toEqual({
+          command: 'zed',
+          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
+        });
+      });
+    });
   });
 
   describe('openDiff', () => {
@@ -322,7 +377,6 @@ describe('editor utils', () => {
       'vscodium',
       'windsurf',
       'cursor',
-      'zed',
       'trae',
     ];
 
@@ -377,6 +431,65 @@ describe('editor utils', () => {
       });
     }
 
+    // Zed-specific openDiff tests
+    describe('Zed', () => {
+      it('should call spawn for zed on macOS with CLI', async () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockReturnValue(Buffer.from('/usr/local/bin/zed'));
+        (existsSync as Mock).mockReturnValue(false);
+
+        const mockSpawnOn = vi.fn((event, cb) => {
+          if (event === 'close') {
+            cb(0);
+          }
+        });
+        (spawn as Mock).mockReturnValue({ on: mockSpawnOn });
+
+        await openDiff('old.txt', 'new.txt', 'zed', () => {});
+        expect(spawn).toHaveBeenCalledWith(
+          'zed',
+          ['--wait', '--diff', 'old.txt', 'new.txt'],
+          {
+            stdio: 'inherit',
+            shell: false,
+          },
+        );
+      });
+
+      it('should call spawn for zed on macOS with app bundle CLI', async () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockImplementation(() => {
+          throw new Error(); // CLI not found
+        });
+        // Accept any path containing Zed.app
+        (existsSync as Mock).mockImplementation((path: string) => path.includes('Zed.app'));
+
+        const mockSpawnOn = vi.fn((event, cb) => {
+          if (event === 'close') {
+            cb(0);
+          }
+        });
+        (spawn as Mock).mockReturnValue({ on: mockSpawnOn });
+
+        await openDiff('old.txt', 'new.txt', 'zed', () => {});
+        expect(spawn).toHaveBeenCalled();
+        // Verify the command uses the CLI tool (not GUI binary)
+        const call = (spawn as Mock).mock.calls[0];
+        expect(call[0]).toMatch(/MacOS[/\\]cli$/);
+      });
+
+      it('should reject if zed is not installed', async () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockImplementation(() => {
+          throw new Error(); // CLI not found
+        });
+        (existsSync as Mock).mockReturnValue(false); // App not found
+
+        await openDiff('old.txt', 'new.txt', 'zed', () => {});
+        // Should complete without throwing (logs error to debugLogger)
+      });
+    });
+
     const terminalEditors: EditorType[] = ['vim', 'neovim', 'emacs'];
 
     for (const editor of terminalEditors) {
@@ -427,7 +540,6 @@ describe('editor utils', () => {
         'vscodium',
         'windsurf',
         'cursor',
-        'zed',
         'trae',
       ];
       for (const editor of guiEditors) {
@@ -443,6 +555,23 @@ describe('editor utils', () => {
           expect(onEditorClose).not.toHaveBeenCalled();
         });
       }
+
+      // Zed-specific onEditorClose tests
+      it('should not call onEditorClose for zed', async () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockReturnValue(Buffer.from('/usr/local/bin/zed'));
+        (existsSync as Mock).mockReturnValue(false);
+
+        const onEditorClose = vi.fn();
+        const mockSpawnOn = vi.fn((event, cb) => {
+          if (event === 'close') {
+            cb(0);
+          }
+        });
+        (spawn as Mock).mockReturnValue({ on: mockSpawnOn });
+        await openDiff('old.txt', 'new.txt', 'zed', onEditorClose);
+        expect(onEditorClose).not.toHaveBeenCalled();
+      });
     });
   });
 
@@ -541,6 +670,101 @@ describe('editor utils', () => {
       (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/nvim'));
       vi.stubEnv('SANDBOX', 'sandbox');
       expect(isEditorAvailable('neovim')).toBe(true);
+    });
+  });
+
+  describe('Zed macOS app detection', () => {
+    describe('checkHasEditorType for Zed', () => {
+      it('should return true on macOS when Zed.app exists even if CLI is not in PATH', () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockImplementation(() => {
+          throw new Error(); // CLI not found
+        });
+        (existsSync as Mock).mockReturnValue(true); // Zed.app exists
+        expect(checkHasEditorType('zed')).toBe(true);
+      });
+
+      it('should return false on macOS when Zed.app does not exist and CLI is not in PATH', () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockImplementation(() => {
+          throw new Error(); // CLI not found
+        });
+        (existsSync as Mock).mockReturnValue(false); // Zed.app does not exist
+        expect(checkHasEditorType('zed')).toBe(false);
+      });
+
+      it('should return true on macOS when Zed CLI is in PATH', () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockReturnValue(Buffer.from('/usr/local/bin/zed'));
+        expect(checkHasEditorType('zed')).toBe(true);
+      });
+
+      it('should not check for Zed.app on non-macOS platforms', () => {
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        (execSync as Mock).mockImplementation(() => {
+          throw new Error(); // CLI not found
+        });
+        (existsSync as Mock).mockReturnValue(true); // This should be ignored on Linux
+        expect(checkHasEditorType('zed')).toBe(false);
+      });
+    });
+
+    describe('getDiffCommand for Zed on macOS', () => {
+      it('should use app bundle CLI path when CLI is not in PATH', () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockImplementation(() => {
+          throw new Error(); // CLI not found
+        });
+        // Accept any path containing Zed.app (the CLI check will be for Contents/MacOS/cli)
+        (existsSync as Mock).mockImplementation((path: string) => path.includes('Zed.app'));
+
+        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
+        expect(diffCommand).not.toBeNull();
+        // Verify the command ends with cli (the CLI tool, not GUI binary zed)
+        expect(diffCommand!.command).toMatch(/MacOS[/\\]cli$/);
+        expect(diffCommand!.args).toEqual([
+          '--wait',
+          '--diff',
+          'old.txt',
+          'new.txt',
+        ]);
+      });
+
+      it('should prefer CLI in PATH over app bundle', () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockReturnValue(Buffer.from('/usr/local/bin/zed'));
+        (existsSync as Mock).mockReturnValue(true); // App also exists
+
+        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
+        expect(diffCommand).toEqual({
+          command: 'zed',
+          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
+        });
+      });
+
+      it('should return null when Zed is not installed at all', () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockImplementation(() => {
+          throw new Error(); // CLI not found
+        });
+        (existsSync as Mock).mockReturnValue(false); // App not found
+
+        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
+        expect(diffCommand).toBeNull();
+      });
+
+      it('should check user Applications folder as fallback', () => {
+        Object.defineProperty(process, 'platform', { value: 'darwin' });
+        (execSync as Mock).mockImplementation(() => {
+          throw new Error(); // CLI not found
+        });
+        // Accept any path containing Zed.app
+        (existsSync as Mock).mockImplementation((path: string) => path.includes('Zed.app'));
+
+        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
+        expect(diffCommand).not.toBeNull();
+        expect(diffCommand!.command).toMatch(/MacOS[/\\]cli$/);
+      });
     });
   });
 });
