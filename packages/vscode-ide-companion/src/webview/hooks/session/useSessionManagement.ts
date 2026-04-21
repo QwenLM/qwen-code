@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useMemo, useRef } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import type { VSCodeAPI } from '../../hooks/useVSCode.js';
 
 /**
@@ -46,6 +46,16 @@ export const useSessionManagement = (vscode: VSCodeAPI) => {
       }, SWITCH_TIMEOUT_MS);
     }
   }, []);
+
+  useEffect(
+    () => () => {
+      if (switchTimeoutRef.current) {
+        clearTimeout(switchTimeoutRef.current);
+        switchTimeoutRef.current = null;
+      }
+    },
+    [],
+  );
 
   /**
    * Filter session list
