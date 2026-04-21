@@ -1,16 +1,16 @@
 # TUI 优化：屏幕闪烁
 
-> 详细设计文档 2/3 — 解决流式输出、窄屏、终端 resize 等场景下的屏幕闪烁问题。
+> 详细设计文档 — 解决流式输出、窄屏、终端 resize 等场景下的屏幕闪烁问题。
 
 ## 1. 问题分析
 
 ### 1.1 闪烁的根本原因
 
-Ink 6.2.3 的渲染模型决定了闪烁问题的根源：
+Ink 6.2.3 的渲染模型决定了闪烁问题的一部分根源，但 qwen-code 当前的可见整屏闪烁还叠加了应用层主动清屏路径：
 
 1. **全量重绘**：每次 React 状态变更，Ink 对整个动态区域执行 `eraseLines(N)` + 重新输出。`eraseLines` 会逐行发出 `ERASE_LINE + CURSOR_UP` 序列对，然后重写所有内容。
 2. **超高重绘频率**：流式输出时每个内容 chunk（可包含一到多个 token）触发一次状态更新和重绘，高频时可达 50+ 次/秒。
-3. **全屏回退路径**：当动态内容高度超过终端高度时，Ink 切换到 `clearTerminal` + 全量重写，产生整屏闪烁。
+3. **应用层整屏清除路径**：当前 qwen-code 的 `refreshStatic()` 会主动调用 `ansiEscapes.clearTerminal`，在 resize、compact 切换、视图切换等场景触发整屏刷新；这和 Ink 的 `eraseLines` 路径是两类问题，必须分开治理。
 
 ### 1.2 当前缓解措施
 
@@ -31,7 +31,7 @@ Ink 6.2.3 的渲染模型决定了闪烁问题的根源：
 - 仅优化光标移动模式，不减少实际输出字节数
 - 不解决 Ink 全量重绘的根本问题
 - 不支持同步输出协议
-- 对全屏清除路径无效
+- 对 `refreshStatic()` 触发的 `clearTerminal` 路径无效
 
 #### Static/Dynamic 分离
 
@@ -51,15 +51,15 @@ Ink 6.2.3 的渲染模型决定了闪烁问题的根源：
 
 **局限**：
 
-- 当流式内容本身超过终端高度时仍会触发全屏重绘
-- `refreshStatic()` 使用 `clearTerminal` 导致整屏闪烁（resize、compact 切换等场景）
+- 当流式内容本身超过终端高度时，动态区仍会频繁走 `eraseLines` 全量重绘，闪烁被放大
+- `refreshStatic()` 使用 `clearTerminal` 导致整屏闪烁（resize、compact 切换、active view 切换等场景）
 
 ### 1.3 具体闪烁场景
 
 | 场景             | 触发条件                               | 严重程度 | 代码位置                     |
 | ---------------- | -------------------------------------- | -------- | ---------------------------- |
 | 流式输出         | 每个内容 chunk 触发 React re-render    | 高       | `useGeminiStream` hook       |
-| 长输出超屏       | 动态内容高度 > 终端行数                | 严重     | Ink 内部 `eraseLines` 路径   |
+| 长输出超屏       | 动态内容高度 > 终端行数                | 严重     | Ink 动态区 `eraseLines` 路径被放大 |
 | 终端宽度 resize  | `refreshStatic()` 调用 `clearTerminal`；当前 effect 主要依赖宽度变化 | 中       | `AppContainer.tsx` resize effect |
 | Compact 模式切换 | 历史合并、settings dialog、快捷键切换触发 `refreshStatic()` | 中       | `MainContent` / `SettingsDialog` / `AppContainer` |
 | 手动清屏/视图切换 | `/clear`、active view 切换触发全屏刷新 | 中 | `slashCommandProcessor` / `DefaultAppLayout` |
@@ -74,11 +74,27 @@ Ink 6.2.3 的渲染模型决定了闪烁问题的根源：
 - **claude-code#37283**：长输出全屏闪烁
 - **claude-code#10794**：SSH 远程场景闪烁加剧
 
+### 1.5 Gemini CLI / Claude Code 调研结论
+
+外部源码调研表明，qwen-code 当前的闪烁问题并不是单点 bug，而是缺少三层能力：
+
+| 层级 | Gemini CLI 已有能力 | Claude Code 已有能力 | qwen-code 当前缺口 |
+| --- | --- | --- | --- |
+| 观测层 | `useFlickerDetector()`：测量 UI 高度是否超屏 | 自定义 Ink profiler / frame diff 统计 | 缺少 flicker frame、frame write 指标 |
+| 中层策略 | `findLastSafeSplitPoint()` + `Static` 提升；alternate/terminal buffer；`ScrollableList` | `StreamingMarkdown` 稳定前缀；`ScrollBox` 贴底与滚动解耦 | 动态区高度控制、渲染模式分层不足 |
+| 底层输出 | 自定义 Ink fork + incrementalRendering 选项，但 main-screen 仍有 `clearTerminal` 路径 | synchronized output + diff patch + DECSTBM + output buffer | 只有 stdout monkeypatch，没有 frame 级 ownership |
+
+这带来一个明确的路线修正：
+
+1. **Phase 1** 先做 Gemini 风格的“中层治理”：观测、节流、Static 提升、渲染模式分层
+2. **Phase 3** 再评估 Claude 风格的“底层接管”：双缓冲、diff、DECSTBM
+3. 不要在尚无同步输出和 frame ownership 时提前推进 DECSTBM
+
 ## 2. 解决方案
 
 ### 2.1 [P0] 同步输出 — DECSET 2026
 
-**原理**：[同步输出协议](https://gist.github.com/christianparpart/d8a62cc1ab659194f6ca7e8e5b1b1814) 允许应用通过转义序列告知终端"我正在更新帧，请暂缓显示直到帧完成"。
+**原理**：[同步输出协议](https://contour-terminal.org/vt-extensions/synchronized-output/) 允许应用通过转义序列告知终端"我正在更新帧，请暂缓显示直到帧完成"。
 
 ```
 CSI ? 2026 h    ← Begin Synchronized Update（暂停显示）
@@ -86,17 +102,25 @@ CSI ? 2026 h    ← Begin Synchronized Update（暂停显示）
 CSI ? 2026 l    ← End Synchronized Update（刷新显示）
 ```
 
-**终端支持情况**：
-| 终端 | 支持版本 |
-|---|---|
-| kitty | 0.17.0+ |
-| foot | 1.0+ |
-| WezTerm | 所有版本 |
-| iTerm2 | 3.5+ |
-| Windows Terminal | 1.18+ |
-| Contour | 0.3.0+ |
-| tmux | 3.4+ (透传) |
-| 不支持的终端 | 通常会忽略未知私有 CSI 序列；仍需按终端和 tmux/SSH 组合验证 |
+**终端支持矩阵的使用方式**：
+
+下面的矩阵应视为 **rollout 验证矩阵**，不是“单靠本仓源码就能证明的最终定论”。本地源码和竞品源码能证明的是：
+
+- [WezTerm 官方文档](https://wezterm.org/escape-sequences.html) 明确支持 synchronized rendering
+- [kitty 官方文档](https://sw.kovidgoyal.net/kitty/performance/) 明确讨论过 synchronized update 对性能的帮助
+- [Contour 的 synchronized output 规范页](https://contour-terminal.org/vt-extensions/synchronized-output/) 维护了一份 adoption state，列出 Contour、mintty、foot、WezTerm、iTerm2、Kitty 已支持，而 Windows Terminal 仍标注为 not yet
+- Claude Code 在自己的 runtime gating 中对 tmux 采取了保守禁用策略
+
+因此，qwen-code 的实施文档不应把 tmux、iTerm2、Windows Terminal、Terminal.app 的行为写成无条件事实，而应以 **runtime probe + 终端家族 allowlist + 实机验证** 共同决定是否默认开启。文档里的矩阵只用于安排 rollout 优先级，不替代实际探测。
+
+| 终端家族 | 文档阶段结论 | 落地要求 |
+| --- | --- | --- |
+| WezTerm | 官方文档明确支持 | 可作为优先验证对象 |
+| kitty | 有官方资料表明支持并强调性能收益 | 可作为优先验证对象 |
+| iTerm2 / foot / Contour | 外部 adoption state 显示已支持，但仍需结合 qwen 自身输出模型实测 | 默认先走特性开关或 runtime probe |
+| Windows Terminal | 外部 adoption state 仍标记为 not yet | 默认关闭，待后续验证 |
+| tmux / SSH 嵌套场景 | 不应仅因“外层终端支持”就默认视为安全 | 默认保守禁用，待验证 passthrough/atomicity 后再开 |
+| Terminal.app 等未知终端 | 不能假设退化为零风险 | 需验证忽略未知序列时是否保持行为不变 |
 
 **落地步骤**：先在现有的 `terminalRedrawOptimizer.ts` 中加入输出指标，再根据指标决定采用“单 write 包裹”还是“帧缓冲合并”。
 
@@ -140,15 +164,15 @@ const optimizedWrite = function (
 
 **风险评估**：**中低**
 
-- 不支持的终端通常忽略 BSU/ESU，但不能宣称零风险，需覆盖 tmux/SSH/Windows Terminal/Terminal.app
+- 不支持的终端常见行为是忽略 BSU/ESU，但这里不能宣称零风险；需覆盖 tmux/SSH/Windows Terminal/Terminal.app 等组合路径
 - 可通过 `QWEN_CODE_LEGACY_ERASE_LINES=1` 或 `QWEN_CODE_LEGACY_RENDERING=1` 禁用
 - stdout monkeypatch 是全局副作用，必须保证原始 `write()` 语义不变
-- Claude Code 在 `src/ink/terminal.ts` 中已使用相同方案
+- Claude Code 在 `src/ink/terminal.ts` 中使用相同协议，但其 runtime gating 对 tmux 明确更保守，qwen-code 也应沿用这种保守策略
 
 **预期收益**：
 
 - 消除大部分可见的帧撕裂和闪烁
-- tmux 场景下效果最为显著（从数千次/秒滚动事件降至帧率级别）
+- 在已支持且通过验证的终端中，writes/sec 与可见帧撕裂会显著下降；tmux/SSH 需单独验证后再评估默认开启
 - 不改变渲染管线，仅改变终端侧行为
 
 ### 2.2 [P0] 流式更新节流
@@ -204,6 +228,30 @@ const onStreamEnd = useCallback(() => {
 - 如有问题可调整 `FLUSH_INTERVAL_MS` 或通过环境变量禁用
 
 **预期收益**：`stdout.write` 调用从 50+/秒降至 < 20/秒，直接减少 60%+ 的渲染开销。
+
+### 2.2A [P0] 渲染模式分层（alternate / terminal buffer）
+
+**动机**：Gemini CLI 已经把闪烁治理和渲染模式绑定在一起，而不是企图让 main-screen、fullscreen、copy mode、长会话都共享同一条输出路径。qwen-code 当前文档也应明确：防闪烁不是单纯改 ANSI 序列，而是要先区分不同 UI 模式。
+
+**建议分层**：
+
+| 模式 | 建议用途 | 闪烁治理策略 |
+| --- | --- | --- |
+| main-screen | 最保守兼容路径 | 节流 + 渐进转 Static + 尽量避免 `clearTerminal` |
+| alternate buffer | 长对话 / fullscreen / 复杂交互 | 优先落地滚动容器、selection、贴底逻辑 |
+| terminal buffer / future buffer mode | 需要稳定 scrollback 的场景 | 为虚拟滚动和更激进的 render 优化预留 |
+
+**近期可执行动作**：
+
+1. 把当前 main-screen 路径与 fullscreen / alternate buffer 路径的闪烁目标拆开写
+2. 把 `refreshStatic()` 的 main-screen 语义与 fullscreen 重排语义分离
+3. 为后续虚拟滚动预留“仅 alternate/fullscreen 启用”的接入点，避免给普通输出路径增加复杂度
+
+**为什么要现在写进设计**：
+
+- Gemini 的经验表明，长会话滚动与防闪烁是绑定问题
+- Claude 的经验表明，一旦要做 `ScrollBox` / 虚拟滚动，滚动状态就不该继续依赖高频 React setState
+- qwen-code 若不先分模式，后续任何滚动或缓冲优化都会和 main-screen 兼容性缠在一起
 
 ### 2.3 [P1] 动态内容高度管理 + 渐进提升
 
@@ -296,6 +344,12 @@ const refreshStatic = useCallback(() => {
 
 3. **增加 resize debounce 到 500ms**（从 300ms），因为 resize 事件通常成组到达
 
+**补充自源码调研得到的约束**：
+
+- Gemini 的 `refreshStatic()` 只在“不使用 alternate buffer 且不使用 terminal buffer”时走 `clearTerminal`，说明 main-screen 与 buffer mode 已经是不同语义
+- Claude 的滚动体系将 scrollTop、贴底和重挂载分离，避免简单 resize 导致滚动/刷新链路互相污染
+- 因此 qwen-code 的 `refreshStatic()` 设计必须明确“是否只是静态区 remount”“是否允许整屏清除”“是否需要保持当前 scrollback/selection”
+
 **影响范围**：`packages/cli/src/ui/AppContainer.tsx`（第 462-464, 1508-1517 行）
 
 ### 2.5 [P2] 双缓冲 + Diff Patch（Phase 3）
@@ -355,35 +409,52 @@ class ScreenBuffer {
 - xterm.js：5 行以下即时，12 行以上平滑步进
 - 原生终端：待处理行数的 3/4，最少 4 行
 
-## 3. 竞品参考
+## 3. 竞品参考与路线校准
 
-### Claude Code 防闪烁架构
+### 3.1 Gemini CLI：中层防闪烁体系
+
+Gemini CLI 在闪烁问题上最值得借鉴的不是底层 diff，而是“中层组合拳”：
+
+| 能力 | 文件 | 对 qwen-code 的启示 |
+| --- | --- | --- |
+| `findLastSafeSplitPoint()` + 渐进转 Static | `packages/cli/src/ui/hooks/useGeminiStream.ts` | 继续强化现有 progressive promotion，而不是推倒重来 |
+| `useFlickerDetector()` | `packages/cli/src/ui/hooks/useFlickerDetector.ts` | 先把闪烁变成指标 |
+| alternate / terminal buffer render options | `packages/cli/src/interactiveCli.tsx` | 闪烁方案必须分模式设计 |
+| `ScrollableList` / `VirtualizedList` | `packages/cli/src/ui/components/shared/*` | 长会话滚动本身就是防闪烁的一部分 |
+
+**关键洞察**：Gemini 证明了在不重写 Ink 内核的前提下，仍能通过模式分层、渐进转 Static 和滚动容器明显改善体验。
+
+### 3.2 Claude Code：底层防闪烁体系
 
 Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 
-| 层级         | 机制                        | 对应文件                                 |
-| ------------ | --------------------------- | ---------------------------------------- |
-| 1. 帧缓冲    | frontFrame/backFrame 双缓冲 | `src/ink/ink.tsx:99-100`                 |
-| 2. Diff 渲染 | 逐 cell 比较，仅输出变更    | `src/ink/log-update.ts`                  |
-| 3. 原子帧    | BSU/ESU 同步输出包裹        | `src/ink/terminal.ts`                    |
-| 4. 硬件滚动  | DECSTBM 滚动区域            | `src/ink/render-node-to-output.ts`       |
-| 5. 布局感知  | 布局稳定时窄范围 diff       | `src/ink/render-node-to-output.ts:34-42` |
+| 层级 | 机制 | 对应文件 |
+| --- | --- | --- |
+| 1. 帧缓冲 | screen buffer / prevScreen 复用 | `src/ink/output.ts`、`src/ink/render-to-screen.ts` |
+| 2. Diff 渲染 | 逐 cell 比较，仅输出变更 | `src/ink/log-update.ts` |
+| 3. 原子帧 | BSU/ESU 同步输出包裹 | `src/ink/terminal.ts` |
+| 4. 硬件滚动 | DECSTBM 滚动区域 | `src/ink/log-update.ts` |
+| 5. 布局/scrollback 感知 | resize / offscreen / shrink 时显式 full reset | `src/ink/log-update.ts` |
 
-**关键洞察**：Claude Code 的经验表明，同步输出（第 3 层）是**单项收益最大**的优化，而双缓冲 + diff（第 1-2 层）提供了最彻底的解决方案。我们的 Phase 1 策略（同步输出 + 节流）可以以约 10% 的实现成本获得约 70% 的效果。
+**关键洞察**：Claude Code 的经验表明，同步输出（第 3 层）是**单项收益最大**的优化；双缓冲 + diff（第 1-2 层）则是最彻底但也最昂贵的路线。qwen-code 的 Phase 1 策略应继续聚焦“同步输出 + 节流 + 中层治理”，不要过早跳入自研 renderer。
 
 ## 4. 实施优先级与里程碑
 
-| 优先级 | 方案                 | 周次  | 风险 | 预期收益                  |
-| ------ | -------------------- | ----- | ---- | ------------------------- |
-| P0     | 输出层 instrumentation | 1     | 低   | 指标口径可信              |
-| P0     | 同步输出 DECSET 2026 | 2     | 中低 | 消除帧撕裂，tmux 效果显著 |
-| P0     | 流式更新节流 60ms    | 2     | 低   | stdout.write -60%+        |
-| P1     | 现有渐进提升增强      | 7     | 中   | 降低长输出全屏闪烁        |
-| P1     | 智能 refreshStatic() | 8-9   | 中   | resize 不再全屏闪烁       |
-| P2     | 双缓冲 + diff patch  | 11-13 | 高   | stdout 字节/帧 -80%       |
-| P2     | DECSTBM 滚动区域     | 13+   | 高   | 滚动性能接近原生          |
+| 优先级 | 方案                        | 周次  | 风险 | 预期收益                  |
+| ------ | --------------------------- | ----- | ---- | ------------------------- |
+| P0     | 输出层 instrumentation      | 1     | 低   | 指标口径可信              |
+| P0     | 同步输出 DECSET 2026        | 2     | 中低 | 消除帧撕裂，tmux 效果显著 |
+| P0     | 流式更新节流 60ms           | 2     | 低   | stdout.write -60%+        |
+| P0     | 渲染模式分层                | 2-3   | 中   | 为滚动和 fullscreen 优化铺路 |
+| P1     | 现有渐进提升增强             | 7     | 中   | 降低长输出全屏闪烁        |
+| P1     | 智能 refreshStatic()        | 8-9   | 中   | resize 不再全屏闪烁       |
+| P2     | alternate/fullscreen 虚拟滚动 | 9-12 | 高   | 长会话稳定性显著提升      |
+| P2     | 双缓冲 + diff patch         | 11-13 | 高   | stdout 字节/帧 -80%       |
+| P2     | DECSTBM 滚动区域            | 13+   | 高   | 滚动性能接近原生          |
 
 ## 5. 验证方案
+
+除本节外，实施前还应对照 `06-implementation-rollout-checklist.md` 中“闪烁治理验收清单”的退出标准。
 
 ### 5.1 定量指标
 
@@ -406,8 +477,9 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 | 窄屏 (< 40 列) | 将终端缩至 30 列        | 布局优雅降级，无抖动 |
 | tmux 内运行    | tmux 分屏环境           | 滚动事件 < 100/秒    |
 | SSH 远程       | 高延迟网络              | 闪烁不加剧           |
-| kitty/WezTerm  | 支持 DECSET 2026 的终端 | 无明显帧撕裂         |
-| Terminal.app   | 不支持 DECSET 2026      | 行为不变（不退化）   |
+| kitty/WezTerm  | 官方资料明确支持或已有正向验证的终端 | 无明显帧撕裂         |
+| Terminal.app / 未知终端 | 未通过 runtime probe 或未纳入 allowlist | 行为不变（不退化）   |
+| alternate/fullscreen 路径 | 长会话滚动 + 贴底输出 | 不出现 blank spacer 或整屏 flash |
 | screen reader  | `config.getScreenReader()` 开启 | 不安装 stdout 优化器 |
 | Buffer write/callback | 直接写 stdout 的外部路径 | `write()` 返回值和 callback 行为不变 |
 
@@ -415,4 +487,4 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 
 - `QWEN_CODE_LEGACY_ERASE_LINES=1`：禁用所有 stdout 拦截优化（已有）
 - `QWEN_CODE_LEGACY_RENDERING=1`：新增，禁用同步输出 + 节流
-- 不支持 DECSET 2026 的终端：通常忽略未知序列，但仍需保留开关和终端矩阵验证
+- 未通过 runtime probe 或未纳入 allowlist 的终端：默认不启用同步输出，仍保留开关和终端矩阵验证

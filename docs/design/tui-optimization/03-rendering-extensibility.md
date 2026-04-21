@@ -1,6 +1,6 @@
 # TUI 优化：渲染性能与可扩展性
 
-> 详细设计文档 3/3 — 提升渲染性能，支持更多格式，增强主题可配置性，探索远期方向。
+> 详细设计文档 — 提升渲染性能，支持更多格式，增强主题可配置性，探索远期方向。
 
 ## 1. 问题分析
 
@@ -98,6 +98,20 @@ export const QwenDark: Theme = {
 | 终端超链接 (OSC 8) | URL 渲染为纯文本   | 点击跳转          |
 | 虚拟滚动           | 无，长会话性能退化 | 长会话场景        |
 | 图表/图像          | 不支持             | 远期探索          |
+
+### 1.6 Gemini CLI / Claude Code 调研结论
+
+外部源码调研说明，渲染层的机会不能只看“Markdown 支持哪些语法”，而要同时看 parser、streaming、highlight、表格和长会话容器：
+
+| 维度 | Gemini CLI | Claude Code | 对 qwen-code 的含义 |
+| --- | --- | --- | --- |
+| Markdown parser | 仍是自定义正则解析器 | `marked` + token cache + plain-text fast path | parser 架构升级应主要参考 Claude，而不是把 Gemini 当 parser 终局 |
+| 流式 Markdown | `findLastSafeSplitPoint()` + Static 提升 | `StreamingMarkdown` 稳定前缀 / 不稳定尾部 | 现有“安全分割点”方向正确，但应升级成稳定块模型 |
+| 代码高亮 | 同步 `lowlight(common)` | Suspense + fallback + 宽度感知渲染 | qwen-code 应坚持“同步基线 + 异步增强” |
+| 表格 | 已有成熟 ANSI/CJK 宽度处理 | `MarkdownTable` 单独组件化 | 表格不是首要重构目标，但应成为 parser 迁移的兼容边界 |
+| 长会话 | `ScrollableList` / `VirtualizedList` | `ScrollBox` / `useVirtualScroll` / `VirtualMessageList` | 虚拟滚动必须进入正式路线图，且要处理动态高度与 resize |
+
+因此，本设计文档后续的重点不应只是“换 parser”，而是把 parser、streaming、高亮、虚拟滚动作为一组相互制约的问题来处理。
 
 ## 2. 解决方案
 
@@ -298,6 +312,12 @@ return [...cachedBlocks.flat(), ...lastBlockTokens];
 5. 内部 dogfood 后渐进切换默认值到 v2，保留 v1 作为回退
 6. 稳定两个小版本后再评估移除 v1
 
+**来自 Claude Code 的额外校准**：
+
+- `marked` 迁移的真正收益不只是语法支持，而是 token cache、plain-text fast path、流式稳定前缀可以一起落地
+- 表格应继续组件化渲染，避免为了 parser 迁移把表格退回到纯文本路径
+- 如果只替换 parser 而不补 cache / streaming policy，收益会明显低于预期
+
 **影响范围**：
 
 - 新增：`packages/cli/src/ui/utils/MarkdownDisplayV2.tsx`
@@ -421,6 +441,16 @@ function wrapHyperlink(url: string, text: string): string {
 
 **现状**：所有历史消息通过 `<Static>` 追加到终端 scrollback，长会话会产生大量渲染元素。
 
+**调研结论先行**：这不是一个“列表 slice 一下”的小优化。Gemini CLI 的 `VirtualizedList` 和 Claude Code 的 `useVirtualScroll` 都表明，真正可用的消息虚拟滚动至少要处理：
+
+- 动态高度消息
+- 贴底行为（sticky bottom）
+- resize 后高度缓存失效
+- overscan
+- 搜索/跳转/定位
+- 复制模式 / 选择模式
+- 渲染中间态不出现 blank spacer
+
 **方案设计**：
 
 ```
@@ -442,7 +472,21 @@ function wrapHyperlink(url: string, text: string): string {
 - 需要切换到 alternate screen 模式或自行管理终端输出
 - 每条消息的高度需要预计算或缓存
 
-**参考**：Claude Code 的 `<ScrollBox>` 组件（31KB）实现了完整的虚拟滚动 + DECSTBM 硬件滚动。
+**应补充的工程约束**：
+
+1. **滚动输入不要每 tick 都走 React setState**
+   Claude 的 `ScrollBox` 直接操作 DOM scrollTop，`useVirtualScroll` 只在量化后的 snapshot 变化时触发 React commit。qwen-code 如果让 wheel/scroll 直接驱动高频 state 更新，后续所有虚拟化收益都会被抵消。
+
+2. **高度缓存不能在 resize 时简单清空**
+   Claude 采用“按列宽比例缩放旧高度 + 冻结旧 range 两帧”的策略，Gemini 也用 `ResizeObserver` 和实测高度维护 offsets。qwen-code 需要把 resize 视为一等场景，而不是异常路径。
+
+3. **要为 sticky bottom 与 copy/search mode 预留语义**
+   Gemini 的 `VirtualizedList` 暴露 `isStickingToBottom`、`stableScrollback`、`copyModeEnabled`；Claude 也把 sticky signal 视为核心状态。qwen-code 若未来要支持 transcript 搜索、selection 或 copy mode，不应把虚拟滚动写成只服务普通聊天输出的最小实现。
+
+4. **初期只建议在 fullscreen / alternate buffer 路径启用**
+   Gemini 的经验表明，这类滚动容器最适合全屏或 buffer 模式；main-screen 路径继续用 `Static` + pending 区域更保守。
+
+**参考**：Claude Code 的 `<ScrollBox>` 和 `useVirtualScroll` 形成了完整的滚动/贴底/overscan/resize 体系；Gemini CLI 的 `ScrollableList` / `VirtualizedList` 则证明这一层可以先在 alternate/fullscreen 路径落地。
 
 **建议**：先评估 Phase 1-2 的优化效果，若长会话性能仍是痛点再实施。
 
@@ -507,37 +551,53 @@ $$
 
 **建议**：仅作为概念验证（POC），不纳入正式路线图。
 
-## 3. 竞品参考
+## 3. 竞品参考与路线校准
 
-### Claude Code 渲染架构
+### 3.1 Gemini CLI：滚动和渲染模式先行
 
-| 能力          | 实现方式                                                   |
-| ------------- | ---------------------------------------------------------- |
-| Markdown 解析 | `marked` 库 + LRU token 缓存（500 条）                     |
-| 快速路径      | 正则检测无 MD 语法 → 跳过 `marked.lexer()`（大多数短回复） |
-| 流式优化      | 在块边界分割，仅重解析最后一个块                           |
-| 代码高亮      | `<Suspense>` 包裹的可选 CLI 语法高亮                       |
-| 表格          | React 组件 `<MarkdownTable>` + flexbox 布局                |
-| 超链接        | OSC 8 终端超链接                                           |
-| 样式池化      | StylePool: ANSI 码集内化为整数 ID + 转换缓存               |
-| 字符池化      | CharPool: ASCII 快速路径 + Map 缓存                        |
+Gemini CLI 在 parser 架构上并没有比 qwen-code 更先进，但它在长会话和渲染模式上已经形成了可借鉴的组合：
 
-**关键差异**：Claude Code 使用 `marked`（成熟的 GFM 解析器）而非自定义正则，并通过 LRU 缓存 + 快速路径跳过 + 流式块分割实现了高效的流式渲染。
+| 能力 | 实现方式 |
+| --- | --- |
+| 长会话容器 | `ScrollableList` / `VirtualizedList` |
+| item 级稳定渲染 | `StaticRender` |
+| 高度测量 | `ResizeObserver` |
+| 贴底行为 | `scrollAnchor` + `isStickingToBottom` |
+| scrollback / copy mode | `stableScrollback` / `copyModeEnabled` |
+
+**关键差异**：Gemini 说明“渲染扩展”不仅是 parser 选择，还包括长会话容器和消息呈现模式。
+
+### 3.2 Claude Code：parser、streaming 与虚拟滚动一体化
+
+| 能力 | 实现方式 |
+| --- | --- |
+| Markdown 解析 | `marked` 库 + LRU token 缓存（500 条） |
+| 快速路径 | 正则检测无 MD 语法 → 跳过 `marked.lexer()` |
+| 流式优化 | `StreamingMarkdown` 稳定前缀，仅重解析最后一个块 |
+| 代码高亮 | `<Suspense>` 包裹的可选 CLI 语法高亮 |
+| 表格 | React 组件 `<MarkdownTable>` |
+| 超链接 | OSC 8 终端超链接 |
+| 长会话 | `ScrollBox` + `useVirtualScroll` + `VirtualMessageList` |
+
+**关键差异**：Claude Code 将 parser、streaming、高亮、虚拟滚动视为同一套渲染架构的一部分，因此能在长会话中同时保持功能完整和性能稳定。
 
 ## 4. 实施优先级与里程碑
 
-| 优先级 | 方案                      | 周次  | 风险   | 预期收益                  |
-| ------ | ------------------------- | ----- | ------ | ------------------------- |
-| P0     | Markdown token/block 缓存 | 3     | 低     | 解析耗时显著下降          |
-| P0     | 代码高亮缓存 + 同步基线/异步预热 | 3 | 中 | 重复渲染消除，降低大块代码成本 |
-| P1     | 切换到 marked 解析器      | 7-8   | 中     | GFM 基础能力增强          |
-| P1     | ANSI 16 色默认 + 能力检测 | 4     | 中     | 修复透明终端兼容性        |
-| P2     | OSC 8 终端超链接          | 9-10  | 低     | URL 可点击                |
-| P2     | 虚拟滚动                  | 13-15 | 高     | 长会话性能                |
-| P3     | LaTeX 数学公式            | 15-16 | 中     | 数学内容渲染              |
-| 远期   | Web 渲染探索              | TBD   | 探索性 | 富文本能力                |
+| 优先级 | 方案                                | 周次  | 风险   | 预期收益                  |
+| ------ | ----------------------------------- | ----- | ------ | ------------------------- |
+| P0     | Markdown token/block 缓存           | 3     | 低     | 解析耗时显著下降          |
+| P0     | 代码高亮缓存 + 同步基线/异步预热     | 3     | 中     | 重复渲染消除，降低大块代码成本 |
+| P1     | ANSI 16 色默认 + 能力检测           | 4     | 中     | 修复透明终端兼容性        |
+| P1     | 切换到 marked 解析器                | 7-8   | 中     | GFM 基础能力增强          |
+| P1     | streaming stable prefix / suffix    | 7-8   | 中     | 流式重解析成本显著下降    |
+| P2     | OSC 8 终端超链接                    | 9-10  | 低     | URL 可点击                |
+| P2     | fullscreen / alternate 路径虚拟滚动 | 13-15 | 高     | 长会话性能                |
+| P3     | LaTeX 数学公式                      | 15-16 | 中     | 数学内容渲染              |
+| 远期   | Web 渲染探索                        | TBD   | 探索性 | 富文本能力                |
 
 ## 5. 验证方案
+
+除本节外，实施前还应对照 `06-implementation-rollout-checklist.md` 中“渲染与扩展验收清单”的退出标准。
 
 ### 5.1 渲染性能基准
 
@@ -577,7 +637,9 @@ Markdown fixture 测试集，验证所有支持的格式正确渲染：
 - 分割线
 - 引用块
 - streaming partial blocks（未闭合代码块、未闭合表格、未闭合列表）
+- stable prefix / unstable suffix 切换场景
 - HTML 输入（默认转义/忽略策略）
+- resize 后高度缓存与虚拟滚动 range 稳定性
 
 ### 5.3 主题兼容性
 
