@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
-import { Box, Static, Text } from 'ink';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import { Box, Text, useStdout } from 'ink';
+import ansiEscapes from 'ansi-escapes';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { t } from '../../../../i18n/index.js';
@@ -83,6 +84,7 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
   onBack,
 }) => {
   const config = useConfig();
+  const { write, stdout } = useStdout();
   const [authState, setAuthState] = useState<AuthState>('idle');
   const [messages, setMessages] = useState<string[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -91,21 +93,6 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
     { status: 'idle' } | { status: 'copied' | 'unsupported'; nonce: number }
   >({ status: 'idle' });
   const isRunning = useRef(false);
-
-  // Emit the URL above the dialog via <Static>: it writes the line once
-  // to stdout as a single OSC 8 hyperlink and lets the terminal wrap it
-  // visually, so the hyperlink state persists across every wrapped row
-  // and every visible line is clickable. This trades a clean
-  // erase-on-close for full-line clickability — the URL remains in the
-  // terminal's scrollback after the dialog dismisses, but every
-  // in-dialog alternative we tried either broke clickability past the
-  // first line (per-slice OSC 8) or left unrecoverable residue behind
-  // (wide overflow row, because Ink's bundled log-update does not
-  // re-measure terminal-wrapped content for erase).
-  const staticAuthUrlItems = useMemo(
-    () => (authUrl ? [{ key: authUrl, url: authUrl }] : []),
-    [authUrl],
-  );
 
   const runAuthentication = useCallback(async () => {
     if (!server || !config || isRunning.current) return;
@@ -211,6 +198,30 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Print the authorization URL above Ink's dynamic UI as a single OSC 8
+  // hyperlink. Ink's `write` (useStdout) clears the live frame, writes
+  // our data into the scrollback, then re-renders the live frame below
+  // — so every byte of the URL reaches the terminal in one piece and
+  // the hyperlink state carries across the terminal's soft-wraps,
+  // keeping every wrapped line clickable. On unmount (auth success, Esc,
+  // dialog dismiss) we navigate back up with cursor-up / eraseLines so
+  // the URL doesn't stay in the scrollback.
+  useEffect(() => {
+    if (!authUrl) return;
+    const columns = Math.max(1, stdout.columns ?? 80);
+    // One leading + one trailing blank row frames the URL visually.
+    const urlVisualLines = Math.max(1, Math.ceil(authUrl.length / columns));
+    write(`\n${osc8Hyperlink(authUrl)}\n`);
+    return () => {
+      // After Ink's writeToStdout clears the dynamic frame, the cursor
+      // sits one row below the trailing blank we wrote. Step up once to
+      // reach that blank, then erase it plus the URL rows plus the
+      // leading blank.
+      const totalRowsToErase = urlVisualLines + 2;
+      write(ansiEscapes.cursorUp(1) + ansiEscapes.eraseLines(totalRowsToErase));
+    };
+  }, [authUrl, write, stdout]);
+
   // Auto-navigate back after authentication succeeds
   useEffect(() => {
     if (authState !== 'success') return;
@@ -264,21 +275,6 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
 
   return (
     <Box flexDirection="column" gap={1}>
-      {/*
-        URL is emitted through <Static>, which writes once above the
-        dynamic UI and is not tracked by log-update. The Box is sized
-        to the URL length so Ink does not wrap it — the terminal soft-
-        wraps it, and the single OSC 8 escape carries the hyperlink
-        state across every wrap so each visible line is clickable.
-      */}
-      <Static items={staticAuthUrlItems}>
-        {(item) => (
-          <Box key={item.key} width={item.url.length}>
-            <Text color={theme.text.accent}>{osc8Hyperlink(item.url)}</Text>
-          </Box>
-        )}
-      </Static>
-
       {/* Server info */}
       <Box>
         <Text color={theme.text.secondary}>
