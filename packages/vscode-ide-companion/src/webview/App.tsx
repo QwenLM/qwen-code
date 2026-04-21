@@ -75,17 +75,23 @@ export const App: React.FC = () => {
   } = useToolCalls();
 
   // UI state
-  const [inputText, setInputText] = useState('');
+  const [inputText, _setInputTextState] = useState('');
   // Defer input state updates so the contentEditable div stays responsive.
   // A ref mirrors the latest value so submitMessage reads the correct text
   // even if the transition hasn't committed yet.
+  // Single-writer invariant: every update to inputText MUST go through
+  // setInputText or deferredSetInputText so the ref stays in sync. Do not
+  // call _setInputTextState directly.
   const inputTextRef = useRef(inputText);
-  inputTextRef.current = inputText;
   const [, startInputTransition] = useTransition();
+  const setInputText = useCallback((text: string) => {
+    inputTextRef.current = text;
+    _setInputTextState(text);
+  }, []);
   const deferredSetInputText = useCallback((text: string) => {
     inputTextRef.current = text;
     startInputTransition(() => {
-      setInputText(text);
+      _setInputTextState(text);
     });
   }, []);
   const [permissionRequest, setPermissionRequest] = useState<{
@@ -814,8 +820,6 @@ export const App: React.FC = () => {
       (a, b) => (a.timestamp || 0) - (b.timestamp || 0),
     );
   }, [messageHandling.messages, inProgressToolCalls, completedToolCalls]);
-
-  console.log('[App] Rendering messages:', allMessages);
 
   // Render all messages and tool calls
   const renderMessages = useCallback<() => React.ReactNode>(() => {
