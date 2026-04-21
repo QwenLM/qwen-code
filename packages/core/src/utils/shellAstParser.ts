@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type {} from '../types/bun.js';
+
 /**
  * Shell AST Parser — powered by web-tree-sitter + tree-sitter-bash.
  *
