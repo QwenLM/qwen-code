@@ -5,8 +5,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect } from 'react';
-import { Box, Text, useStdout } from 'ink';
-import ansiEscapes from 'ansi-escapes';
+import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { t } from '../../../../i18n/index.js';
@@ -87,7 +86,6 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
   onBack,
 }) => {
   const config = useConfig();
-  const { write, stdout } = useStdout();
   const [authState, setAuthState] = useState<AuthState>('idle');
   const [messages, setMessages] = useState<string[]>([]);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -201,37 +199,6 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Print the authorization URL above Ink's dynamic UI as a single OSC 8
-  // hyperlink. Ink's `write` (useStdout) clears the live frame, writes
-  // our data into the scrollback, then re-renders the live frame below
-  // — so every byte of the URL reaches the terminal in one piece and
-  // the hyperlink state carries across the terminal's soft-wraps,
-  // keeping every wrapped line clickable. On unmount (auth success, Esc,
-  // dialog dismiss) we navigate back up with cursor-up / eraseLines so
-  // the URL doesn't stay in the scrollback.
-  useEffect(() => {
-    if (!authUrl) return;
-    // `columns` is captured at effect-run time; a terminal resize
-    // between write and unmount will leave the erase count stale. An
-    // OAuth flow typically finishes in well under a minute, and
-    // authorization URLs are always ASCII (so `.length` matches display
-    // width), so this is acceptable.
-    const columns = Math.max(1, stdout.columns ?? 80);
-    const urlVisualLines = Math.max(1, Math.ceil(authUrl.length / columns));
-    // When the URL length is an exact multiple of the terminal width,
-    // the terminal's auto-wrap pushes the cursor past the last row,
-    // leaving an extra blank row we also need to erase on unmount.
-    const autoWrapOverflow = authUrl.length % columns === 0 ? 1 : 0;
-    const rowsWritten = urlVisualLines + autoWrapOverflow;
-    write(`${osc8Hyperlink(authUrl)}\n`);
-    return () => {
-      // After Ink's writeToStdout clears the dynamic frame, the cursor
-      // sits one row below the rows we wrote. Step up once to reach the
-      // bottom URL row, then erase upward to remove all URL rows.
-      write(ansiEscapes.cursorUp(1) + ansiEscapes.eraseLines(rowsWritten));
-    };
-  }, [authUrl, write, stdout]);
-
   // Auto-navigate back after authentication succeeds
   useEffect(() => {
     if (authState !== 'success') return;
@@ -307,6 +274,12 @@ export const AuthenticateStep: React.FC<AuthenticateStepProps> = ({
       {authState === 'error' && errorMessage && (
         <Box>
           <Text color={theme.status.error}>{errorMessage}</Text>
+        </Box>
+      )}
+
+      {authUrl && (
+        <Box>
+          <Text color={theme.text.accent}>{osc8Hyperlink(authUrl)}</Text>
         </Box>
       )}
 
