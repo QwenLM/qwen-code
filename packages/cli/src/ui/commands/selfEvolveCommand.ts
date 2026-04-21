@@ -371,6 +371,13 @@ function toMessage(
   };
 }
 
+function formatBackgroundFailure(error: unknown): string {
+  return [
+    'The background self-evolve attempt failed unexpectedly.',
+    error instanceof Error ? error.message : String(error),
+  ].join('\n');
+}
+
 function completeSelfEvolveArgs(partialArg: string): CommandCompletionItem[] {
   const normalized = partialArg.replace(/^\s+/, '');
   if (!normalized) {
@@ -451,18 +458,16 @@ export const selfEvolveCommand: SlashCommand = {
     }
 
     const executionMode = context.executionMode ?? 'interactive';
-    if (executionMode === 'interactive') {
+    if (executionMode === 'interactive' && parsed.mode !== 'schedule') {
       context.ui.setPendingItem({
         type: 'info',
-        text:
-          parsed.mode === 'schedule'
-            ? t('Scheduling self-evolve and running the first attempt...')
-            : t('Running self-evolve in an isolated worktree...'),
+        text: t('Running self-evolve in an isolated worktree...'),
       });
     }
 
     try {
       let scheduledSummary: string | undefined;
+      const service = new SelfEvolveService();
       if (parsed.mode === 'schedule') {
         const job = config
           .getCronScheduler()
@@ -475,13 +480,47 @@ export const selfEvolveCommand: SlashCommand = {
           `Cadence: ${parsed.cadence} (${parsed.cron})`,
           roundedLine,
           'Recurring self-evolve jobs are session-only and auto-expire after 3 days.',
-          'Running the first self-evolve attempt now.',
+          executionMode === 'interactive'
+            ? 'Running the first self-evolve attempt in the background. You can keep using Qwen Code.'
+            : 'Running the first self-evolve attempt now.',
         ]
           .filter((line): line is string => Boolean(line))
           .join('\n');
       }
 
-      const service = new SelfEvolveService();
+      if (parsed.mode === 'schedule' && executionMode === 'interactive') {
+        context.ui.addItem(
+          {
+            type: 'info',
+            text: scheduledSummary!,
+          },
+          Date.now(),
+        );
+        void service
+          .run(config, {
+            direction: parsed.direction,
+          })
+          .then((result) => {
+            context.ui.addItem(
+              {
+                type: result.ok ? 'info' : 'error',
+                text: `Background self-evolve attempt finished.\n${formatResult(result)}`,
+              },
+              Date.now(),
+            );
+          })
+          .catch((error) => {
+            context.ui.addItem(
+              {
+                type: 'error',
+                text: formatBackgroundFailure(error),
+              },
+              Date.now(),
+            );
+          });
+        return;
+      }
+
       const result = await service.run(config, {
         direction: parsed.direction,
       });
@@ -503,7 +542,7 @@ export const selfEvolveCommand: SlashCommand = {
 
       return toMessage(result.ok ? 'info' : 'error', content);
     } finally {
-      if (executionMode === 'interactive') {
+      if (executionMode === 'interactive' && parsed.mode !== 'schedule') {
         context.ui.setPendingItem(null);
       }
     }

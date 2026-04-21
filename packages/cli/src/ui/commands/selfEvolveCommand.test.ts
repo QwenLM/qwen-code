@@ -195,6 +195,67 @@ describe('selfEvolveCommand', () => {
     });
   });
 
+  it('runs the first scheduled self-evolve attempt in the background for interactive mode', async () => {
+    cronCreate.mockReturnValue({
+      id: 'job12345',
+      cronExpr: '0 */2 * * *',
+      prompt: '/self-evolve --once --direction focus lint cleanup',
+    });
+
+    let resolveRun:
+      | ((value: Awaited<ReturnType<SelfEvolveService['run']>>) => void)
+      | undefined;
+    mockRun.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveRun = resolve;
+        }),
+    );
+
+    await expect(
+      selfEvolveCommand.action!(mockContext, '--every 2h focus lint cleanup'),
+    ).resolves.toBeUndefined();
+
+    expect(mockContext.ui.setPendingItem).not.toHaveBeenCalled();
+    expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'info',
+        text: expect.stringContaining(
+          'Running the first self-evolve attempt in the background.',
+        ),
+      }),
+      expect.any(Number),
+    );
+    expect(mockRun).toHaveBeenCalledWith(expect.anything(), {
+      direction: 'focus lint cleanup',
+    });
+
+    resolveRun?.({
+      ok: true,
+      attemptId: 'attempt-bg',
+      recordPath: '/tmp/result.json',
+      branch: 'self-evolve/review',
+      commitSha: 'bg123',
+      summary: 'Prepared a small improvement.',
+      selectedTask: 'Fix lint error in src/file.ts:10:2',
+      direction: 'focus lint cleanup',
+      validation: ['pass: npm run lint'],
+      changedFiles: ['src/file.ts'],
+    });
+
+    await vi.waitFor(() => {
+      expect(mockContext.ui.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'info',
+          text: expect.stringContaining(
+            'Background self-evolve attempt finished.',
+          ),
+        }),
+        expect.any(Number),
+      );
+    });
+  });
+
   it('returns usage error for invalid flag combinations', async () => {
     const result = await selfEvolveCommand.action!(
       mockContext,
