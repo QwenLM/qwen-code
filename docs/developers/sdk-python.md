@@ -143,3 +143,22 @@ Repository-level helper commands:
 - `npm run test:sdk:python`
 - `npm run lint:sdk:python`
 - `npm run typecheck:sdk:python`
+- `npm run smoke:sdk:python -- --qwen qwen`
+
+## Real E2E Smoke
+
+For a real runtime check (actual `qwen` process + real model call), run from
+the repository root. The npm helper uses `python3`, so ensure it resolves to a
+Python `>=3.10` interpreter:
+
+```bash
+npm run smoke:sdk:python -- --qwen qwen
+```
+
+This script runs:
+
+- async single-turn query
+- async control flow (`supported_commands`, permission mode updates)
+- sync `query_sync` query
+
+It prints JSON and returns non-zero on failure.
