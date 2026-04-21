@@ -2,7 +2,7 @@
 
 ## Overview
 
-Qwen Code is a TypeScript-based monorepo containing 8 packages that implement an AI-powered coding assistant. The project uses Node.js >= 20.0 and is built with TypeScript for type safety.
+Qwen Code is a TypeScript-based monorepo built with npm workspaces for an AI-powered coding assistant. The project uses Node.js >= 20.0 and is built with TypeScript for type safety.
 
 ## Technology Stack by Part
 
@@ -105,12 +105,12 @@ Qwen Code is a TypeScript-based monorepo containing 8 packages that implement an
 
 ### 8. Test Utils (`packages/test-utils`)
 
-| Category        | Technology           | Version | Justification                               |
-| --------------- | -------------------- | ------- | ------------------------------------------- |
-| Runtime         | Node.js              | >= 20   | Inherited from root                         |
-| Language        | TypeScript           | Latest  | Used for source files                       |
-| Testing         | Vitest               | Latest  | Testing utilities                           |
-| Testing Library | @testing-library/dom | 10.4.1  | Repo-level dependency, not used in package  |
+| Category        | Technology           | Version | Justification                              |
+| --------------- | -------------------- | ------- | ------------------------------------------ |
+| Runtime         | Node.js              | >= 20   | Inherited from root                        |
+| Language        | TypeScript           | Latest  | Used for source files                      |
+| Testing         | Vitest               | Latest  | Testing utilities                          |
+| Testing Library | @testing-library/dom | 10.4.1  | Repo-level dependency, not used in package |
 
 ## Shared Infrastructure
 

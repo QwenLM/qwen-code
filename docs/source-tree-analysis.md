@@ -14,7 +14,7 @@ qwen-code/
 ├── docs-site/                # Documentation website
 ├── hello/                    # Example/hello world
 ├── integration-tests/        # Integration tests
-├── packages/                 # Monorepo packages (8 packages)
+├── packages/                 # Monorepo packages and workspace entries
 │   ├── cli/                 # Terminal CLI application
 │   ├── core/                # Core library (backend)
 │   ├── sdk-typescript/      # TypeScript SDK

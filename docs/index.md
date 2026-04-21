@@ -15,7 +15,7 @@
 | Attribute       | Value                     |
 | --------------- | ------------------------- |
 | Repository Type | Monorepo (npm workspaces) |
-| Packages        | 8 packages                |
+| Workspaces      | See root `package.json`   |
 | Architecture    | Layered (CLI → Core → AI) |
 | Test Framework  | Vitest                    |
 | Build Tool      | esbuild                   |
@@ -77,7 +77,9 @@
 | [Component Inventory](./component-inventory.md)   | UI components catalog            | ✓ Complete |
 | [Development Guide](./development-guide.md)       | Setup and workflow               | ✓ Complete |
 
-## Package Structure
+## Workspace Structure
+
+The root workspace configuration lives in `package.json`. The package list below reflects the current top-level directories under `packages/`; any additional configured workspaces, including nested workspace globs, should also be treated as part of the monorepo layout.
 
 ```
 qwen-code/

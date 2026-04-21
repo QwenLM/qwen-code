@@ -7,14 +7,14 @@
   },
   "mode": "full_rescan",
   "scan_level": "exhaustive",
-  "project_root": "/home/davidyusaku/code/qwen-code",
-  "output_folder": "/home/davidyusaku/code/qwen-code/docs",
+  "project_root": ".",
+  "output_folder": "docs",
   "completed_steps": [
     {
       "step": "step_1",
       "status": "completed",
       "timestamp": "2026-02-03T18:30:00Z",
-      "summary": "Classified as monorepo with 8 parts"
+      "summary": "Classified as monorepo with npm workspaces"
     },
     {
       "step": "step_2",
@@ -38,7 +38,7 @@
       "step": "step_5",
       "status": "completed",
       "timestamp": "2026-02-03T18:40:00Z",
-      "summary": "Source tree documented with 8 packages"
+      "summary": "Source tree documented from workspace and package layout"
     },
     {
       "step": "step_6",
@@ -86,7 +86,6 @@
   "current_step": "completed",
   "project_classification": {
     "repository_type": "monorepo",
-    "parts_count": 8,
     "primary_technology": "TypeScript/Node.js",
     "architecture_type": "Layered with CLI/Core separation"
   },

@@ -20,6 +20,7 @@ describe('ToolConfirmationMessage', () => {
     isTrustedFolder: () => true,
     getIdeMode: () => false,
   } as unknown as Config;
+  const wait = (ms = 50) => new Promise((resolve) => setTimeout(resolve, ms));
 
   it('should not display urls if prompt and url are the same', () => {
     const confirmationDetails: ToolCallConfirmationDetails = {
@@ -280,7 +281,7 @@ describe('ToolConfirmationMessage', () => {
       expect(lastFrame()).toContain('esc or type to revise');
     });
 
-    it('should trigger cancel when typing printable character on third option', () => {
+    it('should trigger cancel when typing printable character on third option', async () => {
       const onConfirm = vi.fn();
       const confirmationDetails: ToolCallConfirmationDetails = {
         type: 'plan',
@@ -306,14 +307,43 @@ describe('ToolConfirmationMessage', () => {
         />,
       );
 
-      // Navigate to third option (down twice)
       stdin.write('\x1B[B'); // Down arrow
       stdin.write('\x1B[B'); // Down arrow again to reach third option
-
-      // Type a printable character
+      await wait();
       stdin.write('a');
+      await wait();
 
-      // Verify onConfirm was called exactly once with Cancel outcome
+      expect(onConfirm).toHaveBeenCalledTimes(1);
+      expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+    });
+
+    it('should trigger cancel when typing shifted printable character on third option', async () => {
+      const onConfirm = vi.fn();
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'plan',
+        title: 'Would you like to proceed?',
+        plan: '# Implementation Plan\n- Step one\n- Step two'.replace(
+          /\n/g,
+          EOL,
+        ),
+        onConfirm,
+      };
+
+      const { stdin } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={30}
+          contentWidth={80}
+        />,
+      );
+
+      stdin.write('\x1B[B');
+      stdin.write('\x1B[B');
+      await wait();
+      stdin.write('A');
+      await wait();
+
       expect(onConfirm).toHaveBeenCalledTimes(1);
       expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
     });
@@ -359,7 +389,7 @@ describe('ToolConfirmationMessage', () => {
       expect(onConfirm.mock.calls.length).toBeLessThanOrEqual(1);
     });
 
-    it('should trigger cancel via escape handler when pressing escape on third option', () => {
+    it('should trigger cancel via escape handler when pressing escape on third option', async () => {
       const onConfirm = vi.fn();
       const confirmationDetails: ToolCallConfirmationDetails = {
         type: 'plan',
@@ -385,14 +415,12 @@ describe('ToolConfirmationMessage', () => {
         />,
       );
 
-      // Navigate to third option
       stdin.write('\x1B[B'); // Down arrow
       stdin.write('\x1B[B'); // Down arrow
-
-      // Press escape - should trigger cancel via general escape handler (not isPrintableKey path)
+      await wait();
       stdin.write('\x1B'); // Escape
+      await wait();
 
-      // Verify onConfirm was called exactly once with Cancel outcome
       expect(onConfirm).toHaveBeenCalledTimes(1);
       expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
     });
