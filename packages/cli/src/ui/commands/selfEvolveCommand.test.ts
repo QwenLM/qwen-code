@@ -191,6 +191,13 @@ describe('selfEvolveCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
+      content: expect.stringContaining(
+        'Cadence: Every 2 hours (`0 */2 * * *`)',
+      ),
+    });
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
       content: expect.stringContaining('Rounded from 90m to every 2 hours.'),
     });
   });
@@ -296,7 +303,7 @@ describe('selfEvolveCommand', () => {
       type: 'message',
       messageType: 'info',
       content:
-        'Scheduled self-evolve jobs:\n\njob1  */5 * * * *\nPrompt: /self-evolve --once',
+        'Scheduled self-evolve jobs:\n\njob1  `*/5 * * * *`\nPrompt: /self-evolve --once',
     });
   });
 

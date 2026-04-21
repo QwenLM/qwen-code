@@ -357,7 +357,7 @@ function isSelfEvolveJob(job: CronJob): boolean {
 }
 
 function formatJob(job: CronJob): string {
-  return [`${job.id}  ${job.cronExpr}`, `Prompt: ${job.prompt}`].join('\n');
+  return [`${job.id}  \`${job.cronExpr}\``, `Prompt: ${job.prompt}`].join('\n');
 }
 
 function toMessage(
@@ -477,7 +477,7 @@ export const selfEvolveCommand: SlashCommand = {
           : undefined;
         scheduledSummary = [
           `Scheduled recurring self-evolve job ${job.id}.`,
-          `Cadence: ${parsed.cadence} (${parsed.cron})`,
+          `Cadence: ${parsed.cadence} (\`${parsed.cron}\`)`,
           roundedLine,
           'Recurring self-evolve jobs are session-only and auto-expire after 3 days.',
           executionMode === 'interactive'
