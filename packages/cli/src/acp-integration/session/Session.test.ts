@@ -87,6 +87,10 @@ describe('Session', () => {
 
     mockConfig = {
       setApprovalMode: vi.fn(),
+      // #buildInitialSystemReminders branches on ApprovalMode.PLAN on every
+      // session.prompt(), so the default must be defined. Individual tests
+      // that care override via `mockConfig.getApprovalMode = vi.fn()...`.
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
