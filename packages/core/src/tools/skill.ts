@@ -85,7 +85,9 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    */
   async refreshSkills(): Promise<void> {
     try {
-      this.availableSkills = await this.skillManager.listSkills();
+      this.availableSkills = (await this.skillManager.listSkills()).filter(
+        (s) => !s.disableModelInvocation,
+      );
       // Merge in model-invocable commands from CommandService (injected via Config),
       // but exclude any whose names already appear as file-based skills to avoid
       // showing the same skill in both <available_skills> and <available_commands>.
@@ -125,7 +127,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 ${skill.name}
 </name>
 <description>
-${skill.description} (${skill.level})
+${skill.description}${skill.whenToUse ? ` — ${skill.whenToUse}` : ''} (${skill.level})
 </description>
 <location>
 ${skill.level}

@@ -43,6 +43,7 @@ import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
+import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
 import { parseSlashCommand } from '../../utils/commands.js';
 import { isBtwCommand } from '../utils/commandUtils.js';
 import { clearScreen } from '../../utils/stdioHelpers.js';
@@ -351,6 +352,7 @@ export const useSlashCommandProcessor = (
           new McpPromptLoader(config),
           new BuiltinCommandLoader(config),
           new BundledSkillLoader(config),
+          new SkillCommandLoader(config),
           new FileCommandLoader(config),
         ];
         const commandService = await CommandService.create(

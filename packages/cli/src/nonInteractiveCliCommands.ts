@@ -16,6 +16,7 @@ import { CommandService } from './services/CommandService.js';
 import { BuiltinCommandLoader } from './services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from './services/BundledSkillLoader.js';
 import { FileCommandLoader } from './services/FileCommandLoader.js';
+import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
   type SlashCommand,
@@ -200,6 +201,7 @@ export const handleSlashCommand = async (
   const allLoaders = [
     new BuiltinCommandLoader(config),
     new BundledSkillLoader(config),
+    new SkillCommandLoader(config),
     new FileCommandLoader(config),
   ];
 
@@ -343,6 +345,7 @@ export const getAvailableCommands = async (
     const loaders = [
       new BuiltinCommandLoader(config),
       new BundledSkillLoader(config),
+      new SkillCommandLoader(config),
       new FileCommandLoader(config),
     ];
 
