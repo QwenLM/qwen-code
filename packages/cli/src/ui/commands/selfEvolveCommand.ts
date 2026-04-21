@@ -51,6 +51,7 @@ const TRAILING_EVERY_PATTERN =
   /^(?<prompt>.+?)\s+every\s+(?<value>\d+)(?:\s*(?<short>[smhd])|(?:\s+)(?<word>seconds?|minutes?|hours?|days?))\s*$/i;
 const CLEAN_MINUTE_INTERVALS = [1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30];
 const CLEAN_HOUR_INTERVALS = [1, 2, 3, 4, 6, 8, 12];
+const SELF_EVOLVE_COMPLETIONS = ['list', 'clear', '--once', '--every'];
 
 function quoteDirection(direction: string): string {
   return direction.split(/\s+/).filter(Boolean).join(' ');
@@ -346,6 +347,21 @@ function toMessage(
   };
 }
 
+function completeSelfEvolveArgs(partialArg: string): string[] {
+  const normalized = partialArg.replace(/^\s+/, '');
+  if (!normalized) {
+    return SELF_EVOLVE_COMPLETIONS;
+  }
+
+  if (/\s/.test(normalized)) {
+    return [];
+  }
+
+  return SELF_EVOLVE_COMPLETIONS.filter((candidate) =>
+    candidate.startsWith(normalized),
+  );
+}
+
 export const selfEvolveCommand: SlashCommand = {
   name: 'self-evolve',
   description:
@@ -353,6 +369,8 @@ export const selfEvolveCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   commandType: 'local',
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
+  completion: async (_context, partialArg) =>
+    completeSelfEvolveArgs(partialArg),
   action: async (context, args): Promise<void | MessageActionReturn> => {
     const parsed = parseSelfEvolveArgs(args);
     if (parsed.mode === 'error') {

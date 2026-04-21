@@ -50,6 +50,29 @@ describe('selfEvolveCommand', () => {
     } as unknown as CommandContext);
   });
 
+  describe('completion', () => {
+    it('suggests common self-evolve argument forms for an empty query', async () => {
+      await expect(
+        selfEvolveCommand.completion?.(mockContext, ''),
+      ).resolves.toEqual(['list', 'clear', '--once', '--every']);
+    });
+
+    it('filters suggestions by prefix', async () => {
+      await expect(
+        selfEvolveCommand.completion?.(mockContext, '--e'),
+      ).resolves.toEqual(['--every']);
+      await expect(
+        selfEvolveCommand.completion?.(mockContext, 'cl'),
+      ).resolves.toEqual(['clear']);
+    });
+
+    it('stops suggesting subcommands after free-form direction text starts', async () => {
+      await expect(
+        selfEvolveCommand.completion?.(mockContext, 'focus lint'),
+      ).resolves.toEqual([]);
+    });
+  });
+
   it('runs one-shot self-evolve with free-form direction text', async () => {
     mockRun.mockResolvedValue({
       ok: true,
