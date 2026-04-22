@@ -639,6 +639,92 @@ export class SessionService {
   }
 
   /**
+   * Forks a session to a new sessionId.
+   *
+   * Reads the source JSONL into memory, rewrites every record's `sessionId`
+   * to `newSessionId`, rebuilds the `parentUuid` chain in write order so the
+   * fork is a linear continuation, stamps `forkedFrom: { sessionId, messageUuid }`
+   * on every copied record for audit, and writes the result to `<newId>.jsonl`.
+   *
+   * Mirrors Claude Code's `/branch` storage model: full in-memory copy + per-
+   * message forkedFrom (see claude-code/src/commands/branch/branch.ts).
+   *
+   * The source file is not modified.
+   *
+   * @throws If source does not exist, source is empty, source belongs to a
+   *   different project, or the target file already exists.
+   */
+  async forkSession(
+    sourceSessionId: string,
+    newSessionId: string,
+  ): Promise<{ filePath: string; copiedCount: number }> {
+    if (!SESSION_FILE_PATTERN.test(`${sourceSessionId}.jsonl`)) {
+      throw new Error(`Invalid source sessionId: ${sourceSessionId}`);
+    }
+    if (!SESSION_FILE_PATTERN.test(`${newSessionId}.jsonl`)) {
+      throw new Error(`Invalid new sessionId: ${newSessionId}`);
+    }
+
+    const chatsDir = this.getChatsDir();
+    const sourcePath = path.join(chatsDir, `${sourceSessionId}.jsonl`);
+    const targetPath = path.join(chatsDir, `${newSessionId}.jsonl`);
+
+    // Read + parse the full source transcript.
+    const records = await jsonl.read<ChatRecord>(sourcePath);
+    if (records.length === 0) {
+      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
+    }
+
+    // Verify project ownership via the first record's cwd.
+    if (getProjectHash(records[0].cwd) !== this.projectHash) {
+      throw new Error(
+        `Source session does not belong to current project: ${sourceSessionId}`,
+      );
+    }
+
+    // Rebuild the parentUuid chain in write order so the fork is a clean
+    // linear descendant. `forkedFrom` captures the origin of each message.
+    let prevUuid: string | null = null;
+    const forked: ChatRecord[] = records.map((record) => {
+      const next: ChatRecord = {
+        ...record,
+        sessionId: newSessionId,
+        parentUuid: prevUuid,
+        forkedFrom: {
+          sessionId: sourceSessionId,
+          messageUuid: record.uuid,
+        },
+      };
+      prevUuid = record.uuid;
+      return next;
+    });
+
+    fs.mkdirSync(chatsDir, { recursive: true });
+    const body = forked.map((r) => JSON.stringify(r)).join('\n') + '\n';
+
+    // Exclusive create: one syscall that both asserts "file doesn't exist"
+    // and opens for writing, eliminating the TOCTOU window between a
+    // separate existsSync check and writeFileSync. Also guarantees we
+    // never silently overwrite an existing session file.
+    let fd: number;
+    try {
+      fd = fs.openSync(targetPath, 'wx', 0o600);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error(`Target session file already exists: ${newSessionId}`);
+      }
+      throw err;
+    }
+    try {
+      fs.writeFileSync(fd, body, { encoding: 'utf8' });
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    return { filePath: targetPath, copiedCount: forked.length };
+  }
+
+  /**
    * Gets the custom title for a session by reading from its JSONL file.
    *
    * @param sessionId The session ID to look up

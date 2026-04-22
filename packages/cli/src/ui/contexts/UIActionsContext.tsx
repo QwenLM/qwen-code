@@ -101,6 +101,8 @@ export interface UIActions {
   openResumeDialog: () => void;
   closeResumeDialog: () => void;
   handleResume: (sessionId: string) => void;
+  // Branch (fork) session
+  handleBranch: (name?: string) => void;
   // Delete session dialog
   openDeleteDialog: () => void;
   closeDeleteDialog: () => void;

@@ -71,6 +71,7 @@ import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
+import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
@@ -592,6 +593,14 @@ export const AppContainer = (props: AppContainerProps) => {
     remount: refreshStatic,
   });
 
+  const { handleBranch } = useBranchCommand({
+    config,
+    historyManager,
+    startNewSession,
+    setSessionName,
+    remount: refreshStatic,
+  });
+
   const {
     isDeleteDialogOpen,
     openDeleteDialog,
@@ -652,6 +661,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openResumeDialog,
       handleResume,
+      handleBranch,
       openDeleteDialog,
     }),
     [
@@ -675,6 +685,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openResumeDialog,
       handleResume,
+      handleBranch,
       openDeleteDialog,
     ],
   );
@@ -2336,6 +2347,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Branch (fork) session
+      handleBranch,
       // Delete session dialog
       openDeleteDialog,
       closeDeleteDialog,
@@ -2400,6 +2413,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openResumeDialog,
       closeResumeDialog,
       handleResume,
+      // Branch (fork) session
+      handleBranch,
       // Delete session dialog
       openDeleteDialog,
       closeDeleteDialog,
