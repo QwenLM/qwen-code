@@ -17,6 +17,7 @@
  */
 
 import { reportError } from '../../utils/errorReporting.js';
+import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
 import { type ToolCallRequestInfo } from '../../core/turn.js';
 import {
@@ -30,6 +31,7 @@ import type {
   ToolCallConfirmationDetails,
 } from '../../tools/tools.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
+import { FinishReason } from '@google/genai';
 import type {
   Content,
   Part,
@@ -72,7 +74,6 @@ import { type ContextState, templateString } from './agent-headless.js';
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
-  ToolNames.SWARM,
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
@@ -387,6 +388,28 @@ export class AgentCore {
     abortController: AbortController,
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
+    // Tag every API call emitted from this loop with the owning subagent's
+    // name so the `/stats` panel can attribute tokens/requests to the
+    // originating subagent. The store is read inside
+    // `LoggingContentGenerator` via `subagentNameContext.getStore()`.
+    return subagentNameContext.run(this.name, () =>
+      this._runReasoningLoopInner(
+        chat,
+        initialMessages,
+        toolsList,
+        abortController,
+        options,
+      ),
+    );
+  }
+
+  private async _runReasoningLoopInner(
+    chat: GeminiChat,
+    initialMessages: Content[],
+    toolsList: FunctionDeclaration[],
+    abortController: AbortController,
+    options?: ReasoningLoopOptions,
+  ): Promise<ReasoningLoopResult> {
     const startTime = options?.startTimeMs ?? Date.now();
     let currentMessages = initialMessages;
     let turnCounter = 0;
@@ -453,6 +476,7 @@ export class AgentCore {
       let lastUsage: GenerateContentResponseUsageMetadata | undefined =
         undefined;
       let currentResponseId: string | undefined = undefined;
+      let wasOutputTruncated = false;
 
       for await (const streamEvent of responseStream) {
         if (roundAbortController.signal.aborted) {
@@ -464,8 +488,16 @@ export class AgentCore {
           };
         }
 
-        // Handle retry events
+        // Handle retry events — reset all per-attempt state so a successful
+        // retry does not inherit stale data (e.g. wasOutputTruncated) from a
+        // previous attempt that may have hit MAX_TOKENS.
         if (streamEvent.type === 'retry') {
+          functionCalls.length = 0;
+          roundText = '';
+          roundThoughtText = '';
+          lastUsage = undefined;
+          currentResponseId = undefined;
+          wasOutputTruncated = false;
           continue;
         }
 
@@ -477,6 +509,9 @@ export class AgentCore {
             currentResponseId = resp.responseId;
           }
           if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
+          if (resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS) {
+            wasOutputTruncated = true;
+          }
           const content = resp.candidates?.[0]?.content;
           const parts = content?.parts || [];
           for (const p of parts) {
@@ -530,6 +565,7 @@ export class AgentCore {
           turnCounter,
           toolsList,
           currentResponseId,
+          wasOutputTruncated,
         );
       } else {
         // No tool calls — treat this as the model's final answer.
@@ -597,6 +633,7 @@ export class AgentCore {
     currentRound: number,
     toolsList: FunctionDeclaration[],
     responseId?: string,
+    wasOutputTruncated = false,
   ): Promise<Content[]> {
     const toolResponseParts: Part[] = [];
 
@@ -826,6 +863,7 @@ export class AgentCore {
         isClientInitiated: true,
         prompt_id: promptId,
         response_id: responseId,
+        wasOutputTruncated,
       };
 
       const description = this.getToolDescription(toolName, args);

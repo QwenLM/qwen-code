@@ -50,6 +50,9 @@ import {
   createHookOutput,
   generateToolUseId,
   MessageBusType,
+  getPlanModeSystemReminder,
+  getSubagentSystemReminder,
+  getArenaSystemReminder,
 } from '@qwen-code/qwen-code-core';
 
 import { RequestError } from '@agentclientprotocol/sdk';
@@ -392,6 +395,16 @@ export class Session implements SessionContext {
           if (additionalContext) {
             parts = [...parts, { text: additionalContext }];
           }
+        }
+
+        // Prepend session-level system reminders (plan mode / subagent /
+        // arena) so the model sees them, matching the behaviour of
+        // `GeminiClient.sendMessageStream` in the CLI/TUI path. Without this,
+        // plan mode in ACP has no effect because the model never learns it
+        // should avoid edits (#1151).
+        const systemReminders = await this.#buildInitialSystemReminders();
+        if (systemReminders.length > 0) {
+          parts = [...systemReminders, ...parts];
         }
 
         let nextMessage: Content | null = { role: 'user', parts };
@@ -866,9 +879,12 @@ export class Session implements SessionContext {
             _meta: { source: 'cron' },
           });
 
+          // Prepend session-level system reminders (same rationale as the
+          // user-query path in #executePrompt).
+          const cronReminders = await this.#buildInitialSystemReminders();
           let nextMessage: Content | null = {
             role: 'user',
-            parts: [{ text: prompt }],
+            parts: [...cronReminders, { text: prompt }],
           };
 
           while (nextMessage !== null) {
@@ -1085,6 +1101,51 @@ export class Session implements SessionContext {
     };
 
     await this.sendUpdate(update);
+  }
+
+  /**
+   * Assemble the per-turn system reminders the model needs to see at the
+   * start of a user query or cron fire. Mirrors the subagent/plan/arena
+   * branches in `GeminiClient.sendMessageStream` (`client.ts:848-878`) —
+   * the ACP path bypasses that code, so without this helper plan mode is
+   * silently inert (#1151) and subagent/arena sessions lose context.
+   *
+   * Scope note: the `relevantAutoMemory` reminder is intentionally NOT
+   * included here. Managed auto-memory requires a prefetch pipeline that
+   * lives in `GeminiClient`, and porting it into the ACP path is tracked
+   * separately as part of the broader middleware-alignment work.
+   */
+  async #buildInitialSystemReminders(): Promise<Part[]> {
+    const reminders: Part[] = [];
+
+    const hasAgentTool = await this.config
+      .getToolRegistry()
+      .ensureTool(ToolNames.AGENT);
+    const subagents = (await this.config.getSubagentManager().listSubagents())
+      .filter((subagent) => subagent.level !== 'builtin')
+      .map((subagent) => subagent.name);
+    if (hasAgentTool && subagents.length > 0) {
+      reminders.push({ text: getSubagentSystemReminder(subagents) });
+    }
+
+    if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
+      reminders.push({
+        text: getPlanModeSystemReminder(this.config.getSdkMode?.()),
+      });
+    }
+
+    const arenaManager = this.config.getArenaManager?.();
+    if (arenaManager) {
+      try {
+        const sessionDir = arenaManager.getArenaSessionDir();
+        const configPath = `${sessionDir}/config.json`;
+        reminders.push({ text: getArenaSystemReminder(configPath) });
+      } catch {
+        // Arena config not yet initialized — skip (matches client.ts).
+      }
+    }
+
+    return reminders;
   }
 
   private async runTool(

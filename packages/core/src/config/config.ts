@@ -1337,6 +1337,13 @@ export class Config {
     sessionId?: string,
     sessionData?: ResumedSessionData,
   ): string {
+    // Finalize the outgoing session before switching.
+    try {
+      this.chatRecordingService?.finalize();
+    } catch {
+      // Best-effort — don't block session switch
+    }
+
     this.sessionId = sessionId ?? randomUUID();
     this.sessionData = sessionData;
     setDebugLogSession(this);
@@ -1603,6 +1610,13 @@ export class Config {
       return;
     }
     try {
+      // Finalize the current session's metadata before cleanup.
+      try {
+        this.chatRecordingService?.finalize();
+      } catch {
+        // Best-effort — don't block shutdown
+      }
+
       this.skillManager?.stopWatching();
 
       if (this.toolRegistry) {
@@ -2611,10 +2625,6 @@ export class Config {
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
-    });
-    await registerLazy(ToolNames.SWARM, async () => {
-      const { SwarmTool } = await import('../tools/swarm.js');
-      return new SwarmTool(this);
     });
     await registerLazy(ToolNames.SKILL, async () => {
       const { SkillTool } = await import('../tools/skill.js');

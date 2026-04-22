@@ -71,20 +71,22 @@ import { IdeClient } from '../ide/ide-client.js';
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
-  'which likely caused incomplete tool call parameters. ' +
+  'which caused incomplete tool call parameters. ' +
   'Please retry the tool call with complete parameters. ' +
   'If the content is too large for a single response, ' +
-  'consider splitting it into smaller parts.';
+  'you MUST split it into smaller parts: ' +
+  'first write_file with a skeleton/partial content, ' +
+  'then use edit to add the remaining sections incrementally.';
 
 const TRUNCATION_EDIT_REJECTION =
   'Your previous response was truncated due to max_tokens limit, ' +
-  'which likely produced incomplete file content. ' +
+  'which produced incomplete file content. ' +
   'The tool call has been rejected to prevent writing ' +
   'truncated content to the file. ' +
-  'Please retry the tool call with complete content. ' +
-  'If the content is too large for a single response, ' +
-  'consider splitting it into smaller parts ' +
-  '(e.g., write_file for initial content, then edit for additions).';
+  'You MUST split the content into smaller parts: ' +
+  'first write_file with a skeleton/partial content, ' +
+  'then use edit to add the remaining sections incrementally. ' +
+  'Do NOT retry with the same large content.';
 
 export type ValidatingToolCall = {
   status: 'validating';
@@ -888,6 +890,24 @@ export class CoreToolScheduler {
           continue;
         }
 
+        // Reject file-modifying calls when truncated to prevent
+        // writing incomplete content, even if params failed schema validation.
+        if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
+          const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
+          newToolCalls.push({
+            status: 'error',
+            request: reqInfo,
+            tool: toolInstance,
+            response: createErrorResponse(
+              reqInfo,
+              truncationError,
+              ToolErrorType.OUTPUT_TRUNCATED,
+            ),
+            durationMs: 0,
+          });
+          continue;
+        }
+
         const invocationOrError = this.buildInvocation(
           toolInstance,
           reqInfo.args,
@@ -933,24 +953,6 @@ export class CoreToolScheduler {
 
         // Reset all validation retry counters for this tool since it passed validation
         this.clearRetryCountsForTool(reqInfo.name);
-
-        // Reject file-modifying calls when truncated to prevent
-        // writing incomplete content.
-        if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
-          const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
-          newToolCalls.push({
-            status: 'error',
-            request: reqInfo,
-            tool: toolInstance,
-            response: createErrorResponse(
-              reqInfo,
-              truncationError,
-              ToolErrorType.OUTPUT_TRUNCATED,
-            ),
-            durationMs: 0,
-          });
-          continue;
-        }
 
         newToolCalls.push({
           status: 'validating',

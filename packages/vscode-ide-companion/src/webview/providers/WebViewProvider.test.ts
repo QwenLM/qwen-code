@@ -7,23 +7,36 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const {
+  mockConfigChangeHandlers,
   availableCommandsCallbackRef,
   mockCreateImagePathResolver,
+  mockConfigGet,
+  mockConfigUpdate,
   mockGetGlobalTempDir,
   mockGetPanel,
   mockMessageHandlerInstances,
+  mockOnDidChangeConfiguration,
   mockOnDidChangeActiveTextEditor,
   mockOnDidChangeTextEditorSelection,
   mockOpenExternal,
+  mockReadQwenSettingsForVSCode,
+  mockWriteCodingPlanConfig,
+  mockWriteModelProvidersConfig,
+  mockClearPersistedAuth,
   slashCommandNotificationCallbackRef,
   mockQwenAgentManagerInstances,
 } = vi.hoisted(() => ({
+  mockConfigChangeHandlers: [] as Array<
+    (event: { affectsConfiguration: (section: string) => boolean }) => unknown
+  >,
   availableCommandsCallbackRef: {
     current: undefined as
       | ((commands: Array<{ name: string; description?: string }>) => void)
       | undefined,
   },
   mockCreateImagePathResolver: vi.fn(),
+  mockConfigGet: vi.fn(),
+  mockConfigUpdate: vi.fn(),
   mockGetGlobalTempDir: vi.fn(() => '/global-temp'),
   mockGetPanel: vi.fn<() => { webview: { postMessage: unknown } } | null>(
     () => null,
@@ -34,9 +47,29 @@ const {
       data: { optionId?: string };
     }) => void;
   }>,
+  mockOnDidChangeConfiguration: vi.fn(
+    (
+      handler: (event: {
+        affectsConfiguration: (section: string) => boolean;
+      }) => unknown,
+    ) => {
+      mockConfigChangeHandlers.push(handler);
+      return { dispose: vi.fn() };
+    },
+  ),
   mockOnDidChangeActiveTextEditor: vi.fn(() => ({ dispose: vi.fn() })),
   mockOnDidChangeTextEditorSelection: vi.fn(() => ({ dispose: vi.fn() })),
   mockOpenExternal: vi.fn(),
+  mockReadQwenSettingsForVSCode: vi.fn<
+    () => {
+      provider: 'coding-plan' | 'api-key';
+      apiKey: string;
+      codingPlanRegion: 'china' | 'global';
+    } | null
+  >(() => null),
+  mockWriteCodingPlanConfig: vi.fn(() => ({})),
+  mockWriteModelProvidersConfig: vi.fn(),
+  mockClearPersistedAuth: vi.fn(),
   slashCommandNotificationCallbackRef: {
     current: undefined as
       | ((event: {
@@ -50,6 +83,7 @@ const {
   mockQwenAgentManagerInstances: [] as Array<{
     permissionRequestCallback?: (request: unknown) => Promise<string>;
     cancelCurrentPrompt: ReturnType<typeof vi.fn>;
+    disconnect: ReturnType<typeof vi.fn>;
   }>,
 }));
 
@@ -66,6 +100,9 @@ vi.mock('@qwen-code/qwen-code-core', async () => {
 });
 
 vi.mock('vscode', () => ({
+  ConfigurationTarget: {
+    Global: 'global',
+  },
   Uri: {
     joinPath: vi.fn((base: { fsPath?: string }, ...parts: string[]) => ({
       fsPath: `${base.fsPath ?? ''}/${parts.join('/')}`.replace(/\/+/g, '/'),
@@ -82,10 +119,22 @@ vi.mock('vscode', () => ({
   },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: '/workspace-root' } }],
+    onDidChangeConfiguration: mockOnDidChangeConfiguration,
+    getConfiguration: vi.fn(() => ({
+      get: mockConfigGet,
+      update: mockConfigUpdate,
+    })),
   },
   commands: {
     executeCommand: vi.fn(),
   },
+}));
+
+vi.mock('../../services/settingsWriter.js', () => ({
+  writeCodingPlanConfig: mockWriteCodingPlanConfig,
+  writeModelProvidersConfig: mockWriteModelProvidersConfig,
+  readQwenSettingsForVSCode: mockReadQwenSettingsForVSCode,
+  clearPersistedAuth: mockClearPersistedAuth,
 }));
 
 vi.mock('../../services/qwenAgentManager.js', () => ({
@@ -179,7 +228,7 @@ vi.mock('./MessageHandler.js', () => ({
     ) {
       mockMessageHandlerInstances.push(this);
     }
-    setLoginHandler = vi.fn();
+    setAuthInteractiveHandler = vi.fn();
     permissionHandler?: (message: {
       type: string;
       data: { optionId?: string };
@@ -226,6 +275,10 @@ import {
   truncatePanelTitle,
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
+
+const createConfigChangeEvent = (...affectedSections: string[]) => ({
+  affectsConfiguration: (section: string) => affectedSections.includes(section),
+});
 
 type WebViewMessageHandler = (message: {
   type: string;
@@ -278,12 +331,19 @@ async function setupAttachedProvider(options?: {
   return { webview, postMessage, provider, messageHandler };
 }
 
+beforeEach(() => {
+  mockConfigChangeHandlers.length = 0;
+});
+
 describe('WebViewProvider.attachToView', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockMessageHandlerInstances.length = 0;
     mockQwenAgentManagerInstances.length = 0;
     mockGetPanel.mockReturnValue(null);
+    mockConfigGet.mockImplementation(
+      (_key: string, defaultValue: unknown) => defaultValue,
+    );
     availableCommandsCallbackRef.current = undefined;
     slashCommandNotificationCallbackRef.current = undefined;
     mockCreateImagePathResolver.mockReturnValue((paths: string[]) =>
@@ -663,6 +723,231 @@ describe('WebViewProvider.attachToView', () => {
         status: 'failed',
       }),
     });
+  });
+});
+
+describe('WebViewProvider settings sync', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfigChangeHandlers.length = 0;
+    mockConfigGet.mockImplementation(
+      (_key: string, defaultValue: unknown) => defaultValue,
+    );
+  });
+
+  it('does not report success for api-key settings without interactive auth data', async () => {
+    mockConfigGet.mockImplementation((key: string, defaultValue: unknown) => {
+      if (key === 'apiKey') {
+        return 'sk-test';
+      }
+      if (key === 'provider') {
+        return 'api-key';
+      }
+      return defaultValue;
+    });
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    const synced = await (
+      provider as unknown as {
+        syncVSCodeSettingsToQwenConfig: () => Promise<boolean>;
+      }
+    ).syncVSCodeSettingsToQwenConfig();
+
+    expect(synced).toBe(false);
+    expect(mockWriteCodingPlanConfig).not.toHaveBeenCalled();
+    expect(mockWriteModelProvidersConfig).not.toHaveBeenCalled();
+  });
+
+  it('only syncs non-secret VS Code settings from ~/.qwen/settings.json', async () => {
+    mockReadQwenSettingsForVSCode.mockReturnValue({
+      provider: 'coding-plan',
+      apiKey: 'sk-updated',
+      codingPlanRegion: 'global',
+    });
+    mockConfigGet.mockImplementation((key: string, defaultValue: unknown) => {
+      if (key === 'provider') {
+        return 'api-key';
+      }
+      if (key === 'apiKey') {
+        return 'sk-current';
+      }
+      if (key === 'codingPlanRegion') {
+        return 'china';
+      }
+      return defaultValue;
+    });
+
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    await (
+      provider as unknown as {
+        syncQwenConfigToVSCodeSettings: () => Promise<void>;
+      }
+    ).syncQwenConfigToVSCodeSettings();
+
+    expect(mockConfigUpdate).toHaveBeenCalledTimes(2);
+    expect(mockConfigUpdate).toHaveBeenCalledWith(
+      'provider',
+      'coding-plan',
+      expect.anything(),
+    );
+    expect(mockConfigUpdate).toHaveBeenCalledWith(
+      'codingPlanRegion',
+      'global',
+      expect.anything(),
+    );
+    expect(mockConfigUpdate).not.toHaveBeenCalledWith(
+      'apiKey',
+      'sk-updated',
+      expect.anything(),
+    );
+  });
+
+  it('ignores non-auth qwen-code setting changes', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    const syncSpy = vi
+      .spyOn(
+        provider as unknown as {
+          syncVSCodeSettingsToQwenConfig: () => Promise<boolean>;
+        },
+        'syncVSCodeSettingsToQwenConfig',
+      )
+      .mockResolvedValue(true);
+
+    const configChangeHandler = mockConfigChangeHandlers.at(-1);
+    expect(configChangeHandler).toBeDefined();
+
+    await configChangeHandler?.(createConfigChangeEvent('qwen-code'));
+
+    expect(syncSpy).not.toHaveBeenCalled();
+  });
+
+  it('reacts to auth-related qwen-code setting changes', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+    const syncSpy = vi
+      .spyOn(
+        provider as unknown as {
+          syncVSCodeSettingsToQwenConfig: () => Promise<boolean>;
+        },
+        'syncVSCodeSettingsToQwenConfig',
+      )
+      .mockResolvedValue(false);
+
+    const configChangeHandler = mockConfigChangeHandlers.at(-1);
+    expect(configChangeHandler).toBeDefined();
+
+    await configChangeHandler?.(
+      createConfigChangeEvent('qwen-code', 'qwen-code.apiKey'),
+    );
+
+    expect(syncSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears persisted credentials and disconnects when apiKey is emptied', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    // Simulate an already-initialized agent connection
+    (provider as unknown as { agentInitialized: boolean }).agentInitialized =
+      true;
+
+    // syncVSCodeSettingsToQwenConfig returns false because apiKey is empty
+    vi.spyOn(
+      provider as unknown as {
+        syncVSCodeSettingsToQwenConfig: () => Promise<boolean>;
+      },
+      'syncVSCodeSettingsToQwenConfig',
+    ).mockResolvedValue(false);
+
+    // apiKey is empty (user cleared it in Settings)
+    mockConfigGet.mockImplementation((key: string, defaultValue: unknown) => {
+      if (key === 'apiKey') {
+        return '';
+      }
+      return defaultValue;
+    });
+
+    const configChangeHandler = mockConfigChangeHandlers.at(-1);
+    expect(configChangeHandler).toBeDefined();
+
+    await configChangeHandler?.(
+      createConfigChangeEvent('qwen-code', 'qwen-code.apiKey'),
+    );
+
+    // Should clear persisted auth
+    expect(mockClearPersistedAuth).toHaveBeenCalledTimes(1);
+
+    // Should disconnect the agent
+    const agentManager = mockQwenAgentManagerInstances.at(-1);
+    expect(agentManager?.disconnect).toHaveBeenCalledTimes(1);
+
+    // agentInitialized should be reset
+    expect(
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized,
+    ).toBe(false);
+  });
+
+  it('does not de-auth when non-apiKey auth settings change on an api-key provider', async () => {
+    const provider = new WebViewProvider(
+      { subscriptions: [] } as never,
+      { fsPath: '/extension-root' } as never,
+    );
+
+    // Simulate an already-initialized agent with api-key provider
+    (provider as unknown as { agentInitialized: boolean }).agentInitialized =
+      true;
+
+    // syncVSCodeSettingsToQwenConfig returns false — normal for api-key providers
+    vi.spyOn(
+      provider as unknown as {
+        syncVSCodeSettingsToQwenConfig: () => Promise<boolean>;
+      },
+      'syncVSCodeSettingsToQwenConfig',
+    ).mockResolvedValue(false);
+
+    // apiKey is empty because api-key providers don't use this VS Code setting
+    mockConfigGet.mockImplementation((key: string, defaultValue: unknown) => {
+      if (key === 'apiKey') {
+        return '';
+      }
+      if (key === 'provider') {
+        return 'api-key';
+      }
+      return defaultValue;
+    });
+
+    const configChangeHandler = mockConfigChangeHandlers.at(-1);
+    expect(configChangeHandler).toBeDefined();
+
+    // Changing codingPlanRegion should NOT trigger de-auth
+    await configChangeHandler?.(
+      createConfigChangeEvent('qwen-code', 'qwen-code.codingPlanRegion'),
+    );
+
+    expect(mockClearPersistedAuth).not.toHaveBeenCalled();
+
+    const agentManager = mockQwenAgentManagerInstances.at(-1);
+    expect(agentManager?.disconnect).not.toHaveBeenCalled();
+
+    // agentInitialized should remain true
+    expect(
+      (provider as unknown as { agentInitialized: boolean }).agentInitialized,
+    ).toBe(true);
   });
 });
 

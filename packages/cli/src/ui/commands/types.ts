@@ -6,7 +6,12 @@
 
 import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
-import type { Config, GitService, Logger } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  GitService,
+  Logger,
+  SessionListItem,
+} from '@qwen-code/qwen-code-core';
 import type {
   HistoryItemWithoutId,
   HistoryItem,
@@ -86,6 +91,7 @@ export interface CommandContext {
     toggleVimEnabled: () => Promise<boolean>;
     setGeminiMdFileCount: (count: number) => void;
     reloadCommands: () => void;
+    setSessionName: (name: string | null) => void;
     extensionsUpdateState: Map<string, ExtensionUpdateStatus>;
     dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
     addConfirmUpdateExtensionRequest: (value: ConfirmationRequest) => void;
@@ -148,6 +154,12 @@ export interface StreamMessagesActionReturn {
 export interface OpenDialogActionReturn {
   type: 'dialog';
 
+  /** Optional session ID to pass directly to the dialog handler (e.g., for /resume <id>). */
+  sessionId?: string;
+
+  /** Pre-filtered sessions for the picker (e.g., multiple title matches from /resume <title>). */
+  matchedSessions?: SessionListItem[];
+
   dialog:
     | 'help'
     | 'arena_start'
@@ -167,6 +179,7 @@ export interface OpenDialogActionReturn {
     | 'permissions'
     | 'approval-mode'
     | 'resume'
+    | 'delete'
     | 'extensions_manage'
     | 'hooks'
     | 'mcp';
