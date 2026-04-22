@@ -496,6 +496,7 @@ export async function main() {
 
     const wasRaw = process.stdin.isRaw;
     let kittyProtocolDetectionComplete: Promise<boolean> | undefined;
+    let themeAutoDetectionComplete: Promise<void> | undefined;
     if (config.isInteractive() && !wasRaw && process.stdin.isTTY) {
       // Set this as early as possible to avoid spurious characters from
       // input showing up in the output.
@@ -518,13 +519,21 @@ export async function main() {
       kittyProtocolDetectionComplete = detectAndEnableKittyProtocol();
 
       // Auto-detect theme (OSC 11 + COLORFGBG + macOS) when the user has
-      // opted into 'auto' or has not configured a theme at all. Running
-      // this inside the early-capture window is deliberate: the filter in
-      // startEarlyInputCapture absorbs the OSC 11 response bytes so they
-      // cannot leak into the TUI input, even though our probe attaches
-      // its own listener to parse the RGB value.
+      // opted into 'auto' or has not configured a theme at all. Kicked off
+      // here without awaiting so the OSC 11 timeout overlaps with the
+      // heavier startup work below (initializeApp, warnings) instead of
+      // blocking the critical path. The synchronous baseline picked above
+      // keeps the active theme valid in the meantime; this probe only
+      // refines it. Running inside the early-capture window is deliberate:
+      // the filter in startEarlyInputCapture absorbs the OSC 11 response
+      // bytes so they cannot leak into the TUI input, even though our
+      // probe attaches its own listener to parse the RGB value.
       if (!configuredTheme || configuredTheme === AUTO_THEME_NAME) {
-        await themeManager.resolveAutoThemeAsync();
+        themeAutoDetectionComplete = themeManager
+          .resolveAutoThemeAsync()
+          .catch((err) => {
+            debugLogger.warn('Async theme auto-detection failed:', err);
+          });
       }
     }
 
@@ -577,6 +586,11 @@ export async function main() {
     if (config.isInteractive()) {
       // Need kitty detection to be complete before we can start the interactive UI.
       await kittyProtocolDetectionComplete;
+      // Drain the auto-theme probe before render so the OSC 11 response is
+      // absorbed by the early-capture filter (which is closed inside
+      // startInteractiveUI) and so the first paint uses the refined theme
+      // when the probe finishes in time.
+      await themeAutoDetectionComplete;
       await startInteractiveUI(
         config,
         settings,
