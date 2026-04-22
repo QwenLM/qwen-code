@@ -51,7 +51,7 @@ Add to your `settings.json`:
 
 **Notes:**
 
-- DashScope requires an Aliyun API key configured via `DASHSCOPE_API_KEY` or explicitly in the provider config
+- DashScope web search currently requires qwen-oauth credentials; it must be explicitly listed in `webSearch.provider` to be used
 - Configure additional providers (Tavily, Google, GLM) if you want alternatives
 - Set `default` to specify which provider to use by default (if not set, priority order: Tavily > Google > GLM > DashScope)
 
@@ -182,6 +182,9 @@ web_search(query="best practices for React 19", provider="dashscope")
 - **Search engines:** `search_std` (standard), `search_pro` (advanced), `search_pro_sogou` (Sogou), `search_pro_quark` (Quark)
 - **Features:** Intent recognition, multi-engine support, recency filter, domain whitelist
 - **Best for:** Chinese-language queries, access to Chinese web content
+- **Server-side limitations (informational):**
+  - `maxResults` (`count`) is not strictly honored by `search_std`/`search_pro` engines — the server currently returns a fixed number of results regardless of the requested count
+  - `searchDomainFilter` is treated as a hint (whitelist), not a hard constraint — results from outside the specified domains may still appear
 
 ## Important Notes
 
