@@ -86,8 +86,10 @@ export const Footer: React.FC = () => {
   const suppressHint = statusLineLines.length > 0;
 
   // MCP init progress lives in this row (not a standalone component above the
-  // input) so the live area's height stays constant across init → ready —
-  // Ink cannot reclaim rows already scrolled into the terminal's scrollback.
+  // input) so the live area's height is constant in the default case, avoiding
+  // the residual-blank-line artifact left behind when a separate block unmounts.
+  // When a custom status line is active, the row shrinks by 1 on transition to
+  // ready — a one-time, small regression preferred over hiding init progress.
   const leftBottomContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
@@ -101,11 +103,11 @@ export const Footer: React.FC = () => {
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-  ) : suppressHint ? null : configInitMessage ? (
+  ) : configInitMessage ? (
     <Text color={theme.text.secondary}>
       <GeminiSpinner /> {configInitMessage}
     </Text>
-  ) : (
+  ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );
 

@@ -171,18 +171,19 @@ describe('<Footer />', () => {
       expect(frame).toContain('? for shortcuts');
     });
 
-    // Regression: when a custom status line suppresses the hint, the init
-    // message must also be suppressed. Otherwise the footer's left-bottom
-    // row is 1 line during init and 0 lines after, which leaves residual
-    // blank rows in the terminal scrollback — the exact bug this change
-    // was meant to fix.
-    it('stays suppressed when a custom status line is active', () => {
+    // Init progress is more useful than zero layout shift: we show it even
+    // when a custom status line is active, accepting that the row shrinks
+    // by one line once init completes. Still strictly better than the
+    // original bug (a 2-row residual above the input in the default case).
+    it('shows init status even when a custom status line is active', () => {
       useStatusLineMock.mockReturnValue({ lines: ['model-name ctx:34%'] });
       const { lastFrame } = renderWithWidth(
         120,
         createMockUIState({ isConfigInitialized: false }),
       );
-      expect(lastFrame()).not.toContain('Initializing...');
+      const frame = lastFrame()!;
+      expect(frame).toContain('model-name ctx:34%');
+      expect(frame).toContain('Initializing...');
     });
   });
 
