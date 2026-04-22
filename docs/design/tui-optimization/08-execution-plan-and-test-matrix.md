@@ -1,6 +1,6 @@
 # TUI 优化执行计划与测试矩阵
 
-> 本文档把 `00-07` 的设计与调研进一步压缩成“可以直接排期和拆任务”的执行稿。  
+> 本文档把 `00-09` 的设计与调研进一步压缩成“可以直接排期和拆任务”的执行稿。
 > 校准时间点：2026-04-22。若 issue / PR / 上游源码继续变化，需要重新核对后再执行。
 
 ## 1. 目标
@@ -36,6 +36,22 @@
 | S5 | 通用 tool budgeting | `coreToolScheduler.ts`, truncation util 相关路径 | 中 | 2-3 天 |
 | S6 | 窄屏 / interactive shell 专项回归与修复 | `shellExecutionService.ts`, `terminalSerializer.ts`, CLI tests | 中高 | 3-5 天 |
 | S7 | bounded detail panel + stable height | tool/subagent 相关组件 | 中高 | 3-5 天 |
+
+### 2A. 与 `#3013` 的对应关系
+
+为了方便把 `#3013` 拆成若干小 PR，建议把这些 slice 和真正的 PR 切分对应起来：
+
+| Slice | 对应 PR | 说明 |
+| --- | --- | --- |
+| S1 | PR-0 | 观测基线，不直接来自 `#3013`，但建议所有后续 PR 先依赖它 |
+| S2 | PR-2 | assistant pending render throttle |
+| S3 | PR-5 | `refreshStatic()` 语义拆分，是 `#3013` 外的关键补漏 |
+| S4 | PR-1 | 大 plain-text 工具输出 pre-slicing |
+| S5 | 后续独立 PR | 不在 `#3013` 当前 patch 中，建议后移 |
+| S6 | PR-6 | 窄屏 / interactive shell 专项，不建议混入主 UI patch |
+| S7 | PR-3 | tool/subagent stable height 与 content budget |
+
+而 `PR-4` synchronized output 灰度接入横跨 S1 之后的输出层验证与 rollout，不单独落在某一个 slice 上，需结合 [10-pr-3013-split-plan.md](./10-pr-3013-split-plan.md) 的约束执行。
 
 ## 3. Slice S1：建立可观测性
 
@@ -282,13 +298,14 @@
 
 建议不要把这些 slice 混成一个超大 PR。更稳的顺序是：
 
-1. PR-A：S1 观测
-2. PR-B：S2 流式节流
-3. PR-C：S3 `refreshStatic()` 语义拆分
-4. PR-D：S4 大工具输出 pre-slicing
-5. PR-E：S5 通用 tool budgeting
-6. PR-F：S6 窄屏专项
-7. PR-G：S7 bounded detail panel / stable height
+1. PR-0：S1 观测
+2. PR-1：S4 大工具输出 pre-slicing
+3. PR-2：S2 assistant pending render throttle
+4. PR-3：S7 bounded detail panel / stable height
+5. PR-5：S3 `refreshStatic()` 语义拆分
+6. PR-4：synchronized output 灰度接入
+7. PR-6：S6 窄屏专项
+8. 通用 tool budgeting 另开独立 PR
 
 这样做的好处是：
 

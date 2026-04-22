@@ -193,3 +193,5 @@ Entry (gemini.tsx)
 | [06-implementation-rollout-checklist.md](./06-implementation-rollout-checklist.md) | 实施门禁、验收、灰度与回滚清单 |
 | [07-issue-backed-failure-taxonomy.md](./07-issue-backed-failure-taxonomy.md) | 基于 issue 与当前源码的故障分类和修复路线 |
 | [08-execution-plan-and-test-matrix.md](./08-execution-plan-and-test-matrix.md) | 按文件落点、阶段拆解和测试矩阵整理的执行稿 |
+| [09-pr-3013-gap-analysis.md](./09-pr-3013-gap-analysis.md) | 专门分析 `#3013` 已修复范围、剩余缺口与后续拆分建议 |
+| [10-pr-3013-split-plan.md](./10-pr-3013-split-plan.md) | 将 `#3013` 拆成若干小 PR 的执行路线、验证边界与推荐顺序 |

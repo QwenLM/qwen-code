@@ -528,6 +528,8 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 
 ## 4. 实施优先级与里程碑
 
+如果目标是把 `#3013` 拆成更小、可验证的 PR 再逐步合入，建议不要直接按原 PR 的 patch 混合推进，而是遵循 [10-pr-3013-split-plan.md](./10-pr-3013-split-plan.md) 中的拆分路线。下面这张里程碑表给的是**技术演进顺序**，`10` 给的是**真正开 PR 时的切分粒度**。
+
 | 优先级 | 方案                        | 周次  | 风险 | 预期收益                  |
 | ------ | --------------------------- | ----- | ---- | ------------------------- |
 | P0     | 输出层 instrumentation      | 1     | 低   | 指标口径可信              |
@@ -539,6 +541,31 @@ Claude Code 的自研 Ink 内核提供了五层防闪烁保护：
 | P2     | alternate/fullscreen 虚拟滚动 | 9-12 | 高   | 长会话稳定性显著提升      |
 | P2     | 双缓冲 + diff patch         | 11-13 | 高   | stdout 字节/帧 -80%       |
 | P2     | DECSTBM 滚动区域            | 13+   | 高   | 滚动性能接近原生          |
+
+### 4.1 针对 `#3013` 的 PR 拆分建议
+
+`#3013` 当前混合了：
+
+- pre-render slicing
+- stable height
+- assistant stream throttle
+- synchronized output
+- resize 微抖动 guard
+- tool/subagent content budget
+
+这类 patch 如果继续放在一条 PR 里，会让 review 很难回答“到底是哪一部分带来了收益”。因此，闪屏相关落地建议以以下顺序拆分：
+
+| PR | 目标 | 是否直接来自 `#3013` | 说明 |
+| --- | --- | --- | --- |
+| PR-0 | 观测基线 | 否 | 先补 counters，给后面每条 PR 建立统一验证口径 |
+| PR-1 | 大 plain-text 工具输出 pre-slicing | 是 | 最容易视频和基准验证 |
+| PR-2 | assistant pending render throttle | 是 | 聚焦普通流式输出抖动 |
+| PR-3 | tool/subagent stable height 与 content budget | 是 | 聚焦 `ctrl+e` / `ctrl+f` 展开闪烁 |
+| PR-5 | `refreshStatic()` 语义拆分 | 否 | 是所有闪屏修复的补漏地基 |
+| PR-4 | synchronized output 灰度接入 | 是 | 放在更后面，避免和现有 stdout 优化层打架 |
+| PR-6 | 窄屏 / interactive shell 专项 | 否 | 完全独立推进，不拖慢前面主 UI patch |
+
+完整的文件落点、非目标和测试矩阵见 [10-pr-3013-split-plan.md](./10-pr-3013-split-plan.md)。
 
 ## 5. 验证方案
 
