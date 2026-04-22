@@ -150,6 +150,42 @@ describe('<Footer />', () => {
     });
   });
 
+  describe('config init message', () => {
+    it('shows init status in place of the hint while config is initializing', () => {
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: false }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).toContain('Initializing...');
+      expect(frame).not.toContain('? for shortcuts');
+    });
+
+    it('falls back to the hint once config is initialized', () => {
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: true }),
+      );
+      const frame = lastFrame()!;
+      expect(frame).not.toContain('Initializing...');
+      expect(frame).toContain('? for shortcuts');
+    });
+
+    // Regression: when a custom status line suppresses the hint, the init
+    // message must also be suppressed. Otherwise the footer's left-bottom
+    // row is 1 line during init and 0 lines after, which leaves residual
+    // blank rows in the terminal scrollback — the exact bug this change
+    // was meant to fix.
+    it('stays suppressed when a custom status line is active', () => {
+      useStatusLineMock.mockReturnValue({ lines: ['model-name ctx:34%'] });
+      const { lastFrame } = renderWithWidth(
+        120,
+        createMockUIState({ isConfigInitialized: false }),
+      );
+      expect(lastFrame()).not.toContain('Initializing...');
+    });
+  });
+
   describe('footer rendering (golden snapshots)', () => {
     it('renders complete footer on wide terminal', () => {
       const { lastFrame } = renderWithWidth(120, createMockUIState());

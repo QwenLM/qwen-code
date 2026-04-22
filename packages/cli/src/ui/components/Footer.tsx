@@ -85,7 +85,9 @@ export const Footer: React.FC = () => {
   // occupies the footer, so the hint is redundant). Matches upstream behavior.
   const suppressHint = statusLineLines.length > 0;
 
-  // Left bottom row: high-priority messages > approval mode > hint.
+  // MCP init progress lives in this row (not a standalone component above the
+  // input) so the live area's height stays constant across init → ready —
+  // Ink cannot reclaim rows already scrolled into the terminal's scrollback.
   const leftBottomContent = uiState.ctrlCPressedOnce ? (
     <Text color={theme.status.warning}>{t('Press Ctrl+C again to exit.')}</Text>
   ) : uiState.ctrlDPressedOnce ? (
@@ -99,11 +101,11 @@ export const Footer: React.FC = () => {
   ) : showAutoAcceptIndicator !== undefined &&
     showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
-  ) : configInitMessage ? (
+  ) : suppressHint ? null : configInitMessage ? (
     <Text color={theme.text.secondary}>
       <GeminiSpinner /> {configInitMessage}
     </Text>
-  ) : suppressHint ? null : (
+  ) : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
   );
 

@@ -9,27 +9,16 @@ import { appEvents } from '../../utils/events.js';
 import { type McpClient, MCPServerStatus } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
-/**
- * Returns a human-readable initialization status message while config is
- * being initialized (MCP servers connecting, etc.). Returns `null` once
- * initialization is complete so the caller can fall through to its
- * default content.
- *
- * Rendered inline (e.g. in the Footer's left-bottom status slot) instead
- * of as a standalone component, so the live area's height stays constant
- * across the init → ready transition and no residual blank rows remain
- * in the terminal scrollback.
- */
+// Tracks MCP connection progress. Returns the current status string while
+// config is initializing, or `null` once complete so callers can fall
+// through to their default content.
 export function useConfigInitMessage(
   isConfigInitialized: boolean,
 ): string | null {
-  const [message, setMessage] = useState<string | null>(
-    isConfigInitialized ? null : t('Initializing...'),
-  );
+  const [message, setMessage] = useState<string>(() => t('Initializing...'));
 
   useEffect(() => {
     if (isConfigInitialized) {
-      setMessage(null);
       return;
     }
 
@@ -58,5 +47,8 @@ export function useConfigInitMessage(
     };
   }, [isConfigInitialized]);
 
-  return message;
+  // Gating on isConfigInitialized (rather than clearing state from the effect)
+  // ensures the first render that flips to initialized returns null without
+  // a transient frame still showing the old message.
+  return isConfigInitialized ? null : message;
 }
