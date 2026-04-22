@@ -18,7 +18,6 @@ tools:
   - run_shell_command
   - skill
   - web_fetch
-  - web_search
 ---
 
 # Test Engineer — Bug Reproduction & Verification
