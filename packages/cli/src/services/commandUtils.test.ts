@@ -22,18 +22,14 @@ function makeCmd(overrides: Partial<SlashCommand>): SlashCommand {
 }
 
 describe('getEffectiveSupportedModes', () => {
-  // ── Priority 1: explicit supportedModes ───────────────────────────────
-  it('explicit supportedModes overrides commandType inference', () => {
-    const cmd = makeCmd({
-      commandType: 'local',
-      supportedModes: ['interactive'],
-    });
+  // ── Explicit supportedModes ────────────────────────────────────────────
+  it('uses explicit supportedModes when declared', () => {
+    const cmd = makeCmd({ supportedModes: ['interactive'] });
     expect(getEffectiveSupportedModes(cmd)).toEqual(['interactive']);
   });
 
-  it('explicit supportedModes can expand to all modes even for local-jsx', () => {
+  it('supportedModes can declare all modes', () => {
     const cmd = makeCmd({
-      commandType: 'local-jsx',
       supportedModes: ['interactive', 'non_interactive', 'acp'],
     });
     expect(getEffectiveSupportedModes(cmd)).toEqual([
@@ -48,45 +44,13 @@ describe('getEffectiveSupportedModes', () => {
     expect(getEffectiveSupportedModes(cmd)).toEqual([]);
   });
 
-  // ── Priority 2: commandType inference ─────────────────────────────────
-  it('commandType: prompt infers all modes', () => {
-    const cmd = makeCmd({ kind: CommandKind.SKILL, commandType: 'prompt' });
-    expect(getEffectiveSupportedModes(cmd)).toEqual([
-      'interactive',
-      'non_interactive',
-      'acp',
-    ]);
-  });
-
-  it('commandType: local infers interactive only (conservative default)', () => {
-    const cmd = makeCmd({ commandType: 'local' });
-    expect(getEffectiveSupportedModes(cmd)).toEqual(['interactive']);
-  });
-
-  it('commandType: local-jsx infers interactive only', () => {
-    const cmd = makeCmd({ commandType: 'local-jsx' });
-    expect(getEffectiveSupportedModes(cmd)).toEqual(['interactive']);
-  });
-
-  it('commandType: local with explicit supportedModes can unlock non_interactive', () => {
-    const cmd = makeCmd({
-      commandType: 'local',
-      supportedModes: ['interactive', 'non_interactive', 'acp'],
-    });
-    expect(getEffectiveSupportedModes(cmd)).toEqual([
-      'interactive',
-      'non_interactive',
-      'acp',
-    ]);
-  });
-
-  // ── Priority 3: CommandKind fallback (backward compat) ────────────────
-  it('no commandType, CommandKind.BUILT_IN falls back to interactive only', () => {
+  // ── CommandKind fallback (no supportedModes) ───────────────────────────
+  it('CommandKind.BUILT_IN without supportedModes falls back to interactive only', () => {
     const cmd = makeCmd({ kind: CommandKind.BUILT_IN });
     expect(getEffectiveSupportedModes(cmd)).toEqual(['interactive']);
   });
 
-  it('no commandType, CommandKind.FILE falls back to all modes', () => {
+  it('CommandKind.FILE without supportedModes falls back to all modes', () => {
     const cmd = makeCmd({ kind: CommandKind.FILE });
     expect(getEffectiveSupportedModes(cmd)).toEqual([
       'interactive',
@@ -95,7 +59,7 @@ describe('getEffectiveSupportedModes', () => {
     ]);
   });
 
-  it('no commandType, CommandKind.SKILL falls back to all modes', () => {
+  it('CommandKind.SKILL without supportedModes falls back to all modes', () => {
     const cmd = makeCmd({ kind: CommandKind.SKILL });
     expect(getEffectiveSupportedModes(cmd)).toEqual([
       'interactive',
@@ -104,7 +68,7 @@ describe('getEffectiveSupportedModes', () => {
     ]);
   });
 
-  it('no commandType, CommandKind.MCP_PROMPT falls back to all modes (fixes original bug)', () => {
+  it('CommandKind.MCP_PROMPT without supportedModes falls back to all modes (fixes original bug)', () => {
     const cmd = makeCmd({ kind: CommandKind.MCP_PROMPT });
     expect(getEffectiveSupportedModes(cmd)).toEqual([
       'interactive',
@@ -118,28 +82,26 @@ describe('filterCommandsForMode', () => {
   const commands: SlashCommand[] = [
     makeCmd({
       name: 'init',
-      commandType: 'local',
       supportedModes: ['interactive', 'non_interactive', 'acp'],
     }),
     makeCmd({
       name: 'model',
-      commandType: 'local-jsx',
-      // no explicit supportedModes → interactive only
+      supportedModes: ['interactive'],
     }),
     makeCmd({
       name: 'review',
       kind: CommandKind.SKILL,
-      commandType: 'prompt',
+      supportedModes: ['interactive', 'non_interactive', 'acp'],
     }),
     makeCmd({
       name: 'gh-prompt',
       kind: CommandKind.MCP_PROMPT,
-      commandType: 'prompt',
+      supportedModes: ['interactive', 'non_interactive', 'acp'],
     }),
     makeCmd({
       name: 'my-script',
       kind: CommandKind.FILE,
-      commandType: 'prompt',
+      supportedModes: ['interactive', 'non_interactive', 'acp'],
     }),
   ];
 
@@ -154,7 +116,7 @@ describe('filterCommandsForMode', () => {
     ]);
   });
 
-  it('non_interactive mode excludes local-jsx commands', () => {
+  it('non_interactive mode excludes interactive-only commands', () => {
     const result = filterCommandsForMode(commands, 'non_interactive');
     expect(result.map((c) => c.name)).toEqual([
       'init',
@@ -164,7 +126,7 @@ describe('filterCommandsForMode', () => {
     ]);
   });
 
-  it('acp mode excludes local-jsx commands', () => {
+  it('acp mode excludes interactive-only commands', () => {
     const result = filterCommandsForMode(commands, 'acp');
     expect(result.map((c) => c.name)).toEqual([
       'init',
@@ -182,20 +144,22 @@ describe('filterCommandsForMode', () => {
   it('does not filter hidden commands (hidden filtering is caller responsibility)', () => {
     const withHidden = [
       ...commands,
-      makeCmd({ name: 'hidden-cmd', commandType: 'local', hidden: true }),
+      makeCmd({
+        name: 'hidden-cmd',
+        hidden: true,
+        // no supportedModes → BUILT_IN fallback → interactive only
+      }),
     ];
     const result = filterCommandsForMode(withHidden, 'non_interactive');
     // filterCommandsForMode does NOT filter hidden — it only filters by mode
-    // hidden-cmd has commandType: 'local' but no supportedModes, so it's interactive only
     expect(result.some((c) => c.name === 'hidden-cmd')).toBe(false);
   });
 
-  it('hidden local command with explicit supportedModes still passes mode filter', () => {
+  it('hidden command with explicit all-mode supportedModes still passes mode filter', () => {
     const withHidden = [
       ...commands,
       makeCmd({
         name: 'hidden-cmd',
-        commandType: 'local',
         hidden: true,
         supportedModes: ['interactive', 'non_interactive', 'acp'],
       }),
@@ -206,7 +170,9 @@ describe('filterCommandsForMode', () => {
   });
 
   it('returns empty array when no commands match', () => {
-    const jsxOnly = [makeCmd({ name: 'model', commandType: 'local-jsx' })];
+    const jsxOnly = [
+      makeCmd({ name: 'model', supportedModes: ['interactive'] }),
+    ];
     expect(filterCommandsForMode(jsxOnly, 'non_interactive')).toEqual([]);
   });
 });

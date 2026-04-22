@@ -13,7 +13,7 @@ export const resumeCommand: SlashCommand = {
   name: 'resume',
   altNames: ['continue'],
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   get description() {
     return t('Resume a previous session');
   },

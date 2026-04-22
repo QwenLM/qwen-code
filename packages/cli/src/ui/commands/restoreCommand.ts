@@ -151,7 +151,7 @@ export const restoreCommand = (config: Config | null): SlashCommand | null => {
       );
     },
     kind: CommandKind.BUILT_IN,
-    commandType: 'local-jsx',
+    supportedModes: ['interactive'] as const,
     action: restoreAction,
     completion,
   };

@@ -22,7 +22,7 @@ export const clearCommand: SlashCommand = {
     return t('Clear conversation history and free up context');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context, _args) => {
     const { config } = context.services;
 
@@ -83,5 +83,14 @@ export const clearCommand: SlashCommand = {
       context.ui.setDebugMessage(t('Starting a new session and clearing.'));
       context.ui.clear();
     }
+
+    if (context.executionMode !== 'interactive') {
+      return {
+        type: 'message' as const,
+        messageType: 'info' as const,
+        content: 'Context cleared. Previous messages are no longer in context.',
+      };
+    }
+    return;
   },
 };

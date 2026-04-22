@@ -35,6 +35,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
 
   private skillManager: SkillManager;
   private availableSkills: SkillConfig[] = [];
+  private modelInvocableCommands: ReadonlyArray<{
+    name: string;
+    description: string;
+  }> = [];
   private loadedSkillNames: Set<string> = new Set();
 
   constructor(private readonly config: Config) {
@@ -81,11 +85,23 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    */
   async refreshSkills(): Promise<void> {
     try {
-      this.availableSkills = await this.skillManager.listSkills();
+      this.availableSkills = (await this.skillManager.listSkills()).filter(
+        (s) => !s.disableModelInvocation,
+      );
+      // Merge in model-invocable commands from CommandService (injected via Config),
+      // but exclude any whose names already appear as file-based skills to avoid
+      // showing the same skill in both <available_skills> and <available_commands>.
+      const provider = this.config.getModelInvocableCommandsProvider();
+      const allCommands = provider ? provider() : [];
+      const skillNames = new Set(this.availableSkills.map((s) => s.name));
+      this.modelInvocableCommands = allCommands.filter(
+        (cmd) => !skillNames.has(cmd.name),
+      );
       this.updateDescriptionAndSchema();
     } catch (error) {
       debugLogger.warn('Failed to load skills for Skills tool:', error);
       this.availableSkills = [];
+      this.modelInvocableCommands = [];
       this.updateDescriptionAndSchema();
     } finally {
       // Update the client with the new tools
@@ -97,29 +113,45 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   }
 
   /**
-   * Updates the tool's description and schema based on available skills.
+   * Updates the tool's description and schema based on available skills and
+   * model-invocable commands (e.g. bundled skills, file commands, MCP prompts).
    */
   private updateDescriptionAndSchema(): void {
-    let skillDescriptions = '';
-    if (this.availableSkills.length === 0) {
-      skillDescriptions =
-        'No skills are currently configured. Skills can be created by adding directories with SKILL.md files to .qwen/skills/ or ~/.qwen/skills/.';
-    } else {
-      skillDescriptions = this.availableSkills
-        .map(
-          (skill) => `<skill>
+    // Merge file-based skills and prompt commands into a single unified list,
+    // matching Claude Code's design where all invocable commands are listed together.
+    const allSkillEntries: string[] = [];
+
+    for (const skill of this.availableSkills) {
+      allSkillEntries.push(`<skill>
 <name>
 ${skill.name}
 </name>
 <description>
-${skill.description} (${skill.level})
+${skill.description}${skill.whenToUse ? ` — ${skill.whenToUse}` : ''} (${skill.level})
 </description>
 <location>
 ${skill.level}
 </location>
-</skill>`,
-        )
-        .join('\n');
+</skill>`);
+    }
+
+    for (const cmd of this.modelInvocableCommands) {
+      allSkillEntries.push(`<skill>
+<name>
+${cmd.name}
+</name>
+<description>
+${cmd.description}
+</description>
+</skill>`);
+    }
+
+    let skillDescriptions = '';
+    if (allSkillEntries.length === 0) {
+      skillDescriptions =
+        'No skills are currently configured. Skills can be created by adding directories with SKILL.md files to .qwen/skills/ or ~/.qwen/skills/.';
+    } else {
+      skillDescriptions = allSkillEntries.join('\n');
     }
 
     const baseDescription = `Execute a skill within the main conversation
@@ -149,8 +181,7 @@ Important:
 
 <available_skills>
 ${skillDescriptions}
-</available_skills>
-`;
+</available_skills>`;
     // Update description using object property assignment
     (this as { description: string }).description = baseDescription;
   }
@@ -165,20 +196,26 @@ ${skillDescriptions}
       return 'Parameter "skill" must be a non-empty string.';
     }
 
-    // Validate that the skill exists
+    // Check file-based skills
     const skillExists = this.availableSkills.some(
       (skill) => skill.name === params.skill,
     );
+    if (skillExists) return null;
 
-    if (!skillExists) {
-      const availableNames = this.availableSkills.map((s) => s.name);
-      if (availableNames.length === 0) {
-        return `Skill "${params.skill}" not found. No skills are currently available.`;
-      }
-      return `Skill "${params.skill}" not found. Available skills: ${availableNames.join(', ')}`;
+    // Check model-invocable commands (e.g. MCP prompts) listed in the description
+    const commandExists = this.modelInvocableCommands.some(
+      (cmd) => cmd.name === params.skill,
+    );
+    if (commandExists) return null;
+
+    const availableNames = [
+      ...this.availableSkills.map((s) => s.name),
+      ...this.modelInvocableCommands.map((c) => c.name),
+    ];
+    if (availableNames.length === 0) {
+      return `Skill "${params.skill}" not found. No skills are currently available.`;
     }
-
-    return null;
+    return `Skill "${params.skill}" not found. Available skills: ${availableNames.join(', ')}`;
   }
 
   protected createInvocation(params: SkillParams) {
@@ -187,6 +224,7 @@ ${skillDescriptions}
       this.skillManager,
       params,
       (name: string) => this.loadedSkillNames.add(name),
+      this.config.getModelInvocableCommandsExecutor(),
     );
   }
 
@@ -218,6 +256,9 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
     private readonly skillManager: SkillManager,
     params: SkillParams,
     private readonly onSkillLoaded: (name: string) => void,
+    private readonly commandExecutor:
+      | ((name: string, args?: string) => Promise<string | null>)
+      | null = null,
   ) {
     super(params);
   }
@@ -237,6 +278,22 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
       );
 
       if (!skill) {
+        // Try model-invocable command executor (e.g. MCP prompts)
+        if (this.commandExecutor) {
+          const content = await this.commandExecutor(this.params.skill);
+          if (content !== null) {
+            logSkillLaunch(
+              this.config,
+              new SkillLaunchEvent(this.params.skill, true),
+            );
+            this.onSkillLoaded(this.params.skill);
+            return {
+              llmContent: [{ text: content }],
+              returnDisplay: `Executed command: ${this.params.skill}`,
+            };
+          }
+        }
+
         // Log failed skill launch
         logSkillLaunch(
           this.config,

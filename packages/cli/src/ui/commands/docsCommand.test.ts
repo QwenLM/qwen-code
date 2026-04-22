@@ -96,4 +96,24 @@ describe('docsCommand', () => {
     // 'open' should be called in this specific sandbox case
     expect(open).toHaveBeenCalledWith(docsUrl);
   });
+
+  describe('non-interactive mode', () => {
+    it('should return docs URL without opening browser', async () => {
+      if (!docsCommand.action) throw new Error('Command has no action');
+
+      const nonInteractiveContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+      });
+
+      const result = await docsCommand.action(nonInteractiveContext, '');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: expect.stringContaining('qwenlm.github.io'),
+      });
+      expect(open).not.toHaveBeenCalled();
+      expect(nonInteractiveContext.ui.addItem).not.toHaveBeenCalled();
+    });
+  });
 });

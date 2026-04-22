@@ -15,7 +15,7 @@ export const copyCommand: SlashCommand = {
     return t('Copy the last result or code snippet to clipboard');
   },
   kind: CommandKind.BUILT_IN,
-  commandType: 'local-jsx',
+  supportedModes: ['interactive'] as const,
   action: async (context, _args): Promise<SlashCommandActionReturn | void> => {
     const chat = await context.services.config?.getGeminiClient()?.getChat();
     const history = chat?.getHistory();

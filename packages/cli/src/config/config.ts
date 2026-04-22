@@ -524,13 +524,6 @@ export async function parseArguments(): Promise<CliArgs> {
           coerce: (tools: string[]) =>
             tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
         })
-        .option('allowed-tools', {
-          type: 'array',
-          string: true,
-          description: 'Tools to allow, will bypass confirmation',
-          coerce: (tools: string[]) =>
-            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
-        })
         .option('disabled-slash-commands', {
           type: 'array',
           string: true,
@@ -541,6 +534,13 @@ export async function parseArguments(): Promise<CliArgs> {
             'against the final command name.',
           coerce: (names: string[]) =>
             names.flatMap((n) => n.split(',').map((t) => t.trim())),
+        })
+        .option('allowed-tools', {
+          type: 'array',
+          string: true,
+          description: 'Tools to allow, will bypass confirmation',
+          coerce: (tools: string[]) =>
+            tools.flatMap((tool) => tool.split(',').map((t) => t.trim())),
         })
         .option('auth-type', {
           type: 'string',
