@@ -186,11 +186,6 @@ const WebFetchToolCallImpl: FC<BaseToolCallProps & { variant: WebVariant }> = ({
  * @param props - Component props
  * @returns JSX element
  */
-export const WebFetchToolCall: FC<BaseToolCallProps> = (props) => {
-  const normalizedKind = props.toolCall.kind.toLowerCase();
-  const variant: WebVariant =
-    normalizedKind === 'web_search' || normalizedKind === 'websearch'
-      ? 'search'
-      : 'fetch'; // 'fetch', 'web_fetch', 'webfetch' all map to 'fetch'
-  return <WebFetchToolCallImpl {...props} variant={variant} />;
-};
+export const WebFetchToolCall: FC<BaseToolCallProps> = (props) => (
+  <WebFetchToolCallImpl {...props} variant={'fetch'} />
+);

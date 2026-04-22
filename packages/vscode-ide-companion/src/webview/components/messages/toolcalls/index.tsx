@@ -78,8 +78,6 @@ export const getToolCallComponent = (
     case 'fetch':
     case 'web_fetch':
     case 'webfetch':
-    case 'web_search':
-    case 'websearch':
       return WebFetchToolCall;
 
     default:

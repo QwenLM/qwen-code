@@ -1741,10 +1741,6 @@ describe('buildHumanReadableRuleLabel', () => {
     expect(buildHumanReadableRuleLabel(['Bash'])).toBe('run commands');
   });
 
-  it('converts bare WebSearch rule to "search the web"', () => {
-    expect(buildHumanReadableRuleLabel(['WebSearch'])).toBe('search the web');
-  });
-
   it('converts Read with absolute path specifier', () => {
     const label = buildHumanReadableRuleLabel(['Read(//Users/mochi/.qwen/**)']);
     expect(label).toBe('read files in /Users/mochi/.qwen/');

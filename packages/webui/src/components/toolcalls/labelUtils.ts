@@ -64,9 +64,6 @@ export const getToolDisplayLabel = ({
     case 'webfetch':
     case 'fetch':
       return 'WebFetch';
-    case 'web_search':
-    case 'websearch':
-      return 'WebSearch';
     case 'grep':
     case 'grep_search':
       return 'Grep';
