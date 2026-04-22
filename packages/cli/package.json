@@ -1,6 +1,6 @@
 {
   "name": "@alife/dataworks-qwen-code",
-  "version": "0.14.6",
+  "version": "0.14.7",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -34,7 +34,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.6"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.14.7"
   },
   "publishConfig": {
     "registry": "https://registry.anpm.alibaba-inc.com"
