@@ -212,8 +212,9 @@ export const handleSlashCommand = async (
     const trimmed = name.trim();
     if (trimmed) disabledNameSet.add(trimmed.toLowerCase());
   }
-  const isDisabled = (cmd: { name: string }) =>
-    disabledNameSet.has(cmd.name.toLowerCase());
+  const isDisabled = (cmd: { name: string; altNames?: readonly string[] }) =>
+    disabledNameSet.has(cmd.name.toLowerCase()) ||
+    (cmd.altNames ?? []).some((a) => disabledNameSet.has(a.toLowerCase()));
 
   // Load the full command set (unfiltered by the denylist) so that the
   // fallback existence check below can distinguish a disabled command from a
@@ -281,12 +282,17 @@ export const handleSlashCommand = async (
     );
 
     if (knownCommand) {
+      // Derive the token the user actually typed (e.g. "about" when the
+      // primary name is "status") to surface a helpful error message.
+      const typedToken =
+        rawQuery.trim().substring(1).trim().split(/\s+/)[0] ??
+        knownCommand.name;
       if (isDisabled(knownCommand)) {
         return {
           type: 'unsupported',
           reason: t(
             'The command "/{{command}}" is disabled by the current configuration.',
-            { command: knownCommand.name },
+            { command: typedToken },
           ),
           originalType: 'filtered_command',
         };
@@ -295,7 +301,7 @@ export const handleSlashCommand = async (
       return {
         type: 'unsupported',
         reason: t('The command "/{{command}}" is not supported in this mode.', {
-          command: knownCommand.name,
+          command: typedToken,
         }),
         originalType: 'filtered_command',
       };

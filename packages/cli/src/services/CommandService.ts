@@ -101,8 +101,12 @@ export class CommandService {
         if (trimmed) normalizedDisabled.add(trimmed.toLowerCase());
       }
       if (normalizedDisabled.size > 0) {
-        for (const name of Array.from(commandMap.keys())) {
-          if (normalizedDisabled.has(name.toLowerCase())) {
+        for (const [name, cmd] of Array.from(commandMap.entries())) {
+          const matchesPrimary = normalizedDisabled.has(name.toLowerCase());
+          const matchesAlias = (cmd.altNames ?? []).some((a) =>
+            normalizedDisabled.has(a.toLowerCase()),
+          );
+          if (matchesPrimary || matchesAlias) {
             commandMap.delete(name);
           }
         }
