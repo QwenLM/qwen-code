@@ -429,15 +429,17 @@ async function main() {
         console.log(`  - "${key}"`),
       );
 
-      // Save these keys to a JSON file
-      const outputPath = path.join(
-        __dirname,
-        'unused-keys-only-in-locales.json',
-      );
-      saveKeysOnlyInLocalesToJson(
-        result.stats.unusedKeysOnlyInLocales,
-        outputPath,
-      );
+      // Save these keys to a JSON file (skip in CI to avoid dirtying the working tree)
+      if (!process.env.CI) {
+        const outputPath = path.join(
+          __dirname,
+          'unused-keys-only-in-locales.json',
+        );
+        saveKeysOnlyInLocalesToJson(
+          result.stats.unusedKeysOnlyInLocales,
+          outputPath,
+        );
+      }
     }
 
     console.log();

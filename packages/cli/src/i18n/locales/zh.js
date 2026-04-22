@@ -578,6 +578,7 @@ export default {
   '(user)': '（用户）',
   '[not set]': '［未设置］',
   '[value stored in keychain]': '［值存储在钥匙串中］',
+  'Value:': '值：',
   'Manage extension settings.': '管理扩展设置。',
   'You need to specify a command (set or list).':
     '您需要指定命令（set 或 list）。',
@@ -1037,6 +1038,8 @@ export default {
   'Command:': '命令：',
   'Working Directory:': '工作目录：',
   'Capabilities:': '功能：',
+  'No server selected': '未选择服务器',
+  prompts: '提示',
 
   // MCP Tool List
   'No tools available for this server.': '此服务器没有可用工具。',
@@ -1049,7 +1052,9 @@ export default {
   '{{current}}/{{total}}': '{{current}}/{{total}}',
 
   // MCP Tool Detail
+  required: '必需',
   Type: '类型',
+  Enum: '枚举',
   Parameters: '参数',
   'No tool selected': '未选择工具',
   Annotations: '注解',
