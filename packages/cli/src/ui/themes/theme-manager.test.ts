@@ -10,11 +10,16 @@ if (process.env['NO_COLOR'] !== undefined) {
 }
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { themeManager, DEFAULT_THEME } from './theme-manager.js';
+import {
+  themeManager,
+  DEFAULT_THEME,
+  AUTO_THEME_NAME,
+} from './theme-manager.js';
 import type { CustomTheme } from './theme.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import type * as osActual from 'node:os';
+import * as detectModule from './detect-terminal-theme.js';
 
 vi.mock('node:fs');
 vi.mock('node:os', async (importOriginal) => {
@@ -25,6 +30,10 @@ vi.mock('node:os', async (importOriginal) => {
     platform: vi.fn(() => 'linux'),
   };
 });
+vi.mock('./detect-terminal-theme.js', () => ({
+  detectTerminalTheme: vi.fn(() => 'dark'),
+  detectTerminalThemeAsync: vi.fn(async () => 'dark'),
+}));
 
 const validCustomTheme: CustomTheme = {
   type: 'custom',
@@ -46,9 +55,14 @@ const validCustomTheme: CustomTheme = {
 
 describe('ThemeManager', () => {
   beforeEach(() => {
-    // Reset themeManager state
+    // Reset themeManager state. themeManager is a module-level singleton,
+    // so the cached async auto-detection result would otherwise leak across
+    // tests and make ordering load-bearing.
     themeManager.loadCustomThemes({});
     themeManager.setActiveTheme(DEFAULT_THEME.name);
+    (
+      themeManager as unknown as { cachedAutoDetection: unknown }
+    ).cachedAutoDetection = undefined;
   });
 
   afterEach(() => {
@@ -112,6 +126,63 @@ describe('ThemeManager', () => {
     } else {
       process.env['NO_COLOR'] = original;
     }
+  });
+
+  describe('auto theme detection', () => {
+    it('should select Qwen Dark when terminal is detected as dark', () => {
+      vi.mocked(detectModule.detectTerminalTheme).mockReturnValue('dark');
+      const result = themeManager.setActiveTheme(AUTO_THEME_NAME);
+      expect(result).toBe(true);
+      expect(themeManager.getActiveTheme().name).toBe('Qwen Dark');
+    });
+
+    it('should select Qwen Light when terminal is detected as light', () => {
+      vi.mocked(detectModule.detectTerminalTheme).mockReturnValue('light');
+      const result = themeManager.setActiveTheme(AUTO_THEME_NAME);
+      expect(result).toBe(true);
+      expect(themeManager.getActiveTheme().name).toBe('Qwen Light');
+    });
+
+    it('should always return true for auto theme', () => {
+      expect(themeManager.setActiveTheme(AUTO_THEME_NAME)).toBe(true);
+    });
+
+    it('should resolve async auto theme with Qwen Light for light', async () => {
+      vi.mocked(detectModule.detectTerminalThemeAsync).mockResolvedValue(
+        'light',
+      );
+      await themeManager.resolveAutoThemeAsync();
+      expect(themeManager.getActiveTheme().name).toBe('Qwen Light');
+    });
+
+    it('should resolve async auto theme with Qwen Dark for dark', async () => {
+      vi.mocked(detectModule.detectTerminalThemeAsync).mockResolvedValue(
+        'dark',
+      );
+      await themeManager.resolveAutoThemeAsync();
+      expect(themeManager.getActiveTheme().name).toBe('Qwen Dark');
+    });
+
+    it('should reuse the async-detected value when auto is re-selected', async () => {
+      // Startup: async probe (e.g. OSC 11) reports light.
+      vi.mocked(detectModule.detectTerminalThemeAsync).mockResolvedValue(
+        'light',
+      );
+      await themeManager.resolveAutoThemeAsync();
+      expect(themeManager.getActiveTheme().name).toBe('Qwen Light');
+
+      // User switches to another theme via /theme.
+      themeManager.setActiveTheme('Ayu');
+      expect(themeManager.getActiveTheme().name).toBe('Ayu');
+
+      // Switching back to Auto must not regress: even if the sync detector
+      // disagrees (OSC 11 is unavailable in-session), the cached async
+      // result wins so the preview stays consistent with startup.
+      vi.mocked(detectModule.detectTerminalTheme).mockReturnValue('dark');
+      themeManager.setActiveTheme(AUTO_THEME_NAME);
+      expect(themeManager.getActiveTheme().name).toBe('Qwen Light');
+      expect(detectModule.detectTerminalTheme).not.toHaveBeenCalled();
+    });
   });
 
   describe('when loading a theme from a file', () => {
