@@ -249,6 +249,11 @@
           "description": "Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).",
           "type": "boolean",
           "default": false
+        },
+        "shellOutputMaxLines": {
+          "description": "Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.",
+          "type": "number",
+          "default": 5
         }
       }
     },

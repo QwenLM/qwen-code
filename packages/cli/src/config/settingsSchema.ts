@@ -707,6 +707,16 @@ const SETTINGS_SCHEMA = {
           'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
         showInDialog: true,
       },
+      shellOutputMaxLines: {
+        type: 'number',
+        label: 'Shell Output Max Lines',
+        category: 'UI',
+        requiresRestart: false,
+        default: 5,
+        description:
+          'Max number of shell output lines shown inline. Set to 0 to disable the cap and show full output. The hidden line count is still surfaced via the `+N lines` indicator.',
+        showInDialog: true,
+      },
     },
   },
 
