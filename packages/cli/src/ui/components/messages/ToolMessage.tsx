@@ -351,14 +351,27 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   // string via `returnDisplayMessage = result.output`). ShellStatsBar surfaces
   // hidden lines via `+N lines` for ANSI; MaxSizedBox handles overflow for string.
   const isShellTool = name === SHELL_COMMAND_NAME || name === SHELL_NAME;
-  const shellOutputMaxLines =
+  const rawShellCap =
     settings.merged.ui?.shellOutputMaxLines ?? DEFAULT_SHELL_OUTPUT_MAX_LINES;
-  const shellCapHeight =
+  // Defensive: clamp non-negative integers; treat negatives / NaN / fractions
+  // as the user's clear intent (0 = disable, otherwise floor to whole rows).
+  const shellOutputMaxLines = Math.max(0, Math.floor(rawShellCap || 0));
+  const isCappingShell =
     isShellTool &&
     shellOutputMaxLines > 0 &&
     !forceShowResult &&
-    !isThisShellFocused
-      ? Math.min(availableHeight ?? shellOutputMaxLines, shellOutputMaxLines)
+    !isThisShellFocused;
+  const shellCapHeight = isCappingShell
+    ? Math.min(availableHeight ?? shellOutputMaxLines, shellOutputMaxLines)
+    : availableHeight;
+  // String path: MaxSizedBox reserves one row for its overflow banner when
+  // content overflows (see MaxSizedBox.tsx visibleContentHeight = max - 1),
+  // so passing the bare cap shows N-1 content rows. ANSI pre-slices to N
+  // (no MaxSizedBox overflow) and renders N rows + the ShellStatsBar line.
+  // +1 keeps the two paths visually symmetric at N visible content rows.
+  const shellStringCapHeight =
+    isCappingShell && shellCapHeight !== undefined
+      ? shellCapHeight + 1
       : availableHeight;
   const innerWidth = contentWidth - STATUS_INDICATOR_WIDTH;
 
@@ -450,7 +463,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
               <StringResultRenderer
                 data={effectiveDisplayRenderer.data}
                 renderAsMarkdown={renderOutputAsMarkdown}
-                availableHeight={shellCapHeight}
+                availableHeight={shellStringCapHeight}
                 childWidth={innerWidth}
               />
             )}

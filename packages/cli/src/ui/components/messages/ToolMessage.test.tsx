@@ -535,11 +535,70 @@ describe('<ToolMessage />', () => {
       StreamingState.Idle,
     );
     const output = lastFrame()!;
-    // With cap=5, only the last few lines should be visible (MaxSizedBox
-    // reserves 1 row for an overflow indicator when content exceeds maxHeight).
+    // With cap=5, the string path should show the last 5 content rows
+    // (the +1 height compensates for MaxSizedBox's overflow banner row,
+    // matching the ANSI path's 5 content rows + stats bar).
     expect(output).not.toContain('line 1\n');
     expect(output).not.toContain('line 10');
+    expect(output).toContain('line 26');
+    expect(output).toContain('line 27');
+    expect(output).toContain('line 28');
+    expect(output).toContain('line 29');
     expect(output).toContain('line 30');
+  });
+
+  it.each([
+    ['negative', -1],
+    ['fractional', 1.5],
+    ['NaN-via-string', 'abc' as unknown as number],
+  ])('clamps %s shellOutputMaxLines to a safe value', (_label, badValue) => {
+    const ansiOutputDisplay: AnsiOutputDisplay = {
+      ansiOutput: [
+        [
+          {
+            text: 'a',
+            fg: '',
+            bg: '',
+            bold: false,
+            italic: false,
+            underline: false,
+            dim: false,
+            inverse: false,
+          },
+        ],
+      ],
+      totalLines: 50,
+    };
+    const settingsWithBadCap = {
+      merged: { ui: { shellOutputMaxLines: badValue } },
+    } as unknown as LoadedSettings;
+    const { lastFrame } = render(
+      <CompactModeProvider value={{ compactMode: false }}>
+        <SettingsContext.Provider value={settingsWithBadCap}>
+          <StreamingContext.Provider value={StreamingState.Idle}>
+            <ToolMessage
+              {...baseProps}
+              name="Shell"
+              resultDisplay={ansiOutputDisplay}
+              availableTerminalHeight={100}
+            />
+          </StreamingContext.Provider>
+        </SettingsContext.Provider>
+      </CompactModeProvider>,
+    );
+    const output = lastFrame()!;
+    // -1 → 0 → cap disabled (height=94)
+    // 1.5 → 1 → cap to 1 (height=1)
+    // 'abc' → NaN → 0 → cap disabled (height=94)
+    if (
+      typeof badValue === 'number' &&
+      Number.isFinite(badValue) &&
+      badValue > 0
+    ) {
+      expect(output).toContain(`height=${Math.floor(badValue)}`);
+    } else {
+      expect(output).toContain('height=94');
+    }
   });
 
   it('does not cap non-shell string output', () => {
