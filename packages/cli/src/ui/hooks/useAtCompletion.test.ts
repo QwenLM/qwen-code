@@ -6,7 +6,16 @@
 
 /** @vitest-environment jsdom */
 
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { renderHook, waitFor, act } from '@testing-library/react';
 import { useAtCompletion } from './useAtCompletion.js';
 import type {
@@ -19,6 +28,7 @@ import {
   FileSearchFactory,
   createTmpDir,
   cleanupTmpDir,
+  installInProcessIndexTransport,
 } from '@qwen-code/qwen-code-core';
 import { useState } from 'react';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
@@ -46,6 +56,22 @@ function useTestHarnessForAtCompletion(
 }
 
 describe('useAtCompletion', () => {
+  // The default FileIndexService transport spawns a worker_thread against
+  // the compiled `fileIndexWorker.js`; under vitest that URL resolves to
+  // a TS source the worker can't parse. Opt in to the in-process backend
+  // for this file only — doing so at test-setup level would pull core's
+  // module tree (including `workspaceContext.ts` with real `node:fs`)
+  // into every other test file's graph and clobber their `vi.mock('fs')`
+  // declarations.
+  let restoreTransport: (() => void) | null = null;
+  beforeAll(() => {
+    restoreTransport = installInProcessIndexTransport();
+  });
+  afterAll(() => {
+    restoreTransport?.();
+    restoreTransport = null;
+  });
+
   let testRootDir: string;
   let mockConfig: Config;
 

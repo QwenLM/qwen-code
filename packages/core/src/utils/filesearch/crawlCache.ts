@@ -50,11 +50,16 @@ export const write = (key: string, results: string[], ttlMs: number): void => {
   // Store the new data
   crawlCache.set(key, results);
 
-  // Set a timer to automatically delete the cache entry after the TTL
+  // Set a timer to automatically delete the cache entry after the TTL.
+  // `.unref()` so a pending TTL (up to 30s by default) doesn't keep the
+  // event loop alive at process exit — otherwise vitest workers hang
+  // until the timer fires. `clear()` still drops them synchronously
+  // between tests.
   const timerId = setTimeout(() => {
     crawlCache.delete(key);
     cacheTimers.delete(key);
   }, ttlMs);
+  timerId.unref?.();
 
   // Store the timer handle so we can clear it if the entry is updated
   cacheTimers.set(key, timerId);

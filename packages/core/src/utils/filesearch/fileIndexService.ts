@@ -466,14 +466,24 @@ export class FileIndexService {
     // best-effort force-kill — worker_threads' `terminate()` is idempotent,
     // so calling it twice just queues another tear-down attempt.
     let timedOut = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
-      this.transport.terminate(),
-      new Promise<void>((resolve) =>
-        setTimeout(() => {
+      this.transport.terminate().then(() => {
+        // Healthy path: clear the pending timer so it doesn't keep the
+        // event loop alive (vitest's matrix workers would otherwise hang
+        // on exit waiting for the 2s handle to fire — see #3455).
+        if (timer) clearTimeout(timer);
+      }),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(() => {
           timedOut = true;
           resolve();
-        }, 2000),
-      ),
+        }, 2000);
+        // Belt-and-suspenders: even if the clear above is missed for any
+        // reason, `.unref()` tells Node this timer shouldn't block the
+        // process from exiting.
+        timer.unref?.();
+      }),
     ]);
     if (timedOut) {
       // eslint-disable-next-line no-console

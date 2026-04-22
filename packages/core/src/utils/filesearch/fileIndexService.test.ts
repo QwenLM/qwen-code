@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import {
   FileIndexService,
   __setIndexTransportFactory,
+  installInProcessIndexTransport,
 } from './fileIndexService.js';
 import {
   cleanupTmpDir,
@@ -15,6 +16,19 @@ import {
 } from '../../test-utils/file-system-test-helpers.js';
 
 describe('FileIndexService', () => {
+  // Vitest executes TS sources directly, so the worker-thread backend
+  // (which imports the compiled `fileIndexWorker.js`) can't spawn here.
+  // Swap to the in-process backend for the duration of this file and
+  // restore the default factory when the suite ends.
+  let restoreTransport: (() => void) | null = null;
+  beforeAll(() => {
+    restoreTransport = installInProcessIndexTransport();
+  });
+  afterAll(() => {
+    restoreTransport?.();
+    restoreTransport = null;
+  });
+
   let tmpDir: string;
   afterEach(async () => {
     // Reset FIRST — cleanupTmpDir on Windows fails with EBUSY if the

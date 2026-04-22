@@ -31,10 +31,11 @@ if (typeof (globalThis as unknown as { File?: unknown }).File === 'undefined') {
   (globalThis as unknown as { File: unknown }).File = class {} as unknown;
 }
 
-// The default `FileIndexService` transport spawns a real Node worker thread
-// that imports the compiled `fileIndexWorker.js`. Vitest executes sources
-// directly (no build step), so the worker URL resolves to a TS file the
-// thread can't parse. Route through the in-process transport instead —
-// same message protocol, executed on the main event loop.
-import { installInProcessIndexTransport } from './src/utils/filesearch/fileIndexService.js';
-installInProcessIndexTransport();
+// Note on FileIndexService: the default transport spawns a real Node worker
+// thread loading the compiled `fileIndexWorker.js`, which vitest can't use
+// when executing TS sources directly. Tests that exercise FileIndexService
+// must opt in to the in-process transport via a local `beforeAll` —
+// installing it here would eagerly pull `src/index.ts` (and thus
+// `workspaceContext.ts` with a real `node:fs` binding) into every test
+// file's module graph, breaking tests that rely on `vi.mock('fs', …)`
+// (e.g. `packages/cli/src/config/config.test.ts` bare-mode cases).
