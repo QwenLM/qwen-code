@@ -26,8 +26,9 @@ meaningful names. This command creates the mapping so users can later resume wit
 ### 2. Read the Index
 
 - File: `.qwen/chat-index.json` (project root, NOT `~/.qwen/`)
-- If the file doesn't exist: treat as empty object `{}`
-- Why: This is the first write for many projects; we create the file only when needed.
+- If the file doesn't exist (ENOENT): treat as empty object `{}`
+- If the file exists but contains malformed JSON: output `"chat-index.json is malformed. Fix it manually before saving."` and **stop**. Do NOT fall back to `{}`, as this would silently overwrite existing saved names.
+- Why: This is the first write for many projects; we create the file only when needed. However, a corrupt index must not be silently replaced — existing mappings would be lost.
 - **Important**: The index is stored in the **current project's root directory**, NOT the user's home directory. This keeps session names project-scoped.
 
 ### 3. Check for Overwrite
@@ -39,12 +40,13 @@ meaningful names. This command creates the mapping so users can later resume wit
 
 ### 4. Find the Current Session ID
 
+- **Preferred method**: Use the session ID from the **current runtime context** (the session this `/chat` command is running in). This is reliable and always refers to the conversation the user is actually using.
 - Directory: `~/.qwen/projects/<hash>/chats/`
   - `<hash>` = SHA-256 of the full project root path (normalized to lowercase on Windows).
-- Look for the most recently modified `.jsonl` file.
+- **Fallback method**: If the runtime context does not expose a session ID, find the most recently modified `.jsonl` file in the chats directory. In this case, **output a warning**: `"Warning: Using most recent session by file time. If this is wrong, resume the target session first."`
 - The filename (without `.jsonl` extension) IS the session UUID.
 - If no `.jsonl` file is found: output `"No active session found. Please start a conversation first."` and stop.
-- Why: The session storage format is JSONL (line-delimited JSON). Each session is a file named by its UUID. We find the active session by scanning for the newest file in the project's chats directory.
+- Why: Using `newest .jsonl` by mtime is unreliable when multiple sessions exist — it may bind the name to a different conversation than the one the user intends. Runtime context is authoritative; filesystem mtime is a last resort with an explicit warning.
 
 ### 5. Write to Index
 
