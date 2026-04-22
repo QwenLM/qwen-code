@@ -154,15 +154,18 @@ class QueryOptions:
             env=_as_optional_str_dict(data, "env"),
             system_prompt=_as_optional_str(data, "system_prompt"),
             append_system_prompt=_as_optional_str(data, "append_system_prompt"),
-            debug=bool(data.get("debug", False)),
+            debug=_as_optional_bool(data, "debug") or False,
             max_session_turns=_as_optional_int(data, "max_session_turns"),
             core_tools=_as_optional_str_list(data, "core_tools"),
             exclude_tools=_as_optional_str_list(data, "exclude_tools"),
             allowed_tools=_as_optional_str_list(data, "allowed_tools"),
             auth_type=data.get("auth_type"),
-            include_partial_messages=bool(data.get("include_partial_messages", False)),
+            include_partial_messages=_as_optional_bool(
+                data, "include_partial_messages"
+            )
+            or False,
             resume=_as_optional_str(data, "resume"),
-            continue_session=bool(data.get("continue_session", False)),
+            continue_session=_as_optional_bool(data, "continue_session") or False,
             session_id=_as_optional_str(data, "session_id"),
             timeout=timeout,
             mcp_servers=_as_optional_nested_dict(data, "mcp_servers"),
@@ -186,6 +189,15 @@ def _as_optional_int(data: Mapping[str, Any], key: str) -> int | None:
     if isinstance(raw, bool) or not isinstance(raw, int):
         raise TypeError(f"{key} must be an integer")
     return int(raw)
+
+
+def _as_optional_bool(data: Mapping[str, Any], key: str) -> bool | None:
+    raw = data.get(key)
+    if raw is None:
+        return None
+    if not isinstance(raw, bool):
+        raise TypeError(f"{key} must be a boolean")
+    return raw
 
 
 def _as_optional_str_dict(data: Mapping[str, Any], key: str) -> dict[str, str] | None:

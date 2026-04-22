@@ -586,9 +586,11 @@ def query(
 
     validate_query_options(parsed_options)
 
-    session_id = parsed_options.resume or parsed_options.session_id or str(uuid4())
+    session_id = parsed_options.resume or parsed_options.session_id
+    if session_id is None and not parsed_options.continue_session:
+        session_id = str(uuid4())
     if parsed_options.resume is None and not parsed_options.continue_session:
         parsed_options.session_id = session_id
 
     transport = ProcessTransport(parsed_options)
-    return Query(transport, parsed_options, prompt, session_id)
+    return Query(transport, parsed_options, prompt, session_id or "")
