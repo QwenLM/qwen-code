@@ -84,30 +84,120 @@ function quoteDirection(direction: string): string {
   return direction.split(/\s+/).filter(Boolean).join(' ');
 }
 
+function formatRounds(rounds: number): string {
+  return `${rounds} round${rounds === 1 ? '' : 's'}`;
+}
+
+function formatCandidateSource(source?: string): string | undefined {
+  switch (source) {
+    case 'failed-test':
+      return 'recorded failing test artifact';
+    case 'lint-error':
+      return 'existing lint failure in the repo';
+    case 'type-error':
+      return 'existing type failure in the repo';
+    case 'todo-comment':
+      return 'existing TODO in the repo';
+    case 'backlog-file':
+      return 'existing backlog item';
+    case 'user-direction':
+      return 'your direction brief';
+    default:
+      return source;
+  }
+}
+
+function pushLine(lines: string[], label: string, value?: string): void {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return;
+  }
+  lines.push(`${label}: ${trimmed}`);
+}
+
+function pushList(lines: string[], label: string, items?: string[]): void {
+  if (!items || items.length === 0) {
+    return;
+  }
+  lines.push(`${label}:`);
+  for (const item of items) {
+    const trimmed = item.trim();
+    if (trimmed) {
+      lines.push(`- ${trimmed}`);
+    }
+  }
+}
+
+function formatOutcome(
+  result: Awaited<ReturnType<SelfEvolveService['run']>>,
+): string {
+  if (result.ok) {
+    return `Outcome: Kept a reviewable change after ${formatRounds(result.roundsAttempted)}.`;
+  }
+
+  if (result.status === 'no_safe_task') {
+    return result.roundsAttempted > 0
+      ? `Outcome: Skipped this run after ${formatRounds(result.roundsAttempted)} because no safe task was selected.`
+      : 'Outcome: Skipped this run because no safe task was selected.';
+  }
+
+  if (
+    result.status === 'validation_failed' ||
+    result.status === 'max_retries_exhausted'
+  ) {
+    return `Outcome: Rolled the trial change back after ${formatRounds(result.roundsAttempted)}.`;
+  }
+
+  return result.roundsAttempted > 0
+    ? `Outcome: Stopped after ${formatRounds(result.roundsAttempted)} without keeping a change.`
+    : 'Outcome: Stopped before a safe change was ready.';
+}
+
+function formatFailureNotesLabel(
+  result: Awaited<ReturnType<SelfEvolveService['run']>>,
+): string {
+  if (result.ok) {
+    return 'Notes';
+  }
+
+  switch (result.status) {
+    case 'no_safe_task':
+      return 'Why it skipped';
+    case 'validation_failed':
+    case 'max_retries_exhausted':
+      return 'Why it rolled back';
+    default:
+      return 'What blocked it';
+  }
+}
+
 function formatResult(
   result: Awaited<ReturnType<SelfEvolveService['run']>>,
 ): string {
-  const lines: string[] = [result.summary];
-  if (result.roundsAttempted > 0) {
-    lines.push(`Rounds: ${result.roundsAttempted}`);
-  }
-  if (result.direction) {
-    lines.push(`Direction: ${result.direction}`);
-  }
-  if (result.selectedTask) {
-    lines.push(`Task: ${result.selectedTask}`);
+  const lines: string[] = [`Summary: ${result.summary}`, formatOutcome(result)];
+  pushLine(lines, 'Requested direction', result.direction);
+  pushLine(lines, 'Selected task', result.selectedTask);
+  pushLine(
+    lines,
+    result.selectedTaskSource === 'user-direction'
+      ? 'Narrowed direction'
+      : 'Why this task',
+    result.selectedTaskRationale,
+  );
+  pushLine(lines, 'Source', formatCandidateSource(result.selectedTaskSource));
+  pushLine(lines, 'Location', result.selectedTaskLocation);
+  if (result.validation && result.validation.length > 0) {
+    pushList(lines, 'Validation', result.validation);
+  } else if (result.status !== 'no_safe_task' && result.selectedTask) {
+    lines.push('Validation: None reported by the child run.');
   }
   if (result.ok) {
-    lines.push(`Branch: ${result.branch}`);
-    lines.push(`Commit: ${result.commitSha}`);
+    pushLine(lines, 'Review branch', result.branch);
+    pushLine(lines, 'Review commit', result.commitSha);
+  } else {
+    pushList(lines, formatFailureNotesLabel(result), result.learnings);
   }
-  if (result.validation && result.validation.length > 0) {
-    lines.push(`Validation: ${result.validation.join(' | ')}`);
-  }
-  if (!result.ok && result.learnings.length > 0) {
-    lines.push(`Learnings: ${result.learnings.join(' | ')}`);
-  }
-  lines.push(`Record: ${result.recordPath}`);
+  pushLine(lines, 'Record', result.recordPath);
   return lines.join('\n');
 }
 
@@ -380,16 +470,19 @@ function toMessage(
 function formatProgress(event: SelfEvolveProgressEvent): string {
   switch (event.stage) {
     case 'discovering_candidates':
+      return 'Inspecting the repo for small safe tasks...';
     case 'creating_worktree':
+      return 'Creating an isolated self-evolve worktree...';
     case 'starting_session':
+      return 'Starting the isolated self-evolve session...';
+    case 'child_activity':
+      return event.message;
     case 'committing':
+      return 'Preparing a review commit...';
     case 'finalizing':
+      return 'Cleaning the isolated worktree for review...';
     case 'cleaning_up':
-      return event.message;
-    case 'running_round':
-      return event.message;
-    case 'validating':
-      return event.message;
+      return 'Removing temporary self-evolve files...';
     default:
       return event.message;
   }
@@ -402,28 +495,25 @@ function formatBackgroundFailure(error: unknown): string {
   ].join('\n');
 }
 
-function shouldRenderBackgroundResultAsError(
-  result: Awaited<ReturnType<SelfEvolveService['run']>>,
-): boolean {
-  return !result.ok && result.status === 'failed';
-}
-
 function formatBackgroundResultHeading(
   result: Awaited<ReturnType<SelfEvolveService['run']>>,
 ): string {
   if (result.ok) {
-    return 'Background self-evolve attempt finished.';
+    return 'Background self-evolve attempt prepared a reviewable change.';
+  }
+
+  if (result.status === 'no_safe_task') {
+    return 'Background self-evolve attempt skipped this round.';
   }
 
   if (
     result.status === 'validation_failed' ||
-    result.status === 'no_safe_task' ||
     result.status === 'max_retries_exhausted'
   ) {
-    return 'Background self-evolve attempt finished without retaining a change.';
+    return 'Background self-evolve attempt rolled back its trial change.';
   }
 
-  return 'Background self-evolve attempt finished.';
+  return 'Background self-evolve attempt stopped before a safe change was ready.';
 }
 
 function completeSelfEvolveArgs(partialArg: string): CommandCompletionItem[] {
@@ -446,7 +536,6 @@ export const selfEvolveCommand: SlashCommand = {
   description:
     'Run a small safe repo improvement once by default, or repeat it on a schedule with every/--every',
   kind: CommandKind.BUILT_IN,
-  commandType: 'local',
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   argumentHint: '[direction] | --every <interval> [direction] | list | clear',
   examples: [
@@ -516,9 +605,28 @@ export const selfEvolveCommand: SlashCommand = {
       });
     };
     const handleProgress = (event: SelfEvolveProgressEvent) => {
+      if (executionMode !== 'interactive') {
+        return;
+      }
+      if (event.stage === 'child_activity') {
+        context.ui.addItem(
+          {
+            type: 'info',
+            text: formatProgress(event),
+          },
+          Date.now(),
+        );
+        return;
+      }
+      if (!useInteractivePending) {
+        return;
+      }
       setInteractivePending(formatProgress(event));
     };
-    if (executionMode === 'interactive' && parsed.mode !== 'schedule') {
+    const useInteractivePending =
+      executionMode === 'interactive' && parsed.mode !== 'schedule';
+
+    if (useInteractivePending) {
       setInteractivePending(
         t('Running self-evolve in an isolated worktree...'),
       );
@@ -538,10 +646,19 @@ export const selfEvolveCommand: SlashCommand = {
           `Scheduled recurring self-evolve job ${job.id}.`,
           `Cadence: ${parsed.cadence} (\`${parsed.cron}\`)`,
           roundedLine,
+          parsed.direction
+            ? `Requested direction: ${parsed.direction}`
+            : undefined,
+          parsed.direction
+            ? 'Each run will narrow that brief into one small safe, verifiable change before editing.'
+            : undefined,
           'Recurring self-evolve jobs are session-only and auto-expire after 3 days.',
           executionMode === 'interactive'
             ? 'Running the first self-evolve attempt in the background. You can keep using Qwen Code.'
             : 'Running the first self-evolve attempt now.',
+          executionMode === 'interactive'
+            ? 'The child session will stream its selected task, rounds, and validation activity here while it works.'
+            : undefined,
         ]
           .filter((line): line is string => Boolean(line))
           .join('\n');
@@ -563,9 +680,7 @@ export const selfEvolveCommand: SlashCommand = {
           .then((result) => {
             context.ui.addItem(
               {
-                type: shouldRenderBackgroundResultAsError(result)
-                  ? 'error'
-                  : 'info',
+                type: 'info',
                 text: `${formatBackgroundResultHeading(result)}\n${formatResult(result)}`,
               },
               Date.now(),
@@ -585,7 +700,7 @@ export const selfEvolveCommand: SlashCommand = {
 
       const result = await service.run(config, {
         direction: parsed.direction,
-        onProgress: handleProgress,
+        onProgress: useInteractivePending ? handleProgress : undefined,
       });
       const resultContent = formatResult(result);
       const content = scheduledSummary
@@ -605,7 +720,7 @@ export const selfEvolveCommand: SlashCommand = {
 
       return toMessage(result.ok ? 'info' : 'error', content);
     } finally {
-      if (executionMode === 'interactive' && parsed.mode !== 'schedule') {
+      if (useInteractivePending) {
         context.ui.setPendingItem(null);
       }
     }

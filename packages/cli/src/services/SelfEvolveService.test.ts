@@ -50,6 +50,23 @@ function successTurn() {
   };
 }
 
+function partialTextEvent(text: string) {
+  return {
+    type: 'stream_event',
+    uuid: 'stream-1',
+    session_id: 'session',
+    parent_tool_use_id: null,
+    event: {
+      type: 'content_block_delta',
+      index: 0,
+      delta: {
+        type: 'text_delta',
+        text,
+      },
+    },
+  } as const;
+}
+
 describe('SelfEvolveService', () => {
   let tempDir: string;
   let projectDir: string;
@@ -112,7 +129,7 @@ describe('SelfEvolveService', () => {
     ]);
   });
 
-  it('retries failed validation in the same child session and promotes a clean review branch', async () => {
+  it('accepts a child-owned implementation and validation loop in a single child session', async () => {
     await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
       recursive: true,
     });
@@ -129,7 +146,6 @@ describe('SelfEvolveService', () => {
     const removeWorktree = vi.fn().mockResolvedValue({ success: true });
     const cleanupSession = vi.fn().mockResolvedValue({ success: true });
     let reviewStatusChecks = 0;
-    let validationChecks = 0;
 
     const runCommand = vi.fn(
       async (cwd: string, command: string, args: string[]) => {
@@ -173,44 +189,29 @@ describe('SelfEvolveService', () => {
       },
     );
 
-    const runShellCommand = vi.fn(async (cwd: string, command: string) => {
-      if (cwd === projectDir) {
-        return ok(command, cwd, '');
-      }
-      validationChecks += 1;
-      if (validationChecks === 1) {
-        return {
-          command,
-          cwd,
-          exitCode: 1,
-          stdout: '',
-          stderr: 'lint failed',
-          timedOut: false,
-        };
-      }
-      return ok(command, cwd, '');
-    });
+    const runShellCommand = vi.fn();
+    const sendPrompt = vi.fn(
+      async (
+        _prompt: string,
+        _timeoutMs: number,
+        onStreamEvent?: (message: ReturnType<typeof partialTextEvent>) => void,
+      ) => {
+        onStreamEvent?.(
+          partialTextEvent(
+            `${[
+              'SELF_EVOLVE_PROGRESS {"kind":"selected_task","round":1,"message":"Selected Address TODO in src/feature.ts:1"}',
+              'SELF_EVOLVE_PROGRESS {"kind":"command","round":1,"message":"Running npm run lint","command":"npm run lint"}',
+              'SELF_EVOLVE_PROGRESS {"kind":"command_result","round":1,"message":"npm run lint failed with one remaining warning","command":"npm run lint"}',
+              'SELF_EVOLVE_PROGRESS {"kind":"round_start","round":2,"message":"Repairing the remaining lint issue."}',
+              'SELF_EVOLVE_PROGRESS {"kind":"command_result","round":2,"message":"npm run lint passed","command":"npm run lint"}',
+            ].join('\n')}\n`,
+          ),
+        );
 
-    const sendPrompt = vi.fn(async (_prompt: string) => {
-      const report =
-        sendPrompt.mock.calls.length === 1
-          ? {
-              round: 1,
-              status: 'validation_failed',
-              selectedCandidateIndex: 1,
-              selectedTask: {
-                title: 'Address TODO in src/feature.ts:1',
-                source: 'todo-comment',
-                location: 'src/feature.ts:1',
-              },
-              summary: 'First round tightened the helper but lint still fails.',
-              learnings: ['The first pass left a lint issue behind.'],
-              validation: [{ command: 'npm run lint', summary: 'failed' }],
-              suggestedCommitMessage:
-                'fix(cli): tighten self-evolve TODO helper',
-              changedFiles: ['src/feature.ts'],
-            }
-          : {
+        await fs.writeFile(
+          path.join(reviewWorktreePath, '.qwen', 'self-evolve-report.json'),
+          JSON.stringify(
+            {
               round: 2,
               status: 'success',
               selectedCandidateIndex: 1,
@@ -225,13 +226,14 @@ describe('SelfEvolveService', () => {
               suggestedCommitMessage:
                 'fix(cli): tighten self-evolve TODO helper',
               changedFiles: ['src/feature.ts'],
-            };
-      await fs.writeFile(
-        path.join(reviewWorktreePath, '.qwen', 'self-evolve-report.json'),
-        JSON.stringify(report, null, 2),
-      );
-      return successTurn();
-    });
+            },
+            null,
+            2,
+          ),
+        );
+        return successTurn();
+      },
+    );
     const shutdown = vi
       .fn()
       .mockResolvedValue(ok('node qwen', reviewWorktreePath));
@@ -239,6 +241,7 @@ describe('SelfEvolveService', () => {
       sendPrompt,
       shutdown,
     }));
+    const progressEvents: Array<{ stage: string; message: string }> = [];
 
     const service = new SelfEvolveService({
       createWorktreeService: () =>
@@ -254,6 +257,11 @@ describe('SelfEvolveService', () => {
 
     const result = await service.run(mockConfig, {
       direction: 'focus the CLI TODO path',
+      onProgress: (event) =>
+        progressEvents.push({
+          stage: event.stage,
+          message: event.message,
+        }),
     });
 
     expect(result.ok).toBe(true);
@@ -265,22 +273,39 @@ describe('SelfEvolveService', () => {
     expect(result.commitSha).toBe('review-sha');
     expect(result.changedFiles).toEqual(['src/feature.ts']);
     expect(result.selectedTask).toBe('Address TODO in src/feature.ts:1');
-    expect(sendPrompt).toHaveBeenCalledTimes(2);
+    expect(result.selectedTaskSource).toBe('todo-comment');
+    expect(result.selectedTaskLocation).toBe('src/feature.ts:1');
+    expect(result.validation).toEqual(['passed: npm run lint']);
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
     expect(sendPrompt.mock.calls[0]?.[0]).toContain(
-      'User direction for task selection: focus the CLI TODO path',
+      'Own the full implementation and validation loop inside this single child session',
     );
-    expect(sendPrompt.mock.calls[1]?.[0]).toContain(
-      'This is repair round 2 of 5.',
+    expect(sendPrompt.mock.calls[0]?.[0]).toContain(
+      'SELF_EVOLVE_PROGRESS {"kind":"selected_task|round_start|command|command_result|final"',
     );
-    expect(sendPrompt.mock.calls[1]?.[0]).toContain(
-      'Locked candidate title: Address TODO in src/feature.ts:1',
+    expect(runShellCommand).not.toHaveBeenCalled();
+    expect(progressEvents).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          stage: 'child_activity',
+          message: expect.stringContaining(
+            'Child round 1 [selected_task]: Selected Address TODO in src/feature.ts:1',
+          ),
+        }),
+        expect.objectContaining({
+          stage: 'child_activity',
+          message: expect.stringContaining(
+            'Child round 2 [command_result]: npm run lint passed',
+          ),
+        }),
+      ]),
     );
     expect(shutdown).toHaveBeenCalledTimes(1);
     expect(removeWorktree).toHaveBeenCalledWith(reviewWorktreePath);
     expect(cleanupSession).not.toHaveBeenCalled();
   });
 
-  it('discards the isolated change only after exhausting validation retries in the same child session', async () => {
+  it('discards the isolated change when the child reports exhausted internal retries', async () => {
     await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
       recursive: true,
     });
@@ -301,38 +326,28 @@ describe('SelfEvolveService', () => {
         throw new Error(`Unexpected command: ${joined}`);
       },
     );
-    const runShellCommand = vi.fn(async (cwd: string, command: string) => {
-      if (cwd === projectDir) {
-        return ok(command, cwd, '');
-      }
-      return {
-        command,
-        cwd,
-        exitCode: 1,
-        stdout: '',
-        stderr: 'lint failed',
-        timedOut: false,
-      };
-    });
+    const runShellCommand = vi.fn();
 
     const sendPrompt = vi.fn(async () => {
-      const round = sendPrompt.mock.calls.length;
       await fs.writeFile(
         path.join(reviewWorktreePath, '.qwen', 'self-evolve-report.json'),
         JSON.stringify(
           {
-            round,
-            status: 'validation_failed',
+            round: 5,
+            status: 'max_retries_exhausted',
             selectedCandidateIndex: 1,
             selectedTask: {
               title: 'Address TODO in src/feature.ts:1',
               source: 'todo-comment',
               location: 'src/feature.ts:1',
             },
-            summary: `Round ${round} still fails lint.`,
-            learnings: ['Still narrowing down the lint issue.'],
+            summary:
+              'The isolated self-evolve change was discarded after 5 unsuccessful internal validation rounds.',
+            learnings: [
+              'npm run lint kept failing after the fifth internal repair.',
+            ],
             validation: [{ command: 'npm run lint', summary: 'failed' }],
-            changedFiles: ['src/feature.ts'],
+            changedFiles: [],
           },
           null,
           2,
@@ -377,34 +392,42 @@ describe('SelfEvolveService', () => {
     }
     expect(result.status).toBe('max_retries_exhausted');
     expect(result.roundsAttempted).toBe(5);
-    expect(result.summary).toContain('5 unsuccessful validation rounds');
-    expect(sendPrompt).toHaveBeenCalledTimes(5);
+    expect(result.summary).toContain(
+      '5 unsuccessful internal validation rounds',
+    );
+    expect(result.validation).toEqual(['failed: npm run lint']);
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(runShellCommand).not.toHaveBeenCalled();
     expect(shutdown).toHaveBeenCalledTimes(1);
     expect(cleanupSession).toHaveBeenCalledWith(
       expect.stringContaining('-review'),
     );
   });
 
-  it('returns no_safe_task when no discovered candidates match the requested direction', async () => {
+  it('can execute a direction-led task even when built-in discovery finds no candidates', async () => {
+    await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
+      recursive: true,
+    });
     await fs.writeFile(
-      path.join(projectDir, 'package.json'),
-      JSON.stringify(
-        {
-          name: 'test-repo',
-          scripts: {
-            typecheck: 'tsc --noEmit',
-          },
-        },
-        null,
-        2,
-      ),
-    );
-    await fs.writeFile(
-      path.join(projectDir, 'src', 'unrelated.ts'),
-      'export const broken = missing.value;\n',
+      path.join(projectDir, 'src', 'feature.ts'),
+      'export const answer = 42;\n',
     );
 
-    const setupWorktrees = vi.fn();
+    const direction = '专注于self-evolve这个功能的ui和ux的优化';
+    const directionCandidateTitle = `Advance user direction: ${direction}`;
+    const setupWorktrees = vi.fn().mockResolvedValue({
+      success: true,
+      worktreesByName: {
+        review: {
+          path: reviewWorktreePath,
+          branch: 'self-evolve/review',
+        },
+      },
+    });
+    const removeWorktree = vi.fn().mockResolvedValue({ success: true });
+    const cleanupSession = vi.fn().mockResolvedValue({ success: true });
+    let reviewStatusChecks = 0;
+
     const runCommand = vi.fn(
       async (cwd: string, command: string, args: string[]) => {
         const joined = `${command} ${args.join(' ')}`;
@@ -412,57 +435,118 @@ describe('SelfEvolveService', () => {
           return ok(joined, cwd, 'main\n');
         }
         if (joined === 'git ls-files') {
-          return ok(joined, cwd, 'package.json\nsrc/unrelated.ts\n');
+          return ok(joined, cwd, 'package.json\nsrc/feature.ts\n');
         }
         if (joined === 'git ls-files --others --exclude-standard') {
           return ok(joined, cwd, '');
         }
+        if (joined === 'git status --short') {
+          reviewStatusChecks += 1;
+          return ok(
+            joined,
+            cwd,
+            reviewStatusChecks === 1 ? 'M src/feature.ts\n' : '',
+          );
+        }
+        if (joined === 'git add --all') {
+          return ok(joined, cwd);
+        }
+        if (joined.startsWith('git commit --no-verify -m ')) {
+          return ok(joined, cwd, '[branch] commit\n');
+        }
+        if (joined === 'git reset --hard HEAD') {
+          return ok(joined, cwd, 'HEAD is now at review-sha\n');
+        }
+        if (joined === 'git clean -fd') {
+          return ok(joined, cwd, '');
+        }
+        if (joined === 'git rev-parse HEAD' && cwd === reviewWorktreePath) {
+          return ok(joined, cwd, 'review-sha\n');
+        }
+        if (joined === 'git diff-tree --no-commit-id --name-only -r HEAD') {
+          return ok(joined, cwd, 'src/feature.ts\n');
+        }
         throw new Error(`Unexpected command: ${joined}`);
       },
     );
-    const runShellCommand = vi.fn(async (cwd: string, command: string) => {
-      if (cwd !== projectDir || command !== 'npm run typecheck') {
-        return ok(command, cwd, '');
-      }
-      return {
-        command,
-        cwd,
-        exitCode: 1,
-        stdout:
-          "src/unrelated.ts(1,23): error TS2304: Cannot find name 'missing'.\n",
-        stderr: '',
-        timedOut: false,
-      };
+    const runShellCommand = vi.fn();
+    const sendPrompt = vi.fn(async (prompt: string) => {
+      expect(prompt).toContain(directionCandidateTitle);
+      expect(prompt).toContain('If you choose the [user-direction] candidate');
+      await fs.writeFile(
+        path.join(reviewWorktreePath, '.qwen', 'self-evolve-report.json'),
+        JSON.stringify(
+          {
+            round: 1,
+            status: 'success',
+            selectedCandidateIndex: 1,
+            selectedTask: {
+              title: directionCandidateTitle,
+              source: 'user-direction',
+              location: 'packages/cli/src/ui/commands/selfEvolveCommand.ts',
+              rationale:
+                'Narrowed the brief to the recurring self-evolve scheduling copy.',
+            },
+            summary: 'Improved the recurring self-evolve scheduling UX.',
+            learnings: [
+              'The broad UI/UX brief was narrowed to the scheduling confirmation flow.',
+            ],
+            validation: [{ command: 'npm run lint', summary: 'passed' }],
+            suggestedCommitMessage:
+              'fix(cli): improve self-evolve scheduling UX',
+            changedFiles: ['src/feature.ts'],
+          },
+          null,
+          2,
+        ),
+      );
+      return successTurn();
     });
-    const createQwenSession = vi.fn();
+    const shutdown = vi
+      .fn()
+      .mockResolvedValue(ok('node qwen', reviewWorktreePath));
 
     const service = new SelfEvolveService({
       createWorktreeService: () =>
         ({
           setupWorktrees,
+          removeWorktree,
+          cleanupSession,
         }) as unknown as GitWorktreeService,
       runCommand,
       runShellCommand,
-      createQwenSession: createQwenSession as never,
+      createQwenSession: vi.fn(() => ({
+        sendPrompt,
+        shutdown,
+      })) as never,
     });
 
     const result = await service.run(mockConfig, {
-      direction: '专注于self-evolve这个功能的ui和ux的优化',
+      direction,
     });
 
-    expect(result.ok).toBe(false);
-    if (result.ok) {
-      throw new Error('Expected failure result');
+    expect(result.ok).toBe(true);
+    if (!result.ok) {
+      throw new Error('Expected success result');
     }
-    expect(result.status).toBe('no_safe_task');
-    expect(result.summary).toBe(
-      'No discovered self-evolve candidates matched the requested direction.',
+    expect(result.selectedTask).toBe(directionCandidateTitle);
+    expect(result.selectedTaskSource).toBe('user-direction');
+    expect(result.selectedTaskLocation).toBe(
+      'packages/cli/src/ui/commands/selfEvolveCommand.ts',
     );
-    expect(setupWorktrees).not.toHaveBeenCalled();
-    expect(createQwenSession).not.toHaveBeenCalled();
+    expect(result.selectedTaskRationale).toBe(
+      'Narrowed the brief to the recurring self-evolve scheduling copy.',
+    );
+    expect(result.summary).toBe(
+      'Improved the recurring self-evolve scheduling UX.',
+    );
+    expect(sendPrompt).toHaveBeenCalledTimes(1);
+    expect(runShellCommand).not.toHaveBeenCalled();
+    expect(removeWorktree).toHaveBeenCalledWith(reviewWorktreePath);
+    expect(cleanupSession).not.toHaveBeenCalled();
   });
 
-  it('rejects retry rounds that drift to a different selected task', async () => {
+  it('rejects final reports that do not select one of the provided candidates', async () => {
     await fs.mkdir(path.join(reviewWorktreePath, '.qwen'), {
       recursive: true,
     });
@@ -491,49 +575,26 @@ describe('SelfEvolveService', () => {
         throw new Error(`Unexpected command: ${joined}`);
       },
     );
-    const runShellCommand = vi.fn(async (cwd: string, command: string) => {
-      if (cwd === projectDir) {
-        return ok(command, cwd, '');
-      }
-      return {
-        command,
-        cwd,
-        exitCode: 1,
-        stdout: '',
-        stderr: 'lint failed',
-        timedOut: false,
-      };
-    });
+    const runShellCommand = vi.fn();
     const sendPrompt = vi.fn(async () => {
-      const report =
-        sendPrompt.mock.calls.length === 1
-          ? {
-              round: 1,
-              status: 'validation_failed',
-              selectedCandidateIndex: 1,
-              selectedTask: {
-                title: 'Address TODO in src/feature.ts:1',
-                source: 'todo-comment',
-                location: 'src/feature.ts:1',
-              },
-              summary: 'Round 1 picked the feature TODO.',
-              validation: [{ command: 'npm run lint', summary: 'failed' }],
-            }
-          : {
-              round: 2,
-              status: 'success',
-              selectedCandidateIndex: 2,
-              selectedTask: {
-                title: 'Address TODO in src/other.ts:1',
-                source: 'todo-comment',
-                location: 'src/other.ts:1',
-              },
-              summary: 'Round 2 drifted to a different TODO.',
-              validation: [{ command: 'npm run lint', summary: 'passed' }],
-            };
       await fs.writeFile(
         path.join(reviewWorktreePath, '.qwen', 'self-evolve-report.json'),
-        JSON.stringify(report, null, 2),
+        JSON.stringify(
+          {
+            round: 2,
+            status: 'success',
+            selectedCandidateIndex: 99,
+            selectedTask: {
+              title: 'Address TODO in src/missing.ts:1',
+              source: 'todo-comment',
+              location: 'src/missing.ts:1',
+            },
+            summary: 'The child drifted to a different TODO.',
+            validation: [{ command: 'npm run lint', summary: 'passed' }],
+          },
+          null,
+          2,
+        ),
       );
       return successTurn();
     });
@@ -570,9 +631,9 @@ describe('SelfEvolveService', () => {
       throw new Error('Expected failure result');
     }
     expect(result.summary).toBe(
-      'The isolated self-evolve session drifted away from the originally selected task.',
+      'The isolated self-evolve run did not select one of the provided candidates.',
     );
-    expect(result.selectedTask).toBe('Address TODO in src/feature.ts:1');
+    expect(result.selectedTask).toBeUndefined();
     expect(cleanupSession).toHaveBeenCalledWith(
       expect.stringContaining('-review'),
     );

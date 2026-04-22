@@ -214,6 +214,9 @@ export class CronScheduler {
         const candidateMs = nowMinuteMs + offset * 60_000;
         const candidateDate = new Date(candidateMs);
         if (!matches(job.cronExpr, candidateDate)) continue;
+        if (job.recurring && candidateMs <= job.createdAt) {
+          continue;
+        }
 
         const fireTimeMs = candidateMs + job.jitterMs;
         if (currentMs >= fireTimeMs) {

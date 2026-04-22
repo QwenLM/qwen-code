@@ -1,6 +1,8 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { CronScheduler, type CronJob } from './cronScheduler.js';
 
+const TEST_CREATED_AT = new Date(2025, 0, 15, 0, 0, 0).getTime();
+
 describe('CronScheduler', () => {
   let scheduler: CronScheduler;
 
@@ -89,7 +91,8 @@ describe('CronScheduler', () => {
       scheduler.start((job) => fired.push(job));
 
       // Use every-minute cron so jitter is tiny (max ~6s for 1-min period)
-      scheduler.create('*/1 * * * *', 'match', true);
+      const job = scheduler.create('*/1 * * * *', 'match', true);
+      job.createdAt = TEST_CREATED_AT;
 
       // Tick at 10:30:59 — past any jitter for a 1-min period job
       const date = new Date(2025, 0, 15, 10, 30, 59);
@@ -104,6 +107,7 @@ describe('CronScheduler', () => {
       scheduler.start((job) => fired.push(job));
 
       const job = scheduler.create('30 10 * * *', 'no match', true);
+      job.createdAt = TEST_CREATED_AT;
       job.jitterMs = 0; // pin jitter so the test is deterministic
 
       // Tick at 10:31 — should not fire
@@ -115,7 +119,8 @@ describe('CronScheduler', () => {
       const fired: CronJob[] = [];
       scheduler.start((job) => fired.push(job));
 
-      scheduler.create('*/1 * * * *', 'once per minute', true);
+      const job = scheduler.create('*/1 * * * *', 'once per minute', true);
+      job.createdAt = TEST_CREATED_AT;
 
       // Both ticks in second 59 — past jitter for a 1-min period job
       const date1 = new Date(2025, 0, 15, 10, 30, 59);
@@ -142,7 +147,8 @@ describe('CronScheduler', () => {
       const fired: CronJob[] = [];
       scheduler.start((job) => fired.push(job));
 
-      scheduler.create('*/1 * * * *', 'recurring', true);
+      const job = scheduler.create('*/1 * * * *', 'recurring', true);
+      job.createdAt = TEST_CREATED_AT;
 
       // Tick at second 59 — past any jitter for a 1-min period job
       scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
@@ -166,7 +172,8 @@ describe('CronScheduler', () => {
       scheduler.start((job) => fired.push(job));
 
       // Every minute
-      scheduler.create('* * * * *', 'every minute', true);
+      const job = scheduler.create('* * * * *', 'every minute', true);
+      job.createdAt = TEST_CREATED_AT;
 
       scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
       expect(fired).toHaveLength(1);
@@ -181,6 +188,7 @@ describe('CronScheduler', () => {
       scheduler.start((job) => fired.push(job));
 
       const job = scheduler.create('0 * * * *', 'hourly delayed', true);
+      job.createdAt = TEST_CREATED_AT;
       job.jitterMs = 6 * 60 * 1000;
 
       scheduler.tick(new Date(2025, 0, 15, 10, 5, 59));
@@ -204,6 +212,22 @@ describe('CronScheduler', () => {
       scheduler.tick(new Date(2025, 0, 15, 10, 29, 30));
       expect(fired).toHaveLength(1);
       expect(fired[0]!.prompt).toBe('oneshot early');
+    });
+
+    it('does not replay a recurring slot that started before the job was created', () => {
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+
+      const job = scheduler.create('0 */2 * * *', 'every two hours', true);
+      job.createdAt = new Date(2025, 0, 15, 0, 6, 3).getTime();
+      job.jitterMs = 5 * 60 * 1000;
+
+      scheduler.tick(new Date(2025, 0, 15, 0, 6, 10));
+      expect(fired).toHaveLength(0);
+
+      scheduler.tick(new Date(2025, 0, 15, 2, 5, 0));
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.prompt).toBe('every two hours');
     });
   });
 

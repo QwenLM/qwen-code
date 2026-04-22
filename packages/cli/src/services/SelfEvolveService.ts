@@ -17,10 +17,14 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type {
+  CLIPartialAssistantMessage,
   CLIResultMessage,
   CLIUserMessage,
 } from '../nonInteractive/types.js';
-import { isCLIResultMessage } from '../nonInteractive/types.js';
+import {
+  isCLIPartialAssistantMessage,
+  isCLIResultMessage,
+} from '../nonInteractive/types.js';
 
 const execFileAsync = promisify(execFile);
 const debugLogger = createDebugLogger('SELF_EVOLVE');
@@ -30,21 +34,11 @@ const MAX_DISCOVERED_CANDIDATES = 8;
 const MAX_SELF_EVOLVE_ROUNDS = 5;
 const DISCOVERY_TIMEOUT_MS = 45_000;
 const QWEN_ATTEMPT_TIMEOUT_MS = 10 * 60_000;
-const VALIDATION_TIMEOUT_MS = 5 * 60_000;
 const TODO_PATTERN = /\b(?:TODO|FIXME|HACK)\b[:\s-]*(.*)$/;
 const BACKLOG_FILE_PATTERN = /(^|\/)(backlog|roadmap|tasks?|todo)(\.[^/]+)?$/i;
 const TEST_ARTIFACT_PATTERN =
   /(^|\/)(junit|test-results?|vitest-results?|failures?)(\.[^/]+)?$/i;
-const SAFE_VALIDATION_PREFIXES = new Set([
-  'npm',
-  'npx',
-  'pnpm',
-  'yarn',
-  'node',
-  'vitest',
-  'eslint',
-  'tsc',
-]);
+const SELF_EVOLVE_PROGRESS_PREFIX = 'SELF_EVOLVE_PROGRESS ';
 const DIRECTION_MATCH_STOP_WORDS = new Set([
   'a',
   'an',
@@ -74,7 +68,8 @@ type CandidateSource =
   | 'lint-error'
   | 'type-error'
   | 'todo-comment'
-  | 'backlog-file';
+  | 'backlog-file'
+  | 'user-direction';
 
 interface SelfEvolveCandidate {
   title: string;
@@ -109,6 +104,12 @@ interface SelfEvolveAttemptReport {
   changedFiles?: string[];
 }
 
+interface SelfEvolveSelectedTaskMetadata {
+  selectedTaskSource?: string;
+  selectedTaskLocation?: string;
+  selectedTaskRationale?: string;
+}
+
 interface CommandExecutionResult {
   command: string;
   cwd: string;
@@ -128,6 +129,9 @@ interface SelfEvolveSuccessResult {
   commitSha: string;
   summary: string;
   selectedTask: string;
+  selectedTaskSource?: string;
+  selectedTaskLocation?: string;
+  selectedTaskRationale?: string;
   direction?: string;
   validation: string[];
   changedFiles: string[];
@@ -141,6 +145,9 @@ interface SelfEvolveFailureResult {
   recordPath: string;
   summary: string;
   selectedTask?: string;
+  selectedTaskSource?: string;
+  selectedTaskLocation?: string;
+  selectedTaskRationale?: string;
   direction?: string;
   validation?: string[];
   learnings: string[];
@@ -155,8 +162,7 @@ export interface SelfEvolveProgressEvent {
     | 'discovering_candidates'
     | 'creating_worktree'
     | 'starting_session'
-    | 'running_round'
-    | 'validating'
+    | 'child_activity'
     | 'committing'
     | 'finalizing'
     | 'cleaning_up';
@@ -217,8 +223,19 @@ interface QwenSessionTurnResult {
 }
 
 interface QwenSession {
-  sendPrompt(prompt: string, timeoutMs: number): Promise<QwenSessionTurnResult>;
+  sendPrompt(
+    prompt: string,
+    timeoutMs: number,
+    onStreamEvent?: (message: CLIPartialAssistantMessage) => void,
+  ): Promise<QwenSessionTurnResult>;
   shutdown(): Promise<CommandExecutionResult>;
+}
+
+interface SelfEvolveChildProgressPayload {
+  kind?: string;
+  round?: number;
+  message?: string;
+  command?: string;
 }
 
 function getShellInvocation(command: string): {
@@ -358,6 +375,95 @@ interface PersistentQwenSessionParams {
   env?: NodeJS.ProcessEnv;
 }
 
+class SelfEvolveChildProgressParser {
+  private pendingLine = '';
+
+  constructor(
+    private readonly emit: (event: SelfEvolveProgressEvent) => void,
+  ) {}
+
+  handle(message: CLIPartialAssistantMessage): void {
+    switch (message.event.type) {
+      case 'content_block_delta':
+        if (message.event.delta.type === 'text_delta') {
+          this.consumeText(message.event.delta.text);
+        }
+        break;
+      case 'message_stop':
+      case 'content_block_stop':
+        this.flushPendingLine();
+        break;
+      default:
+        break;
+    }
+  }
+
+  private consumeText(text: string): void {
+    this.pendingLine += text;
+
+    while (true) {
+      const newlineIndex = this.pendingLine.indexOf('\n');
+      if (newlineIndex === -1) {
+        break;
+      }
+
+      const line = this.pendingLine.slice(0, newlineIndex);
+      this.pendingLine = this.pendingLine.slice(newlineIndex + 1);
+      this.processLine(line);
+    }
+  }
+
+  private flushPendingLine(): void {
+    if (!this.pendingLine.trim()) {
+      this.pendingLine = '';
+      return;
+    }
+
+    this.processLine(this.pendingLine);
+    this.pendingLine = '';
+  }
+
+  private processLine(line: string): void {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith(SELF_EVOLVE_PROGRESS_PREFIX)) {
+      return;
+    }
+
+    const rawPayload = trimmed.slice(SELF_EVOLVE_PROGRESS_PREFIX.length).trim();
+    let payload: SelfEvolveChildProgressPayload;
+    try {
+      payload = JSON.parse(rawPayload) as SelfEvolveChildProgressPayload;
+    } catch {
+      return;
+    }
+
+    const message = payload.message?.trim();
+    if (!message) {
+      return;
+    }
+
+    const round =
+      Number.isInteger(payload.round) && payload.round != null
+        ? payload.round
+        : undefined;
+    const kind =
+      typeof payload.kind === 'string' && payload.kind.trim()
+        ? payload.kind.trim()
+        : 'update';
+    const detailPrefix = round == null ? 'Child' : `Child round ${round}`;
+
+    this.emit({
+      stage: 'child_activity',
+      message: `${detailPrefix} [${kind}]: ${message}`,
+      round,
+      command:
+        typeof payload.command === 'string'
+          ? payload.command.trim()
+          : undefined,
+    });
+  }
+}
+
 class PersistentQwenSession implements QwenSession {
   private readonly cwd: string;
   private readonly logPath: string;
@@ -371,6 +477,7 @@ class PersistentQwenSession implements QwenSession {
         stdoutLines: string[];
         stderrOffset: number;
         timedOut: boolean;
+        onStreamEvent?: (message: CLIPartialAssistantMessage) => void;
         settle: (result: QwenSessionTurnResult) => void;
         timer: NodeJS.Timeout;
       }
@@ -403,6 +510,10 @@ class PersistentQwenSession implements QwenSession {
       try {
         parsed = JSON.parse(line);
       } catch {
+        return;
+      }
+      if (isCLIPartialAssistantMessage(parsed)) {
+        this.currentTurn.onStreamEvent?.(parsed);
         return;
       }
       if (!isCLIResultMessage(parsed)) {
@@ -454,6 +565,7 @@ class PersistentQwenSession implements QwenSession {
   async sendPrompt(
     prompt: string,
     timeoutMs: number,
+    onStreamEvent?: (message: CLIPartialAssistantMessage) => void,
   ): Promise<QwenSessionTurnResult> {
     if (this.currentTurn) {
       throw new Error('A self-evolve child session turn is already running.');
@@ -480,6 +592,7 @@ class PersistentQwenSession implements QwenSession {
         stdoutLines: [],
         stderrOffset: this.stderrChunks.length,
         timedOut: false,
+        onStreamEvent,
         settle: resolve,
         timer,
       };
@@ -519,16 +632,6 @@ class PersistentQwenSession implements QwenSession {
       `${this.stdoutLines.join('\n')}\n\n--- STDERR ---\n${this.stderrChunks.join('')}`,
     );
   }
-}
-
-function formatCommandResult(result: CommandExecutionResult): string {
-  const status = result.exitCode === 0 ? 'pass' : 'fail';
-  const detail = result.timedOut
-    ? ' (timed out)'
-    : result.stderr.trim()
-      ? ` (${result.stderr.trim().split('\n')[0]})`
-      : '';
-  return `${status}: ${result.command}${detail}`;
 }
 
 function sanitizeCommitMessage(
@@ -594,6 +697,16 @@ function tokenizeDirectionText(value: string): string[] {
     );
 }
 
+function buildUserDirectionCandidate(direction: string): SelfEvolveCandidate {
+  return {
+    title: `Advance user direction: ${direction}`,
+    source: 'user-direction',
+    details:
+      'Treat the user brief as the primary goal. First narrow it to one small, safe, locally verifiable improvement before editing.',
+    validationCommands: [],
+  };
+}
+
 async function safeReadJson<T>(filePath: string): Promise<T | null> {
   try {
     const content = await fs.readFile(filePath, 'utf8');
@@ -643,7 +756,14 @@ export class SelfEvolveService {
       stage: 'discovering_candidates',
       message: 'Discovering a small, safe candidate task...',
     });
-    const candidates = await this.discoverCandidates(projectRoot);
+    const discoveredCandidates = this.prioritizeCandidatesByDirection(
+      await this.discoverCandidates(projectRoot),
+      direction,
+    );
+    const candidates =
+      direction == null
+        ? discoveredCandidates
+        : [...discoveredCandidates, buildUserDirectionCandidate(direction)];
     if (candidates.length === 0) {
       return this.finishFailure(
         attemptPaths.recordPath,
@@ -653,30 +773,6 @@ export class SelfEvolveService {
           'Candidate discovery did not find failed tests, lint/type errors, TODO comments, or backlog items.',
         ],
         undefined,
-        undefined,
-        direction,
-        'no_safe_task',
-      );
-    }
-
-    const scopedCandidates = this.filterCandidatesByDirection(
-      candidates,
-      direction,
-    );
-    if (direction && scopedCandidates.length === 0) {
-      return this.finishFailure(
-        attemptPaths.recordPath,
-        attemptId,
-        'No discovered self-evolve candidates matched the requested direction.',
-        [
-          `Direction: ${direction}`,
-          'Self-evolve only keeps working when it finds a small, safe candidate that clearly matches the requested area.',
-        ],
-        {
-          status: 'no_safe_task',
-          summary:
-            'No discovered self-evolve candidates matched the requested direction.',
-        },
         undefined,
         direction,
         'no_safe_task',
@@ -742,225 +838,164 @@ export class SelfEvolveService {
         },
       });
       let report: SelfEvolveAttemptReport | null = null;
-      let selectedCandidateSelection:
-        | {
-            candidate: SelfEvolveCandidate;
-            index: number;
-          }
-        | undefined;
-      let validationResults: string[] = [];
-      let roundsAttempted = 0;
       let finalTurnResult: QwenSessionTurnResult | undefined;
+      const childProgressParser = new SelfEvolveChildProgressParser(
+        emitProgress,
+      );
 
       try {
         emitProgress({
           stage: 'starting_session',
           message: 'Starting the isolated self-evolve session...',
         });
-        for (let round = 1; round <= MAX_SELF_EVOLVE_ROUNDS; round += 1) {
-          roundsAttempted = round;
-          emitProgress({
-            stage: 'running_round',
-            message:
-              round === 1
-                ? 'Running the first self-evolve implementation round...'
-                : `Running repair round ${round} of ${MAX_SELF_EVOLVE_ROUNDS}...`,
-            round,
-            totalRounds: MAX_SELF_EVOLVE_ROUNDS,
-          });
-          const turnPrompt =
-            round === 1
-              ? this.buildPrompt({
-                  projectRoot,
-                  reportPath,
-                  candidates: scopedCandidates,
-                  direction,
-                })
-              : this.buildRepairPrompt({
-                  reportPath,
-                  round,
-                  selectedCandidate: selectedCandidateSelection!.candidate,
-                  selectedCandidateIndex: selectedCandidateSelection!.index + 1,
-                  validationResults,
-                  direction,
-                  priorReport: report,
-                  maxRounds: MAX_SELF_EVOLVE_ROUNDS,
-                  childFailure:
-                    this.summarizeSessionTurnFailure(finalTurnResult),
-                });
-
-          finalTurnResult = await qwenSession.sendPrompt(
-            turnPrompt,
-            QWEN_ATTEMPT_TIMEOUT_MS,
-          );
-          report = await safeReadJson<SelfEvolveAttemptReport>(reportPath);
-
-          if (finalTurnResult.timedOut || finalTurnResult.childExited) {
-            const learnings: string[] = [];
-            if (finalTurnResult.timedOut) {
-              learnings.push('The child Qwen session timed out.');
-            }
-            if (finalTurnResult.childExited) {
-              learnings.push(
-                `The child Qwen session exited with code ${finalTurnResult.exitCode ?? -1}.`,
-              );
-            }
-            if (finalTurnResult.stderr.trim()) {
-              learnings.push(
-                finalTurnResult.stderr.trim().split('\n')[0] ?? '',
-              );
-            }
-            await worktreeService.cleanupSession(reviewSessionId);
-            return this.finishFailure(
-              attemptPaths.recordPath,
-              attemptId,
-              'The isolated self-evolve session did not stay alive long enough to finish the task.',
-              learnings,
-              report,
-              validationResults,
-              direction,
-              'failed',
-              selectedCandidateSelection?.candidate.title,
-              roundsAttempted,
-            );
-          }
-
-          if (report?.status === 'no_safe_task' && round === 1) {
-            await worktreeService.cleanupSession(reviewSessionId);
-            return this.finishFailure(
-              attemptPaths.recordPath,
-              attemptId,
-              report.summary?.trim() || 'No small safe task was selected.',
-              report.learnings ?? [
-                'The candidate list did not contain a clearly safe and verifiable task.',
-              ],
-              report,
-              validationResults,
-              direction,
-              'no_safe_task',
-              undefined,
-              roundsAttempted,
-            );
-          }
-
-          const resolvedSelection = this.resolveSelectedCandidateSelection(
-            report,
-            scopedCandidates,
-          );
-          if (!resolvedSelection) {
-            await worktreeService.cleanupSession(reviewSessionId);
-            return this.finishFailure(
-              attemptPaths.recordPath,
-              attemptId,
-              'The isolated self-evolve run did not select one of the provided candidates.',
-              [
-                'The child run must pick exactly one discovered candidate and copy its title/location verbatim.',
-              ],
-              report,
-              validationResults,
-              direction,
-              'failed',
-              '',
-              roundsAttempted,
-            );
-          }
-          if (
-            selectedCandidateSelection &&
-            resolvedSelection.candidate.title !==
-              selectedCandidateSelection.candidate.title
-          ) {
-            await worktreeService.cleanupSession(reviewSessionId);
-            return this.finishFailure(
-              attemptPaths.recordPath,
-              attemptId,
-              'The isolated self-evolve session drifted away from the originally selected task.',
-              [
-                'Retry rounds must stay on the first selected candidate until validation passes or retries are exhausted.',
-              ],
-              report,
-              validationResults,
-              direction,
-              'failed',
-              selectedCandidateSelection.candidate.title,
-              roundsAttempted,
-            );
-          }
-          selectedCandidateSelection =
-            selectedCandidateSelection ?? resolvedSelection;
-
-          const validationCommands = this.collectValidationCommands(
-            report,
-            selectedCandidateSelection.candidate,
-          );
-          if (validationCommands.length === 0) {
-            await worktreeService.cleanupSession(reviewSessionId);
-            return this.finishFailure(
-              attemptPaths.recordPath,
-              attemptId,
-              'The isolated self-evolve change did not provide a rerunnable validation command.',
-              report?.learnings ?? [
-                'The child run finished without reporting a safe validation command.',
-              ],
-              report,
-              validationResults,
-              direction,
-              'failed',
-              selectedCandidateSelection.candidate.title,
-              roundsAttempted,
-            );
-          }
-
-          validationResults = [];
-          let validationFailureLearning: string | undefined;
-          for (const command of validationCommands) {
-            emitProgress({
-              stage: 'validating',
-              message: `Running validation: ${command}`,
-              round,
-              totalRounds: MAX_SELF_EVOLVE_ROUNDS,
-              command,
-            });
-            const validationResult = await this.deps.runShellCommand(
-              reviewWorktree.path,
-              command,
-              { timeoutMs: VALIDATION_TIMEOUT_MS },
-            );
-            validationResults.push(formatCommandResult(validationResult));
-            if (validationResult.exitCode !== 0) {
-              validationFailureLearning =
-                `Validation failed: ${command} | ` +
-                (summarizeOutput(validationResult.stderr) ??
-                  summarizeOutput(validationResult.stdout) ??
-                  'Validation command exited with a non-zero status.');
-              break;
-            }
-          }
-
-          if (!validationFailureLearning) {
-            break;
-          }
-
-          if (round === MAX_SELF_EVOLVE_ROUNDS) {
-            await worktreeService.cleanupSession(reviewSessionId);
-            return this.finishFailure(
-              attemptPaths.recordPath,
-              attemptId,
-              `The isolated self-evolve change was discarded after ${MAX_SELF_EVOLVE_ROUNDS} unsuccessful validation rounds.`,
-              [
-                validationFailureLearning,
-                'The change was rolled back after exhausting the retry budget for the same selected task.',
-              ],
-              report,
-              validationResults,
-              direction,
-              'max_retries_exhausted',
-              selectedCandidateSelection.candidate.title,
-              roundsAttempted,
-            );
-          }
-        }
+        finalTurnResult = await qwenSession.sendPrompt(
+          this.buildPrompt({
+            projectRoot,
+            reportPath,
+            candidates,
+            direction,
+          }),
+          QWEN_ATTEMPT_TIMEOUT_MS,
+          (message) => childProgressParser.handle(message),
+        );
+        report = await safeReadJson<SelfEvolveAttemptReport>(reportPath);
       } finally {
         await qwenSession.shutdown().catch(() => undefined);
+      }
+
+      const roundsAttempted = this.getReportedRoundsAttempted(report);
+      const validationResults = this.getReportedValidationResults(report);
+
+      if (finalTurnResult.timedOut || finalTurnResult.childExited) {
+        const learnings: string[] = [];
+        if (finalTurnResult.timedOut) {
+          learnings.push('The child Qwen session timed out.');
+        }
+        if (finalTurnResult.childExited) {
+          learnings.push(
+            `The child Qwen session exited with code ${finalTurnResult.exitCode ?? -1}.`,
+          );
+        }
+        if (finalTurnResult.stderr.trim()) {
+          learnings.push(finalTurnResult.stderr.trim().split('\n')[0] ?? '');
+        }
+        await worktreeService.cleanupSession(reviewSessionId);
+        return this.finishFailure(
+          attemptPaths.recordPath,
+          attemptId,
+          'The isolated self-evolve session did not stay alive long enough to finish the task.',
+          learnings,
+          report,
+          validationResults,
+          direction,
+          'failed',
+          undefined,
+          roundsAttempted,
+          undefined,
+        );
+      }
+
+      if (!report) {
+        await worktreeService.cleanupSession(reviewSessionId);
+        return this.finishFailure(
+          attemptPaths.recordPath,
+          attemptId,
+          'The isolated self-evolve session finished without writing a final report.',
+          [
+            'The child run must write the required self-evolve report before exiting.',
+          ],
+          undefined,
+          validationResults,
+          direction,
+          'failed',
+          undefined,
+          roundsAttempted,
+        );
+      }
+
+      if (report.status === 'no_safe_task') {
+        await worktreeService.cleanupSession(reviewSessionId);
+        return this.finishFailure(
+          attemptPaths.recordPath,
+          attemptId,
+          report.summary?.trim() || 'No small safe task was selected.',
+          report.learnings ?? [
+            direction
+              ? 'The requested direction could not be narrowed into a small safe and verifiable change.'
+              : 'The candidate list did not contain a clearly safe and verifiable task.',
+          ],
+          report,
+          validationResults,
+          direction,
+          'no_safe_task',
+          undefined,
+          roundsAttempted,
+        );
+      }
+
+      const selectedCandidateSelection = this.resolveSelectedCandidateSelection(
+        report,
+        candidates,
+      );
+      if (!selectedCandidateSelection) {
+        await worktreeService.cleanupSession(reviewSessionId);
+        return this.finishFailure(
+          attemptPaths.recordPath,
+          attemptId,
+          'The isolated self-evolve run did not select one of the provided candidates.',
+          [
+            'The child run must pick exactly one provided candidate and keep its selected index stable.',
+          ],
+          report,
+          validationResults,
+          direction,
+          'failed',
+          '',
+          roundsAttempted,
+        );
+      }
+
+      if (
+        report.status === 'max_retries_exhausted' ||
+        report.status === 'validation_failed'
+      ) {
+        await worktreeService.cleanupSession(reviewSessionId);
+        return this.finishFailure(
+          attemptPaths.recordPath,
+          attemptId,
+          report.summary?.trim() ||
+            `The isolated self-evolve change was discarded after ${MAX_SELF_EVOLVE_ROUNDS} unsuccessful validation rounds.`,
+          report.learnings ?? [
+            'The child run exhausted its internal retry budget and discarded the isolated change.',
+          ],
+          report,
+          validationResults,
+          direction,
+          'max_retries_exhausted',
+          selectedCandidateSelection.candidate.title,
+          roundsAttempted,
+          selectedCandidateSelection.candidate,
+        );
+      }
+
+      if (report.status !== 'success') {
+        await worktreeService.cleanupSession(reviewSessionId);
+        return this.finishFailure(
+          attemptPaths.recordPath,
+          attemptId,
+          report.summary?.trim() ||
+            'The isolated self-evolve run ended without producing a successful result.',
+          report.learnings ?? [
+            'The child run did not report success after completing its internal attempt loop.',
+          ],
+          report,
+          validationResults,
+          direction,
+          'failed',
+          selectedCandidateSelection.candidate.title,
+          roundsAttempted,
+          selectedCandidateSelection.candidate,
+        );
       }
 
       const statusResult = await this.deps.runCommand(
@@ -981,14 +1016,15 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection?.candidate.title,
+          selectedCandidateSelection.candidate.title,
           roundsAttempted,
+          selectedCandidateSelection.candidate,
         );
       }
 
       const commitMessage = sanitizeCommitMessage(
         report?.suggestedCommitMessage,
-        selectedCandidateSelection!.candidate.title,
+        selectedCandidateSelection.candidate.title,
       );
       emitProgress({
         stage: 'committing',
@@ -1014,8 +1050,9 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection!.candidate.title,
+          selectedCandidateSelection.candidate.title,
           roundsAttempted,
+          selectedCandidateSelection.candidate,
         );
       }
 
@@ -1044,8 +1081,9 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection!.candidate.title,
+          selectedCandidateSelection.candidate.title,
           roundsAttempted,
+          selectedCandidateSelection.candidate,
         );
       }
 
@@ -1068,8 +1106,9 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection!.candidate.title,
+          selectedCandidateSelection.candidate.title,
           roundsAttempted,
+          selectedCandidateSelection.candidate,
         );
       }
 
@@ -1096,8 +1135,9 @@ export class SelfEvolveService {
           validationResults,
           direction,
           'failed',
-          selectedCandidateSelection!.candidate.title,
+          selectedCandidateSelection.candidate.title,
           roundsAttempted,
+          selectedCandidateSelection.candidate,
         );
       }
 
@@ -1136,7 +1176,11 @@ export class SelfEvolveService {
         summary:
           report?.summary?.trim() ||
           'Completed a self-evolve change and prepared a review commit.',
-        selectedTask: selectedCandidateSelection!.candidate.title,
+        selectedTask: selectedCandidateSelection.candidate.title,
+        ...this.getSelectedTaskMetadata(
+          report,
+          selectedCandidateSelection.candidate,
+        ),
         direction,
         validation: validationResults,
         changedFiles,
@@ -1499,17 +1543,25 @@ export class SelfEvolveService {
       '',
       'Pick exactly one small, safe, locally verifiable improvement task from the candidate list below.',
       'Pick by candidate index and keep the chosen title/location exactly as written in the candidate list.',
-      'Do not rename, paraphrase, or synthesize a new task.',
+      'For discovered repo candidates, do not rename, paraphrase, or synthesize a new task.',
+      'If you choose the [user-direction] candidate, treat that direction as the primary brief and narrow it internally to one concrete small change before editing.',
+      'If the [user-direction] candidate still feels too broad after narrowing, write status "no_safe_task" and do not edit anything.',
+      `Own the full implementation and validation loop inside this single child session, with at most ${MAX_SELF_EVOLVE_ROUNDS} internal rounds.`,
+      'Do not rely on the parent process to validate or repair the work for you.',
+      'Within the same session: edit, run focused validation yourself, inspect failures, repair the task, and retry until it passes or you exhaust the internal round budget.',
+      `If you exhaust ${MAX_SELF_EVOLVE_ROUNDS} rounds, discard the isolated change yourself with \`git reset --hard HEAD\` and \`git clean -fd\`, then write status "max_retries_exhausted".`,
+      'Success means you personally re-ran focused validation after the final edit and the validation passed.',
       params.direction
         ? `User direction for task selection: ${params.direction}`
         : undefined,
-      params.direction
-        ? 'Only choose a candidate that clearly matches the user direction. If none do, write status "no_safe_task" and do not edit anything.'
-        : undefined,
       'Do not push, open PRs, change remotes, or create commits.',
       'Keep the scope narrow. Avoid broad refactors.',
-      'Run focused validation for the chosen task before finishing.',
       'If no candidate is clearly safe and verifiable, do not edit anything. Instead write a report with status "no_safe_task".',
+      '',
+      'While you work, emit concise machine-readable progress lines so the parent process can surface them in the UI.',
+      'Use exactly this format on a single line each time:',
+      'SELF_EVOLVE_PROGRESS {"kind":"selected_task|round_start|command|command_result|final","round":1,"message":"short human-readable update","command":"optional shell command"}',
+      'Always emit at least: the selected task, each round start, each validation command start/result, and the final outcome.',
       '',
       'Write a JSON report to this exact path before exiting:',
       params.reportPath,
@@ -1517,9 +1569,9 @@ export class SelfEvolveService {
       'Report schema:',
       JSON.stringify(
         {
-          status:
-            'success | failed | validation_failed | no_safe_task | max_retries_exhausted',
-          round: 'number',
+          status: 'success | failed | no_safe_task | max_retries_exhausted',
+          round:
+            'number (total internal rounds attempted inside the child session)',
           selectedCandidateIndex:
             'number (1-based index from the candidate list)',
           selectedTask: {
@@ -1545,65 +1597,7 @@ export class SelfEvolveService {
       .join('\n');
   }
 
-  private buildRepairPrompt(params: {
-    reportPath: string;
-    round: number;
-    maxRounds: number;
-    selectedCandidate: SelfEvolveCandidate;
-    selectedCandidateIndex: number;
-    validationResults: string[];
-    direction?: string;
-    priorReport: SelfEvolveAttemptReport | null;
-    childFailure?: string;
-  }): string {
-    return [
-      'Continue the same /self-evolve task inside the existing isolated worktree.',
-      params.direction
-        ? `Original user direction: ${params.direction}`
-        : undefined,
-      `This is repair round ${params.round} of ${params.maxRounds}.`,
-      `Locked candidate index: ${params.selectedCandidateIndex}`,
-      `Locked candidate title: ${params.selectedCandidate.title}`,
-      params.selectedCandidate.location
-        ? `Locked candidate location: ${params.selectedCandidate.location}`
-        : undefined,
-      'Do not switch to another candidate. Do not broaden scope.',
-      'Fix the validation failure, stay on the locked task, and update the same report file before ending this turn.',
-      params.childFailure
-        ? `Previous child-session failure signal: ${params.childFailure}`
-        : undefined,
-      params.priorReport?.summary
-        ? `Previous report summary: ${params.priorReport.summary}`
-        : undefined,
-      params.validationResults.length > 0
-        ? `Latest external validation results: ${params.validationResults.join(' | ')}`
-        : undefined,
-      '',
-      'Write a JSON report to this exact path before ending this turn:',
-      params.reportPath,
-      '',
-      'Keep selectedCandidateIndex and selectedTask.title/location consistent with the locked candidate.',
-      'If you are still not done, set status to "validation_failed" or "failed" with concise learnings. Do not abandon the locked task.',
-    ]
-      .filter((line): line is string => Boolean(line))
-      .join('\n');
-  }
-
-  private collectValidationCommands(
-    report: SelfEvolveAttemptReport | null,
-    selectedCandidate: SelfEvolveCandidate,
-  ): string[] {
-    const reported = (report?.validation ?? [])
-      .map((entry) => entry.command?.trim())
-      .filter((entry): entry is string => Boolean(entry))
-      .filter((entry) => SAFE_VALIDATION_PREFIXES.has(entry.split(/\s+/)[0]!));
-    if (reported.length > 0) {
-      return Array.from(new Set(reported));
-    }
-    return selectedCandidate.validationCommands;
-  }
-
-  private filterCandidatesByDirection(
+  private prioritizeCandidatesByDirection(
     candidates: SelfEvolveCandidate[],
     direction: string | undefined,
   ): SelfEvolveCandidate[] {
@@ -1612,7 +1606,7 @@ export class SelfEvolveService {
       return candidates;
     }
 
-    return candidates.filter((candidate) => {
+    const scoreCandidate = (candidate: SelfEvolveCandidate) => {
       const candidateTerms = new Set(
         tokenizeDirectionText(
           [candidate.title, candidate.details, candidate.location]
@@ -1620,8 +1614,15 @@ export class SelfEvolveService {
             .join(' '),
         ),
       );
-      return directionTerms.some((term) => candidateTerms.has(term));
-    });
+      return directionTerms.reduce(
+        (score, term) => score + (candidateTerms.has(term) ? 1 : 0),
+        0,
+      );
+    };
+
+    return [...candidates].sort(
+      (left, right) => scoreCandidate(right) - scoreCandidate(left),
+    );
   }
 
   private resolveSelectedCandidateSelection(
@@ -1663,17 +1664,57 @@ export class SelfEvolveService {
     };
   }
 
-  private summarizeSessionTurnFailure(
-    result: QwenSessionTurnResult | undefined,
-  ): string | undefined {
-    if (!result?.result?.is_error) {
-      return undefined;
+  private getReportedRoundsAttempted(
+    report: SelfEvolveAttemptReport | null,
+  ): number {
+    if (Number.isInteger(report?.round) && report!.round != null) {
+      return Math.max(0, report!.round);
     }
-    return (
-      result.result.error?.message ||
-      summarizeOutput(result.stderr) ||
-      'The previous child-session turn ended with an error result.'
-    );
+
+    return report?.status === 'no_safe_task' ? 0 : 1;
+  }
+
+  private getReportedValidationResults(
+    report: SelfEvolveAttemptReport | null,
+  ): string[] {
+    return (report?.validation ?? [])
+      .map((entry) => {
+        const command = entry.command?.trim();
+        const summary = entry.summary?.trim();
+
+        if (command && summary) {
+          return `${summary}: ${command}`;
+        }
+        return command || summary || undefined;
+      })
+      .filter((entry): entry is string => Boolean(entry));
+  }
+
+  private getSelectedTaskMetadata(
+    report?: SelfEvolveAttemptReport | null,
+    fallbackCandidate?: SelfEvolveCandidate,
+  ): SelfEvolveSelectedTaskMetadata {
+    const selectedTask = report?.selectedTask;
+
+    const source =
+      typeof selectedTask?.source === 'string' && selectedTask.source.trim()
+        ? selectedTask.source.trim()
+        : fallbackCandidate?.source;
+    const location =
+      typeof selectedTask?.location === 'string' && selectedTask.location.trim()
+        ? selectedTask.location.trim()
+        : fallbackCandidate?.location;
+    const rationale =
+      typeof selectedTask?.rationale === 'string' &&
+      selectedTask.rationale.trim()
+        ? selectedTask.rationale.trim()
+        : undefined;
+
+    return {
+      selectedTaskSource: source,
+      selectedTaskLocation: location,
+      selectedTaskRationale: rationale,
+    };
   }
 
   private async finishFailure(
@@ -1687,7 +1728,9 @@ export class SelfEvolveService {
     status: Exclude<SelfEvolveStatus, 'success'> = 'failed',
     selectedTask?: string,
     roundsAttempted: number = 0,
+    fallbackCandidate?: SelfEvolveCandidate,
   ): Promise<SelfEvolveFailureResult> {
+    const reportedSelectedTask = report?.selectedTask?.title?.trim();
     const result: SelfEvolveFailureResult = {
       ok: false,
       status,
@@ -1697,8 +1740,14 @@ export class SelfEvolveService {
       summary,
       selectedTask:
         selectedTask === undefined
-          ? report?.selectedTask?.title?.trim()
+          ? reportedSelectedTask
           : selectedTask || undefined,
+      ...this.getSelectedTaskMetadata(
+        selectedTask === undefined || selectedTask === reportedSelectedTask
+          ? report
+          : undefined,
+        fallbackCandidate,
+      ),
       direction,
       validation,
       learnings,
