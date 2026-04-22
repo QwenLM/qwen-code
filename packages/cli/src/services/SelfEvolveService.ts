@@ -150,6 +150,22 @@ export type SelfEvolveResult =
   | SelfEvolveSuccessResult
   | SelfEvolveFailureResult;
 
+export interface SelfEvolveProgressEvent {
+  stage:
+    | 'discovering_candidates'
+    | 'creating_worktree'
+    | 'starting_session'
+    | 'running_round'
+    | 'validating'
+    | 'committing'
+    | 'finalizing'
+    | 'cleaning_up';
+  message: string;
+  round?: number;
+  totalRounds?: number;
+  command?: string;
+}
+
 interface AttemptPaths {
   attemptDir: string;
   attemptLogPath: string;
@@ -184,6 +200,11 @@ interface RuntimeDeps {
     sessionId: string;
     env?: NodeJS.ProcessEnv;
   }) => QwenSession;
+}
+
+interface RunOptions {
+  direction?: string;
+  onProgress?: (event: SelfEvolveProgressEvent) => void;
 }
 
 interface QwenSessionTurnResult {
@@ -598,9 +619,7 @@ export class SelfEvolveService {
 
   async run(
     config: Config,
-    options: {
-      direction?: string;
-    } = {},
+    options: RunOptions = {},
   ): Promise<SelfEvolveResult> {
     const projectRoot = config.getProjectRoot();
     const attemptId = `self-evolve-${Date.now()}-${randomUUID().slice(0, 6)}`;
@@ -616,7 +635,14 @@ export class SelfEvolveService {
       projectRoot,
       worktreeBaseDir,
     );
+    const emitProgress = (event: SelfEvolveProgressEvent) => {
+      options.onProgress?.(event);
+    };
 
+    emitProgress({
+      stage: 'discovering_candidates',
+      message: 'Discovering a small, safe candidate task...',
+    });
     const candidates = await this.discoverCandidates(projectRoot);
     if (candidates.length === 0) {
       return this.finishFailure(
@@ -661,6 +687,10 @@ export class SelfEvolveService {
     let reviewBranch: string | undefined;
 
     try {
+      emitProgress({
+        stage: 'creating_worktree',
+        message: 'Creating an isolated review worktree...',
+      });
       const reviewSetup = await worktreeService.setupWorktrees({
         sessionId: reviewSessionId,
         sourceRepoPath: projectRoot,
@@ -723,8 +753,21 @@ export class SelfEvolveService {
       let finalTurnResult: QwenSessionTurnResult | undefined;
 
       try {
+        emitProgress({
+          stage: 'starting_session',
+          message: 'Starting the isolated self-evolve session...',
+        });
         for (let round = 1; round <= MAX_SELF_EVOLVE_ROUNDS; round += 1) {
           roundsAttempted = round;
+          emitProgress({
+            stage: 'running_round',
+            message:
+              round === 1
+                ? 'Running the first self-evolve implementation round...'
+                : `Running repair round ${round} of ${MAX_SELF_EVOLVE_ROUNDS}...`,
+            round,
+            totalRounds: MAX_SELF_EVOLVE_ROUNDS,
+          });
           const turnPrompt =
             round === 1
               ? this.buildPrompt({
@@ -870,6 +913,13 @@ export class SelfEvolveService {
           validationResults = [];
           let validationFailureLearning: string | undefined;
           for (const command of validationCommands) {
+            emitProgress({
+              stage: 'validating',
+              message: `Running validation: ${command}`,
+              round,
+              totalRounds: MAX_SELF_EVOLVE_ROUNDS,
+              command,
+            });
             const validationResult = await this.deps.runShellCommand(
               reviewWorktree.path,
               command,
@@ -940,6 +990,10 @@ export class SelfEvolveService {
         report?.suggestedCommitMessage,
         selectedCandidateSelection!.candidate.title,
       );
+      emitProgress({
+        stage: 'committing',
+        message: `Creating review commit: ${commitMessage}`,
+      });
       await this.deps.runCommand(reviewWorktree.path, 'git', ['add', '--all']);
       const reviewCommitResult = await this.deps.runCommand(
         reviewWorktree.path,
@@ -967,6 +1021,10 @@ export class SelfEvolveService {
 
       // Collapse the review worktree to the final commit so no transient
       // validation artifacts remain in the filesystem presented to users.
+      emitProgress({
+        stage: 'finalizing',
+        message: 'Finalizing the review worktree into a clean state...',
+      });
       const resetResult = await this.deps.runCommand(
         reviewWorktree.path,
         'git',
@@ -1057,6 +1115,10 @@ export class SelfEvolveService {
         .map((line) => line.trim())
         .filter(Boolean);
 
+      emitProgress({
+        stage: 'cleaning_up',
+        message: 'Cleaning up temporary self-evolve worktree files...',
+      });
       await worktreeService.removeWorktree(reviewWorktree.path);
       await fs.rm(
         GitWorktreeService.getSessionDir(reviewSessionId, worktreeBaseDir),

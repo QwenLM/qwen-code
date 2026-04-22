@@ -12,7 +12,10 @@ import type {
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
-import { SelfEvolveService } from '../../services/SelfEvolveService.js';
+import {
+  SelfEvolveService,
+  type SelfEvolveProgressEvent,
+} from '../../services/SelfEvolveService.js';
 
 type SelfEvolveParsedArgs =
   | {
@@ -374,6 +377,24 @@ function toMessage(
   };
 }
 
+function formatProgress(event: SelfEvolveProgressEvent): string {
+  switch (event.stage) {
+    case 'discovering_candidates':
+    case 'creating_worktree':
+    case 'starting_session':
+    case 'committing':
+    case 'finalizing':
+    case 'cleaning_up':
+      return event.message;
+    case 'running_round':
+      return event.message;
+    case 'validating':
+      return event.message;
+    default:
+      return event.message;
+  }
+}
+
 function formatBackgroundFailure(error: unknown): string {
   return [
     'The background self-evolve attempt failed unexpectedly.',
@@ -485,11 +506,22 @@ export const selfEvolveCommand: SlashCommand = {
     }
 
     const executionMode = context.executionMode ?? 'interactive';
-    if (executionMode === 'interactive' && parsed.mode !== 'schedule') {
+    const setInteractivePending = (text: string) => {
+      if (executionMode !== 'interactive') {
+        return;
+      }
       context.ui.setPendingItem({
         type: 'info',
-        text: t('Running self-evolve in an isolated worktree...'),
+        text,
       });
+    };
+    const handleProgress = (event: SelfEvolveProgressEvent) => {
+      setInteractivePending(formatProgress(event));
+    };
+    if (executionMode === 'interactive' && parsed.mode !== 'schedule') {
+      setInteractivePending(
+        t('Running self-evolve in an isolated worktree...'),
+      );
     }
 
     try {
@@ -526,6 +558,7 @@ export const selfEvolveCommand: SlashCommand = {
         void service
           .run(config, {
             direction: parsed.direction,
+            onProgress: handleProgress,
           })
           .then((result) => {
             context.ui.addItem(
@@ -552,6 +585,7 @@ export const selfEvolveCommand: SlashCommand = {
 
       const result = await service.run(config, {
         direction: parsed.direction,
+        onProgress: handleProgress,
       });
       const resultContent = formatResult(result);
       const content = scheduledSummary

@@ -127,9 +127,12 @@ describe('selfEvolveCommand', () => {
       'focus lint and tests around the CLI',
     );
 
-    expect(mockRun).toHaveBeenCalledWith(expect.anything(), {
-      direction: 'focus lint and tests around the CLI',
-    });
+    expect(mockRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        direction: 'focus lint and tests around the CLI',
+      }),
+    );
     expect(cronCreate).not.toHaveBeenCalled();
     expect(mockContext.ui.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -182,9 +185,12 @@ describe('selfEvolveCommand', () => {
       '/self-evolve --once --direction focus lint cleanup',
       true,
     );
-    expect(mockRun).toHaveBeenCalledWith(expect.anything(), {
-      direction: 'focus lint cleanup',
-    });
+    expect(mockRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        direction: 'focus lint cleanup',
+      }),
+    );
     expect(result).toEqual({
       type: 'message',
       messageType: 'info',
@@ -237,9 +243,12 @@ describe('selfEvolveCommand', () => {
       }),
       expect.any(Number),
     );
-    expect(mockRun).toHaveBeenCalledWith(expect.anything(), {
-      direction: 'focus lint cleanup',
-    });
+    expect(mockRun).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        direction: 'focus lint cleanup',
+      }),
+    );
 
     resolveRun?.({
       ok: true,
