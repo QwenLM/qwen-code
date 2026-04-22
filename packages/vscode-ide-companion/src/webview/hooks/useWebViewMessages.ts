@@ -457,15 +457,8 @@ export const useWebViewMessages = ({
           break;
         }
 
-        case 'loginSuccess': {
-          // Clear loading state and show a short assistant notice
+        case 'authSuccess': {
           handlers.messageHandling.clearWaitingForResponse();
-          handlers.messageHandling.addMessage({
-            role: 'assistant',
-            content: 'Successfully logged in. You can continue chatting.',
-            timestamp: Date.now(),
-          });
-          // Set authentication state to true
           handlers.setIsAuthenticated?.(true);
           break;
         }
@@ -495,12 +488,12 @@ export const useWebViewMessages = ({
           break;
         }
 
-        case 'loginError': {
+        case 'authError': {
           // Clear loading state and show error notice
           handlers.messageHandling.clearWaitingForResponse();
           const errorMsg =
             (message?.data?.message as string) ||
-            'Login failed. Please try again.';
+            'Auth failed. Please try again.';
           handlers.messageHandling.addMessage({
             role: 'assistant',
             content: errorMsg,
