@@ -12,6 +12,7 @@ import type {
   ToolConfirmationOutcome,
   ToolResultDisplay,
   AgentStatus,
+  ArenaDiffSummary,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
 import { type ReactNode } from 'react';
@@ -354,6 +355,9 @@ export interface ArenaAgentCardData {
   rounds: number;
   error?: string;
   diff?: string;
+  diffSummary?: ArenaDiffSummary;
+  modifiedFiles?: string[];
+  approachSummary?: string;
 }
 
 export type HistoryItemArenaAgentComplete = HistoryItemBase & {

@@ -56,7 +56,10 @@ describe('Session', () => {
   let currentAuthType: AuthType;
   let switchModelSpy: ReturnType<typeof vi.fn>;
   let getAvailableCommandsSpy: ReturnType<typeof vi.fn>;
-  let mockToolRegistry: { getTool: ReturnType<typeof vi.fn> };
+  let mockToolRegistry: {
+    getTool: ReturnType<typeof vi.fn>;
+    ensureTool: ReturnType<typeof vi.fn>;
+  };
   beforeEach(() => {
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
@@ -73,11 +76,21 @@ describe('Session', () => {
       getHistory: vi.fn().mockReturnValue([]),
     } as unknown as GeminiChat;
 
-    mockToolRegistry = { getTool: vi.fn() };
+    mockToolRegistry = {
+      getTool: vi.fn(),
+      // #executePrompt → #buildInitialSystemReminders calls
+      // getToolRegistry().ensureTool(ToolNames.AGENT) on every session.prompt(),
+      // so the default mock must provide it (#1151 / #3479).
+      ensureTool: vi.fn().mockResolvedValue(true),
+    };
     const fileService = { shouldGitIgnoreFile: vi.fn().mockReturnValue(false) };
 
     mockConfig = {
       setApprovalMode: vi.fn(),
+      // #buildInitialSystemReminders branches on ApprovalMode.PLAN on every
+      // session.prompt(), so the default must be defined. Individual tests
+      // that care override via `mockConfig.getApprovalMode = vi.fn()...`.
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       switchModel: switchModelSpy,
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
@@ -91,6 +104,12 @@ describe('Session', () => {
         recordToolResult: vi.fn(),
       }),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
+      // #buildInitialSystemReminders iterates listSubagents() on every
+      // session.prompt(). Default to an empty list so tests that don't
+      // exercise subagent reminders don't need to stub it (#1151 / #3479).
+      getSubagentManager: vi.fn().mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([]),
+      }),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
@@ -134,9 +153,7 @@ describe('Session', () => {
     mockConfig = undefined as unknown as Config;
     mockClient = undefined as unknown as AgentSideConnection;
     mockSettings = undefined as unknown as LoadedSettings;
-    mockToolRegistry = undefined as unknown as {
-      getTool: ReturnType<typeof vi.fn>;
-    };
+    mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
   });
@@ -1061,6 +1078,108 @@ describe('Session', () => {
 
           expect(mockFireStopFailureEvent).not.toHaveBeenCalled();
         });
+      });
+    });
+
+    describe('system reminders', () => {
+      // Captures the `message` parts fed into chat.sendMessageStream on the
+      // first turn so individual tests can assert what the model saw.
+      const captureFirstTurnMessage = () => {
+        const capture: { parts: Array<{ text?: string }> } = { parts: [] };
+        (mockChat.sendMessageStream as ReturnType<typeof vi.fn>) = vi
+          .fn()
+          .mockImplementation(async (_model, req) => {
+            capture.parts = req.message ?? [];
+            return createEmptyStream();
+          });
+        return capture;
+      };
+
+      const stubEmptySubagents = () => {
+        (mockConfig as unknown as Record<string, unknown>)[
+          'getSubagentManager'
+        ] = vi.fn().mockReturnValue({
+          listSubagents: vi.fn().mockResolvedValue([]),
+        });
+        // ensureTool is called on the result of getToolRegistry(); add it.
+        (
+          mockToolRegistry as unknown as { ensureTool: () => Promise<boolean> }
+        ).ensureTool = vi.fn().mockResolvedValue(true);
+      };
+
+      it('prepends plan-mode reminder when approval mode is PLAN (#1151)', async () => {
+        stubEmptySubagents();
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.PLAN);
+        const capture = captureFirstTurnMessage();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'research this' }],
+        });
+
+        const reminderPart = capture.parts.find(
+          (p) => p.text && p.text.includes('Plan mode is active'),
+        );
+        expect(reminderPart).toBeTruthy();
+        expect(reminderPart!.text).toContain('exit_plan_mode');
+        // Reminder comes before the user text, matching client.ts ordering.
+        const reminderIdx = capture.parts.indexOf(reminderPart!);
+        const userIdx = capture.parts.findIndex(
+          (p) => p.text === 'research this',
+        );
+        expect(reminderIdx).toBeLessThan(userIdx);
+      });
+
+      it('does not prepend plan-mode reminder in default approval mode', async () => {
+        stubEmptySubagents();
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        const capture = captureFirstTurnMessage();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hi' }],
+        });
+
+        const hasPlanReminder = capture.parts.some(
+          (p) => p.text && p.text.includes('Plan mode is active'),
+        );
+        expect(hasPlanReminder).toBe(false);
+      });
+
+      it('prepends subagent reminder when user-level subagents exist', async () => {
+        (mockConfig as unknown as Record<string, unknown>)[
+          'getSubagentManager'
+        ] = vi.fn().mockReturnValue({
+          listSubagents: vi.fn().mockResolvedValue([
+            { name: 'researcher', level: 'user' },
+            { name: 'planner', level: 'project' },
+            // builtin entries are filtered out, matching client.ts:853.
+            { name: 'builtin-helper', level: 'builtin' },
+          ]),
+        });
+        (
+          mockToolRegistry as unknown as { ensureTool: () => Promise<boolean> }
+        ).ensureTool = vi.fn().mockResolvedValue(true);
+        mockConfig.getApprovalMode = vi
+          .fn()
+          .mockReturnValue(ApprovalMode.DEFAULT);
+        const capture = captureFirstTurnMessage();
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hi' }],
+        });
+
+        const reminder = capture.parts.find(
+          (p) =>
+            p.text &&
+            p.text.includes('researcher') &&
+            p.text.includes('planner'),
+        );
+        expect(reminder).toBeTruthy();
+        expect(reminder!.text).not.toContain('builtin-helper');
       });
     });
   });

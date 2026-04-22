@@ -16,6 +16,7 @@ import {
 } from './shared/index.js';
 import type { BaseToolCallProps } from './shared/index.js';
 import { getToolDisplayLabel } from './labelUtils.js';
+import { MarkdownRenderer } from '../messages/MarkdownRenderer/MarkdownRenderer.js';
 
 type WebVariant = 'fetch' | 'search';
 
@@ -70,24 +71,28 @@ const OutputCard: FC<{
             OUT
           </div>
           <div
-            className={`whitespace-pre-wrap break-words m-0 p-1 overflow-hidden ${
-              !isExpanded && isLongContent
-                ? `max-h-[${COLLAPSED_HEIGHT}px] [mask-image:linear-gradient(to_bottom,var(--app-primary-background)_80px,transparent_${COLLAPSED_HEIGHT}px)]`
-                : ''
+            className={`break-words m-0 p-1 overflow-hidden ${
+              isError ? 'whitespace-pre-wrap' : ''
             }`}
             style={
               !isExpanded && isLongContent
-                ? { maxHeight: `${COLLAPSED_HEIGHT}px` }
+                ? {
+                    maxHeight: `${COLLAPSED_HEIGHT}px`,
+                    maskImage: `linear-gradient(to bottom, var(--app-primary-background) 80px, transparent ${COLLAPSED_HEIGHT}px)`,
+                    WebkitMaskImage: `linear-gradient(to bottom, var(--app-primary-background) 80px, transparent ${COLLAPSED_HEIGHT}px)`,
+                  }
                 : undefined
             }
           >
-            <pre
-              className={`m-0 overflow-hidden font-mono text-[0.85em] ${
-                isError ? 'text-[#c74e39]' : ''
-              }`}
-            >
-              {content}
-            </pre>
+            {isError ? (
+              <pre className="m-0 overflow-hidden font-mono text-[0.85em] text-[#c74e39]">
+                {content}
+              </pre>
+            ) : (
+              <div className="text-[0.85em]">
+                <MarkdownRenderer content={content} enableFileLinks={false} />
+              </div>
+            )}
           </div>
         </div>
 

@@ -25,6 +25,7 @@ import type {
   IdeContext,
   ApprovalMode,
   IdeInfo,
+  SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import type { DOMElement } from 'ink';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
@@ -61,6 +62,8 @@ export interface UIState {
   isPermissionsDialogOpen: boolean;
   isApprovalModeDialogOpen: boolean;
   isResumeDialogOpen: boolean;
+  resumeMatchedSessions: SessionListItem[] | undefined;
+  isDeleteDialogOpen: boolean;
   slashCommands: readonly SlashCommand[];
   pendingSlashCommandHistoryItems: HistoryItemWithoutId[];
   commandContext: CommandContext;
@@ -144,6 +147,13 @@ export interface UIState {
   isFeedbackDialogOpen: boolean;
   // Per-task token tracking
   taskStartTokens: number;
+  // Real-time token display: ref to streaming output char length (polled, not state)
+  streamingResponseLengthRef: React.RefObject<number>;
+  // True = receiving content (↓), false = waiting for API response (↑)
+  isReceivingContent: boolean;
+  // Session custom name (set via /rename)
+  sessionName: string | null;
+  setSessionName: (name: string | null) => void;
   // Prompt suggestion
   promptSuggestion: string | null;
   /** Dismiss prompt suggestion (clears state, aborts speculation) */

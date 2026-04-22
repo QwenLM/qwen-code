@@ -25,6 +25,7 @@ import {
   SlashCommandStatus,
   ToolConfirmationOutcome,
   IdeClient,
+  type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -72,6 +73,7 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'reset',
   'new',
   'resume',
+  'delete',
   'btw',
 ]);
 
@@ -86,7 +88,9 @@ interface SlashCommandProcessorActions {
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
-  openResumeDialog: () => void;
+  openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
+  handleResume: (sessionId: string) => void;
+  openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
   setDebugMessage: (message: string) => void;
   dispatchExtensionStateUpdate: (action: ExtensionUpdateAction) => void;
@@ -117,6 +121,7 @@ export const useSlashCommandProcessor = (
   extensionsUpdateState: Map<string, ExtensionUpdateStatus>,
   isConfigInitialized: boolean,
   logger: Logger | null,
+  setSessionName?: (name: string | null) => void,
 ) => {
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
@@ -271,6 +276,7 @@ export const useSlashCommandProcessor = (
           clearItems();
           clearScreen();
           refreshStatic();
+          setSessionName?.(null);
         },
         loadHistory,
         setDebugMessage: actions.setDebugMessage,
@@ -284,6 +290,7 @@ export const useSlashCommandProcessor = (
         toggleVimEnabled,
         setGeminiMdFileCount,
         reloadCommands,
+        setSessionName: setSessionName ?? (() => {}),
         extensionsUpdateState,
         dispatchExtensionStateUpdate: actions.dispatchExtensionStateUpdate,
         addConfirmUpdateExtensionRequest:
@@ -316,6 +323,7 @@ export const useSlashCommandProcessor = (
       sessionShellAllowlist,
       setGeminiMdFileCount,
       reloadCommands,
+      setSessionName,
       extensionsUpdateState,
       isIdleRef,
     ],
@@ -559,7 +567,14 @@ export const useSlashCommandProcessor = (
                       actions.openApprovalModeDialog();
                       return { type: 'handled' };
                     case 'resume':
-                      actions.openResumeDialog();
+                      if (result.sessionId) {
+                        actions.handleResume(result.sessionId);
+                      } else {
+                        actions.openResumeDialog(result.matchedSessions);
+                      }
+                      return { type: 'handled' };
+                    case 'delete':
+                      actions.openDeleteDialog();
                       return { type: 'handled' };
                     case 'extensions_manage':
                       actions.openExtensionsManagerDialog();

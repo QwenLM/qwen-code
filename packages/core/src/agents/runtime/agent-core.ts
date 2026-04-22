@@ -31,6 +31,7 @@ import type {
   ToolCallConfirmationDetails,
 } from '../../tools/tools.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
+import { FinishReason } from '@google/genai';
 import type {
   Content,
   Part,
@@ -475,6 +476,7 @@ export class AgentCore {
       let lastUsage: GenerateContentResponseUsageMetadata | undefined =
         undefined;
       let currentResponseId: string | undefined = undefined;
+      let wasOutputTruncated = false;
 
       for await (const streamEvent of responseStream) {
         if (roundAbortController.signal.aborted) {
@@ -486,8 +488,16 @@ export class AgentCore {
           };
         }
 
-        // Handle retry events
+        // Handle retry events — reset all per-attempt state so a successful
+        // retry does not inherit stale data (e.g. wasOutputTruncated) from a
+        // previous attempt that may have hit MAX_TOKENS.
         if (streamEvent.type === 'retry') {
+          functionCalls.length = 0;
+          roundText = '';
+          roundThoughtText = '';
+          lastUsage = undefined;
+          currentResponseId = undefined;
+          wasOutputTruncated = false;
           continue;
         }
 
@@ -499,6 +509,9 @@ export class AgentCore {
             currentResponseId = resp.responseId;
           }
           if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
+          if (resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS) {
+            wasOutputTruncated = true;
+          }
           const content = resp.candidates?.[0]?.content;
           const parts = content?.parts || [];
           for (const p of parts) {
@@ -552,6 +565,7 @@ export class AgentCore {
           turnCounter,
           toolsList,
           currentResponseId,
+          wasOutputTruncated,
         );
       } else {
         // No tool calls — treat this as the model's final answer.
@@ -619,6 +633,7 @@ export class AgentCore {
     currentRound: number,
     toolsList: FunctionDeclaration[],
     responseId?: string,
+    wasOutputTruncated = false,
   ): Promise<Content[]> {
     const toolResponseParts: Part[] = [];
 
@@ -848,6 +863,7 @@ export class AgentCore {
         isClientInitiated: true,
         prompt_id: promptId,
         response_id: responseId,
+        wasOutputTruncated,
       };
 
       const description = this.getToolDescription(toolName, args);

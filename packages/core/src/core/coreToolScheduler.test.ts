@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
 import type {
+  AnyDeclarativeTool,
   Config,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
@@ -43,6 +44,7 @@ import type { HookExecutionResponse } from '../confirmation-bus/types.js';
 import { type NotificationType } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import { IdeClient } from '../ide/ide-client.js';
+import { WriteFileTool } from '../tools/write-file.js';
 
 vi.mock('fs/promises', () => ({
   writeFile: vi.fn(),
@@ -1822,7 +1824,7 @@ describe('CoreToolScheduler request queueing', () => {
 
 describe('CoreToolScheduler truncated output protection', () => {
   function createTruncationTestScheduler(
-    tool: TestApprovalTool | MockTool,
+    tool: AnyDeclarativeTool,
     toolNames: string[],
   ) {
     const onAllToolCallsComplete = vi.fn();
@@ -1989,6 +1991,59 @@ describe('CoreToolScheduler truncated output protection', () => {
     expect(completedCalls).toHaveLength(1);
     // Non-Edit tools should still execute even when output was truncated
     expect(completedCalls[0].status).toBe('success');
+  });
+
+  it('should prefer truncation rejection over validation errors for truncated write_file calls', async () => {
+    const writeFileConfig = {
+      getProjectRoot: () => '/tmp',
+      getTargetDir: () => '/tmp',
+      getFileSystemService: () => ({
+        readTextFile: vi.fn(),
+        writeTextFile: vi.fn(),
+      }),
+      getDefaultFileEncoding: () => undefined,
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+    const writeFileTool = new WriteFileTool(writeFileConfig);
+    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
+      writeFileTool,
+      [WriteFileTool.Name],
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: '1',
+          name: WriteFileTool.Name,
+          args: { file_path: '/tmp/test.txt' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-id-write-file-truncated',
+          wasOutputTruncated: true,
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls).toHaveLength(1);
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+
+    if (completedCall.status === 'error') {
+      const errorMessage = completedCall.response.error?.message;
+      expect(errorMessage).toContain('truncated due to max_tokens limit');
+      expect(errorMessage).toContain(
+        'rejected to prevent writing truncated content',
+      );
+      expect(errorMessage).not.toContain(
+        "params must have required property 'content'",
+      );
+    }
   });
 });
 

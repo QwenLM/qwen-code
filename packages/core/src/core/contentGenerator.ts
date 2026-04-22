@@ -92,6 +92,9 @@ export type ContentGeneratorConfig = {
     frequency_penalty?: number;
     temperature?: number;
     max_tokens?: number;
+    // Additional provider-specific keys pass through verbatim
+    // (e.g. `max_completion_tokens` for GPT-5 / o-series, `reasoning_effort`).
+    [key: string]: unknown;
   };
   reasoning?:
     | false

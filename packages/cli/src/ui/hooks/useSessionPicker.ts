@@ -38,6 +38,13 @@ export interface UseSessionPickerOptions {
    */
   centerSelection?: boolean;
   /**
+   * Pre-filtered sessions to display instead of loading from sessionService.
+   * When provided, skips the initial listSessions() call and disables
+   * pagination (load-more). Used by /resume <title> when multiple sessions
+   * match the given title.
+   */
+  initialSessions?: SessionListItem[];
+  /**
    * Enable/disable input handling.
    */
   isActive?: boolean;
@@ -63,16 +70,18 @@ export function useSessionPicker({
   onCancel,
   maxVisibleItems,
   centerSelection = false,
+  initialSessions,
   isActive = true,
 }: UseSessionPickerOptions): UseSessionPickerResult {
+  const hasInitialSessions = initialSessions !== undefined;
   const [selectedIndex, setSelectedIndex] = useState(0);
-  const [sessionState, setSessionState] = useState<SessionState>({
-    sessions: [],
-    hasMore: true,
-    nextCursor: undefined,
-  });
+  const [sessionState, setSessionState] = useState<SessionState>(
+    hasInitialSessions
+      ? { sessions: initialSessions, hasMore: false, nextCursor: undefined }
+      : { sessions: [], hasMore: true, nextCursor: undefined },
+  );
   const [filterByBranch, setFilterByBranch] = useState(false);
-  const [isLoading, setIsLoading] = useState(true);
+  const [isLoading, setIsLoading] = useState(!hasInitialSessions);
 
   // For follow mode (non-centered)
   const [followScrollOffset, setFollowScrollOffset] = useState(0);
@@ -112,9 +121,9 @@ export function useSessionPicker({
   const showScrollDown =
     scrollOffset + maxVisibleItems < filteredSessions.length;
 
-  // Initial load
+  // Initial load — skip when pre-filtered sessions are provided
   useEffect(() => {
-    if (!sessionService) {
+    if (!sessionService || hasInitialSessions) {
       return;
     }
 
@@ -134,7 +143,7 @@ export function useSessionPicker({
     };
 
     void loadInitialSessions();
-  }, [sessionService]);
+  }, [sessionService, hasInitialSessions]);
 
   const loadMoreSessions = useCallback(async () => {
     if (!sessionService || !sessionState.hasMore || isLoadingMoreRef.current) {
