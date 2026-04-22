@@ -9,39 +9,34 @@ import { useState, useEffect } from 'react';
 import { Box, Text } from 'ink';
 import { ToolCallStatus } from '../../types.js';
 import { theme } from '../../semantic-colors.js';
-
-/**
- * Formats elapsed seconds as compact text.
- * Under 60s: "3s", "45s".
- * 60s+: "1m", "1m 30s", "2h 15m".
- */
-export function formatElapsed(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainingSeconds = seconds % 60;
-  if (minutes < 60) {
-    return remainingSeconds > 0
-      ? `${minutes}m ${remainingSeconds}s`
-      : `${minutes}m`;
-  }
-  const hours = Math.floor(minutes / 60);
-  const remainingMinutes = minutes % 60;
-  return remainingMinutes > 0 ? `${hours}h ${remainingMinutes}m` : `${hours}h`;
-}
+import { formatDuration } from '../../utils/formatters.js';
 
 interface ToolElapsedTimeProps {
   status: ToolCallStatus;
   executionStartTime?: number;
+  /**
+   * When provided, the elapsed indicator becomes a combined budget display:
+   * `(elapsed · timeout N)` visible from t=0 so the timeout is always on
+   * screen. When absent, the indicator keeps the 3-second quiet threshold
+   * and renders just the elapsed time.
+   */
+  timeoutMs?: number;
 }
 
 /**
- * Right-aligned elapsed-time indicator for an executing tool. Renders
- * nothing until the tool has been running for at least 3 seconds, so quick
- * tools stay visually quiet.
+ * Right-aligned elapsed-time indicator for an executing tool.
+ *
+ * Two modes:
+ *   - no `timeoutMs`: suppressed for the first 3 seconds so fast tools stay
+ *     visually quiet.
+ *   - with `timeoutMs`: rendered as `(elapsed · timeout N)` from t=0 so the
+ *     user can see both how long the tool has been running and how much
+ *     budget remains.
  */
 export const ToolElapsedTime: React.FC<ToolElapsedTimeProps> = ({
   status,
   executionStartTime,
+  timeoutMs,
 }) => {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
 
@@ -57,11 +52,21 @@ export const ToolElapsedTime: React.FC<ToolElapsedTimeProps> = ({
     return () => clearInterval(interval);
   }, [status, executionStartTime]);
 
-  if (status !== ToolCallStatus.Executing || elapsedSeconds < 3) return null;
+  if (status !== ToolCallStatus.Executing) return null;
+
+  const hasTimeout = timeoutMs != null && timeoutMs > 0;
+  if (!hasTimeout && elapsedSeconds < 3) return null;
+
+  const elapsedStr = formatDuration(elapsedSeconds * 1000, {
+    hideTrailingZeros: true,
+  });
+  const label = hasTimeout
+    ? `(${elapsedStr} · timeout ${formatDuration(timeoutMs, { hideTrailingZeros: true })})`
+    : elapsedStr;
 
   return (
     <Box flexShrink={0} marginLeft={1}>
-      <Text color={theme.text.secondary}>{formatElapsed(elapsedSeconds)}</Text>
+      <Text color={theme.text.secondary}>{label}</Text>
     </Box>
   );
 };
