@@ -169,6 +169,7 @@ describe('InputPrompt', () => {
       navigateUp: vi.fn(),
       navigateDown: vi.fn(),
       handleSubmit: vi.fn(),
+      resetHistoryNav: vi.fn(),
     };
     mockedUseInputHistory.mockReturnValue(mockInputHistory);
 
@@ -738,6 +739,25 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(props.onSubmit).toHaveBeenCalledWith('/clear');
+    unmount();
+  });
+
+  it('should reset history navigation after submitting on Enter', async () => {
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      showSuggestions: false,
+      isPerfectMatch: false,
+    });
+    props.buffer.setText('a prompt from history');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\r');
+    await wait();
+
+    expect(props.onSubmit).toHaveBeenCalledWith('a prompt from history');
+    expect(mockInputHistory.resetHistoryNav).toHaveBeenCalled();
     unmount();
   });
 

@@ -14,7 +14,7 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
-import { AppContainer } from './AppContainer.js';
+import { AppContainer, dedupeNewestFirst } from './AppContainer.js';
 import {
   type Config,
   makeFakeConfig,
@@ -1403,5 +1403,30 @@ describe('AppContainer State Management', () => {
       capturedUIActions.closeModelDialog();
       expect(mockCloseModelDialog).toHaveBeenCalled();
     });
+  });
+});
+
+describe('dedupeNewestFirst', () => {
+  it('returns empty array for empty input', () => {
+    expect(dedupeNewestFirst([])).toEqual([]);
+  });
+
+  it('preserves order when there are no duplicates', () => {
+    expect(dedupeNewestFirst(['a', 'b', 'c'])).toEqual(['a', 'b', 'c']);
+  });
+
+  it('removes consecutive duplicates', () => {
+    expect(dedupeNewestFirst(['a', 'a', 'b'])).toEqual(['a', 'b']);
+  });
+
+  it('removes non-consecutive duplicates keeping the first (newest) occurrence', () => {
+    expect(
+      dedupeNewestFirst([
+        'first prompt',
+        'third prompt',
+        'second prompt',
+        'first prompt',
+      ]),
+    ).toEqual(['first prompt', 'third prompt', 'second prompt']);
   });
 });

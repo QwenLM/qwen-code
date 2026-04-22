@@ -273,6 +273,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     [],
   );
 
+  // Ref to inputHistory.resetHistoryNav, populated after useInputHistory runs.
+  // Needed because handleSubmitAndClear is passed into useInputHistory as
+  // onSubmit, so we can't reference inputHistory directly here without a cycle.
+  const resetHistoryNavRef = useRef<() => void>(() => {});
+
   const handleSubmitAndClear = useCallback(
     (submittedValue: string) => {
       // Expand any large paste placeholders to their full content before submitting
@@ -309,6 +314,10 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
       onSubmit(finalValue);
+
+      // Reset history navigation so the next Up-arrow starts from the newest
+      // entry rather than advancing from whatever index the user picked.
+      resetHistoryNavRef.current();
 
       // Dismiss follow-up suggestion after submit
       followup.dismiss();
@@ -352,6 +361,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     currentQuery: buffer.text,
     onChange: customSetTextAndResetCompletionSignal,
   });
+
+  resetHistoryNavRef.current = inputHistory.resetHistoryNav;
 
   // When an arena session starts (agents appear), reset history position so
   // that pressing down-arrow immediately focuses the agent tab bar instead
